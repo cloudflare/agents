@@ -458,6 +458,61 @@ export class Session {
     return this.#core.getCompactions(this.sessionId);
   }
 
+  // ── Annotations and config (internal) ────────────────────────────────────
+
+  /**
+   * @internal Sibling-package support, not a public API. Server-side data a
+   * first-party module keeps about messages of this session, by kind. Never
+   * part of a message and never sent to a client; deleted with its message
+   * and on clear; an overlay carries the newest annotation of each kind
+   * from the rows it hides. Returns only the ids that have one.
+   */
+  async internal_annotations(
+    kind: string,
+    messageIds: readonly string[]
+  ): Promise<Map<string, string>> {
+    await this.#ready();
+    return this.#core.annotations(this.sessionId, kind, messageIds);
+  }
+
+  /** @internal Store one annotation (see {@link internal_annotations}). */
+  async internal_setAnnotation(
+    kind: string,
+    messageId: string,
+    value: string
+  ): Promise<void> {
+    await this.#ready();
+    this.#core.setAnnotation(this.sessionId, kind, messageId, value);
+  }
+
+  /**
+   * @internal The newest annotation of `kind` among the messages
+   * `getHistory({ leafId })` returns, overlay messages included.
+   */
+  async internal_latestAnnotation(
+    kind: string,
+    leafId?: string | null
+  ): Promise<{ messageId: string; value: string } | null> {
+    await this.#ready();
+    return this.#core.latestAnnotation(this.sessionId, kind, leafId);
+  }
+
+  /**
+   * @internal A value a first-party module keeps for this session. Keys
+   * starting with `transcript:` are deleted by `clearMessages()`; any other
+   * key outlives a clear.
+   */
+  async internal_config(key: string): Promise<string | null> {
+    await this.#ready();
+    return this.#core.config(this.sessionId, key);
+  }
+
+  /** @internal Set, or delete with `null`, a value kept for this session. */
+  async internal_setConfig(key: string, value: string | null): Promise<void> {
+    await this.#ready();
+    this.#core.setConfig(this.sessionId, key, value);
+  }
+
   /**
    * Run the registered compaction function and store the result as an
    * overlay. When `leafId` is given, compact that root-to-leaf branch instead
