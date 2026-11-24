@@ -120,6 +120,16 @@ describe("Search blocks in system prompt", () => {
     expect(prompt).toContain("Product docs");
   });
 
+  it("renders an empty read-only searchable block", async () => {
+    const blocks = new ContextBlocks([
+      { label: "knowledge", provider: new ReadonlySearchProvider() }
+    ]);
+    await blocks.load();
+    const prompt = await blocks.renderSystemPrompt();
+    expect(prompt).toContain("KNOWLEDGE");
+    expect(prompt).toContain("[searchable]");
+  });
+
   it("renders searchable block even when content is empty", async () => {
     const blocks = new ContextBlocks([
       {
