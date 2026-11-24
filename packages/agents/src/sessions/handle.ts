@@ -9,8 +9,12 @@
  */
 
 import type { CompactResult } from "./compaction-helpers";
-import { COMPACTION_PREFIX, isCompactionMessage } from "./compaction-helpers";
-import type { SessionsCore } from "./core";
+import {
+  COMPACTION_PREFIX,
+  OLDEST_PART,
+  isCompactionMessage
+} from "./compaction-helpers";
+import { COMPACT_INPUT_BYTES, type SessionsCore } from "./core";
 import { mirrorSessionChanges, type SessionMirrorOptions } from "./mirror";
 import { byteLength, sanitizeMessage } from "./sanitize";
 import type {
@@ -469,7 +473,25 @@ export class Session {
         "No compaction function registered. Call onCompaction() first."
       );
     }
-    const history = await this.#core.getHistory(this.sessionId, { leafId });
+    // The oldest visible part that fits one round's budget: a long
+    // uncompacted path compacts in rounds instead of failing to load.
+    const {
+      messages: history,
+      omitted,
+      omittedTokens
+    } = await this.#core.oldestVisible(
+      this.sessionId,
+      COMPACT_INPUT_BYTES,
+      leafId
+    );
+    // `createCompactFunction` then protects no recent tail inside the part:
+    // the recent messages are past it, and protecting some here could
+    // leave a round with nothing to summarize, round after round.
+    if (omitted > 0) {
+      Object.defineProperty(history, OLDEST_PART, {
+        value: { messages: omitted, tokens: omittedTokens }
+      });
+    }
 
     let result: CompactResult | null;
     try {

@@ -169,7 +169,7 @@ The budget counts what hydration actually costs. Each row is charged its full st
 const messages = await session.getHistory();
 ```
 
-Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`. `getHistory()`, `history()` and `getHistoryRowStats()` start at the root, so they hold one entry per message before reading content; past 200,000 visible messages they throw, and never return a shorter history. Read newest-first or use `getRecentHistory()`.
+Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`. `getHistory()`, `history()` and `getHistoryRowStats()` start at the root, so they hold one entry per message before reading content; past 200,000 visible messages they throw, and never return a shorter history. Read newest-first, use `getRecentHistory()`, or compact the session.
 
 Other reads:
 
@@ -226,6 +226,8 @@ session
 ```
 
 `createCompactFunction` takes exactly two options. `summarize` calls the model with a prompt and returns its text. `keepRecentTokens` is the token budget for the recent tail kept verbatim, defaulting to 20,000. The first three messages are kept verbatim as the head, at least the last two are kept as the tail, and the boundaries are aligned so a tool call is never separated from its result.
+
+A compaction function is handed at most the oldest 4 MiB of the visible history, counting each message as 1 KiB more than its stored size (a single oldest message larger than that is handed over alone). A long session that never compacted therefore compacts in rounds, each one starting from the previous summary. When a round holds only the oldest part, the newer messages it left out count toward the recent tail `createCompactFunction` keeps: inside the part it protects only what they fall short of `keepRecentTokens` and of its two-message minimum.
 
 Run it explicitly:
 

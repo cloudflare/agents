@@ -1,9 +1,13 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { createCompactFunction } from "../../sessions";
 import type { SessionHarnessObject } from "../capabilities/sessions";
 import type { SessionMessage } from "../../sessions";
-import { isCompactionMessage } from "../../sessions/compaction-helpers";
+import {
+  OLDEST_PART,
+  isCompactionMessage
+} from "../../sessions/compaction-helpers";
 
 /**
  * The read model: overlays continue at a stored row below them, deletes
@@ -559,4 +563,155 @@ describe("Sessions legacy stored summaries and hidden rows", () => {
       expect(page.map((row) => row.id)).toEqual(["m9", "m8", "m7"]);
     });
   });
+});
+
+describe("Sessions compact() takes a bounded oldest part", () => {
+  it("still marks a long walk's oldest part as partial", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // At this length the walk trims its dropped prefix on its last batch
+      // (512 steps a batch, ~3,850 of these messages per round).
+      seed(sqlOf(instance), 1, 7_950);
+      const session = instance.sessions.session();
+      session.onCompaction(
+        createCompactFunction({ summarize: async () => "summary" })
+      );
+      expect(await session.compact()).not.toBeNull();
+      expect((await session.getHistory()).length).toBeLessThan(6_950);
+    });
+  }, 120_000);
+
+  it("keeps the recent tail's tokens when the last round is partial", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // Just over one round (~3,860 of these): the last round leaves out a
+      // few dozen messages, far short of keepRecentTokens.
+      seed(sqlOf(instance), 1, 3_900);
+      const session = instance.sessions.session();
+      session.onCompaction(
+        createCompactFunction({ summarize: async () => "summary" })
+      );
+      expect(await session.compact()).not.toBeNull();
+      expect((await session.getHistory()).length).toBeLessThan(3_900);
+      for (let round = 0; round < 5; round++) {
+        if ((await session.compact()) === null) break;
+      }
+      // keepRecentTokens (20,000) covers ~3,300 of these short messages;
+      // protecting nothing in the last round left 52.
+      expect((await session.getHistory()).length).toBeGreaterThan(1_000);
+    });
+  }, 120_000);
+
+  it("summarizes a message over the tail budget left once the minimum is met", async () => {
+    const messages: SessionMessage[] = Array.from({ length: 4 }, (_, i) => ({
+      id: `q${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      parts: [{ type: "text", text: i === 3 ? "y ".repeat(500) : "short" }]
+    }));
+    // Two newer messages left out, 10 tokens short of keepRecentTokens.
+    Object.defineProperty(messages, OLDEST_PART, {
+      value: { messages: 2, tokens: 19_990 }
+    });
+    const result = await createCompactFunction({
+      summarize: async () => "summary"
+    })(messages);
+    expect(result?.toMessageId).toBe("q3");
+  });
+
+  it("counts a left-out summary at its own size", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 4_000);
+      const session = instance.sessions.session();
+      // Just over one round, with a ~25,000-token summary near the leaf
+      // over a range of short rows: the round leaves out little else.
+      await session.addCompaction("z ".repeat(50_000), "m3880", "m3990");
+      session.onCompaction(
+        createCompactFunction({ summarize: async () => "summary" })
+      );
+      const before = (await session.getHistory()).length;
+      expect(await session.compact()).not.toBeNull();
+      // The left-out summary alone covers keepRecentTokens, so the round
+      // summarizes its whole part. Counted as its one short end row, it
+      // left most of the part protected.
+      expect(before - (await session.getHistory()).length).toBeGreaterThan(
+        3_000
+      );
+    });
+  }, 120_000);
+
+  it("keeps the two newest messages when a round leaves out only one", async () => {
+    const messages: SessionMessage[] = Array.from({ length: 10 }, (_, i) => ({
+      id: `p${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      parts: [{ type: "text", text: `message ${i}` }]
+    }));
+    Object.defineProperty(messages, OLDEST_PART, {
+      value: { messages: 1, tokens: 20_000 }
+    });
+    const result = await createCompactFunction({
+      summarize: async () => "summary"
+    })(messages);
+    // p9 stays with the one message left out: two verbatim.
+    expect(result?.toMessageId).toBe("p8");
+  });
+
+  it("makes progress every round with the reference compaction function on short messages", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 10_000);
+      const session = instance.sessions.session();
+      session.onCompaction(
+        createCompactFunction({ summarize: async () => "summary" })
+      );
+      // A round holds at most 4,096 of these messages, all older than the
+      // recent tail: none of them is protected, so each round shortens it.
+      let visible = (await session.getHistory()).length;
+      for (let round = 0; round < 2; round++) {
+        expect(await session.compact()).not.toBeNull();
+        const now = (await session.getHistory()).length;
+        expect(now).toBeLessThan(visible - 1_000);
+        visible = now;
+      }
+    });
+  }, 120_000);
+
+  it("compacts a path past 200,000 messages in rounds", async () => {
+    const stub = await started();
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      seed(sqlOf(instance), 1, 200_005);
+      const session = instance.sessions.session();
+      const seen: { length: number; first: string; fourth: string }[] = [];
+      session.onCompaction(async (messages) => {
+        seen.push({
+          length: messages.length,
+          first: messages[0].id,
+          fourth: messages[3].id
+        });
+        return {
+          summary: `round ${seen.length}`,
+          fromMessageId: messages[3].id,
+          toMessageId: messages[messages.length - 3].id
+        };
+      });
+      // A root-first read of the whole path throws; compact() does not.
+      await expect(session.getHistory()).rejects.toMatchObject({
+        name: "SessionPathTooLongError"
+      });
+      await session.compact();
+      // The oldest part, within 4 MiB at 1 KiB a message on top.
+      expect(seen[0].first).toBe("m1");
+      expect(seen[0].length).toBeLessThan(4 * 1024);
+      expect(seen[0].length).toBeGreaterThan(3_000);
+      // The next round starts from the first round's summary.
+      await session.compact();
+      expect(seen[1].first).toBe("m1");
+      expect(seen[1].fourth.startsWith("compaction_")).toBe(true);
+      // Rounds take the path under the root-first bound.
+      const history = await session.getHistory();
+      expect(history.slice(0, 3).map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
+      expect(history[3].parts[0]).toMatchObject({ text: "round 2" });
+      expect(history.at(-1)?.id).toBe("m200005");
+    });
+  }, 240_000);
 });

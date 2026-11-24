@@ -97,6 +97,16 @@ const WALK_BATCH_STEPS = 512;
  */
 const RECENT_MESSAGE_OVERHEAD_BYTES = 1024;
 
+/**
+ * What one `compact()` round hands the compaction function at most: the
+ * oldest visible messages within this many bytes (each charged
+ * `RECENT_MESSAGE_OVERHEAD_BYTES` on top). One history chunk: a compaction
+ * function gets the part in one call, and a summarizer can't use more than
+ * a model's context. A larger part means fewer rounds for a session that
+ * never compacted, but a summary call that fails makes no progress.
+ */
+export const COMPACT_INPUT_BYTES = 4 * 1024 * 1024;
+
 /** First batch of a byte-budgeted read: most budgets stop within it. */
 const RECENT_FIRST_BATCH_STEPS = 64;
 
@@ -126,8 +136,8 @@ function pathTooLong(leafId: string | null | undefined): Error {
   const error = new Error(
     `Sessions: the path${leafId ? ` to "${leafId}"` : ""} holds more than ` +
       `${MAX_ROOT_FIRST_STEPS.toLocaleString("en-US")} visible messages, too many to read root-first. ` +
-      "Read it newest-first with history({ newestFirst: true }) or use " +
-      "getRecentHistory()."
+      "Read it newest-first with history({ newestFirst: true }), use " +
+      "getRecentHistory(), or compact the session."
   );
   error.name = "SessionPathTooLongError";
   return error;
@@ -1675,6 +1685,72 @@ export class SessionsCore {
       messages.push(message);
     }
     return messages;
+  }
+
+  /**
+   * The oldest part of the visible path that fits `maxBytes`, root first:
+   * what `compact()` hands the compaction function. A path that fits is
+   * returned whole. A longer one compacts in rounds: each round summarises
+   * its oldest part, the overlay ends inside it, and the next round starts
+   * from the summary. The walk goes from the leaf, measured, keeping only
+   * the steps seen last (the oldest) within the budget, so it holds at most
+   * `maxBytes` of steps and needs no id list of the whole path. Each message
+   * is charged `RECENT_MESSAGE_OVERHEAD_BYTES` on top of its stored bytes,
+   * as in `getRecentHistory`. At least one message is returned, so a single
+   * oldest message larger than `maxBytes` is returned alone. `omitted` is how
+   * many newer visible messages were left out, `omittedTokens` their
+   * estimated tokens.
+   */
+  async oldestVisible(
+    sessionId: string,
+    maxBytes: number,
+    leafId?: string | null
+  ): Promise<{
+    messages: SessionMessage[];
+    omitted: number;
+    omittedTokens: number;
+  }> {
+    // Newest at the front, oldest at the back; dropped from the front.
+    const kept: VisibleStep[] = [];
+    let start = 0;
+    let used = 0;
+    // Newer visible messages left out, counted apart from `start`, which
+    // goes back to 0 whenever the dropped prefix is trimmed off.
+    let omitted = 0;
+    let omittedTokens = 0;
+    for (const batch of this.#walkBatches(sessionId, leafId, true)) {
+      for (const step of batch) {
+        if (step.hidden) continue;
+        kept.push(step);
+        used += (step.bytes ?? 0) + RECENT_MESSAGE_OVERHEAD_BYTES;
+        while (used > maxBytes && kept.length - start > 1) {
+          const dropped = kept[start++];
+          omitted++;
+          // An overlay is seen as its summary, so it counts as that.
+          omittedTokens +=
+            dropped.overlaySeq === null
+              ? dropped.tokenEstimate
+              : estimateStringTokens(
+                  this.#overlayAt(sessionId, dropped).summary
+                );
+          used -= (dropped.bytes ?? 0) + RECENT_MESSAGE_OVERHEAD_BYTES;
+        }
+      }
+      // Compact the array once the dropped prefix dominates it.
+      if (start > 1024 && start > kept.length / 2) {
+        kept.splice(0, start);
+        start = 0;
+      }
+    }
+    const messages: SessionMessage[] = [];
+    for await (const message of this.#streamSteps(
+      sessionId,
+      kept.slice(start).reverse(),
+      HISTORY_CONTENT_CHUNK_SIZE
+    )) {
+      messages.push(message);
+    }
+    return { messages, omitted, omittedTokens };
   }
 
   /**
