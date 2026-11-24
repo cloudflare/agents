@@ -5071,6 +5071,36 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       );
       return original(callback, data, reason, delaySeconds, key);
     };
+    // An attempt a turn's own run takes is keyed as the Task would have
+    // keyed it: only a first (`initial`) schedule.
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      scheduleRecovery(input: {
+        reason?: string;
+        into?: (attempt: unknown) => boolean;
+      }): Promise<boolean>;
+    };
+    const schedule = engine.scheduleRecovery.bind(engine);
+    engine.scheduleRecovery = (input) => {
+      const into = input.into;
+      return schedule(
+        into
+          ? {
+              ...input,
+              into: (attempt) => {
+                const taken = into(attempt);
+                if (taken) {
+                  this._recoveryTaskKeyed.push(
+                    (input.reason ?? "initial") === "initial"
+                  );
+                }
+                return taken;
+              }
+            }
+          : input
+      );
+    };
   }
 
   getRecoveryTaskKeyedForTest(): boolean[] {
@@ -5093,10 +5123,18 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   /** The backoff, in seconds, of the recovery Task scheduled last. */
   getScheduledRecoveryDelayForTest(): number | null {
     return (
+      // A recovery Task run's input, or the attempt a turn's run journaled.
       this.sql<{ delay: number | null }>`
-        SELECT json_extract(input, '$.delaySeconds') AS delay
-        FROM cf_agents_task_runs
-        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        SELECT delay FROM (
+          SELECT json_extract(input, '$.delaySeconds') AS delay, created_at
+          FROM cf_agents_task_runs
+          WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+          UNION ALL
+          SELECT json_extract(result, '$.delaySeconds') AS delay, updated_at
+          FROM cf_agents_task_steps
+          WHERE step_name = 'model-turn'
+            AND json_extract(result, '$.callback') IS NOT NULL
+        )
         ORDER BY created_at DESC
         LIMIT 1
       `[0]?.delay ?? null
