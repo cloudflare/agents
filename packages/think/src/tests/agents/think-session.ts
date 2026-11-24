@@ -9107,6 +9107,18 @@ export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
 
+  /** Keep-alive holds taken since construction (each pushes a job). */
+  private _keepAliveHolds = 0;
+
+  override keepAlive(): Promise<() => void> {
+    this._keepAliveHolds++;
+    return super.keepAlive();
+  }
+
+  async keepAliveHoldsForTest(): Promise<number> {
+    return this._keepAliveHolds;
+  }
+
   private _responseLog: ChatResponseResult[] = [];
   private _submissionLog: ThinkSubmissionInspection[] = [];
   private _submissionSettlementRows = new Map<

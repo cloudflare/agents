@@ -203,11 +203,15 @@ export function createChatAdmissionStore(
   const exists = (): boolean => {
     if (state === "ready") return true;
     if (state === "absent") return false;
-    const found =
-      run(
-        `select 1 from sqlite_master where type = 'table' and name = ?`,
-        table
-      ).length > 0;
+    // A read of no rows: it fails only when the table is missing, and reads
+    // nothing either way (a `sqlite_master` scan reads the whole schema).
+    let found = true;
+    try {
+      run(`select 1 from ${table} limit 0`);
+    } catch (error) {
+      if (!String(error).includes("no such table")) throw error;
+      found = false;
+    }
     if (found) ensure();
     else state = "absent";
     return found;
@@ -603,6 +607,18 @@ export class ChatAdmissions {
    *
    * @returns Once every record is queued or ended. Not when their turns end.
    */
+  /**
+   * Whether an earlier isolate left records to replay (or a replay runs),
+   * so a host holds the object awake only when there is something to do.
+   */
+  hasOrphans(): boolean {
+    if (this.#replaying) return true;
+    if (!this.#orphansMaybe) return false;
+    if (this.#orphans().length > 0) return true;
+    this.#orphansMaybe = false;
+    return false;
+  }
+
   async resume(options: { force?: boolean } = {}): Promise<void> {
     if (this.#replaying) return this.#replaying;
     if (!this.#orphansMaybe) return;

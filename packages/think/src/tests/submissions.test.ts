@@ -119,6 +119,7 @@ type ThinkSubmissionTestStub = {
     limit?: number;
   }): Promise<ThinkSubmissionInspection[]>;
   submissionResultForTest(submissionId: string): Promise<unknown>;
+  keepAliveHoldsForTest(): Promise<number>;
   recordLargeTurnOutputForTest(
     submissionId: string,
     outputChars: number
@@ -408,6 +409,11 @@ describe("Think durable submissions", () => {
     } finally {
       await agent.setSubmissionRecoveryStaleMsForTest(15 * 60 * 1000);
     }
+  });
+
+  it("takes no keep-alive hold when it starts with no stored requests to replay", async () => {
+    const agent = await freshAgent();
+    await expect(agent.keepAliveHoldsForTest()).resolves.toBe(0);
   });
 
   it("accepts a submission quickly and completes it through the normal turn path", async () => {

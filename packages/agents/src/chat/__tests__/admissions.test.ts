@@ -37,7 +37,10 @@ class Host implements ChatTurnsHost {
   generateRequestId() {
     return crypto.randomUUID();
   }
+  /** Keep-alive holds taken: each one is a job pushed and deleted. */
+  holds = 0;
   keepAliveWhile<T>(fn: () => Promise<T>) {
+    this.holds++;
     return fn();
   }
   fireContinuation() {}
@@ -189,6 +192,22 @@ describe("durable admission", () => {
     await r;
     // insert at admission, delete at the fiber, delete (of nothing) at the end
     expect(a.statements() - before).toBe(3);
+  });
+
+  it("takes no keep-alive hold, and reads no schema, on a start with nothing to replay", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = isolate(db);
+    const before = a.host.holds;
+    await a.turns.resumeAdmissions();
+    expect(a.host.holds).toBe(before);
+  });
+
+  it("holds the object awake while it replays what a reset left", async () => {
+    const db = new DatabaseSync(":memory:");
+    await queueBehindRunningTurn(db, ["r2"]);
+    const b = isolate(db);
+    await b.turns.resumeAdmissions();
+    expect(b.host.holds).toBeGreaterThan(0);
   });
 
   it("replays what a reset left, in order, each as its own request", async () => {

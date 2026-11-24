@@ -2256,9 +2256,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // legacy fiber recovery runs first). Its replays then wait for the
     // call startup makes once it is done.
     if (!this._appStartedForAdmissions) return;
-    void this.keepAliveWhile(() => this._turns.resumeAdmissions()).catch(
-      (error) => console.error("[Think] failed to replay requests:", error)
-    );
+    void this._turns
+      .resumeAdmissions()
+      .catch((error) =>
+        console.error("[Think] failed to replay requests:", error)
+      );
   }
 
   /**

@@ -710,7 +710,11 @@ export class ChatTurns<
    * for recovery. See `admissions.ts`.
    */
   resumeAdmissions(): Promise<void> {
-    return this.admissions?.resume() ?? Promise.resolve();
+    const admissions = this.admissions;
+    // Held awake only while there is something to replay: a start with no
+    // records arms and drops no keep-alive job.
+    if (!admissions?.hasOrphans()) return Promise.resolve();
+    return this.host.keepAliveWhile(() => admissions.resume());
   }
 
   /**
