@@ -831,6 +831,40 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       ).toHaveLength(1);
     });
 
+    it("gives a tab back on a new socket a request's end through its ACK", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-done",
+        done: true,
+        body: "",
+        outcome: "completed"
+      });
+      const { resumableStream } = makeStream();
+      const ended = new EndedRequests();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended
+      });
+      const ends = (sink: SentFrame[]) =>
+        sink.filter((f) => f.id === "req-done" && f.done === true);
+
+      // The first socket is told, and an ACK on it does not repeat it.
+      const first: SentFrame[] = [];
+      const one = makeConnection("c1", first);
+      await handshake.handleResumeRequest(one, "p1", ["req-done"]);
+      await handshake.handleResumeAck(one, "req-done");
+      await handshake.handleResumeAck(one, "req-done");
+      expect(ends(first)).toHaveLength(1);
+
+      // The same tab on a new socket (its id kept) is told through its ACK.
+      const second: SentFrame[] = [];
+      const two = makeConnection("c1", second);
+      await handshake.handleResumeRequest(two, "p2", ["req-done"]);
+      await handshake.handleResumeAck(two, "req-done");
+      expect(ends(second)).toHaveLength(1);
+    });
+
     it("tells a tab directly how a request it stops ended", async () => {
       const kv = kvStore();
       recordRecentChatTerminal(kv, {

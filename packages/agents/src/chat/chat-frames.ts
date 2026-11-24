@@ -44,7 +44,12 @@ export interface ChatFrameConnection {
 export interface ChatFramesOptions {
   /** Send to every connection except the `without` ids. */
   broadcast(message: string, without: string[]): void;
-  /** The connections a broadcast reaches. */
+  /**
+   * The connections a broadcast reaches: the same objects the host's
+   * message and resume handlers receive for each socket, since the end
+   * ledger keys by object (an Agent's `getConnections()` does; measured on
+   * a deployment).
+   */
   connections(): Iterable<{ readonly id: string }>;
   /** Where recent terminal frames are recorded. */
   kv: RecentTerminalsKv;
