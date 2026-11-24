@@ -175,6 +175,8 @@ export function createOAuthMcpServer({
   }
   /** How many times a client tried to register, accepted or not. */
   let registrationAttempts = 0;
+  /** How many requests the authorization server received. */
+  let authorizationRequests = 0;
 
   /** While set, requests to the held endpoint wait before they are answered. */
   let held: Promise<void> | undefined;
@@ -457,6 +459,7 @@ export function createOAuthMcpServer({
   }
 
   async function authorizationServer(request: Request): Promise<Response> {
+    authorizationRequests += 1;
     const { pathname } = new URL(request.url);
     if (pathname === "/.well-known/oauth-authorization-server") {
       return Response.json({
@@ -642,6 +645,11 @@ export function createOAuthMcpServer({
       return registrationAttempts;
     },
 
+    /** How many requests the authorization server received. */
+    authorizationRequests(): number {
+      return authorizationRequests;
+    },
+
     /** How many MCP requests were refused with a plain 403. */
     forbiddenResponses(): number {
       return forbiddenResponses;
@@ -685,6 +693,7 @@ export function createOAuthMcpServer({
       forbiddenResponses = 0;
       unavailableResponses = 0;
       registrationAttempts = 0;
+      authorizationRequests = 0;
       releaseHeld();
       for (const session of sseSessions.values()) {
         try {

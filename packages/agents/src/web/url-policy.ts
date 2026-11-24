@@ -1,6 +1,6 @@
 /**
- * Which URLs a tool that reaches the web may request, shared by `web_fetch`
- * and Think's `fetch_url`. Internal — not an entry point.
+ * Which URLs a tool that reaches the web may request, shared by `web_fetch`,
+ * Think's `fetch_url` and the MCP client. Internal — not an entry point.
  *
  * Hosts are compared as the WHATWG URL parser leaves them. It already
  * canonicalises IP literals (`0x7f.1`, `2130706433`, `0177.0.0.1` become
@@ -40,6 +40,13 @@ export type UrlPolicy = {
    * local development against `localhost`.
    */
   allowPrivateHosts?: boolean;
+  /**
+   * Allow loopback hosts only: `localhost`, `*.localhost`, `127.0.0.0/8`
+   * and `[::1]`. Every other private or local host is still refused. For
+   * clients that connect to a server running on the same machine during
+   * local development.
+   */
+  allowLoopback?: boolean;
   /** The longest URL accepted, in characters. Defaults to 2000. */
   maxUrlLength?: number;
 };
@@ -111,7 +118,11 @@ export function validateUrl(
   if (allowed && allowed.length > 0 && !matchesAnyHostPattern(host, allowed)) {
     return reject("host_not_allowed", `The host ${host} is not allowed.`);
   }
-  if (!policy.allowPrivateHosts && isPrivateOrLocalHost(host)) {
+  if (
+    !policy.allowPrivateHosts &&
+    isPrivateOrLocalHost(host) &&
+    !(policy.allowLoopback && isLoopbackHost(host))
+  ) {
     return reject(
       "private_host",
       `The host ${host} is a private or local address.`
@@ -190,6 +201,16 @@ export function isPrivateOrLocalHost(hostname: string): boolean {
 }
 
 const LOCAL_SUFFIXES = [".localhost", ".internal"];
+
+/** `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]`, as `URL.hostname` gives it. */
+function isLoopbackHost(host: string): boolean {
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "[::1]" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  );
+}
 
 function matchesAnyHostPattern(
   host: string,

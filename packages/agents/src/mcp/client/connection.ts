@@ -27,7 +27,8 @@ import {
   fetchMcpTools
 } from "./catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
-import { AuthorizationTurns } from "./authorization-turns";
+import { AuthorizationTurns, type TransportFetch } from "./authorization-turns";
+import { fetchWithinUrlPolicy } from "./url-policy";
 import {
   advertisedElicitation,
   createMcpSdkClient,
@@ -112,7 +113,7 @@ function withStaticHeaders<
     return merged;
   };
   const sse = options as SSEClientTransportOptions;
-  const streamFetch = sse.eventSourceInit?.fetch ?? fetch;
+  const streamFetch = sse.eventSourceInit?.fetch ?? options.fetch ?? fetch;
   return {
     ...options,
     requestInit: {
@@ -130,6 +131,32 @@ function withStaticHeaders<
           ) as typeof init.headers
         })
     }
+  };
+}
+
+/**
+ * Send every request an HTTP transport makes (MCP messages, OAuth discovery
+ * and token requests, the SSE stream) through the URL policy, redirects
+ * included. Apply before {@link withStaticHeaders}, so the static headers
+ * are added once per request and a redirect to another origin drops them.
+ */
+function withUrlPolicy<
+  T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
+>(options: T): T {
+  const { eventSourceInit } = options as SSEClientTransportOptions;
+  return {
+    ...options,
+    fetch: fetchWithinUrlPolicy(options.fetch),
+    ...(eventSourceInit?.fetch && {
+      eventSourceInit: {
+        ...eventSourceInit,
+        // The SSE stream's fetch is typed with the eventsource package's
+        // narrower request and response; at runtime it is a fetch.
+        fetch: fetchWithinUrlPolicy(
+          eventSourceInit.fetch as TransportFetch
+        ) as typeof eventSourceInit.fetch
+      }
+    })
   };
 }
 
@@ -1029,7 +1056,9 @@ export class MCPClientConnection {
             this.url,
             this.authorizationTurnOptions(
               withStaticHeaders(
-                this.options.transport as StreamableHTTPClientTransportOptions
+                withUrlPolicy(
+                  this.options.transport as StreamableHTTPClientTransportOptions
+                )
               )
             )
           )
@@ -1040,7 +1069,9 @@ export class MCPClientConnection {
             this.url,
             this.authorizationTurnOptions(
               withStaticHeaders(
-                this.options.transport as SSEClientTransportOptions
+                withUrlPolicy(
+                  this.options.transport as SSEClientTransportOptions
+                )
               )
             )
           )

@@ -8,7 +8,7 @@ import {
 import type { McpClientContext } from "./context";
 import { toErrorMessage } from "./errors";
 import type { ConnectionEntryPoints, ServerController } from "./servers";
-import { assertAllowedUrl } from "./servers";
+import { assertAllowedUrl } from "./url-policy";
 
 /** Options for the deprecated `MCPClientManager.connect()`. */
 export type LegacyConnectOptions = {
@@ -46,7 +46,7 @@ export function legacyConnect(
         provider.clientId = options.reconnect.oauthClientId;
       }
     }
-    assertAllowedUrl(url);
+    if (options.transport?.type !== "rpc") assertAllowedUrl(url);
 
     // An OAuth reconnect keeps the connection to preserve its state;
     // otherwise drop any existing one and build it again.

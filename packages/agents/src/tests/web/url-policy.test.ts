@@ -115,6 +115,31 @@ describe("validateUrl", () => {
     expect(codeOf(url, { allowPrivateHosts: true })).toBe("ok");
   });
 
+  it.each([
+    "http://localhost:8787/",
+    "http://LOCALHOST./",
+    "http://app.localhost/",
+    "http://127.0.0.1/",
+    "http://127.12.34.56:9999/",
+    "http://[::1]:8080/",
+    "http://0x7f.1/"
+  ])("allowLoopback allows the loopback host %s", (url) => {
+    expect(codeOf(url, { allowLoopback: true })).toBe("ok");
+  });
+
+  it.each([
+    "http://10.0.0.1/",
+    "http://169.254.169.254/",
+    "http://0.0.0.0/",
+    "http://[::]/",
+    "http://[::ffff:127.0.0.1]/",
+    "http://[64:ff9b::7f00:1]/",
+    "http://metadata.google.internal/",
+    "http://localhost.internal/"
+  ])("allowLoopback still refuses %s", (url) => {
+    expect(codeOf(url, { allowLoopback: true })).toBe("private_host");
+  });
+
   it("names the canonical host in its messages", () => {
     const result = validateUrl("http://[::ffff:127.0.0.1]/");
     expect(result.ok ? "" : result.message).toContain("[::ffff:7f00:1]");

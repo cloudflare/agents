@@ -28,7 +28,7 @@ import type {
   MCPServerSettlement,
   RegisterServerOptions
 } from "./types";
-import { isBlockedUrl } from "./url-policy";
+import { assertAllowedUrl } from "./url-policy";
 
 /**
  * The manager's public connection methods. Internal paths call through
@@ -81,7 +81,7 @@ export class ServerController {
 
   /** Create the connection and save the server, without connecting. */
   register(id: string, options: RegisterServerOptions): void {
-    assertAllowedUrl(options.url);
+    if (options.transport?.type !== "rpc") assertAllowedUrl(options.url);
     const authProvider =
       options.transport?.authProvider ??
       (options.callbackUrl
@@ -932,15 +932,6 @@ export class ServerController {
   private idOf(conn: MCPClientConnection): string | undefined {
     return Object.keys(this.ctx.connections).find(
       (key) => this.ctx.connections[key] === conn
-    );
-  }
-}
-
-/** Throw for a URL the SSRF policy blocks. */
-export function assertAllowedUrl(url: string): void {
-  if (isBlockedUrl(url)) {
-    throw new Error(
-      `Blocked URL: ${url} — MCP client connections to private/internal addresses are not allowed`
     );
   }
 }

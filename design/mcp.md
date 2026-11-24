@@ -101,7 +101,7 @@ The SDK v2 client negotiates Stateless first and falls back to Legacy on the sam
 | `agent-servers.ts`          | Agent's `addMcpServer()`, `reconnectMcpServer()` and `getMcpServers()` as functions over the manager: id reuse and migration, callback URL, the result or error a settled server gives, the state sent to clients |
 | `oauth-callback.ts`         | Callback recognition and parsing, state checks, code exchange, response rendering                                                                                                                                 |
 | `catalog.ts`, `ai-tools.ts` | Paginated catalogs, namespaced listings and filters; AI SDK tool conversion                                                                                                                                       |
-| `url-policy.ts`             | Stable server ids and the SSRF policy                                                                                                                                                                             |
+| `url-policy.ts`             | Stable server ids; the URL policy (`web/url-policy.ts` with loopback allowed) applied to every request a transport sends, redirects included                                                                      |
 | `connection.ts`             | Transport selection, the SDK client, catalogs and the connection-level state machine                                                                                                                              |
 
 `servers.ts` reaches `connectToServer` and `discoverIfConnected` through the manager, so a subclass override (or a test spy) sees internal calls too.

@@ -1,8 +1,16 @@
 /**
  * Rules for the identifiers and URLs the MCP client manager accepts: stable
- * server ids, and the SSRF policy that keeps HTTP connections off private
+ * server ids, and the URL policy that keeps HTTP connections off private
  * and internal networks.
  */
+
+import {
+  validateRedirect,
+  validateUrl,
+  type UrlPolicy,
+  type UrlValidation
+} from "../../web/url-policy";
+import type { TransportFetch } from "./authorization-turns";
 
 /** Maximum length of a normalized MCP server id. */
 export const MCP_SERVER_ID_MAX_LENGTH = 64;
@@ -54,127 +62,117 @@ export function normalizeServerId(input: string): string {
 }
 
 /**
- * Blocked hostname patterns for SSRF protection.
- * Prevents MCP client from connecting to internal/private network addresses
- * while allowing loopback hosts for local development.
+ * The hosts an MCP client may reach: the web tools' policy, with loopback
+ * allowed so a client can reach a server on the same machine during local
+ * development. Server URLs had no length limit before this policy, so none
+ * is added.
  */
-const BLOCKED_HOSTNAMES = new Set([
-  "0.0.0.0",
-  "[::]",
-  "metadata.google.internal"
-]);
+const MCP_URL_POLICY: UrlPolicy = {
+  allowLoopback: true,
+  maxUrlLength: Number.MAX_SAFE_INTEGER
+};
 
-/**
- * Check whether four IPv4 octets belong to a private/reserved range.
- * Blocks RFC 1918, link-local, cloud metadata, and unspecified addresses.
- */
-function isPrivateIPv4(octets: number[]): boolean {
-  const [a, b] = octets;
-  // 10.0.0.0/8
-  if (a === 10) return true;
-  // 172.16.0.0/12
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  // 192.168.0.0/16
-  if (a === 192 && b === 168) return true;
-  // 169.254.0.0/16 (link-local / cloud metadata)
-  if (a === 169 && b === 254) return true;
-  // 0.0.0.0/8
-  if (a === 0) return true;
-  return false;
+/** The most redirects followed for one request, as `fetch` does. */
+const MAX_REDIRECTS = 20;
+
+/** Throw for a server URL the policy refuses. */
+export function assertAllowedUrl(url: string): void {
+  allowedUrl(url, validateUrl(url, MCP_URL_POLICY));
 }
 
 /**
- * fe80::/10 — IPv6 link-local (RFC 4291 §2.5.6).
- *
- * The /10 boundary fixes the first 10 bits (1111111010), which means valid
- * first hextets range from fe80 through febf. Only hex digits 8, 9, a, b
- * have high two bits "10" — anything else (e.g. fe7f, fec0) is out of range.
- * The fourth hex digit is unconstrained by the /10 boundary.
- *
- * Historical bug: `startsWith("fe80")` only matched the narrower fe80::/16
- * prefix and let fe81::/feab::/febf:: slip through. See issue #1325.
+ * Wrap a transport's `fetch` so every request it sends, and every redirect
+ * it follows, goes only to a URL the policy allows. A request that asks
+ * `fetch` to follow redirects is followed here one hop at a time, each hop
+ * checked, as `fetch` would follow it.
  */
-const IPV6_LINK_LOCAL = /^fe[89ab][0-9a-f]/;
+export function fetchWithinUrlPolicy(
+  base: TransportFetch = fetch
+): TransportFetch {
+  return async (input, init) => {
+    let url = allowedUrl(
+      String(input),
+      validateUrl(String(input), MCP_URL_POLICY)
+    );
+    if (init?.redirect === "manual" || init?.redirect === "error") {
+      return base(url, init);
+    }
+    let request: RequestInit = { ...init, redirect: "manual" };
+    for (let hops = 0; ; hops++) {
+      const response = await base(url, request);
+      const location = response.headers.get("location");
+      if (!isRedirect(response.status) || location === null) return response;
+      await response.body?.cancel();
+      if (hops === MAX_REDIRECTS) {
+        throw new Error(
+          `${url.origin} redirected more than ${MAX_REDIRECTS} times`
+        );
+      }
+      const next = allowedUrl(
+        location,
+        validateRedirect(location, url, MCP_URL_POLICY)
+      );
+      request = redirectedRequest(request, response.status, url, next);
+      url = next;
+    }
+  };
+}
+
+function allowedUrl(url: string, checked: UrlValidation): URL {
+  if (checked.ok) return checked.url;
+  throw new Error(
+    `Blocked URL: ${withoutCredentials(url)}. ${checked.message}`
+  );
+}
+
+/** The URL as given, minus any username and password, for an error. */
+function withoutCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = parsed.password = "";
+    return parsed.href;
+  } catch {
+    return url;
+  }
+}
+
+function isRedirect(status: number): boolean {
+  return [301, 302, 303, 307, 308].includes(status);
+}
 
 /**
- * Check whether a bracket-stripped, lowercased IPv6 address belongs to a
- * private/reserved range. Also unwraps IPv4-mapped IPv6 (::ffff:...) and
- * delegates to isPrivateIPv4 for those.
- *
- * Loopback (::1) and unspecified (::) are NOT blocked here:
- *   - ::1 is intentionally allowed (parallel to 127.x.x.x for local dev)
- *   - :: (== [::]) is blocked via BLOCKED_HOSTNAMES at the hostname level
+ * The request `fetch` sends after a redirect: 303, and 301 or 302 after a
+ * POST, become a GET without a body; credentials are not sent to another
+ * origin.
  */
-function isPrivateIPv6(addr: string): boolean {
-  // fc00::/7 — unique local addresses (fc00:: through fdff::).
-  // /7 fixes first 7 bits "1111110", so the 8-bit prefix is either
-  // fc (11111100) or fd (11111101). No other first hextets qualify.
-  if (addr.startsWith("fc") || addr.startsWith("fd")) return true;
-
-  // fe80::/10 — link-local addresses (fe80:: through febf:...).
-  if (IPV6_LINK_LOCAL.test(addr)) return true;
-
-  // IPv4-mapped IPv6 (::ffff:x.x.x.x or ::ffff:XXYY:ZZWW).
-  // The WHATWG URL parser does NOT canonicalize hex-form tails to dotted
-  // form — [::ffff:a00:1] stays as "::ffff:a00:1" and will only be caught
-  // by the hex branch. Both forms must therefore be handled here.
-  if (addr.startsWith("::ffff:")) {
-    const mapped = addr.slice(7);
-    const dotParts = mapped.split(".");
-    if (dotParts.length === 4 && dotParts.every((p) => /^\d{1,3}$/.test(p))) {
-      if (isPrivateIPv4(dotParts.map(Number))) return true;
-    } else {
-      const hexParts = mapped.split(":");
-      if (hexParts.length === 2) {
-        const hi = parseInt(hexParts[0], 16);
-        const lo = parseInt(hexParts[1], 16);
-        if (
-          isPrivateIPv4([
-            (hi >> 8) & 0xff,
-            hi & 0xff,
-            (lo >> 8) & 0xff,
-            lo & 0xff
-          ])
-        )
-          return true;
-      }
+function redirectedRequest(
+  request: RequestInit,
+  status: number,
+  from: URL,
+  to: URL
+): RequestInit {
+  const method = (request.method ?? "GET").toUpperCase();
+  const toGet =
+    (status === 303 && method !== "GET" && method !== "HEAD") ||
+    ((status === 301 || status === 302) && method === "POST");
+  const headers = new Headers(request.headers);
+  if (toGet) {
+    for (const name of [
+      "content-type",
+      "content-length",
+      "content-encoding",
+      "content-language",
+      "content-location"
+    ]) {
+      headers.delete(name);
     }
   }
-
-  return false;
-}
-
-/**
- * Check whether a hostname looks like a private/internal IP address.
- * Blocks RFC 1918, link-local, unique-local, unspecified,
- * and cloud metadata endpoints. Also detects IPv4-mapped IPv6 addresses.
- */
-export function isBlockedUrl(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return true; // Malformed URLs are blocked
+  if (from.origin !== to.origin) {
+    headers.delete("authorization");
+    headers.delete("cookie");
+    headers.delete("proxy-authorization");
   }
-
-  const hostname = parsed.hostname;
-
-  if (BLOCKED_HOSTNAMES.has(hostname)) return true;
-
-  // IPv4 checks
-  const ipv4Parts = hostname.split(".");
-  if (ipv4Parts.length === 4 && ipv4Parts.every((p) => /^\d{1,3}$/.test(p))) {
-    if (isPrivateIPv4(ipv4Parts.map(Number))) return true;
-  }
-
-  // IPv6 private range checks.
-  // URL parser keeps brackets: hostname for [fc00::1] is "[fc00::1]".
-  // The parser also lowercases/canonicalizes the address, but we
-  // lowercase again defensively in case this helper is ever called with
-  // a non-parser-produced hostname.
-  if (hostname.startsWith("[") && hostname.endsWith("]")) {
-    if (isPrivateIPv6(hostname.slice(1, -1).toLowerCase())) return true;
-  }
-
-  return false;
+  return toGet
+    ? { ...request, method: "GET", body: undefined, headers }
+    : { ...request, headers };
 }
