@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
+import { SQLITE_ROW_BYTES } from "../internal/platform-limits";
 import { SqlError } from "../sql-error";
 import type { TestAlarmInitAgent } from "./agents/schedule";
 
@@ -13,8 +14,8 @@ describe("SqlError", () => {
     );
     await runInDurableObject(stub, async (agent: TestAlarmInitAgent) => {
       agent.sql`CREATE TABLE IF NOT EXISTS big (v TEXT)`;
-      // Over the 2.2 MB cap of the workerd the test pool runs.
-      const value = "x".repeat(3_000_000);
+      // Over every runtime's row cap (8,388,637 bytes is the largest measured).
+      const value = "x".repeat(9_000_000);
       let error: unknown;
       try {
         agent.sql`INSERT INTO big (v) VALUES (${value})`;
@@ -27,7 +28,9 @@ describe("SqlError", () => {
       expect(message).toContain("8 MiB in production");
       expect(message).toContain("Upgrade an older local runtime");
       expect(message).toContain("SQLITE_TOOBIG. A row");
-      expect(message).toContain("2,000,000 bytes");
+      expect(message).toContain(
+        `${SQLITE_ROW_BYTES.toLocaleString("en-US")} bytes`
+      );
     });
   });
 
