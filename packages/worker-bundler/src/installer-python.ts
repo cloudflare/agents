@@ -24,9 +24,10 @@ export interface PythonRuntime {
  * match the Python the Worker runs, which its compatibility date and flags
  * pick. Wheels built for another Python or toolchain fail to import.
  * Measured 24 Nov 2026 on dynamic Workers in production:
- * - Python 3.14 from 2026-09-08, or with `python_workers_314` or
- *   `python_workers_20260610`; `no_python_workers_314` turns the date off.
- *   A 2026-09-08 date with `python_workers_20250116` still runs 3.14.
+ * - Python 3.14 (Pyodide 314.0.6) from 2026-09-08, or with
+ *   `python_workers_314`; `no_python_workers_314` turns the date off. A
+ *   2026-09-08 date with `python_workers_20250116` still runs it.
+ * - Otherwise Python 3.14 on Pyodide 314.0.4 with `python_workers_20260610`.
  * - Python 3.13 from 2025-09-29, or with `python_workers_20250116`;
  *   `no_python_workers_20250116` turns the date off.
  * - Python 3.12.1 otherwise, Pyodide 0.26.0a2 (Emscripten 3.1.52).
@@ -36,11 +37,11 @@ export function pyodideVersionFor(runtime: PythonRuntime): string {
   const date = runtime.compatibilityDate;
   if (
     flags.includes("python_workers_314") ||
-    flags.includes("python_workers_20260610") ||
     (date >= "2026-09-08" && !flags.includes("no_python_workers_314"))
   ) {
     return "v314.0.6";
   }
+  if (flags.includes("python_workers_20260610")) return "v314.0.4";
   if (
     flags.includes("python_workers_20250116") ||
     (date >= "2025-09-29" && !flags.includes("no_python_workers_20250116"))
@@ -65,7 +66,8 @@ export interface PyprojectToml {
   };
 }
 
-interface PyPASimpleFile {
+/** @internal */
+export interface PyPASimpleFile {
   filename: string;
   url: string;
   hashes?: Record<string, string>;
@@ -496,10 +498,28 @@ async function fetchPythonPackageMetadata(
  * Selects the latest version from compatible wheels.
  * TODO: implement proper platform/python version matching
  */
-function selectLatestCompatibleWheel(
+/** Whether a PEP 440 version is a pre-release or development release. */
+function isPreRelease(version: string): boolean {
+  return /(a|b|rc|alpha|beta|c|pre|preview|dev)\d*/i.test(
+    version.replace(/^\d+(\.\d+)*/, "").replace(/\.post\d+/i, "")
+  );
+}
+
+/**
+ * The newest wheel to install from a registry listing: universal wheels
+ * first, final releases over pre-releases (as pip does without `--pre`).
+ *
+ * @internal Exported for its test.
+ */
+export function selectLatestCompatibleWheel(
   files: PyPASimpleFile[]
 ): PyPASimpleFile | null {
-  const wheels = files.filter((f) => f.filename.endsWith(".whl"));
+  const all = files.filter((f) => f.filename.endsWith(".whl"));
+  const final = all.filter((f) => {
+    const version = parseVersionFromWheelName(f.filename);
+    return version !== undefined && !isPreRelease(version);
+  });
+  const wheels = final.length > 0 ? final : all;
   if (wheels.length === 0) return null;
 
   // Filter to universal wheels (py3-none-any or py2.py3-none-any)

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { pyodideVersionFor } from "../installer-python";
+import {
+  pyodideVersionFor,
+  selectLatestCompatibleWheel
+} from "../installer-python";
 
 describe("pyodideVersionFor", () => {
   it("follows the compatibility date", () => {
@@ -24,12 +27,26 @@ describe("pyodideVersionFor", () => {
         compatibilityFlags: ["python_workers_20250116"]
       })
     ).toBe("v0.28.2");
+    // The early 3.14 flag runs Pyodide 314.0.4, unless the date or
+    // python_workers_314 picks 314.0.6.
     expect(
       pyodideVersionFor({
         compatibilityDate: "2025-01-01",
         compatibilityFlags: ["python_workers_20260610"]
       })
+    ).toBe("v314.0.4");
+    expect(
+      pyodideVersionFor({
+        compatibilityDate: "2026-11-20",
+        compatibilityFlags: ["python_workers_20260610"]
+      })
     ).toBe("v314.0.6");
+    expect(
+      pyodideVersionFor({
+        compatibilityDate: "2026-11-20",
+        compatibilityFlags: ["python_workers_20260610", "no_python_workers_314"]
+      })
+    ).toBe("v314.0.4");
   });
 
   it("keeps 3.14 for a 2026-09-08 date even with the 3.13 flag", () => {
@@ -51,5 +68,30 @@ describe("pyodideVersionFor", () => {
       on("2026-11-20", "no_python_workers_314", "no_python_workers_20250116")
     ).toBe("v0.26.0a2");
     expect(on("2026-01-01", "no_python_workers_20250116")).toBe("v0.26.0a2");
+  });
+});
+
+describe("selectLatestCompatibleWheel", () => {
+  const wheel = (filename: string) => ({
+    filename,
+    url: `https://files/${filename}`,
+    hashes: {}
+  });
+
+  it("prefers the newest final release over a newer pre-release", () => {
+    const picked = selectLatestCompatibleWheel([
+      wheel("httpx-0.28.1-py3-none-any.whl"),
+      wheel("httpx-1.0.dev3-py3-none-any.whl"),
+      wheel("httpx-1.0rc1-py3-none-any.whl"),
+      wheel("httpx-0.27.2-py3-none-any.whl")
+    ]);
+    expect(picked?.filename).toBe("httpx-0.28.1-py3-none-any.whl");
+  });
+
+  it("takes a pre-release when there is nothing else", () => {
+    expect(
+      selectLatestCompatibleWheel([wheel("pkg-2.0b1-py3-none-any.whl")])
+        ?.filename
+    ).toBe("pkg-2.0b1-py3-none-any.whl");
   });
 });

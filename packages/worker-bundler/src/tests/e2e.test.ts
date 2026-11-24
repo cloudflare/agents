@@ -1391,6 +1391,41 @@ describe("createWorker with pyproject.toml", () => {
     }
   );
 
+  it("installs a final HTTPX release from PyPI for a Python 3.12 date", async () => {
+    // Pyodide 0.26.0a2, which 3.12 runs, has no HTTPX wheel, so it comes
+    // from PyPI, where the newest upload is a pre-release without AsyncClient.
+    const id = "test-worker-" + testId++;
+    const createWorkerResult = await createWorker({
+      files: {
+        "index.py": [
+          "from workers import Response, WorkerEntrypoint",
+          "import httpx",
+          "class Default(WorkerEntrypoint):",
+          "  async def fetch(self, request):",
+          '    return Response.json({"client": httpx.AsyncClient.__name__})'
+        ].join("\n"),
+        "pyproject.toml": [
+          "[project]",
+          'name = "dummy"',
+          'version = "0.0.0"',
+          'dependencies = ["httpx"]'
+        ].join("\n"),
+        "wrangler.toml": 'compatibility_date = "2025-09-01"'
+      }
+    });
+    expect(createWorkerResult.warnings ?? []).toEqual([]);
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: createWorkerResult.mainModule,
+      modules: createWorkerResult.modules,
+      compatibilityDate: createWorkerResult.wranglerConfig!.compatibilityDate!,
+      compatibilityFlags: createWorkerResult.wranglerConfig!.compatibilityFlags!
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(await response.json()).toEqual({ client: "AsyncClient" });
+  });
+
   it("imports larger packages", async () => {
     const id = "test-worker-" + testId++;
     const createWorkerResult = await createWorker({
