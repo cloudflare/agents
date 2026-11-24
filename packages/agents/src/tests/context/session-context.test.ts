@@ -84,13 +84,14 @@ async function modelWrites(
   session: Session,
   answerId: string,
   label: string,
-  content: string
+  content: string,
+  action: "replace" | "append" = "replace"
 ): Promise<void> {
   const tools = await context.tools();
   const setContext = tools.set_context as unknown as {
     execute(input: unknown, options: unknown): Promise<unknown>;
   };
-  const input = { label, content, action: "replace" };
+  const input = { label, content, action };
   const output = await setContext.execute(input, {
     toolCallId: `call-${answerId}`,
     messages: []
@@ -355,6 +356,60 @@ describe("Context", () => {
       const second = await context.build();
       expect(second.system).toBe(first.system);
       expect(texts(second.messages.at(-1))).toHaveLength(1);
+    });
+  });
+
+  it("sends code's change to a block the model appended to", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes" }
+      ]);
+      await context.setBlock("notes", "Deploy to staging");
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+      await modelWrites(
+        context,
+        session,
+        "a1",
+        "notes",
+        "Run smoke tests",
+        "append"
+      );
+      await context.setBlock("notes", "Deploy to production\nRun smoke tests");
+      await session.appendMessage(user("u2", "next"));
+      const last = (await context.build()).messages.at(-1);
+      expect(texts(last)[1]).toContain("Deploy to production");
+    });
+  });
+
+  it("keeps the model's successful write when a later call fails", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "todo", whenChanged: "remind" }
+      ]);
+      await session.appendMessage(user("u1", "plan it"));
+      await context.build();
+      await modelWrites(context, session, "a1", "todo", "1. draft");
+      await session.appendMessage({
+        id: "a2",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-set_context",
+            toolCallId: "call-a2",
+            state: "output-available",
+            input: {
+              label: "todo",
+              content: "far too long",
+              action: "replace"
+            },
+            output: "Error: over the block's token limit"
+          }
+        ]
+      } as SessionMessage);
+      await session.appendMessage(user("u2", "next"));
+      const sent = JSON.stringify((await context.build()).messages);
+      expect(sent.split("1. draft").length - 1).toBe(1);
     });
   });
 

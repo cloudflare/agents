@@ -697,19 +697,17 @@ export class Context {
   ): Promise<{ changes: Section[]; own: Section[] }> {
     const writes = ownWrites(history, delivered.at);
     const remind = await this.#blocks.internal_remindSections();
+    const changed = await this.#changedLabels();
     const known = new Set<string>();
     for (const [label, write] of writes) {
       const content = this.#blocks.getBlock(label)?.content;
-      if (
-        content !== undefined &&
-        (write.append
-          ? content.endsWith(write.content)
-          : content === write.content)
-      ) {
-        known.add(label);
-      }
+      // A replace set the whole block; an append only its end, so code may
+      // have changed the rest since the model last saw it.
+      const holds = write.append
+        ? !changed.has(label) && content?.endsWith(write.content) === true
+        : content === write.content;
+      if (holds) known.add(label);
     }
-    const changed = await this.#changedLabels();
     const current =
       changed.size > 0 || known.size > 0
         ? await this.#blocks.internal_sections()
@@ -867,14 +865,19 @@ function ownWrites(
         toolName?: string;
         state?: string;
         input?: { label?: unknown; content?: unknown; action?: unknown };
+        output?: unknown;
       };
       const named =
         tool.type === "tool-set_context" ||
         (tool.type === "dynamic-tool" && tool.toolName === "set_context");
       const { label, content, action } = tool.input ?? {};
+      // The tool reports a failed write in its output: only a write that
+      // happened counts.
       if (
         named &&
         tool.state === "output-available" &&
+        typeof tool.output === "string" &&
+        tool.output.startsWith("Written to ") &&
         typeof label === "string" &&
         typeof content === "string"
       ) {
