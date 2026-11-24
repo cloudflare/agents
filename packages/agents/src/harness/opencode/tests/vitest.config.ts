@@ -2,6 +2,7 @@ import path from "node:path";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { stripNodeModulesSourceMapReferences } from "../../../../../../scripts/vitest/strip-node-modules-source-map-references";
 import { defineConfig } from "vitest/config";
+import { stubModelsDevSnapshot } from "./models-dev-snapshot";
 
 const testsDir = import.meta.dirname;
 
@@ -13,9 +14,14 @@ export default defineConfig({
       name: "empty-httpapi-scalar",
       enforce: "pre",
       load: (id) =>
-        id.includes("/effect/dist/unstable/httpapi/internal/httpApiScalar.js")
+        id.includes("/effect/dist/http-api/internal/httpApiScalar.js")
           ? 'export const javascript = "";'
           : null
+    },
+    {
+      name: "empty-models-dev-snapshot",
+      enforce: "pre",
+      transform: stubModelsDevSnapshot
     },
     stripNodeModulesSourceMapReferences(),
     cloudflareTest({
