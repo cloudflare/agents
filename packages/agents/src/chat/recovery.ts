@@ -103,7 +103,12 @@ export function unwrapChatFiberSnapshot<Kind extends string>(
 
   const envelope = value as Record<string, unknown>;
   const snapshot = envelope[key];
-  if (typeof snapshot !== "object" || snapshot === null) {
+  // An envelope that kept the app's data but no snapshot (it could not be
+  // kept).
+  if (snapshot === null) {
+    return { snapshot: null, user: envelope.user ?? null };
+  }
+  if (typeof snapshot !== "object") {
     return { snapshot: null, user: value };
   }
   const candidate = snapshot as Record<string, unknown>;

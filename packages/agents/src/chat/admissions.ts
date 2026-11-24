@@ -430,13 +430,18 @@ export function interruptedTurnRequestIds(
   try {
     for (const row of sql
       .exec(
-        `select input from cf_agents_task_runs
+        `select input, metadata from cf_agents_task_runs
          where definition = ? and status in ('pending', 'running')`,
         turnName
       )
       .toArray()) {
-      const parsed = parseJson<{ requestId?: unknown }>(row.input);
-      if (typeof parsed?.requestId === "string") ids.push(parsed.requestId);
+      // The run's metadata names its request. Its input does too, but a
+      // large input is kept in parts, not on the row; runs from before the
+      // metadata named it have only the input.
+      const requestId =
+        parseJson<{ requestId?: unknown }>(row.metadata)?.requestId ??
+        parseJson<{ requestId?: unknown }>(row.input)?.requestId;
+      if (typeof requestId === "string") ids.push(requestId);
     }
   } catch {
     // No Tasks table yet.

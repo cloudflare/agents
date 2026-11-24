@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createChatFiberSnapshot } from "../recovery";
 import { ChatTurnFibers, type ChatTurnFiberHost } from "../turn-fiber";
 import type { ChatTurnClosureEntry } from "../turn-task";
@@ -140,24 +140,77 @@ describe("ChatTurnFibers", () => {
     expect(fibers.requestContext("r1")).toBeUndefined();
   });
 
-  it("wraps the snapshot and the app's stash data into one envelope", async () => {
-    let envelope: unknown;
+  it("gives the run the snapshot in its envelope, and keeps the app's stash data live", async () => {
     // One snapshot for the run and the expectation: it carries a timestamp.
     const turnSnapshot = snapshot("r1");
     let closure!: ChatTurnClosureEntry;
+    let input: unknown;
     const runTask = host.runTask;
-    host.runTask = (input, local) => {
+    host.runTask = (taskInput, local) => {
       closure = local;
-      return runTask(input, local);
+      input = taskInput;
+      return runTask(taskInput, local);
     };
     await fibers.run(
       { requestId: "r1", continuation: false, snapshot: turnSnapshot },
       async () => {
-        envelope = closure.wrap({ step: 2 });
+        closure.onStash({ step: 2 });
         expect(fibers.liveTurns.get("r1")?.recoveryData).toEqual({ step: 2 });
       }
     );
-    expect(envelope).toEqual({ __snapshot: turnSnapshot, user: { step: 2 } });
+    expect(input).toMatchObject({
+      requestId: "r1",
+      envelope: JSON.parse(
+        JSON.stringify({ __snapshot: turnSnapshot, user: null })
+      )
+    });
+  });
+
+  it("starts a turn whose snapshot would not fit in a run's input without one", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let input: Record<string, unknown> = {};
+    const runTask = host.runTask;
+    host.runTask = (taskInput, local) => {
+      input = taskInput;
+      return runTask(taskInput, local);
+    };
+    const turnSnapshot = {
+      ...snapshot("r1"),
+      lastBody: { big: "x".repeat(17 * 1024 * 1024) }
+    } as unknown as ReturnType<typeof snapshot>;
+    try {
+      expect(
+        await fibers.run(
+          { requestId: "r1", continuation: false, snapshot: turnSnapshot },
+          async () => "reply"
+        )
+      ).toBe("reply");
+      expect(input.envelope).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("starts a turn whose snapshot cannot be kept as JSON without one", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let input: Record<string, unknown> = {};
+    const runTask = host.runTask;
+    host.runTask = (taskInput, local) => {
+      input = taskInput;
+      return runTask(taskInput, local);
+    };
+    const turnSnapshot = {
+      ...snapshot("r1"),
+      lastBody: { count: 1n }
+    } as unknown as ReturnType<typeof snapshot>;
+    expect(
+      await fibers.run(
+        { requestId: "r1", continuation: false, snapshot: turnSnapshot },
+        async () => "reply"
+      )
+    ).toBe("reply");
+    expect(input.envelope).toBeUndefined();
+    warn.mockRestore();
   });
 
   it("tells the host once the fiber is accepted, before the turn runs", async () => {

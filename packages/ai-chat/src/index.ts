@@ -786,14 +786,14 @@ export class AIChatAgent<
     snapshotKey: "__cfAIChatFiberSnapshot",
     generateId: () => nanoid(),
     turnSignal: (requestId) => this._abortRegistry.getExistingSignal(requestId),
-    runTask: ({ requestId, continuation, nonce }, local) =>
+    runTask: (input, local) =>
       this.tasks.run(
         (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
-        { requestId, continuation, nonce },
+        input,
         {
-          runId: `chat_${nonce}`,
+          runId: `chat_${input.nonce}`,
           retain: false,
-          metadata: { requestId },
+          metadata: { requestId: input.requestId },
           start: "now",
           local
         }
@@ -816,6 +816,7 @@ export class AIChatAgent<
       chatFiberName,
       createChatTurnTaskDefinition({
         storage: this.ctx.storage,
+        snapshotKey: "__cfAIChatFiberSnapshot",
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn)
