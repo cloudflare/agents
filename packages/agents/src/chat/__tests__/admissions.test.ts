@@ -60,12 +60,19 @@ function isolate(
     recoveryOwns?: (requestId: string) => boolean | Promise<boolean>;
     /** `false`: a turn's fiber is never accepted, so its record stays. */
     fiber?: boolean;
+    /** Every read of the store throws. */
+    failReads?: boolean;
   } = {}
 ) {
   let statements = 0;
+  const queries: string[] = [];
   const store = createChatAdmissionStore(() => ({
     exec: (query: string, ...bindings: unknown[]) => {
       statements++;
+      queries.push(query);
+      if (options.failReads && /^\s*select/i.test(query)) {
+        throw new Error("store read failed");
+      }
       const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
       return { toArray: () => rows as Record<string, unknown>[] };
     }
@@ -140,6 +147,7 @@ function isolate(
     asked,
     ids: () => host.transcript.map((m) => m.id),
     statements: () => statements,
+    queries: () => queries,
     records: () => store.list().map((r) => r.requestId),
     send: (requestId: string) => turns.runClientRequest(request(requestId)),
     finish: (requestId: string) => gates.get(requestId)?.(),
@@ -200,6 +208,17 @@ describe("durable admission", () => {
     const before = a.host.holds;
     await a.turns.resumeAdmissions();
     expect(a.host.holds).toBe(before);
+    expect(a.queries().some((q) => q.includes("sqlite_master"))).toBe(false);
+  });
+
+  it("rejects, rather than throws, when the store cannot be read", async () => {
+    const db = new DatabaseSync(":memory:");
+    const a = isolate(db, { failReads: true });
+    let promise: Promise<void> | undefined;
+    expect(() => {
+      promise = a.turns.resumeAdmissions();
+    }).not.toThrow();
+    await expect(promise).rejects.toThrow("store read failed");
   });
 
   it("holds the object awake while it replays what a reset left", async () => {

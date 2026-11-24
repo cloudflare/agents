@@ -601,13 +601,6 @@ export class ChatAdmissions {
   }
 
   /**
-   * Queue the records an earlier isolate left, in order, each as its own
-   * request. Unless `force`, nothing happens while an interrupted turn
-   * still waits for recovery: the recovery's end calls this again.
-   *
-   * @returns Once every record is queued or ended. Not when their turns end.
-   */
-  /**
    * Whether an earlier isolate left records to replay (or a replay runs),
    * so a host holds the object awake only when there is something to do.
    */
@@ -619,6 +612,13 @@ export class ChatAdmissions {
     return false;
   }
 
+  /**
+   * Queue the records an earlier isolate left, in order, each as its own
+   * request. Unless `force`, nothing happens while an interrupted turn
+   * still waits for recovery: the recovery's end calls this again.
+   *
+   * @returns Once every record is queued or ended. Not when their turns end.
+   */
   async resume(options: { force?: boolean } = {}): Promise<void> {
     if (this.#replaying) return this.#replaying;
     if (!this.#orphansMaybe) return;
