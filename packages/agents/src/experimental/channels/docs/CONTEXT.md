@@ -98,7 +98,7 @@ _Avoid_: Delivery stream, reply, operation
 ## Harnesses
 
 **Harness**:
-An agent loop that keeps its own transcripts behind the shared harness interface (`submit`, `abort`, `wait`, `reset`, `watch`, and session create, fork and list), such as `AiSdkHarness` or the pi harness's adapter. It is the only way an agent connects to Channels: `Channels.forHarness` serves each harness session as one conversation with the same id. The harness's words (session, operation, run) stay in harness-facing code.
+An agent loop that keeps its own transcripts behind the shared harness interface (`submit`, `abort`, `wait`, `reset`, `watch`, and session create, fork and list), such as `ThinkHarness` or the pi harness's adapter. It is the only way an agent connects to Channels: `Channels.forHarness` serves each harness session as one conversation with the same id. The harness's words (session, operation, run) stay in harness-facing code.
 _Avoid_: Session (outside harness-facing code)
 
 **Harness adapter**:

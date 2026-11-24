@@ -12,7 +12,6 @@ const entries = [
   "src/skills/tools/ai-sdk.ts",
   "src/skills/runner.ts",
   "src/lifecycle/index.ts",
-  "src/harness/ai-sdk/index.ts",
   "src/harness/opencode/index.ts",
   "src/harness/pi/index.ts",
   "src/harness/think/index.ts",

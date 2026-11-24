@@ -51,7 +51,7 @@ import {
   toResponseChunk,
   toTranscriptMessage,
   type ToolCallAnswer
-} from "../ai-sdk/turns";
+} from "../../experimental/channels/ai-sdk-conversion";
 import {
   SessionEvents,
   Watcher,

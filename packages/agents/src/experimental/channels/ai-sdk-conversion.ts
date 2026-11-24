@@ -1,3 +1,8 @@
+/**
+ * Conversions between AI SDK UI messages and chunks and the Channels
+ * transcript and response chunks, for harnesses that run the AI SDK and for
+ * the Web Channel's AI SDK transport. Internal — not an entry point.
+ */
 import type { ToolSet, UIMessage, UIMessageChunk } from "ai";
 import type {
   InboundEvent,
@@ -7,7 +12,7 @@ import type {
   ResponseChunk,
   ToolPart,
   TranscriptMessage
-} from "../../experimental/channels/protocol";
+} from "./protocol";
 
 export type AiSdkConversionOptions = {
   /** The agent's tools. Those without `execute` run on a client. */
@@ -49,28 +54,6 @@ function warnSkipped(type: string): void {
   if (warned) return;
   warned = true;
   console.warn(`Channels skipped an AI SDK part it cannot carry: "${type}"`);
-}
-
-/**
- * Convert an AI SDK UI message stream into response chunks.
- *
- * An `error` or `abort` chunk makes the iteration throw once the stream
- * ends, so a failed or aborted generation never reads as a finished one, while the stream still
- * runs to its end and its `onEnd` sees the partial message.
- */
-export async function* toResponseChunks(
-  stream: AsyncIterable<UIMessageChunk>,
-  options: AiSdkConversionOptions = {}
-): AsyncGenerator<ResponseChunk> {
-  let error: Error | undefined;
-  for await (const chunk of stream) {
-    if (chunk.type === "error") error ??= new Error(chunk.errorText);
-    if (chunk.type === "abort")
-      error ??= new Error("The generation was aborted");
-    const converted = toResponseChunk(chunk, options);
-    if (converted) yield converted;
-  }
-  if (error) throw error;
 }
 
 /** Convert one AI SDK UI message chunk into a response chunk, if it has one. */
@@ -332,58 +315,6 @@ function toToolPart(
       ...(part.title !== undefined && { title: part.title })
     } satisfies ToolPart,
     part.callProviderMetadata
-  );
-}
-
-/** Convert a transcript message into an AI SDK UI message. */
-export function toUIMessage(message: TranscriptMessage): UIMessage {
-  return {
-    id: message.id,
-    role: message.role,
-    parts: message.parts.map(toUIPart),
-    ...(message.metadata && { metadata: message.metadata })
-  };
-}
-
-function toUIPart(part: MessagePart): UIPart {
-  switch (part.type) {
-    case "data": {
-      const { name, ...rest } = part;
-      return { ...rest, type: `data-${name}` };
-    }
-    case "tool": {
-      const {
-        type: _type,
-        toolName,
-        dynamic,
-        owner: _owner,
-        providerMetadata,
-        ...rest
-      } = part;
-      const call = {
-        ...rest,
-        ...(providerMetadata && { callProviderMetadata: providerMetadata })
-      };
-      // SAFETY: the state and its fields were produced together by
-      // toToolPart, or by an agent following the same ToolState rules.
-      return (
-        dynamic
-          ? { ...call, type: "dynamic-tool", toolName }
-          : { ...call, type: `tool-${toolName}` }
-      ) as UIPart;
-    }
-    default:
-      // SAFETY: the remaining parts match their AI SDK shapes field for field.
-      return part as UIPart;
-  }
-}
-
-/** Whether the message has a tool call waiting for a result or an approval. */
-export function awaitsInput(message: UIMessage): boolean {
-  return message.parts.some(
-    (part) =>
-      "toolCallId" in part &&
-      (part.state === "input-available" || part.state === "approval-requested")
   );
 }
 

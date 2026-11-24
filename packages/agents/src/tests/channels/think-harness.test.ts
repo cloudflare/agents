@@ -1,7 +1,8 @@
 import { runInDurableObject } from "cloudflare:test";
-import type { AiSdkHarnessObject } from "../capabilities/ai-sdk-harness";
+import type { ThinkChannelsObject } from "../capabilities/think-channels";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { ROOT_SESSION } from "../../harness/think";
 import type {
   TranscriptMessage,
   TurnStatus
@@ -11,10 +12,10 @@ import {
   type ServerFrame
 } from "../../experimental/channels/web";
 
-type Agent = DurableObjectStub<AiSdkHarnessObject>;
+type Agent = DurableObjectStub<ThinkChannelsObject>;
 
 function agent(): Agent {
-  return env.AiSdkHarnessObject.getByName(crypto.randomUUID());
+  return env.ThinkChannelsObject.getByName(crypto.randomUUID());
 }
 
 type Client = {
@@ -97,13 +98,13 @@ const messagesWith =
   ): frame is Extract<ServerFrame, { type: "channels:messages" }> =>
     frame.type === "channels:messages" && frame.messages.some(test);
 
-describe("An AI SDK harness served through Channels", () => {
+describe("ThinkHarness served through Channels", () => {
   it("answers a message and saves the reply", async () => {
     const stub = agent();
     await stub.setScript([{ text: "Hello there" }]);
     const alice = await connect(stub);
     expect(alice.snapshot).toMatchObject({
-      conversationId: "main",
+      conversationId: ROOT_SESSION,
       messages: [],
       turns: []
     });
@@ -120,7 +121,7 @@ describe("An AI SDK harness served through Channels", () => {
       outcome: "completed",
       messageIds: [reply.messages[0].id]
     });
-    expect(await stub.wait("main", "e1")).toMatchObject({
+    expect(await stub.wait(ROOT_SESSION, "e1")).toMatchObject({
       status: "done",
       text: "Hello there"
     });
@@ -140,10 +141,14 @@ describe("An AI SDK harness served through Channels", () => {
       { text: "Found it" },
       { text: "Still here" }
     ]);
-    await stub.submit("main", "look it up", "o1");
-    expect(await stub.wait("main", "o1")).toMatchObject({ status: "done" });
-    await stub.submit("main", "and again", "o2");
-    expect(await stub.wait("main", "o2")).toMatchObject({ status: "done" });
+    await stub.submit(ROOT_SESSION, "look it up", "o1");
+    expect(await stub.wait(ROOT_SESSION, "o1")).toMatchObject({
+      status: "done"
+    });
+    await stub.submit(ROOT_SESSION, "and again", "o2");
+    expect(await stub.wait(ROOT_SESSION, "o2")).toMatchObject({
+      status: "done"
+    });
 
     // The third call rebuilds the history from the saved transcript.
     const prompt = await stub.getPrompt(2);
@@ -161,7 +166,7 @@ describe("An AI SDK harness served through Channels", () => {
     await alice.until(settled("e1"));
     const second = await alice.until(settled("e2"));
     expect(second.turn).toMatchObject({ outcome: "completed" });
-    const state = await stub.state("main");
+    const state = await stub.state(ROOT_SESSION);
     expect(state.messages.map((m) => m.parts[0])).toEqual([
       { type: "text", text: "one" },
       { type: "text", text: "first" },
@@ -205,7 +210,7 @@ describe("An AI SDK harness served through Channels", () => {
     const done = await alice.until(settled("e1"));
     expect(done.turn).toMatchObject({ outcome: "completed" });
 
-    const state = await stub.state("main");
+    const state = await stub.state(ROOT_SESSION);
     expect(state.messages).toHaveLength(2);
     expect(state.messages[1].id).toBe(call.id);
     expect(state.messages[1].parts).toEqual([
@@ -244,7 +249,7 @@ describe("An AI SDK harness served through Channels", () => {
     });
     bob.send(result("r1"));
     await bob.until((f) => f.type === "channels:ack" && f.eventId === "r1");
-    expect(await stub.wait("main", "r1")).toMatchObject({
+    expect(await stub.wait(ROOT_SESSION, "r1")).toMatchObject({
       status: "unanswered",
       reason: "not_owner"
     });
@@ -254,8 +259,10 @@ describe("An AI SDK harness served through Channels", () => {
 
     alice.send(result("r2"));
     await alice.until((f) => f.type === "channels:ack" && f.eventId === "r2");
-    expect(await stub.wait("main", "r2")).toMatchObject({ status: "done" });
-    const state = await stub.state("main");
+    expect(await stub.wait(ROOT_SESSION, "r2")).toMatchObject({
+      status: "done"
+    });
+    const state = await stub.state(ROOT_SESSION);
     expect(state.messages[1].parts.at(-1)).toEqual({
       type: "text",
       text: "You are in Lisbon"
@@ -271,7 +278,7 @@ describe("An AI SDK harness served through Channels", () => {
     await stub.submit("a", "hi", "op-a");
     await stub.submit("b", "hi", "op-b");
     // What a restart runs: walk the stored sessions and wake the busy ones.
-    await runInDurableObject(stub, (instance: AiSdkHarnessObject) =>
+    await runInDurableObject(stub, (instance: ThinkChannelsObject) =>
       instance.harness.onStart()
     );
     expect(await stub.wait("a", "op-a")).toMatchObject({ status: "done" });
@@ -281,11 +288,13 @@ describe("An AI SDK harness served through Channels", () => {
   it("rejects a wait whose signal is already aborted", async () => {
     const stub = agent();
     await stub.setScript([{ text: "slow", held: true }]);
-    await stub.submit("main", "hi", "o1");
+    await stub.submit(ROOT_SESSION, "hi", "o1");
     // Held, so o1 is still pending when the wait begins.
-    expect(await stub.waitAborted("main", "o1")).toBe("rejected");
+    expect(await stub.waitAborted(ROOT_SESSION, "o1")).toBe("rejected");
     await stub.release();
-    expect(await stub.wait("main", "o1")).toMatchObject({ status: "done" });
+    expect(await stub.wait(ROOT_SESSION, "o1")).toMatchObject({
+      status: "done"
+    });
   });
 
   it("forks a conversation with its history", async () => {
@@ -296,7 +305,7 @@ describe("An AI SDK harness served through Channels", () => {
     await alice.until(settled("e1"));
     alice.send({ type: "conversation-fork", eventId: "f1" });
     const fork = await alice.until((f) => f.type === "channels:snapshot");
-    expect(fork.conversationId).not.toBe("main");
+    expect(fork.conversationId).not.toBe(ROOT_SESSION);
     expect(fork.type === "channels:snapshot" && fork.messages).toHaveLength(2);
   });
 });
