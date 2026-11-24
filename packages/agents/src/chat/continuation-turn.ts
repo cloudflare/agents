@@ -95,6 +95,8 @@ export interface ContinuationTurnParts<
    * answered my tool result" has something to look at.
    */
   dropped(event: ContinuationDropped): void;
+  /** The pending continuation `requestId` was released. Optional. */
+  released?(requestId: string): void;
 }
 
 /** A continuation that will not run, and why. */
@@ -449,8 +451,10 @@ function releaseOwnPending<TConnection extends ContinuationConnection>(
 function releasePending<TConnection extends ContinuationConnection>(
   parts: ContinuationTurnParts<TConnection>
 ): void {
+  const requestId = parts.continuation.pending?.requestId;
   parts.continuation.sendResumeNone();
   parts.continuation.clearPending();
+  if (requestId !== undefined) parts.released?.(requestId);
 }
 
 /**

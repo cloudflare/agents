@@ -7,6 +7,8 @@ import {
   afterEach,
   onTestFinished
 } from "vitest";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { createChatAdmissionStore } from "../admissions";
 import { AutoContinuationController } from "../auto-continuation-controller";
 import {
   ChatTurns,
@@ -328,6 +330,56 @@ describe("the continuation turn", () => {
     await fire();
     await drain();
     expect(host.ran).toEqual(["cont-2"]);
+  });
+
+  it("keeps a continuation's record until its turn or its drop, deferred follow-ups included", async () => {
+    const db = new DatabaseSync(":memory:");
+    const store = createChatAdmissionStore(() => ({
+      exec: (query: string, ...bindings: unknown[]) => {
+        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+        return { toArray: () => rows as Record<string, unknown>[] };
+      }
+    }));
+    turns = new ChatTurns<TestConnection>(host, {
+      defaultDebounceMs: 750,
+      admissions: {
+        store,
+        recoveryPending: async () => false,
+        recoveryOwns: async () => false,
+        replayRequest: () => null
+      }
+    });
+    host.turns = turns;
+    const records = () => store.list().map((r) => r.requestId);
+
+    // The answer's continuation is kept until it runs; the conversation moved
+    // on before it did, so it ends without a turn and its record goes.
+    await result("a1");
+    expect(records()).toEqual(["cont-1"]);
+    host.transcript = [...host.transcript, user("u2")];
+    await fire();
+    await drain();
+    expect(host.droppedEvents).toEqual(["cont-1:moved_on"]);
+    expect(records()).toEqual([]);
+
+    // A follow-up deferred behind a running continuation is kept as soon as
+    // it becomes pending.
+    host.transcript = [user("u3"), toolReply("a3", "output-available")];
+    let release!: () => void;
+    host.model = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    await result("a3");
+    await fire();
+    await drain();
+    expect(turns.continuation.pending?.pastCoalesce).toBe(true);
+    await result("a3");
+    expect(turns.continuation.deferred).not.toBeNull();
+    release();
+    await drain();
+    expect(turns.continuation.pending?.requestId).toBe("cont-3");
+    expect(records()).toContain("cont-3");
   });
 
   it("runs nothing once the conversation moved on, and releases the waiting connection", async () => {

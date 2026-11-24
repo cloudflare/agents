@@ -191,11 +191,9 @@ describe("ChatTurns", () => {
       admissions: admissions()
     });
     await after.resumeAdmissions();
-    expect(after.continuation.pending).toMatchObject({
-      requestId,
-      connectionId: null,
-      targetMessageIds: ["a1"]
-    });
+    // Queued at once, not after the coalesce timer: a request that woke the
+    // agent must not run before it.
+    expect(restarted.fired).toBe(1);
     await vi.advanceTimersByTimeAsync(COALESCE);
     expect(restarted.fired).toBe(1);
 

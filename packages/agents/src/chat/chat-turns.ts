@@ -472,7 +472,8 @@ export class ChatTurns<
       hasIncompleteToolBatch: () => hasIncompleteToolBatch(host.messages()),
       drainInteractionApplies: () => this.drainInteractions(),
       keepAliveWhile: (fn) => host.keepAliveWhile(fn),
-      fire: () => host.fireContinuation()
+      fire: () => host.fireContinuation(),
+      scheduled: () => this.#admitContinuation()
     });
     this.#continuationParts = {
       continuation: this.continuation,
@@ -483,7 +484,9 @@ export class ChatTurns<
       streamed: new Map(),
       firing: new Set(),
       unscheduled: new Set(),
-      dropped: (event) => host.continuationDropped?.(event)
+      dropped: (event) => host.continuationDropped?.(event),
+      // A continuation that ends without a turn leaves no record behind.
+      released: (requestId) => this.admissions?.end(requestId)
     };
   }
 
@@ -990,7 +993,9 @@ export class ChatTurns<
       pastCoalesce: false,
       targetMessageIds
     };
-    this.autoContinuation.armTimer();
+    // Queued at once, in replay order: a request that woke the agent must
+    // not run, and store its question, before the answer's continuation.
+    this.autoContinuation.fireWhenStable();
   }
 
   /**
