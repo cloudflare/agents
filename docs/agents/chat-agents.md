@@ -613,7 +613,12 @@ return result.toUIMessageStreamResponse({
     }
     // An in-stream error (such as an overload) is a plain object: send it
     // as JSON, so the agent can still read it.
-    return error instanceof Error ? error.message : JSON.stringify(error);
+    if (error instanceof Error) return error.message;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
   }
 });
 ```
