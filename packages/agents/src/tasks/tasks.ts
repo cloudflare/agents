@@ -124,6 +124,22 @@ const WAKE_JOB_PREFIX = "task:";
 /** The job that delivers terminal reports a reset or a throw cut short. */
 const REPORT_JOB_ID = "tasks:reports";
 const REPORT_JOB_FN = "reports";
+/**
+ * When a run's wake job should fire: its deadline, but no later than
+ * {@link LIVE_WAKE_MS} from now while it runs.
+ */
+function wakeTime(
+  row:
+    | { next_at: number | null; status: string; generation: string | null }
+    | undefined
+): number | null {
+  if (row?.next_at == null) return null;
+  // A claimed run only: a struck one (claim stripped) waits out its backoff.
+  return row.status === "running" && row.generation !== null
+    ? Math.min(row.next_at, Date.now() + LIVE_WAKE_MS)
+    : row.next_at;
+}
+
 /** Terminal reports one report job delivers before it hands on to the next. */
 const REPORT_BATCH = 100;
 
@@ -149,6 +165,13 @@ const WAKE_JOB_RETRY = { maxAttempts: 1 } as const;
  * inline settle for queue liveness.
  */
 const DISPATCH_BUDGET_MS = 5_000;
+
+/**
+ * Farthest a running run's wake may be while its attempt executes: the
+ * attempt outlives its dispatch, so this wake is what notices a reset that
+ * killed it (#2847). One alarm write per interval while a run executes.
+ */
+const LIVE_WAKE_MS = 5_000;
 
 const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "completed",
@@ -227,6 +250,12 @@ export class Tasks<
 > extends LifecycleCapability {
   readonly #definitions: TaskHandlers;
   readonly #registered = new Map<string, TaskFrameworkDefinition>();
+  /** Terminal reports under way whose guard is the report job. */
+  #guardedReports = 0;
+  /** A replay of owed reports is under way; its job must stay. */
+  #replaying = false;
+  /** Reports are owed to the report job; nothing may cancel it. */
+  #reportsOwed = false;
   readonly #active = new Map<string, ActiveAttempt>();
   /**
    * `local` of each run accepted in this isolate whose caller still waits
@@ -564,13 +593,19 @@ export class Tasks<
     return `checkpoint = CASE WHEN definition IN (${names.join(", ")}) THEN checkpoint ELSE NULL END`;
   }
 
-  /** Push a live attempt's durable claim deadline forward one claim window. */
+  /**
+   * Push a live attempt's claim forward, once half of it is used: its wake
+   * comes back every LIVE_WAKE_MS, and a write each time would be wasted.
+   */
   #refreshClaim(runId: string): void {
     const definition = this.#store.getRun(runId)?.definition ?? "";
+    const now = Date.now();
+    const timeout = this.#claimTimeoutMs(definition);
     this.#store.sql`
       UPDATE cf_agents_task_runs
-      SET next_at = ${Date.now() + this.#claimTimeoutMs(definition)}, updated_at = ${Date.now()}
+      SET next_at = ${now + timeout}, updated_at = ${now}
       WHERE run_id = ${runId} AND status = 'running'
+        AND (next_at IS NULL OR next_at < ${now + timeout / 2})
     `;
   }
 
@@ -594,8 +629,8 @@ export class Tasks<
     if (!this.#laneAllows(row)) return undefined;
     const active = this.#liveAttempt(runId);
     if (active) {
-      // A live attempt in this isolate; push the claim backstop forward so
-      // the due job does not hot-loop the alarm while it works.
+      // A live attempt in this isolate: its wake comes back in
+      // LIVE_WAKE_MS.
       this.#refreshClaim(runId);
       this.lifecycle.trackAlarmWork(active.promise);
       return this.#wakeOutcome(runId);
@@ -667,8 +702,8 @@ export class Tasks<
       await this.#settleFailed(runId, null, {
         name: "TaskMemoryLimitSealed",
         message:
-          "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
-          "consecutive Durable Object memory-limit resets."
+          "Sealed by the alarm circuit breaker (#1825) after consecutive " +
+          "resets during the alarm (for example the memory limit)."
       });
       return;
     }
@@ -698,13 +733,17 @@ export class Tasks<
    * again either way.
    */
   #wakeOutcome(runId: string): LifecycleJobOutcome {
-    const rows = this.#store.sql<{ next_at: number | null }>`
-      SELECT next_at FROM cf_agents_task_runs
+    const rows = this.#store.sql<{
+      next_at: number | null;
+      status: string;
+      generation: string | null;
+    }>`
+      SELECT next_at, status, generation FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
-    const next = rows[0]?.next_at;
-    return typeof next === "number" ? { rescheduleAt: next } : undefined;
+    const next = wakeTime(rows[0]);
+    return next === null ? undefined : { rescheduleAt: next };
   }
 
   /**
@@ -724,9 +763,11 @@ export class Tasks<
   ): Promise<boolean> {
     const rows = this.#store.sql<{
       next_at: number | null;
+      status: string;
+      generation: string | null;
       created_at: number;
     }>`
-      SELECT next_at, created_at FROM cf_agents_task_runs
+      SELECT next_at, status, generation, created_at FROM cf_agents_task_runs
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
@@ -739,7 +780,7 @@ export class Tasks<
     ) {
       return true;
     }
-    const next = rows[0]?.next_at ?? null;
+    const next = wakeTime(rows[0]);
 
     const jobId = `${WAKE_JOB_PREFIX}${runId}`;
     if (next === null) {
@@ -1146,17 +1187,15 @@ export class Tasks<
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
-    // Mirror the claim deadline before the handler runs, not after: a
-    // routed run's root has no other way to learn it, and a push here
-    // clears the queue row's in-flight marker, so it durably wins over a
-    // root dispatch that later returns a stale outcome past its own
-    // budget (job-queue's own "newer pushes win" guard on that marker).
-    // A local run its own wake dispatches needs none: the dispatch's
-    // outcome is read from the row after the claim. Nor does an attached
-    // attempt its caller started: it ends before its caller returns.
+    // Mirror the claim deadline before the handler runs: a push here clears
+    // the queue row's in-flight marker, so it durably wins over a dispatch
+    // that later returns a stale outcome past its own budget. A run its own
+    // wake dispatches needs none: the dispatch's outcome is read from the
+    // row after the claim. Nor does an attached attempt its caller started:
+    // it ends before its caller returns.
     const attached =
       !byOwnWake && this.#registeredOptions.get(row.definition)?.attached;
-    if (!attached && (!byOwnWake || this.lifecycle.routes.source)) {
+    if (!attached && !byOwnWake) {
       await this.#syncWake(runId);
       // A cancel() that ran during that await found no live attempt and
       // settled the run itself. The claim is void then: start no handler.
@@ -1668,18 +1707,18 @@ export class Tasks<
   ): Promise<void> {
     const onStatus =
       row && this.#registeredOptions.get(row.definition)?.onStatus;
-    if (onStatus && !this.lifecycle.routes.source) {
+    let guarded = false;
+    if (onStatus) {
       // The terminal report must outlive a reset before it returns: the
       // run's wake stays until then (when due it delivers the report), and
       // a run with none (queued in a lane) gets the report job.
       if (!this.lifecycle.jobs.get(`${WAKE_JOB_PREFIX}${runId}`)) {
-        await this.#pushReportJob(REPORT_RETRY_MS);
+        guarded = true;
+        this.#guardedReports++;
+        await this.#pushReportJob(REPORT_RETRY_MS, false);
       }
     } else {
       await this.#syncWake(runId);
-      // A facet's run wake lives on its root, so the report job (a facet
-      // job, woken through the root) keeps the report alive here.
-      if (onStatus) await this.#pushReportJob(REPORT_RETRY_MS);
     }
     // Only the head settling moves its lane on: a run queued behind it that
     // ends (a cancel, a clear) leaves the head where it is.
@@ -1697,8 +1736,12 @@ export class Tasks<
       if (row?.retain === 0) this.#store.deleteRun(runId);
       return;
     }
-    await this.#deliverTerminal(runId, row.retain !== 0);
-    if (onStatus && !this.lifecycle.routes.source) {
+    try {
+      await this.#deliverTerminal(runId, row.retain !== 0);
+    } finally {
+      if (guarded) await this.#releaseReportGuard();
+    }
+    if (onStatus) {
       await this.#syncWake(runId, { createdAt: row.created_at });
     }
   }
@@ -1762,8 +1805,13 @@ export class Tasks<
    * Arm the report job for `delayMs` from now. A job already due sooner is
    * left alone (a burst of settles must not keep postponing a retry); one
    * in flight is pushed again, so it outlives its dispatch.
+   *
+   * @param owed - Reports are owed to the job (a throw, a reset, a batch
+   *   left over), so nothing may cancel it until it runs. False for the
+   *   guard a terminal report holds only while it is under way.
    */
-  async #pushReportJob(delayMs = 0): Promise<void> {
+  async #pushReportJob(delayMs = 0, owed = true): Promise<void> {
+    if (owed) this.#reportsOwed = true;
     const now = Date.now();
     const time = now + delayMs;
     const existing = this.lifecycle.jobs.get(REPORT_JOB_ID);
@@ -1776,8 +1824,30 @@ export class Tasks<
     });
   }
 
+  /**
+   * A terminal report that held the report job as its guard returned: the
+   * job goes when no other report holds it and none is owed to it, so it
+   * does not wake the object for nothing.
+   */
+  async #releaseReportGuard(): Promise<void> {
+    this.#guardedReports--;
+    if (this.#guardedReports === 0 && !this.#reportsOwed && !this.#replaying) {
+      await this.lifecycle.jobs.cancel(REPORT_JOB_ID);
+    }
+  }
+
   /** Deliver the terminal reports a reset or a throw left undelivered. */
   async #replayReports(): Promise<void> {
+    this.#reportsOwed = false;
+    this.#replaying = true;
+    try {
+      await this.#replayBatch();
+    } finally {
+      this.#replaying = false;
+    }
+  }
+
+  async #replayBatch(): Promise<void> {
     const names = [...this.#registeredOptions.keys()].filter(
       (name) => this.#registeredOptions.get(name)?.onStatus
     );
