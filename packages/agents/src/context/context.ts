@@ -600,7 +600,15 @@ export class Context {
    */
   async #released(): Promise<string | null> {
     if (!this.#promptStore) return null;
-    this.#frozen ??= await this.#promptStore.get();
+    // A store that fails or holds nothing never fails a turn: there is
+    // just no prompt from before.
+    this.#frozen ??= await this.#promptStore.get().then(
+      (text) => (typeof text === "string" && text.length > 0 ? text : null),
+      (error: unknown) => {
+        console.warn("Context could not read the frozen prompt store", error);
+        return null;
+      }
+    );
     if (this.#frozen === null) return null;
     return (await this.#session.internal_config(CLEARED_AT)) === null
       ? this.#frozen

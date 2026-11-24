@@ -880,6 +880,34 @@ describe("Context", () => {
     });
   });
 
+  it("never fails a turn on a frozen prompt store that throws or is empty", async () => {
+    for (const store of [
+      {
+        get: async (): Promise<string | null> => {
+          throw new Error("store down");
+        }
+      },
+      { get: async (): Promise<string | null> => null },
+      { get: async () => "" }
+    ]) {
+      await withCapabilityHarness(async ({ storage, install }) => {
+        const sessions = new Sessions();
+        install(sessions);
+        const session = sessions.session();
+        const context = new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            { label: "soul", provider: { get: async () => "Be kind." } }
+          ],
+          promptStore: store
+        });
+        await session.appendMessage(user("u1", "hello"));
+        const built = await context.build();
+        expect(built.system).toContain("Be kind.");
+      });
+    }
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>

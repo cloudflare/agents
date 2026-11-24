@@ -87,4 +87,4 @@ If you used `agents/context` directly before this release:
 - Think's `this.context` is a `Context`. The methods you called on it keep their names and signatures.
 - An agent upgraded from an earlier release keeps the prompt it last froze: its first turn opens with exactly that text, and an answer from before the upgrade is regenerated with it. A remind block that changed since is sent once on that turn. A conversation started after the upgrade, or after the chat is cleared, does not use it.
 - Think no longer writes a `_system_prompt` row; each prompt it records lives on the session.
-- `withCachedPrompt(provider)` still works: the provider supplies the prompt frozen before the upgrade. It is read, not written.
+- A store passed to `withCachedPrompt(provider)` is no longer written. It is only read, for the prompt frozen before the upgrade, which the turns from before the upgrade are sent until the chat is cleared. A store that throws or holds nothing is treated as having no prompt.
