@@ -436,6 +436,9 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.tasks.register("__cf_echo", async (input) => (input as string).length);
+    this.tasks.register("__cf_kept", async () => "kept", {
+      keepCheckpoint: true
+    });
     this.tasks.register("__cf_parking", async () =>
       TaskSettlement.park("detached")
     );

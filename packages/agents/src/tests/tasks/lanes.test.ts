@@ -155,3 +155,52 @@ describe("Tasks lanes", () => {
     });
   });
 });
+
+describe("Tasks clear and the checkpoint", () => {
+  it("keeps the checkpoint of a definition that keeps it, and clears the rest", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.tasks.get("warm");
+        const now = Date.now();
+        for (const [runId, definition, seq] of [
+          ["kept", "__cf_kept", 1],
+          ["plain", "__cf_echo", 2]
+        ] as const) {
+          state.storage.sql.exec(
+            `INSERT INTO cf_agents_task_runs
+               (run_id, definition, status, retain, attempt, cancel_requested,
+                created_at, updated_at, lane, seq, checkpoint)
+             VALUES (?, ?, 'pending', 1, 0, 0, ?, ?, 'l', ?, ?)`,
+            runId,
+            definition,
+            now,
+            now,
+            seq,
+            JSON.stringify({ note: runId })
+          );
+        }
+        await instance.tasks.clear("l", "stop");
+        const rows = Object.fromEntries(
+          state.storage.sql
+            .exec<{
+              run_id: string;
+              status: string;
+              checkpoint: string | null;
+            }>(
+              "SELECT run_id, status, checkpoint FROM cf_agents_task_runs WHERE lane = 'l'"
+            )
+            .toArray()
+            .map((row) => [row.run_id, row])
+        );
+        expect(rows.kept).toMatchObject({ status: "skipped" });
+        expect(JSON.parse(rows.kept.checkpoint!)).toEqual({ note: "kept" });
+        expect(rows.plain).toMatchObject({
+          status: "skipped",
+          checkpoint: null
+        });
+      }
+    );
+  });
+});
