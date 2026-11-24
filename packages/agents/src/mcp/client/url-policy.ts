@@ -121,8 +121,19 @@ export function fetchWithinUrlPolicy(
 function allowedUrl(url: string, checked: UrlValidation): URL {
   if (checked.ok) return checked.url;
   throw new Error(
-    `Blocked URL: ${url} — MCP client connections to private/internal addresses are not allowed (${checked.message})`
+    `Blocked URL: ${withoutCredentials(url)}. ${checked.message}`
   );
+}
+
+/** The URL as given, minus any username and password, for an error. */
+function withoutCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = parsed.password = "";
+    return parsed.href;
+  } catch {
+    return url;
+  }
 }
 
 function isRedirect(status: number): boolean {

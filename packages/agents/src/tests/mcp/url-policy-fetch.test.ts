@@ -39,6 +39,18 @@ describe("fetchWithinUrlPolicy", () => {
     expect(net.sent).toEqual([]);
   });
 
+  it("says why a URL was refused, without its credentials", async () => {
+    const guarded = fetchWithinUrlPolicy(fakeNetwork({}).fetch);
+    await expect(
+      guarded("https://user:secret@mcp.example.com/mcp")
+    ).rejects.toThrow(
+      "Blocked URL: https://mcp.example.com/mcp. URLs with a username or password can't be fetched."
+    );
+    await expect(guarded("http://10.0.0.1/mcp")).rejects.toThrow(
+      "Blocked URL: http://10.0.0.1/mcp. The host 10.0.0.1 is a private or local address."
+    );
+  });
+
   it("allows loopback for local development", async () => {
     const net = fakeNetwork({
       "http://localhost:8787/mcp": () => new Response("ok")
