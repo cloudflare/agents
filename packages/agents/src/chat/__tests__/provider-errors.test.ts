@@ -1,6 +1,10 @@
 import { APICallError } from "@ai-sdk/provider";
+import { RetryError } from "ai";
 import { describe, expect, it } from "vitest";
-import { CloudflareAIError as CoreCloudflareAIError } from "../../models/core/errors";
+import {
+  CloudflareAIError as CoreCloudflareAIError,
+  normalizeThrownError
+} from "../../models/core/errors";
 import { CloudflareAIError } from "../../models/ai-sdk/errors";
 import { classifyProviderError } from "../provider-errors";
 
@@ -64,21 +68,40 @@ describe("classifyProviderError", () => {
     );
   });
 
-  it("reads a Workers AI capacity error as transient", () => {
-    // `normalizeThrownError` maps binding code 3040 to a 429/503 status.
-    const capacity = new CoreCloudflareAIError({
-      message: "3040: Capacity temporarily exceeded",
-      model: "@cf/meta/llama",
-      url: "binding",
-      requestBodyValues: {},
-      status: 503,
-      code: "provider-error"
-    });
-    expect(classifyProviderError(capacity)).toBe("transient");
+  it("reads a Workers AI capacity error as a rate limit", () => {
+    // The binding throws `3040: Capacity temporarily exceeded`, which
+    // `normalizeThrownError` maps to a 429.
+    const capacity = normalizeThrownError(
+      new Error("3040: Capacity temporarily exceeded, please try again."),
+      { model: "@cf/meta/llama", url: "binding", requestBodyValues: {} }
+    );
+    expect(classifyProviderError(capacity)).toBe("rate_limit");
+  });
+
+  it("reads 5xx, 529, 408 and an in-stream overload as transient", () => {
+    expect(classifyProviderError(call(503, "Service unavailable"))).toBe(
+      "transient"
+    );
     expect(classifyProviderError(call(529, "Overloaded"))).toBe("transient");
     expect(classifyProviderError(call(408, "Request timeout"))).toBe(
       "transient"
     );
+    // Anthropic's in-stream error part, with no HTTP status.
+    expect(
+      classifyProviderError({
+        type: "error",
+        error: { type: "overloaded_error", message: "Overloaded" }
+      })
+    ).toBe("transient");
+  });
+
+  it("reads an AI SDK RetryError by its last error", () => {
+    const exhausted = new RetryError({
+      message: "Failed after 3 attempts.",
+      reason: "maxRetriesExceeded",
+      errors: [call(429, "Rate limit"), call(503, "Unavailable")]
+    });
+    expect(classifyProviderError(exhausted)).toBe("transient");
   });
 
   it("says nothing about an error it cannot act on", () => {

@@ -874,7 +874,7 @@ classifyChatError(error: unknown, ctx?: ChatErrorContext): ChatErrorClassificati
 
 - `"context_overflow"` runs the compact-and-retry backstop when `contextOverflow.reactive` is enabled (see [Context-window overflow recovery](./index.md#context-window-overflow-recovery)). If recovery cannot save the turn, that classification is surfaced on the terminal `onChatError` call via `ChatErrorContext.classification`.
 - `"transient"` and `"rate_limit"` route the turn into bounded chat recovery, the same path as a stream stall. Think calls `onChatRecovery`, keeps the partial response (unless the hook returns `persist: false`), and schedules a continuation. The continuation waits 1 second on the first attempt and doubles on each later attempt, up to 30 seconds. Once `chatRecovery.maxAttempts` is spent, the turn ends with the configured terminal message and `onExhausted`, not the raw error.
-- `"fatal"`, `"unknown"`, and `void` (the default) keep the existing terminal behavior.
+- `"fatal"` and `"unknown"` keep the existing terminal behavior. `void` (the default) lets Think read the provider's error itself, as described below.
 
 When `classifyChatError` returns nothing (or is not overridden), Think reads the provider's error itself: a context-window error (OpenAI `context_length_exceeded`, Anthropic "prompt is too long", and the other common providers' wording) is `"context_overflow"`, an HTTP 429 is `"rate_limit"`, and a 408, 5xx or 529 is `"transient"`. The `agents/models` errors, AI SDK `APICallError`s and any error with an HTTP status are read this way. Your override always wins.
 
@@ -884,27 +884,15 @@ The second argument is a [`ChatErrorContext`](#onchaterror): when consulted for 
 
 ### Example
 
-For the common case, assign the bundled `defaultContextOverflowClassifier`, which matches the context-overflow errors of Anthropic, OpenAI, Google, Bedrock, and others:
-
-```typescript
-import { Think, defaultContextOverflowClassifier } from "@cloudflare/think";
-
-export class MyAgent extends Think<Env> {
-  override classifyChatError = defaultContextOverflowClassifier;
-}
-```
-
-Or write your own, optionally delegating to the bundled classifier:
+Think already reads the common providers' errors, so override this only for errors it does not know. Return nothing to fall back to Think's own reading:
 
 ```typescript
 import type { ChatErrorClassification } from "@cloudflare/think";
-import { defaultContextOverflowClassifier } from "@cloudflare/think";
 
 classifyChatError(error: unknown): ChatErrorClassification | void {
-  if (error instanceof Error && /rate.?limit/i.test(error.message)) {
-    return "rate_limit";
+  if (error instanceof Error && /quota exhausted/i.test(error.message)) {
+    return "fatal";
   }
-  return defaultContextOverflowClassifier(error);
 }
 ```
 

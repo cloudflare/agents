@@ -420,7 +420,7 @@ path.
 | `waitForMcpConnections`    | `false`                          | Wait for MCP servers before inference                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `chatRecovery`             | Always on                        | Durable recovery configuration. See [`ChatRecoveryConfig`](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#stream-recovery) for all options and defaults.                                                                                                                                                                                                                                                                                                                                         |
 | `chatStreamStallTimeoutMs` | `0` (off)                        | Opt-in inactivity watchdog: abort a turn whose model stream produces no chunk for this long (measures the gap between chunks, including tool execution — set above your slowest model TTFT + tool, e.g. `120_000`). Emits a `chat:stream:stalled` event; the stall routes into bounded recovery (see below) instead of an infinite spinner, and only terminalizes once the budget is exhausted. Override per-turn via `TurnConfig.chatStreamStallTimeoutMs` (returned from `beforeTurn`) for a turn with a known-slow tool. |
-| `contextOverflow`          | `undefined`                      | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery).                                                                                                                                                                                                                                                                                               |
+| `contextOverflow`          | `undefined`                      | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery).                                                                                                                                                                                                                                                                                                                     |
 
 ### AI Gateway options
 
@@ -682,26 +682,22 @@ This runs during transcript repair — before the repaired transcript is persist
 
 [Compaction](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md#compaction) is checked **between turns** — `compactAfter()` runs after each `appendMessage()`. But a single long, tool-heavy turn grows the prompt step by step inside one `streamText` loop and can exceed the model's context window **mid-turn**, before the next pre-turn check. The provider then rejects the request (`"prompt is too long"`, `context_length_exceeded`), and the turn would otherwise die terminally.
 
-Think recovers from this with two opt-in, provider-agnostic layers, both configured through the `contextOverflow` property. Both are off by default, so existing behavior is unchanged. Both reuse your session's compaction function, so they require a `configureSession()` with `onCompaction()` configured. Both require [`classifyChatError`](./lifecycle-hooks.md#classifychaterror) to tell Think which errors are overflows — Think ships no provider-specific matching in core.
+Think recovers from this with two opt-in, provider-agnostic layers, both configured through the `contextOverflow` property. Both are off by default, so existing behavior is unchanged. Both reuse your session's compaction function, so they require a `configureSession()` with `onCompaction()` configured. Think recognises the common providers' context-window errors (Anthropic, OpenAI, Google, Bedrock, Mistral, Workers AI) by itself; override [`classifyChatError`](./lifecycle-hooks.md#classifychaterror) to classify errors it does not know, and your classification wins.
 
-**1. Reactive backstop — `contextOverflow.reactive`.** When a turn fails with an error you classify as `"context_overflow"`, Think discards the truncated partial, runs `session.compact()`, and re-runs the turn from the compacted history. The partial is not persisted: the turn restarts from scratch, so keeping the cut-off assistant message would orphan it beside the recovered answer. It is bounded by `contextOverflow.maxRetries` (default `1`); if compaction cannot shorten history or the budget is spent, the overflow surfaces terminally through `onChatError` with `classification: "context_overflow"` — it never loops or ends silently.
+**1. Reactive backstop — `contextOverflow.reactive`.** When a turn fails with a context-overflow error, Think discards the truncated partial, runs `session.compact()`, and re-runs the turn from the compacted history. The partial is not persisted: the turn restarts from scratch, so keeping the cut-off assistant message would orphan it beside the recovered answer. It is bounded by `contextOverflow.maxRetries` (default `1`); if compaction cannot shorten history or the budget is spent, the overflow surfaces terminally through `onChatError` with `classification: "context_overflow"` — it never loops or ends silently.
 
 ```typescript
-import { Think, defaultContextOverflowClassifier } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
 
 export class MyAgent extends Think<Env> {
   override contextOverflow = { reactive: true };
-
-  // The bundled classifier covers the common providers (Anthropic, OpenAI,
-  // Google, Bedrock, …). Assign it directly, or write your own.
-  override classifyChatError = defaultContextOverflowClassifier;
 }
 ```
 
 **2. Proactive guard — `contextOverflow.proactive`.** Heads off the provider error before it happens. Before each step, Think reads the previous step's model-reported `usage.inputTokens` (provider-agnostic) and, if it crosses `maxInputTokens * (headroom ?? 0.9)`, compacts in place and feeds the recompacted history into the upcoming step. If a provider omits `inputTokens`, it falls back to `usage.totalTokens` (a safe over-approximation — it compacts slightly early rather than missing the threshold). It compacts at most `proactive.maxCompactions` times per turn (default `1`) — independent of the reactive `maxRetries` budget — so a history that cannot shorten does not compact on every step.
 
 ```typescript
-import { Think, defaultContextOverflowClassifier } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
 
 export class MyAgent extends Think<Env> {
   override contextOverflow = {
@@ -709,8 +705,6 @@ export class MyAgent extends Think<Env> {
     // Compact mid-turn once a step approaches 90% of a 200K window.
     proactive: { maxInputTokens: 200_000 }
   };
-
-  override classifyChatError = defaultContextOverflowClassifier;
 }
 ```
 
