@@ -1889,8 +1889,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           // Any compaction, the harness's own or Sessions' automatic one:
           // the prefix is gone and the summary hides the turns that wrote
           // the blocks, so the next turn rebuilds the context from them.
-          void this.#contexts
-            .get(session)
+          // (Built here if this object has not used it yet.)
+          void this.#context(session)
             ?.refreshSystemPrompt()
             .catch((error: unknown) =>
               console.warn("ThinkHarness could not refresh the context", error)

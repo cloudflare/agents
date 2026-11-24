@@ -309,6 +309,55 @@ describe("Context", () => {
     });
   });
 
+  it("sends a provider's change to a block the model wrote, once it differs", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      let todo = "";
+      const { session, context, setDate } = await setup(
+        storage,
+        (s) => install(s),
+        [
+          {
+            label: "todo",
+            whenChanged: "remind",
+            provider: {
+              get: async () => todo,
+              set: async (content: string) => {
+                todo = content;
+              }
+            }
+          }
+        ]
+      );
+      await session.appendMessage(user("u1", "plan it"));
+      await context.build();
+      await modelWrites(context, session, "a1", "todo", "draft");
+      // The app changes the plan behind the provider, not through Context,
+      // and another block changes on the same turn.
+      todo = "approved";
+      setDate("Tuesday");
+      await session.appendMessage(user("u2", "next"));
+      const last = (await context.build()).messages.at(-1);
+      expect(texts(last)[1]).toContain("approved");
+      expect(texts(last)[1]).toContain("Today is Tuesday.");
+    });
+  });
+
+  it("does not send back a block the model overwrote after code wrote it", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes" }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      const first = await context.build();
+      await context.setBlock("notes", "from code");
+      await modelWrites(context, session, "a1", "notes", "from the model");
+      await session.appendMessage(user("u2", "next"));
+      const second = await context.build();
+      expect(second.system).toBe(first.system);
+      expect(texts(second.messages.at(-1))).toHaveLength(1);
+    });
+  });
+
   it("sends a block code set back to the value the prompt shows", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context } = await setup(storage, (s) => install(s), [

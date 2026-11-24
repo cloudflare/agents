@@ -685,32 +685,52 @@ export class Context {
   /** Remind blocks whose section differs from the one last delivered. */
   /**
    * What the model has not been shown: a remind block whose value differs
-   * from the one last delivered, unless the model wrote it itself (its
-   * `set_context` call is in the history since the newest record), and any
-   * block written from code since (CHANGED), always.
+   * from the one last delivered, and any block written from code since
+   * (CHANGED). A block holding what the model last wrote itself (its
+   * `set_context` call is in the history since the newest record) is known
+   * to it, whatever changed before; once it holds something else, a later
+   * write or provider change did that, and it is sent.
    */
   async #changes(
     delivered: Delivered,
     history: readonly SessionMessage[]
   ): Promise<{ changes: Section[]; own: Section[] }> {
-    const own = ownWrites(history, delivered.at);
+    const writes = ownWrites(history, delivered.at);
     const remind = await this.#blocks.internal_remindSections();
-    const changes = remind.filter(
-      ([label, text]) => !own.has(label) && delivered.values.get(label) !== text
-    );
+    const known = new Set<string>();
+    for (const [label, write] of writes) {
+      const content = this.#blocks.getBlock(label)?.content;
+      if (
+        content !== undefined &&
+        (write.append
+          ? content.endsWith(write.content)
+          : content === write.content)
+      ) {
+        known.add(label);
+      }
+    }
     const changed = await this.#changedLabels();
     const current =
-      changed.size > 0 || own.size > 0
+      changed.size > 0 || known.size > 0
         ? await this.#blocks.internal_sections()
         : [];
+    const changes = remind.filter(
+      ([label, text]) =>
+        !known.has(label) && delivered.values.get(label) !== text
+    );
     for (const section of current) {
-      if (changed.has(section[0]) && !changes.some(([l]) => l === section[0])) {
+      const [label] = section;
+      if (
+        changed.has(label) &&
+        !known.has(label) &&
+        !changes.some(([l]) => l === label)
+      ) {
         changes.push(section);
       }
     }
     return {
       changes,
-      own: current.filter(([label]) => own.has(label) && !changed.has(label))
+      own: current.filter(([label]) => known.has(label))
     };
   }
 
@@ -826,19 +846,19 @@ type Delivered = {
 };
 
 /**
- * Blocks the model wrote itself with `set_context` in the history after the
- * message holding the newest record (all of it when that message is not in
- * the history): the tool call and its result are the model's record.
+ * What the model last wrote with `set_context`, per block, in the history
+ * after the message holding the newest record (all of it when that message
+ * is not in the history): the tool call and its result are its record.
  */
 function ownWrites(
   history: readonly SessionMessage[],
   recordAt: string | undefined
-): Set<string> {
+): Map<string, { content: string; append: boolean }> {
   const from =
     recordAt === undefined
       ? 0
       : history.findIndex((message) => message.id === recordAt) + 1;
-  const labels = new Set<string>();
+  const writes = new Map<string, { content: string; append: boolean }>();
   for (const message of history.slice(from)) {
     if (message.role !== "assistant") continue;
     for (const part of message.parts) {
@@ -846,21 +866,23 @@ function ownWrites(
         type: string;
         toolName?: string;
         state?: string;
-        input?: { label?: unknown };
+        input?: { label?: unknown; content?: unknown; action?: unknown };
       };
       const named =
         tool.type === "tool-set_context" ||
         (tool.type === "dynamic-tool" && tool.toolName === "set_context");
+      const { label, content, action } = tool.input ?? {};
       if (
         named &&
         tool.state === "output-available" &&
-        typeof tool.input?.label === "string"
+        typeof label === "string" &&
+        typeof content === "string"
       ) {
-        labels.add(tool.input.label);
+        writes.set(label, { content, append: action === "append" });
       }
     }
   }
-  return labels;
+  return writes;
 }
 
 function renderSystem(sections: readonly Section[]): string {
