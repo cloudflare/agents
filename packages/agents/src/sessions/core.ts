@@ -271,6 +271,24 @@ export class SessionsCore {
     );
     this.#fts = true;
     this.#backfillMissingFtsRows();
+    this.#backfillSplitMessages();
+  }
+
+  /**
+   * Index the messages stored across continuation rows. Their first slice
+   * is not valid JSON on its own, so the SQL backfill skips them; each is
+   * indexed from its reassembled content, one message in memory at a time.
+   * Runs only when the index is created, so none of them is indexed yet.
+   */
+  #backfillSplitMessages(): void {
+    const split = this.io.sql<{ session_id: string; id: string }>(
+      "SELECT session_id, id FROM cf_agents_session_messages WHERE content_chunks > 0",
+      []
+    );
+    for (const { session_id: sessionId, id } of split) {
+      const message = this.getMessage(sessionId, id);
+      if (message) this.#indexFts(sessionId, message, false);
+    }
   }
 
   /** Index rows that predate indexing, in SQL, without loading JSON into JS. */
@@ -293,22 +311,6 @@ export class SessionsCore {
        GROUP BY m.id, m.session_id, m.role`,
       []
     );
-    // A split message's first slice is not valid JSON on its own, so the SQL
-    // above skips it. Index those one at a time from their reassembled
-    // content: one message in memory at a time.
-    const split = this.io.sql<{ session_id: string; id: string }>(
-      `SELECT m.session_id, m.id FROM cf_agents_session_messages m
-       WHERE m.content_chunks > 0
-         AND NOT EXISTS (
-           SELECT 1 FROM cf_agents_session_fts AS existing
-           WHERE existing.id = m.id AND existing.session_id = m.session_id
-         )`,
-      []
-    );
-    for (const { session_id: sessionId, id } of split) {
-      const message = this.getMessage(sessionId, id);
-      if (message) this.#indexFts(sessionId, message, false);
-    }
   }
 
   /**
