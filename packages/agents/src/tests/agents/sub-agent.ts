@@ -58,6 +58,10 @@ export class CounterSubAgent extends Agent {
     return super._cf_routeLifecycle(target, envelope);
   }
 
+  async storedRootJurisdictionForTest(): Promise<string | undefined> {
+    return this.ctx.storage.get<string>("cf_agents_root_jurisdiction");
+  }
+
   async treeScheduleRows(): Promise<TreeScheduleRow[]> {
     return treeScheduleRows(this, false);
   }
@@ -1965,6 +1969,43 @@ export class TestSubAgentParent extends Agent {
   ): Promise<Array<{ id: string; time: number }>> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.scheduleTimes();
+  }
+
+  /**
+   * Initialise a sub-agent as a root in jurisdiction `jurisdiction` would,
+   * and read back what it stored. Local runs have no jurisdictions.
+   */
+  async childRootJurisdictionForTest(
+    subAgentName: string,
+    jurisdiction: string
+  ): Promise<string | undefined> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const path = await child.getSelfPath();
+    const identity =
+      this.ctx.storage.sql
+        .exec<{ identity_name: string | null }>(
+          "SELECT identity_name FROM cf_agents_sub_agents WHERE name = ?",
+          subAgentName
+        )
+        .toArray()[0]?.identity_name ?? subAgentName;
+    await (
+      child as unknown as {
+        _cf_initAsFacet(
+          name: string,
+          parentPath: unknown,
+          identityName: string,
+          rootChannel: undefined,
+          rootJurisdiction: string
+        ): Promise<void>;
+      }
+    )._cf_initAsFacet(
+      subAgentName,
+      path.slice(0, -1),
+      identity,
+      undefined,
+      jurisdiction
+    );
+    return child.storedRootJurisdictionForTest();
   }
 
   failNextAdoptsForTest(count: number): void {

@@ -121,6 +121,9 @@ export function rejectSubAgentWebSocket(response: Response): Response {
   return new Response(null, { status: 101, webSocket: client });
 }
 
+/** A facet's stored copy of its root's jurisdiction. */
+const ROOT_JURISDICTION_KEY = "cf_agents_root_jurisdiction";
+
 /**
  * The facet-backed dynamic-agent machinery, extracted from the Agent
  * class. One instance per Agent, installed as a Lifecycle capability
@@ -186,6 +189,14 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    * through it do not loop back into the runtime as a root stub does.
    */
   #rootChannel?: RootFacetRpcSurface;
+
+  /** In a facet: the jurisdiction its root was addressed in, if any. */
+  #rootJurisdiction?: string;
+
+  /** In a facet: the jurisdiction its root was addressed in, if any. */
+  get rootJurisdiction(): string | undefined {
+    return this.#rootJurisdiction;
+  }
 
   constructor(host: DynamicAgentHostPort) {
     super("dynamic-agents");
@@ -340,9 +351,28 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // Every root endpoint on this surface starts the root's lifecycle itself,
     // so a plain stub is enough. `getAgentByName()` would spend an extra
     // `__unsafe_ensureInitialized` round trip on every broadcast and send.
-    return binding.get(
-      binding.idFromName(root.name)
+    const namespace = this.#inRootJurisdiction(binding);
+    return namespace.get(
+      namespace.idFromName(root.name)
     ) as unknown as RootFacetRpcSurface;
+  }
+
+  /**
+   * The root's namespace in the root's jurisdiction: the same name outside
+   * it is another Durable Object (#2470).
+   */
+  #inRootJurisdiction(binding: DurableObjectNamespace): DurableObjectNamespace {
+    const jurisdiction = this.#rootJurisdiction;
+    return jurisdiction
+      ? binding.jurisdiction(jurisdiction as DurableObjectJurisdiction)
+      : binding;
+  }
+
+  /** What this agent hands a child facet as its root's jurisdiction. */
+  #jurisdictionForChildren(): string | undefined {
+    return this.#host._isFacet
+      ? this.#rootJurisdiction
+      : this.#host.ctx.id.jurisdiction;
   }
 
   rootResolvesToSelf(): boolean {
@@ -355,7 +385,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       | undefined;
     if (!binding?.idFromName) return false;
 
-    return binding.idFromName(root.name).equals(this.#host.ctx.id);
+    return this.#inRootJurisdiction(binding)
+      .idFromName(root.name)
+      .equals(this.#host.ctx.id);
   }
 
   /**
@@ -622,14 +654,16 @@ export class DynamicAgentsInternal extends LifecycleCapability {
               name: string,
               parentPath: ReadonlyArray<{ className: string; name: string }>,
               identityName: string,
-              rootChannel?: RootFacetRpcSurface
+              rootChannel?: RootFacetRpcSurface,
+              rootJurisdiction?: string
             ): Promise<void>;
           }
         )._cf_initAsFacet(
           name,
           childParentPath,
           identity.name,
-          this.#channelForChildren()
+          this.#channelForChildren(),
+          this.#jurisdictionForChildren()
         );
       });
     } catch (error) {
@@ -683,14 +717,16 @@ export class DynamicAgentsInternal extends LifecycleCapability {
               name: string,
               parentPath: ReadonlyArray<{ className: string; name: string }>,
               identityName: string,
-              rootChannel?: RootFacetRpcSurface
+              rootChannel?: RootFacetRpcSurface,
+              rootJurisdiction?: string
             ): Promise<void>;
           }
         )._cf_initAsFacet(
           name,
           childParentPath,
           identityName,
-          this.#channelForChildren()
+          this.#channelForChildren(),
+          this.#jurisdictionForChildren()
         );
       });
     } catch (error) {
@@ -1675,6 +1711,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       this.#host._facetName = storedFacetName;
     }
 
+    this.#rootJurisdiction =
+      (await this.#host.ctx.storage.get<string>(ROOT_JURISDICTION_KEY)) ??
+      this.#rootJurisdiction;
+
     const storedParentPath = await this.#host.ctx.storage.get<
       Array<{ className: string; name: string }>
     >("cf_agents_parent_path");
@@ -1870,8 +1910,13 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
     identityName = name,
-    rootChannel?: RootFacetRpcSurface
+    rootChannel?: RootFacetRpcSurface,
+    rootJurisdiction?: string
   ): Promise<void> {
+    if (rootJurisdiction && rootJurisdiction !== this.#rootJurisdiction) {
+      this.#rootJurisdiction = rootJurisdiction;
+      await this.#host.ctx.storage.put(ROOT_JURISDICTION_KEY, rootJurisdiction);
+    }
     if (rootChannel) {
       // Kept past this call; the newest one replaces the last.
       const kept = (

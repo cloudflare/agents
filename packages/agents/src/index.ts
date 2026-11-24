@@ -3127,13 +3127,15 @@ export class Agent<
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
     identityName = name,
-    rootChannel?: RootFacetRpcSurface
+    rootChannel?: RootFacetRpcSurface,
+    rootJurisdiction?: string
   ): Promise<void> {
     return this._dynamicAgents.init(
       name,
       parentPath,
       identityName,
-      rootChannel
+      rootChannel,
+      rootJurisdiction
     );
   }
 
@@ -3265,7 +3267,21 @@ export class Agent<
           `exported under that class name and registered as a Durable Object binding.`
       );
     }
-    return await getAgentByName<Cloudflare.Env, T>(binding, parent.name);
+    return await getAgentByName<Cloudflare.Env, T>(
+      binding,
+      parent.name,
+      this._cf_rootJurisdictionOptions()
+    );
+  }
+
+  /** The root's jurisdiction, for a lookup of the root (#2470). */
+  private _cf_rootJurisdictionOptions():
+    | { jurisdiction: DurableObjectJurisdiction }
+    | undefined {
+    const jurisdiction = this._dynamicAgents.rootJurisdiction;
+    return jurisdiction
+      ? { jurisdiction: jurisdiction as DurableObjectJurisdiction }
+      : undefined;
   }
 
   private _cf_getTopLevelNamespaceByClassName<T extends Agent>(
@@ -3313,7 +3329,8 @@ export class Agent<
 
     const rootStubPromise = getAgentByName<Cloudflare.Env, Agent>(
       rootBinding,
-      root.name
+      root.name,
+      this._cf_rootJurisdictionOptions()
     );
     const targetPath = parentPath.map((step) => ({ ...step }));
     const invokeBridge = async (method: string, args: unknown[]) => {

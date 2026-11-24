@@ -1325,6 +1325,16 @@ describe("SubAgent", () => {
     await expectRootKeepAliveRefCount(agent, 0);
   });
 
+  it("keeps the jurisdiction its root hands down (#2470)", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    // Its later calls to the root resolve the root in that jurisdiction;
+    // the same name outside it is another Durable Object. Checked on a
+    // deployment: local runs have no jurisdictions.
+    expect(await agent.childRootJurisdictionForTest("jur-child", "eu")).toBe(
+      "eu"
+    );
+  });
+
   it("lets many new sub-agents reach the root in one call", async () => {
     // Each sub-agent's keep-alive is a call to the root. Through a root stub,
     // calls from more than about 14 new sub-agents in one invocation hit the
