@@ -1578,6 +1578,60 @@ describe("Think durable submissions", () => {
     });
   });
 
+  it("delivers a structured output that fits a workflow event, and fails one that does not with the reason", async () => {
+    const agent = await freshAgent();
+    const prompt = (id: string, eventType: string) => ({
+      [workflowPromptMetadataKey]: {
+        workflow: {
+          name: "TEST_WORKFLOW",
+          id,
+          stepName: "draft-report",
+          eventType
+        },
+        output: {
+          schema: {
+            type: "object",
+            properties: { title: { type: "string" } },
+            required: ["title"],
+            additionalProperties: false
+          }
+        },
+        fingerprint: "fingerprint"
+      }
+    });
+
+    await agent.setFinalAnswerResponseForTest({ title: "t".repeat(900_000) });
+    await agent.testSubmitMessages("a large output", {
+      submissionId: "sub-large-output",
+      metadata: prompt("workflow-large", "think-prompt-large")
+    });
+    const delivered = await waitForWorkflowEvent(
+      agent,
+      (entry) => entry.event.type === "think-prompt-large"
+    );
+    const payload = delivered.event.payload as {
+      status: string;
+      output: { title: string };
+    };
+    expect(payload.status).toBe("completed");
+    expect(payload.output.title.length).toBe(900_000);
+
+    await agent.setFinalAnswerResponseForTest({ title: "u".repeat(1_200_000) });
+    await agent.testSubmitMessages("an output too large", {
+      submissionId: "sub-huge-output",
+      metadata: prompt("workflow-huge", "think-prompt-huge")
+    });
+    const failed = await waitForWorkflowEvent(
+      agent,
+      (entry) => entry.event.type === "think-prompt-huge"
+    );
+    expect(failed.event.payload).toMatchObject({
+      submissionId: "sub-huge-output",
+      status: "error",
+      error: expect.stringMatching(/a workflow event holds at most/)
+    });
+  }, 30_000);
+
   it("recovers a request-aborted submission as aborted, not completed", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["partial ", "answer"], 100);

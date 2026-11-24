@@ -48,6 +48,20 @@ const RUNS_COLUMNS = `
         checkpoint TEXT
       `;
 
+/**
+ * The run columns a listing reads: the record's fields, without the input,
+ * result and checkpoint values (each up to a row's room).
+ */
+export const RUN_LIST_COLUMNS = RUNS_COLUMNS.split(",\n")
+  .map((line) => line.trim().split(/\s+/)[0])
+  .filter((name) => name !== undefined && name.length > 0)
+  .map((name) =>
+    name === "input" || name === "result" || name === "checkpoint"
+      ? `NULL AS ${name}`
+      : name
+  )
+  .join(", ");
+
 /** @internal SQL-backed store for one Tasks capability instance. */
 export class TaskStore {
   readonly #storage: DurableObjectStorage;
@@ -362,7 +376,11 @@ export class TaskStore {
       ) WITHOUT ROWID`);
   }
 
-  rowToRecord(row: TaskRunRow): TaskRecord {
+  /**
+   * @param withResult - False for a listing that reads no results (its rows
+   *   came from {@link RUN_LIST_COLUMNS}): a completed record has none.
+   */
+  rowToRecord(row: TaskRunRow, withResult = true): TaskRecord {
     return {
       runId: row.run_id,
       definition: row.definition,
@@ -376,9 +394,10 @@ export class TaskStore {
       }),
       ...(row.status === "pending" &&
         row.wait_reason !== null && { waitReason: row.wait_reason }),
-      ...(row.status === "completed" && {
-        result: deserializeTaskValue(row.result) as TaskValue
-      }),
+      ...(row.status === "completed" &&
+        withResult && {
+          result: deserializeTaskValue(row.result) as TaskValue
+        }),
       ...(row.status === "error" && {
         error: {
           name: row.error_name ?? "Error",

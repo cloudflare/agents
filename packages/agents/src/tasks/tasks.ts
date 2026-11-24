@@ -23,7 +23,7 @@ import type {
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
-import { TaskStore } from "./store";
+import { RUN_LIST_COLUMNS, TaskStore } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
 import { MissingTaskDefinitionError } from "./errors";
@@ -2017,12 +2017,18 @@ export class Tasks<
     parked?: boolean;
     /** Only runs accepted with exactly this input. */
     input?: TaskJson;
+    /**
+     * False: the records come without results (and the rows are read
+     * without inputs or checkpoints), for a listing that shows none.
+     */
+    results?: boolean;
     order?: "oldest" | "newest";
     limit?: number;
   }): TaskRecord[] {
     if (options.status?.length === 0) return [];
     const params: (string | number)[] = [options.definition];
-    let query = "SELECT * FROM cf_agents_task_runs WHERE definition = ?";
+    const withResults = options.results !== false;
+    let query = `SELECT ${withResults ? "*" : RUN_LIST_COLUMNS} FROM cf_agents_task_runs WHERE definition = ?`;
     if (options.input !== undefined) {
       query += " AND input = ?";
       params.push(serializeTaskValue(options.input, "input filter") ?? "");
@@ -2045,7 +2051,9 @@ export class Tasks<
       throw new SqlError(query, cause);
     }
     // SAFETY: the query selects * from Tasks' own schema.
-    return (rows as TaskRunRow[]).map((row) => this.#store.rowToRecord(row));
+    return (rows as TaskRunRow[]).map((row) =>
+      this.#store.rowToRecord(row, withResults)
+    );
   }
 
   /**
