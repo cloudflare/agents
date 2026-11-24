@@ -32,6 +32,7 @@ import { StreamAccumulator } from "../../chat/stream-accumulator";
 import type {
   AgentHarness,
   HarnessInput,
+  HarnessInputFrom,
   HarnessSession,
   HarnessSessions,
   SessionEvent,
@@ -231,6 +232,16 @@ function isUIMessage(input: ThinkInput): input is UIMessage {
   );
 }
 
+/**
+ * The participant whose client runs a message's client tools, from the
+ * message metadata the turn that wrote it started with.
+ */
+function ownerOf(metadata: unknown): string | undefined {
+  return isRecord(metadata) && typeof metadata.owner === "string"
+    ? metadata.owner
+    : undefined;
+}
+
 function harnessInputMessage(input: HarnessInput, id: string): UIMessage {
   return {
     id: input.messageId ?? id,
@@ -271,14 +282,22 @@ function operationInput(
     return { kind: "messages", messages: input as readonly UIMessage[] };
   }
   if (isToolAnswer(input)) {
-    return { kind: "answer", answer: input, autoContinue };
+    const { from, ...answer } = input as ToolAnswer & HarnessInputFrom;
+    return {
+      kind: "answer",
+      answer,
+      autoContinue,
+      ...(from && { from: from.participantId })
+    };
   }
   if (isUIMessage(input)) return { kind: "messages", messages: [input] };
-  // SAFETY: the remaining ThinkInput is the shared HarnessInput.
-  const harnessInput = input as HarnessInput;
+  // SAFETY: the remaining ThinkInput is the shared HarnessInput, which
+  // Channels sends with the participant it came from.
+  const harnessInput = input as HarnessInput & HarnessInputFrom;
   return {
     kind: "messages",
-    messages: [harnessInputMessage(harnessInput, operationId)]
+    messages: [harnessInputMessage(harnessInput, operationId)],
+    ...(harnessInput.from && { owner: harnessInput.from.participantId })
   };
 }
 
@@ -737,18 +756,27 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const early: SessionEvent[][] = [];
     // Listen before reading, so nothing that happens during the read is
     // lost; a message read and then re-sent only replaces itself.
+    // Client tool calls carry the participant whose client runs them.
+    const tools = await this.#tools(session);
+    let owner: string | undefined;
     const unsubscribe = this.#events.subscribe(session, (event) => {
-      const events = toSessionEvents(event);
+      if (event.type === "chunk" && event.chunk.type === "start") {
+        owner = ownerOf(event.chunk.messageMetadata);
+      }
+      const events = toSessionEvents(event, tools, owner);
       if (watcher) watcher.push(events);
       else early.push(events);
     });
     const live = this.#live.get(session);
     const partial = live ? [...live.partial] : this.#recoverableChunks(session);
+    // The call in progress started with its owner.
+    const started = partial.find((chunk) => chunk.type === "start");
+    if (started?.type === "start") owner = ownerOf(started.messageMetadata);
     const messages = await this.messages(session);
     const open = this.#tables().open(session);
     const running = open.find((op) => op.status === "running");
     const state: SessionState = {
-      messages: messages.map((message) => toTranscriptMessage(message)),
+      messages: messages.map((message) => transcriptOf(message, tools)),
       pending: open.map((op) => ({
         operationId: op.operationId,
         status: op.status === "queued" ? "queued" : "placed"
@@ -758,7 +786,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           operations: [running.operationId],
           ...(partial.length > 0 && {
             partial: partial.flatMap((chunk) => {
-              const converted = toResponseChunk(chunk, {});
+              const converted = toResponseChunk(chunk, { tools, owner });
               return converted ? [converted] : [];
             })
           })
@@ -1083,6 +1111,22 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             break;
           }
         }
+        if (answer.type === "tool-result" && input.from !== undefined) {
+          // Only the client of the participant who started the turn runs
+          // a client tool.
+          const owner = ownerOf(
+            history.find((message) =>
+              message.parts.some(
+                (part) =>
+                  isToolCallPart(part) && part.toolCallId === answer.toolCallId
+              )
+            )?.metadata
+          );
+          if (owner !== undefined && owner !== input.from) {
+            unanswered = "not_owner";
+            break;
+          }
+        }
         const answered = answerToolCall(history, toolCallAnswer(answer));
         if (!answered) {
           unanswered = "not_waiting";
@@ -1178,6 +1222,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   ): Promise<RunOutcome | undefined> {
     const { session, operationId } = op;
     const messageId = op.messageId ?? crypto.randomUUID();
+    const owner = existing
+      ? ownerOf(existing.metadata)
+      : op.input.kind === "messages"
+        ? op.input.owner
+        : undefined;
     const hooks = this.#options.hooks;
     const handle = this.#handle(session);
     const history = asUIMessages(
@@ -1300,6 +1349,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         // must not do (the last message may be a compaction summary).
         originalMessages: existing ? history : [],
         generateMessageId: () => messageId,
+        // The participant who started the turn runs its client tools.
+        messageMetadata: ({ part }) =>
+          part.type === "start" && owner !== undefined ? { owner } : undefined,
         onEnd: ({ responseMessage }) => {
           final = responseMessage;
         }
@@ -2120,8 +2172,23 @@ function waiterKey(session: ThinkSessionId, operationId: string): string {
   return JSON.stringify([session, operationId]);
 }
 
-/** Project a session event onto the shared harness interface's events. */
-function toSessionEvents(event: ThinkSessionEvent): SessionEvent[] {
+/** A message as the shared harness interface carries it. */
+function transcriptOf(message: UIMessage, tools: ToolSet) {
+  return toTranscriptMessage(message, {
+    tools,
+    owner: ownerOf(message.metadata)
+  });
+}
+
+/**
+ * Project a session event onto the shared harness interface's events.
+ * `owner` is the participant who started the run the event belongs to.
+ */
+function toSessionEvents(
+  event: ThinkSessionEvent,
+  tools: ToolSet,
+  owner: string | undefined
+): SessionEvent[] {
   switch (event.type) {
     case "operation":
       return [{ type: "operation", status: event.status }];
@@ -2130,11 +2197,11 @@ function toSessionEvents(event: ThinkSessionEvent): SessionEvent[] {
     case "run-end":
       return [{ type: "run-end", operations: [event.operationId] }];
     case "chunk": {
-      const chunk = toResponseChunk(event.chunk, {});
+      const chunk = toResponseChunk(event.chunk, { tools, owner });
       return chunk ? [{ type: "chunk", chunk }] : [];
     }
     case "message":
-      return [{ type: "message", message: toTranscriptMessage(event.message) }];
+      return [{ type: "message", message: transcriptOf(event.message, tools) }];
     case "reset":
       return [{ type: "reset" }];
     case "transcript":

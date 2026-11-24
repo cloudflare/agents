@@ -273,6 +273,24 @@ describe("ThinkHarness approvals and client tools", () => {
     expect(await stub.dangerousRuns()).toBe(0);
   });
 
+  it("lets only the participant who asked answer a client tool", async () => {
+    const stub = fresh();
+    await stub.promptAs("client", "alice");
+    expect(await stub.watchedToolOwners()).toEqual(["alice"]);
+    const toolCallId = (await stub.lastToolCalls())[0]?.toolCallId ?? "";
+    const result = {
+      type: "tool-result" as const,
+      toolCallId,
+      result: { ok: true as const, output: "because" }
+    };
+    expect(reason(await stub.answerAs(result, "bob"))).toBe("not_owner");
+    expect(text(await stub.answerAs(result, "alice"))).toBe(
+      "tool said: because"
+    );
+    // The continued message still belongs to Alice.
+    expect(await stub.watchedToolOwners()).toEqual(["alice"]);
+  });
+
   it("waits for a client tool result, then continues", async () => {
     const stub = fresh();
     const first = await stub.prompt("client");

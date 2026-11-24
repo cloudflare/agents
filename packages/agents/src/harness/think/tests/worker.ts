@@ -411,6 +411,37 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.session(session).submit(answer);
   }
 
+  /** Submit a message as Channels does, from a participant, and wait. */
+  async promptAs(text: string, participantId: string) {
+    const session = this.harness.session();
+    const { operationId } = await session.submit({
+      parts: [{ type: "text", text }],
+      from: { participantId }
+    });
+    return session.wait(operationId);
+  }
+
+  /** Answer as Channels does, from a participant, and wait. */
+  async answerAs(answer: ToolAnswer, participantId: string) {
+    const session = this.harness.session();
+    const { operationId } = await session.submit({
+      ...answer,
+      from: { participantId }
+    });
+    return session.wait(operationId);
+  }
+
+  /** The owner of each tool call, as a watch of the session sees it. */
+  async watchedToolOwners(): Promise<(string | undefined)[]> {
+    const watch = await this.harness.session().watch();
+    await watch.stop();
+    return watch.state.messages.flatMap((message) =>
+      message.parts.flatMap((part) =>
+        part.type === "tool" ? [part.owner] : []
+      )
+    );
+  }
+
   async prompt(text: string, session?: string) {
     const response = await this.harness.session(session).prompt(text);
     return { ...response, messages: summarize(response.messages) };
