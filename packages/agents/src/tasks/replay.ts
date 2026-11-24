@@ -170,8 +170,12 @@ export function computeRetryDelayMs(
       delay = base * failedAttempt;
       break;
     case "exponential":
-      // Jittered, so runs that failed together do not retry together.
-      delay = backoffDelay(failedAttempt, { baseMs: base });
+      // Jittered, so runs that failed together do not retry together;
+      // capped first, so steps at the cap keep their jitter.
+      delay = backoffDelay(failedAttempt, {
+        baseMs: base,
+        maxMs: MAX_RETRY_DELAY_MS
+      });
       break;
   }
   return Math.min(delay, MAX_RETRY_DELAY_MS);
