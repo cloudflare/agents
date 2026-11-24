@@ -209,8 +209,30 @@ describe("facet wake", () => {
     await agent.resetTree().catch(() => {});
     const again = await getAgentByName(env.FacetWakeRoot, name);
     const [wake] = await again.rootJobs();
+    // Moved to the back-off deadline, not left at its own minute.
     expect(wake!.time).toBeGreaterThanOrEqual(marked + 25_000);
+    expect(wake!.time).toBeLessThan(marked + 45_000);
     expect(await again.alarmAt()).toBe(wake!.time);
+  });
+
+  it("drives an already due facet wake at once when the root starts again, past a later fallback alarm", async () => {
+    const name = crypto.randomUUID();
+    const agent = await getAgentByName(env.FacetWakeRoot, name);
+    await agent.middlePush("m", "later", 60_000);
+    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
+    // A drive was cut off with its wake already due, after the driver had
+    // set its fallback alarm 30 s out.
+    await agent.markUnreportedDrives(key, 1);
+    await agent.makeFacetWakesDueKeepingDrives();
+    await agent.setAlarmForTest(Date.now() + 30_000);
+
+    const resetAt = Date.now();
+    await agent.resetTree().catch(() => {});
+    const again = await getAgentByName(env.FacetWakeRoot, name);
+    await vi.waitFor(async () => {
+      expect(await again.unreportedDrives(key)).toBe(0);
+    });
+    expect(Date.now() - resetAt).toBeLessThan(10_000);
   });
 
   it("gives up a facet job that keeps ending its isolate", async () => {

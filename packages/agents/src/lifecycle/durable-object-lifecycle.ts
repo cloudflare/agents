@@ -757,7 +757,12 @@ export class Lifecycle<
         facetDriveKey(path)
       );
       const target = Math.max(Math.min(time, now), facetDriveNotBefore(drives));
-      if (target === time) continue;
+      if (target === time) {
+        // Already due: the alarm may still be a fallback set further out
+        // (by the drive the reset cut off), so it is set again.
+        if (time <= now) moved = true;
+        continue;
+      }
       // Retimed in place: its attempt count is the sign that the last drive
       // crashed, which the scan reads to run other owners' jobs first.
       this.#jobQueue.setTime(facetWakeJobId(path), target);

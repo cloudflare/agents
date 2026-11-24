@@ -370,6 +370,10 @@ export class FacetWakeRoot extends WakeAgent {
       SELECT id, capability, time FROM cf_agents_jobs ORDER BY time`;
   }
 
+  async setAlarmForTest(time: number): Promise<void> {
+    await this.ctx.storage.setAlarm(time);
+  }
+
   async alarmAt(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
   }
