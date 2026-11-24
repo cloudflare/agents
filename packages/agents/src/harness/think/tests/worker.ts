@@ -318,7 +318,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       } else if (text === "client") {
         parts = callReply([{ name: "ask", input: { question: "why?" } }]);
       } else if (text === "late client") {
-        parts = callReply([{ name: "late" }]);
+        parts = callReply([
+          { name: "late", id: "late-1" },
+          { name: "late", id: "late-2" }
+        ]);
       } else if (text === "client reused id") {
         // A provider that reuses tool-call ids across replies.
         parts = callReply([
@@ -451,24 +454,44 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Open a watch, add a client tool, then have a participant's turn call it:
-   * the owner each call carries in the watch's events.
+   * Open a watch, add a client tool, have a participant's turn call it
+   * twice, then answer the first call: the owner each call carries in the
+   * watch's streamed chunks and messages, as `toolCallId@owner`.
    */
   async ownersAfterLateTool(participantId: string) {
     const watch = await this.harness.session().watch();
-    const owners: (string | undefined)[] = [];
+    const chunks: string[] = [];
+    const messages: string[][] = [];
     watch.start(async (events: readonly SessionEvent[]) => {
       for (const event of events) {
-        if (event.type !== "message") continue;
-        for (const part of event.message.parts) {
-          if (part.type === "tool") owners.push(part.owner);
+        if (event.type === "chunk" && "toolCallId" in event.chunk) {
+          if (event.chunk.type === "tool-input-available") {
+            chunks.push(`${event.chunk.toolCallId}@${event.chunk.owner}`);
+          }
+        } else if (event.type === "message") {
+          const tools = event.message.parts.flatMap((part) =>
+            part.type === "tool"
+              ? [`${part.toolCallId}@${part.owner}:${part.state}`]
+              : []
+          );
+          if (tools.length > 0) messages.push(tools);
         }
       }
     });
     this.addLateTool();
     await this.promptAs("late client", participantId);
+    await this.answerAs(
+      {
+        type: "tool-result",
+        toolCallId: "late-1",
+        result: { ok: true, output: "here" }
+      },
+      participantId
+    );
+    // The watch delivers events in batches; let the answer's arrive.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await watch.stop();
-    return owners;
+    return { chunks, messages };
   }
 
   /** The owner of each tool call, as a watch of the session sees it. */

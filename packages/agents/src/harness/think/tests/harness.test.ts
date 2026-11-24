@@ -293,7 +293,14 @@ describe("ThinkHarness approvals and client tools", () => {
 
   it("gives a client tool added after a watch opened its owner", async () => {
     const stub = fresh();
-    expect(await stub.ownersAfterLateTool("alice")).toContain("alice");
+    const seen = await stub.ownersAfterLateTool("alice");
+    // Streamed, as the calls arrive.
+    expect(seen.chunks).toEqual(["late-1@alice", "late-2@alice"]);
+    // After the first is answered, the call still waiting keeps its owner.
+    expect(seen.messages.at(-1)).toEqual([
+      "late-1@alice:output-available",
+      "late-2@alice:input-available"
+    ]);
   });
 
   it("finds the owner on the call an answer settles when a tool-call id is reused", async () => {

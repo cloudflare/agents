@@ -1107,6 +1107,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       case "answer": {
         const history = asUIMessages(await handle.getHistory());
         const tools = await this.#tools(session);
+        // The answered message is published before the model loop runs, if
+        // it runs at all: watches read its client tools from these.
+        const live = this.#live.get(session);
+        if (live) live.tools = tools;
         const answer = input.answer;
         if (answer.type === "tool-result" && op.source === "client") {
           // A client answers only its own tools. A server tool's result
