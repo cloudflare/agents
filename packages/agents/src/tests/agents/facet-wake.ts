@@ -325,6 +325,15 @@ export class FacetWakeRoot extends WakeAgent {
   }
 
   /** Record that a path's drives ended unreported, as after a tree reset. */
+  /** Unreplied drives this root counts for a path, read from the root. */
+  unreportedDrives(key: string): number {
+    return (
+      this.ctx.storage.kv.get<{ count: number }>(
+        `cf_agents:facet_drives:${key}`
+      )?.count ?? 0
+    );
+  }
+
   markUnreportedDrives(key: string, count: number, agoMs = 0): void {
     this.ctx.storage.kv.put(`cf_agents:facet_drives:${key}`, {
       count,
@@ -359,6 +368,10 @@ export class FacetWakeRoot extends WakeAgent {
   rootJobs(): { id: string; capability: string; time: number }[] {
     return this.sql<{ id: string; capability: string; time: number }>`
       SELECT id, capability, time FROM cf_agents_jobs ORDER BY time`;
+  }
+
+  async setAlarmForTest(time: number): Promise<void> {
+    await this.ctx.storage.setAlarm(time);
   }
 
   async alarmAt(): Promise<number | null> {

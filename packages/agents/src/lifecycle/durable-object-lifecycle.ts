@@ -748,20 +748,22 @@ export class Lifecycle<
     let moved = false;
     for (const { capability, time } of rows) {
       const path = capability.slice(prefix.length);
-      // A path whose last drive never replied (perhaps the very reset that
-      // restarted this root) keeps its recheck delay and back-off, even when
-      // its wake is already due: nothing in this fresh isolate is driving it.
+      // Driven at once, even when its last drive never replied: that is
+      // most often an ordinary drive the reset cut off, and a job that keeps
+      // ending the isolate is sealed by the facet's own count of unsettled
+      // attempts. Only a path whose drives keep dying (the back-off, from
+      // the third) waits.
       const drives = this.#ctx.storage.kv.get<FacetDriveCount>(
         facetDriveKey(path)
       );
-      const target = drives
-        ? Math.max(
-            now,
-            drives.at + FACET_DRIVE_RECHECK_MS,
-            facetDriveNotBefore(drives)
-          )
-        : Math.min(time, now);
-      if (target === time) continue;
+      const target = Math.max(Math.min(time, now), facetDriveNotBefore(drives));
+      if (target === time) {
+        // Already due: the alarm may still be a fallback set further out
+        // (by the drive the reset cut off), so it is set again. Not when
+        // this start runs inside an alarm, whose scan drives it anyway.
+        if (time <= now && this.#alarmsRunning === 0) moved = true;
+        continue;
+      }
       // Retimed in place: its attempt count is the sign that the last drive
       // crashed, which the scan reads to run other owners' jobs first.
       this.#jobQueue.setTime(facetWakeJobId(path), target);
@@ -1379,14 +1381,22 @@ export class Lifecycle<
    * the host invocation boundary.
    */
   async alarm(): Promise<void> {
-    await this.#jobDriver.runAlarm(
-      () => this.#ensureInitialized(),
-      () =>
-        runInLifecycleHostContext({ host: this.#host }, async () => {
-          await this.#host.onAlarm?.();
-        })
-    );
+    this.#alarmsRunning++;
+    try {
+      await this.#jobDriver.runAlarm(
+        () => this.#ensureInitialized(),
+        () =>
+          runInLifecycleHostContext({ host: this.#host }, async () => {
+            await this.#host.onAlarm?.();
+          })
+      );
+    } finally {
+      this.#alarmsRunning--;
+    }
   }
+
+  /** Alarm invocations running on this instance. */
+  #alarmsRunning = 0;
 
   /**
    * Resolve a job owner to its dispatch hooks. Host jobs run inside the

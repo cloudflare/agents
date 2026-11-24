@@ -112,7 +112,10 @@ drives it with the same driver as a root. Only arming differs:
   A root that starts may have been reset with its whole tree, and a facet's
   own start is what recovers its interrupted work (for example a turn whose
   claim would otherwise wait for its deadline), so each facet with jobs is
-  woken once at once.
+  woken once at once. That holds after one or two unreplied drives too:
+  those are most often ordinary drives the reset cut off. A job that keeps
+  ending the isolate is sealed by the facet's own count of unsettled
+  attempts. Only a path past the back-off threshold waits.
 - Deleting a facet sub-tree drops the wake jobs of that path and every path
   below it.
 

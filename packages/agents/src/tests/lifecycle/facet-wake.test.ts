@@ -179,39 +179,83 @@ describe("facet wake", () => {
     expect(starts.some((at) => at > resetAt && at < before)).toBe(true);
   });
 
-  it("keeps the recheck delay of an unreplied drive whose wake was already due when the root starts again", async () => {
+  it("drives a facet at once when the root starts again after one unreplied drive", async () => {
     const name = crypto.randomUUID();
     const agent = await getAgentByName(env.FacetWakeRoot, name);
-    await agent.middlePush("m", "due", 60_000);
+    await agent.middlePush("m", "later", 60_000);
     const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
-    // A drive went unanswered because it took the tree down with it; its
-    // claimed wake is still due.
+    // An ordinary drive the reset cut off.
     await agent.markUnreportedDrives(key, 1);
-    await agent.makeFacetWakesDueKeepingDrives();
+
+    const resetAt = Date.now();
+    await agent.resetTree().catch(() => {});
+    const again = await getAgentByName(env.FacetWakeRoot, name);
+    // The restarted root drove it at once, read from the root alone: the
+    // drive replied, which clears the count, well inside the old 30 s.
+    await vi.waitFor(async () => {
+      expect(await again.unreportedDrives(key)).toBe(0);
+    });
+    expect(Date.now() - resetAt).toBeLessThan(10_000);
+  });
+
+  it("keeps the back-off of a facet whose drives keep dying when the root starts again", async () => {
+    const name = crypto.randomUUID();
+    const agent = await getAgentByName(env.FacetWakeRoot, name);
+    await agent.middlePush("m", "later", 60_000);
+    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
+    await agent.markUnreportedDrives(key, 3);
     const marked = Date.now();
 
     await agent.resetTree().catch(() => {});
     const again = await getAgentByName(env.FacetWakeRoot, name);
     const [wake] = await again.rootJobs();
+    // Moved to the back-off deadline, not left at its own minute.
     expect(wake!.time).toBeGreaterThanOrEqual(marked + 25_000);
-    // The root's alarm follows the moved wake, not the old minute.
+    expect(wake!.time).toBeLessThan(marked + 45_000);
     expect(await again.alarmAt()).toBe(wake!.time);
   });
 
-  it("keeps the recheck delay for a facet whose last drive never replied", async () => {
+  it("drives an already due facet wake in the alarm that starts the root", async () => {
     const name = crypto.randomUUID();
     const agent = await getAgentByName(env.FacetWakeRoot, name);
     await agent.middlePush("m", "later", 60_000);
     const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
     await agent.markUnreportedDrives(key, 1);
-    const marked = Date.now();
+    await agent.makeFacetWakesDueKeepingDrives();
 
     await agent.resetTree().catch(() => {});
+    // The alarm, not a request, starts the root; its own scan drives the
+    // facet, with no second wake needed.
+    const namespace = env.FacetWakeRoot;
+    expect(
+      await runDurableObjectAlarm(namespace.get(namespace.idFromName(name)))
+    ).toBe(true);
     const again = await getAgentByName(env.FacetWakeRoot, name);
+    expect(await again.unreportedDrives(key)).toBe(0);
+    // The facet replied with its own next job, so its wake is still held.
     const [wake] = await again.rootJobs();
-    expect(wake!.time).toBeGreaterThanOrEqual(marked + 25_000);
-    expect(wake!.time).toBeLessThan(marked + 60_000);
-    expect(await again.alarmAt()).toBe(wake!.time);
+    expect(wake?.id).toBe(`facet:${key}`);
+    expect(wake!.time).toBeGreaterThan(Date.now() + 30_000);
+  });
+
+  it("drives an already due facet wake at once when the root starts again, past a later fallback alarm", async () => {
+    const name = crypto.randomUUID();
+    const agent = await getAgentByName(env.FacetWakeRoot, name);
+    await agent.middlePush("m", "later", 60_000);
+    const key = (await agent.rootJobs())[0]!.id.slice("facet:".length);
+    // A drive was cut off with its wake already due, after the driver had
+    // set its fallback alarm 30 s out.
+    await agent.markUnreportedDrives(key, 1);
+    await agent.makeFacetWakesDueKeepingDrives();
+    await agent.setAlarmForTest(Date.now() + 30_000);
+
+    const resetAt = Date.now();
+    await agent.resetTree().catch(() => {});
+    const again = await getAgentByName(env.FacetWakeRoot, name);
+    await vi.waitFor(async () => {
+      expect(await again.unreportedDrives(key)).toBe(0);
+    });
+    expect(Date.now() - resetAt).toBeLessThan(10_000);
   });
 
   it("gives up a facet job that keeps ending its isolate", async () => {
