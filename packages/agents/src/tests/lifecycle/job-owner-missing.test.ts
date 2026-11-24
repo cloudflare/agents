@@ -1,35 +1,13 @@
 import { describe, expect, it } from "vitest";
-import {
-  LifecycleCapability,
-  type LifecycleJobContext,
-  type LifecycleJobPushOptions
-} from "../../lifecycle";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
 import { withCapabilityHarness } from "../shared/capability-harness";
-
-class Jobs extends LifecycleCapability {
-  readonly ran: string[] = [];
-  readonly attempts: number[] = [];
-
-  constructor(id: string) {
-    super(id);
-  }
-
-  onJob({ job, attempt }: LifecycleJobContext): void {
-    this.ran.push(job.id);
-    this.attempts.push(attempt);
-  }
-
-  push(options: LifecycleJobPushOptions) {
-    return this.lifecycle.jobs.push(options);
-  }
-}
+import { TestJobs } from "./test-jobs";
 
 describe("jobs whose owner is not installed", () => {
   it("keeps the jobs untouched, holds the wake, and runs them in order once the owner returns", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       // A deploy installs the owner and it queues two jobs, the older first.
-      const before = install(new Jobs("returning-owner"));
+      const before = install(new TestJobs("returning-owner"));
       await before.lifecycle.start();
       const now = Date.now();
       await before.capability.push({ id: "older", fn: "run", time: now - 2 });
@@ -48,7 +26,7 @@ describe("jobs whose owner is not installed", () => {
 
       // The next deploy does not install it. Its alarms find the jobs
       // ownerless, several times.
-      const without = install(new Jobs("someone-else"));
+      const without = install(new TestJobs("someone-else"));
       await without.lifecycle.start();
       const capture = captureDiagnosticsEvents(
         "agents:lifecycle",
@@ -69,7 +47,7 @@ describe("jobs whose owner is not installed", () => {
 
       // The owner comes back (a fresh isolate) and both run, older first,
       // the older one continuing its attempt count.
-      const after = install(new Jobs("returning-owner"));
+      const after = install(new TestJobs("returning-owner"));
       await after.lifecycle.start();
       await after.lifecycle.alarm();
       expect(after.capability.ran).toEqual(["older", "newer"]);
@@ -79,7 +57,7 @@ describe("jobs whose owner is not installed", () => {
 
   it("re-arms for an installed owner while a hundred owners are missing", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs("installed-owner");
+      const jobs = new TestJobs("installed-owner");
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       // Creates the queue table, then fills it with a hundred jobs whose
@@ -116,7 +94,7 @@ describe("jobs whose owner is not installed", () => {
 
   it("reports a job whose unreported attempts ran out", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      const jobs = new Jobs("exhausted-owner");
+      const jobs = new TestJobs("exhausted-owner");
       const { lifecycle } = install(jobs);
       await lifecycle.start();
       await jobs.push({ id: "work", fn: "run", time: Date.now() + 60_000 });

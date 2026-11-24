@@ -1,27 +1,8 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import {
-  Lifecycle,
-  LifecycleCapability,
-  type LifecycleJobPushOptions
-} from "../../lifecycle";
-
-class Jobs extends LifecycleCapability {
-  constructor() {
-    super("alarm-writes-probe");
-  }
-
-  onJob(): void {}
-
-  push(options: LifecycleJobPushOptions) {
-    return this.lifecycle.jobs.push(options);
-  }
-
-  cancel(id: string) {
-    return this.lifecycle.jobs.cancel(id);
-  }
-}
+import { Lifecycle } from "../../lifecycle";
+import { TestJobs } from "./test-jobs";
 
 /** Bind native methods so the wrappers below can call them. */
 function bound<T extends object>(target: T, overrides: Partial<T>): T {
@@ -61,7 +42,7 @@ describe("Lifecycle alarm writes", () => {
       const storage = state.storage;
       const { writes, ctx } = countingAlarmWrites(state);
       const host = Object.create(instance, { ctx: { value: ctx } });
-      const jobs = new Jobs();
+      const jobs = new TestJobs("alarm-writes-probe");
       const lifecycle = new Lifecycle(host).use(jobs);
       await lifecycle.start();
 
@@ -107,7 +88,7 @@ describe("Lifecycle alarm writes", () => {
       const host = Object.create(instance, {
         ctx: { value: bound(ctx, { storage }) }
       });
-      const jobs = new Jobs();
+      const jobs = new TestJobs("alarm-writes-probe");
       const lifecycle = new Lifecycle(host).use(jobs);
       await lifecycle.start();
       reads.length = 0;
