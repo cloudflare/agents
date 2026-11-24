@@ -160,6 +160,21 @@ describe("facet wake", () => {
     );
   }, 20_000);
 
+  it("rechecks a facet whose drive outran the budget within 5 s, so a reset before its reply is noticed soon", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "slow-job", 0);
+    const alarm = runDurableObjectAlarm(agent);
+    // Past the drive's 5 s budget, before the facet's 6.5 s job replies:
+    // the path's wake now is what a reset would leave.
+    await new Promise((resolve) => setTimeout(resolve, 5_600));
+    const [wake] = (await agent.rootJobs()).filter((job) =>
+      job.id.startsWith("facet:")
+    );
+    expect(await agent.middleRan("m")).toEqual([]);
+    expect(wake?.time).toBeLessThanOrEqual(Date.now() + 5_000);
+    await alarm;
+  }, 20_000);
+
   it("wakes every facet with jobs at once when the root starts again", async () => {
     const name = crypto.randomUUID();
     const agent = await getAgentByName(env.FacetWakeRoot, name);

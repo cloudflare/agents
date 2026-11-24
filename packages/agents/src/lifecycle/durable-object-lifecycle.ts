@@ -69,6 +69,14 @@ const FACET_DRIVE_BUDGET_MS = 5_000;
 /** The root's wake for a facet whose drive outran the budget or was busy. */
 const FACET_DRIVE_RECHECK_MS = 30_000;
 /**
+ * The root's wake for a facet whose drive is still running (it outran the
+ * budget, or the facet answered busy): its reply normally moves the wake
+ * first, but a reset of the tree before that reply leaves only this wake,
+ * so it is short (a long Task attempt's own wake is 5 s too). A drive that
+ * failed keeps the longer recheck.
+ */
+const FACET_DRIVE_RUNNING_RECHECK_MS = 5_000;
+/**
  * Drives of one facet path that may end without a reply (the isolate was
  * reset, for example by a job over the memory limit, which takes the root
  * with it) before the root backs off that path.
@@ -1481,7 +1489,7 @@ export class Lifecycle<
           if ((reply as FacetDriveReply & { busy?: true }).busy) {
             if (drives) kv.put(countKey, drives);
             else kv.delete(countKey);
-            return Date.now() + FACET_DRIVE_RECHECK_MS;
+            return Date.now() + FACET_DRIVE_RUNNING_RECHECK_MS;
           }
           kv.delete(countKey);
           return (reply as { next: number | null }).next;
@@ -1528,14 +1536,14 @@ export class Lifecycle<
         }
         // The facet's drive runs on by itself; its reply moves the path's
         // wake when it comes, unless a newer report got there first.
-        // Meanwhile the path keeps a recheck wake.
+        // Meanwhile the path keeps a short recheck wake.
         this.trackAlarmWork(call);
         void call.then(({ next, stamp }) =>
           this.#holdFacetWake(target, next, stamp).catch((error: unknown) =>
             console.error(this.#errorLogPrefix("facet wake"), error)
           )
         );
-        return { rescheduleAt: Date.now() + FACET_DRIVE_RECHECK_MS };
+        return { rescheduleAt: Date.now() + FACET_DRIVE_RUNNING_RECHECK_MS };
       }
     };
   }
