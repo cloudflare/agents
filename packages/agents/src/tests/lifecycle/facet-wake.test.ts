@@ -133,15 +133,19 @@ describe("facet wake", () => {
     expect(wake?.time).toBeGreaterThanOrEqual(now + 25_000);
   });
 
-  it("keeps the alarm within 5 s while a drive runs, so a reset in the middle of it is followed soon", async () => {
+  it("is woken within 5 s when it is reset in the middle of a drive", async () => {
     const agent = await root();
     await agent.pushJob("slow-root", 0);
-    const alarm = runDurableObjectAlarm(agent);
+    const alarm = runDurableObjectAlarm(agent).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 1_000));
-    const at = await agent.alarmAt();
-    expect(at).not.toBeNull();
-    expect(at!).toBeLessThanOrEqual(Date.now() + 5_000);
+    // Reset while the drive runs: what is stored is all that wakes it.
+    const resetAt = Date.now();
+    await agent.resetTree().catch(() => {});
     await alarm;
+    const again = await getAgentByName(env.FacetWakeRoot, rootName);
+    const at = await again.alarmAt();
+    expect(at).not.toBeNull();
+    expect(at!).toBeLessThanOrEqual(resetAt + 5_000);
   }, 20_000);
 
   it("does not hold the root's own jobs behind a slow facet job", async () => {
