@@ -131,7 +131,8 @@ function contentDigest(json: string): string {
  * The text a message contributes to the search index. The index holds it in
  * one row, so only the first row budget is searchable; the rest would not
  * fit (`SQLITE_TOOBIG`). A cut inside a word is moved back to the last
- * whitespace, so no fragment is indexed as if it were a word.
+ * separator the index's `unicode61` tokenizer splits on (anything that is
+ * not a letter or a digit), so no fragment is indexed as if it were a word.
  */
 function searchableText(message: SessionMessage): string {
   const text = message.parts
@@ -139,12 +140,29 @@ function searchableText(message: SessionMessage): string {
     .map((part) => part.text ?? "")
     .join(" ");
   const first = splitContent(text)[0] ?? "";
-  if (first.length === text.length || /\s/.test(text[first.length])) {
+  if (
+    first.length === text.length ||
+    SEARCH_SEPARATOR.test(text[first.length])
+  ) {
     return first;
   }
-  const lastSpace = first.search(/\s\S*$/);
-  return lastSpace > 0 ? first.slice(0, lastSpace) : first;
+  const cut = first.search(LAST_SEARCH_WORD);
+  return cut > 0 ? first.slice(0, cut + 1) : first;
 }
+
+/** What the `unicode61` tokenizer treats as a word: letters and digits. */
+const SEARCH_SEPARATOR = /[^\p{L}\p{N}]/u;
+/** The last separator and the (cut) word after it, at the end of a string. */
+const LAST_SEARCH_WORD = /[^\p{L}\p{N}][\p{L}\p{N}]*$/u;
+
+/**
+ * The search index's own marker, a row at a fixed rowid with no text (it
+ * never matches): present once every message stored across continuation
+ * rows is indexed. An index built by an earlier release, which skipped those
+ * messages, has none, and gets them on its first search here. Read by rowid.
+ */
+const SEARCH_BACKFILLED_ROWID = -1;
+const SEARCH_MARKER_SESSION = "\u0000search";
 
 export class SessionsCore {
   readonly io: SessionsIo;
@@ -161,6 +179,8 @@ export class SessionsCore {
   #tablesEnsured = false;
   /** True once the FTS index exists; it is built on the first `search()`. */
   #fts = false;
+  /** True once this isolate knows every split message is in the index. */
+  #ftsBackfilled = false;
 
   constructor(options: SessionsOptions, io: SessionsIo) {
     this.io = io;
@@ -263,7 +283,20 @@ export class SessionsCore {
    * searched; the first search pays a one-time SQL backfill instead.
    */
   #ensureFts(): void {
-    if (this.#fts) return;
+    if (this.#fts) {
+      if (!this.#ftsBackfilled) {
+        const marked =
+          this.io.sql<{ one: number }>(
+            "SELECT 1 AS one FROM cf_agents_session_fts WHERE rowid = ?",
+            [SEARCH_BACKFILLED_ROWID]
+          ).length > 0;
+        // An index from an earlier release, or a backfill cut short: some
+        // split messages may already be indexed (appends since), so check.
+        if (!marked) this.#backfillSplitMessages(true);
+        this.#ftsBackfilled = true;
+      }
+      return;
+    }
     this.io.sqlWrite(
       `CREATE VIRTUAL TABLE cf_agents_session_fts
        USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')`,
@@ -271,24 +304,43 @@ export class SessionsCore {
     );
     this.#fts = true;
     this.#backfillMissingFtsRows();
-    this.#backfillSplitMessages();
+    this.#backfillSplitMessages(false);
+    this.#ftsBackfilled = true;
   }
 
   /**
    * Index the messages stored across continuation rows. Their first slice
    * is not valid JSON on its own, so the SQL backfill skips them; each is
-   * indexed from its reassembled content, one message in memory at a time.
-   * Runs only when the index is created, so none of them is indexed yet.
+   * indexed from its reassembled JSON (attachments are not loaded: the
+   * index holds text), one message in memory at a time. On a new index
+   * none of them is there yet; on an older one, `check` skips those already
+   * indexed. The marker row goes in last, so a backfill cut short is
+   * finished by a later search.
    */
-  #backfillSplitMessages(): void {
+  #backfillSplitMessages(check: boolean): void {
     const split = this.io.sql<{ session_id: string; id: string }>(
       "SELECT session_id, id FROM cf_agents_session_messages WHERE content_chunks > 0",
       []
     );
     for (const { session_id: sessionId, id } of split) {
-      const message = this.getMessage(sessionId, id);
+      if (
+        check &&
+        this.io.sql<{ one: number }>(
+          "SELECT 1 AS one FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
+          [id, sessionId]
+        ).length > 0
+      ) {
+        continue;
+      }
+      const json = this.#content(sessionId, id);
+      const message = json === null ? null : this.#parse(json);
       if (message) this.#indexFts(sessionId, message, false);
     }
+    this.io.sqlWrite(
+      `INSERT INTO cf_agents_session_fts (rowid, id, session_id, role, content)
+       VALUES (?, '', ?, '', '')`,
+      [SEARCH_BACKFILLED_ROWID, SEARCH_MARKER_SESSION]
+    );
   }
 
   /** Index rows that predate indexing, in SQL, without loading JSON into JS. */

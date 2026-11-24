@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { SessionHarnessObject } from "../capabilities/sessions";
 import type { SessionChangeEvent, SessionMessage } from "../../sessions";
@@ -18,6 +18,11 @@ import { MAX_INLINE_ROW_BYTES, splitContent } from "../../sessions/chunking";
 
 /** A payload no single message row can hold. */
 const OVER_BUDGET_BYTES = 2 * 1024 * 1024;
+
+function sqlOf(instance: object): SqlStorage {
+  // SAFETY: tests read the object's own storage.
+  return (instance as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+}
 
 function text(id: string, body: string, role = "user"): SessionMessage {
   return { id, role, parts: [{ type: "text", text: body }] };
@@ -195,6 +200,50 @@ describe("Sessions capability", () => {
       await session.appendMessage(text("cut", `${prefix}needle and more`));
       expect(await session.search("nee")).toEqual([]);
       expect(await session.search("needle")).toEqual([]);
+    });
+  });
+
+  it("treats punctuation as a word boundary at the row budget", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.search("warm");
+      // A comma, then a word the budget cuts three bytes in.
+      await session.appendMessage(
+        text("comma", `${"x".repeat(MAX_INLINE_ROW_BYTES - 4)},needle more`)
+      );
+      expect(await session.search("nee")).toEqual([]);
+      // A whole word right before a comma at the budget stays searchable.
+      await session.appendMessage(
+        text("whole", `${"y".repeat(MAX_INLINE_ROW_BYTES - 7)} needle,more`)
+      );
+      expect((await session.search("needle")).map((hit) => hit.id)).toEqual([
+        "whole"
+      ]);
+    });
+  });
+
+  it("indexes the split messages an index from an earlier release left out", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(
+        text("big", `needle ${"x ".repeat(1_500_000)}`)
+      );
+      // The index as an earlier release built it: no split messages, no marker.
+      sqlOf(instance).exec(
+        `CREATE VIRTUAL TABLE cf_agents_session_fts
+         USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')`
+      );
+    });
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      expect((await session.search("needle")).map((hit) => hit.id)).toEqual([
+        "big"
+      ]);
+      // Once: a second search finds it once, not twice.
+      expect(await session.search("needle")).toHaveLength(1);
     });
   });
 
