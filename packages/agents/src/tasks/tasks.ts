@@ -702,8 +702,8 @@ export class Tasks<
       await this.#settleFailed(runId, null, {
         name: "TaskMemoryLimitSealed",
         message:
-          "Sealed by the alarm memory-limit circuit breaker (#1825) after " +
-          "consecutive Durable Object memory-limit resets."
+          "Sealed by the alarm circuit breaker (#1825) after consecutive " +
+          "resets during the alarm (for example the memory limit)."
       });
       return;
     }
