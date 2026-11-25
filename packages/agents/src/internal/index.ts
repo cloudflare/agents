@@ -75,3 +75,10 @@ export {
   type EventLogSocket,
   type EventLogSubscription
 } from "../event-log-client";
+export {
+  registerDeliverySink,
+  sendDelivery,
+  type DeliveryAttempt,
+  type DeliveryRetryPolicy,
+  type DeliverySink
+} from "./delivery";

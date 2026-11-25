@@ -63,7 +63,8 @@ import type {
   TaskRunRow,
   TaskRunSnapshot,
   TaskStatus,
-  TaskValue
+  TaskValue,
+  TaskWaitReason
 } from "./types";
 
 /**
@@ -1447,6 +1448,10 @@ export class Tasks<
       }
       return;
     }
+    if (settlement.kind === "retry") {
+      await this.#suspend(row, generation, "retry", settlement.wakeAt ?? now);
+      return;
+    }
     const parked = this.#store.fencedWrite(
       runId,
       generation,
@@ -1465,6 +1470,34 @@ export class Tasks<
       });
       await this.#syncWake(runId);
       await this.#report(runId);
+    }
+  }
+
+  /** Leave a claimed run `pending` until `wakeAt`, fenced to its attempt. */
+  async #suspend(
+    row: TaskRunRow,
+    generation: string,
+    reason: TaskWaitReason,
+    wakeAt: number
+  ): Promise<void> {
+    const runId = row.run_id;
+    const suspended = this.#store.fencedWrite(
+      runId,
+      generation,
+      `UPDATE ${this.#tables.runs}
+       SET status = 'pending', wait_reason = ?, next_at = ?, generation = NULL,
+           updated_at = ?
+       WHERE run_id = ? AND generation = ? AND status = 'running'`,
+      [reason, wakeAt, Date.now()]
+    );
+    if (suspended) {
+      this.#emit("task:waiting", {
+        runId,
+        definition: row.definition,
+        reason,
+        wakeAt
+      });
+      await this.#syncWake(runId);
     }
   }
 
@@ -1499,6 +1532,17 @@ export class Tasks<
     if (claimed === 0) return false;
     for (const [key, value] of Object.entries(options.checkpoint ?? {})) {
       this.#store.setCheckpoint(runId, generation, key, value);
+    }
+    if (outcome instanceof TaskSettlement && outcome.kind === "retry") {
+      // Written before the first await, so a racing settle finds the run
+      // pending again and takes nothing.
+      await this.#suspend(
+        row,
+        generation,
+        "retry",
+        outcome.wakeAt ?? Date.now()
+      );
+      return true;
     }
     if (outcome instanceof TaskSettlement) {
       await this.#settleReturned(row, generation, outcome);
@@ -1562,24 +1606,7 @@ export class Tasks<
         );
         return;
       }
-      const suspended = this.#store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE ${this.#tables.runs}
-         SET status = 'pending', wait_reason = ?, next_at = ?, generation = NULL,
-             updated_at = ?
-         WHERE run_id = ? AND generation = ? AND status = 'running'`,
-        [thrown.reason, thrown.wakeAt, Date.now()]
-      );
-      if (suspended) {
-        this.#emit("task:waiting", {
-          runId,
-          definition: row.definition,
-          reason: thrown.reason,
-          wakeAt: thrown.wakeAt
-        });
-        await this.#syncWake(runId);
-      }
+      await this.#suspend(row, generation, thrown.reason, thrown.wakeAt);
       return;
     }
 

@@ -1585,6 +1585,13 @@ describe("SubAgent", () => {
     ).resolves.toEqual([["default"], ["audit"]]);
   });
 
+  it("retries a delivery in a facet until its sink acknowledges, woken through the root", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentDeliverThroughFlakySink("delivery-child")
+    ).resolves.toEqual({ status: "completed", attempts: [1, 2] });
+  });
+
   it("runs a named Tasks in a facet apart from the facet's own Tasks", async () => {
     const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
     await expect(

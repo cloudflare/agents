@@ -6,9 +6,10 @@
  */
 export class TaskSettlement {
   private constructor(
-    readonly kind: "aborted" | "skipped" | "failed" | "park",
+    readonly kind: "aborted" | "skipped" | "failed" | "park" | "retry",
     readonly reason: string | undefined,
-    readonly error: unknown
+    readonly error: unknown,
+    readonly wakeAt?: number
   ) {}
 
   /** End the run `aborted`. */
@@ -32,5 +33,14 @@ export class TaskSettlement {
    */
   static park(reason?: string): TaskSettlement {
     return new TaskSettlement("park", reason, undefined);
+  }
+
+  /**
+   * Leave the run `pending` with wait reason `retry` until `at` (epoch ms);
+   * its next attempt runs then. No journal row: the handler decides the
+   * backoff and when to give up.
+   */
+  static retry(at: number): TaskSettlement {
+    return new TaskSettlement("retry", undefined, undefined, at);
   }
 }
