@@ -107,9 +107,10 @@ export function replayCompletedChunks(
   connection: Connection,
   requestId: string
 ): boolean {
-  ops.flush();
   const row = latestChatRowByTag(ops, requestId, "completed");
   if (!row) return false;
+  // Only this stream's buffer: other producers' buffers are theirs.
+  ops.flush(row.stream_id);
 
   const chat = parseChatMetadata(row);
   const continuation = chat?.isContinuation === 1;
@@ -152,9 +153,9 @@ export function replayErroredChunks(
   connection: Connection,
   requestId: string
 ): boolean {
-  ops.flush();
   const row = latestChatRowByTag(ops, requestId, "errored");
   if (!row) return true;
+  ops.flush(row.stream_id);
   const chat = parseChatMetadata(row);
   return sendReplayBodies(
     connection,

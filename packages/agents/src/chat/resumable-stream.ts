@@ -221,6 +221,11 @@ export class ResumableStream {
 
   private readonly ops: StreamsSyncInternal;
 
+  /** @internal The Streams sync aperture this adapter reads and writes. */
+  get streamOps(): StreamsSyncInternal {
+    return this.ops;
+  }
+
   constructor(
     streams: Streams,
     sql: SqlTaggedTemplate,

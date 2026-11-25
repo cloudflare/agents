@@ -45,8 +45,6 @@ import {
   ContinuationState,
   ResumableStream,
   createChatStreams,
-  replayCompletedChunks,
-  replayErroredChunks,
   ResumeHandshake,
   buildChatRecoveringFrame,
   bumpChatRecoveryProgress,
@@ -730,18 +728,6 @@ export class TanStackAgent extends Agent<Env> {
     return {
       responseMessageType: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
       resumableStream: this._resumableStream,
-      replayCompleted: (connection, requestId) =>
-        replayCompletedChunks(
-          this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
-          connection,
-          requestId
-        ),
-      replayErrored: (connection, requestId) =>
-        replayErroredChunks(
-          this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
-          connection,
-          requestId
-        ),
       continuation: this._continuation,
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => pendingChatTerminal(this.ctx.storage),

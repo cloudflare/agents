@@ -28,6 +28,7 @@ import {
 import type { ContinuationState } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
 import type { ResumableStream } from "./resumable-stream";
+import { replayCompletedChunks, replayErroredChunks } from "./stream-rows";
 import type { ChatRecentTerminal } from "./recent-terminals";
 import { endedRequestOf, type EndedRequests } from "./chat-frames";
 
@@ -50,16 +51,18 @@ export interface ResumeHandshakeHost {
   readonly resumableStream: ResumableStream;
   /**
    * Replay the request's latest completed chat stream, ending in its
-   * `done` frame (`replayCompletedChunks` over the host's Streams).
+   * `done` frame. Defaults to `replayCompletedChunks` over the stream
+   * adapter's Streams: released hosts (ai-chat 0.12, Think 0.24) pass no
+   * replays.
    * @returns False when there is none, or the connection closed.
    */
-  replayCompleted(connection: Connection, requestId: string): boolean;
+  replayCompleted?(connection: Connection, requestId: string): boolean;
   /**
    * Replay the request's latest errored chat stream, with no terminal frame
-   * (`replayErroredChunks`).
+   * Defaults to `replayErroredChunks`, as above.
    * @returns False only when the connection closed mid-replay.
    */
-  replayErrored(connection: Connection, requestId: string): boolean;
+  replayErrored?(connection: Connection, requestId: string): boolean;
   readonly continuation: ContinuationState<Connection>;
   /**
    * Accepted-but-not-yet-streamed turns (#1784). Optional: experimental
@@ -444,7 +447,15 @@ export class ResumeHandshake {
       // over, or the app declined it): what it held is in the transcript if
       // the app kept it, and must not come back if it did not. Only its
       // recorded end is sent.
-    } else if (this.host.replayCompleted(connection, requestId)) {
+    } else if (
+      this.host.replayCompleted
+        ? this.host.replayCompleted(connection, requestId)
+        : replayCompletedChunks(
+            resumableStream.streamOps,
+            connection,
+            requestId
+          )
+    ) {
       // A stream that closed into recovery ends on "recovering", which is
       // not an end for the tab. A stop since then recorded the request's
       // real end; send it after the replay.
@@ -564,7 +575,14 @@ export class ResumeHandshake {
     // content chunks, then the terminal error (#1575). If the connection drops
     // mid-replay, skip the terminal frame; the record is retained, so the next
     // reconnect retries the whole sequence.
-    if (!this.host.replayErrored(connection, pending.requestId)) {
+    const replayed = this.host.replayErrored
+      ? this.host.replayErrored(connection, pending.requestId)
+      : replayErroredChunks(
+          resumableStream.streamOps,
+          connection,
+          pending.requestId
+        );
+    if (!replayed) {
       return true;
     }
     const messageIds =
