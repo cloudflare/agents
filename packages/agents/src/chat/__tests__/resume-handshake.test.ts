@@ -63,6 +63,8 @@ interface FakeStreamState {
   /** Orphaned stream id `replayChunks` returns ("" = not orphaned). */
   orphanedStreamId: string;
   replayCompletedReturn: boolean;
+  /** Chunk bodies the completed stream holds. */
+  completedChunks?: string[];
   replayErroredReturn: boolean;
   originMessageIds?: string[];
   outcome?: ChatTurnOutcome;
@@ -154,10 +156,19 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
         }
         return [];
       },
-      readChunks: (streamId: string, fromSeq: number) =>
-        streamId.startsWith("errored-") && fromSeq === 0
-          ? [{ seq: 0, chunk: JSON.stringify(DROPPED_CHUNK), created_at: 0 }]
-          : []
+      readChunks: (streamId: string, fromSeq: number) => {
+        if (fromSeq !== 0) return [];
+        if (streamId.startsWith("errored-")) {
+          return [
+            { seq: 0, chunk: JSON.stringify(DROPPED_CHUNK), created_at: 0 }
+          ];
+        }
+        return (state.completedChunks ?? []).map((body, seq) => ({
+          seq,
+          chunk: JSON.stringify(body),
+          created_at: 0
+        }));
+      }
     }
   } as unknown as ResumableStream;
   return { state, resumableStream };
@@ -625,14 +636,18 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({
       active: false,
-      replayCompletedReturn: true
+      replayCompletedReturn: true,
+      completedChunks: ["stored-chunk"]
     });
     const handshake = new ResumeHandshake(makeHost({ resumableStream }));
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-done");
 
-    // The replay's own terminal frame, and nothing after it.
-    expect(frames).toEqual([replayDoneFrame("req-done", RESPONSE_TYPE)]);
+    // The stored chunk, the replay's own terminal frame, and nothing after.
+    expect(frames).toEqual([
+      expect.objectContaining({ body: "stored-chunk", replay: true, seq: 0 }),
+      replayDoneFrame("req-done", RESPONSE_TYPE)
+    ]);
   });
 
   it("ACK with nothing left to replay emits a clean replay-done close", async () => {
