@@ -91,4 +91,14 @@ describe("extensions: one file in process and in a Worker", () => {
       classes: ["context-overflow", undefined]
     });
   });
+
+  it("runs a tool in a Worker that restarted since it was built", async () => {
+    // A fresh Worker has built nothing, as one that restarted on its own.
+    const handle = await inWorker();
+    const call = { id: "c", session: "s", messages: [] };
+    expect(await handle.execute("add", { a: 1, b: 2 }, call, () => {})).toEqual(
+      { ok: true, output: 3 }
+    );
+    expect(await handle.needsApproval("fail", {}, call)).toBe(true);
+  });
 });

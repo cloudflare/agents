@@ -579,7 +579,8 @@
         "outputs": [
           "{projectRoot}/dist",
           "{projectRoot}/docs",
-          "{projectRoot}/src/harness/container/daemon-source.generated.ts"
+          "{projectRoot}/src/harness/container/daemon-source.generated.ts",
+          "{projectRoot}/src/harness/think/extensions/worker-runtime.generated.ts"
         ]
       }
     }

@@ -281,6 +281,21 @@ export class ExtensionRuntime<
     return converted;
   }
 
+  /**
+   * A tool this extension set for `session`. A runtime that has not built
+   * for the session (it restarted since, as a Worker may on its own)
+   * builds its own tools again first.
+   */
+  async #toolFor(
+    session: ThinkSessionId,
+    name: string
+  ): Promise<ExtensionTool> {
+    if (!this.#kept.has(session)) {
+      await this.build({ tools: [], prompt: [] }, { session });
+    }
+    return this.#tool(session, name);
+  }
+
   #tool(session: ThinkSessionId, name: string): ExtensionTool {
     const tool = this.#kept.get(session)?.get(name);
     if (!tool) {
@@ -297,7 +312,7 @@ export class ExtensionRuntime<
     call: ToolCall,
     onOutput: (output: unknown) => void | Promise<void>
   ): Promise<ToolOutcome> {
-    const execute = this.#tool(call.session, name).execute;
+    const execute = (await this.#toolFor(call.session, name)).execute;
     if (typeof execute !== "function") {
       return { ok: false, errorText: "The tool has no execute function" };
     }
@@ -335,7 +350,7 @@ export class ExtensionRuntime<
     build: BuildContext
   ): Promise<Validation> {
     const validate = this.#schemaOf(
-      this.#tool(build.session, name).inputSchema
+      (await this.#toolFor(build.session, name)).inputSchema
     ).validate;
     if (!validate) return { success: true, value: input };
     return validate(input);
@@ -346,7 +361,8 @@ export class ExtensionRuntime<
     output: { toolCallId: string; input: unknown; output: unknown },
     build: BuildContext
   ): Promise<unknown> {
-    const toModelOutput = this.#tool(build.session, name).toModelOutput;
+    const toModelOutput = (await this.#toolFor(build.session, name))
+      .toModelOutput;
     if (!toModelOutput) {
       throw new Error(`Tool "${name}" has no toModelOutput`);
     }
@@ -358,7 +374,8 @@ export class ExtensionRuntime<
     input: unknown,
     call: ToolCall
   ): Promise<boolean> {
-    const needsApproval = this.#tool(call.session, name).needsApproval;
+    const needsApproval = (await this.#toolFor(call.session, name))
+      .needsApproval;
     if (typeof needsApproval === "function") {
       return Boolean(
         await needsApproval(input, {
