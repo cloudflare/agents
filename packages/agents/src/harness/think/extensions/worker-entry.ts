@@ -60,7 +60,10 @@ function runtime() {
   loaded ??= (async () => {
     const { name } = manifest as { name: string };
     const runtime = new ExtensionRuntime(name, rules, jsonSchemaOnly);
-    await runtime.install(extension as ThinkExtension<never>);
+    // SAFETY: the loader puts an extension function in extension.js.
+    await runtime.install(
+      extension as ThinkExtension<Record<string, readonly [unknown, unknown]>>
+    );
     return runtime;
   })();
   return loaded;
