@@ -36,7 +36,7 @@
   "packages/agents/src/streams/streams.ts": 39,
   "packages/agents/src/streams/types.ts": 2,
   "packages/agents/src/tasks/serialization.ts": 1,
-  "packages/agents/src/tasks/store.ts": 13,
+  "packages/agents/src/tasks/store.ts": 12,
   "packages/agents/src/tasks/tasks.ts": 3,
   "packages/agents/src/tasks/types.ts": 3,
   "packages/agents/src/voice/index.ts": 1,
