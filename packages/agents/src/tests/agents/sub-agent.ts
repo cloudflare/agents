@@ -348,8 +348,12 @@ export class CounterSubAgent extends Agent {
     return rows.length > 0 ? rows[0].value : 0;
   }
 
-  onMessage(_connection: Connection, message: WSMessage) {
+  onMessage(connection: Connection, message: WSMessage) {
     if (message === STALE_FRAME_PROBE) this.increment(STALE_FRAME_PROBE);
+    // Inbound order probe: echo each frame as it is handled.
+    if (typeof message === "string" && message.startsWith("order:")) {
+      connection.send(`seen:${message}`);
+    }
   }
 
   ping(): string {
@@ -1640,6 +1644,27 @@ class DelayedForwardingSubAgentBridge extends RpcTarget {
 }
 
 export class TestSubAgentParent extends Agent {
+  /**
+   * Hold the `nth` facet init call from now on for `ms`, as a slow facet
+   * start does to one forwarded frame (F11).
+   */
+  delayFacetInitForTest(nth: number, ms: number): void {
+    const host = this as unknown as {
+      _runFacetInitInvocation<T>(body: () => Promise<T>): Promise<T>;
+    };
+    const original = host._runFacetInitInvocation.bind(this);
+    let calls = 0;
+    host._runFacetInitInvocation = async <T>(
+      body: () => Promise<T>
+    ): Promise<T> => {
+      calls++;
+      if (calls === nth) {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      return original(body);
+    };
+  }
+
   private _fiberWakeRouteFailuresRemaining = 0;
   private _rootResolutionFailuresRemaining = 0;
   private _nextRootResolutionDelayMs = 0;
