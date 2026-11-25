@@ -8,6 +8,7 @@ import { asSchema } from "ai";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { coreOf, ExtensionManager, sanitizeName } from "../extensions/manager";
+import { getAgentByName } from "agents";
 import type { ExtensionManifest } from "../extensions/types";
 
 // Simple extension source: a greet tool that returns a greeting
@@ -900,5 +901,38 @@ describe("ExtensionManager hook timeout", () => {
     expect(config).toEqual({ maxSteps: 2 });
     expect(timedOut).toBe(true);
     expect(waited).toBeLessThan(1500);
+  });
+});
+
+describe("ExtensionManager network hosts", () => {
+  async function fetchThrough(url: string) {
+    const agent = await getAgentByName(
+      env.ThinkExtensionNetworkAgent,
+      "network-hosts"
+    );
+    return agent.fetchThroughExtension(url) as Promise<{
+      status?: number;
+      body?: string;
+      thrown?: string;
+    }>;
+  }
+
+  it("refuses a host the manifest does not list", async () => {
+    const result = await fetchThrough("https://unlisted.example/path");
+    expect(result.status).toBe(403);
+    expect(result.body).toContain("The host unlisted.example is not allowed");
+  });
+
+  it("refuses a listed host that is a private or local address", async () => {
+    const result = await fetchThrough("http://127.0.0.1/secret");
+    expect(result.status).toBe(403);
+    expect(result.body).toContain("private or local address");
+  });
+
+  it("passes a listed host on to the network", async () => {
+    const result = await fetchThrough("https://allowed.example/");
+    // The host does not exist, so the request fails at the DNS lookup,
+    // after the bridge let it through.
+    expect(result.thrown).toContain("Network connection failed");
   });
 });

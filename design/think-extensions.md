@@ -60,6 +60,8 @@ Their hooks are the released ones, a second hook map on the same manager until `
 
 Each call has the agent's `hookTimeout`. An extension that fails or passes it is logged and skipped. A snapshot is made only when some extension subscribes to the event. A tool of an unloaded extension answers with an error that says it is no longer available.
 
+A manifest's `network` hosts are enforced by `HostBridgeLoopback`, the binding the app already re-exports for host access. The extension Worker's `globalOutbound` is that binding, so every `fetch()` it makes arrives at the bridge's `fetch`. The bridge checks the URL with the web tools' URL policy (`allowedHosts` from the manifest, private and local addresses refused) and answers `403` when it fails. It forwards a request that passes with `redirect: "manual"`, so each redirect hop comes back through the check. Without the re-export nothing can enforce the list, so the Worker keeps the agent's network as before, and the manager warns once. An extension with no hosts has no network at all.
+
 A context block's `type` in the manifest is ignored with a warning, once per manager. An extension writes its blocks with `host.setContext()`, which its `context.write` permission governs.
 
 ## Guarantees

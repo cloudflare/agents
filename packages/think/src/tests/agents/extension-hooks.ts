@@ -263,3 +263,52 @@ export class ThinkExtensionBeforeTurnModelAgent extends Think {
     return content == null ? null : JSON.parse(content);
   }
 }
+
+const NETWORK_EXTENSION_SOURCE = `{
+  tools: {
+    get: {
+      description: "Fetch a URL",
+      parameters: { url: { type: "string" } },
+      required: ["url"],
+      execute: async (args) => {
+        try {
+          const response = await fetch(args.url);
+          return { status: response.status, body: await response.text() };
+        } catch (error) {
+          return { thrown: String(error) };
+        }
+      }
+    }
+  }
+}`;
+
+/** An extension that may reach one listed host, through the host bridge. */
+export class ThinkExtensionNetworkAgent extends Think {
+  extensionLoader = this.env.LOADER;
+
+  override getModel(): LanguageModel {
+    return createMockToolModel();
+  }
+
+  override getExtensions() {
+    return [
+      {
+        manifest: {
+          name: "net",
+          version: "1.0.0",
+          permissions: { network: ["allowed.example", "127.0.0.1"] }
+        },
+        source: NETWORK_EXTENSION_SOURCE
+      }
+    ];
+  }
+
+  async fetchThroughExtension(url: string): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
+    const tool = this.extensionManager?.getTools().net_get;
+    return tool?.execute?.(
+      { url },
+      { toolCallId: crypto.randomUUID(), messages: [], context: undefined }
+    );
+  }
+}
