@@ -1,11 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
-Support the next Pi release. Pi tools now park with `{ kind: "sleep", signals, until }` instead of `{ sleep: { ... } }`, and a signal's state is `{ kind: "value", value }` or `{ kind: "expired" }`. A tool that still returns the old shape compiles but ends with an empty result, so update parking tools when you upgrade. See [Tools that wait](https://developers.cloudflare.com/agents/harnesses/pi/#tools-that-wait).
-
-On the `agents/models/pi-ai` chat-completions wire, `rawStopReason` now records the provider's finish reason, and OpenRouter models add the upstream provider's `native_finish_reason` to it and to error messages, as pi-ai does; an OpenRouter `stop` with no text or tool calls whose native reason is a failure is now a retryable empty-response error. See [Models for pi-ai](https://developers.cloudflare.com/agents/models/pi-ai/).
-
-`agents/models/pi-ai` now calls `onResponse` for every response, as pi-ai does: a vendor's error response on every wire and AI Gateway's own failures included, so a failed request's status and `retry-after` can be read. See [Models for pi-ai](https://developers.cloudflare.com/agents/models/pi-ai/).
-
-The `agents/models` SSE decoder reads a large streamed event in time linear in its size; it rescanned the incomplete line on every chunk, which made multi-megabyte events take seconds. See [Models for pi-ai](https://developers.cloudflare.com/agents/models/pi-ai/).
+Support Pi 1.6.1 (`~1.6.1`). Pi tools now park with `{ kind: "sleep", signals, until }` instead of `{ sleep: { ... } }`, and a signal's state is `{ kind: "value", value }` or `{ kind: "expired" }`; a tool that still returns the old shape compiles but ends with an empty result, so update parking tools when you upgrade. `agents/models/pi-ai` now matches pi-ai 1.6.1: a chat-completions stream that ends with `finish_reason: "error"` fails with an error the Pi harness retries under its retry settings, `rawStopReason` records the provider's reason (with OpenRouter's `native_finish_reason`), an OpenRouter `stop` with no output and a failing native reason is a retryable error, and `onResponse` sees every response, failures included. The `agents/models` SSE decoder reads large streamed events in linear time. See [pi-durable 1.6.1's changelog](https://github.com/earendil-works/pi/blob/v1.6.1/packages/durable/CHANGELOG.md#161---2026-11-25) and [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/#tools-that-wait).
