@@ -1141,11 +1141,13 @@ export class Tasks<
          0, ${now}, ${now},
          ${lane}, ${place?.seq ?? null}, ${placed.parts})
     `;
-    await this.#finishSkipped(skipped, `superseded by ${runId}`);
     // Before the wake is published: an attempt this isolate starts from it
     // (the alarm can win the claim) still gets the caller's `local`.
     if (options.local !== undefined && startMode !== "queued") {
       this.#locals.set(runId, options.local);
+    }
+    if (skipped.length > 0) {
+      await this.#finishSkipped(skipped, `superseded by ${runId}`);
     }
     // The run starts only once its `pending` report returned: its wake is
     // published after it (a reset in between leaves the row's deadline,
