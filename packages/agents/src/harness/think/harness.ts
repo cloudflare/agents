@@ -582,40 +582,40 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const left = store.leftOperations();
     if (!left) return;
     for (const op of left) {
-      const runId = runIdOf(op.session, op.operationId);
+      const {
+        session,
+        operationId,
+        input,
+        source,
+        status,
+        abandonReason,
+        startedToolCalls,
+        createdAt,
+        ...progress
+      } = op;
+      const runId = runIdOf(session, operationId);
       // A version rolled back to before this one may have reused the id of
       // a settled run: the open operation is the newer.
       const existing = this.#tasks.peek(runId);
       if (existing && TERMINAL.includes(existing.status)) {
         this.#tasks.deleteRun(runId);
       }
-      const running = op.status === "running";
       const state: TurnState = {
-        parentId: op.parentId,
-        messageId: op.messageId,
-        streamId: op.streamId,
-        pendingModel: op.pendingModel,
-        steps: op.steps,
-        interruptions: op.interruptions,
-        overflowRetries: op.overflowRetries,
-        ...(op.abandonReason !== null && {
-          ended: { reason: op.abandonReason }
-        }),
-        ...(op.startedToolCalls.length > 0 && {
-          started: op.startedToolCalls
-        })
+        ...progress,
+        ...(abandonReason !== null && { ended: { reason: abandonReason } }),
+        ...(startedToolCalls.length > 0 && { started: startedToolCalls })
       };
       await this.#tasks.importRun({
         runId,
         definition: OPERATION_DEFINITION,
-        status: running ? "running" : "pending",
-        attempt: running ? 1 : 0,
+        status: status === "running" ? "running" : "pending",
+        attempt: status === "running" ? 1 : 0,
         // SAFETY: as for enqueue's input.
-        input: { input: op.input, source: op.source } as unknown as TaskJson,
-        lane: laneOf(op.session),
-        createdAt: op.createdAt,
-        ...(running && {
-          startedAt: op.createdAt,
+        input: { input, source } as unknown as TaskJson,
+        lane: laneOf(session),
+        createdAt,
+        ...(status === "running" && {
+          startedAt: createdAt,
           checkpoint: { [TURN_KEY]: state }
         })
       });
