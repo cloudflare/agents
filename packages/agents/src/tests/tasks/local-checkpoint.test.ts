@@ -302,6 +302,76 @@ describe("Tasks checkpoint column", () => {
 });
 
 describe("Tasks schema 4", () => {
+  it("brings schema 2 up in one migration: the rebuild keeps the run and its checkpoint rows move in", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        // The tables as schema 2 left them: statuses renamed, no lanes, the
+        // checkpoint in its own table.
+        state.storage.sql.exec(`
+          CREATE TABLE cf_agents_task_runs (
+            run_id TEXT PRIMARY KEY,
+            definition TEXT NOT NULL,
+            input TEXT,
+            status TEXT NOT NULL,
+            result TEXT,
+            error_name TEXT,
+            error_message TEXT,
+            status_message TEXT,
+            metadata TEXT,
+            idempotency_key TEXT UNIQUE,
+            retain INTEGER NOT NULL DEFAULT 1,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            generation TEXT,
+            next_at INTEGER,
+            wait_reason TEXT,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            cancel_reason TEXT,
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            updated_at INTEGER NOT NULL,
+            settled_at INTEGER
+          ) WITHOUT ROWID`);
+        state.storage.sql.exec(`
+          CREATE TABLE cf_agents_task_checkpoint (
+            run_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (run_id, key)
+          ) WITHOUT ROWID`);
+        state.storage.sql.exec(
+          `INSERT INTO cf_agents_task_runs
+             (run_id, definition, status, wait_reason, next_at, retain,
+              attempt, cancel_requested, created_at, updated_at)
+           VALUES ('two', 'remembering', 'pending', 'sleep', ?, 1, 1, 0, 1, 1)`,
+          Date.now() + 60 * 60 * 1000
+        );
+        state.storage.sql.exec(
+          "INSERT INTO cf_agents_task_checkpoint VALUES ('two', 'note', '1')"
+        );
+        forgetSchemaVersion(instance.lifecycle, "tasks");
+        await state.storage.put("cf_agents:tasks_schema_version", 2);
+
+        await instance.lifecycle.start();
+
+        expect(await instance.tasks.get("two")).toMatchObject({
+          status: "pending",
+          waitReason: "sleep"
+        });
+        expect(instance.tasks.checkpointOf("two", "note")).toBe(1);
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT name FROM sqlite_master WHERE name = 'cf_agents_task_checkpoint'"
+            )
+            .toArray()
+        ).toEqual([]);
+        expect(tasksSchemaVersion(state.storage)).toBe(4);
+      }
+    );
+  });
+
   it("moves schema 3's checkpoint rows into their run's column and drops the table", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
