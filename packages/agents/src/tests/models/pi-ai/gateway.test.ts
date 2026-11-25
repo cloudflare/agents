@@ -6,6 +6,7 @@ import {
   anthropicModel,
   anthropicTextEvents,
   asAi,
+  billingError,
   collectEvents,
   fakeBinding,
   jsonResponse,
@@ -393,5 +394,125 @@ describe("pi-ai: string legs and Workers AI knobs on vendor models", () => {
       "reasoning-effort",
       "chat-template-kwargs"
     ]);
+  });
+});
+
+describe("pi-ai: onResponse sees every response, failures included", () => {
+  const wires = [
+    ["Anthropic Messages", anthropicModel("claude-sonnet-4-5")],
+    ["chat completions", groqModel("openai/gpt-oss-20b")],
+    ["Responses", openaiModel("gpt-5-mini")]
+  ] as const;
+
+  async function reported(
+    model: Model<Api> | string,
+    answer: () => Response
+  ): Promise<{ status: number; headers: Record<string, string> }[]> {
+    const binding = fakeBinding(answer);
+    const ai = createAI({ binding: asAi(binding) });
+    const seen: { status: number; headers: Record<string, string> }[] = [];
+    const { message } = await collectEvents(
+      ai.stream(ai(model), userContext("hi"), {
+        maxRetries: 0,
+        onResponse: (response) => {
+          seen.push(response);
+        }
+      })
+    );
+    expect(message.stopReason).toBe("error");
+    return seen;
+  }
+
+  for (const [wire, model] of wires) {
+    it(`reports the gateway's own failure on the ${wire} wire`, async () => {
+      const seen = await reported(model, () =>
+        jsonResponse(billingError(), {
+          headers: { "cf-aig-log-id": "log-402" },
+          status: 402
+        })
+      );
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        headers: { "cf-aig-log-id": "log-402" },
+        status: 402
+      });
+    });
+
+    it(`reports a vendor's error response once on the ${wire} wire`, async () => {
+      const seen = await reported(model, () =>
+        jsonResponse(
+          { error: { message: "slow down", type: "rate_limit_error" } },
+          { headers: { "retry-after": "7" }, status: 429 }
+        )
+      );
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        headers: { "retry-after": "7" },
+        status: 429
+      });
+    });
+  }
+
+  it("reports a success once on every wire", async () => {
+    const answers = [
+      () => sseEventResponse(anthropicTextEvents()),
+      () => sseResponse(workersAITextStream()),
+      () => sseResponse(responsesTextStream())
+    ];
+    for (const [index, [, model]] of wires.entries()) {
+      const binding = fakeBinding(answers[index] ?? (() => new Response()));
+      const ai = createAI({ binding: asAi(binding) });
+      const statuses: number[] = [];
+      await collectEvents(
+        ai.stream(ai(model), userContext("hi"), {
+          onResponse: (response) => {
+            statuses.push(response.status);
+          }
+        })
+      );
+      expect(statuses).toEqual([200]);
+    }
+  });
+
+  // The Anthropic wire hands the response to pi-ai's own implementation,
+  // which calls onResponse itself.
+  for (const [wire, model] of [
+    ["chat completions", groqModel("openai/gpt-oss-20b")],
+    ["Responses", openaiModel("gpt-5-mini")],
+    ["catalog /run", "openai/gpt-5.4"]
+  ] as const) {
+    it(`cancels the body when onResponse throws on the ${wire} path`, async () => {
+      let cancelled = false;
+      const binding = fakeBinding(
+        () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              cancel() {
+                cancelled = true;
+              }
+            }),
+            { headers: { "content-type": "text/event-stream" } }
+          )
+      );
+      const ai = createAI({ binding: asAi(binding) });
+      const { message } = await collectEvents(
+        ai.stream(ai(model), userContext("hi"), {
+          maxRetries: 0,
+          onResponse: () => {
+            throw new Error("rejected by the app");
+          }
+        })
+      );
+      expect(message.stopReason).toBe("error");
+      expect(message.errorMessage).toContain("rejected by the app");
+      expect(cancelled).toBe(true);
+    });
+  }
+
+  it("reports a /run failure for a catalog model", async () => {
+    const seen = await reported("anthropic/claude-opus-4.8", () =>
+      jsonResponse(billingError(), { status: 402 })
+    );
+    expect(seen.map((response) => response.status)).toEqual([402]);
   });
 });

@@ -133,14 +133,16 @@ export function streamResponses(
           ? body
           : (overridden as Record<string, unknown>);
 
+      // Every response is reported, a gateway failure that throws included,
+      // as pi-ai reports error responses too.
       response = await sendGateway(
         request,
         transport,
         payload,
         openAIVendorHeaders(),
-        "responses"
+        "responses",
+        (raw) => options.onResponse?.(responseInfo(raw), model)
       );
-      await options.onResponse?.(responseInfo(response), model);
       attachCorrelation(
         output,
         correlationDetails(request, response, transport)

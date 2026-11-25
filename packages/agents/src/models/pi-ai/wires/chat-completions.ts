@@ -612,23 +612,30 @@ export function streamCompletions(
           ? prepared.body
           : (overridden as Record<string, unknown>);
 
-      response = workersAI
-        ? await transport.run({
-            format: "chat-completions",
-            gateway: resolved.gateway,
-            headers: request.headers,
-            input: payload,
-            model: model.id,
-            signal: options.signal
-          })
-        : await sendGateway(
-            request,
-            transport,
-            payload,
-            openAIVendorHeaders(),
-            "chat-completions"
-          );
-      await options.onResponse?.(responseInfo(response), model);
+      // Every response is reported, a gateway failure that throws included,
+      // as pi-ai reports error responses too.
+      const reportResponse = (raw: Response) =>
+        options.onResponse?.(responseInfo(raw), model);
+      if (workersAI) {
+        response = await transport.run({
+          format: "chat-completions",
+          gateway: resolved.gateway,
+          headers: request.headers,
+          input: payload,
+          model: model.id,
+          signal: options.signal
+        });
+        await reportResponse(response);
+      } else {
+        response = await sendGateway(
+          request,
+          transport,
+          payload,
+          openAIVendorHeaders(),
+          "chat-completions",
+          reportResponse
+        );
+      }
       attachCorrelation(
         output,
         correlationDetails(request, response, transport)
