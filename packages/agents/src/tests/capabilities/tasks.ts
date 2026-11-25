@@ -41,6 +41,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly lanedLocals: unknown[] = [];
   /** `laned` runs park on their label's gate, when it has one. */
   readonly lanedGates = new Map<string, Promise<void>>();
+  /** `__cf_superseding` runs whose signal aborted while they ran. */
+  readonly supersededSignals: string[] = [];
 
   readonly tasks = new Tasks({
     definitions: {
@@ -451,6 +453,22 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.tasks.register("__cf_echo", async (input) => (input as string).length);
+    this.tasks.register(
+      "__cf_superseding",
+      async (input, step) => {
+        const { label } = input as { label: string };
+        this.lanedStarted.push(label);
+        await Promise.race([
+          this.lanedGates.get(label),
+          new Promise((resolve) =>
+            step.signal.addEventListener("abort", resolve)
+          )
+        ]);
+        if (step.signal.aborted) this.supersededSignals.push(label);
+        return label;
+      },
+      { supersedeRunning: true }
+    );
     this.tasks.register("__cf_parking", async () =>
       TaskSettlement.park("detached")
     );

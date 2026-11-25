@@ -425,7 +425,8 @@ export class Tasks<
       options.maxAttempts !== undefined ||
       options.keepCheckpoint ||
       options.claimMs !== undefined ||
-      options.attached
+      options.attached ||
+      options.supersedeRunning
     ) {
       this.#registeredOptions.set(name, options);
     }
@@ -1090,13 +1091,70 @@ export class Tasks<
     }
 
     const runId = options.runId ?? `task_${nanoid()}`;
-    const now = Date.now();
     const lane = options.lane ?? null;
+    const policy = options.policy ?? "queue";
+    const debounceMs = typeof policy === "object" ? policy.debounceMs : 0;
+    if ((options.policy !== undefined || options.front) && lane === null) {
+      throw new Error("A Task run's policy and front need a lane");
+    }
+    if (!Number.isFinite(debounceMs) || debounceMs < 0) {
+      throw new Error("A Task run's debounceMs must be a finite number >= 0");
+    }
+    let superseded: string[] | undefined;
+    if (lane !== null && policy !== "queue") {
+      const busy = this.#store.laneHead(lane) !== undefined;
+      if (busy && policy === "drop") {
+        return {
+          runId,
+          definition,
+          accepted: false,
+          dropped: true,
+          status: "skipped",
+          createdAt: Date.now()
+        };
+      }
+      if (busy && policy !== "drop") {
+        superseded = await this.#skipLane(
+          lane,
+          `superseded by ${runId}`,
+          this.#registeredOptions.get(definition)?.supersedeRunning === true
+        );
+      }
+    }
+    const now = Date.now();
     const placed = this.#store.placeInput(runId, inputJson);
     // A run queued behind its lane's open run waits with no deadline (and
-    // no wake job) until that run settles.
+    // no wake job) until that run settles; a debounced one waits its quiet
+    // period first.
     const place = lane === null ? null : this.#store.lanePlace(lane);
-    const queued = place?.open ?? false;
+    let queued = place?.open ?? false;
+    let seq = place?.seq ?? null;
+    let displaced: string[] = [];
+    if (lane !== null && options.front) {
+      // Ahead of the runs that have not started, which wait behind it with
+      // no deadline; behind a started one.
+      displaced = this.#store.sql<{ run_id: string; seq: number }>`
+        SELECT run_id, seq FROM ${this.#tables.runs}
+        WHERE lane = ${lane} AND status = 'pending' AND attempt = 0
+        ORDER BY seq
+      `.map((row) => row.run_id);
+      if (displaced.length > 0) {
+        seq = this.#store.sql<{ seq: number }>`
+          SELECT seq FROM ${this.#tables.runs} WHERE run_id = ${displaced[0]}
+        `[0]!.seq;
+        this.#store.sql`
+          UPDATE ${this.#tables.runs}
+          SET seq = seq + 1, next_at = NULL, updated_at = ${now}
+          WHERE lane = ${lane} AND status = 'pending' AND attempt = 0
+        `;
+      }
+      queued =
+        this.#store.sql<{ n: number }>`
+          SELECT COUNT(*) AS n FROM ${this.#tables.runs}
+          WHERE lane = ${lane} AND (status = 'running' OR
+            (status = 'pending' AND attempt > 0))
+        `[0]!.n > 0;
+    }
     this.#store.sql`
       INSERT INTO ${this.#tables.runs}
         (run_id, definition, input, status, metadata, idempotency_key, retain,
@@ -1105,10 +1163,10 @@ export class Tasks<
       VALUES
         (${runId}, ${definition}, ${placed.input}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
-         0, ${queued ? null : now}, 0, ${now}, ${now}, ${lane},
-         ${place?.seq ?? null},
-         ${placed.parts})
+         0, ${queued ? null : now + debounceMs}, 0, ${now}, ${now}, ${lane},
+         ${seq}, ${placed.parts})
     `;
+    for (const id of displaced) await this.#syncWake(id);
     // Before the wake is published: an attempt this isolate starts from it
     // (the alarm can win the claim) still gets the caller's `local`.
     if (options.local !== undefined && startMode !== "queued") {
@@ -1164,7 +1222,8 @@ export class Tasks<
       definition,
       accepted: true,
       status: "pending",
-      createdAt: now
+      createdAt: now,
+      ...(superseded?.length ? { superseded } : {})
     };
   }
 
@@ -2444,35 +2503,50 @@ export class Tasks<
    */
   async clear(lane: string, reason?: string): Promise<void> {
     if (this.lifecycle.status() !== "started") await this.lifecycle.ready();
+    await this.#skipLane(lane, reason ?? null, true);
+  }
+
+  /**
+   * End a lane's open runs `skipped`: those that have not started, and the
+   * started one (running, or waiting to retry or wake) too when `running`
+   * is set. Returns their ids in lane order.
+   */
+  async #skipLane(
+    lane: string,
+    reason: string | null,
+    running: boolean
+  ): Promise<string[]> {
     const now = Date.now();
     const query = `UPDATE ${this.#tables.runs}
       SET status = 'skipped', cancel_reason = ?, generation = NULL,
           ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?,
           updated_at = ?
-      WHERE lane = ? AND status IN ('pending', 'running')
+      WHERE lane = ? AND ${running ? "status IN ('pending', 'running')" : "status = 'pending' AND attempt = 0"}
       RETURNING *`;
     let rows: TaskRunRow[];
     try {
       // SAFETY: RETURNING * from Tasks' own schema.
       rows = this.lifecycle.storage.sql
-        .exec(query, reason ?? null, now, now, lane)
+        .exec(query, reason, now, now, lane)
         .toArray() as unknown as TaskRunRow[];
     } catch (cause) {
       throw new SqlError(query, cause);
     }
+    rows.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     for (const row of rows) {
       this.#active
         .get(row.run_id)
-        ?.controller.abort(new TaskCancellation(reason));
+        ?.controller.abort(new TaskCancellation(reason ?? undefined));
     }
     for (const row of rows) {
       this.#emit("task:skipped", {
         runId: row.run_id,
         definition: row.definition,
-        reason: reason ?? null
+        reason
       });
       await this.#finishTerminalSettlement(row.run_id, row);
     }
+    return rows.map((row) => row.run_id);
   }
 
   /**
