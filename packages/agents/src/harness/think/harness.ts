@@ -1188,7 +1188,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     first: Turn,
     live: LiveRun
   ): Promise<OperationOutcome> {
-    const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
     let turn = first;
     // One build per attempt: every model call and tool call of it sees the
     // same tools and prompt. A change to them applies from the next turn.
@@ -1198,6 +1197,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     for (;;) {
       if (run.signal.aborted) throw run.signal.reason;
       const message = await this.#message(turn);
+      // Read at every step, so a host that sets it from a turn's own
+      // configuration (a `beforeTurn` before the first model call) holds.
+      const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
       const action = nextAction(
         {
           streamId: turn.streamId ?? undefined,

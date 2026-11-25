@@ -52,6 +52,7 @@ export { ThinkClientToolsAgent } from "./client-tools";
 export {
   ThinkExtensionHookAgent,
   ThinkExtensionNetworkAgent,
+  ThinkExtensionTurnAgent,
   ThinkExtensionBeforeTurnModelAgent
 } from "./extension-hooks";
 export {

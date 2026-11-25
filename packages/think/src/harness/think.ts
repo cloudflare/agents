@@ -281,18 +281,28 @@ export class Think<
           ? this.getSystemPrompt()
           : undefined,
       tools: () => this.getTools(),
+      // A turn's `beforeTurn` may set its own, as in Think.
       get maxSteps() {
-        return self.maxSteps;
+        return self.#turnMaxSteps ?? self.maxSteps;
       },
       hooks: {
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
-          await this.#extensionHooks.toolCallStart({
-            // SAFETY: a snapshot reads the name, id and input only.
-            toolCall: call as unknown as TypedToolCall<ToolSet>,
-            stepNumber: undefined
-          });
-          return this.#beforeToolCall(call);
+          const decision = await this.#beforeToolCall(call);
+          // As in Think: extensions hear of a call that runs, with the
+          // input it runs with.
+          if (!decision || decision.action === "run") {
+            const input =
+              decision?.action === "run" && decision.input !== undefined
+                ? decision.input
+                : call.input;
+            await this.#extensionHooks.toolCallStart({
+              // SAFETY: a snapshot reads the name, id and input only.
+              toolCall: { ...call, input } as unknown as TypedToolCall<ToolSet>,
+              stepNumber: undefined
+            });
+          }
+          return decision;
         },
         afterToolCall: async (result) => {
           await this.#extensionHooks.toolCallFinish({
@@ -337,10 +347,23 @@ export class Think<
           } as unknown as StepContext);
         },
         onChunk: ({ chunk }) => {
-          void this.#extensionHooks.chunk({ chunk } as unknown as ChunkContext);
+          // A snapshot reads a delta's text as `text`, as a stream part has it.
+          const text = "delta" in chunk ? chunk.delta : undefined;
+          // In order, one after another, as Think awaits each chunk's hooks.
+          this.#chunkHooks = this.#chunkHooks
+            .then(() =>
+              this.#extensionHooks.chunk({
+                chunk: text === undefined ? chunk : { ...chunk, text }
+              } as unknown as ChunkContext)
+            )
+            .catch((error: unknown) =>
+              console.error("[Think] An extension's onChunk failed", error)
+            );
           void this.onChunk({ chunk } as unknown as ChunkContext);
         },
         onTurnEnd: async (end) => {
+          // The extensions' chunk hooks finish inside the turn, as in Think.
+          await this.#chunkHooks;
           if (!end.message) return;
           await this.onChatResponse({
             message: end.message,
@@ -369,7 +392,12 @@ export class Think<
       }
     });
     this.harness.observe((_session, event) => {
-      if (event.type === "run-end") this.#running = undefined;
+      if (event.type === "run-end") {
+        this.#running = undefined;
+        this.#extensionTurn = undefined;
+        this.#turnMaxSteps = undefined;
+        void this.#appendHeldHostMessages();
+      }
     });
     this.lifecycle.use(this.harness);
 
@@ -667,14 +695,44 @@ export class Think<
     await this.#sync();
   }
 
+  /** Messages extensions sent during a turn, appended when it ends. */
+  #heldHostMessages: UIMessage[] = [];
+
+  /** The extensions' `onChunk` calls, chained so they run in order. */
+  #chunkHooks: Promise<void> = Promise.resolve();
+
+  /** The running turn's own `maxSteps`, from its `beforeTurn`. */
+  #turnMaxSteps: number | undefined;
+
+  /** The extensions' `beforeTurn` changes, kept for the operation. */
+  #extensionTurn:
+    | { readonly operationId: string; readonly changes: TurnConfig }
+    | undefined;
+
+  async #appendHeldHostMessages(): Promise<void> {
+    const held = this.#heldHostMessages;
+    this.#heldHostMessages = [];
+    for (const message of held) {
+      try {
+        await this.appendMessageToHistory(message);
+      } catch (error) {
+        console.error("[Think] Could not append an extension's message", error);
+      }
+    }
+  }
+
   /** What a sandboxed extension can reach on this agent, as on Think. */
   readonly #hostApi = createThinkHostApi({
     workspace: () => this.workspace,
     context: () => this.context,
     messages: () => this.#messages,
     // Not a submission: a tool calling this during a turn would wait on
-    // its own turn.
-    appendMessage: (message) => this.appendMessageToHistory(message)
+    // its own turn. During a turn it is kept until the turn ends, so it
+    // follows the reply on the conversation, as Think queues it.
+    appendMessage: async (message) => {
+      if (this.#running) this.#heldHostMessages.push(message);
+      else await this.appendMessageToHistory(message);
+    }
   });
 
   /**
@@ -952,12 +1010,28 @@ export class Think<
       requestId: turn.operationId
     };
     const own = await this.beforeTurn(context);
-    // The sandboxed extensions see the subclass's config, as in Think.
-    const config = await this.#extensionHooks.beforeTurn(
-      // SAFETY: the fields a turn snapshot reads are all here.
-      context as unknown as TurnContext,
-      own ?? {}
-    );
+    // The sandboxed extensions see the subclass's config, as in Think,
+    // once per operation: Think prepares a turn once for its whole tool
+    // loop, and the harness asks before every model call.
+    const folded =
+      this.#extensionTurn?.operationId === turn.operationId
+        ? this.#extensionTurn.changes
+        : undefined;
+    const config =
+      folded !== undefined
+        ? { ...(own ?? {}), ...folded }
+        : await this.#extensionHooks.beforeTurn(
+            // SAFETY: the fields a turn snapshot reads are all here.
+            context as unknown as TurnContext,
+            own ?? {}
+          );
+    if (folded === undefined) {
+      this.#extensionTurn = {
+        operationId: turn.operationId,
+        changes: changesOf(own ?? {}, config)
+      };
+    }
+    this.#turnMaxSteps = config.maxSteps;
     // Nothing to change: neither the subclass nor an extension set a field.
     if (!own && Object.keys(config).length === 0) return;
     const system = config.instructions ?? config.system;
@@ -968,6 +1042,15 @@ export class Think<
       ...(typeof system === "string" && { system }),
       ...(config.messages && { messages: config.messages }),
       ...(config.activeTools && { activeTools: config.activeTools }),
+      ...(config.toolChoice !== undefined && {
+        toolChoice: config.toolChoice
+      }),
+      ...(config.providerOptions !== undefined && {
+        // SAFETY: provider options are JSON by the AI SDK's contract.
+        providerOptions: config.providerOptions as NonNullable<
+          ThinkTurnConfig["providerOptions"]
+        >
+      }),
       ...(config.maxOutputTokens !== undefined && {
         maxOutputTokens: config.maxOutputTokens
       }),
@@ -1082,3 +1165,13 @@ function stubUnsupported(target: object, legacy: object): void {
 }
 
 stubUnsupported(Think.prototype, LegacyThink.prototype);
+
+/** The fields `folded` set or changed relative to `own`. */
+function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
+  const changes: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(folded)) {
+    if ((own as Record<string, unknown>)[key] !== value) changes[key] = value;
+  }
+  // SAFETY: every key is one of `folded`'s, a TurnConfig's.
+  return changes as TurnConfig;
+}

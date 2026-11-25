@@ -172,6 +172,10 @@
         "name": "ThinkExtensionNetworkAgent"
       },
       {
+        "class_name": "ThinkExtensionTurnAgent",
+        "name": "ThinkExtensionTurnAgent"
+      },
+      {
         "class_name": "ThinkExtensionBeforeTurnModelAgent",
         "name": "ThinkExtensionBeforeTurnModelAgent"
       },
@@ -301,6 +305,7 @@
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
         "ThinkExtensionNetworkAgent",
+        "ThinkExtensionTurnAgent",
         "ThinkExtensionBeforeTurnModelAgent",
         "ThinkMessengerDeliveryTestAgent",
         "ThinkMessengerRouteTestAgent",
