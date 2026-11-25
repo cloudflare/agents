@@ -101,6 +101,35 @@ describe("v1 chunk rows fold into blocks lazily", () => {
     });
   });
 
+  it("does not probe for the v1 table on each touch while it holds rows", async () => {
+    const stub = env.CutoverHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {
+      const ctx = (instance as unknown as { ctx: DurableObjectState }).ctx;
+      await ctx.storage.put("cf_agents:streams_schema_version", 1);
+      seedV1(instance, { old: { state: "completed", chunks: ["a"] } });
+      await instance.lifecycle.start();
+      const writer = await instance.streams.open("new");
+      const sql = ctx.storage.sql;
+      const exec = sql.exec.bind(sql);
+      const probes: string[] = [];
+      sql.exec = ((query: string, ...params: SqlStorageValue[]) => {
+        if (query.includes("LIMIT 0")) probes.push(query);
+        return exec(query, ...params);
+      }) as typeof sql.exec;
+      try {
+        writer.append("x");
+        writer.append("y");
+        await collect(
+          instance.streams.read("new", { signal: AbortSignal.timeout(50) })
+        ).catch(() => []);
+      } finally {
+        sql.exec = exec;
+      }
+      expect(probes).toEqual([]);
+      writer.close();
+    });
+  });
+
   it("still folds v1 chunks after a restart that left them untouched", async () => {
     const name = crypto.randomUUID();
     let stub = env.CutoverHarnessObject.getByName(name);
