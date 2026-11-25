@@ -70,6 +70,9 @@ import {
   type ThinkSessionEvent,
   type ThinkSessionListener
 } from "./events";
+import { ExtensionManager } from "./extensions/manager";
+import { contextExtension, optionsExtension, resolve } from "./extensions/own";
+import { loadInProcess } from "./extensions/runtime";
 import { ReleasedRecords, type OperationInput } from "./records";
 import {
   executeTool,
@@ -89,7 +92,6 @@ import {
   type ToolCallPart
 } from "./turn";
 import type {
-  PerSession,
   ThinkErrorClass,
   ThinkHarnessOptions,
   ThinkInFlight,
@@ -321,22 +323,6 @@ function stateOf(turn: Turn): TurnState {
   return state;
 }
 
-async function resolve<T>(
-  value: PerSession<T> | undefined,
-  session: ThinkSessionId
-): Promise<T | undefined> {
-  if (typeof value === "function") {
-    // SAFETY: PerSession<T> is T or a function of the session context, and
-    // no T the harness takes (a model, a system prompt, a tool set) is a
-    // function, so a function here is the per-session form.
-    const compute = value as (context: {
-      session: ThinkSessionId;
-    }) => T | Promise<T>;
-    return compute({ session });
-  }
-  return value;
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -519,6 +505,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /** Each session's context, from the `context` option, built on first use. */
   readonly #contexts = new Map<ThinkSessionId, Context | undefined>();
   /**
+   * What builds each session's tools and prompt, and receives the hooks:
+   * the session context's tools, then the options.
+   */
+  readonly #extensions = new ExtensionManager();
+  /**
    * The operations: one run each, on the harness's own Tasks unless the
    * host gave it one (`options.tasks`).
    */
@@ -552,6 +543,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   constructor(options: ThinkHarnessOptions<TOOLS>) {
     super("think-harness");
     this.#options = options;
+    this.#extensions.load(
+      "context",
+      loadInProcess(
+        "context",
+        contextExtension((session) => this.#context(session))
+      )
+    );
+    this.#extensions.load(
+      "options",
+      loadInProcess("options", optionsExtension(options))
+    );
     this.#sessions = new Sessions({
       ...(options.reservedMetadataKeys && {
         reservedMetadataKeys: options.reservedMetadataKeys
@@ -921,7 +923,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // Listen before reading, so nothing that happens during the read is
     // lost; a message read and then re-sent only replaces itself.
     // Client tool calls carry the participant whose client runs them.
-    const tools = await this.#tools(session);
+    const { tools } = await this.#build(session);
     let owner: string | undefined;
     const unsubscribe = this.#events.subscribe(session, (event) => {
       if (event.type === "chunk" && event.chunk.type === "start") {
@@ -1153,7 +1155,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     for (;;) {
       if (run.signal.aborted) throw run.signal.reason;
       const message = await this.#message(turn);
-      const tools = await this.#tools(turn.session);
+      const built = await this.#build(turn.session);
+      const tools = built.tools;
       live.tools = tools;
       const action = nextAction(
         {
@@ -1171,7 +1174,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           next = await this.#recoverModel(run, turn, message);
           break;
         case "call-model":
-          next = await this.#callModel(run, turn, message, tools, live);
+          next = await this.#callModel(
+            run,
+            turn,
+            message,
+            tools,
+            built.system,
+            live
+          );
           break;
         case "run-tools":
           if (!message) return outcomeOf({}, message);
@@ -1254,7 +1264,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       case "answer": {
         const history = asUIMessages(await handle.getHistory());
-        const tools = await this.#tools(session);
+        const { tools } = await this.#build(session);
         // The answered message is published before the model loop runs, if
         // it runs at all: watches read its client tools from these.
         const live = this.#live.get(session);
@@ -1373,6 +1383,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     start: Turn,
     existing: UIMessage | undefined,
     tools: ToolSet,
+    optionsSystem: string | undefined,
     live: LiveRun
   ): Promise<Turn | OperationOutcome> {
     const { session, operationId } = start;
@@ -1409,10 +1420,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         prepared.reminder
       );
     }
-    const system = joinSystem(
-      await resolve(this.#options.system, session),
-      contextSystem
-    );
+    const system = joinSystem(optionsSystem, contextSystem);
     const config =
       (await hooks?.beforeTurn?.({
         session,
@@ -1553,14 +1561,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (stalled || failure !== undefined) {
       if (failure !== undefined) {
         try {
-          await hooks?.onError?.(failure, { session, operationId });
+          await this.#extensions.hook("onError", {
+            error: failure,
+            session,
+            operationId
+          });
         } catch (error) {
           console.error("ThinkHarness onError hook failed", error);
         }
       }
       const kind = stalled
         ? "retry"
-        : (hooks?.classifyError?.(failure) ?? "fail");
+        : ((await this.#extensions.hook("classifyError", {
+            error: failure
+          })) ?? "fail");
       if (
         kind === "context-overflow" &&
         turn.overflowRetries < MAX_OVERFLOW_RETRIES
@@ -1612,7 +1626,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     live.partial = [];
     live.continues = true;
     this.#events.emit(session, { type: "message", message, operationId });
-    await hooks?.onStepFinish?.({
+    await this.#extensions.hook("onStepFinish", {
       session,
       operationId,
       step: turn.steps,
@@ -1660,13 +1674,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const maxAttempts = recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     let decision: "continue" | "abandon" =
       attempt > maxAttempts ? "abandon" : "continue";
-    if (decision === "continue" && this.#options.hooks?.onRecovery) {
-      decision = await this.#options.hooks.onRecovery({
-        session,
-        operationId,
-        attempt,
-        partial
-      });
+    if (decision === "continue") {
+      decision =
+        (await this.#extensions.hook("onRecovery", {
+          session,
+          operationId,
+          attempt,
+          partial
+        })) ?? "continue";
     }
     let next = turn;
     await this.#commit(run, session, streamId, (put) => {
@@ -1718,7 +1733,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     tools: ToolSet
   ): Promise<Turn> {
     const { session, operationId } = start;
-    const hooks = this.#options.hooks;
     const history = asUIMessages(
       await this.#handle(session).getHistory({ leafId: message.id })
     );
@@ -1806,7 +1820,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             }
             let input: unknown = call.input;
             if (!outcome) {
-              const decision = await hooks?.beforeToolCall?.({
+              const decision = await this.#extensions.hook("beforeToolCall", {
                 session,
                 operationId,
                 toolCallId,
@@ -1846,7 +1860,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             // Aborted while it ran: the run's report settles the call.
             if (signal.aborted) return;
             const settled = outcome;
-            await hooks?.afterToolCall?.({
+            await this.#extensions.hook("afterToolCall", {
               session,
               operationId,
               toolCallId,
@@ -2008,7 +2022,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             }
     });
     try {
-      await this.#options.hooks?.onTurnEnd?.({
+      await this.#extensions.hook("onTurnEnd", {
         ...result,
         ...(message && { message })
       });
@@ -2223,13 +2237,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return message ? asUIMessage(message) : undefined;
   }
 
-  async #tools(session: ThinkSessionId): Promise<ToolSet> {
-    // Context tools (`set_context`, `search_context`) come first, so a tool
-    // from the options with the same name replaces one.
-    const tools = {
-      ...((await this.#context(session)?.tools()) ?? {}),
-      ...((await resolve(this.#options.tools, session)) ?? {})
-    };
+  /** A session's tools, its client's included, and its options' prompt. */
+  async #build(
+    session: ThinkSessionId
+  ): Promise<{ tools: ToolSet; system: string | undefined }> {
+    const { tools, system } = await this.#extensions.build(session);
     const declared =
       await this.#handle(session).internal_config(CLIENT_TOOLS_KEY);
     // A client's declaration that is not a list declares nothing.
@@ -2248,7 +2260,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         );
       }
     }
-    return { ...client, ...tools };
+    return { tools: { ...client, ...tools }, system };
   }
 
   /**

@@ -1,0 +1,195 @@
+/**
+ * ThinkHarness's extensions: what an extension writes, and what crosses
+ * between an extension and the harness.
+ *
+ * The rule every part of this API follows: nothing is in it that cannot be
+ * the same in the harness's isolate and across Workers RPC. So what an
+ * extension registers is split in two. Data crosses: tool entries, prompt
+ * entries, hook contexts and hook results. Functions stay beside the
+ * extension, kept by its runtime, and the harness reaches them through the
+ * extension's handle.
+ *
+ * @internal Not exported from any entry point.
+ */
+import type { JSONSchema7, ModelMessage, Tool } from "ai";
+import type {
+  ThinkErrorClass,
+  ThinkHookContext,
+  ThinkRecoveryContext,
+  ThinkSessionId,
+  ThinkStepFinishContext,
+  ThinkToolCallContext,
+  ThinkToolCallDecision,
+  ThinkToolCallResultContext,
+  ThinkTurnEndContext,
+  ToolRecovery
+} from "../types";
+
+/** What a build is for. @internal */
+export type BuildContext = {
+  readonly session: ThinkSessionId;
+};
+
+/**
+ * A tool as the harness holds it: data only. The functions behind it stay
+ * with the extension that set it, its `owner`.
+ *
+ * @internal
+ */
+export type ToolEntry = {
+  /** The extension that set this tool last, and runs it. */
+  readonly owner: string;
+  /**
+   * The tool's data fields as its author gave them (`description`, `type`,
+   * `id`, `args`, `providerOptions`, `strict`, `recovery`, ...).
+   */
+  readonly definition: Readonly<Record<string, unknown>>;
+  /** As the AI SDK sends it to the model. */
+  readonly inputSchema: JSONSchema7;
+  readonly outputSchema?: JSONSchema7;
+  /** Which of the tool's functions the owner keeps. */
+  readonly execute: boolean;
+  /** The input schema validates (and may transform) a call's input. */
+  readonly validate: boolean;
+  /** The tool converts its output for the model (`toModelOutput`). */
+  readonly modelOutput: boolean;
+  /** `"always"`, or `"call"` to ask the owner per call. */
+  readonly approval?: "always" | "call";
+};
+
+/** A prompt section, by key. @internal */
+export type PromptEntry = {
+  readonly owner: string;
+  readonly text: string;
+};
+
+/** Tools and prompt as a build passes them along. Ordered. @internal */
+export type Drafts = {
+  readonly tools: readonly (readonly [string, ToolEntry])[];
+  readonly prompt: readonly (readonly [string, PromptEntry])[];
+};
+
+/** A tool as an extension sets it: an AI SDK tool. @internal */
+export type ExtensionTool = Tool & { readonly recovery?: ToolRecovery };
+
+/**
+ * A named, ordered collection a transform edits. Setting a name already
+ * present replaces it in place; `get` returns data only.
+ *
+ * @internal
+ */
+export interface Draft<Value, Entry> {
+  get(name: string): Entry | undefined;
+  has(name: string): boolean;
+  set(name: string, value: Value): void;
+  delete(name: string): boolean;
+  keys(): IterableIterator<string>;
+}
+
+/** @internal */
+export type ToolDraft = Draft<ExtensionTool, ToolEntry>;
+/** @internal */
+export type PromptDraft = Draft<{ readonly text: string }, PromptEntry>;
+
+/** @internal */
+export type Transform<D> = (
+  draft: D,
+  build: BuildContext
+) => void | Promise<void>;
+
+/**
+ * The hooks an extension subscribes to, with their context and what a
+ * handler may return. Contexts and results are data.
+ *
+ * @internal
+ */
+export type ExtensionHooks = {
+  beforeToolCall: [ThinkToolCallContext, ThinkToolCallDecision | void];
+  afterToolCall: [ThinkToolCallResultContext, void];
+  onStepFinish: [ThinkStepFinishContext, void];
+  onTurnEnd: [ThinkTurnEndContext, void];
+  onError: [{ readonly error: unknown } & ThinkHookContext, void];
+  classifyError: [{ readonly error: unknown }, ThinkErrorClass | void];
+  onRecovery: [ThinkRecoveryContext, "continue" | "abandon" | void];
+};
+
+/** @internal */
+export type ExtensionHookName = keyof ExtensionHooks;
+
+/** @internal */
+export type ExtensionHookHandler<H extends ExtensionHookName> = (
+  context: ExtensionHooks[H][0]
+) => ExtensionHooks[H][1] | Promise<ExtensionHooks[H][1]>;
+
+/** What an extension is given. @internal */
+export type ExtensionContext = {
+  /** The name it was loaded under. */
+  readonly name: string;
+  readonly tools: { transform(change: Transform<ToolDraft>): void };
+  readonly prompt: { transform(change: Transform<PromptDraft>): void };
+  on<H extends ExtensionHookName>(
+    hook: H,
+    handler: ExtensionHookHandler<H>
+  ): void;
+};
+
+/**
+ * An extension: a function that registers transforms and hooks before it
+ * returns. It runs once, when it is loaded.
+ *
+ * @internal
+ */
+export type ThinkExtension = (ctx: ExtensionContext) => void | Promise<void>;
+
+/** A tool call as its owner sees it. @internal */
+export type ToolCall = {
+  readonly id: string;
+  readonly session: ThinkSessionId;
+  readonly messages: ModelMessage[];
+};
+
+/** A tool call's outcome. @internal */
+export type ToolOutcome =
+  | { readonly ok: true; readonly output: unknown }
+  | { readonly ok: false; readonly errorText: string };
+
+/** A validated input, or why it is not valid. @internal */
+export type Validation =
+  | { readonly success: true; readonly value: unknown }
+  | { readonly success: false; readonly error: Error };
+
+/**
+ * A loaded extension, as the harness reaches it. A loader returns one;
+ * every argument and result is structured-clone data or, for
+ * `onPreliminary`, a function, which Workers RPC passes as a stub.
+ *
+ * @internal
+ */
+export interface ExtensionHandle {
+  describe(): Promise<{ readonly hooks: readonly ExtensionHookName[] }>;
+  /** Run this extension's transforms over what the ones before it built. */
+  build(drafts: Drafts, build: BuildContext): Promise<Drafts>;
+  execute(
+    tool: string,
+    input: unknown,
+    call: ToolCall,
+    onPreliminary: (output: unknown) => void
+  ): Promise<ToolOutcome>;
+  /** Abort a running call's `abortSignal`, with `reason`. */
+  cancel(callId: string, reason?: unknown): void;
+  validate(
+    tool: string,
+    input: unknown,
+    build: BuildContext
+  ): Promise<Validation>;
+  modelOutput(
+    tool: string,
+    output: { toolCallId: string; input: unknown; output: unknown },
+    build: BuildContext
+  ): Promise<unknown>;
+  needsApproval(tool: string, input: unknown, call: ToolCall): Promise<boolean>;
+  hook<H extends ExtensionHookName>(
+    name: H,
+    context: ExtensionHooks[H][0]
+  ): Promise<ExtensionHooks[H][1]>;
+}
