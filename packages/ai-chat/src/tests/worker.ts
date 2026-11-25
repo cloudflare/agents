@@ -2332,6 +2332,15 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return continuationStateForTest(this);
   }
 
+  /** How many turns the queue holds, the running one included. */
+  queuedTurnCountForTest(): number {
+    return (
+      this as unknown as {
+        _turns: { queue: { queuedCount(): number } };
+      }
+    )._turns.queue.queuedCount();
+  }
+
   holdStreamForTest(requestId = "next"): void {
     this._streamGates.set(requestId, new TestGate());
   }

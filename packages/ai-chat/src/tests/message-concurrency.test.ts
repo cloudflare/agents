@@ -447,13 +447,13 @@ describe("AIChatAgent messageConcurrency", () => {
       { format: "plaintext", chunkCount: 2, chunkDelayMs: 10 }
     );
     await waitForOverlappingSubmits(agentStub, 2);
-    await agentStub.releaseStreamForTest("req-om-1");
     // Waiting, not stored, though the override does not pass options on.
     expect(
       ((await agentStub.getPersistedMessages()) as ChatMessage[]).map(
         (m) => m.id
       )
     ).toEqual(["user-1"]);
+    await agentStub.releaseStreamForTest("req-om-1");
     await agentStub.waitForIdleForTest();
     const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
     // Both questions join after the first reply and one turn answers them.
@@ -709,11 +709,17 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // The first reply stays active until the regenerate has queued behind it.
+    await agentStub.holdStreamForTest("req-regen-1");
+    onTestFinished(() => agentStub.releaseStreamForTest("req-regen-1"));
     sendChatRequest(ws, "req-regen-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 6,
       chunkDelayMs: 50
     });
+    await waitUntil(
+      async () => await agentStub.isStreamHeldForTest("req-regen-1")
+    );
 
     sendChatRequest(ws, "req-regen-2", [firstUserMessage], {
       trigger: "regenerate-message",
@@ -721,6 +727,10 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 4,
       chunkDelayMs: 40
     });
+    await waitUntil(
+      async () => (await agentStub.queuedTurnCountForTest()) === 2
+    );
+    await agentStub.releaseStreamForTest("req-regen-1");
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
@@ -767,6 +777,11 @@ describe("AIChatAgent messageConcurrency", () => {
     });
     await waitUntil(
       async () => await agentStub.isStreamHeldForTest("req-clear-1")
+    );
+    // The second request waits in the queue behind the held reply (the
+    // count includes the running turn).
+    await waitUntil(
+      async () => (await agentStub.queuedTurnCountForTest()) === 2
     );
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
