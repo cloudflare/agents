@@ -55,7 +55,7 @@ tab.on("Page.frameNavigated", ({ params }) => {
   void params.frmae;
 });
 tab.on("Cloudflare.handoffComplete", ({ params }) => {
-  expectTypeOf(params).toEqualTypeOf<Record<string, unknown>>();
+  expectTypeOf(params).toEqualTypeOf<Readonly<Record<string, unknown>>>();
 });
 expectTypeOf(tab.waitFor("Page.loadEventFired")).toEqualTypeOf<
   Promise<CdpEvent<"Page.loadEventFired">>
