@@ -100,6 +100,19 @@ describe("Tasks local and checkpoint", () => {
         await instance.lifecycle.rearmAlarm();
       }
     );
+    // Count the replayed attempt's statements: its checkpoint comes with
+    // the claim, so it reads the stored note without a query of its own.
+    const queries: string[] = [];
+    await runInDurableObject(stub, async (_instance, state) => {
+      const sql = state.storage.sql as unknown as {
+        exec: (query: string, ...rest: unknown[]) => unknown;
+      };
+      const exec = sql.exec.bind(sql);
+      sql.exec = (query: string, ...rest: unknown[]) => {
+        queries.push(query);
+        return exec(query, ...rest);
+      };
+    });
     await runDurableObjectAlarm(stub);
     await runInDurableObject(
       stub,
@@ -112,6 +125,11 @@ describe("Tasks local and checkpoint", () => {
         expect(instance.rememberingSeen).toEqual([
           { local: undefined, note: { attempt: 1 } }
         ]);
+        expect(instance.rememberingAfter).toEqual([true]);
+        expect(queries.length).toBeGreaterThan(0);
+        expect(queries.filter((q) => /SELECT checkpoint FROM/.test(q))).toEqual(
+          []
+        );
         expect((await instance.tasks.get("reset-run"))?.status).toBe(
           "completed"
         );
@@ -145,6 +163,8 @@ describe("Tasks local and checkpoint", () => {
         expect(checkpointRows(state.storage, receipt.runId)).toEqual([
           { key: "note", value: JSON.stringify({ attempt: 1 }) }
         ]);
+        // Nor does the superseded attempt read back the write it lost.
+        expect(instance.rememberingAfter).toEqual([null]);
       }
     );
   });

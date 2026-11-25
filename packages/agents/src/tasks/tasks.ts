@@ -1310,8 +1310,10 @@ export class Tasks<
           return json === undefined ? undefined : (JSON.parse(json) as T);
         },
         set: (key, value) => {
-          store.setCheckpoint(runId, generation, key, value);
-          checkpoint.set(key, JSON.stringify(value));
+          // A write a newer attempt fenced out is not seen here either.
+          if (store.setCheckpoint(runId, generation, key, value)) {
+            checkpoint.set(key, JSON.stringify(value));
+          }
         }
       }
     });
