@@ -630,6 +630,23 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._persistDelayForTest = { role, ms };
   }
 
+  /** Holds the next `persistMessages` of a `role` message until released. */
+  private _persistHold: { role: "user" | "assistant"; gate: TestGate } | null =
+    null;
+
+  holdPersistForTest(role: "user" | "assistant"): void {
+    this._persistHold = { role, gate: new TestGate() };
+  }
+
+  isPersistHeldForTest(): boolean {
+    return this._persistHold?.gate.reached ?? false;
+  }
+
+  releasePersistForTest(): void {
+    this._persistHold?.gate.release();
+    this._persistHold = null;
+  }
+
   /** `saveMessages` with one more user message; returns the status. */
   async saveUserMessageForTest(text: string): Promise<string> {
     const result = await this.saveMessages([
@@ -643,14 +660,19 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return result.status;
   }
 
-  private _laterNoteForTest: { ms: number } | null = null;
+  private _laterNoteForTest: TestGate | null = null;
 
   /**
    * Make the next `persistMessages` of a user message start work that
-   * stores a note `ms` later, the way an override's fire-and-forget does.
+   * stores a note once the test calls `storeLaterNoteForTest`, the way an
+   * override's fire-and-forget does.
    */
-  storeNoteLaterFromPersistForTest(ms: number): void {
-    this._laterNoteForTest = { ms };
+  storeNoteLaterFromPersistForTest(): void {
+    this._laterNoteForTest = new TestGate();
+  }
+
+  storeLaterNoteForTest(): void {
+    this._laterNoteForTest?.release();
   }
 
   override async persistMessages(
@@ -659,22 +681,25 @@ export class TestChatAgent extends AIChatAgent<Env> {
     options?: { _deleteStaleRows?: boolean }
   ) {
     const later = this._laterNoteForTest;
-    if (later && messages.at(-1)?.role === "user") {
-      this._laterNoteForTest = null;
-      setTimeout(() => {
-        void this.persistMessages([
+    if (later && !later.reached && messages.at(-1)?.role === "user") {
+      void later.pass().then(() =>
+        this.persistMessages([
           ...this.messages,
           {
             id: "note-later",
             role: "assistant",
             parts: [{ type: "text", text: "Stored later." }]
           }
-        ]);
-      }, later.ms);
+        ])
+      );
     }
     const wait = this._persistDelayForTest;
     if (wait && messages.at(-1)?.role === wait.role) {
       await new Promise((resolve) => setTimeout(resolve, wait.ms));
+    }
+    const hold = this._persistHold;
+    if (hold && !hold.gate.reached && messages.at(-1)?.role === hold.role) {
+      await hold.gate.pass();
     }
     return super.persistMessages(messages, excludeBroadcastIds, options);
   }
