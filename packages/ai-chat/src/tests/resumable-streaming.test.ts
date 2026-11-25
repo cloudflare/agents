@@ -44,6 +44,24 @@ async function waitFor(
   }
 }
 
+/**
+ * Wait until the agent has handled `count` socket messages of `type`: the
+ * socket and the RPCs that follow are separate channels.
+ */
+async function waitUntilHandled(
+  agent: { handledMessageCountForTest(type: string): Promise<number> },
+  type: string,
+  count: number
+) {
+  const deadline = Date.now() + 5000;
+  while ((await agent.handledMessageCountForTest(type)) < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`${type} was not handled ${count} time(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("Resumable Streaming", () => {
   describe("Stream lifecycle", () => {
     it("stores stream metadata when starting a stream", async () => {
@@ -444,7 +462,11 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitUntilHandled(
+        agentStub,
+        MessageType.CF_AGENT_STREAM_RESUME_ACK,
+        1
+      );
 
       // Should NOT receive chunks (only state/mcp messages)
       const chunkMsgs = messages2.filter(isUseChatResponseMessage);

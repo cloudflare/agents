@@ -32,6 +32,24 @@ async function waitForMessage(
   return undefined;
 }
 
+/**
+ * Wait until the agent has handled `count` socket messages of `type`: the
+ * socket and the RPCs that follow are separate channels.
+ */
+async function waitUntilHandled(
+  agent: { handledMessageCountForTest(type: string): Promise<number> },
+  type: string,
+  count: number
+) {
+  const deadline = Date.now() + 5000;
+  while ((await agent.handledMessageCountForTest(type)) < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`${type} was not handled ${count} time(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("Client tools continuation", () => {
   it("should pass client tools to onChatMessage during auto-continuation", async () => {
     const room = crypto.randomUUID();
@@ -1463,7 +1481,7 @@ describe("Client tools continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
 
     // Client tools should be undefined after chat clear
     const continuationClientTools = await agentStub.getCapturedClientTools();

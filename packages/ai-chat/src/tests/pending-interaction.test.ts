@@ -33,6 +33,24 @@ const firstUserMessage: ChatMessage = {
   parts: [{ type: "text", text: "Hello" }]
 };
 
+/**
+ * Wait until the agent has handled `count` socket messages of `type`: the
+ * socket and the RPCs that follow are separate channels.
+ */
+async function waitUntilHandled(
+  agent: { handledMessageCountForTest(type: string): Promise<number> },
+  type: string,
+  count: number
+) {
+  const deadline = Date.now() + 5000;
+  while ((await agent.handledMessageCountForTest(type)) < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`${type} was not handled ${count} time(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("AIChatAgent pending interaction helpers", () => {
   it("detects pending tool interactions on the latest assistant message", async () => {
     const room = crypto.randomUUID();
@@ -321,7 +339,7 @@ describe("AIChatAgent pending interaction helpers", () => {
       })
     );
 
-    await delay(20);
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 1);
     agentStub.resetTurnStateForTest();
     await agentStub.waitForIdleForTest();
 

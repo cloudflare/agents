@@ -83,6 +83,24 @@ const firstUserMessage: ChatMessage = {
   parts: [{ type: "text", text: "Hello" }]
 };
 
+/**
+ * Wait until the agent has handled `count` socket messages of `type`: the
+ * socket and the RPCs that follow are separate channels.
+ */
+async function waitUntilHandled(
+  agent: { handledMessageCountForTest(type: string): Promise<number> },
+  type: string,
+  count: number
+) {
+  const deadline = Date.now() + 5000;
+  while ((await agent.handledMessageCountForTest(type)) < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`${type} was not handled ${count} time(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("AIChatAgent chat turn serialization", () => {
   it("queues a second websocket request behind the active turn", async () => {
     const room = crypto.randomUUID();
@@ -226,7 +244,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(20);
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
 
     const idlePromise = agentStub.waitForIdleForTest();
 
@@ -295,7 +313,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(20);
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 2);
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getStartedRequestIds()).toEqual([
@@ -472,7 +490,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(50);
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));

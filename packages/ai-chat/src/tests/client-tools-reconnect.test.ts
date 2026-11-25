@@ -5,6 +5,24 @@ import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 import { getAgentByName } from "agents";
 
+/**
+ * Wait until the agent has handled `count` socket messages of `type`: the
+ * socket and the RPCs that follow are separate channels.
+ */
+async function waitUntilHandled(
+  agent: { handledMessageCountForTest(type: string): Promise<number> },
+  type: string,
+  count: number
+) {
+  const deadline = Date.now() + 5000;
+  while ((await agent.handledMessageCountForTest(type)) < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`${type} was not handled ${count} time(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("Client tools after reconnect", () => {
   it("should use client tools from CF_AGENT_TOOL_RESULT for continuation", async () => {
     const room = crypto.randomUUID();
@@ -132,7 +150,7 @@ describe("Client tools after reconnect", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 1);
 
     // Continuation should still fire, just without client tools
     const capturedClientTools = await agentStub.getCapturedClientTools();

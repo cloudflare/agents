@@ -55,6 +55,24 @@ async function fetchPersistedMessages(room: string): Promise<ChatMessage[]> {
   return (await res.json()) as ChatMessage[];
 }
 
+/**
+ * Wait until the agent has handled `count` socket messages of `type`: the
+ * socket and the RPCs that follow are separate channels.
+ */
+async function waitUntilHandled(
+  agent: { handledMessageCountForTest(type: string): Promise<number> },
+  type: string,
+  count: number
+) {
+  const deadline = Date.now() + 5000;
+  while ((await agent.handledMessageCountForTest(type)) < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`${type} was not handled ${count} time(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("Regenerate message (reconcile stale rows)", () => {
   it("deletes the stale assistant message when client sends truncated array", async () => {
     const room = crypto.randomUUID();
@@ -135,7 +153,7 @@ describe("Regenerate message (reconcile stale rows)", () => {
       })
     );
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_CHAT_MESSAGES, 1);
 
     // All 3 messages should be preserved — CF_AGENT_CHAT_MESSAGES does not reconcile
     const persisted = await fetchPersistedMessages(room);
