@@ -21,6 +21,7 @@ import {
 } from "./hook-proxy";
 import type { ExtensionManager as ExtensionCore } from "agents/internal";
 import {
+  asNetworkGateway,
   ExtensionManager,
   sanitizeName,
   type ReleasedHookName,
@@ -60,22 +61,21 @@ export function createThinkExtensionManager(
     ...(hasBridge
       ? {
           workerIdScope: `${agentClassName}:${agentId}`,
-          createHostBinding: (
-            permissions: ExtensionPermissions,
-            ownContextLabels: string[]
-          ) =>
-            (
-              exports.HostBridgeLoopback as (opts: {
-                props: Record<string, unknown>;
-              }) => Fetcher
-            )({
-              props: {
-                agentClassName,
-                agentId,
-                permissions,
-                ownContextLabels
-              }
-            })
+          createHostBinding: asNetworkGateway(
+            (permissions: ExtensionPermissions, ownContextLabels: string[]) =>
+              (
+                exports.HostBridgeLoopback as (opts: {
+                  props: Record<string, unknown>;
+                }) => Fetcher
+              )({
+                props: {
+                  agentClassName,
+                  agentId,
+                  permissions,
+                  ownContextLabels
+                }
+              })
+          )
         }
       : {})
   });

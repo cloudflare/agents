@@ -397,6 +397,20 @@ export class ReleasedWorkerHandle implements ExtensionHandle<ReleasedHooks> {
   }
 }
 
+/** Host binding factories whose bindings are `HostBridgeLoopback`s. */
+const GATEWAYS = new WeakSet<object>();
+
+/**
+ * Mark `createHostBinding` as making `HostBridgeLoopback` bindings, which
+ * also enforce an extension's network hosts.
+ *
+ * @internal
+ */
+export function asNetworkGateway<F extends object>(createHostBinding: F): F {
+  GATEWAYS.add(createHostBinding);
+  return createHostBinding;
+}
+
 /** Each manager's extension core, and the hook timeout it runs under. */
 const cores = new WeakMap<
   ExtensionManager,
@@ -539,20 +553,26 @@ export class ExtensionManager {
       (permissions.messages ?? "none") !== "none" ||
       permissions.session?.sendMessage ||
       permissions.session?.metadata;
+    // The listed hosts are enforced by HostBridgeLoopback's `fetch`, which
+    // the Worker's fetch() goes through. Only a binding Think created is
+    // known to be one; an app's own `createHostBinding` may serve the host
+    // operations alone, so its Worker keeps the agent's network, as does
+    // one with no binding at all.
     const needsNetwork = (permissions.network?.length ?? 0) > 0;
+    const gateway =
+      needsNetwork &&
+      this.#createHostBinding !== null &&
+      GATEWAYS.has(this.#createHostBinding);
     const binding =
-      this.#createHostBinding && (needsHost || needsNetwork)
+      this.#createHostBinding && (needsHost || gateway)
         ? this.#createHostBinding(permissions, ownLabels)
         : undefined;
     if (binding && needsHost) workerEnv.host = binding;
 
-    // The listed hosts are enforced by the host binding, which the Worker's
-    // fetch() goes through. Without one there is nothing to enforce them,
-    // so the Worker keeps the agent's network, as before.
     let globalOutbound: Fetcher | null | undefined = null;
     if (needsNetwork) {
-      globalOutbound = binding;
-      if (!binding && !this.#warnedNetwork) {
+      globalOutbound = gateway ? binding : undefined;
+      if (!gateway && !this.#warnedNetwork) {
         this.#warnedNetwork = true;
         console.warn(
           `[Think] Extension "${manifest.name}": its network hosts are not enforced, because the Worker entry does not re-export HostBridgeLoopback. It can reach any host.`

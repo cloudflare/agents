@@ -936,3 +936,38 @@ describe("ExtensionManager network hosts", () => {
     expect(result.thrown).toContain("Network connection failed");
   });
 });
+
+describe("ExtensionManager network hosts with an app's own host binding", () => {
+  it("keeps the agent's network, since the binding may not serve fetch", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const configs: { globalOutbound?: unknown; env?: unknown }[] = [];
+    const loader = {
+      get: (_id: string, make: () => { globalOutbound?: unknown }) => {
+        configs.push(make());
+        return {
+          getEntrypoint: () => ({
+            describe: async () => "[]",
+            manifest: async () => JSON.stringify({ hooks: [] })
+          })
+        };
+      }
+    } as unknown as WorkerLoader;
+    // An app's binding that serves the host operations only.
+    const createHostBinding = () => ({}) as Fetcher;
+    await new ExtensionManager({ loader, createHostBinding }).load(
+      makeManifest({
+        name: "netonly",
+        permissions: { network: ["api.example.com"] }
+      }),
+      "{ tools: {} }"
+    );
+    const warned = warn.mock.calls.some((call) =>
+      String(call[0]).includes("network hosts are not enforced")
+    );
+    warn.mockRestore();
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.globalOutbound).toBeUndefined();
+    expect(configs[0]?.env).toBeUndefined();
+    expect(warned).toBe(true);
+  });
+});
