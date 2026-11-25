@@ -23,14 +23,14 @@ class NothingInstalled extends LifecycleCapability {
 
 type Snapshot = {
   tables: string[];
+  /** Virtual tables (an FTS5 index), whose shadow tables follow their name. */
+  virtual: string[];
   indexes: string[];
   keys: string[];
   jobs: string[];
   /** `<table> <rows as JSON>` for every table but the job queue. */
   rows: string[];
 };
-
-const FIELDS = ["tables", "indexes", "keys", "jobs", "rows"] as const;
 
 function snapshot(storage: DurableObjectStorage): Snapshot {
   const names = (type: string) =>
@@ -42,6 +42,12 @@ function snapshot(storage: DurableObjectStorage): Snapshot {
       .toArray()
       .map((row) => row.name);
   const tables = names("table");
+  const virtual = storage.sql
+    .exec<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+    )
+    .toArray()
+    .map((row) => row.name);
   const jobs = tables.includes("cf_agents_jobs")
     ? storage.sql
         .exec<{ id: string; capability: string }>(
@@ -52,6 +58,7 @@ function snapshot(storage: DurableObjectStorage): Snapshot {
     : [];
   return {
     tables,
+    virtual,
     indexes: names("index"),
     // Keys and rows with their values, so an overwrite in place shows.
     keys: [...storage.kv.list()]
@@ -92,34 +99,77 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
     await subject.smoke(capability);
     return snapshot(storage);
   });
-  const both = await withCapabilityHarness(async ({ install, storage }) => {
-    const capability = subject.make();
-    const probe = subject.make("probe");
-    const { lifecycle } = install(capability);
-    lifecycle.use(probe);
-    await lifecycle.start();
-    await subject.smoke(capability);
-    await subject.smoke(probe);
-    return snapshot(storage);
-  });
+  // Values are compared within one run: a smoke may write times and random
+  // ids, which differ from run to run. `before` is after the default's
+  // smoke and before the probe's.
+  const { before, both } = await withCapabilityHarness(
+    async ({ install, storage }) => {
+      const capability = subject.make();
+      const probe = subject.make("probe");
+      const { lifecycle } = install(capability);
+      lifecycle.use(probe);
+      await lifecycle.start();
+      await subject.smoke(capability);
+      const before = snapshot(storage);
+      await subject.smoke(probe);
+      return { before, both: snapshot(storage) };
+    }
+  );
 
   const id = `${subject.kind}/probe`;
-  const added = (field: (typeof FIELDS)[number]) =>
-    both[field].filter((value) => !alone[field].includes(value));
+  // FTS5 names its shadow tables by appending `_data`, `_content`, ... to
+  // the virtual table's name. A capability may also name its probe index
+  // other than `<name>__n_probe` (Sessions ends it in `_search` so no shadow
+  // name can meet another instance's index): its copy is the probe table
+  // that starts with `<name>__n_probe`, and the shadows follow that.
+  const shadow = /^(.*)_(data|idx|content|docsize|config)$/;
+  const isProbeName = (name: string) => /__n_probe(_|$)/.test(name);
+  const probeCopy = (name: string): string => {
+    const match = shadow.exec(name);
+    if (match && alone.virtual.includes(match[1]!)) {
+      return `${probeCopy(match[1]!)}_${match[2]}`;
+    }
+    if (alone.virtual.includes(name)) {
+      return (
+        both.virtual.find((table) => table.startsWith(`${name}__n_probe`)) ??
+        `${name}__n_probe`
+      );
+    }
+    return `${name}__n_probe`;
+  };
+  const keyName = (entry: string) => entry.slice(0, entry.indexOf(" "));
+  const rowTable = (entry: string) => entry.slice(0, entry.indexOf(" "));
+  // Names against the default alone (names do not vary by run): anything
+  // the probe created, on install or in its smoke, outside its names.
+  const addedNames = {
+    tables: both.tables.filter((name) => !alone.tables.includes(name)),
+    indexes: both.indexes.filter((name) => !alone.indexes.includes(name)),
+    keys: both.keys
+      .map(keyName)
+      .filter((key) => !alone.keys.map(keyName).includes(key)),
+    jobs: both.jobs.filter((job) => !alone.jobs.includes(job))
+  };
+  // Values within the run: what the probe's smoke wrote or changed.
+  const changedRows = both.rows.filter((row) => !before.rows.includes(row));
+  const changedKeys = both.keys.filter((key) => !before.keys.includes(key));
   const misplaced = [
-    ...added("tables").filter((name) => !name.endsWith("__n_probe")),
-    ...added("indexes").filter((name) => !name.endsWith("__n_probe")),
-    ...added("keys").filter((key) => !key.startsWith(`cf_agents:${id}:`)),
-    ...added("jobs").filter((job) => !job.startsWith(`${id} ${id}:`)),
-    ...added("rows").filter((row) => !row.split(" ")[0]!.endsWith("__n_probe"))
+    ...addedNames.tables.filter((name) => !isProbeName(name)),
+    ...addedNames.indexes.filter((name) => !isProbeName(name)),
+    ...addedNames.keys.filter((key) => !key.startsWith(`cf_agents:${id}:`)),
+    ...addedNames.jobs.filter((job) => !job.startsWith(`${id} ${id}:`)),
+    ...changedRows.filter((row) => !isProbeName(rowTable(row))),
+    ...changedKeys.filter(
+      (entry) => !keyName(entry).startsWith(`cf_agents:${id}:`)
+    )
   ];
   expect(misplaced, "stored by the probe instance outside its names").toEqual(
     []
   );
-  for (const field of FIELDS) {
-    const own = added(field);
+  for (const field of ["tables", "indexes", "jobs"] as const) {
     expect(
-      both[field].filter((value) => !own.includes(value)),
+      both[field].filter(
+        (value) => !(addedNames[field] as string[]).includes(value)
+      ),
       `the default instance's ${field}, next to the probe`
     ).toEqual(alone[field]);
   }
@@ -131,11 +181,10 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
     for (const name of alone[field]) {
       if (lifecycleOwn(field, name)) continue;
       expect(both[field], `the probe instance's copy of ${name}`).toContain(
-        `${name}__n_probe`
+        probeCopy(name)
       );
     }
   }
-  const keyName = (entry: string) => entry.slice(0, entry.indexOf(" "));
   const bothKeys = both.keys.map(keyName);
   for (const entry of alone.keys) {
     const key = keyName(entry);

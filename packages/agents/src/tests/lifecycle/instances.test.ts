@@ -98,6 +98,13 @@ describe("capability instances", () => {
     make: (name) => new Notes(name),
     smoke: (notes) => notes.add("n1", "t")
   });
+  // A smoke that writes random ids (and times) still conforms: values are
+  // compared within one run.
+  describeInstanceConformance({
+    kind: "notes",
+    make: (name) => new Notes(name),
+    smoke: (notes) => notes.add(crypto.randomUUID(), "t")
+  });
 
   it("keeps two instances' rows, jobs and events apart", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
