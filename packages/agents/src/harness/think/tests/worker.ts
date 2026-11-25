@@ -282,39 +282,42 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       }
     },
     context: (session, id) =>
-      this.#contextSessions.has(id)
-        ? new Context(session, {
-            sql: storageSql(this.ctx.storage),
-            blocks: [
-              { label: "soul", provider: { get: async () => "Be kind." } },
-              {
-                label: "catalogue",
-                provider: {
-                  get: async () => {
-                    // A provider that can be made to hang, to cut a load short:
-                    // it never answers until the object is evicted.
-                    if (this.ctx.storage.kv.get<boolean>(HANG_KEY)) {
-                      await new Promise(() => {});
+      this.#remember(
+        id,
+        this.#contextSessions.has(id)
+          ? new Context(session, {
+              sql: storageSql(this.ctx.storage),
+              blocks: [
+                { label: "soul", provider: { get: async () => "Be kind." } },
+                {
+                  label: "catalogue",
+                  provider: {
+                    get: async () => {
+                      // A provider that can be made to hang, to cut a load short:
+                      // it never answers until the object is evicted.
+                      if (this.ctx.storage.kv.get<boolean>(HANG_KEY)) {
+                        await new Promise(() => {});
+                      }
+                      return (
+                        this.ctx.storage.kv.get<string>(CATALOGUE_KEY) ??
+                        "Hammers."
+                      );
                     }
-                    return (
-                      this.ctx.storage.kv.get<string>(CATALOGUE_KEY) ??
-                      "Hammers."
-                    );
                   }
-                }
-              },
-              { label: "memory", description: "Learned facts" },
-              {
-                label: "environment",
-                provider: {
-                  get: async () =>
-                    `Today is ${this.ctx.storage.kv.get<string>(ENVIRONMENT_KEY) ?? "Monday"}.`
                 },
-                whenChanged: "remind"
-              }
-            ]
-          })
-        : undefined,
+                { label: "memory", description: "Learned facts" },
+                {
+                  label: "environment",
+                  provider: {
+                    get: async () =>
+                      `Today is ${this.ctx.storage.kv.get<string>(ENVIRONMENT_KEY) ?? "Monday"}.`
+                  },
+                  whenChanged: "remind"
+                }
+              ]
+            })
+          : undefined
+      ),
     configureSession: (session, id) => {
       this.#handles.set(id, session);
       session.onCompaction(async (history) => {
@@ -1200,6 +1203,19 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   setCatalogue(value: string): void {
     this.ctx.storage.kv.put(CATALOGUE_KEY, value);
+  }
+
+  /** Each session's context, as the harness made it last. */
+  readonly #madeContexts = new Map<string, Context>();
+
+  #remember(id: string, context: Context | undefined): Context | undefined {
+    if (context) this.#madeContexts.set(id, context);
+    return context;
+  }
+
+  /** Record a new system prompt at the session's next turn. */
+  async refreshContext(session: string): Promise<void> {
+    await this.#madeContexts.get(session)?.refreshSystemPrompt();
   }
 
   setRemindSectionLabel(label: string): void {
