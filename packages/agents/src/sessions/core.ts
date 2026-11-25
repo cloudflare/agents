@@ -363,8 +363,14 @@ export interface SessionTables {
   contextBlocks: string;
 }
 
-/** The tables of the instance whose store maps `name` to a table name. */
-export function sessionTables(table: (name: string) => string): SessionTables {
+/**
+ * The tables of the instance whose store maps `name` to a table name.
+ * `named` is true for a named instance.
+ */
+export function sessionTables(
+  table: (name: string) => string,
+  named = false
+): SessionTables {
   return {
     messages: table("session_messages"),
     chunks: table("session_message_chunks"),
@@ -372,7 +378,11 @@ export function sessionTables(table: (name: string) => string): SessionTables {
     compactionsRebuild: table("session_compactions_v2"),
     config: table("session_config"),
     annotations: table("session_annotations"),
-    fts: table("session_fts"),
+    // FTS5 names its shadow tables by appending `_data`, `_content`, ... to
+    // the index's name, so `__n_audit`'s shadow `__n_audit_content` would be
+    // instance `audit-content`'s index. A named index ends in `_search`,
+    // which no shadow ends in. The default keeps today's name.
+    fts: named ? `${table("session_fts")}_search` : table("session_fts"),
     attachmentMeta: table("session_attachment_meta"),
     attachmentChunks: table("session_attachment_chunks"),
     attachmentRefs: table("session_attachment_refs"),

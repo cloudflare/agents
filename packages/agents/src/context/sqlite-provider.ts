@@ -22,18 +22,20 @@ export class AgentContextProvider implements WritableContextProvider {
   private initialized = false;
   readonly #table: string;
 
-  /**
-   * @param table @internal The block table: Context passes the one of the
-   *   Sessions instance it was given. Default `cf_agents_context_blocks`.
-   */
   constructor(
     agent: SqlProvider,
     label?: string,
-    table = "cf_agents_context_blocks"
+    options: {
+      /**
+       * @internal The block table: Context passes the one of the Sessions
+       * instance it was given. Default `cf_agents_context_blocks`.
+       */
+      table?: string;
+    } = {}
   ) {
     this.agent = agent;
     this.label = label ?? "";
-    this.#table = table;
+    this.#table = options.table ?? "cf_agents_context_blocks";
   }
 
   init(label: string): void {

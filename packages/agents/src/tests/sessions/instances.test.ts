@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Context } from "../../context";
 import { Sessions } from "../../sessions";
-import { DEFAULT_SESSION_TABLES } from "../../sessions/core";
+import { capabilityStore } from "../../lifecycle/capability";
+import { sessionTables } from "../../sessions/core";
 import type { SessionMessage } from "../../sessions";
 import { withCapabilityHarness } from "../shared/capability-harness";
 import { describeInstanceConformance } from "../shared/instance-conformance";
@@ -48,21 +49,43 @@ describe("Sessions instances", () => {
   });
 
   it("keeps the default instance on the tables every release used", () => {
-    // The default's statement text is built from these, so it is byte for
-    // byte the text before instances.
-    expect(DEFAULT_SESSION_TABLES).toEqual({
-      messages: "cf_agents_session_messages",
-      chunks: "cf_agents_session_message_chunks",
-      compactions: "cf_agents_session_compactions",
-      compactionsRebuild: "cf_agents_session_compactions_v2",
-      config: "cf_agents_session_config",
-      annotations: "cf_agents_session_annotations",
-      fts: "cf_agents_session_fts",
-      attachmentMeta: "cf_agents_session_attachment_meta",
-      attachmentChunks: "cf_agents_session_attachment_chunks",
-      attachmentRefs: "cf_agents_session_attachment_refs",
-      tailIndex: "cf_agents_session_messages_by_seq",
-      contextBlocks: "cf_agents_context_blocks"
+    // What Sessions builds from its store: the default's statement text is
+    // built from these, so it is byte for byte the text before instances.
+    expect(sessionTables(capabilityStore("sessions", undefined).table)).toEqual(
+      {
+        messages: "cf_agents_session_messages",
+        chunks: "cf_agents_session_message_chunks",
+        compactions: "cf_agents_session_compactions",
+        compactionsRebuild: "cf_agents_session_compactions_v2",
+        config: "cf_agents_session_config",
+        annotations: "cf_agents_session_annotations",
+        fts: "cf_agents_session_fts",
+        attachmentMeta: "cf_agents_session_attachment_meta",
+        attachmentChunks: "cf_agents_session_attachment_chunks",
+        attachmentRefs: "cf_agents_session_attachment_refs",
+        tailIndex: "cf_agents_session_messages_by_seq",
+        contextBlocks: "cf_agents_context_blocks"
+      }
+    );
+    expect(
+      sessionTables(capabilityStore("sessions/audit", "audit").table, true).fts
+    ).toBe("cf_agents_session_fts__n_audit_search");
+  });
+
+  it("keeps the search indexes of instances whose names extend each other apart", async () => {
+    // FTS5's shadow table of `audit` (`..._content`) would otherwise be the
+    // index of `audit-content`.
+    await withCapabilityHarness(async ({ install }) => {
+      const audit = new Sessions({ name: "audit" });
+      const content = new Sessions({ name: "audit-content" });
+      const { lifecycle } = install(audit);
+      lifecycle.use(content);
+      await lifecycle.start();
+      await audit.session().appendMessage(text("a1", "apples"));
+      await content.session().appendMessage(text("c1", "cherries"));
+      expect((await audit.session().search("apples")).length).toBe(1);
+      expect((await content.session().search("cherries")).length).toBe(1);
+      expect((await content.session().search("apples")).length).toBe(0);
     });
   });
 

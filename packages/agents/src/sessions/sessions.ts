@@ -66,7 +66,7 @@ export class Sessions extends LifecycleCapability {
         transaction: (fn) => this.lifecycle.storage.transactionSync(fn),
         emit: (type, payload) => this.lifecycle.events.emit(type, payload)
       },
-      sessionTables(store.table)
+      sessionTables(store.table, options.name !== undefined)
     );
   }
 
