@@ -10693,9 +10693,19 @@ export class ThinkProgrammaticTestAgent extends Think {
     });
   }
 
-  /** Wait until the alarm loop has delivered every queued workflow notification. */
+  /**
+   * Wait until every workflow notification is delivered or given up: no
+   * queue item from the released version and no open delivery run.
+   */
   async drainWorkflowNotificationsForTest(): Promise<void> {
     await this._waitForQueueDrainForTest("_cfDeliverWorkflowNotification");
+    const deadline = Date.now() + 10_000;
+    while ((await this.listWorkflowNotificationsForTest()).length > 0) {
+      if (Date.now() > deadline) {
+        throw new Error("workflow notifications did not drain in time");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
 
   async insertWorkflowNotificationForTest(options: {
@@ -10737,25 +10747,24 @@ export class ThinkProgrammaticTestAgent extends Think {
       payload: unknown;
     }>
   > {
-    const items = this.sql<{ id: string; payload: string }>`
-      SELECT id, payload FROM cf_agents_jobs
-      WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
-      ORDER BY time ASC
+    const runs = this.sql<{ run_id: string; input: string }>`
+      SELECT run_id, input FROM cf_agents_task_runs
+      WHERE definition = '__cf_delivery:think-workflow-notification'
+        AND status IN ('pending', 'running')
+      ORDER BY created_at ASC
     `;
-    return items.map((row) => {
-      const envelope = JSON.parse(row.payload) as {
-        payload: {
-          workflowName: string;
-          workflowId: string;
-          event: { type: string; payload?: unknown };
-        };
+    return runs.map((row) => {
+      const notification = JSON.parse(row.input) as {
+        workflowName: string;
+        workflowId: string;
+        event: { type: string; payload?: unknown };
       };
       return {
-        notificationId: row.id,
-        workflowName: envelope.payload.workflowName,
-        workflowId: envelope.payload.workflowId,
-        eventType: envelope.payload.event.type,
-        payload: envelope.payload.event.payload
+        notificationId: row.run_id,
+        workflowName: notification.workflowName,
+        workflowId: notification.workflowId,
+        eventType: notification.event.type,
+        payload: notification.event.payload
       };
     });
   }

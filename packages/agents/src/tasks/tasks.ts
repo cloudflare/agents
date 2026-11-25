@@ -64,7 +64,8 @@ import type {
   TaskRunRow,
   TaskRunSnapshot,
   TaskStatus,
-  TaskValue
+  TaskValue,
+  TaskWaitReason
 } from "./types";
 
 /**
@@ -1467,6 +1468,10 @@ export class Tasks<
       }
       return;
     }
+    if (settlement.kind === "retry") {
+      await this.#suspend(row, generation, "retry", settlement.wakeAt ?? now);
+      return;
+    }
     const parked = this.#store.fencedWrite(
       runId,
       generation,
@@ -1488,6 +1493,34 @@ export class Tasks<
     }
   }
 
+  /** Leave a claimed run `pending` until `wakeAt`, fenced to its attempt. */
+  async #suspend(
+    row: TaskRunRow,
+    generation: string,
+    reason: TaskWaitReason,
+    wakeAt: number
+  ): Promise<void> {
+    const runId = row.run_id;
+    const suspended = this.#store.fencedWrite(
+      runId,
+      generation,
+      `UPDATE ${this.#tables.runs}
+       SET status = 'pending', wait_reason = ?, next_at = ?, generation = NULL,
+           updated_at = ?
+       WHERE run_id = ? AND generation = ? AND status = 'running'`,
+      [reason, wakeAt, Date.now()]
+    );
+    if (suspended) {
+      this.#emit("task:waiting", {
+        runId,
+        definition: row.definition,
+        reason,
+        wakeAt
+      });
+      await this.#syncWake(runId);
+    }
+  }
+
   /**
    * @internal End a run that no attempt runs in this isolate (parked, or
    * left `running` by a reset) as `outcome` says: a returned settlement, or
@@ -1500,6 +1533,10 @@ export class Tasks<
     outcome: TaskSettlement | TaskValue,
     options: { checkpoint?: Record<string, TaskJson> } = {}
   ): Promise<boolean> {
+    if (outcome instanceof TaskSettlement && outcome.kind === "retry") {
+      // Only a handler waits to retry; settle() ends a run.
+      throw new Error("settle() does not take TaskSettlement.retry()");
+    }
     await this.lifecycle.ready();
     if (this.#liveAttempt(runId)) return false;
     const row = this.#store.getRun(runId);
@@ -1582,24 +1619,7 @@ export class Tasks<
         );
         return;
       }
-      const suspended = this.#store.fencedWrite(
-        runId,
-        generation,
-        `UPDATE ${this.#tables.runs}
-         SET status = 'pending', wait_reason = ?, next_at = ?, generation = NULL,
-             updated_at = ?
-         WHERE run_id = ? AND generation = ? AND status = 'running'`,
-        [thrown.reason, thrown.wakeAt, Date.now()]
-      );
-      if (suspended) {
-        this.#emit("task:waiting", {
-          runId,
-          definition: row.definition,
-          reason: thrown.reason,
-          wakeAt: thrown.wakeAt
-        });
-        await this.#syncWake(runId);
-      }
+      await this.#suspend(row, generation, thrown.reason, thrown.wakeAt);
       return;
     }
 

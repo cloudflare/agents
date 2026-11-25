@@ -6,6 +6,7 @@ import type { LanguageModel, ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
 import { ThinkModelResolver, isWorkersAIModelId } from "../model";
 import { tableExists } from "../config-store";
+import { migrateWorkflowNotificationTable } from "../workflow-notifications";
 import { capabilityBlock, systemPromptForTurn } from "../system-prompt";
 
 type ConfigAccess = {
@@ -259,13 +260,13 @@ describe("tableExists", () => {
 });
 
 describe("legacy workflow notification migration", () => {
-  it("queues each undelivered notification and drops the legacy table", async () => {
+  it("sends each undelivered notification as a delivery and drops the legacy table", async () => {
     const stub = await getAgentByName(
       env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
       `periphery-legacy-workflow-${crypto.randomUUID()}`
     );
     await stub.getMessages();
-    await runInDurableObject(stub, async (instance, state) => {
+    await runInDurableObject(stub, async (_instance, state) => {
       const sql = state.storage.sql;
       sql.exec(`CREATE TABLE cf_think_workflow_notifications (
         notification_id TEXT PRIMARY KEY,
@@ -282,29 +283,73 @@ describe("legacy workflow notification migration", () => {
           ('n1', 's1', 'WF', 'wf-1', 'completed', '{"ok":true}', 1, NULL),
           ('n2', 's2', 'WF', 'wf-2', 'completed', '{"ok":true}', 2, 5)`
       );
-      const queued: Array<{ payload: unknown; id?: string }> = [];
-      const agent = instance as unknown as {
-        queue: (
-          callback: string,
-          payload: unknown,
-          options?: { id?: string }
-        ) => Promise<string>;
-        _migrateLegacyWorkflowNotifications: () => Promise<void>;
-      };
-      agent.queue = async (_callback, payload, options) => {
-        queued.push({ payload, id: options?.id });
-        return options?.id ?? "";
-      };
-      await agent._migrateLegacyWorkflowNotifications();
-      expect(queued).toEqual([
+      const sent: Array<{
+        id: string;
+        notification: unknown;
+        resume: unknown;
+      }> = [];
+      await migrateWorkflowNotificationTable(
+        sql,
+        async (id, notification, resume) => {
+          sent.push({ id, notification, resume });
+        }
+      );
+      expect(sent).toEqual([
         {
-          payload: {
+          id: "workflow-notification:s1:completed",
+          notification: {
             workflowName: "WF",
             workflowId: "wf-1",
             event: { type: "completed", payload: { ok: true } }
           },
-          id: "workflow-notification:s1:completed"
+          resume: { sentAt: 1, attempts: 0 }
         }
+      ]);
+      expect(tableExists(sql, "cf_think_workflow_notifications")).toBe(false);
+    });
+  });
+
+  it("keeps a row whose send failed, and drops the table once a later start sends it", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-legacy-workflow-fail-${crypto.randomUUID()}`
+    );
+    await stub.getMessages();
+    await runInDurableObject(stub, async (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec(`CREATE TABLE cf_think_workflow_notifications (
+        notification_id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      )`);
+      sql.exec(
+        `INSERT INTO cf_think_workflow_notifications VALUES
+          ('n1', 's1', 'WF', 'wf-1', 'completed', '{"ok":true}', 1, NULL),
+          ('n2', 's2', 'WF', 'wf-2', 'completed', '{"ok":true}', 2, NULL)`
+      );
+      const sent: string[] = [];
+      await migrateWorkflowNotificationTable(sql, async (id) => {
+        if (id.includes(":s1:")) throw new Error("storage full");
+        sent.push(id);
+      });
+      expect(sent).toEqual(["workflow-notification:s2:completed"]);
+      expect(
+        sql
+          .exec("SELECT notification_id FROM cf_think_workflow_notifications")
+          .toArray()
+      ).toEqual([{ notification_id: "n1" }]);
+
+      await migrateWorkflowNotificationTable(sql, async (id) => {
+        sent.push(id);
+      });
+      expect(sent).toEqual([
+        "workflow-notification:s2:completed",
+        "workflow-notification:s1:completed"
       ]);
       expect(tableExists(sql, "cf_think_workflow_notifications")).toBe(false);
     });

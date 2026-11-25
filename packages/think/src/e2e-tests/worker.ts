@@ -2505,8 +2505,9 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
       (await this.ctx.storage.get<number>("e2e:delivered_notifications")) ?? 0;
     const pending =
       this.sql<{ c: number }>`
-        SELECT COUNT(*) as c FROM cf_agents_jobs
-        WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
+        SELECT COUNT(*) as c FROM cf_agents_task_runs
+        WHERE definition = '__cf_delivery:think-workflow-notification'
+          AND status IN ('pending', 'running')
       `[0]?.c ?? 0;
     return { total: delivered + pending, delivered };
   }

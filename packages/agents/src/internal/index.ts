@@ -75,3 +75,8 @@ export {
   type EventLogSocket,
   type EventLogSubscription
 } from "../event-log-client";
+export {
+  registerDeliverySink,
+  sendDelivery,
+  type DeliverySink
+} from "./delivery";

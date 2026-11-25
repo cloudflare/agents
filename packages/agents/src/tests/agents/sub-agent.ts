@@ -18,6 +18,7 @@ import { Tasks } from "../../tasks/tasks.ts";
 import { Streams } from "../../streams/streams.ts";
 import { EventLogSubAgent } from "./event-log-sub-agent.ts";
 import type { TaskStep } from "../../tasks/types.ts";
+import { registerDeliverySink, sendDelivery } from "../../internal/delivery.ts";
 
 const STALE_FRAME_PROBE = "stale-frame-probe";
 
@@ -104,6 +105,9 @@ export class CounterSubAgent extends Agent {
     }
   });
 
+  /** Attempts the `flaky` delivery sink saw; it fails the first. */
+  readonly deliveryAttempts: number[] = [];
+
   /** A default Streams and a named one beside it. */
   readonly streams = new Streams();
   readonly audit = new Streams({ name: "audit" });
@@ -111,6 +115,12 @@ export class CounterSubAgent extends Agent {
   constructor(...args: ConstructorParameters<typeof Agent>) {
     super(...args);
     this.lifecycle.use(this.imports).use(this.streams).use(this.audit);
+    registerDeliverySink<{ n: number }>(this.tasks, "flaky", {
+      deliver: () => {
+        this.deliveryAttempts.push(this.deliveryAttempts.length + 1);
+        if (this.deliveryAttempts.length === 1) throw new Error("sink down");
+      }
+    });
   }
 
   /** The same stream id in both Streams; what each reads back. */
@@ -130,6 +140,19 @@ export class CounterSubAgent extends Agent {
       results.push(chunks);
     }
     return results;
+  }
+
+  /**
+   * Send a delivery whose sink fails once: the retry waits for the alarm,
+   * which a facet only gets through its root.
+   */
+  async deliverThroughFlakySinkForTest(): Promise<{
+    status: string | undefined;
+    attempts: number[];
+  }> {
+    await sendDelivery(this.tasks, "flaky", "d1", { n: 1 });
+    const record = await this.tasks.wait("d1", { timeoutMs: 10_000 });
+    return { status: record?.status, attempts: this.deliveryAttempts };
   }
 
   /**
@@ -1929,6 +1952,13 @@ export class TestSubAgentParent extends Agent {
       hangingRunAfterStartForTest(): Promise<string | undefined>;
     };
     return stub.hangingRunAfterStartForTest();
+  }
+
+  async subAgentDeliverThroughFlakySink(
+    subAgentName: string
+  ): Promise<{ status: string | undefined; attempts: number[] }> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.deliverThroughFlakySinkForTest();
   }
 
   async subAgentRunRememberTask(subAgentName: string): Promise<{

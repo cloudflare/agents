@@ -6,9 +6,10 @@
  */
 export class TaskSettlement {
   private constructor(
-    readonly kind: "aborted" | "skipped" | "failed" | "park",
+    readonly kind: "aborted" | "skipped" | "failed" | "park" | "retry",
     readonly reason: string | undefined,
-    readonly error: unknown
+    readonly error: unknown,
+    readonly wakeAt?: number
   ) {}
 
   /** End the run `aborted`. */
@@ -32,5 +33,21 @@ export class TaskSettlement {
    */
   static park(reason?: string): TaskSettlement {
     return new TaskSettlement("park", reason, undefined);
+  }
+
+  /**
+   * Leave the run `pending` with wait reason `retry` until `at` (epoch ms;
+   * a past `at` is due now); its next attempt runs then, as `attempt + 1`,
+   * and counts against the definition's `maxAttempts` if it sets one. No
+   * journal row and no error status between attempts: the handler owns the
+   * backoff and the give-up, which a thrown error would hand to Tasks.
+   */
+  static retry(at: number): TaskSettlement {
+    if (!Number.isFinite(at)) {
+      throw new TypeError(
+        `TaskSettlement.retry: \`at\` must be finite, got ${at}`
+      );
+    }
+    return new TaskSettlement("retry", undefined, undefined, at);
   }
 }
