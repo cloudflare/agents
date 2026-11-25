@@ -411,6 +411,12 @@ const DETACHED_BACKBONE_CADENCE_S = [5, 15, 30, 120];
 // cap is deferred until evidence shows the single cap conflates two budgets.)
 const DETACHED_LIVE_COUNT_WARN_THRESHOLD = 50;
 const DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
+// The reasons the backbone cancels a child with when it gives up on a run. The
+// child records the reason as its `aborted` run's error, which is how an abort
+// the give-up caused is told from one the child had for its own reasons.
+const DETACHED_BUDGET_CANCEL_REASON = "detached budget exceeded";
+const DETACHED_SILENT_CANCEL_REASON =
+  "detached run went silent past its no-progress window";
 // Conventional method name a chat agent (Think / AIChatAgent) implements to
 // receive `detached: { notify: true }` completions. Resolved by name so the
 // base Agent stays decoupled from the chat layer.
@@ -724,8 +730,6 @@ export class Agent<
   private _agentToolRunRecoveryPromise: Promise<void> | undefined;
   /** @internal Serializes detached-backbone arming against concurrent dispatch. */
   private _detachedBackboneArming: Promise<void> = Promise.resolve();
-  /** @internal Runs whose child the backbone is cancelling for a give-up. */
-  private _detachedGivingUp = new Set<string>();
   /** @internal Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
 
@@ -4073,14 +4077,15 @@ export class Agent<
 
   /**
    * An `aborted` that the backbone's own give-up caused by cancelling the
-   * child. The give-up already reports it, so it is not delivered as a finish,
-   * whether the parent saw it on the warm tail or on a later tick.
+   * child. The give-up reports it, so it is not delivered as a finish, whether
+   * the parent sees it on the warm tail or on a later tick.
    */
-  private _isDetachedGiveUpAbort(runId: string, status: string): boolean {
-    if (status !== "aborted") return false;
-    if (this._detachedGivingUp.has(runId)) return true;
-    const row = this._readAgentToolRun(runId);
-    return row?.give_up_claimed_at != null && row.child_still_running === 0;
+  private _isDetachedGiveUpAbort(inspection: AgentToolRunInspection): boolean {
+    return (
+      inspection.status === "aborted" &&
+      (inspection.error === DETACHED_BUDGET_CANCEL_REASON ||
+        inspection.error === DETACHED_SILENT_CANCEL_REASON)
+    );
   }
 
   /** Detached runs still holding a concurrency slot (non-terminal). */
@@ -4151,7 +4156,7 @@ export class Agent<
         this._isAgentToolRowHardTerminal(
           inspection.status as AgentToolRunStatus
         ) &&
-        !this._isDetachedGiveUpAbort(runId, inspection.status)
+        !this._isDetachedGiveUpAbort(inspection)
       ) {
         const result = this._terminalResultFromInspection<Output>(
           runInfo.agentType,
@@ -4475,7 +4480,7 @@ export class Agent<
         this._isAgentToolRowHardTerminal(
           inspection.status as AgentToolRunStatus
         ) &&
-        !this._isDetachedGiveUpAbort(runId, inspection.status)
+        !this._isDetachedGiveUpAbort(inspection)
       ) {
         const result = this._terminalResultFromInspection(
           row.agent_type,
@@ -4527,74 +4532,71 @@ export class Agent<
         (overAbsolute || overNoProgress) &&
         row.give_up_delivered_at === null
       ) {
-        // Marks the child's coming `aborted` as this give-up's own (see
-        // `_isDetachedGiveUpAbort`) while the warm tail may still see it.
-        this._detachedGivingUp.add(runId);
+        let childTornDown = false;
+        let afterCancel: AgentToolRunInspection | null = null;
         try {
-          let childTornDown = false;
-          let afterCancel: AgentToolRunInspection | null = null;
-          try {
-            const child = await this._cf_resolveSubAgent(row.agent_type, runId);
-            const adapter = this._asAgentToolChildAdapter(child);
-            await adapter.cancelAgentToolRun(
-              runId,
-              overAbsolute
-                ? "detached budget exceeded"
-                : "detached run went silent past its no-progress window"
+          const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+          const adapter = this._asAgentToolChildAdapter(child);
+          await adapter.cancelAgentToolRun(
+            runId,
+            overAbsolute
+              ? DETACHED_BUDGET_CANCEL_REASON
+              : DETACHED_SILENT_CANCEL_REASON
+          );
+          // Cancelling an already-finished child is a no-op, so re-inspect: a
+          // child that completed between the inspection above and the cancel
+          // must have its real result delivered, not be sealed as torn down.
+          afterCancel = await adapter.inspectAgentToolRun(runId);
+          childTornDown = true;
+        } catch {
+          // Could not confirm teardown; the child may complete anyway and the
+          // finish slot (still open) will deliver the real result.
+        }
+        // The post-cancel snapshot can report milestones the first inspection
+        // missed; deliver them now, as this run may not be polled again.
+        if (afterCancel?.milestones && row.detached_on_milestones) {
+          const milestoneRunInfo = this._agentToolRunInfoFromRow(row);
+          for (const milestone of afterCancel.milestones) {
+            this._maybeDeliverDetachedMilestone(
+              row,
+              milestoneRunInfo,
+              milestone
             );
-            // Cancelling an already-finished child is a no-op, so re-inspect: a
-            // child that completed between the inspection above and the cancel
-            // must have its real result delivered, not be sealed as torn down.
-            afterCancel = await adapter.inspectAgentToolRun(runId);
-            childTornDown = true;
-          } catch {
-            // Could not confirm teardown; the child may complete anyway and the
-            // finish slot (still open) will deliver the real result.
           }
-          // The post-cancel snapshot can report milestones the first inspection
-          // missed; deliver them now, as this run may not be polled again.
-          if (afterCancel?.milestones && row.detached_on_milestones) {
-            const milestoneRunInfo = this._agentToolRunInfoFromRow(row);
-            for (const milestone of afterCancel.milestones) {
-              this._maybeDeliverDetachedMilestone(
-                row,
-                milestoneRunInfo,
-                milestone
-              );
-            }
-          }
-          if (
-            afterCancel &&
-            (afterCancel.status === "completed" ||
-              afterCancel.status === "error")
-          ) {
-            await this._deliverDetachedTerminal(
-              runId,
-              "finish",
-              this._terminalResultFromInspection(row.agent_type, afterCancel),
-              { sequence: Date.now(), serialize: true },
-              afterCancel.completedAt
-            );
-            continue;
-          }
+        }
+        // A child that ended on its own before the cancel landed (completed,
+        // error, or stopped by its own client) has a real result to deliver.
+        if (
+          afterCancel &&
+          this._isAgentToolRowHardTerminal(
+            afterCancel.status as AgentToolRunStatus
+          ) &&
+          !this._isDetachedGiveUpAbort(afterCancel)
+        ) {
           await this._deliverDetachedTerminal(
             runId,
-            "give_up",
-            {
-              runId,
-              agentType: row.agent_type,
-              status: "interrupted",
-              error: overAbsolute
-                ? "detached run exceeded its budget before completing"
-                : "detached run went silent past its no-progress window",
-              reason: overAbsolute ? "budget-exceeded" : "no-progress",
-              childStillRunning: !childTornDown
-            },
-            { serialize: true }
+            "finish",
+            this._terminalResultFromInspection(row.agent_type, afterCancel),
+            { sequence: Date.now(), serialize: true },
+            afterCancel.completedAt
           );
-        } finally {
-          this._detachedGivingUp.delete(runId);
+          continue;
         }
+        await this._deliverDetachedTerminal(
+          runId,
+          "give_up",
+          {
+            runId,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error: overAbsolute
+              ? "detached run exceeded its budget before completing"
+              : "detached run went silent past its no-progress window",
+            reason: overAbsolute ? "budget-exceeded" : "no-progress",
+            childStillRunning: !childTornDown
+          },
+          { serialize: true }
+        );
       }
     }
 

@@ -178,6 +178,34 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(result.schedules).toBe(0);
   });
 
+  it("delivers the child's own abort when it is stopped before the give-up cancel lands (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-stopped-${crypto.randomUUID()}`
+    );
+
+    const result = await agent.giveUpRacingChildCompletionForTest(
+      "run-giveup-stopped",
+      undefined,
+      "is stopped"
+    );
+    expect(result.status).toBe("aborted");
+    expect(result.log).toEqual([
+      {
+        hook: "onAgentToolFinish",
+        runId: "run-giveup-stopped",
+        status: "aborted"
+      },
+      {
+        hook: "onDetachedDone",
+        runId: "run-giveup-stopped",
+        status: "aborted"
+      }
+    ]);
+    expect(result.outstanding).toBe(false);
+    expect(result.schedules).toBe(0);
+  });
+
   it("delivers a milestone only the post-cancel inspection reports (#2768)", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,
@@ -205,6 +233,8 @@ describe("detached agent-tool delivery (#1752)", () => {
         `run-warm-${tail}`,
         tail
       );
+      // The warm tail did read the child's `aborted`.
+      expect(result.inspected).toContain("fast:aborted");
       // The same callbacks as a cold parent: the give-up, and no `aborted`
       // finish for the cancel the give-up itself made.
       expect(result.statuses).toEqual(["interrupted"]);

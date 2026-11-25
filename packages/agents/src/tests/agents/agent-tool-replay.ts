@@ -457,7 +457,8 @@ export class TestAgentToolReplayAgent extends Agent {
    */
   async giveUpRacingChildCompletionForTest(
     runId: string,
-    lateMilestone?: string
+    lateMilestone?: string,
+    childEnds: "completes" | "is stopped" = "completes"
   ): Promise<{
     log: DetachedDeliveryLogEntry[];
     milestones: string[];
@@ -495,7 +496,8 @@ export class TestAgentToolReplayAgent extends Agent {
       if (name === runId && ++resolves === 2) {
         if (lateMilestone)
           await child.addMilestoneForTest(runId, lateMilestone);
-        await child.completeRunForTest(runId);
+        if (childEnds === "completes") await child.completeRunForTest(runId);
+        else await child.cancelAgentToolRun(runId, "stopped by its client");
       }
       return original(className, name);
     };
@@ -566,64 +568,79 @@ export class TestAgentToolReplayAgent extends Agent {
    * fast path tailing it. The backbone tick cancels the child for the give-up,
    * which ends the warm tail on the child's `aborted`. `tail` picks when the
    * fast path inspects the child: between the tick's cancel and its give-up
-   * delivery, or after the tick. Returns the per-run callback statuses.
+   * delivery, or after the tick. Returns the per-run callback statuses and
+   * the status each inspection read, the fast path's marked `fast:`.
    */
   async giveUpWithWarmTailForTest(
     runId: string,
     tail: "during-give-up" | "after-give-up"
-  ): Promise<{ statuses: string[]; outstanding: boolean; schedules: number }> {
+  ): Promise<{
+    statuses: string[];
+    inspected: string[];
+    outstanding: boolean;
+    schedules: number;
+  }> {
     await this.seedRunningRunPastBudget(runId, "onDetachedDone");
-    const runFastPath = () =>
-      this._agentTool._detachedFastPath(
-        {
-          runId,
-          agentType: "TestAgentToolStubChild",
-          parentToolCallId: undefined
-        } as unknown as AgentToolRunInfo,
-        TestAgentToolStubChild,
-        runId
-      );
+    type Inspection = { status: string } | null;
     const self = this as unknown as {
       _asAgentToolChildAdapter(child: unknown): {
-        inspectAgentToolRun(runId: string): Promise<unknown>;
+        inspectAgentToolRun(runId: string): Promise<Inspection>;
       };
     };
     const original = self._asAgentToolChildAdapter.bind(this);
+    const inspected: string[] = [];
+    let inFastPath = false;
     let tickInspections = 0;
-    let fastPathRan = false;
-    if (tail === "during-give-up") {
-      self._asAgentToolChildAdapter = (resolved) => {
-        const adapter = original(resolved);
-        return new Proxy(adapter, {
-          get(target, key, receiver) {
-            if (key !== "inspectAgentToolRun" || fastPathRan) {
-              return Reflect.get(target, key, receiver);
-            }
+    const runFastPath = async () => {
+      inFastPath = true;
+      try {
+        await this._agentTool._detachedFastPath(
+          {
+            runId,
+            agentType: "TestAgentToolStubChild",
+            parentToolCallId: undefined
+          } as unknown as AgentToolRunInfo,
+          TestAgentToolStubChild,
+          runId
+        );
+      } finally {
+        inFastPath = false;
+      }
+    };
+    self._asAgentToolChildAdapter = (resolved) => {
+      const adapter = original(resolved);
+      return new Proxy(adapter, {
+        get(target, key, receiver) {
+          if (key !== "inspectAgentToolRun") {
+            return Reflect.get(target, key, receiver);
+          }
+          return async (id: string) => {
+            const fast = inFastPath;
             // The tick's second inspection follows its cancel: run the warm
             // fast path to the end first, as the closed tail would.
-            return async (id: string) => {
-              if (++tickInspections === 2) {
-                fastPathRan = true;
-                await runFastPath();
-              }
-              return target.inspectAgentToolRun(id);
-            };
-          }
-        });
-      };
-    }
+            if (!fast && ++tickInspections === 2 && tail === "during-give-up") {
+              await runFastPath();
+            }
+            const inspection = await target.inspectAgentToolRun(id);
+            inspected.push(`${fast ? "fast:" : ""}${inspection?.status}`);
+            return inspection;
+          };
+        }
+      });
+    };
     try {
       await this._cfDetachedReconcileTick();
+      if (tail === "after-give-up") await runFastPath();
     } finally {
       self._asAgentToolChildAdapter = original;
     }
-    if (tail === "after-give-up") await runFastPath();
     return {
       statuses: this.detachedDeliveryLog
         .filter(
           (entry) => entry.runId === runId && entry.hook === "onDetachedDone"
         )
         .map((entry) => entry.status),
+      inspected,
       outstanding: this._agentTool._hasOutstandingDetachedRuns(),
       schedules: (await this.detachedBackboneSchedulesForTest()).length
     };
@@ -993,12 +1010,14 @@ export class TestAgentToolStubChild extends Agent {
     };
   }
 
-  async cancelAgentToolRun(runId: string): Promise<void> {
+  async cancelAgentToolRun(runId: string, reason?: string): Promise<void> {
     this._ensureTables();
-    // Like Think / AIChat, cancelling an already-finished run is a no-op.
+    // Like Think / AIChat, cancelling an already-finished run is a no-op, and
+    // a cancel records its reason as the aborted run's error.
     this.sql`
       UPDATE cf_test_stub_runs
-      SET status = 'aborted', completed_at = ${Date.now()}, pending_json = NULL
+      SET status = 'aborted', error = ${reason ?? null},
+          completed_at = ${Date.now()}, pending_json = NULL
       WHERE run_id = ${runId} AND completed_at IS NULL
     `;
   }
