@@ -57,3 +57,8 @@ export const loaded = cdp.waitFor("Page.loadEventFired", {
   sessionId: "session",
   predicate: ({ params }) => params.timestamp > 0
 });
+
+// So are commands: the result is the protocol's.
+export const createdTargetId = cdp
+  .send("Target.createTarget", { url: "about:blank" })
+  .then(({ targetId }) => targetId satisfies string);

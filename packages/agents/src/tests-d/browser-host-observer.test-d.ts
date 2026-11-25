@@ -23,14 +23,17 @@ const shapes: BrowserHostObserver[] = [
   },
   async (tab) => {
     await tab.send("Network.enable");
-  }
+  },
+  // A command that resolves with nothing can be the hook's promise.
+  (tab) => tab.send("Network.enable")
 ];
 new Browser({ provider: browserRun(env.BROWSER), hostObserver: shapes[0] });
 
-// A hook that returns anything else, such as a command's promise, is a
+// A hook that returns anything else, such as a command's result, is a
 // type error: write an async block body that awaits it.
-// @ts-expect-error Promise<unknown> is not a cleanup.
-const returnsSend: BrowserHostObserver = (tab) => tab.send("Page.enable");
+const returnsSend: BrowserHostObserver = (tab) =>
+  // @ts-expect-error Promise<EvaluateResponse> is not a cleanup.
+  tab.send("Runtime.evaluate", { expression: "1" });
 void returnsSend;
 
 expectTypeOf<BrowserHostTab["targetId"]>().toEqualTypeOf<string>();

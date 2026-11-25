@@ -33,10 +33,13 @@ import type { Protocol } from "devtools-protocol";
 import {
   CdpProtocolError,
   CdpTimeoutError,
+  type CdpCommandMethod,
+  type CdpCommandResult,
   type CdpConnection,
   type CdpEvent,
   type CdpEventHandler,
   type CdpEventMethod,
+  type CdpSendArgs,
   type CdpSendOptions,
   type CdpWaitForOptions
 } from "./cdp-connection";
@@ -103,11 +106,10 @@ export interface BrowserHostTab {
    * Send a command to this tab on the host's connection. Without
    * `timeoutMs`, the `Browser`'s command timeout applies.
    */
-  send(
-    method: string,
-    params?: unknown,
-    options?: Omit<CdpSendOptions, "sessionId">
-  ): Promise<unknown>;
+  send<M extends CdpCommandMethod>(
+    method: M,
+    ...args: CdpSendArgs<M, Omit<CdpSendOptions, "sessionId">>
+  ): Promise<CdpCommandResult<M>>;
   /**
    * Listen for this tab's `method` events, and return a function that
    * stops listening. Enable the domain first (`tab.send("Network.enable")`):
@@ -618,18 +620,14 @@ export class HostObserver {
     for (const watcher of this.#builtIns) {
       if (watcher.watch) this.#start(watcher, watcher.watch, hostTab);
     }
-    const send = (method: string, params?: unknown) =>
-      cdp.send(method, params, {
-        sessionId,
-        timeoutMs: OBSERVER_SETUP_TIMEOUT_MS
-      });
+    const setup = { sessionId, timeoutMs: OBSERVER_SETUP_TIMEOUT_MS };
     // Page.enable is what dialog answering needs. Behind an open dialog it
     // times out, and so does Page.getFrameTree, either of which flags the
     // tab blocked. The frame tree is also the flush command at close; sent
     // together, it costs no extra round trip.
     const results = await Promise.allSettled([
-      send("Page.enable"),
-      send("Page.getFrameTree")
+      cdp.send("Page.enable", {}, setup),
+      cdp.send("Page.getFrameTree", {}, setup)
     ]);
     const errors = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason as unknown] : []
@@ -660,8 +658,18 @@ export class HostObserver {
       scope: this.#scope,
       cdp,
       sessionId,
-      send: (method, params, options) =>
-        cdp.send(method, params, { ...options, sessionId }),
+      // SAFETY: passes the caller's method, params and options on as they
+      // came, only binding the tab's session, so the types the tab's send
+      // promises for that method are the ones cdp.send gives it.
+      send: ((
+        method: string,
+        params?: object,
+        options?: Omit<CdpSendOptions, "sessionId">
+      ) =>
+        cdp.send(method, params, {
+          ...options,
+          sessionId
+        })) as BrowserHostTab["send"],
       on: (method, handler) => cdp.on(method, handler, { sessionId }),
       waitFor: (method, options) =>
         cdp.waitFor(method, { ...options, sessionId }),

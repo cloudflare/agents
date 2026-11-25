@@ -5,11 +5,15 @@ export {
   type CdpSendOptions,
   type CdpAttachOptions,
   type CdpConnectionOptions,
+  type CdpCommandMethod,
+  type CdpCommandParams,
+  type CdpCommandResult,
   type CdpEvent,
   type CdpEventFilter,
   type CdpEventHandler,
   type CdpEventMethod,
   type CdpEventParams,
+  type CdpSendArgs,
   type CdpWaitForOptions
 } from "./cdp-connection";
 
