@@ -166,7 +166,9 @@ let declareEventLogOn: <T, S>(
  *
  * Declare logs where you construct the capability: a client's subscribe
  * frame can arrive in a fresh isolate, and a log declared later does not
- * exist yet then. Declaring a name twice throws.
+ * exist yet then. Declaring a name twice throws. A log over a Streams a
+ * composer composed is named `<composer id>/<name>`, and clients follow it
+ * by that name.
  *
  * @internal Sibling-package support (`agents/internal`). Not a public API.
  */
@@ -358,14 +360,14 @@ export class WebSockets extends LifecycleCapability {
       name: string,
       options: EventLogOptions<S>
     ): EventLog<T, S> => {
-      if (webSockets.#logs.has(name)) {
-        throw new Error(`Event log "${name}" is already declared`);
-      }
       const log = new EventLog<T, S>(name, options, {
         connections: () =>
           webSockets.#logConnections?.() ?? webSockets.getConnections()
       });
-      webSockets.#logs.set(name, log);
+      if (webSockets.#logs.has(log.name)) {
+        throw new Error(`Event log "${log.name}" is already declared`);
+      }
+      webSockets.#logs.set(log.name, log);
       return log;
     };
   }

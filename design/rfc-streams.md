@@ -39,6 +39,20 @@ const status = await this.streams.status("reply:123");
 // { state, cursor, tag?, ... } — the evidence a replayed producer resumes from
 ```
 
+- **Instances.** `new Streams({ name })` is a second Streams in the same
+  Durable Object, apart from the default (unnamed) one: its own streams,
+  blocks, tag index and schema version. The default keeps
+  `cf_agents_streams`, `cf_agents_stream_blocks`,
+  `idx_cf_agents_streams_tag` and `cf_agents:streams_schema_version` byte
+  for byte; a named instance `audit` has the same names with `__n_audit`
+  at the end (`idx_cf_agents_streams_tag__n_audit`) and its key under
+  `cf_agents:streams/audit:`. The names come from the Lifecycle's
+  capability store, resolved once in the constructor, and are written into
+  statement text, never bound or built from input. A named instance starts
+  at the current schema; schema v1's chunk table is only ever the
+  default's. Stream ids and tags are unique within an instance, and
+  `open`, `read`, `status`, `list`, `delete` and the sync aperture see
+  only that instance.
 - **Cursors are monotonic sequence numbers** (0-based; `from` is
   inclusive; `status().cursor` is the next to be assigned). The append
   fence is a read: `#append` is one synchronous block (state check, chunk-log

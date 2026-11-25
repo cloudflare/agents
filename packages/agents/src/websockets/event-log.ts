@@ -204,7 +204,14 @@ export class EventLog<T = unknown, S = unknown> {
         `Event log names must be 1 to ${MAX_LOG_NAME_LENGTH} characters`
       );
     }
-    this.name = name;
+    // A log over a Streams a composer composed (`@<composer id>`) is named
+    // under that composer, so two composers' logs of one name never meet
+    // on the object's sockets. Its stream keeps the declared name: it is
+    // in the composer's own tables.
+    const composer = options.streams.instanceName?.startsWith("@")
+      ? options.streams.instanceName.slice(1)
+      : undefined;
+    this.name = composer === undefined ? name : `${composer}/${name}`;
     this.#host = host;
     this.#streamsCapability = options.streams;
     this.#streamId = `log:${name}`;

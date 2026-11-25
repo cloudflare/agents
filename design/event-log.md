@@ -34,6 +34,10 @@ A buffered write goes into a new block: one INSERT per flush, no read, and no re
 
 Retention (`Streams.trim`) waits until the log is an eighth past `maxEvents` events or `maxBytes` stored bytes (UTF-8, as SQLite counts them). It then reads the oldest blocks a page at a time and deletes them down to the limits with one range `DELETE`, never touching the newest block. A log at its limit therefore trims once per eighth of it, not on every write (2,000 publishes at a 1,000-event limit: 39 ms of CPU against main's 97.5 ms on a deployment). A block is one flush (or part of a split one), so a log can hold up to an eighth plus one flush more than its limits, and a trim may delete the older blocks of a split flush, and the head is never reused. Totals are read once per isolate and kept in memory.
 
+### Logs of a composed capability
+
+A log over a `Streams` that a composer composed (its instance name is `@<composer id>`, see [rfc-capability-instances.md](./rfc-capability-instances.md)) is named `<composer id>/<name>`: two harnesses that each declare `chat` on the object's one `WebSockets` have the logs `think-harness/a/chat` and `think-harness/b/chat`, and clients follow them by those names. Frames carry the full name. The log's stream keeps the declared name (`log:chat`), because it is in the composer's own tables. A log over the default `Streams`, or over one an app named, keeps the name as declared; two logs of one name over different instances throw at declaration. Cursors are per log: each log has its own epoch, so a cursor from one resyncs on the other.
+
 ### Batches and the crash rule
 
 `publish` writes before it sends. `batch().append` sends first and writes later. The chunk waits in Streams' buffer for the stream until 10 events, 256 KiB, 250 ms (the log's timer), a `publish` on the same log, `flush()`, `close()`, or a subscribe (which writes the buffer and applies retention before it judges the cursor, so the replay reads exactly what was judged). One buffer per stream keeps seq order across batches and publishes.

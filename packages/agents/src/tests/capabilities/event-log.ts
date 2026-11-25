@@ -3,7 +3,7 @@ import {
   ROW_VALUE_BYTES
 } from "../../internal/platform-limits";
 import { DurableObject, RpcTarget } from "cloudflare:workers";
-import { Lifecycle } from "../../lifecycle";
+import { Lifecycle, LifecycleCapability } from "../../lifecycle";
 import { Streams } from "../../streams/streams";
 import { WebSockets } from "../../websockets";
 import {
@@ -26,6 +26,21 @@ class EventLogCallables extends RpcTarget {
 
   publish(data: unknown): number {
     return this.#publish(data);
+  }
+}
+
+/**
+ * A composer that composes its own Streams and declares a `chat` log over
+ * it on the object's WebSockets, as a harness does.
+ */
+class LogComposer extends LifecycleCapability {
+  readonly streams: Streams;
+  readonly chat: EventLog;
+
+  constructor(name: string, webSockets: WebSockets) {
+    super("log-composer", name);
+    this.streams = this.compose(new Streams({ name: this.composedName }));
+    this.chat = declareEventLog(webSockets, "chat", { streams: this.streams });
   }
 }
 
@@ -114,9 +129,15 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
       new URL(connection.uri ?? "https://x").searchParams.has("allow")
   });
 
+  /** Two composers, each with a log declared as `chat`. */
+  readonly #one = new LogComposer("one", this.#webSockets);
+  readonly #two = new LogComposer("two", this.#webSockets);
+
   readonly lifecycle = Lifecycle.install(this)
     .use(this.#streams)
-    .use(this.#webSockets);
+    .use(this.#webSockets)
+    .use(this.#one)
+    .use(this.#two);
 
   #batch: EventLogBatch | undefined;
 
@@ -127,6 +148,8 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     if (name === "fractional") return this.#fractional;
     if (name === "paged") return this.#paged;
     if (name === "big") return this.#big;
+    if (name === this.#one.chat.name) return this.#one.chat;
+    if (name === this.#two.chat.name) return this.#two.chat;
     return this.#guarded;
   }
 

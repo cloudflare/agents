@@ -5,6 +5,7 @@
  * machine; every byte that touches SQLite goes through here.
  */
 
+import { SqlName } from "../sql-name";
 import { splitPieces } from "../internal/platform-limits";
 import { SqlError } from "../sql-error";
 import { deserializeTaskValue, INLINE_INPUT_UNITS } from "./serialization";
@@ -61,18 +62,6 @@ export const RUN_LIST_COLUMNS = RUNS_COLUMNS.split(",\n")
       : name
   )
   .join(", ");
-
-/**
- * @internal A table name, written into statement text where it appears
- * instead of bound as a parameter. Only built from an instance's resolved
- * names (`this.store.table()`), never from input.
- */
-export class SqlName {
-  constructor(readonly name: string) {}
-  toString(): string {
-    return this.name;
-  }
-}
 
 /** @internal One Tasks instance's tables. */
 export type TaskTables = {

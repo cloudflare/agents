@@ -16,6 +16,7 @@
 import { LifecycleCapability } from "../lifecycle/capability";
 import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import { SqlError } from "../sql-error";
+import { SqlName } from "../sql-name";
 import {
   StreamClosedError,
   StreamNotFoundError,
@@ -37,7 +38,6 @@ import type {
   StreamBatching
 } from "./types";
 
-const STREAM_SCHEMA_VERSION_KEY = "cf_agents:streams_schema_version";
 const CURRENT_STREAM_SCHEMA_VERSION = 2;
 
 /**
@@ -47,9 +47,6 @@ const CURRENT_STREAM_SCHEMA_VERSION = 2;
  * that a replay page parses one block at a time.
  */
 const BLOCK_MAX_CHARS = 256 * 1024;
-const INSERT_BLOCK = `INSERT INTO cf_agents_stream_blocks
-  (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?)`;
 
 type Buffered = { readonly firstSeq: number; readonly jsons: string[] };
 
@@ -75,6 +72,15 @@ const utf8 = new TextEncoder();
  * @experimental The API surface may change before stabilizing.
  */
 export interface StreamsOptions {
+  /**
+   * This instance's name, for more than one Streams in one Durable Object:
+   * each named instance keeps its own streams, apart from the default
+   * (unnamed) one and from each other. A lowercase letter, then up to 31
+   * lowercase letters, digits or hyphens.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly name?: string;
   /** Ceiling for one serialized chunk. Default: 1 MiB. */
   readonly maxChunkBytes?: number;
 }
@@ -230,6 +236,12 @@ export interface StreamsSyncInternal {
  */
 export class Streams extends LifecycleCapability {
   readonly #maxChunkBytes: number;
+  /** This instance's tables, resolved once. */
+  readonly #tables: { readonly streams: SqlName; readonly blocks: SqlName };
+  /** This instance's schema version key. */
+  readonly #schemaVersionKey: string;
+  /** The one-block INSERT, built once from this instance's table. */
+  readonly #insertBlock: string;
   /** Wakeup callbacks for readers tailing a live stream, per stream. */
   readonly #wakeups = new Map<string, Set<() => void>>();
   /**
@@ -283,7 +295,16 @@ export class Streams extends LifecycleCapability {
   #legacyChunkTable = false;
 
   constructor(options: StreamsOptions = {}) {
-    super("streams");
+    super("streams", options.name);
+    this.#tables = {
+      streams: new SqlName(this.store.table("streams")),
+      blocks: new SqlName(this.store.table("stream_blocks"))
+    };
+    this.#schemaVersionKey = this.store.key("streams_schema_version");
+    // The default's text is the released statement's, byte for byte.
+    this.#insertBlock = `INSERT INTO ${this.#tables.blocks}
+  (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)`;
     this.#maxChunkBytes = options.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES;
   }
 
@@ -292,15 +313,15 @@ export class Streams extends LifecycleCapability {
   /** Migrate stream storage during Lifecycle startup. */
   async onStart(): Promise<void> {
     const storage = this.lifecycle.storage;
-    const version = (await storage.get<number>(STREAM_SCHEMA_VERSION_KEY)) ?? 0;
+    const version = (await storage.get<number>(this.#schemaVersionKey)) ?? 0;
     if (version < CURRENT_STREAM_SCHEMA_VERSION) {
       this.#ensureTables();
-      await storage.put(
-        STREAM_SCHEMA_VERSION_KEY,
-        CURRENT_STREAM_SCHEMA_VERSION
-      );
+      await storage.put(this.#schemaVersionKey, CURRENT_STREAM_SCHEMA_VERSION);
     }
-    if (version >= 1) this.#legacyChunkTable = this.#hasLegacyChunkTable();
+    // Schema v1's chunk table only ever belonged to the default instance.
+    if (version >= 1 && this.instanceName === undefined) {
+      this.#legacyChunkTable = this.#hasLegacyChunkTable();
+    }
   }
 
   // ── Producer surface ─────────────────────────────────────────────────────
@@ -344,7 +365,7 @@ export class Streams extends LifecycleCapability {
     );
     const now = Date.now();
     this.#sql`
-      INSERT INTO cf_agents_streams
+      INSERT INTO ${this.#tables.streams}
         (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
       VALUES
         (${streamId}, 'streaming', ${options.tag ?? null}, ${metadataJson}, 0, ${now}, ${now})
@@ -475,7 +496,7 @@ export class Streams extends LifecycleCapability {
       : options.state !== undefined
         ? [options.state]
         : [];
-    let query = "SELECT * FROM cf_agents_streams WHERE 1 = 1";
+    let query = `SELECT * FROM ${this.#tables.streams} WHERE 1 = 1`;
     const params: (string | number)[] = [];
     if (states.length > 0) {
       query += ` AND state IN (${states.map(() => "?").join(", ")})`;
@@ -549,7 +570,7 @@ export class Streams extends LifecycleCapability {
         );
         const now = Date.now();
         this.#sql`
-          INSERT INTO cf_agents_streams
+          INSERT INTO ${this.#tables.streams}
             (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
           VALUES
             (${streamId}, 'streaming', ${tag}, ${metadataJson}, 0, ${now}, ${now})
@@ -564,7 +585,7 @@ export class Streams extends LifecycleCapability {
           `metadata for stream "${streamId}"`
         );
         this.#sql`
-          UPDATE cf_agents_streams SET metadata = ${metadataJson}
+          UPDATE ${this.#tables.streams} SET metadata = ${metadataJson}
           WHERE stream_id = ${streamId}
         `;
       },
@@ -583,7 +604,7 @@ export class Streams extends LifecycleCapability {
           bufferEnd(this.#buffers.get(streamId)) ??
           this.#tail(streamId).nextSeq;
         const oldest = this.#sql<{ seq_from: number | null }>`
-          SELECT MIN(seq_from) AS seq_from FROM cf_agents_stream_blocks
+          SELECT MIN(seq_from) AS seq_from FROM ${this.#tables.blocks}
           WHERE stream_id = ${streamId}
         `[0]?.seq_from;
         return {
@@ -602,7 +623,7 @@ export class Streams extends LifecycleCapability {
         }
         return (
           this.#sql<{ one: number }>`
-            SELECT 1 AS one FROM cf_agents_stream_blocks
+            SELECT 1 AS one FROM ${this.#tables.blocks}
             WHERE stream_id = ${streamId} AND seq_from <= ${seq} AND seq_to > ${seq}
             LIMIT 1
           `.length > 0
@@ -636,17 +657,17 @@ export class Streams extends LifecycleCapability {
       readChunks: (streamId, fromSeq, limit) =>
         this.#readChunks(streamId, fromSeq, limit),
       listRows: () => this.#sql<StreamRow>`
-        SELECT * FROM cf_agents_streams ORDER BY created_at DESC, rowid DESC
+        SELECT * FROM ${this.#tables.streams} ORDER BY created_at DESC, rowid DESC
       `,
       rowsByTag: (tag, state) =>
         state
           ? this.#sql<StreamRow>`
-              SELECT * FROM cf_agents_streams
+              SELECT * FROM ${this.#tables.streams}
               WHERE tag = ${tag} AND state = ${state}
               ORDER BY created_at DESC, rowid DESC
             `
           : this.#sql<StreamRow>`
-              SELECT * FROM cf_agents_streams
+              SELECT * FROM ${this.#tables.streams}
               WHERE tag = ${tag}
               ORDER BY created_at DESC, rowid DESC
             `,
@@ -657,7 +678,7 @@ export class Streams extends LifecycleCapability {
           `metadata for stream "${row.streamId}"`
         );
         this.#sql`
-          INSERT INTO cf_agents_streams
+          INSERT INTO ${this.#tables.streams}
             (stream_id, state, tag, metadata, chunk_count,
              created_at, updated_at, closed_at)
           VALUES
@@ -831,11 +852,11 @@ export class Streams extends LifecycleCapability {
       start = end;
     }
     try {
-      if (rows.length === 1) this.#sqlWrite(INSERT_BLOCK, rows[0]);
+      if (rows.length === 1) this.#sqlWrite(this.#insertBlock, rows[0]);
       else {
         // All blocks or none: a retry writes the same seqs, never half.
         this.lifecycle.storage.transactionSync(() => {
-          for (const row of rows) this.#sqlWrite(INSERT_BLOCK, row);
+          for (const row of rows) this.#sqlWrite(this.#insertBlock, row);
         });
       }
     } catch (error) {
@@ -876,7 +897,7 @@ export class Streams extends LifecycleCapability {
       const row = this.#sql<{ chunks: number | null; bytes: number | null }>`
         SELECT SUM(seq_to - seq_from) AS chunks,
           SUM(length(CAST(body AS BLOB))) AS bytes
-        FROM cf_agents_stream_blocks WHERE stream_id = ${streamId}
+        FROM ${this.#tables.blocks} WHERE stream_id = ${streamId}
       `[0];
       totals = { chunks: row?.chunks ?? 0, bytes: row?.bytes ?? 0 };
       this.#totals.set(streamId, totals);
@@ -910,7 +931,7 @@ export class Streams extends LifecycleCapability {
       const page = this.#sql<{ block: number; chunks: number; bytes: number }>`
         SELECT block, seq_to - seq_from AS chunks,
           length(CAST(body AS BLOB)) AS bytes
-        FROM cf_agents_stream_blocks
+        FROM ${this.#tables.blocks}
         WHERE stream_id = ${streamId} AND block > ${cut ?? -1}
           AND block < ${newest}
         ORDER BY block ASC LIMIT ${limit}
@@ -948,7 +969,7 @@ export class Streams extends LifecycleCapability {
     }
     if (cut === undefined) return;
     this.#sql`
-      DELETE FROM cf_agents_stream_blocks
+      DELETE FROM ${this.#tables.blocks}
       WHERE stream_id = ${streamId} AND block <= ${cut}
     `;
     totals.chunks = chunks;
@@ -967,13 +988,13 @@ export class Streams extends LifecycleCapability {
     const seq = tail?.seq_to ?? 0;
     if (tail && tail.len + chunkJson.length + 1 <= BLOCK_MAX_CHARS) {
       this.#sql`
-        UPDATE cf_agents_stream_blocks
+        UPDATE ${this.#tables.blocks}
         SET body = body || ',' || ${chunkJson}, seq_to = ${seq + 1}, updated_at = ${at}
         WHERE stream_id = ${streamId} AND block = ${tail.block}
       `;
     } else {
       this.#sql`
-        INSERT INTO cf_agents_stream_blocks
+        INSERT INTO ${this.#tables.blocks}
           (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
         VALUES
           (${streamId}, ${(tail?.block ?? -1) + 1}, ${seq}, ${seq + 1}, ${chunkJson}, ${at}, ${at})
@@ -1004,7 +1025,7 @@ export class Streams extends LifecycleCapability {
         updated_at: number;
       }>`
         SELECT block, seq_from, seq_to, body, updated_at
-        FROM cf_agents_stream_blocks
+        FROM ${this.#tables.blocks}
         WHERE stream_id = ${streamId} AND block > ${block} AND seq_to > ${fromSeq}
         ORDER BY block ASC
         LIMIT 1
@@ -1054,10 +1075,11 @@ export class Streams extends LifecycleCapability {
       this.#sql`DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}`;
       this.#dropLegacyChunkTableIfEmpty();
     }
-    this.#sql`DELETE FROM cf_agents_stream_blocks WHERE stream_id = ${streamId}`;
-    return this.#sqlWrite("DELETE FROM cf_agents_streams WHERE stream_id = ?", [
-      streamId
-    ]);
+    this.#sql`DELETE FROM ${this.#tables.blocks} WHERE stream_id = ${streamId}`;
+    return this.#sqlWrite(
+      `DELETE FROM ${this.#tables.streams} WHERE stream_id = ?`,
+      [streamId]
+    );
   }
 
   /**
@@ -1165,7 +1187,7 @@ export class Streams extends LifecycleCapability {
   ): boolean {
     const finalCursor = this.#tail(streamId).nextSeq;
     const settled = this.#sqlWrite(
-      `UPDATE cf_agents_streams
+      `UPDATE ${this.#tables.streams}
        SET state = ?, error_message = ?, closed_at = ?, updated_at = ?,
            chunk_count = ?
        WHERE stream_id = ? AND state = 'streaming'`,
@@ -1258,17 +1280,23 @@ export class Streams extends LifecycleCapability {
 
   #sql<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
-    ...values: (string | number | boolean | null)[]
+    ...values: (string | number | boolean | null | SqlName)[]
   ): T[] {
-    const query = strings.reduce(
-      (result, part, index) =>
-        result + part + (index < values.length ? "?" : ""),
-      ""
-    );
+    const params: (string | number | boolean | null)[] = [];
+    let query = strings[0];
+    for (let index = 0; index < values.length; index++) {
+      const value = values[index];
+      if (value instanceof SqlName) query += value.name;
+      else {
+        query += "?";
+        params.push(value);
+      }
+      query += strings[index + 1];
+    }
     try {
       // SAFETY: Streams queries select from its own schema; T describes the
       // projected columns of the accompanying query text.
-      return [...this.lifecycle.storage.sql.exec(query, ...values)] as T[];
+      return [...this.lifecycle.storage.sql.exec(query, ...params)] as T[];
     } catch (cause) {
       throw new SqlError(query, cause);
     }
@@ -1284,7 +1312,7 @@ export class Streams extends LifecycleCapability {
 
   #getStream(streamId: string): StreamRow | undefined {
     const rows = this.#sql<StreamRow>`
-      SELECT * FROM cf_agents_streams WHERE stream_id = ${streamId}
+      SELECT * FROM ${this.#tables.streams} WHERE stream_id = ${streamId}
     `;
     return rows[0];
   }
@@ -1296,7 +1324,7 @@ export class Streams extends LifecycleCapability {
    */
   #state(streamId: string): StreamState | undefined {
     const rows = this.#sql<{ state: StreamState }>`
-      SELECT state FROM cf_agents_streams WHERE stream_id = ${streamId}
+      SELECT state FROM ${this.#tables.streams} WHERE stream_id = ${streamId}
     `;
     return rows[0]?.state;
   }
@@ -1325,7 +1353,7 @@ export class Streams extends LifecycleCapability {
       len: number;
     }>`
       SELECT block, seq_to, updated_at, length(body) AS len
-      FROM cf_agents_stream_blocks
+      FROM ${this.#tables.blocks}
       WHERE stream_id = ${streamId}
       ORDER BY block DESC
       LIMIT 1
@@ -1345,7 +1373,7 @@ export class Streams extends LifecycleCapability {
     if (!this.#legacyTableLive()) return;
     this.lifecycle.storage.transactionSync(() => {
       const tail = this.#sql<{ block: number; seq_to: number }>`
-        SELECT block, seq_to FROM cf_agents_stream_blocks
+        SELECT block, seq_to FROM ${this.#tables.blocks}
         WHERE stream_id = ${streamId}
         ORDER BY block DESC
         LIMIT 1
@@ -1359,7 +1387,7 @@ export class Streams extends LifecycleCapability {
       const flush = () => {
         if (body === "") return;
         this.#sql`
-          INSERT INTO cf_agents_stream_blocks
+          INSERT INTO ${this.#tables.blocks}
             (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
           VALUES
             (${streamId}, ${block}, ${seqFrom}, ${seq}, ${body}, ${createdAt}, ${updatedAt})
@@ -1483,7 +1511,7 @@ export class Streams extends LifecycleCapability {
     // and it costs one billed row per stream open — per turn, never per
     // chunk.
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_streams (
+      CREATE TABLE IF NOT EXISTS ${this.#tables.streams} (
         stream_id TEXT PRIMARY KEY,
         state TEXT NOT NULL CHECK (state IN (
           'streaming', 'completed', 'errored'
@@ -1497,11 +1525,11 @@ export class Streams extends LifecycleCapability {
         closed_at INTEGER
       )`);
     rawSql(`
-      CREATE INDEX IF NOT EXISTS idx_cf_agents_streams_tag
-      ON cf_agents_streams(tag, created_at)
+      CREATE INDEX IF NOT EXISTS ${this.store.index("streams_tag")}
+      ON ${this.#tables.streams}(tag, created_at)
     `);
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_stream_blocks (
+      CREATE TABLE IF NOT EXISTS ${this.#tables.blocks} (
         stream_id TEXT NOT NULL,
         block INTEGER NOT NULL,
         seq_from INTEGER NOT NULL,

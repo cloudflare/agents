@@ -15,6 +15,7 @@ import { agentPathKey } from "../../dynamic-agents/identity.ts";
 import { declareSchedules } from "../../schedules/scheduler.ts";
 import { armFacetWake } from "../../lifecycle/durable-object-lifecycle.ts";
 import { Tasks } from "../../tasks/tasks.ts";
+import { Streams } from "../../streams/streams.ts";
 import { EventLogSubAgent } from "./event-log-sub-agent.ts";
 import type { TaskStep } from "../../tasks/types.ts";
 
@@ -103,9 +104,32 @@ export class CounterSubAgent extends Agent {
     }
   });
 
+  /** A default Streams and a named one beside it. */
+  readonly streams = new Streams();
+  readonly audit = new Streams({ name: "audit" });
+
   constructor(...args: ConstructorParameters<typeof Agent>) {
     super(...args);
-    this.lifecycle.use(this.imports);
+    this.lifecycle.use(this.imports).use(this.streams).use(this.audit);
+  }
+
+  /** The same stream id in both Streams; what each reads back. */
+  async writeNamedStreamsForTest(): Promise<unknown[][]> {
+    const results: unknown[][] = [];
+    for (const [streams, text] of [
+      [this.streams, "default"],
+      [this.audit, "audit"]
+    ] as const) {
+      const writer = await streams.open("same", { tag: "t" });
+      writer.append(text);
+      writer.close();
+    }
+    for (const streams of [this.streams, this.audit]) {
+      const chunks: unknown[] = [];
+      for await (const chunk of streams.read("same")) chunks.push(chunk.chunk);
+      results.push(chunks);
+    }
+    return results;
   }
 
   /**
@@ -1843,6 +1867,11 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string[]> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.jobsDuringTerminalReportForTest();
+  }
+
+  async subAgentWriteNamedStreams(subAgentName: string): Promise<unknown[][]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.writeNamedStreamsForTest();
   }
 
   async subAgentRunNamedTasks(subAgentName: string): Promise<Array<unknown>> {

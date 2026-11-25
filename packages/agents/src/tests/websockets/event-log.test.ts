@@ -702,6 +702,56 @@ async function waitFor(check: () => boolean): Promise<void> {
   }
 }
 
+describe("event logs of composed capabilities", () => {
+  const ONE = "log-composer/one/chat";
+  const TWO = "log-composer/two/chat";
+
+  it("names each composer's log under the composer, and a tab on one never gets the other's events", async () => {
+    const name = crypto.randomUUID();
+    const client = await connect(name);
+    const cursor = await follow(client, ONE);
+    expect(cursor.seq).toBe(0);
+
+    expect(await stub(name).publish(TWO, "two-1")).toBe(1);
+    expect(await stub(name).publish(ONE, "one-1")).toBe(1);
+    const frames = await client.until(isType("events"));
+    expect(frames.filter(isType("events"))).toEqual([
+      expect.objectContaining({ log: ONE })
+    ]);
+    expect(events(frames)).toEqual([{ seq: 1, data: "one-1" }]);
+
+    // The declared name alone is no log on this object.
+    client.subscribe("chat");
+    const [error] = (await client.until(isType("error"))).slice(-1);
+    expect(error).toMatchObject({ log: "chat" });
+    client.close();
+  });
+
+  it("keeps cursors per log: one log's cursor resyncs on the other", async () => {
+    const name = crypto.randomUUID();
+    await stub(name).publishMany(ONE, 3);
+    await stub(name).publishMany(TWO, 1);
+    const one = await stub(name).head(ONE);
+    const two = await stub(name).head(TWO);
+    expect(one.seq).toBe(3);
+    expect(two.seq).toBe(1);
+    expect(one.epoch).not.toBe(two.epoch);
+
+    const client = await connect(name);
+    client.subscribe(TWO, { epoch: one.epoch, seq: 1 });
+    const [resync] = (await client.until(isType("resync"))).slice(-1);
+    expect(resync).toMatchObject({ log: TWO, epoch: two.epoch, seq: 1 });
+
+    client.subscribe(ONE, { epoch: one.epoch, seq: 1 });
+    const frames = await client.until(isType("synced"));
+    expect(events(frames)).toEqual([
+      { seq: 2, data: 1 },
+      { seq: 3, data: 2 }
+    ]);
+    client.close();
+  });
+});
+
 describe("followEventLog", () => {
   it("rebuilds from the snapshot, then picks up missed events by cursor after a reconnect", async () => {
     const name = crypto.randomUUID();
