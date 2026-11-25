@@ -423,20 +423,47 @@ describe("ThinkHarness durability", () => {
     expect((await stub.wait(receipt.operationId)).status).toBe("done");
   });
 
-  it("continues a model call whose stream an earlier version kept in the default tables", async () => {
+  for (const [when, forgetSchema] of [
+    ["after an upgrade", true],
+    ["after a rollback, with the harness's schema already recorded", false]
+  ] as const) {
+    it(`continues a model call whose stream is in the default tables, ${when}`, async () => {
+      const name = crypto.randomUUID();
+      let stub = fresh(name);
+      const receipt = await stub.submit("slow");
+      await stub.streamed();
+      stub = await crash(name);
+      await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+        instance.moveStreamsToDefault({ forgetSchema })
+      );
+      await evictDurableObject(stub);
+      stub = fresh(name);
+      await runDurableObjectAlarm(stub);
+      expect((await stub.wait(receipt.operationId)).status).toBe("done");
+      expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+      expect(await stub.defaultStreamRows()).toBe(0);
+      expect(await stub.streamRows()).toBe(0);
+    });
+  }
+
+  it("keeps the partial of an aborted call whose report is owed and whose stream is in the default tables", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
     const receipt = await stub.submit("slow");
     await stub.streamed();
     stub = await crash(name);
-    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
-      instance.moveStreamsToDefault()
-    );
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) => {
+      instance.moveStreamsToDefault({ forgetSchema: false });
+      instance.abortWithReportOwed(receipt.operationId);
+    });
     await evictDurableObject(stub);
     stub = fresh(name);
     await runDurableObjectAlarm(stub);
-    expect((await stub.wait(receipt.operationId)).status).toBe("done");
-    expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+$/);
     expect(await stub.defaultStreamRows()).toBe(0);
     expect(await stub.streamRows()).toBe(0);
   });

@@ -140,7 +140,6 @@ const OPERATION_DEFINITION = "__cf_think_harness_operation";
 const SESSION_KEY = "think-harness:session";
 /** The session value holding the client tools its client last declared. */
 const CLIENT_TOOLS_KEY = "think-harness:client-tools";
-const UTF8 = new TextEncoder();
 /** Open operations carried forward from the harness store at a time. */
 const CARRY_BATCH = 50;
 /** The checkpoint key a placed operation's progress is kept under. */
@@ -531,6 +530,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   readonly #streams: Streams;
   /**
+   * The default Streams over the shared tables, bound only to move a
+   * stream an earlier version left there (`#adoptStream`).
+   */
+  #sharedStreams: Streams | undefined;
+  /**
    * The transcripts. The harness writes every message, and its operations
    * point at them, so it owns the Sessions capability too; a second one
    * writing the same tables would leave this one's caches stale. A
@@ -588,11 +592,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     this.#bindOwned();
     await this.#sessions.onStart();
     await this.lifecycle.schema.migrate({
-      version: 2,
-      steps: {
-        1: () => this.#carryReleased(),
-        2: () => this.#carryStreams()
-      }
+      version: 1,
+      steps: { 1: () => this.#carryReleased() }
     });
     await this.#ensureSession(ROOT_SESSION);
   }
@@ -629,58 +630,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (sessions.length < CARRY_BATCH) break;
     }
     released.drop();
-  }
-
-  /**
-   * Move the stream of each open operation's interrupted model call into
-   * the harness's own Streams, out of the default instance's tables where
-   * an earlier version kept it. Read and written through the default
-   * instance's synchronous operations only: it is not started here, so it
-   * records no schema of its own. Idempotent: a stream already moved is
-   * no longer in the default tables.
-   */
-  async #carryStreams(): Promise<void> {
-    if (!hasTable(this.lifecycle.storage.sql, "cf_agents_streams")) return;
-    const shared = new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
-    bindLifecycleCapability(shared, this.lifecycle);
-    const from = shared.__DO_NOT_USE_WILL_BREAK__sync();
-    const to = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
-    for (const record of this.#open()) {
-      const streamId = this.#state(record.runId)?.streamId;
-      const row = streamId == null ? undefined : from.getStream(streamId);
-      if (streamId == null || !row) continue;
-      this.lifecycle.storage.transactionSync(() => {
-        if (!to.getStream(streamId)) {
-          to.insertStream(
-            streamId,
-            row.tag,
-            // SAFETY: stream metadata is JSON the harness wrote.
-            row.metadata === null
-              ? undefined
-              : (JSON.parse(row.metadata) as Record<string, StreamJson>)
-          );
-          for (let seq = 0; ;) {
-            const rows = from.readChunks(streamId, seq, READ_PAGE);
-            for (const chunk of rows) {
-              // Stored as it was: one segment the harness wrote per chunk.
-              to.appendJson(
-                streamId,
-                chunk.chunk,
-                UTF8.encode(chunk.chunk).byteLength,
-                {
-                  maxChunks: READ_PAGE,
-                  maxBytes: SEGMENT_MAX_BYTES
-                }
-              );
-            }
-            to.flush(streamId);
-            if (rows.length < READ_PAGE) break;
-            seq = (rows.at(-1)?.seq ?? seq) + 1;
-          }
-        }
-        from.deleteUnchecked(streamId);
-      });
-    }
   }
 
   /**
@@ -2361,11 +2310,72 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
   }
 
-  /** Every chunk a stream holds, without waiting for more. */
+  /**
+   * Move stream `streamId` out of the default Streams tables into the
+   * harness's own, in one transaction: its row and its chunks as they are
+   * (times included), then deleted there. Through the default instance's
+   * synchronous operations only: it is never started here, so it records
+   * no schema under the harness's id.
+   *
+   * @returns Whether there was such a stream.
+   */
+  #adoptStream(streamId: string): boolean {
+    if (!hasTable(this.lifecycle.storage.sql, "cf_agents_streams")) {
+      return false;
+    }
+    if (!this.#sharedStreams) {
+      this.#sharedStreams = new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
+      bindLifecycleCapability(this.#sharedStreams, this.lifecycle);
+    }
+    const from = this.#sharedStreams.__DO_NOT_USE_WILL_BREAK__sync();
+    const row = from.getStream(streamId);
+    if (!row) return false;
+    const to = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
+    this.lifecycle.storage.transactionSync(() => {
+      to.importStream({
+        streamId,
+        state: row.state,
+        tag: row.tag,
+        // SAFETY: stream metadata is JSON the harness wrote.
+        metadata:
+          row.metadata === null
+            ? undefined
+            : (JSON.parse(row.metadata) as Record<string, StreamJson>),
+        chunkCount: row.chunk_count,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        closedAt: row.closed_at
+      });
+      for (let seq = 0; ;) {
+        const rows = from.readChunks(streamId, seq, READ_PAGE);
+        for (const chunk of rows) {
+          // SAFETY: each stored chunk is a segment the harness wrote.
+          to.importChunk(
+            streamId,
+            JSON.parse(chunk.chunk) as StreamJson,
+            chunk.created_at
+          );
+        }
+        if (rows.length < READ_PAGE) break;
+        seq = (rows.at(-1)?.seq ?? seq) + 1;
+      }
+      from.deleteUnchecked(streamId);
+    });
+    return true;
+  }
+
+  /**
+   * Every chunk a run's stream holds, without waiting for more. A stream
+   * the harness's own instance lacks may be in the default Streams tables,
+   * where earlier versions kept it (and still do after a rollback): it is
+   * moved here first.
+   */
   #streamChunks(streamId: string | null | undefined): UIMessageChunk[] {
     if (streamId == null) return [];
     const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
-    if (!streams.getStream(streamId)) return [];
+    if (!streams.getStream(streamId) && !this.#adoptStream(streamId)) {
+      return [];
+    }
     const chunks: UIMessageChunk[] = [];
     let from = 0;
     for (;;) {

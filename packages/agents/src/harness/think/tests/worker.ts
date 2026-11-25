@@ -1020,7 +1020,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
    * them, in the default Streams tables, and forget the harness's schema
    * version, as an object upgraded from that version has none.
    */
-  moveStreamsToDefault(): void {
+  moveStreamsToDefault(options: { forgetSchema: boolean }): void {
     const sql = this.ctx.storage.sql;
     // The default tables, created with the same schema as the harness's.
     for (const { sql: create } of sql
@@ -1046,7 +1046,27 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     );
     sql.exec(`DELETE FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`);
     sql.exec(`DELETE FROM cf_agents_streams${HARNESS_SUFFIX}`);
-    forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
+    if (options.forgetSchema) {
+      forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
+    }
+  }
+
+  /**
+   * Leave an operation's run aborted with its terminal report still owed,
+   * as a reset right after `abort()` settled it does.
+   */
+  abortWithReportOwed(operationId: string): void {
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_task_runs
+       SET status = 'aborted', cancel_requested = 1, cancel_reason = 'aborted',
+           generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?,
+           notified = NULL
+       WHERE run_id = ?`,
+      now,
+      now,
+      JSON.stringify(["", operationId])
+    );
   }
 
   releaseSlow(): void {
