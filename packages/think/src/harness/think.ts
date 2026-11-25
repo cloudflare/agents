@@ -47,6 +47,7 @@ import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
+import { admittedSubmissionMetadata } from "../submissions";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
@@ -695,22 +696,25 @@ export class Think<
     messages: UIMessage[],
     options?: SubmitMessagesOptions
   ): Promise<SubmitMessagesResult> {
-    const submissionId =
-      options?.submissionId ?? options?.idempotencyKey ?? crypto.randomUUID();
-    const receipt = await this.harness
-      .session()
-      .submit(messages, { operationId: submissionId });
-    const inspection = await this.inspectSubmission(submissionId);
-    return {
-      ...(inspection ?? {
-        submissionId,
-        status: "pending",
-        createdAt: Date.now()
-      }),
+    if (messages.length === 0) {
+      throw new Error("submitMessages requires at least one message");
+    }
+    const metadata = admittedSubmissionMetadata(options?.metadata);
+    const receipt = await this.harness.session().submit(messages, {
+      operationId:
+        options?.submissionId ?? options?.idempotencyKey ?? crypto.randomUUID(),
       ...(options?.idempotencyKey !== undefined && {
         idempotencyKey: options.idempotencyKey
       }),
-      ...(options?.metadata !== undefined && { metadata: options.metadata }),
+      ...(metadata !== undefined && { metadata })
+    });
+    const inspection = await this.inspectSubmission(receipt.operationId);
+    return {
+      ...(inspection ?? {
+        submissionId: receipt.operationId,
+        status: "pending",
+        createdAt: Date.now()
+      }),
       accepted: receipt.accepted
     };
   }
@@ -724,7 +728,15 @@ export class Think<
       submissionId,
       requestId: submissionId,
       status: submissionStatus(status),
-      createdAt: Date.now(),
+      createdAt: status.createdAt,
+      ...(status.startedAt !== undefined && { startedAt: status.startedAt }),
+      ...(status.settledAt !== undefined && {
+        completedAt: status.settledAt
+      }),
+      ...(status.idempotencyKey !== undefined && {
+        idempotencyKey: status.idempotencyKey
+      }),
+      ...(status.metadata !== undefined && { metadata: status.metadata }),
       ...(status.status === "unanswered" &&
         status.reason !== undefined && { error: status.reason }),
       ...("messageId" in status &&

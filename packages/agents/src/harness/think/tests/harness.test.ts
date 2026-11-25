@@ -131,6 +131,38 @@ describe("ThinkHarness turns", () => {
     expect(await stub.inspect("nope")).toBeUndefined();
   });
 
+  it("keeps an operation's key, metadata and times, and dedupes a repeated key", async () => {
+    const stub = fresh();
+    const first = await stub.submit("hello", {
+      operationId: "op-1",
+      idempotencyKey: "key-1",
+      metadata: { source: "test" }
+    });
+    const again = await stub.submit("hello", {
+      operationId: "op-2",
+      idempotencyKey: "key-1"
+    });
+    // The repeated key names the operation the first submission started.
+    expect(again).toMatchObject({ operationId: "op-1", accepted: false });
+    await stub.wait(first.operationId);
+    const inspection = JSON.parse(await stub.inspectRecord("op-1")) as {
+      status: string;
+      idempotencyKey?: string;
+      metadata?: unknown;
+      createdAt: number;
+      startedAt: number;
+      settledAt: number;
+    };
+    expect(inspection).toMatchObject({
+      status: "done",
+      idempotencyKey: "key-1",
+      metadata: { source: "test" }
+    });
+    expect(inspection.startedAt).toBeGreaterThanOrEqual(inspection.createdAt);
+    expect(inspection.settledAt).toBeGreaterThanOrEqual(inspection.startedAt);
+    expect(await stub.inspect("op-2")).toBeUndefined();
+  });
+
   it("refuses to steer instead of queueing the input", async () => {
     const stub = fresh();
     expect(await stub.steer("hello")).toBe("SteerNotSupportedError");

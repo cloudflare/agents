@@ -25,6 +25,7 @@ import {
 } from "../harness";
 import type {
   ThinkOperationResult,
+  ThinkOperationStatus,
   ThinkReceipt,
   ThinkSubmitOptions
 } from "../types";
@@ -1169,8 +1170,17 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return { types, end };
   }
 
-  inspect(operationId: string) {
+  /** An operation's status (see `inspectRecord` for the rest). */
+  async inspect(
+    operationId: string
+  ): Promise<ThinkOperationStatus | undefined> {
     return this.harness.session().inspect(operationId);
+  }
+
+  /** An operation's key, metadata and times, as plain JSON for RPC. */
+  async inspectRecord(operationId: string): Promise<string> {
+    const inspection = await this.harness.session().inspect(operationId);
+    return JSON.stringify(inspection ?? null);
   }
 
   setSystem(system: string): void {

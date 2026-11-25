@@ -102,6 +102,7 @@ import type {
   ThinkHarnessOptions,
   ThinkInFlight,
   ThinkInput,
+  ThinkOperationInspection,
   ThinkOperationStatus,
   ThinkStreamCallback,
   ThinkOperationResult,
@@ -787,9 +788,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       // SAFETY: an OperationRunInput is plain JSON: UI messages and tool
       // answers as clients send them.
       stored as unknown as TaskJson,
-      { runId: runIdOf(session, operationId), lane: laneOf(session) }
+      {
+        runId: runIdOf(session, operationId),
+        lane: laneOf(session),
+        ...(options.idempotencyKey !== undefined && {
+          idempotencyKey: options.idempotencyKey
+        }),
+        ...(options.metadata !== undefined && { metadata: options.metadata })
+      }
     );
-    return { operationId, session, accepted: receipt.accepted };
+    // A repeated idempotency key names the operation the first one started.
+    return {
+      operationId: operationOf(receipt.runId)[1],
+      session,
+      accepted: receipt.accepted
+    };
   }
 
   /** @internal Stop one operation, or everything open in a session. */
@@ -841,15 +854,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   async inspect(
     session: ThinkSessionId,
     operationId: string
-  ): Promise<ThinkOperationStatus | undefined> {
+  ): Promise<ThinkOperationInspection | undefined> {
     await this.lifecycle.ready();
     const record = this.#tasks.peek(runIdOf(session, operationId));
     if (!record) return undefined;
-    if (TERMINAL.includes(record.status)) return this.#result(record);
+    const status: ThinkOperationStatus = TERMINAL.includes(record.status)
+      ? this.#result(record)
+      : {
+          operationId,
+          session,
+          status: isQueued(record) ? "queued" : "running"
+        };
     return {
-      operationId,
-      session,
-      status: isQueued(record) ? "queued" : "running"
+      ...status,
+      createdAt: record.createdAt,
+      ...(record.startedAt !== undefined && { startedAt: record.startedAt }),
+      ...(record.settledAt !== undefined && { settledAt: record.settledAt }),
+      ...(record.idempotencyKey !== undefined && {
+        idempotencyKey: record.idempotencyKey
+      }),
+      ...(record.metadata !== undefined && { metadata: record.metadata })
     };
   }
 
@@ -2840,7 +2864,7 @@ export class ThinkSession implements HarnessSession {
   }
 
   /** One operation's status, or undefined when the id is unknown. */
-  inspect(operationId: string): Promise<ThinkOperationStatus | undefined> {
+  inspect(operationId: string): Promise<ThinkOperationInspection | undefined> {
     return this.#harness.inspect(this.id, operationId);
   }
 
