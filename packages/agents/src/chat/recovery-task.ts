@@ -9,7 +9,10 @@
  * @internal Sibling-package support for AI Chat and Think.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { isPlatformFailure, tryN } from "../retries";
+import type { TaskJson } from "../tasks";
+import { MAX_SERIALIZED_BYTES } from "../tasks/serialization";
 import type { TaskRunOptions, TaskStep } from "../tasks/types";
 import type {
   ChatRecoveryAttemptInput,
@@ -239,17 +242,75 @@ export function createChatRecoveryTaskDefinition(
 export async function runChatRecoveryAttempt(
   step: TaskStep,
   hooks: ChatRecoveryTaskHooks,
-  input: ChatRecoveryAttemptInput
+  first: ChatRecoveryAttemptInput
 ): Promise<void> {
-  if (input.delaySeconds > 0) {
-    await step.sleep("backoff", input.delaySeconds * 1000);
+  // An attempt that times out waiting for a stable chat plans the next one
+  // (`rescheduleAfterStableTimeout`) into this run, bounded by the
+  // incident's attempt budget: the run waits and dispatches it again.
+  let input = first;
+  for (let n = 1; ; n++) {
+    const suffix = n === 1 ? "" : `-${n}`;
+    if (input.delaySeconds > 0) {
+      await step.sleep(`backoff${suffix}`, input.delaySeconds * 1000);
+    }
+    const next = await step.do(
+      `continuation${suffix}`,
+      {
+        retries: { limit: 3, delay: 100, backoff: "exponential" },
+        timeout: "15 minutes"
+      },
+      async () => {
+        let planned: ChatRecoveryAttemptInput | undefined;
+        let open = true;
+        try {
+          await runAttempt.run(
+            (attempt) => {
+              if (!open || planned || !journalableAttempt(attempt)) {
+                return false;
+              }
+              planned = attempt;
+              return true;
+            },
+            () => hooks[input.callback](input.data)
+          );
+        } finally {
+          open = false;
+        }
+        // SAFETY: the attempt is the recovery engine's JSON payload.
+        return (planned ?? null) as unknown as TaskJson;
+      }
+    );
+    if (!next) return;
+    input = next as unknown as ChatRecoveryAttemptInput;
   }
-  await step.do(
-    "continuation",
-    {
-      retries: { limit: 3, delay: 100, backoff: "exponential" },
-      timeout: "15 minutes"
-    },
-    () => hooks[input.callback](input.data)
+}
+
+const utf8 = new TextEncoder();
+
+/**
+ * Whether a recovery attempt fits in a step result (at most 1 MiB). One
+ * carrying a larger request body goes to the recovery Task, whose input is
+ * parted.
+ */
+export function journalableAttempt(attempt: ChatRecoveryAttemptInput): boolean {
+  return (
+    utf8.encode(JSON.stringify(attempt)).byteLength <=
+    MAX_SERIALIZED_BYTES - 1024
   );
+}
+
+/** Where a running recovery attempt plans the next one. */
+const runAttempt = new AsyncLocalStorage<
+  (attempt: ChatRecoveryAttemptInput) => boolean
+>();
+
+/**
+ * The run of the recovery attempt running now, as a place for the next
+ * attempt it plans, or `undefined` outside one. It declines once the
+ * attempt's step ended, a second attempt, and one too large to journal.
+ */
+export function currentRunAttempt():
+  | ((attempt: ChatRecoveryAttemptInput) => boolean)
+  | undefined {
+  return runAttempt.getStore();
 }

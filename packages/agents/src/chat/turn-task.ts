@@ -13,9 +13,9 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { TaskJson, TaskStep } from "../tasks";
-import { MAX_SERIALIZED_BYTES } from "../tasks/serialization";
 import type { ChatRecoveryAttemptInput } from "./recovery-engine";
 import {
+  journalableAttempt,
   runChatRecoveryAttempt,
   type ChatRecoveryTaskHooks
 } from "./recovery-task";
@@ -81,20 +81,6 @@ export type ChatTurnTaskHooks = {
   /** The host's recovery callbacks, as the recovery Task runs them. */
   readonly attempts: ChatRecoveryTaskHooks;
 };
-
-const utf8 = new TextEncoder();
-
-/**
- * Whether a recovery attempt fits in a step result (at most 1 MiB). One
- * carrying a larger request body goes to the recovery Task, whose input is
- * parted.
- */
-function journalable(attempt: ChatRecoveryAttemptInput): boolean {
-  return (
-    utf8.encode(JSON.stringify(attempt)).byteLength <=
-    MAX_SERIALIZED_BYTES - 1024
-  );
-}
 
 /** Where a live turn's interruption hands its recovery attempt. */
 const turnAttempt = new AsyncLocalStorage<
@@ -181,7 +167,7 @@ export function createChatTurnTaskDefinition(
             persisted,
             createdAt: step.createdAt,
             attempt: (next) => {
-              if (!journalable(next)) return false;
+              if (!journalableAttempt(next)) return false;
               scheduled = next;
               return true;
             }
@@ -195,7 +181,7 @@ export function createChatTurnTaskDefinition(
         let scheduled: ChatRecoveryAttemptInput | undefined;
         let open = true;
         const take = (next: ChatRecoveryAttemptInput): boolean => {
-          if (!open || scheduled || !journalable(next)) return false;
+          if (!open || scheduled || !journalableAttempt(next)) return false;
           try {
             // SAFETY: the attempt is the recovery engine's JSON payload.
             step.checkpoint.set(ATTEMPT, next as unknown as TaskJson);
