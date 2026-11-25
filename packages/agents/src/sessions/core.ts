@@ -539,6 +539,23 @@ export class SessionsCore {
   }
 
   /**
+   * Whether a legacy source table exists under exactly this name. SQLite
+   * resolves names regardless of case, so the probe alone would take an
+   * app's own `Assistant_Sessions` for `assistant_sessions`, and the lift
+   * would drop it. The exact-name read runs only when the probe finds a
+   * table: once the sources are gone, a start reads no `sqlite_master`.
+   */
+  #legacyTableExists(name: string): boolean {
+    return (
+      this.#tableExists(name) &&
+      this.io.sql<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        [name]
+      ).length > 0
+    );
+  }
+
+  /**
    * Build the FTS index on demand. Maintaining it costs an extra billed row
    * on every append, so it exists only on objects that have actually
    * searched; the first search pays a one-time SQL backfill instead.
@@ -791,7 +808,9 @@ export class SessionsCore {
     this.#pathTokens.clear();
     let complete = true;
     const drop = (name: string): void => {
-      if (this.#tableExists(name)) this.io.sqlWrite(`DROP TABLE ${name}`, []);
+      if (this.#legacyTableExists(name)) {
+        this.io.sqlWrite(`DROP TABLE ${name}`, []);
+      }
     };
     /**
      * Drop a lifted source only once every one of its rows has a copy holding
@@ -825,7 +844,7 @@ export class SessionsCore {
       });
     };
 
-    if (this.#tableExists("assistant_messages")) {
+    if (this.#legacyTableExists("assistant_messages")) {
       this.io.sqlWrite(
         `INSERT OR IGNORE INTO ${this.#t.messages}
           (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
@@ -843,7 +862,7 @@ export class SessionsCore {
       }
       dropWhenCopied("assistant_messages", `${this.#t.messages}`, "content");
     }
-    if (this.#tableExists("assistant_compactions")) {
+    if (this.#legacyTableExists("assistant_compactions")) {
       this.io.sqlWrite(
         `INSERT OR IGNORE INTO ${this.#t.compactions}
           (session_id, id, seq, summary, from_message_id, to_message_id, created_at)
@@ -883,7 +902,7 @@ export class SessionsCore {
    */
   liftLegacyFlatMessages(): boolean {
     const source = this.#legacyFlatMessages;
-    if (!source || !this.#tableExists(source.table)) return true;
+    if (!source || !this.#legacyTableExists(source.table)) return true;
     const { table } = source;
     const order = this.io
       .sql<{
