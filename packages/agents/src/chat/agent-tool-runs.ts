@@ -101,6 +101,8 @@ export interface AgentToolRunsHost {
   responseType: string;
   /** The error recorded for a run the chat was reset under. */
   resetError: string;
+  /** The turn queue's generation: a chat reset moves it on. */
+  turnGeneration(): number;
   /** Hold the isolate alive for the duration of `fn`. */
   keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>;
   /** Mint the request id of a run's turn. */
@@ -480,6 +482,9 @@ export class AgentToolRuns {
     // isolate awake can take longer for the first run on a fresh child than
     // for the next (F4).
     const before = this.#arrivals;
+    // A run waiting for its turn to start is reset with the chat, like a
+    // turn already queued.
+    const generation = this.host.turnGeneration();
     let arrived!: () => void;
     this.#arrivals = new Promise<void>((resolve) => {
       arrived = resolve;
@@ -489,6 +494,15 @@ export class AgentToolRuns {
       lifecycleRan = true;
       await before;
       arrived();
+      if (this.host.turnGeneration() !== generation) {
+        this.#settle(runId, () => ({
+          status: "error",
+          error: this.host.resetError
+        }));
+        this.controllers.delete(runId);
+        this.closeTailers(runId);
+        return;
+      }
       // Set when the run is left open for chat recovery to finish.
       let recovering = false;
       try {

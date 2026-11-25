@@ -628,6 +628,7 @@ export class AIChatAgent<
     storage: () => this.ctx.storage,
     responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
     resetError: "Agent tool run was skipped because the chat was cleared.",
+    turnGeneration: () => this._turns.queue.generation,
     keepAliveWhile: (fn) => this.keepAliveWhile(fn),
     generateRequestId: () => nanoid(),
     activeRequestId: () => this._resumableStream?.activeRequestId ?? null,

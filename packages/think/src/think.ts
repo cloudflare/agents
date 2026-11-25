@@ -2408,6 +2408,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     storage: () => this.ctx.storage,
     responseType: MSG_CHAT_RESPONSE,
     resetError: "Agent tool run was skipped before the child could finish.",
+    turnGeneration: () => this._turns.queue.generation,
     keepAliveWhile: (fn) => this.keepAliveWhile(fn),
     generateRequestId: () => crypto.randomUUID(),
     activeRequestId: () => admittedTurnContext.getStore()?.requestId,

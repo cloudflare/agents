@@ -142,6 +142,7 @@ function setup() {
   let keepAliveGate: Promise<void> = Promise.resolve();
   /** Waits before each next run's lifecycle starts, in order. */
   const keepAliveHolds: Promise<void>[] = [];
+  let generation = 0;
   const lifecycles: Promise<unknown>[] = [];
   let requestIds = 0;
   let flushes = 0;
@@ -182,6 +183,7 @@ function setup() {
     }),
     responseType: "response",
     resetError: "cleared",
+    turnGeneration: () => generation,
     keepAliveWhile: (fn) => {
       if (keepAliveError) {
         const error = keepAliveError;
@@ -249,6 +251,8 @@ function setup() {
     setActiveRequest: (requestId: string | null) => {
       activeRequestId = requestId;
     },
+    /** A chat reset: the turn queue moves to a new generation. */
+    resetChat: () => void generation++,
     /** Make holding the isolate wait on `hold` for the next run to start. */
     holdKeepAlive: (hold: Promise<void>) => void keepAliveHolds.push(hold),
     /** Make holding the isolate fail before the run's lifecycle runs. */
@@ -379,6 +383,35 @@ describe("AgentToolRuns", () => {
     releaseFirst();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(order).toEqual(["a", "b"]);
+  });
+
+  it("resets a run still waiting for its turn to start with the chat", async () => {
+    const { runs, store, holdKeepAlive, resetChat } = setup();
+    let releaseFirst = () => {};
+    holdKeepAlive(
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      })
+    );
+    holdKeepAlive(Promise.resolve());
+    const order: string[] = [];
+    const turnOf =
+      (name: string) =>
+      async (turn: { requestId: string }): Promise<AgentToolTurnResult> => {
+        order.push(name);
+        return { requestId: turn.requestId, status: "completed" };
+      };
+    await runs.start("run-a", START, turnOf("a"));
+    await runs.start("run-b", START, turnOf("b"));
+    resetChat();
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Both were waiting when the chat was cleared: neither turn runs.
+    expect(order).toEqual([]);
+    expect(store.terminal("run-b")).toEqual({
+      status: "error",
+      error: "cleared"
+    });
   });
 
   it("settles a run error when holding the isolate fails before it runs", async () => {
