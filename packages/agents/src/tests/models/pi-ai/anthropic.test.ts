@@ -291,6 +291,21 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
     );
   });
 
+  it("sends no disabled thinking to a catalog Claude that cannot turn it off", async () => {
+    // pi's gateway catalog marks Opus 5.5's "off" unsupported, after
+    // Anthropic's own entry; Haiku 5.5 can turn thinking off.
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    await collectEvents(
+      ai.streamSimple(ai("anthropic/claude-opus-5.5"), userContext("hi"))
+    );
+    await collectEvents(
+      ai.streamSimple(ai("anthropic/claude-haiku-5.5"), userContext("hi"))
+    );
+    expect(field(binding.calls[0]?.input, "thinking")).toBeUndefined();
+    expect(field(binding.calls[1]?.input, "thinking.type")).toBe("disabled");
+  });
+
   it("replays a thinking block with its signature on the next turn", async () => {
     const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
     const ai = createAI({ binding: asAi(binding) });

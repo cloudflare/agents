@@ -13,7 +13,10 @@
  */
 export function sseDataStream(): TransformStream<Uint8Array, string> {
   const decoder = new TextDecoder();
-  let buffer = "";
+  /** The incomplete last line, read once when its terminator arrives. */
+  let pending = "";
+  /** The last text ended in `\r`, so a leading `\n` completes that CRLF. */
+  let skipLeadingLf = false;
   let data: string[] = [];
 
   const flushEvent = (controller: TransformStreamDefaultController<string>) => {
@@ -40,39 +43,43 @@ export function sseDataStream(): TransformStream<Uint8Array, string> {
   };
 
   /**
-   * Consumes whole lines out of the buffer. A buffer ending in a lone `\r` is
-   * held back while more bytes may arrive, because the next byte decides
-   * whether that `\r` was a CRLF pair or a bare-CR terminator.
+   * Consumes the whole lines `text` completes. Only the new text is scanned,
+   * and an incomplete line is joined once, when it ends, so an event that
+   * arrives in many chunks costs time linear in its size.
    */
-  const drain = (
-    controller: TransformStreamDefaultController<string>,
-    final: boolean
+  const decodeText = (
+    text: string,
+    controller: TransformStreamDefaultController<string>
   ) => {
-    for (;;) {
-      const match = /\r\n|[\r\n]/.exec(buffer);
-      if (match === null) break;
-      const end = match.index + match[0].length;
-      if (!final && match[0] === "\r" && end === buffer.length) break;
-      consumeLine(buffer.slice(0, match.index), controller);
-      buffer = buffer.slice(end);
+    let start = skipLeadingLf && text.startsWith("\n") ? 1 : 0;
+    if (text.length > 0) skipLeadingLf = false;
+    for (let i = start; i < text.length; i++) {
+      const char = text.charCodeAt(i);
+      if (char !== 0x0a && char !== 0x0d) continue;
+      consumeLine(pending + text.slice(start, i), controller);
+      pending = "";
+      if (char === 0x0d) {
+        if (i + 1 === text.length) skipLeadingLf = true;
+        else if (text.charCodeAt(i + 1) === 0x0a) i++;
+      }
+      start = i + 1;
     }
+    pending += text.slice(start);
   };
 
   return new TransformStream<Uint8Array, string>({
     flush(controller) {
-      buffer += decoder.decode();
-      drain(controller, true);
+      decodeText(decoder.decode(), controller);
       // A server that closed without a final blank line still owes us the
       // last event; emit whatever is left rather than dropping it.
-      if (buffer !== "") {
-        consumeLine(buffer, controller);
-        buffer = "";
+      if (pending !== "") {
+        consumeLine(pending, controller);
+        pending = "";
       }
       flushEvent(controller);
     },
     transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      drain(controller, false);
+      decodeText(decoder.decode(chunk, { stream: true }), controller);
     }
   });
 }

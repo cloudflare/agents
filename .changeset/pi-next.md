@@ -1,0 +1,5 @@
+---
+"agents": patch
+---
+
+Support Pi 1.6.1 (`~1.6.1`). Pi tools now park with `{ kind: "sleep", signals, until }` instead of `{ sleep: { ... } }`, and a signal's state is `{ kind: "value", value }` or `{ kind: "expired" }`; a tool that still returns the old shape compiles but ends with an empty result, so update parking tools when you upgrade. `agents/models/pi-ai` now matches pi-ai 1.6.1: a chat-completions stream that ends with `finish_reason: "error"` fails with an error the Pi harness retries under its retry settings, `rawStopReason` records the provider's reason (with OpenRouter's `native_finish_reason`), an OpenRouter `stop` with no output and a failing native reason is a retryable error, and `onResponse` sees every response, failures included. The `agents/models` SSE decoder reads large streamed events in linear time. See [pi-durable 1.6.1's changelog](https://github.com/earendil-works/pi/blob/v1.6.1/packages/durable/CHANGELOG.md#161---2026-11-25) and [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/#tools-that-wait).

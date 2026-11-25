@@ -14,7 +14,7 @@ Pi owns everything about a run: the transcript, the inbox of steers and follow-u
 npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/pi-schema @earendil-works/chord
 ```
 
-The four Pi packages are optional peer dependencies of `agents`, at `~1.6.0`. pi-durable is experimental, and its API can change in minor releases, so `agents` supports one Pi minor at a time. A new Pi minor can also store conversations in formats the previous one cannot read: after a conversation runs on Pi 1.6, rolling your Worker back to an `agents` version on Pi 1.5 blocks its tool calls and model requests, as Pi 1.6 stores them in versions Pi 1.5 does not run. Roll forward to fix a bad deploy instead. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
+The four Pi packages are optional peer dependencies of `agents`, at `~1.6.1`. pi-durable is experimental, and its API can change in minor releases, so `agents` supports one Pi minor at a time. A new Pi minor can also store conversations in formats the previous one cannot read: after a conversation runs on Pi 1.6, rolling your Worker back to an `agents` version on Pi 1.5 blocks its tool calls and model requests, as Pi 1.6 stores them in versions Pi 1.5 does not run. Roll forward to fix a bad deploy instead. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
 
 ## Create the harness
 
@@ -353,7 +353,7 @@ The example app folds the transcript into chat messages, ignores `kind` and `dat
 
 ### Tools that wait
 
-A Pi tool can park instead of returning: it returns `{ sleep: { signals, until } }`, and Pi runs it again when one of the signals arrives or the deadline passes. While it waits, the call holds no invocation, so the object can hibernate or be evicted. Deliver a signal with `harness.signal()`, for example from the request that carries a person's answer:
+A Pi tool can park instead of returning: it returns `{ kind: "sleep", signals, until }`, and Pi runs it again when one of the signals arrives or the deadline passes. While it waits, the call holds no invocation, so the object can hibernate or be evicted. Deliver a signal with `harness.signal()`, for example from the request that carries a person's answer:
 
 ```ts
 import { defineSignal } from "@earendil-works/pi-durable";
@@ -367,11 +367,11 @@ const Answer = defineSignal({
 
 // In the tool's execute(args, api, context): park until the answer comes.
 const answer = await api.readSignal(Answer, "answer", context);
-if (answer !== undefined && "value" in answer) {
+if (answer?.kind === "value") {
   return { output: [{ type: "text", text: answer.value.text }] };
 }
 await showQuestion(api.taskId, args.question);
-return { sleep: { signals: [Answer.key("answer")] } };
+return { kind: "sleep", signals: [Answer.key("answer")] };
 
 // Later, in your agent, with the task id the question was shown with:
 await this.harness.signal(taskId, Answer, "answer", { text: "Yes" });
@@ -379,7 +379,7 @@ await this.harness.signal(taskId, Answer, "answer", { text: "Yes" });
 
 `harness.signal()` returns Pi's result: `delivered`, or `duplicate`, `invalid`, `closed` or `not_found` when the call did not take the value. It schedules the harness's wake before it hands Pi the value, so if the object dies while the woken call runs, the wake's alarm restarts it. Deliver signals through it rather than through `harness.pi()`.
 
-A tool can also give a `cancel()`, which Pi runs when a parked call is aborted, for example to cancel the work it was waiting on. A `beforeTool` hook can park a call the same way before it runs, to hold it for an approval, a rate limit or a budget. Pi runs that hook again each time it reopens, so the hook must be idempotent.
+A tool can also give a `cancel()`, which Pi runs when a parked call is aborted, for example to cancel the work it was waiting on. A `beforeTool` hook can park a call before it runs, by returning `{ sleep: { signals, until } }`, to hold it for an approval, a rate limit or a budget. Pi runs that hook again each time it reopens, so the hook must be idempotent.
 
 While a call is parked, its run is still going: `pending()` lists its operation as `running`, `busy()` is `true`, and Pi's `pi.live` shows the call's slot as `sleeping` or `waiting`. Refer to [Tools that park](https://github.com/earendil-works/pi/tree/main/packages/durable#tools-that-park) in the pi-durable README for the rules a parking tool follows.
 
@@ -393,7 +393,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 // Inside a tool's execute({ task }, api, context):
 const state = await api.readSignal(SubmissionSettled, "answered", context);
-if (state !== undefined && "value" in state) {
+if (state?.kind === "value") {
   const settled = state.value;
   if (settled.status !== "done" || settled.type === "write") {
     return {
@@ -426,7 +426,7 @@ await (
   },
   context
 );
-return { sleep: { signals: [SubmissionSettled.key("answered")] } };
+return { kind: "sleep", signals: [SubmissionSettled.key("answered")] };
 ```
 
 When the child's input settles, Pi delivers the settled record to the call in the same commit, and the tool runs again with it. Because the child is owned by the call, aborting the parent session stops the child too, and a rerun before the park was stored finds the same child instead of creating another. The `requestId` makes a rerun find the same submission. If the task to notify has ended or does not exist, the input still settles as usual. `session.submit()` and `session.continue()` take the same `notify` option, for a child your own code created.
