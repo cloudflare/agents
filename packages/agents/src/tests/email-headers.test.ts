@@ -40,6 +40,12 @@ describe("isAutoReplyEmail", () => {
     expect(isAutoReplyEmail(headers)).toBe(false);
   });
 
+  it("reads a header value with spaces around it", () => {
+    expect(isAutoReplyEmail([{ key: "Auto-Submitted", value: " no " }])).toBe(
+      false
+    );
+  });
+
   it("should detect X-Auto-Response-Suppress header", () => {
     const headers = createHeaders({
       "X-Auto-Response-Suppress": "All"

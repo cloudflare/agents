@@ -18,6 +18,11 @@ import {
   type InboundEmailRaw
 } from "./inbound-email";
 import { utf8ByteLength } from "../internal";
+import {
+  EMAIL_HEADER_VALUE_LIMIT,
+  referencesHeader as toReferencesHeader,
+  replySubject
+} from "../../../email-headers";
 
 export type EmailAddress = EmailSurfaceAddress;
 export type EmailRecipients = EmailSurfaceRecipients;
@@ -60,7 +65,6 @@ export type EmailChannelOptions = {
 };
 
 const DEFAULT_EMAIL_TITLE = "Agent message";
-const EMAIL_HEADER_VALUE_LIMIT = 2048;
 
 const PERMANENT_EMAIL_ERRORS = new Set([
   "E_VALIDATION_ERROR",
@@ -146,30 +150,6 @@ function mutableRecipients(
   return Array.isArray(value) ? [...value] : (value as EmailAddress);
 }
 
-function replySubject(subject: string | undefined): string | undefined {
-  if (!subject) return undefined;
-  return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
-}
-
-function referenceHeader(references: readonly string[]): string | undefined {
-  const unique = [...new Set(references.filter(Boolean))];
-  if (unique.length === 0) return undefined;
-  const root = `<${unique[0]}>`;
-  if (utf8ByteLength(root) > EMAIL_HEADER_VALUE_LIMIT) return undefined;
-
-  const selected = [root];
-  for (let index = unique.length - 1; index > 0; index -= 1) {
-    const candidate = `<${unique[index]}>`;
-    if (
-      utf8ByteLength([...selected, candidate].join(" ")) <=
-      EMAIL_HEADER_VALUE_LIMIT
-    ) {
-      selected.splice(1, 0, candidate);
-    }
-  }
-  return selected.join(" ");
-}
-
 /** Create a configured email Channel. */
 export function email(options: EmailChannelOptions): Channel<InboundEmailRaw> {
   if (!options.binding) {
@@ -199,7 +179,7 @@ export function email(options: EmailChannelOptions): Channel<InboundEmailRaw> {
     }
     const references = destination.address.references;
     const referencesHeader = references
-      ? referenceHeader(references)
+      ? toReferencesHeader(references)
       : undefined;
     if (references?.length && !referencesHeader) {
       return {
