@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import type { ChatResponseResult } from "../";
@@ -190,7 +190,6 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 8,
       chunkDelayMs: 80
     });
-    await delay(50);
 
     sendChatRequest(
       ws,
@@ -272,8 +271,8 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkDelayMs: 50
     });
 
+    // A dropped request is done: it can no longer start.
     await waitForDone(ws, "req-drop-2");
-    await delay(50);
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-drop-1"]);
     const terminalFor = (requestId: string) =>
@@ -342,14 +341,12 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 15,
       chunkDelayMs: 150
     });
-    await delay(100);
 
     sendChatRequest(ws, "req-merge-2", [firstUserMessage, secondUserMessage], {
       format: "plaintext",
       chunkCount: 15,
       chunkDelayMs: 150
     });
-    await delay(50);
 
     sendChatRequest(
       ws,
@@ -419,13 +416,11 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 15,
       chunkDelayMs: 100
     });
-    await delay(100);
     sendChatRequest(ws, "req-om-2", [firstUserMessage, secondUserMessage], {
       format: "plaintext",
       chunkCount: 2,
       chunkDelayMs: 10
     });
-    await delay(50);
     sendChatRequest(
       ws,
       "req-om-3",
@@ -482,7 +477,6 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 15,
       chunkDelayMs: 150
     });
-    await delay(50);
 
     sendChatRequest(
       ws,
@@ -494,7 +488,6 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkDelayMs: 80
       }
     );
-    await delay(50);
 
     sendChatRequest(
       ws,
@@ -696,7 +689,6 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 6,
       chunkDelayMs: 50
     });
-    await delay(40);
 
     sendChatRequest(ws, "req-regen-2", [firstUserMessage], {
       trigger: "regenerate-message",
@@ -733,20 +725,24 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // The first reply stays active until the clear has been handled.
+    await agentStub.holdStreamForTest("req-clear-1");
+    onTestFinished(() => agentStub.releaseStreamForTest("req-clear-1"));
     sendChatRequest(ws, "req-clear-1", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
       chunkCount: 8,
       chunkDelayMs: 50
     });
-    await delay(40);
 
     sendChatRequest(ws, "req-clear-2", [firstUserMessage, secondUserMessage], {
       format: "plaintext",
       chunkCount: 8,
       chunkDelayMs: 50
     });
-    await delay(20);
+    await waitUntil(
+      async () => await agentStub.isStreamHeldForTest("req-clear-1")
+    );
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     // Listen for the skipped request's `done` BEFORE sending the clear: it
@@ -762,6 +758,7 @@ describe("AIChatAgent messageConcurrency", () => {
     await clearBroadcast;
 
     await skippedDone;
+    await agentStub.releaseStreamForTest("req-clear-1");
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-clear-1"]);
@@ -880,7 +877,6 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 8,
       chunkDelayMs: 160
     });
-    await delay(40);
 
     sendChatRequest(
       ws,
@@ -892,7 +888,6 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkDelayMs: 160
       }
     );
-    await delay(20);
 
     sendChatRequest(
       ws,
@@ -990,7 +985,6 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 15,
       chunkDelayMs: 150
     });
-    await delay(50);
 
     sendChatRequest(
       ws,
@@ -1002,7 +996,6 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkDelayMs: 80
       }
     );
-    await delay(50);
 
     sendChatRequest(
       ws,
@@ -1044,7 +1037,6 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 3,
       chunkDelayMs: 30
     });
-    await delay(50);
 
     sendChatRequest(
       ws,
