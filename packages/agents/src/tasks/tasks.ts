@@ -1137,7 +1137,7 @@ export class Tasks<
         (${runId}, ${definition}, ${placed.input}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
          0, ${debounceUntil ?? (queued ? null : now)},
-         ${debounceUntil !== null ? "debounce" : queued && policy === "latest" ? "overlap" : null},
+         ${debounceUntil !== null ? "debounce" : policy === "queue" || policy === "drop" ? null : "overlap"},
          0, ${now}, ${now},
          ${lane}, ${place?.seq ?? null}, ${placed.parts})
     `;
@@ -1146,13 +1146,15 @@ export class Tasks<
     if (options.local !== undefined && startMode !== "queued") {
       this.#locals.set(runId, options.local);
     }
-    if (skipped.length > 0) {
-      await this.#finishSkipped(skipped, `superseded by ${runId}`);
-    }
     // The run starts only once its `pending` report returned: its wake is
     // published after it (a reset in between leaves the row's deadline,
     // which the next start mirrors).
     await this.#report(runId);
+    // The runs it replaced settle after its `pending` report: settling them
+    // can move the lane on to this run and start it.
+    if (skipped.length > 0) {
+      await this.#finishSkipped(skipped, `superseded by ${runId}`);
+    }
     // A run started now outside a lane, or a lane's free head that this
     // isolate starts at once for a caller holding its `local`, gets its first
     // wake from the claim that follows; until then its row's deadline is the

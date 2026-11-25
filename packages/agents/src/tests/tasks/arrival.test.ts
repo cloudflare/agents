@@ -234,6 +234,82 @@ describe("Tasks lane arrival policies", () => {
     );
   });
 
+  it("marks every latest or debounced arrival replaceable: a zero quiet period, and one into a held lane", async () => {
+    await runInDurableObject(harness(), async (instance: TaskHarnessObject) => {
+      // A held empty lane: the arrival is not behind anything, yet waits.
+      instance.tasks.holdLane("held");
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        { runId: "b", lane: "held", policy: "latest" }
+      );
+      const second = await instance.tasks.run(
+        "laned",
+        { label: "c" },
+        { runId: "c", lane: "held", policy: "latest" }
+      );
+      expect(second.superseded).toEqual(["b"]);
+
+      // A zero quiet period at a busy lane.
+      const a = gate();
+      instance.lanedGates.set("a", a.promise);
+      await instance.tasks.run(
+        "laned",
+        { label: "a" },
+        { runId: "a", lane: "l" }
+      );
+      await until(() => instance.lanedStarted.includes("a"));
+      await instance.tasks.run(
+        "laned",
+        { label: "d" },
+        { runId: "d", lane: "l", policy: { debounceMs: 0 } }
+      );
+      const next = await instance.tasks.run(
+        "laned",
+        { label: "e" },
+        { runId: "e", lane: "l", policy: "latest" }
+      );
+      expect(next.superseded).toEqual(["d"]);
+      a.open();
+    });
+  });
+
+  it("reports a replacement pending before the runs it replaced move the lane on to it", async () => {
+    await runInDurableObject(harness(), async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      const a = gate();
+      instance.lanedGates.set("a", a.promise);
+      await instance.tasks.run(
+        "laned",
+        { label: "a" },
+        { runId: "a", lane: "l" }
+      );
+      await until(() => instance.lanedStarted.includes("a"));
+      // b waits as the head-to-be with a quiet period still to run.
+      await instance.tasks.run("__cf_reported" as never, undefined as never, {
+        runId: "b",
+        lane: "l",
+        policy: { debounceMs: 60_000 }
+      });
+      a.open();
+      await until(
+        async () => (await instance.tasks.get("a"))?.status === "completed"
+      );
+      // c replaces b; settling b moves the lane on to c, which its caller's
+      // local starts here.
+      await instance.tasks.run("__cf_reported" as never, undefined as never, {
+        runId: "c",
+        lane: "l",
+        policy: "latest",
+        local: "C"
+      });
+      await until(() => instance.reports.includes("c:completed"));
+      const own = instance.reports.filter((entry) => entry.startsWith("c:"));
+      expect(own.indexOf("c:pending")).toBeLessThan(own.indexOf("c:running"));
+      expect(own[0]).toBe("c:pending");
+    });
+  });
+
   it("refuses a policy without a lane", async () => {
     await runInDurableObject(harness(), async (instance: TaskHarnessObject) => {
       await expect(
