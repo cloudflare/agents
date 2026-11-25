@@ -1456,9 +1456,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   /**
-   * Per socket, the frame the facet is being handed now: resolved once its
-   * call to the facet has gone out. Bounded by the open sockets; an entry
-   * goes when its socket's last frame has been handed over.
+   * Per socket, the frame the facet is being handed now: resolved
+   * and removed once its call to the facet has gone out. At most one entry
+   * per socket with a hand-over in progress.
    */
   readonly #inboundTails = new Map<string, Promise<void>>();
 
@@ -1467,40 +1467,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     message: WSMessage,
     replyBridge?: DynamicAgentConnectionBridge
   ): Promise<boolean> {
-    // Frames reach the facet in the order the socket delivered them (F11).
-    // Each waits until the frame before it has been handed over, not until
-    // the facet handled it: resolving the facet takes a call of its own,
-    // and one slower than the next frame's would let that frame go first.
-    const previous = this.#inboundTails.get(connection.id);
-    let handedOver!: () => void;
-    const tail = new Promise<void>((resolve) => {
-      handedOver = resolve;
-    });
-    this.#inboundTails.set(connection.id, tail);
-    try {
-      await previous;
-      const routed = await this.#resolveConnection(connection, {
-        create: false
-      });
-      if (routed.status === "no-match") return false;
-      if (routed.status === "dropped") return true;
-
+    return this.#handOverInOrder(connection, (child, meta) => {
       const bridge = this.#createConnectionBridge(connection);
-      const handled = routed.child._cf_handleSubAgentWebSocketMessage(
+      return child._cf_handleSubAgentWebSocketMessage(
         message,
         bridge,
-        routed.meta,
+        meta,
         replyBridge ?? bridge
       );
-      handedOver();
-      await handled;
-      return true;
-    } finally {
-      handedOver();
-      if (this.#inboundTails.get(connection.id) === tail) {
-        this.#inboundTails.delete(connection.id);
-      }
-    }
+    });
   }
 
   async forwardWebSocketClose(
@@ -1520,6 +1495,50 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       this.#createConnectionBridge(connection),
       routed.meta
     );
+    return true;
+  }
+
+  /**
+   * Hand a socket's frame to its facet in the order the socket delivered
+   * them (F11). Each waits until the one before it has been
+   * handed over, not until the facet handled it: resolving the facet takes
+   * a call of its own, and one slower than the next frame's would let that
+   * frame go first.
+   *
+   * @returns False when the socket does not target a sub-agent.
+   */
+  async #handOverInOrder(
+    connection: Connection,
+    handOver: (
+      child: DynamicAgentWebSocketEndpoint,
+      meta: DynamicAgentConnectionMeta
+    ) => Promise<void>
+  ): Promise<boolean> {
+    const previous = this.#inboundTails.get(connection.id);
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#inboundTails.set(connection.id, tail);
+    const handedOver = () => {
+      release();
+      if (this.#inboundTails.get(connection.id) === tail) {
+        this.#inboundTails.delete(connection.id);
+      }
+    };
+    let handled: Promise<void>;
+    try {
+      await previous;
+      const routed = await this.#resolveConnection(connection, {
+        create: false
+      });
+      if (routed.status === "no-match") return false;
+      if (routed.status === "dropped") return true;
+      handled = handOver(routed.child, routed.meta);
+    } finally {
+      handedOver();
+    }
+    await handled;
     return true;
   }
 
