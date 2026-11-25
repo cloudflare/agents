@@ -13,7 +13,7 @@ import { z } from "zod";
 import { harnessHookRules } from "../extensions/hooks";
 import { ExtensionManager } from "../extensions/manager";
 import { optionsExtension } from "../extensions/own";
-import { loadInProcess } from "../extensions/runtime";
+import { loadInProcess } from "../extensions/in-process";
 import type {
   ExtensionHandle,
   ThinkExtension,

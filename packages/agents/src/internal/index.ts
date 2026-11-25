@@ -83,11 +83,14 @@ export {
   type DeliverySink
 } from "./delivery";
 export { ExtensionManager, toolsOf } from "../harness/think/extensions/manager";
+export { ExtensionRuntime } from "../harness/think/extensions/runtime";
 export type {
   Drafts,
   ExtensionHandle,
   HookHandler,
   HookRules,
+  SchemaOf,
+  ThinkExtension,
   ToolEntry,
   ToolOutcome
 } from "../harness/think/extensions/types";

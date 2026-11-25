@@ -147,19 +147,20 @@ export type ExtensionHooks = {
 export type ExtensionHookName = keyof ExtensionHooks;
 
 /** @internal */
-export type ExtensionHookHandler<H extends ExtensionHookName> = (
-  context: ExtensionHooks[H][0]
-) => ExtensionHooks[H][1] | Promise<ExtensionHooks[H][1]>;
+export type ExtensionHookHandler<
+  H extends keyof M & string,
+  M extends HookMap = ExtensionHooks
+> = (context: M[H][0]) => M[H][1] | Promise<M[H][1]>;
 
-/** What an extension is given. @internal */
-export type ExtensionContext = {
+/** What an extension is given, with the hooks of `M`. @internal */
+export type ExtensionContext<M extends HookMap = ExtensionHooks> = {
   /** The name it was loaded under. */
   readonly name: string;
   readonly tools: { transform(change: Transform<ToolDraft>): void };
   readonly prompt: { transform(change: Transform<PromptDraft>): void };
-  on<H extends ExtensionHookName>(
+  on<H extends keyof M & string>(
     hook: H,
-    handler: ExtensionHookHandler<H>
+    handler: ExtensionHookHandler<H, M>
   ): void;
 };
 
@@ -169,7 +170,21 @@ export type ExtensionContext = {
  *
  * @internal
  */
-export type ThinkExtension = (ctx: ExtensionContext) => void | Promise<void>;
+export type ThinkExtension<M extends HookMap = ExtensionHooks> = (
+  ctx: ExtensionContext<M>
+) => void | Promise<void>;
+
+/**
+ * How the runtime turns a tool's input schema into JSON Schema and a
+ * validator. In process it is the AI SDK's `asSchema`; in a Worker, where
+ * a tool's schema is JSON Schema already, it passes it through.
+ *
+ * @internal
+ */
+export type SchemaOf = (schema: unknown) => {
+  readonly jsonSchema: JSONSchema7 | PromiseLike<JSONSchema7>;
+  readonly validate?: (value: unknown) => Validation | PromiseLike<Validation>;
+};
 
 /** A tool call as its owner sees it. @internal */
 export type ToolCall = {
