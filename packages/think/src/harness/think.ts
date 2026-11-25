@@ -288,6 +288,8 @@ export class Think<
       hooks: {
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
+          // The step's chunks reach extensions before its tool calls do.
+          await this.#chunkHooks;
           const decision = await this.#beforeToolCall(call);
           // As in Think: extensions hear of a call that runs, with the
           // input it runs with.
@@ -328,6 +330,7 @@ export class Think<
           } as unknown as ToolCallResultContext);
         },
         onStepFinish: async ({ message, finishReason, operationId, step }) => {
+          await this.#chunkHooks;
           await this.#extensionHooks.stepFinish({
             stepNumber: step,
             finishReason: finishReason ?? "unknown",
@@ -437,7 +440,11 @@ export class Think<
       await this.#skills.start(() => this.getSkills());
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
-        if (event.type === "reset") this.#messages = [];
+        if (event.type === "reset") {
+          this.#messages = [];
+          // A cleared conversation keeps nothing an extension sent during it.
+          this.#heldHostMessages = [];
+        }
         if (event.type === "message") {
           // Apply it now, so a synchronous read right after a turn sees it;
           // the re-read that follows picks up compaction and branching.
@@ -710,6 +717,10 @@ export class Think<
     | undefined;
 
   async #appendHeldHostMessages(): Promise<void> {
+    // A reply waiting for an approval or a client's result stays the last
+    // message, so the answer resumes it: the messages wait for a turn that
+    // settles.
+    if (awaitsInput(this.#messages.at(-1))) return;
     const held = this.#heldHostMessages;
     this.#heldHostMessages = [];
     for (const message of held) {
@@ -1026,10 +1037,10 @@ export class Think<
             own ?? {}
           );
     if (folded === undefined) {
-      this.#extensionTurn = {
-        operationId: turn.operationId,
-        changes: changesOf(own ?? {}, config)
-      };
+      // `messages` is the first call's transcript: a later call has the
+      // tool results since, so it is not kept.
+      const { messages: _messages, ...kept } = changesOf(own ?? {}, config);
+      this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
     this.#turnMaxSteps = config.maxSteps;
     // Nothing to change: neither the subclass nor an extension set a field.
@@ -1174,4 +1185,17 @@ function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
   }
   // SAFETY: every key is one of `folded`'s, a TurnConfig's.
   return changes as TurnConfig;
+}
+
+/** Whether a message is a reply waiting for an approval or a client. */
+function awaitsInput(message: UIMessage | undefined): boolean {
+  return (
+    message?.role === "assistant" &&
+    message.parts.some(
+      (part) =>
+        "state" in part &&
+        (part.state === "approval-requested" ||
+          part.state === "input-available")
+    )
+  );
 }
