@@ -930,6 +930,27 @@ describe("ThinkHarness untrusted input", () => {
     expect(await stub.dangerousRuns()).toBe(0);
   });
 
+  it("offers the same tools when beforeTurn edits the tool set it is shown", async () => {
+    const stub = fresh();
+    await stub.editToolSetInBeforeTurn();
+    await stub.prompt("hello");
+    expect(await stub.lastOffered()).toContain("multiply");
+  });
+
+  it("offers client tools after the server's, as Think does", async () => {
+    const stub = fresh();
+    const receipt = await stub.submitAsClient(
+      [{ id: "u1", role: "user", text: "hello" }],
+      [{ name: "aaa_client" }]
+    );
+    await stub.wait(receipt.operationId);
+    const offered = await stub.lastOffered();
+    expect(offered.at(-1)).toBe("aaa_client");
+    expect(offered.indexOf("multiply")).toBeLessThan(
+      offered.indexOf("aaa_client")
+    );
+  });
+
   it("does not let a client tool replace a server tool", async () => {
     const stub = fresh();
     const receipt = await stub.submitAsClient(

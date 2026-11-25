@@ -42,6 +42,7 @@ const BLOCK_KEY = "test:block";
 const ENDED_KEY = "test:ended";
 const LATE_TOOL_KEY = "test:late-tool";
 const HOLD_AFTER_KEY = "test:hold-after-tool-call";
+const EDIT_TOOLSET_KEY = "test:edit-toolset";
 const AFTER_KEY = "test:after-tool-call";
 
 const usage = {
@@ -146,6 +147,8 @@ function storageSql(storage: DurableObjectStorage) {
 export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** Every model call's prompt, in order, for this isolate. */
   readonly prompts: PromptMessage[][] = [];
+  /** The tool names each model call was offered, in order. */
+  readonly offered: string[][] = [];
   #releaseSlow: () => void = () => {};
   #slowHeld = new Promise<void>((resolve) => {
     this.#releaseSlow = resolve;
@@ -162,10 +165,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     tasks: this.tasks,
     system: "You are a test.",
     model: new MockLanguageModelV4({
-      doStream: async ({ prompt }) => {
+      doStream: async ({ prompt, tools }) => {
         // SAFETY: the mock's prompt is the provider's message list.
         const messages = prompt as unknown as PromptMessage[];
         this.prompts.push(messages);
+        this.offered.push((tools ?? []).map((offered) => offered.name));
         return { stream: this.#reply(messages) };
       }
     }),
@@ -214,7 +218,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
-      beforeTurn: () => {
+      beforeTurn: ({ toolSet }) => {
+        // A hook that edits the tools it is shown changes nothing offered.
+        if (this.ctx.storage.kv.get<boolean>(EDIT_TOOLSET_KEY)) {
+          delete toolSet.multiply;
+        }
         const system = this.ctx.storage.kv.get<string>(SYSTEM_KEY);
         return system ? { system } : undefined;
       },
@@ -1191,6 +1199,15 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   ended(): string[] {
     return this.ctx.storage.kv.get<string[]>(ENDED_KEY) ?? [];
+  }
+
+  editToolSetInBeforeTurn(): void {
+    this.ctx.storage.kv.put(EDIT_TOOLSET_KEY, true);
+  }
+
+  /** The tool names the last model call was offered, in order. */
+  lastOffered(): string[] {
+    return this.offered.at(-1) ?? [];
   }
 
   modelCalls(): number {

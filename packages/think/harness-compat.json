@@ -1,8 +1,8 @@
 {
-  "total": 1540,
-  "passed": 519,
-  "needThink": 1249,
-  "needThinkPassed": 228,
+  "total": 1541,
+  "passed": 520,
+  "needThink": 1250,
+  "needThinkPassed": 229,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -113,8 +113,8 @@
       "passed": 41
     },
     "fetch-tools.test.ts": {
-      "total": 51,
-      "passed": 50
+      "total": 52,
+      "passed": 51
     },
     "fiber.test.ts": {
       "total": 7,
@@ -403,6 +403,7 @@
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > never reuses a host extension id without a scope",
     "extension-manager.test.ts > ExtensionManager worker id stability > reuses the same worker id across managers for identical extensions",
     "fetch-tools.test.ts > Think — fetchTools integration > does not register fetch tools by default",
+    "fetch-tools.test.ts > Think — fetchTools integration > sends the workspace and fetch tools as they are given directly, in that order, byte for byte",
     "fetch-tools.test.ts > createFetchTools — config > generates one fetch_<name> tool per binding with a sanitized name",
     "fetch-tools.test.ts > createFetchTools — config > registers fetch_url only when a public allowlist is set",
     "fetch-tools.test.ts > createFetchTools — config > throws when neither allowlist nor bindings are configured",

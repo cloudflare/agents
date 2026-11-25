@@ -19,7 +19,14 @@ import type { StreamCallback, TurnContext } from "../../think";
 /** The tool definitions each model request carried, in order. */
 type RequestTools = { name?: string }[] | undefined;
 
-function createTextModel(requests: RequestTools[] = []): LanguageModel {
+/**
+ * A model that asks for one `write` call when `writePath` is set and the
+ * request does not yet carry its result, and otherwise answers "ok".
+ */
+function createTextModel(
+  requests: RequestTools[] = [],
+  writePath?: () => string | undefined
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -28,11 +35,39 @@ function createTextModel(requests: RequestTools[] = []): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream(options: { tools?: { name?: string }[] }) {
+    doStream(options: {
+      tools?: { name?: string }[];
+      prompt?: { role: string }[];
+    }) {
       requests.push(options.tools);
+      const path = writePath?.();
+      const answered = options.prompt?.some((m) => m.role === "tool");
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
+          if (path && !answered) {
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "write-1",
+              toolName: "write",
+              input: JSON.stringify({ path, content: "from the model\n" })
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: { unified: "tool-calls", raw: undefined },
+              usage: {
+                inputTokens: {
+                  total: 10,
+                  noCache: 10,
+                  cacheRead: 0,
+                  cacheWrite: 0
+                },
+                outputTokens: { total: 5, text: 5, reasoning: 0 }
+              }
+            });
+            controller.close();
+            return;
+          }
           controller.enqueue({ type: "text-start", id: "t" });
           controller.enqueue({ type: "text-delta", id: "t", delta: "ok" });
           controller.enqueue({ type: "text-end", id: "t" });
@@ -70,9 +105,32 @@ export class ThinkWorkspaceToolsAgent extends Think {
   #system = "";
   #overrideRead = false;
   readonly #requests: RequestTools[] = [];
+  #writePath: string | undefined;
 
   override getModel(): LanguageModel {
-    return createTextModel(this.#requests);
+    return createTextModel(this.#requests, () => this.#writePath);
+  }
+
+  /**
+   * Have the model call `write` for `path` in a turn, as a durable tool
+   * call; return the file as stored, and the reply's parts as kept.
+   */
+  async writeThroughModel(
+    path: string
+  ): Promise<{ file: string; parts: string[] }> {
+    this.#writePath = path;
+    await this.chat("write it", noopCallback);
+    this.#writePath = undefined;
+    const file = await new Response(
+      await this.workspace.fs.readFile(path)
+    ).text();
+    const messages = await this.getMessages();
+    return {
+      file,
+      parts: (messages.at(-1)?.parts ?? []).map((part) =>
+        "state" in part ? `${part.type}:${part.state}` : part.type
+      )
+    };
   }
 
   /**

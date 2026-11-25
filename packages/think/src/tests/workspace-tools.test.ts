@@ -36,6 +36,15 @@ describe("Think workspace tools", () => {
     expect(order).toEqual([...workspace, "shout"]);
   });
 
+  it("writes a file when the model calls the write tool, and keeps the call", async () => {
+    const agent = await freshAgent();
+    const { file, parts } = await agent.writeThroughModel(
+      "/workspace/model.txt"
+    );
+    expect(file).toBe("from the model\n");
+    expect(parts).toContain("tool-write:output-available");
+  });
+
   it("lets a same-name tool from getTools() replace a built-in", async () => {
     const agent = await freshAgent();
     await agent.overrideRead();
