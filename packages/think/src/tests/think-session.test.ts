@@ -2446,7 +2446,9 @@ describe("Think — sanitization", () => {
 
 describe("Think — model message conversion", () => {
   it("replays truncated workspace text read outputs as text", async () => {
-    const agent = await freshAgent("model-conversion-truncated-read");
+    const agent = await freshAgent(
+      `model-conversion-truncated-read-${crypto.randomUUID()}`
+    );
     const largeContent = "read-output ".repeat(100);
 
     await agent.persistTestMessage({
@@ -2471,7 +2473,10 @@ describe("Think — model message conversion", () => {
         } as UIMessage["parts"][number]
       ]
     });
-    for (let i = 0; i < 4; i++) {
+    // Read-time truncation cuts at multiples of `truncationStep` (8), keeping
+    // 4 to 11 recent messages at full fidelity. Twelve recent messages put 15
+    // in the prompt, so the cutoff (8) is past the read result.
+    for (let i = 0; i < 12; i++) {
       await agent.persistTestMessage({
         id: `recent-${i}`,
         role: "user",

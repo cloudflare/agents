@@ -1565,13 +1565,20 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
   });
 
   it("replays an aged tool output through a validating toModelOutput (#2014)", async () => {
-    const agent = await freshToolAgent("validated-output-aged");
+    // A fresh object each run: a retry must not inherit the last attempt's
+    // transcript, which moved the truncation cutoff.
+    const agent = await freshToolAgent(
+      `validated-output-aged-${crypto.randomUUID()}`
+    );
     await agent.setEchoExecuteMode("validated-output");
     const first = await agent.testChat("call echo");
     expect(first.error).toBeUndefined();
     expect(await agent.getEchoExecuteCount()).toBe(1);
 
-    for (let i = 0; i < 4; i++) {
+    // Read-time truncation cuts at multiples of `truncationStep` (8), keeping
+    // 4 to 11 recent messages at full fidelity. Six follow-ups put 15
+    // messages in the last prompt, so the cutoff (8) is past the tool result.
+    for (let i = 0; i < 6; i++) {
       const result = await agent.testChat(`follow-up ${i}`);
       expect(result.error).toBeUndefined();
       expect(result.done).toBe(true);

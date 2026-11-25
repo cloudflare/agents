@@ -3394,12 +3394,17 @@ describe("resume coordination during pending continuation", () => {
     // Held: the client is told a stream is pending, not that there is none.
     const pending = waitForMessageOfType(ws, MSG_STREAM_PENDING, 3000);
     const resuming = waitForMessageOfType(ws, MSG_STREAM_RESUMING, 10000);
-    ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
-    await pending;
-
-    // Once the continuation streams, the held request resumes it.
     const done = waitForDone(ws, 10000);
-    await agent.releaseContinuationStartForTest();
+    // Awaited below; a failure before then must not surface unhandled.
+    resuming.catch(() => {});
+    done.catch(() => {});
+    try {
+      ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
+      await pending;
+    } finally {
+      // Once the continuation streams, the held request resumes it.
+      await agent.releaseContinuationStartForTest();
+    }
     expect(await resuming).toMatchObject({ type: MSG_STREAM_RESUMING });
     await done;
     await closeWS(ws);

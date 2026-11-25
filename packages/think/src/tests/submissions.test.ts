@@ -1082,18 +1082,23 @@ describe("Think durable submissions", () => {
   });
 
   it("waitForSubmission resolves on cancellation and on reset", async () => {
+    // Two agents: on one, the cancel would make the second submission the
+    // head of its lane and wake it, so it could start before the reset.
     const agent = await freshAgent();
+    const resetAgent = await freshAgent();
     await agent.insertSubmissionForTest({ submissionId: "sub-wait-cancel" });
-    await agent.insertSubmissionForTest({ submissionId: "sub-wait-reset" });
+    await resetAgent.insertSubmissionForTest({
+      submissionId: "sub-wait-reset"
+    });
 
     const cancelled = agent.waitForSubmissionForTest("sub-wait-cancel");
-    const reset = agent.waitForSubmissionForTest("sub-wait-reset");
+    const reset = resetAgent.waitForSubmissionForTest("sub-wait-reset");
     await agent.cancelSubmissionForTest("sub-wait-cancel", "stop");
     await expect(cancelled).resolves.toMatchObject({
       status: "aborted",
       error: "stop"
     });
-    await agent.resetTurnStateForTest();
+    await resetAgent.resetTurnStateForTest();
     await expect(reset).resolves.toMatchObject({ status: "skipped" });
   });
 
