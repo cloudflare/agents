@@ -251,4 +251,28 @@ describe("inbound Email", () => {
       }
     });
   });
+
+  it("keeps a thread root too long to send, so a reply to it is refused rather than sent without its thread", async () => {
+    const root = `${"r".repeat(3000)}@example.com`;
+    const ingress = inboundEmail({
+      to: "agent@example.com",
+      from: "operator@example.com"
+    });
+    const result = claimed(
+      await ingress.receive(
+        emailInput(
+          rawEmail({
+            messageId: "message-3",
+            references: `<${root}> <message-2>`,
+            inReplyTo: "message-2",
+            text: "YES"
+          })
+        )
+      )
+    );
+    const surface = result.events[0]?.event.replySurface;
+    expect(
+      (surface?.address as { references?: string[] }).references?.[0]
+    ).toBe(root);
+  });
 });
