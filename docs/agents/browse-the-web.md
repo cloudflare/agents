@@ -410,9 +410,10 @@ browser = new Browser({
       if (!params.canceled) failed++;
     });
     tab.on("Page.frameNavigated", ({ params }) => {
-      const frame = params.frame as { parentId?: string; url: string };
       // The main frame only. The URL can carry tokens: redact it before you log it.
-      if (!frame.parentId) console.log(tab.scope, "navigated to", frame.url);
+      if (!params.frame.parentId) {
+        console.log(tab.scope, "navigated to", params.frame.url);
+      }
     });
     await Promise.all([tab.send("Network.enable"), tab.send("Page.enable")]);
     // Runs when the session closes, while the connection is still open.

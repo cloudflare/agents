@@ -29,12 +29,14 @@
  * follows page targets only.
  */
 
+import type { Protocol } from "devtools-protocol";
 import {
   CdpProtocolError,
   CdpTimeoutError,
   type CdpConnection,
   type CdpEvent,
   type CdpEventHandler,
+  type CdpEventMethod,
   type CdpSendOptions,
   type CdpWaitForOptions
 } from "./cdp-connection";
@@ -110,18 +112,22 @@ export interface BrowserHostTab {
    * Listen for this tab's `method` events, and return a function that
    * stops listening. Enable the domain first (`tab.send("Network.enable")`):
    * the SDK enables only what its built-ins need. Handlers run as
-   * `CdpConnection.on` runs them; one that throws is logged.
+   * `CdpConnection.on` runs them; one that throws is logged. The event is
+   * typed for `method`, as there.
    */
-  on(method: string, handler: CdpEventHandler): () => void;
+  on<M extends CdpEventMethod>(
+    method: M,
+    handler: CdpEventHandler<M>
+  ): () => void;
   /**
    * Wait for this tab's next `method` event, as `CdpConnection.waitFor`.
    * One still waiting when the session closes rejects, for code that
    * awaits it; one nothing awaits isn't an unhandled rejection.
    */
-  waitFor(
-    method: string,
-    options?: Omit<CdpWaitForOptions, "sessionId">
-  ): Promise<CdpEvent>;
+  waitFor<M extends CdpEventMethod>(
+    method: M,
+    options?: Omit<CdpWaitForOptions<M>, "sessionId">
+  ): Promise<CdpEvent<M>>;
   /**
    * Add a sentence to the notices the model gets when the session closes,
    * after the SDK's own. Up to 10 per session, each cut to 500
@@ -198,7 +204,7 @@ export interface HostTabWatcher {
 /** A dialog {@link dialogWatcher} answered. */
 interface AnsweredDialog {
   targetId: string;
-  type: string;
+  type: Protocol.Page.DialogType;
   /** Cut to 200 characters. */
   message: string;
   accepted: boolean;
@@ -232,16 +238,13 @@ export function dialogWatcher(): HostTabWatcher {
       cdp.on("Page.javascriptDialogOpening", (event) => {
         const tab = tabOf(event);
         if (!tab) return;
-        const type = String(event.params.type ?? "alert");
+        const { type, message } = event.params;
         const accepted = type === "alert" || type === "beforeunload";
         // Kept now, so the notices list dialogs in the order they opened.
         const dialog: AnsweredDialog = {
           targetId: tab.targetId,
           type,
-          message: String(event.params.message ?? "").slice(
-            0,
-            MAX_DIALOG_MESSAGE_LENGTH
-          ),
+          message: message.slice(0, MAX_DIALOG_MESSAGE_LENGTH),
           accepted
         };
         counts.set(tab.targetId, (counts.get(tab.targetId) ?? 0) + 1);
@@ -771,7 +774,6 @@ export class HostObserver {
     // and a tab the model closed isn't blocked any more.
     cdp.on("Target.detachedFromTarget", (event) => {
       const { sessionId } = event.params;
-      if (typeof sessionId !== "string") return;
       const tab = this.#tabsBySession.get(sessionId);
       if (tab) delete tab.blocked;
       this.#tabsBySession.delete(sessionId);

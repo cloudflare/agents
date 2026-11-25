@@ -42,12 +42,27 @@ expectTypeOf<BrowserHostTab["notify"]>().toEqualTypeOf<
 expectTypeOf<BrowserHostTab["send"]>().returns.toEqualTypeOf<
   Promise<unknown>
 >();
-expectTypeOf<BrowserHostTab["waitFor"]>().returns.toEqualTypeOf<
-  Promise<CdpEvent>
->();
-expectTypeOf<BrowserHostTab["on"]>().returns.toEqualTypeOf<() => void>();
 
 declare const tab: BrowserHostTab;
+
+// A tab's events are typed as CdpConnection's are.
+expectTypeOf(tab.on("Page.frameNavigated", () => {})).toEqualTypeOf<
+  () => void
+>();
+tab.on("Page.frameNavigated", ({ params }) => {
+  expectTypeOf(params.frame.url).toEqualTypeOf<string>();
+  // @ts-expect-error not a field of Page.frameNavigated
+  void params.frmae;
+});
+tab.on("Cloudflare.handoffComplete", ({ params }) => {
+  expectTypeOf(params).toEqualTypeOf<Record<string, unknown>>();
+});
+expectTypeOf(tab.waitFor("Page.loadEventFired")).toEqualTypeOf<
+  Promise<CdpEvent<"Page.loadEventFired">>
+>();
+void tab.waitFor("Page.frameNavigated", {
+  predicate: ({ params }) => params.frame.parentId === undefined
+});
 // The tab's session id is bound: callers can't pass their own.
 // @ts-expect-error sessionId is not a send option on a tab.
 void tab.send("Page.enable", {}, { sessionId: "other" });
