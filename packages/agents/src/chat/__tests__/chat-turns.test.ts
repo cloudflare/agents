@@ -1,7 +1,5 @@
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { memoryLane } from "./memory-lane";
+import { memoryLane, memoryStorage } from "./memory-lane";
 import { ChatRecoverySupersededError } from "../turn-stop";
-import { createChatAdmissionStore } from "../admissions";
 import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { UIMessage } from "ai";
@@ -160,16 +158,11 @@ describe("ChatTurns", () => {
   it("continues an answer after a reset that landed before its continuation ran", async () => {
     // A tab approved a tool call with autoContinue; the isolate reset during
     // the coalesce window, before the continuation's turn existed (P1).
-    const db = new DatabaseSync(":memory:");
+    const kept = memoryStorage();
     const admissions = () => ({
-      store: createChatAdmissionStore(() => ({
-        exec: (query: string, ...bindings: unknown[]) => {
-          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-          return { toArray: () => rows as Record<string, unknown>[] };
-        }
-      })),
+      storage: kept.storage,
       recoveryPending: async () => false,
-      recoveryOwns: async () => false,
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
@@ -212,16 +205,11 @@ describe("ChatTurns", () => {
   });
 
   it("does not continue after a reset what a stop dropped", async () => {
-    const db = new DatabaseSync(":memory:");
+    const kept = memoryStorage();
     const admissions = () => ({
-      store: createChatAdmissionStore(() => ({
-        exec: (query: string, ...bindings: unknown[]) => {
-          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-          return { toArray: () => rows as Record<string, unknown>[] };
-        }
-      })),
+      storage: kept.storage,
       recoveryPending: async () => false,
-      recoveryOwns: async () => false,
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
@@ -247,17 +235,51 @@ describe("ChatTurns", () => {
     expect(after.continuation.pending).toBeNull();
   });
 
+  it("schedules a continuation an earlier release kept", async () => {
+    const kept = memoryStorage();
+    host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
+    const restarted = new FakeHost();
+    restarted.transcript = host.transcript;
+    const after = new ChatTurns(restarted, {
+      defaultDebounceMs: 750,
+      lane: memoryLane(),
+      admissions: {
+        storage: kept.storage,
+        recoveryPending: async () => false,
+        released: () => ({
+          records: [
+            {
+              requestId: "cont-old",
+              seq: 1,
+              messageIds: [],
+              messages: [],
+              afterUserId: null,
+              decision: {
+                strategy: null,
+                overlapping: false,
+                debounceUntilMs: null
+              },
+              payload: { trigger: "continuation", targetMessageIds: ["a1"] },
+              stopped: false,
+              createdAt: 1
+            }
+          ],
+          drop: () => {}
+        }),
+        replayRequest: () => null
+      }
+    });
+    await after.resumeAdmissions();
+    expect(restarted.fired).toBe(1);
+    expect(after.continuation.pending?.requestId).toBe("cont-old");
+  });
+
   it("drops a kept continuation whose answered message is no longer the latest", async () => {
-    const db = new DatabaseSync(":memory:");
+    const kept = memoryStorage();
     const admissions = () => ({
-      store: createChatAdmissionStore(() => ({
-        exec: (query: string, ...bindings: unknown[]) => {
-          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-          return { toArray: () => rows as Record<string, unknown>[] };
-        }
-      })),
+      storage: kept.storage,
       recoveryPending: async () => false,
-      recoveryOwns: async () => false,
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];

@@ -89,6 +89,7 @@ export { storedAsFacet } from "../dynamic-agents/facet-flag";
 export {
   createChatTurnTaskDefinition,
   currentTurnCheckpoint,
+  runAppStart,
   type ChatTurnClosureEntry,
   type ChatTurnTaskHooks
 } from "./turn-task";
@@ -101,10 +102,9 @@ export {
   CHAT_ADMISSIONS_TABLE,
   ChatAdmissions,
   chatRecoveryNames,
-  createChatAdmissionStore,
   newUserMessageIds,
+  takeReleasedChatAdmissions,
   type ChatAdmissionRecord,
-  type ChatAdmissionStore,
   type ChatAdmissionsHost,
   type HeldChatMessage,
   type StoredSubmitDecision

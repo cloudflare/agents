@@ -20,6 +20,7 @@ type AdmissionStub = {
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
   seedQueuedRequestForTest(requestId: string): Promise<void>;
+  turnInNextOnStartForTest(): Promise<void>;
   getTranscriptsSeenForTest(): Promise<string[][]>;
   ageAdmissionsForTest(ms: number): Promise<void>;
 };
@@ -49,10 +50,23 @@ function sendChatRequest(
 }
 
 /** Every frame a socket receives, from now on. */
+/** Record what a tab is sent; it acks a resumed stream, as a client does. */
 function record(ws: WebSocket): unknown[] {
   const frames: unknown[] = [];
   ws.addEventListener("message", (event: MessageEvent) => {
-    frames.push(JSON.parse(event.data as string));
+    const frame = JSON.parse(event.data as string) as {
+      type?: unknown;
+      id?: unknown;
+    };
+    frames.push(frame);
+    if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: frame.id
+        })
+      );
+    }
   });
   return frames;
 }
@@ -335,6 +349,31 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const messages = await restarted.getPersistedMessages();
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
+  }, 40_000);
+
+  it("an onStart that waits for its own turn is not held behind a replay", async () => {
+    const room = crypto.randomUUID();
+    const binding = "AsyncStartAdmissionAgent";
+    const stub = await agent(binding, room);
+    await stub.seedQueuedRequestForTest("r9");
+    await stub.turnInNextOnStartForTest();
+    await reset(binding, room);
+    const restarted = await agent(binding, room);
+    // The onStart turn runs first; the replay runs once onStart is done.
+    const messages = await waitFor(
+      () => restarted.getPersistedMessages(),
+      (m) => m.filter((x) => x.role === "assistant").length === 2,
+      15_000
+    );
+    // onStart's turn answers first, then the replay.
+    expect(
+      messages.map((m) => [m.role, m.role === "user" ? m.id : ""])
+    ).toEqual([
+      ["user", "on-start"],
+      ["assistant", ""],
+      ["user", "u-r9"],
+      ["assistant", ""]
+    ]);
   }, 40_000);
 
   it("a request replayed after a reset runs once the app's onStart is done", async () => {

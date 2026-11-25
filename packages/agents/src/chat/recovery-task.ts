@@ -9,6 +9,7 @@
  * @internal Sibling-package support for AI Chat and Think.
  */
 
+import { holdLaneForReply } from "./turn-task";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isPlatformFailure, tryN } from "../retries";
 import type { TaskJson } from "../tasks";
@@ -106,6 +107,9 @@ export async function dispatchChatRecoveryToHandoff(
     }
     handoff.onDetachedError(error);
   });
+  // A lane run's recovery keeps the lane until the recovered reply ends: a
+  // question queued behind it must not stream beside it.
+  holdLaneForReply(turn);
   await Promise.race([turn, tracked]);
 }
 

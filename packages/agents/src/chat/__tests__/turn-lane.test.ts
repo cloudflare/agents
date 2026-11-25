@@ -38,6 +38,45 @@ describe("TurnLane", () => {
     expect(order).toEqual([1, 2, 3]);
   });
 
+  it("keeps a reserved turn's place until its work is handed over", async () => {
+    const queue = new TurnLane(memoryLaneRun());
+    const order: string[] = [];
+    const reserved = queue.reserve("r1");
+    const second = queue.enqueue("r2", async () => void order.push("r2"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // r2 waits behind r1's place, though r1 has no work yet.
+    expect(order).toEqual([]);
+    await reserved.enqueue(async () => void order.push("r1"));
+    await second;
+    expect(order).toEqual(["r1", "r2"]);
+  });
+
+  it("counts a turn running in place as queued work", async () => {
+    const queue = new TurnLane(memoryLaneRun());
+    let release = () => {};
+    queue.reserveInline("r1");
+    const running = queue.enqueue(
+      "r1",
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    // A request deciding under `drop` now sees work in the lane.
+    expect(queue.queuedCount()).toBe(1);
+    release();
+    await running;
+    expect(queue.queuedCount()).toBe(0);
+  });
+
+  it("moves on when a reserved turn is released without work", async () => {
+    const queue = new TurnLane(memoryLaneRun());
+    const reserved = queue.reserve("r1");
+    const second = queue.enqueue("r2", async () => "ran");
+    reserved.release();
+    expect(await second).toEqual({ status: "completed", value: "ran" });
+  });
+
   // ── Return value ─────────────────────────────────────────────────
 
   it("returns the fn's value in a completed result", async () => {

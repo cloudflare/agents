@@ -57,7 +57,7 @@ import {
   ChatTurns,
   AgentToolRuns,
   createAgentToolRunStore,
-  createChatAdmissionStore,
+  takeReleasedChatAdmissions,
   newUserMessageIds,
   clientResolvableToolNames,
   chatRecoveryNames,
@@ -105,6 +105,7 @@ import {
   chatRecoveryStorageAdapter,
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
+  runAppStart,
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
@@ -424,9 +425,9 @@ export class AIChatAgent<
       },
       // A request waiting in the queue survives an isolate reset.
       admissions: {
-        store: createChatAdmissionStore(() => this.ctx.storage.sql),
+        storage: () => this.ctx.storage,
         recoveryPending: () => this._chatRecoveryNames(),
-        recoveryOwns: (requestId) => this._chatRecoveryNames(requestId),
+        released: () => takeReleasedChatAdmissions(() => this.ctx.storage.sql),
         replayRequest: (record) => this._replayClientChatRequest(record)
       }
     }
@@ -830,6 +831,8 @@ export class AIChatAgent<
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn),
+        replay: (runId, record) => this._turns.replayInRun(runId, record),
+        parkUntil: (runId, reply) => this._turns.parkUntil(runId, reply),
         attempts
       })
     );
@@ -1000,7 +1003,7 @@ export class AIChatAgent<
           });
         }
       );
-      const started = await _onStart(props);
+      const started = await runAppStart(async () => _onStart(props));
       // Requests an earlier isolate accepted and never started run again,
       // once the app has started and no interrupted turn waits for recovery.
       this._appStartedForAdmissions = true;

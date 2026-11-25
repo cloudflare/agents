@@ -1,13 +1,11 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { memoryLane } from "./memory-lane";
-import { describe, expect, it } from "vitest";
-import { splitPieces } from "../../internal/platform-limits";
+import { MemoryWorld, memoryLane, memoryStorage } from "./memory-lane";
+import { describe, expect, it, vi } from "vitest";
 import {
   chatRecoveryNames,
-  createChatAdmissionStore,
   newUserMessageIds,
-  type ChatAdmissionRecord,
-  type HeldChatMessage
+  takeReleasedChatAdmissions,
+  type ChatAdmissionRecord
 } from "../admissions";
 import {
   ChatTurns,
@@ -50,34 +48,25 @@ class Host implements ChatTurnsHost {
 type Ended = "ran" | "skipped" | "aborted";
 
 /**
- * One isolate's turn core over a shared database: build a second one over
- * the same `db` and the first one's memory is gone, as after a reset.
+ * One isolate's turn core over one object's chat lane: build a second one
+ * over the same `world` and the first one's memory is gone, as after a
+ * reset. What the lane holds (its runs, their inputs and marks) is kept.
  */
 function isolate(
-  db: DatabaseSync,
+  world: MemoryWorld,
   options: {
     concurrency?: MessageConcurrency;
-    recoveryPending?: () => boolean;
-    recoveryOwns?: (requestId: string) => boolean | Promise<boolean>;
-    /** `false`: a turn's fiber is never accepted, so its record stays. */
+    /** `false`: a turn's model call never begins, so its run stays a record. */
     fiber?: boolean;
-    /** Every read of the store throws. */
-    failReads?: boolean;
+    /** Awaited in a request's `persist`: what lands while it waits. */
+    duringPersist?: (requestId: string) => Promise<void>;
+    /** Awaited after a request's turn, as a host's response hooks are. */
+    afterTurn?: (turns: ChatTurns) => Promise<void>;
+    /** What an earlier release left (`ChatTurnsAdmissionOptions.released`). */
+    released?: () => { records: ChatAdmissionRecord[]; drop(): void };
   } = {}
 ) {
-  let statements = 0;
-  const queries: string[] = [];
-  const store = createChatAdmissionStore(() => ({
-    exec: (query: string, ...bindings: unknown[]) => {
-      statements++;
-      queries.push(query);
-      if (options.failReads && /^\s*select/i.test(query)) {
-        throw new Error("store read failed");
-      }
-      const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-      return { toArray: () => rows as Record<string, unknown>[] };
-    }
-  }));
+  const lane = memoryLane(world);
   const host = new Host();
   const ended = new Map<string, Ended>();
   const started: string[] = [];
@@ -96,7 +85,10 @@ function isolate(
       payload: { requestId }
     },
     onDropped: () => ended.set(requestId, "skipped"),
-    persist: async () => true,
+    persist: async () => {
+      await options.duringPersist?.(requestId);
+      return true;
+    },
     join: async ({ messages }) => {
       joins.push(...messages.map((m) => m.id));
       for (const message of messages) {
@@ -108,6 +100,7 @@ function isolate(
       const done = turns.queue.enqueue(requestId, turn, { generation });
       onQueued();
       const result = await done;
+      await options.afterTurn?.(turns);
       return result.status === "stale" ? "stale" : "completed";
     },
     run: async () => {
@@ -116,8 +109,11 @@ function isolate(
         requestId,
         host.transcript.map((m) => m.id)
       );
-      // The turn's fiber is accepted.
-      if (options.fiber !== false) turns.turnAccepted(requestId);
+      // The turn's model call begins: its run is recovery's from now on.
+      if (options.fiber !== false) {
+        world.began.add(requestId);
+        turns.turnAccepted(requestId);
+      }
       await new Promise<void>((resolve) => gates.set(requestId, resolve));
       ended.set(requestId, "ran");
     },
@@ -127,11 +123,11 @@ function isolate(
 
   const turns: ChatTurns = new ChatTurns(host, {
     defaultDebounceMs: 0,
-    lane: memoryLane(),
+    lane,
     admissions: {
-      store,
-      recoveryPending: async () => options.recoveryPending?.() ?? false,
-      recoveryOwns: async (id) => (await options.recoveryOwns?.(id)) ?? false,
+      storage: memoryStorage(world.keys).storage,
+      recoveryPending: async () => false,
+      released: options.released ?? (() => ({ records: [], drop: () => {} })),
       replayRequest: (record) => {
         replayed.push(record);
         return request(record.requestId);
@@ -148,11 +144,17 @@ function isolate(
     joins,
     asked,
     ids: () => host.transcript.map((m) => m.id),
-    statements: () => statements,
-    queries: () => queries,
-    records: () => store.list().map((r) => r.requestId),
+    /** The requests waiting on the lane, not cleared. */
+    records: () => world.waiting(),
     send: (requestId: string) => turns.runClientRequest(request(requestId)),
     finish: (requestId: string) => gates.get(requestId)?.(),
+    /** This isolate's start: what earlier isolates left runs, in lane order. */
+    resume: async () => {
+      // The wake runs them; it settles when they do, so it is not awaited.
+      void lane.wake(turns);
+      await turns.resumeAdmissions();
+      await tick();
+    },
     copyTranscript: (from: { host: Host }) => {
       host.transcript = [...from.host.transcript];
     }
@@ -160,9 +162,13 @@ function isolate(
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+/** Long enough for a replay in the lane to settle and the next to start. */
+const flush = async () => {
+  for (let i = 0; i < 10; i++) await tick();
+};
 
 /** r1 runs, then `queued` wait behind it; the isolate then "resets". */
-async function queueBehindRunningTurn(db: DatabaseSync, queued: string[]) {
+async function queueBehindRunningTurn(db: MemoryWorld, queued: string[]) {
   const first = isolate(db);
   void first.send("r1");
   await tick();
@@ -173,7 +179,7 @@ async function queueBehindRunningTurn(db: DatabaseSync, queued: string[]) {
 
 describe("durable admission", () => {
   it("records a request until its turn has a fiber, and not after it ends", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = isolate(db);
     const r1 = a.send("r1");
     await tick();
@@ -188,90 +194,42 @@ describe("durable admission", () => {
     expect(a.started).toEqual(["r1", "r2"]);
   });
 
-  it("costs three statements and two written rows for a request that runs", async () => {
-    const db = new DatabaseSync(":memory:");
-    const a = isolate(db);
-    void a.send("warm");
-    await tick();
-    a.finish("warm");
-    await tick();
-    const before = a.statements();
-    const r = a.send("r1");
-    await tick();
-    a.finish("r1");
-    await r;
-    // insert at admission, delete at the fiber, delete (of nothing) at the end
-    expect(a.statements() - before).toBe(3);
-  });
-
-  it("takes no keep-alive hold, and reads no schema, on a start with nothing to replay", async () => {
-    const db = new DatabaseSync(":memory:");
+  it("takes no keep-alive hold on a start with nothing to replay", async () => {
+    const db = new MemoryWorld();
     const a = isolate(db);
     const before = a.host.holds;
-    await a.turns.resumeAdmissions();
+    await a.resume();
     expect(a.host.holds).toBe(before);
-    expect(a.queries().some((q) => q.includes("sqlite_master"))).toBe(false);
-  });
-
-  it("rejects, rather than throws, when the store cannot be read", async () => {
-    const db = new DatabaseSync(":memory:");
-    const a = isolate(db, { failReads: true });
-    let promise: Promise<void> | undefined;
-    expect(() => {
-      promise = a.turns.resumeAdmissions();
-    }).not.toThrow();
-    await expect(promise).rejects.toThrow("store read failed");
-  });
-
-  it("holds the object awake while it replays what a reset left", async () => {
-    const db = new DatabaseSync(":memory:");
-    await queueBehindRunningTurn(db, ["r2"]);
-    const b = isolate(db);
-    await b.turns.resumeAdmissions();
-    expect(b.host.holds).toBeGreaterThan(0);
   });
 
   it("replays what a reset left, in order, each as its own request", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2", "r3"]);
     expect(a.records()).toEqual(["r2", "r3"]);
 
     const b = isolate(db);
     b.copyTranscript(a);
-    await b.turns.resumeAdmissions();
+    await b.resume();
     await tick();
     expect(b.started).toEqual(["r2"]);
     b.finish("r2");
-    await tick();
-    await tick();
+    await flush();
     expect(b.started).toEqual(["r2", "r3"]);
     b.finish("r3");
     await tick();
     expect(b.records()).toEqual([]);
   });
 
-  it("waits while an interrupted turn waits for recovery", async () => {
-    const db = new DatabaseSync(":memory:");
+  it("a new request waits behind what a reset left, in lane order", async () => {
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
-    let pending = true;
-    const b = isolate(db, { recoveryPending: () => pending });
-    b.copyTranscript(a);
-    await b.turns.resumeAdmissions();
-    await tick();
-    expect(b.started).toEqual([]);
-    pending = false;
-    await b.turns.resumeAdmissions();
-    await tick();
-    expect(b.started).toEqual(["r2"]);
-  });
-
-  it("a new request replays the records first, ahead of itself, recovery or not", async () => {
-    const db = new DatabaseSync(":memory:");
-    const a = await queueBehindRunningTurn(db, ["r2"]);
-    const b = isolate(db, { recoveryPending: () => true });
+    const b = isolate(db);
     b.copyTranscript(a);
     void b.send("r9");
     await tick();
+    // r1's run (recovery's) and r2's are ahead of it in the lane.
+    expect(b.started).toEqual([]);
+    await b.resume();
     await tick();
     expect(b.started).toEqual(["r2"]);
     b.finish("r2");
@@ -279,16 +237,15 @@ describe("durable admission", () => {
     await tick();
     expect(b.started).toEqual(["r2", "r9"]);
   });
-
   it("a stop while the request is only a record ends it aborted after the reset", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
-    const b = isolate(db, { recoveryPending: () => true });
+    const b = isolate(db);
     b.copyTranscript(a);
     await b.turns.cancel("r2");
     const c = isolate(db);
     c.copyTranscript(a);
-    await c.turns.resumeAdmissions();
+    await c.resume();
     await tick();
     expect(c.started).toEqual([]);
     expect(c.ended.get("r2")).toBe("aborted");
@@ -296,51 +253,40 @@ describe("durable admission", () => {
   });
 
   it("a stop of a queued request is on its record, so a reset does not undo it", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
     await a.turns.cancel("r2");
     const b = isolate(db);
     b.copyTranscript(a);
-    await b.turns.resumeAdmissions();
+    await b.resume();
     await tick();
     expect(b.started).toEqual([]);
     expect(b.ended.get("r2")).toBe("aborted");
   });
 
   it("a clear deletes every record", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
     a.turns.reset();
     expect(a.records()).toEqual([]);
   });
 
-  it("leaves a request recovery owns to recovery", async () => {
-    const db = new DatabaseSync(":memory:");
-    const a = await queueBehindRunningTurn(db, ["r2"]);
-    const b = isolate(db, { recoveryOwns: (id) => id === "r2" });
-    b.copyTranscript(a);
-    await b.turns.resumeAdmissions();
-    await tick();
-    expect(b.replayed).toEqual([]);
-    expect(b.records()).toEqual([]);
-  });
-
   it("a replay stores the message its record holds, after the transcript", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
     // The waiting message is on the record only.
     expect(a.ids()).toEqual(["u-r1"]);
     const b = isolate(db);
     b.copyTranscript(a);
     b.host.transcript.push({ id: "a-r1", role: "assistant", parts: [] });
-    await b.turns.resumeAdmissions();
+    await b.resume();
     await tick();
     expect(b.started).toEqual(["r2"]);
     expect(b.asked.get("r2")).toEqual(["u-r1", "a-r1", "u-r2"]);
   });
 
   it("a reset after the message joined does not store it again", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = isolate(db, { fiber: false });
     void a.send("r1");
     await tick();
@@ -354,7 +300,7 @@ describe("durable admission", () => {
     expect(a.records()).toEqual(["r2"]);
     const b = isolate(db);
     b.copyTranscript(a);
-    await b.turns.resumeAdmissions();
+    await b.resume();
     await tick();
     expect(b.started).toEqual(["r2"]);
     expect(b.joins).toEqual([]);
@@ -362,7 +308,7 @@ describe("durable admission", () => {
   });
 
   it("under `latest`, a request a later one superseded stays superseded", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const first = isolate(db, { concurrency: "latest" });
     void first.send("r1");
     await tick();
@@ -371,47 +317,22 @@ describe("durable admission", () => {
     await tick();
     const b = isolate(db, { concurrency: "latest" });
     b.copyTranscript(first);
-    await b.turns.resumeAdmissions();
-    await tick();
-    await tick();
+    await b.resume();
+    await flush();
     expect(b.ended.get("r2")).toBe("skipped");
     expect(b.started).toEqual(["r3"]);
     // The superseded question is kept, before the one that superseded it.
     expect(b.asked.get("r3")).toEqual(["u-r1", "u-r2", "u-r3"]);
   });
 
-  it("under `latest`, a new request during recovery is not superseded by the older replays", async () => {
-    const db = new DatabaseSync(":memory:");
-    const first = isolate(db, { concurrency: "latest" });
-    void first.send("r1");
-    await tick();
-    void first.send("r2");
-    void first.send("r3");
-    await tick();
-    // After the reset recovery still owns r1's turn, so nothing is replayed
-    // until a new request arrives.
-    const b = isolate(db, {
-      concurrency: "latest",
-      recoveryPending: () => true
-    });
-    b.copyTranscript(first);
-    void b.send("r4");
-    await tick();
-    await tick();
-    await tick();
-    expect(b.started).toEqual(["r4"]);
-    expect(b.ended.get("r2")).toBe("skipped");
-    expect(b.ended.get("r3")).toBe("skipped");
-  });
-
   it("tabs are sent a waiting message after the transcript, named as queued", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
     const view = a.turns.clientView(a.host.transcript);
     expect(view.messages.map((m) => m.id)).toEqual(["u-r1", "u-r2"]);
     expect(view.queuedMessageIds).toEqual(["u-r2"]);
     // After a reset, before the replay, too.
-    const b = isolate(db, { recoveryPending: () => true });
+    const b = isolate(db);
     b.copyTranscript(a);
     expect(b.turns.clientView(b.host.transcript).queuedMessageIds).toEqual([
       "u-r2"
@@ -426,7 +347,7 @@ describe("durable admission", () => {
   });
 
   it("a running turn's request never holds the question queued behind it", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2", "r3"]);
     expect(a.asked.get("r1")).toEqual(["u-r1"]);
     a.host.transcript.push({ id: "a-r1", role: "assistant", parts: [] });
@@ -442,7 +363,7 @@ describe("durable admission", () => {
   });
 
   it("a request stopped while it waits keeps its question, unanswered", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2", "r3"]);
     await a.turns.cancel("r2");
     a.finish("r1");
@@ -453,7 +374,7 @@ describe("durable admission", () => {
   });
 
   it("a clear drops a waiting message: it is never stored", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
     a.turns.reset();
     a.host.transcript = [];
@@ -464,22 +385,49 @@ describe("durable admission", () => {
     expect(a.turns.clientView(a.host.transcript).messages).toEqual([]);
   });
 
-  it("a request whose record cannot be written ends with an error", async () => {
+  it("a parked run is ended though its first settle throws", async () => {
+    const lane = memoryLane();
+    const tasks = lane.tasks();
+    const settled: string[] = [];
+    let calls = 0;
     const turns = new ChatTurns(new Host(), {
       defaultDebounceMs: 0,
-      lane: memoryLane(),
-      admissions: {
-        store: {
-          ...createChatAdmissionStore(() => ({
-            exec: () => ({ toArray: () => [] })
-          })),
-          add: () => {
+      lane: {
+        definition: lane.definition,
+        tasks: () => ({
+          ...tasks,
+          settle: async (runId: string) => {
+            if (++calls === 1) throw new Error("storage hiccup");
+            settled.push(runId);
+            return true;
+          }
+        })
+      }
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    turns.parkUntil("run-1", Promise.resolve());
+    await vi.waitFor(() => expect(settled).toEqual(["run-1"]));
+    errors.mockRestore();
+  });
+
+  it("a request whose record cannot be written ends with an error", async () => {
+    const lane = memoryLane();
+    const tasks = lane.tasks();
+    const turns = new ChatTurns(new Host(), {
+      defaultDebounceMs: 0,
+      lane: {
+        definition: lane.definition,
+        tasks: () => ({
+          ...tasks,
+          run: async () => {
             throw new Error("SQLITE_TOOBIG");
-          },
-          list: () => []
-        },
+          }
+        })
+      },
+      admissions: {
+        storage: memoryStorage().storage,
         recoveryPending: async () => false,
-        recoveryOwns: async () => false,
+        released: () => ({ records: [], drop: () => {} }),
         replayRequest: () => null
       }
     });
@@ -509,22 +457,124 @@ describe("durable admission", () => {
   });
 
   it("replays a record however long its request waited", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
-    // The turn ahead of it ran for two hours (a long agent-tool run).
-    db.prepare("update cf_agents_chat_admissions set created_at = ?").run(
-      Date.now() - 2 * 60 * 60 * 1000
-    );
+    // The turn ahead of it ran for two hours (a long agent-tool run): the
+    // run keeps no deadline while it waits.
     const b = isolate(db);
     b.copyTranscript(a);
-    await b.turns.resumeAdmissions();
+    await b.resume();
     await tick();
     expect(b.started).toEqual(["r2"]);
     expect(b.ids()).toContain("u-r2");
   });
 
+  it("a replayed request's follow-up turn runs: the lane moves on after its turn", async () => {
+    const db = new MemoryWorld();
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    let followed = false;
+    const b = isolate(db, {
+      // A response hook that queues a turn of its own and waits for it.
+      afterTurn: async (turns) => {
+        await turns.queue.enqueue("follow", async () => {
+          followed = true;
+        });
+      }
+    });
+    b.copyTranscript(a);
+    await b.resume();
+    await flush();
+    b.finish("r2");
+    await flush();
+    expect(followed).toBe(true);
+  });
+
+  it("carries an earlier release's records over before it drops their table", async () => {
+    const db = new MemoryWorld();
+    let waitingAtDrop: string[] = [];
+    const record: ChatAdmissionRecord = {
+      requestId: "old",
+      seq: 1,
+      messageIds: ["u-old"],
+      messages: [{ id: "u-old", role: "user" }],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: { requestId: "old" },
+      stopped: false,
+      createdAt: 1
+    };
+    const b = isolate(db, {
+      released: () => ({
+        records: [record],
+        drop: () => {
+          waitingAtDrop = db.waiting();
+        }
+      })
+    });
+    await b.resume();
+    await flush();
+    // The replacement was on the lane before the old rows went.
+    expect(waitingAtDrop).toEqual(["old"]);
+    expect(b.started).toEqual(["old"]);
+  });
+
+  it("carries an earlier release's records once, though a reset cut the first carry short", async () => {
+    const db = new MemoryWorld();
+    const record: ChatAdmissionRecord = {
+      requestId: "old",
+      seq: 1,
+      messageIds: ["u-old"],
+      messages: [{ id: "u-old", role: "user" }],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: { requestId: "old" },
+      stopped: false,
+      // The table was never dropped: the reset landed first.
+      createdAt: 1
+    };
+    const released = () => ({ records: [record], drop: () => {} });
+    const first = isolate(db, { released });
+    await first.turns.resumeAdmissions();
+    const b = isolate(db, { released });
+    await b.turns.resumeAdmissions();
+    // One run for the request, not one per carry.
+    expect(db.runs.size).toBe(1);
+    await b.resume();
+    await flush();
+    expect(b.started).toEqual(["old"]);
+  });
+
+  it("a cleared request's message is not drawn as waiting after a restart", async () => {
+    const db = new MemoryWorld();
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    a.turns.reset();
+    const b = isolate(db);
+    b.copyTranscript(a);
+    expect(b.turns.clientView(b.host.transcript).queuedMessageIds).toBe(
+      undefined
+    );
+  });
+
+  it("replays in admission order when the lane's listing ties", async () => {
+    const db = new MemoryWorld();
+    const first = isolate(db, { concurrency: "latest" });
+    void first.send("r1");
+    await tick();
+    void first.send("r2");
+    void first.send("r3");
+    await tick();
+    // Runs accepted in one millisecond list in no set order.
+    db.listReversed = true;
+    const b = isolate(db, { concurrency: "latest" });
+    b.copyTranscript(first);
+    await b.resume();
+    await flush();
+    expect(b.ended.get("r2")).toBe("skipped");
+    expect(b.started).toEqual(["r3"]);
+  });
+
   it("a replay whose conversation moved on stores its question and ends skipped", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
     const b = isolate(db);
     b.copyTranscript(a);
@@ -535,7 +585,7 @@ describe("durable admission", () => {
       { id: "u-new", role: "user", parts: [] },
       { id: "a-new", role: "assistant", parts: [] }
     );
-    await b.turns.resumeAdmissions();
+    await b.resume();
     await tick();
     expect(b.started).toEqual([]);
     expect(b.ended.get("r2")).toBe("skipped");
@@ -545,39 +595,37 @@ describe("durable admission", () => {
   });
 
   it("a stop that lands while the replay awaits still stops the request", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
     const holder: { b?: ReturnType<typeof isolate> } = {};
     const b = isolate(db, {
-      recoveryOwns: async (id) => {
+      duringPersist: async (id) => {
         await holder.b?.turns.cancel(id);
-        return false;
       }
     });
     holder.b = b;
     b.copyTranscript(a);
-    await b.turns.resumeAdmissions();
+    await b.resume();
     await tick();
     expect(b.started).toEqual([]);
     expect(b.ended.get("r2")).toBe("aborted");
   });
 
   it("a clear that lands while the replay awaits leaves nothing to replay", async () => {
-    const db = new DatabaseSync(":memory:");
+    const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
     const holder: { b?: ReturnType<typeof isolate> } = {};
     const b = isolate(db, {
-      recoveryOwns: async () => {
+      duringPersist: async () => {
         holder.b?.turns.reset();
-        return false;
       }
     });
     holder.b = b;
     b.copyTranscript(a);
-    await b.turns.resumeAdmissions();
+    await b.resume();
     await tick();
-    expect(b.replayed).toEqual([]);
     expect(b.started).toEqual([]);
+    expect(b.ended.get("r2")).toBe("skipped");
   });
 });
 
@@ -588,7 +636,7 @@ describe("chatRecoveryNames", () => {
   ) {
     const db = new DatabaseSync(":memory:");
     db.exec(
-      "create table cf_agents_task_runs (definition text, status text, input text, metadata text, lane text, checkpoint text)"
+      "create table cf_agents_task_runs (definition text, status text, wait_reason text, input text, metadata text, lane text, checkpoint text)"
     );
     db.prepare(
       "insert into cf_agents_task_runs (definition, status, input, metadata) values (?, ?, ?, ?)"
@@ -679,92 +727,86 @@ describe("chatRecoveryNames", () => {
   });
 });
 
-describe("held messages", () => {
-  const sqlOver =
-    (db: DatabaseSync, limit = Infinity) =>
-    () => ({
-      exec: (query: string, ...bindings: unknown[]) => {
-        // SQLite's row limit, smaller here: a binding over it fails the write.
-        for (const binding of bindings) {
-          if (typeof binding === "string" && binding.length > limit) {
-            throw new Error("SQLITE_TOOBIG");
-          }
-        }
-        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-        return { toArray: () => rows as Record<string, unknown>[] };
-      }
-    });
-
-  it("split on the size of the messages and the payload together", () => {
-    const db = new DatabaseSync(":memory:");
-    // Each part alone is under a piece, both together are over.
-    const store = createChatAdmissionStore(sqlOver(db, 500_000));
-    const text = "m".repeat(300_000);
-    const body = { big: "b".repeat(300_000) };
-    store.add({
-      requestId: "r1",
-      messages: [{ id: "u", role: "user", text } as HeldChatMessage],
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: { body }
-    });
-    const [record] = createChatAdmissionStore(sqlOver(db)).list();
-    expect(
-      (record.messages[0] as HeldChatMessage & { text: string }).text
-    ).toBe(text);
-    expect(record.payload).toEqual({ body });
+describe("takeReleasedChatAdmissions", () => {
+  const sql = (db: DatabaseSync) => () => ({
+    exec: (query: string, ...bindings: unknown[]) => {
+      const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
+      return { toArray: () => rows as Record<string, unknown>[] };
+    }
   });
 
-  it("a new isolate deletes a split record's pieces before it lists", () => {
+  it("reads an earlier release's records in order, pieces included, and drops the tables", () => {
     const db = new DatabaseSync(":memory:");
-    createChatAdmissionStore(sqlOver(db)).add({
-      requestId: "r1",
-      messages: [
-        { id: "u", role: "user", text: "x".repeat(600_000) } as HeldChatMessage
-      ],
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: null
+    db.exec(`create table cf_agents_chat_admissions (
+      request_id text primary key, seq integer, message_ids text,
+      messages text, decision text, payload text, stopped integer,
+      created_at integer, message_pieces integer, after_user_id text)`);
+    db.exec(
+      "create table cf_agents_chat_admissions_messages (request_id text, piece integer, data text)"
+    );
+    const both = JSON.stringify({
+      messages: [{ id: "u2", role: "user" }],
+      payload: { big: "x".repeat(10) }
     });
-    createChatAdmissionStore(sqlOver(db)).remove("r1");
-    expect(
-      db
-        .prepare("select count(*) as n from cf_agents_chat_admissions_messages")
-        .get()
-    ).toEqual({ n: 0 });
+    const insert = db.prepare(
+      "insert into cf_agents_chat_admissions values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    insert.run("r2", 2, '["u2"]', null, null, null, 1, 2, 2, "u1");
+    insert.run(
+      "r1",
+      1,
+      '["u1"]',
+      '[{"id":"u1","role":"user"}]',
+      '{"strategy":"latest","overlapping":true,"debounceUntilMs":null}',
+      '{"trigger":"submit-message"}',
+      0,
+      1,
+      0,
+      null
+    );
+    const piece = db.prepare(
+      "insert into cf_agents_chat_admissions_messages values (?, ?, ?)"
+    );
+    piece.run("r2", 0, both.slice(0, 20));
+    piece.run("r2", 1, both.slice(20));
+
+    const released = takeReleasedChatAdmissions(sql(db));
+    const { records } = released;
+    expect(records.map((r) => r.requestId)).toEqual(["r1", "r2"]);
+    expect(records[0]).toMatchObject({
+      messages: [{ id: "u1", role: "user" }],
+      decision: { strategy: "latest", overlapping: true },
+      payload: { trigger: "submit-message" },
+      stopped: false
+    });
+    expect(records[1]).toMatchObject({
+      messages: [{ id: "u2", role: "user" }],
+      payload: { big: "x".repeat(10) },
+      stopped: true,
+      afterUserId: "u1"
+    });
+    // The tables stay until the records are carried over, then go.
+    expect(takeReleasedChatAdmissions(sql(db)).records).toHaveLength(2);
+    released.drop();
+    expect(takeReleasedChatAdmissions(sql(db)).records).toEqual([]);
   });
 
-  it("round-trip a large message with a surrogate pair on a piece boundary", () => {
+  it("reads the oldest table, with no messages column", () => {
     const db = new DatabaseSync(":memory:");
-    const store = createChatAdmissionStore(() => ({
-      exec: (query: string, ...bindings: unknown[]) => {
-        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-        return { toArray: () => rows as Record<string, unknown>[] };
-      }
-    }));
-    // The JSON opens with `[{"id":"u","role":"user","text":"` (33 units),
-    // so an emoji at the cut lands its high surrogate at 499,999.
-    const head = '[{"id":"u","role":"user","text":"';
-    const text = `${"a".repeat(500_000 - head.length - 1)}😀${"b".repeat(600_000)}`;
-    store.add({
-      requestId: "r1",
-      messages: [{ id: "u", role: "user", text } as HeldChatMessage],
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: null
-    });
-    // A new isolate reads it from storage.
-    const again = createChatAdmissionStore(() => ({
-      exec: (query: string, ...bindings: unknown[]) => {
-        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-        return { toArray: () => rows as Record<string, unknown>[] };
-      }
-    }));
-    const [record] = again.list();
+    db.exec(`create table cf_agents_chat_admissions (
+      request_id text primary key, seq integer, message_ids text,
+      decision text, payload text, stopped integer, created_at integer)`);
+    db.prepare(
+      "insert into cf_agents_chat_admissions values (?, ?, ?, ?, ?, ?, ?)"
+    ).run("r1", 1, '["u1"]', null, null, 0, 1);
+    const { records } = takeReleasedChatAdmissions(sql(db));
+    expect(records).toMatchObject([{ requestId: "r1", messages: [] }]);
+  });
+
+  it("reads nothing on an object with no table", () => {
     expect(
-      (record.messages[0] as HeldChatMessage & { text: string }).text
-    ).toBe(text);
-    expect(splitPieces("ab😀", 3)).toEqual(["ab", "😀"]);
+      takeReleasedChatAdmissions(sql(new DatabaseSync(":memory:"))).records
+    ).toEqual([]);
   });
 });
 

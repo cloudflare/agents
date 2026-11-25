@@ -16,7 +16,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { ChatLaneEntry } from "./turn-task";
+import { runsInPlace, type ChatLaneEntry } from "./turn-task";
 
 export type TurnResult<T> =
   | { status: "completed"; value: T }
@@ -34,14 +34,29 @@ export interface EnqueueOptions {
 /** Accept one turn's run on the chat lane, `entry` as its `local`. */
 export type TurnLaneRun = (
   requestId: string,
-  entry: ChatLaneEntry
-) => Promise<unknown>;
+  entry: ChatLaneEntry,
+  input?: Record<string, unknown>
+) => Promise<{ runId: string }>;
+
+/** A turn's place in the lane, taken before its work is ready. */
+export interface TurnReservation {
+  /** The run's id, once it is durably accepted; rejects if it was not. */
+  readonly accepted: Promise<string>;
+  enqueue<T>(
+    fn: () => Promise<T>,
+    options?: EnqueueOptions
+  ): Promise<TurnResult<T>>;
+  /** End the run without a turn. */
+  release(): void;
+}
 
 export class TurnLane {
   #generation = 0;
   #activeRequestId: string | null = null;
   #activeGeneration: number | null = null;
   readonly #counts = new Map<number, number>();
+  /** Turns that took their place before their work was handed over. */
+  readonly #reserved = new Map<string, TurnReservation>();
   /** Settles once every turn queued so far has settled. */
   #tail: Promise<void> = Promise.resolve();
 
@@ -68,6 +83,25 @@ export class TurnLane {
    * when the generation moved on before its run started.
    */
   enqueue<T>(
+    requestId: string,
+    fn: () => Promise<T>,
+    options?: EnqueueOptions
+  ): Promise<TurnResult<T>> {
+    // A lane run's recovery attempt holds the lane, and the app's onStart
+    // comes before what an earlier isolate left: their turns run in place.
+    if (runsInPlace()) {
+      this.reserveInline(requestId);
+    }
+    // A request that took its place earlier runs there.
+    const reserved = this.#reserved.get(requestId);
+    if (reserved) {
+      this.#reserved.delete(requestId);
+      return reserved.enqueue(fn, options);
+    }
+    return this.#enqueueNow(requestId, fn, options);
+  }
+
+  #enqueueNow<T>(
     requestId: string,
     fn: () => Promise<T>,
     options?: EnqueueOptions
@@ -124,6 +158,138 @@ export class TurnLane {
       (error: unknown) => settle(() => reject(error))
     );
     return result;
+  }
+
+  /** Forget a {@link reserveInline} its request did not use. */
+  releaseInline(requestId: string): void {
+    this.#reserved.get(requestId)?.release();
+  }
+
+  /**
+   * Run the turn `requestId` where it is now, inside the run that replays
+   * it: its next `enqueue` runs at once.
+   */
+  reserveInline(requestId: string, onDone?: () => void): void {
+    this.#reserved.set(requestId, {
+      accepted: Promise.resolve(""),
+      release: () => {
+        this.#reserved.delete(requestId);
+        onDone?.();
+      },
+      enqueue: async <T>(fn: () => Promise<T>) => {
+        const generation = this.#generation;
+        // Counted as queued work while it runs, as a turn on the lane is.
+        this.#counts.set(generation, (this.#counts.get(generation) ?? 0) + 1);
+        this.#activeRequestId = requestId;
+        this.#activeGeneration = generation;
+        try {
+          return { status: "completed" as const, value: await fn() };
+        } finally {
+          this.#activeRequestId = null;
+          this.#activeGeneration = null;
+          this.#decrement(generation);
+          onDone?.();
+        }
+      }
+    });
+  }
+
+  /**
+   * Take the turn `requestId` its place in the lane now, with `input` on its
+   * run, and hand it its work later: `enqueue` runs it there, `release`
+   * ends its run without a turn.
+   */
+  reserve(requestId: string, input?: Record<string, unknown>): TurnReservation {
+    // Set once the work is handed over: a run that starts after it begins
+    // at once, one that starts before waits for it.
+    let handed: (() => Promise<void>) | null | undefined;
+    let resolveWork!: (work: (() => Promise<void>) | null) => void;
+    const work = new Promise<(() => Promise<void>) | null>((resolve) => {
+      resolveWork = resolve;
+    });
+    const handOver = (next: (() => Promise<void>) | null) => {
+      if (handed !== undefined) return;
+      handed = next;
+      resolveWork(next);
+    };
+    let dropped = () => {};
+    const ended = new Promise<void>((resolve) => {
+      dropped = resolve;
+    });
+    // The turn runs in the async context it was queued in (its connection,
+    // its request), whichever attempt starts its run.
+    let inCaller = AsyncLocalStorage.snapshot();
+    let inside: (<T>(fn: () => Promise<T>) => Promise<T>) | undefined;
+    const entry: ChatLaneEntry = {
+      lane: true,
+      run: async (into) => {
+        inside = into;
+        const next = handed !== undefined ? handed : await work;
+        if (next) await inCaller(next);
+      },
+      // The run ended without running the turn: skipped, cancelled, or its
+      // attempt failed before it began.
+      dropped: () => {
+        dropped();
+        handOver(null);
+      }
+    };
+    const accepted = this.accept(requestId, entry, input);
+    const reservation: TurnReservation = {
+      accepted: accepted.then((receipt) => receipt.runId),
+      release: () => {
+        if (this.#reserved.get(requestId) === reservation) {
+          this.#reserved.delete(requestId);
+        }
+        handOver(null);
+      },
+      enqueue: <T>(fn: () => Promise<T>, options?: EnqueueOptions) => {
+        const generation = options?.generation ?? this.#generation;
+        this.#counts.set(generation, (this.#counts.get(generation) ?? 0) + 1);
+        inCaller = AsyncLocalStorage.snapshot();
+        let settled = false;
+        let resolve!: (result: TurnResult<T>) => void;
+        let reject!: (error: unknown) => void;
+        const result = new Promise<TurnResult<T>>((res, rej) => {
+          resolve = res;
+          reject = rej;
+        });
+        const settle = (end: () => void) => {
+          if (settled) return;
+          settled = true;
+          this.#decrement(generation);
+          end();
+        };
+        handOver(async () => {
+          if (this.#generation !== generation || !inside) {
+            settle(() => resolve({ status: "stale" }));
+            return;
+          }
+          this.#activeRequestId = requestId;
+          this.#activeGeneration = generation;
+          try {
+            const value = await inside(fn);
+            settle(() => resolve({ status: "completed", value }));
+          } catch (error) {
+            settle(() => reject(error));
+          } finally {
+            this.#activeRequestId = null;
+            this.#activeGeneration = null;
+          }
+        });
+        void ended.then(() => settle(() => resolve({ status: "stale" })));
+        accepted.catch((error: unknown) => settle(() => reject(error)));
+        const done = result.then(
+          () => {},
+          () => {}
+        );
+        const previous = this.#tail;
+        this.#tail = previous.then(() => done);
+        return result;
+      }
+    };
+    if (input) this.#reserved.set(requestId, reservation);
+    return reservation;
   }
 
   /** Skip every turn queued so far once its run starts. */

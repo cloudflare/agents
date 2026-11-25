@@ -5,6 +5,7 @@ import {
   type ChatRecoveryHandoff,
   type ChatRecoveryTaskInput
 } from "../recovery-task";
+import { runHoldingLane } from "../turn-task";
 
 /** Text `isPlatformFailure` recognizes, mirroring a real memory-limit reset. */
 function platformFailure(context: string): Error {
@@ -139,5 +140,38 @@ describe("chatRecoveryTaskRunOptions — the initial key", () => {
     expect(chatRecoveryTaskRunOptions(input(), "initial").idempotencyKey).toBe(
       "chat-recovery:_chatRecoveryContinue:incident-1"
     );
+  });
+});
+
+describe("dispatchChatRecoveryToHandoff in a lane run's recovery", () => {
+  it("returns at the handoff, and hands the lane the reply to wait for", async () => {
+    let finishReply: () => void = () => {};
+    let ended = false;
+    const replyEnds = new Promise<void>((resolve) => {
+      finishReply = resolve;
+    });
+    const handoff: ChatRecoveryHandoff = {
+      detached: async (onTurnStarted) => {
+        onTurnStarted();
+        await replyEnds;
+      },
+      track: () => {},
+      redefer: async () => {},
+      onDetachedError: () => {}
+    };
+    // Returns while the reply streams: the attempt does not hold the job
+    // loop the reply may need.
+    const { reply } = await runHoldingLane(() =>
+      dispatchChatRecoveryToHandoff(handoff)
+    );
+    expect(reply).toBeDefined();
+    void reply?.then(() => {
+      ended = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(ended).toBe(false);
+    finishReply();
+    await reply;
+    expect(ended).toBe(true);
   });
 });
