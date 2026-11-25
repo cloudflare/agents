@@ -468,6 +468,22 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.session(session).submit(text, rest);
   }
 
+  /**
+   * Submit, and return why it was refused, or null. Caught here, so a
+   * refusal does not also surface as the object's unhandled rejection.
+   */
+  async submitRefusal(
+    text: string,
+    options: ThinkSubmitOptions = {}
+  ): Promise<string | null> {
+    try {
+      await this.harness.session().submit(text, options);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   /** Submit through the shared harness interface, asking to steer. */
   async steer(text: string): Promise<string> {
     const session: HarnessSession = this.harness.session();

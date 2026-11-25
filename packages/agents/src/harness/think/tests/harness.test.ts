@@ -142,9 +142,12 @@ describe("ThinkHarness turns", () => {
     // The repeated key names the operation the first submission started.
     expect(again).toMatchObject({ operationId: "op-1", accepted: false });
     // A key paired with another operation's id is refused, as Think refuses.
-    await expect(
-      stub.submit("hello", { operationId: "op-2", idempotencyKey: "key-1" })
-    ).rejects.toThrow(/refer to different operations/);
+    expect(
+      await stub.submitRefusal("hello", {
+        operationId: "op-2",
+        idempotencyKey: "key-1"
+      })
+    ).toMatch(/refer to different operations/);
     // The same key in another session is that session's own.
     const other = await stub.submit("hello", {
       idempotencyKey: "key-1",
@@ -169,6 +172,14 @@ describe("ThinkHarness turns", () => {
     expect(inspection.startedAt).toBeGreaterThanOrEqual(inspection.createdAt);
     expect(inspection.settledAt).toBeGreaterThanOrEqual(inspection.startedAt);
     expect(await stub.inspect("op-2")).toBeUndefined();
+  });
+
+  it("treats an empty idempotency key as none, as Think does", async () => {
+    const stub = fresh();
+    const first = await stub.submit("one", { idempotencyKey: "" });
+    const second = await stub.submit("two", { idempotencyKey: "" });
+    expect(second.operationId).not.toBe(first.operationId);
+    expect(second.accepted).toBe(true);
   });
 
   it("streams the joined operation's chunks when a chat repeats a running key", async () => {

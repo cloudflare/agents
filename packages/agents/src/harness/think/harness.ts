@@ -782,10 +782,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (whenBusy === "steer") throw new SteerNotSupportedError(session);
     await this.lifecycle.ready();
     // A key names an operation in its own session only.
-    const key =
-      options.idempotencyKey === undefined
-        ? undefined
-        : keyOf(session, options.idempotencyKey);
+    // An empty key is no key, as on Think.
+    const key = options.idempotencyKey
+      ? keyOf(session, options.idempotencyKey)
+      : undefined;
     const byKey =
       key === undefined ? undefined : this.#tasks.peekByIdempotencyKey(key);
     const operationId = options.operationId ?? crypto.randomUUID();
@@ -2772,7 +2772,7 @@ export class ThinkSession implements HarnessSession {
     // A repeated key with no id names the operation the key started.
     const operationId =
       options.operationId ??
-      (options.idempotencyKey !== undefined
+      (options.idempotencyKey
         ? await this.#harness.keyedOperation(this.id, options.idempotencyKey)
         : undefined) ??
       crypto.randomUUID();
@@ -2911,7 +2911,7 @@ export class ThinkSession implements HarnessSession {
     // a repeated idempotency key makes an earlier one.
     let operationId =
       options.operationId ??
-      (options.idempotencyKey !== undefined
+      (options.idempotencyKey
         ? await this.#harness.keyedOperation(this.id, options.idempotencyKey)
         : undefined) ??
       crypto.randomUUID();

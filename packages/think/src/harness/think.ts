@@ -701,7 +701,7 @@ export class Think<
     }
     const metadata = admittedSubmissionMetadata(options?.metadata);
     const { submissionId, idempotencyKey } = options ?? {};
-    if (submissionId !== undefined && idempotencyKey !== undefined) {
+    if (submissionId !== undefined && idempotencyKey) {
       // Think's message for a pair that names two submissions; the harness
       // refuses the pair too.
       const session = this.harness.session().id;
@@ -721,7 +721,8 @@ export class Think<
       ...(options?.submissionId !== undefined && {
         operationId: options.submissionId
       }),
-      ...(options?.idempotencyKey !== undefined && {
+      // An empty key is no key, as on Think.
+      ...(options?.idempotencyKey && {
         idempotencyKey: options.idempotencyKey
       }),
       ...(metadata !== undefined && { metadata })
