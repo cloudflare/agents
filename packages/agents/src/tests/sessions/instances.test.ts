@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Context } from "../../context";
 import { Sessions } from "../../sessions";
 import { DEFAULT_SESSION_TABLES } from "../../sessions/core";
 import type { SessionMessage } from "../../sessions";
@@ -60,7 +61,8 @@ describe("Sessions instances", () => {
       attachmentMeta: "cf_agents_session_attachment_meta",
       attachmentChunks: "cf_agents_session_attachment_chunks",
       attachmentRefs: "cf_agents_session_attachment_refs",
-      tailIndex: "cf_agents_session_messages_by_seq"
+      tailIndex: "cf_agents_session_messages_by_seq",
+      contextBlocks: "cf_agents_context_blocks"
     });
   });
 
@@ -104,6 +106,40 @@ describe("Sessions instances", () => {
       expect((kept?.parts[1] as { url?: string } | undefined)?.url).toBe(
         (image("pic").parts[1] as { url: string }).url
       );
+    });
+  });
+
+  it("keeps Context's blocks with the Sessions it is given", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const plain = new Sessions();
+      const audit = new Sessions({ name: "audit" });
+      const { lifecycle } = install(plain);
+      lifecycle.use(audit);
+      await lifecycle.start();
+      const sql = {
+        sql: <T>(
+          strings: TemplateStringsArray,
+          ...values: (string | number | boolean | null)[]
+        ) => [...storage.sql.exec(strings.join("?"), ...values)] as T[]
+      };
+      for (const [sessions, fact] of [
+        [plain, "plain fact"],
+        [audit, "audit fact"]
+      ] as const) {
+        const context = new Context(sessions.session(), {
+          sql,
+          blocks: [{ label: "memory", description: "Learned facts" }]
+        });
+        await context.load();
+        await context.setBlock("memory", fact);
+      }
+      const read = (table: string) =>
+        storage.sql
+          .exec<{ content: string }>(`SELECT content FROM ${table}`)
+          .toArray()
+          .map((row) => row.content);
+      expect(read("cf_agents_context_blocks")).toEqual(["plain fact"]);
+      expect(read("cf_agents_context_blocks__n_audit")).toEqual(["audit fact"]);
     });
   });
 

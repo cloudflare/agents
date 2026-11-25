@@ -105,6 +105,8 @@ export interface ContextSession {
   ): Promise<{ messageId: string; value: string } | null>;
   /** @internal */
   internal_config(key: string): Promise<string | null>;
+  /** @internal The block table of the Sessions this session belongs to. */
+  readonly internal_contextBlocksTable?: string;
   /** @internal */
   internal_setConfig(key: string, value: string | null): Promise<void>;
 }
@@ -224,7 +226,12 @@ export class Context {
     const defaultProvider =
       options.defaultProvider ??
       (sql
-        ? (label: string) => new AgentContextProvider(sql, key(label))
+        ? (label: string) =>
+            new AgentContextProvider(
+              sql,
+              key(label),
+              session.internal_contextBlocksTable
+            )
         : undefined);
     this.#blocks = new ContextBlocks([...(options.blocks ?? [])], {
       defaultProvider

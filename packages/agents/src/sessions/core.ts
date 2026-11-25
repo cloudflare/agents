@@ -356,6 +356,11 @@ export interface SessionTables {
   attachmentRefs: string;
   /** The `(session_id, seq)` tail index (an index, so database-wide). */
   tailIndex: string;
+  /**
+   * Context's block table for this instance: Context keeps its blocks next
+   * to the Sessions it is given.
+   */
+  contextBlocks: string;
 }
 
 /** The tables of the instance whose store maps `name` to a table name. */
@@ -373,7 +378,8 @@ export function sessionTables(table: (name: string) => string): SessionTables {
     attachmentRefs: table("session_attachment_refs"),
     // Today's name for the default (not the store's `idx_` form), with the
     // instance suffix for a named one: an index name is database-wide.
-    tailIndex: table("session_messages_by_seq")
+    tailIndex: table("session_messages_by_seq"),
+    contextBlocks: table("context_blocks")
   };
 }
 
@@ -401,6 +407,11 @@ export class SessionsCore {
 
   /** This instance's table and index names. */
   readonly #t: SessionTables;
+
+  /** @internal This instance's table and index names. */
+  get tables(): SessionTables {
+    return this.#t;
+  }
 
   constructor(
     options: SessionsOptions,

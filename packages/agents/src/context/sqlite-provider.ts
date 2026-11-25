@@ -20,10 +20,20 @@ export class AgentContextProvider implements WritableContextProvider {
   private agent: SqlProvider;
   private label: string;
   private initialized = false;
+  readonly #table: string;
 
-  constructor(agent: SqlProvider, label?: string) {
+  /**
+   * @param table @internal The block table: Context passes the one of the
+   *   Sessions instance it was given. Default `cf_agents_context_blocks`.
+   */
+  constructor(
+    agent: SqlProvider,
+    label?: string,
+    table = "cf_agents_context_blocks"
+  ) {
     this.agent = agent;
     this.label = label ?? "";
+    this.#table = table;
   }
 
   init(label: string): void {
@@ -32,32 +42,55 @@ export class AgentContextProvider implements WritableContextProvider {
     }
   }
 
+  /**
+   * Run `parts` as a tagged template whose text holds the table name. The
+   * name is fixed at construction, never a value; values stay bound.
+   */
+  #sql<T>(
+    parts: string[],
+    ...values: (string | number | boolean | null)[]
+  ): T[] {
+    const strings = Object.assign([...parts], { raw: [...parts] });
+    // SAFETY: an array with `raw` is what a tagged template receives.
+    return this.agent.sql<T>(
+      strings as unknown as TemplateStringsArray,
+      ...values
+    );
+  }
+
   private ensureTable(): void {
     if (this.initialized) return;
-    this.agent.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_context_blocks (
+    this.#sql([
+      `CREATE TABLE IF NOT EXISTS ${this.#table} (
         label TEXT PRIMARY KEY,
         content TEXT NOT NULL,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `;
+      )`
+    ]);
     this.initialized = true;
   }
 
   async get(): Promise<string | null> {
     this.ensureTable();
-    const rows = this.agent.sql<{ content: string }>`
-      SELECT content FROM cf_agents_context_blocks WHERE label = ${this.label}
-    `;
+    const rows = this.#sql<{ content: string }>(
+      [`SELECT content FROM ${this.#table} WHERE label = `, ""],
+      this.label
+    );
     return rows[0]?.content ?? null;
   }
 
   async set(content: string): Promise<void> {
     this.ensureTable();
-    this.agent.sql`
-      INSERT INTO cf_agents_context_blocks (label, content)
-      VALUES (${this.label}, ${content})
-      ON CONFLICT(label) DO UPDATE SET content = ${content}, updated_at = CURRENT_TIMESTAMP
-    `;
+    this.#sql(
+      [
+        `INSERT INTO ${this.#table} (label, content) VALUES (`,
+        ", ",
+        `) ON CONFLICT(label) DO UPDATE SET content = `,
+        ", updated_at = CURRENT_TIMESTAMP"
+      ],
+      this.label,
+      content,
+      content
+    );
   }
 }
