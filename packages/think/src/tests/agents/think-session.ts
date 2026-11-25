@@ -68,6 +68,7 @@ import {
   type ChatProtocolHost,
   REPLAY_CHUNK_BYTES
 } from "agents/chat";
+import { currentTurnCheckpoint } from "agents/chat";
 import type {
   ChatTurns,
   ClientToolSchema,
@@ -309,7 +310,9 @@ export type RpcJsonObject = Record<
 async function insertInterruptedTurnForTest(
   agent: Think,
   name: string,
-  snapshot?: unknown
+  snapshot?: unknown,
+  /** More checkpoint entries the interrupted run kept (an owed hook). */
+  kept?: Record<string, unknown>
 ): Promise<void> {
   const prefix = `${Think.CHAT_FIBER_NAME}:`;
   if (!name.startsWith(prefix)) {
@@ -329,7 +332,9 @@ async function insertInterruptedTurnForTest(
   const requestId = name.slice(prefix.length);
   // Make sure the Tasks tables exist before writing a row into them.
   await agent.tasks.get(runId);
-  const checkpoint = snapshot ? JSON.stringify({ snapshot }) : null;
+  const entries = { ...(snapshot ? { snapshot } : {}), ...kept };
+  const checkpoint =
+    Object.keys(entries).length > 0 ? JSON.stringify(entries) : null;
   const now = Date.now();
   agent.sql`
     INSERT INTO cf_agents_task_runs
@@ -11534,8 +11539,12 @@ export class ThinkRecoveryTestAgent extends Think {
     messageId: string;
     recovered?: boolean;
   }> = [];
-  private _turnAtReset: { requestId: string; userMessageId?: string } | null =
-    null;
+  private _turnAtReset: {
+    requestId: string;
+    userMessageId?: string;
+    /** The hook the turn's run owed when the reset came. */
+    owedHook?: unknown;
+  } | null = null;
 
   override onChatResponse(result: ChatResponseResult): void {
     this._chatResponses.push({
@@ -11569,6 +11578,7 @@ export class ThinkRecoveryTestAgent extends Think {
     self._fireResponseHook = async (result) => {
       self._fireResponseHook = original;
       this._turnAtReset = {
+        owedHook: currentTurnCheckpoint()?.get("owedHook"),
         requestId: result.requestId,
         userMessageId: this.messages
           .filter((message) => message.role === "user")
@@ -11597,7 +11607,8 @@ export class ThinkRecoveryTestAgent extends Think {
     const turn = this._turnAtReset;
     if (!turn) throw new Error("no reset captured");
     this._turnAtReset = null;
-    await this.insertInterruptedFiber(
+    await insertInterruptedTurnForTest(
+      this,
       `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${turn.requestId}`,
       {
         __cfThinkChatFiberSnapshot: {
@@ -11611,7 +11622,8 @@ export class ThinkRecoveryTestAgent extends Think {
           startedAt: Date.now()
         },
         user: null
-      }
+      },
+      turn.owedHook === undefined ? undefined : { owedHook: turn.owedHook }
     );
   }
 
@@ -11625,6 +11637,54 @@ export class ThinkRecoveryTestAgent extends Think {
       self._persistAssistantMessageWithCutover = original;
       throw new Error("simulated persist failure");
     };
+  }
+
+  /**
+   * Keep the hook the reset left owed as a released version would have, in
+   * KV, with no chat fiber left to recover.
+   */
+  async leaveOwedHookAsReleasedForTest(): Promise<void> {
+    const turn = this._turnAtReset;
+    if (!turn?.owedHook) throw new Error("no owed hook captured");
+    this._turnAtReset = null;
+    await this.ctx.storage.put(
+      `cf_think_pending_response_hook:${turn.requestId}`,
+      turn.owedHook
+    );
+  }
+
+  /**
+   * Run one turn and return the KV keys written during it, and whether its
+   * owed hook was on the turn's run when the hook fired.
+   */
+  async owedHookStorageDuringTurnForTest(
+    text: string
+  ): Promise<{ kvKeys: string[]; onRun: boolean }> {
+    const storage = this.ctx.storage;
+    const kvKeys: string[] = [];
+    const put = storage.put.bind(storage);
+    storage.put = ((key: string | Record<string, unknown>, value?: unknown) => {
+      kvKeys.push(...(typeof key === "string" ? [key] : Object.keys(key)));
+      return value === undefined
+        ? put(key as Record<string, unknown>)
+        : put(key as string, value);
+    }) as typeof storage.put;
+    let onRun = false;
+    const self = this as unknown as {
+      _fireResponseHook(result: ChatResponseResult): Promise<void>;
+    };
+    const fire = self._fireResponseHook;
+    self._fireResponseHook = async (result) => {
+      self._fireResponseHook = fire;
+      onRun = currentTurnCheckpoint()?.get("owedHook") != null;
+      return fire.call(this, result);
+    };
+    try {
+      await this.runTurn({ input: text });
+    } finally {
+      storage.put = put;
+    }
+    return { kvKeys, onRun };
   }
 
   /** Replay owed response hooks, as the startup durable-work step does. */

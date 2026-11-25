@@ -380,7 +380,11 @@ import type {
   ReplyRemoval,
   TurnFailureHost
 } from "agents/chat";
-import { replyIsEmpty, stripTrailingReasoning } from "agents/chat";
+import {
+  currentTurnCheckpoint,
+  replyIsEmpty,
+  stripTrailingReasoning
+} from "agents/chat";
 import type {
   BeforeTurnRepairResult,
   RepairedTranscriptSink,
@@ -420,7 +424,13 @@ function turnContextWithoutModel(ctx: TurnContext): Omit<TurnContext, "model"> {
 }
 
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
+/**
+ * Where a hook deferred past its turn waits for the next start (and where
+ * earlier versions kept every owed hook).
+ */
 const PENDING_RESPONSE_HOOK_PREFIX = "cf_think_pending_response_hook:";
+/** The chat turn's checkpoint key for the response hook it owes. */
+const OWED_RESPONSE_HOOK = "owedHook";
 function messageText(message: UIMessage | undefined): string {
   return (message?.parts ?? [])
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
@@ -9837,13 +9847,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * otherwise re-run it. Fire the owed hook and settle the submission instead.
    */
   private async _settlePersistedChatTurn(requestId: string): Promise<boolean> {
-    const hook = await this.ctx.storage.get<PendingResponseHook>(
-      PENDING_RESPONSE_HOOK_PREFIX + requestId
-    );
+    // Kept on the turn's run; a turn of an earlier version kept it in KV.
+    const turn = currentTurnCheckpoint();
+    const kept = turn?.get<PendingResponseHook | null>(OWED_RESPONSE_HOOK);
+    const hook =
+      kept ??
+      (await this.ctx.storage.get<PendingResponseHook>(
+        PENDING_RESPONSE_HOOK_PREFIX + requestId
+      ));
     if (!hook || !(await this.session.getMessage(hook.messageId))) {
       return false;
     }
-    await this._replayPendingResponseHooks(requestId);
+    if (kept && turn) {
+      await this._fireOwedResponseHook(hook);
+      turn.set(OWED_RESPONSE_HOOK, null);
+    } else {
+      await this._replayPendingResponseHooks(requestId);
+    }
     await this._completeRecoveredSubmission(
       requestId,
       hook.status === "error" ? "error" : "completed",
@@ -10848,7 +10868,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       await this._fireResponseHook(result);
     } catch (error) {
       console.error("[Think] onChatResponse deferred to replay:", error);
-      await this._rememberPendingResponseHook(result).catch(() => {});
+      // Past its turn: the turn's run settles and clears what it keeps.
+      await this._rememberPendingResponseHook(result, true).catch(() => {});
       this._responseHooksInFlight.delete(result.requestId);
       return;
     }
@@ -10865,10 +10886,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /**
    * Record, before the assistant message is persisted, that this turn owes
-   * `onChatResponse`, so a reset between the persist and the hook replays it.
+   * `onChatResponse`, so a reset between the persist and the hook fires it
+   * from the turn's recovery. Kept on the turn's run (cleared with it); a
+   * hook deferred past its turn (`afterTurn`) is kept in KV, which the next
+   * start replays.
    */
   private async _rememberPendingResponseHook(
-    result: ChatResponseResult
+    result: ChatResponseResult,
+    afterTurn = false
   ): Promise<void> {
     this._responseHooksInFlight.add(result.requestId);
     const pending: PendingResponseHook = {
@@ -10878,15 +10903,42 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       status: result.status,
       ...(result.error !== undefined && { error: result.error })
     };
+    const turn = currentTurnCheckpoint();
+    if (turn && !afterTurn) {
+      // SAFETY: every field is JSON.
+      turn.set(OWED_RESPONSE_HOOK, pending as unknown as TaskJson);
+      return;
+    }
     await this.ctx.storage.put(
       PENDING_RESPONSE_HOOK_PREFIX + result.requestId,
       pending
     );
+    // Moved, not copied: the turn's recovery must not fire it as well.
+    turn?.set(OWED_RESPONSE_HOOK, null);
   }
 
   private async _forgetPendingResponseHook(requestId: string): Promise<void> {
-    await this.ctx.storage.delete(PENDING_RESPONSE_HOOK_PREFIX + requestId);
+    const turn = currentTurnCheckpoint();
+    if (turn) turn.set(OWED_RESPONSE_HOOK, null);
+    else
+      await this.ctx.storage.delete(PENDING_RESPONSE_HOOK_PREFIX + requestId);
     this._responseHooksInFlight.delete(requestId);
+  }
+
+  /** Fire a hook a reset left owed, if its message was persisted. */
+  private async _fireOwedResponseHook(
+    hook: PendingResponseHook
+  ): Promise<void> {
+    const message = await this.session.getMessage(hook.messageId);
+    if (!message) return;
+    await this._fireResponseHook({
+      message: message as UIMessage,
+      requestId: hook.requestId,
+      continuation: hook.continuation,
+      status: hook.status,
+      ...(hook.error !== undefined && { error: hook.error }),
+      recovered: true
+    });
   }
 
   /**
@@ -10933,17 +10985,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ) {
         continue;
       }
-      const message = await this.session.getMessage(hook.messageId);
-      if (message) {
-        await this._fireResponseHook({
-          message: message as UIMessage,
-          requestId: hook.requestId,
-          continuation: hook.continuation,
-          status: hook.status,
-          ...(hook.error !== undefined && { error: hook.error }),
-          recovered: true
-        });
-      }
+      await this._fireOwedResponseHook(hook);
       await this.ctx.storage.delete(key);
     }
   }
