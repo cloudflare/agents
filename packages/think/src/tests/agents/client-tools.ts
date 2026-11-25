@@ -1329,10 +1329,11 @@ export class ThinkClientToolsAgent extends Think {
    * can still have its apply to come.
    */
   hasPendingInteractionForTest(): boolean {
-    return (
-      (this["_turns"] as unknown as { pendingInteraction: unknown })
-        .pendingInteraction !== null
-    );
+    // The harness-backed Think (`pnpm test:harness`) has no `_turns`.
+    const turns = this["_turns"] as unknown as
+      | { pendingInteraction: unknown }
+      | undefined;
+    return (turns?.pendingInteraction ?? null) !== null;
   }
 
   /** How many socket messages of `type` the agent has finished handling. */
@@ -1857,8 +1858,9 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   isChatTurnActiveForTest(): boolean {
-    return (this as unknown as { _turnQueue: { isActive: boolean } })._turnQueue
-      .isActive;
+    const queue = (this as unknown as { _turnQueue?: { isActive: boolean } })
+      ._turnQueue;
+    return queue?.isActive ?? false;
   }
 
   getOverlappingSubmitCountForTest(): number {
@@ -1938,13 +1940,10 @@ export class ThinkClientToolsAgent extends Think {
 
   /** The request id of the continuation waiting to run, if any. */
   async pendingContinuationRequestIdForTest(): Promise<string | null> {
-    return (
-      (
-        this["_turns"] as unknown as {
-          continuation: { pending: { requestId: string } | null };
-        }
-      ).continuation.pending?.requestId ?? null
-    );
+    const turns = this["_turns"] as unknown as
+      | { continuation: { pending: { requestId: string } | null } }
+      | undefined;
+    return turns?.continuation.pending?.requestId ?? null;
   }
 
   /** How many continuation turns reached `beforeTurn`. */
