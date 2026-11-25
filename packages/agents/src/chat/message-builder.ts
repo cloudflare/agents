@@ -587,9 +587,10 @@ export function applyChunkToParts(
         const p = toolPart as Record<string, unknown>;
         p.state = "output-available";
         p.output = chunk.output;
-        if (chunk.preliminary !== undefined) {
-          p.preliminary = chunk.preliminary;
-        }
+        // As the AI SDK records it: a final output carries no `preliminary`
+        // and clears an earlier one (#2635).
+        if (chunk.preliminary === undefined) delete p.preliminary;
+        else p.preliminary = chunk.preliminary;
       }
       return true;
     }

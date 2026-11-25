@@ -906,6 +906,32 @@ describe("applyChunkToParts", () => {
       const part = parts[0] as Record<string, unknown>;
       expect(part.preliminary).toBeUndefined();
     });
+
+    it("a final output without the flag clears an earlier preliminary one (#2635)", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "countdown",
+        input: {}
+      });
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId: "call_1",
+        output: "3",
+        preliminary: true
+      });
+      // A generator tool's last value arrives with no `preliminary` field.
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId: "call_1",
+        output: "done"
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("output-available");
+      expect(part.output).toBe("done");
+      expect(part).not.toHaveProperty("preliminary");
+    });
   });
 
   describe("toolMetadata", () => {
