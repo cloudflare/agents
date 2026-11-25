@@ -21,6 +21,7 @@ import type {
   HookRules,
   PromptDraft,
   PromptEntry,
+  PromptSection,
   ThinkExtension,
   ToolCall,
   ToolDraft,
@@ -221,9 +222,9 @@ export class ExtensionRuntime<
       },
       (toolName) => kept.delete(toolName)
     );
-    const prompt = new EntryDraft<{ readonly text: string }, PromptEntry>(
+    const prompt = new EntryDraft<PromptSection, PromptEntry>(
       drafts.prompt,
-      (_key, section) => ({ owner: this.#name, text: section.text }),
+      (_key, section) => ({ ...section, owner: this.#name }),
       () => {}
     );
     for (const change of this.#toolTransforms) await change(tools, build);

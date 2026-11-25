@@ -985,6 +985,62 @@ describe("ThinkHarness context", () => {
     );
   });
 
+  it("puts an extension's remind section in the recorded prompt and delivers its change once", async () => {
+    const stub = fresh();
+    await stub.setRemindSection("Skill: plumbing.");
+    await stub.prompt("hello", session);
+    await stub.setRemindSection("Skill: plumbing and wiring.");
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+
+    const [first, second, third] = await stub.promptTexts();
+    const system = (prompt: string) => prompt.split("|")[0];
+    expect(system(first)).toContain("Skill: plumbing.");
+    // The recorded prompt is not rewritten by the change.
+    expect(system(second)).toBe(system(first));
+    expect(system(third)).toBe(system(first));
+    // The change goes out once, after the user message that noticed it.
+    expect(second).toMatch(/\|user:again[^|]*Skill: plumbing and wiring\./);
+    expect(third.startsWith(second)).toBe(true);
+    expect(third.endsWith("|user:thanks")).toBe(true);
+  });
+
+  it("gives a reset session's context the extension's remind section, until the extension drops it", async () => {
+    const stub = fresh();
+    await stub.setRemindSection("Skill: plumbing.");
+    await stub.prompt("hello", session);
+    await stub.reset(session);
+    await stub.prompt("after reset", session);
+    expect(await stub.lastPromptText()).toContain("Skill: plumbing.");
+
+    await stub.clearRemindSection();
+    await stub.reset(session);
+    await stub.prompt("after it is dropped", session);
+    expect(await stub.lastPromptText()).not.toContain("Skill: plumbing");
+  });
+
+  it("leaves out a remind section whose label the context already has, instead of failing the turn", async () => {
+    const stub = fresh();
+    // "soul" is one of the fixture context's own blocks.
+    await stub.setRemindSectionLabel("soul");
+    await stub.setRemindSection("Not the soul.");
+    const result = await stub.prompt("hello", session);
+    expect(result.status).toBe("done");
+    const prompt = await stub.lastPromptText();
+    expect(prompt).toContain("Be kind.");
+    expect(prompt).not.toContain("Not the soul.");
+  });
+
+  it("sends an extension's remind section as system text, in its place, when the session has no context", async () => {
+    const stub = fresh();
+    await stub.setRemindSection("Skill: plumbing.");
+    await stub.prompt("hello");
+    // The extension is loaded ahead of the options, as its section is.
+    expect(await stub.lastPromptText()).toBe(
+      "system:Skill: plumbing.\n\nYou are a test.|user:hello"
+    );
+  });
+
   it("delivers a changed remind block once and keeps every request a prefix of the next", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);
