@@ -1,14 +1,50 @@
-import { afterAll, afterEach, beforeAll, describe, it, expect } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  it,
+  expect
+} from "vitest";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { getAgentByName } from "../..";
 
-// Only the tests that add a handler use it; other requests go out as before.
-const mcpServer = setupServer();
-beforeAll(() => mcpServer.listen({ onUnhandledRequest: "bypass" }));
-afterEach(() => mcpServer.resetHandlers());
+// No request leaves the test. The unreachable servers fail at once, as an
+// unresolvable host does; the slow ones answer only when a test ends, so a
+// test that reads a connection before it settles sees it connecting.
+let releaseSlowServers = () => {};
+const mcpServer = setupServer(
+  ...[
+    "http://nonexistent-mcp.example.com/*",
+    "http://cold-custom.example.com/*",
+    "http://oauth-mcp.example.com/*",
+    "https://auth.example.com/*"
+  ].map((url) => http.all(url, () => HttpResponse.error())),
+  ...[
+    "http://slow-mcp.example.com/*",
+    "http://very-slow-mcp.example.com/*"
+  ].map((url) =>
+    http.all(url, async () => {
+      await slowServersReleased;
+      return new HttpResponse(null, { status: 404 });
+    })
+  )
+);
+let slowServersReleased = Promise.resolve();
+beforeAll(() => mcpServer.listen({ onUnhandledRequest: "error" }));
+beforeEach(() => {
+  slowServersReleased = new Promise((resolve) => {
+    releaseSlowServers = resolve;
+  });
+});
+afterEach(() => {
+  releaseSlowServers();
+  mcpServer.resetHandlers();
+});
 afterAll(() => mcpServer.close());
 
 /**
@@ -147,12 +183,9 @@ describe("waitForConnections E2E", () => {
     const result = await stub.restoreWithoutWait();
 
     expect(result.connectionIds).toContain("race-server");
-    // Without waiting, connection is likely still in "connecting" state
-    // (this demonstrates the race condition the fix addresses)
-    const state = result.connectionStates["race-server"];
-    expect(state).toBeDefined();
-    // State should be "connecting" since we didn't wait
-    expect(state).toBe("connecting");
+    // The server has not answered yet, so without waiting the connection is
+    // still connecting (the race the wait fixes).
+    expect(result.connectionStates["race-server"]).toBe("connecting");
   });
 
   it("should handle OAuth servers that skip restore (authenticating state)", async () => {
