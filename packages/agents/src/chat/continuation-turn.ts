@@ -290,6 +290,11 @@ function tryClaimContinuation<TConnection extends ContinuationConnection>(
  * Never rejects: a failure goes to `turn.onError`, unless the turn was
  * stopped ({@link isTurnStopped}).
  */
+/** How many times a continuation whose enqueue failed fires again. */
+const CONTINUATION_ENQUEUE_RETRIES = 3;
+/** The first wait before it fires again, doubling each time (ms). */
+const CONTINUATION_ENQUEUE_RETRY_MS = 250;
+
 export async function runContinuationTurn<
   TConnection extends ContinuationConnection,
   TMessage
@@ -299,7 +304,8 @@ export async function runContinuationTurn<
   unscheduled?: {
     continuation: ContinuationContext<TConnection>;
     errorPrefix: string | null;
-  }
+  },
+  attempt = 0
 ): Promise<void> {
   const pending = unscheduled ? null : parts.continuation.pending;
   if (!unscheduled && !pending) return;
@@ -339,10 +345,16 @@ export async function runContinuationTurn<
   };
 
   const queued = () => parts.queued?.(requestId);
+  // An enqueue that failed before the turn started, for another reason than
+  // a stop (a reset of the Durable Object the turn's start goes through):
+  // the continuation keeps its slot and its record and fires again.
+  let retry = false;
+  let started = false;
   try {
     await turn.enqueue(
       requestId,
       async () => {
+        started = true;
         // On the queue and running: the queue says the chat is busy now.
         parts.firing.delete(firing);
         parts.unscheduled.delete(requestId);
@@ -360,20 +372,34 @@ export async function runContinuationTurn<
       queued
     );
   } catch (error) {
+    retry =
+      !started &&
+      !unscheduled &&
+      attempt < CONTINUATION_ENQUEUE_RETRIES &&
+      !isTurnStopped(signal) &&
+      parts.continuation.pending?.requestId === requestId;
     // A stopped turn fails with the stop's reason. That is not an error.
-    if (!isTurnStopped(signal)) {
+    if (!retry && !isTurnStopped(signal)) {
       turn.onError(error, { errorPrefix, reported: outcome.reported });
     }
   } finally {
     parts.firing.delete(firing);
     parts.unscheduled.delete(requestId);
-    // The abort signal goes however the turn ended. The release is for a
-    // turn that never started (the host's enqueue failed, or a reset dropped
-    // the turn from the queue): a turn that ran has settled already.
-    parts.aborts.remove(requestId);
-    releaseOwnPending(parts, requestId);
-    // However it ended, nothing waits for it to be queued any more.
-    queued();
+    if (!retry) {
+      // The abort signal goes however the turn ended. The release is for a
+      // turn that never started (a reset dropped the turn from the queue):
+      // a turn that ran has settled already.
+      parts.aborts.remove(requestId);
+      releaseOwnPending(parts, requestId);
+      // However it ended, nothing waits for it to be queued any more.
+      queued();
+    }
+  }
+  if (retry) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, CONTINUATION_ENQUEUE_RETRY_MS * 2 ** attempt)
+    );
+    return runContinuationTurn(parts, turn, undefined, attempt + 1);
   }
 
   // The turn has left the queue: `onChatResponse` may start a turn itself.

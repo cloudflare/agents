@@ -538,6 +538,8 @@ describe("the continuation turn", () => {
     await result("a1");
     await fire();
     await drain();
+    // It fires again a few times first (250, 500 and 1000 ms apart).
+    await vi.advanceTimersByTimeAsync(2_000);
 
     expect(host.ran).toEqual([]);
     expect(host.errors).toMatchObject([{ reported: false }]);
@@ -547,6 +549,34 @@ describe("the continuation turn", () => {
     expect(turns.continuation.pending).toBeNull();
     expect(turns.aborts.size).toBe(0);
     expect(turns.hasPendingDecision()).toBe(false);
+  });
+
+  it("a continuation whose enqueue fails once (a reset where its start goes) keeps its slot and fires again (P1)", async () => {
+    const turn = host.turn();
+    let failures = 1;
+    host.turn = () => ({
+      ...turn,
+      enqueue: async (requestId, body, onQueued) => {
+        if (failures-- > 0) throw new Error("probe parent reset");
+        return turn.enqueue(requestId, body, onQueued);
+      }
+    });
+    host.model = async (continuation) => {
+      await host.stream(continuation.requestId, true);
+    };
+    await result("a1");
+    await fire();
+    await drain();
+    // Not released: still pending, nothing told the tab there is no stream.
+    expect(host.ran).toEqual([]);
+    expect(turns.continuation.pending?.requestId).toBe("cont-1");
+    expect(connection.sent).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(250);
+    await drain();
+    expect(host.ran).toEqual(["cont-1"]);
+    expect(host.errors).toEqual([]);
+    expect(turns.continuation.pending).toBeNull();
   });
 
   it("a newer pending continuation with no deferred result is left as it is", async () => {
