@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**234 of the 1259 tests that construct Think pass (18%).** Across the whole suite, 526 of 1551.
+**237 of the 1261 tests that construct Think pass (18%).** Across the whole suite, 529 of 1553.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -32,7 +32,7 @@ supported by the harness-backed Think yet".
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 34 / 136 | 25%  |
+| `client-tools.test.ts`                 | 33 / 136 | 24%  |
 | `cold-rpc-initialization.test.ts`      | 3 / 4    | 75%  |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
@@ -49,7 +49,7 @@ supported by the harness-backed Think yet".
 | `hooks.test.ts`                        | 38 / 149 | 25%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
-| `mcp-tool-materialization.test.ts`     | 3 / 5    | 60%  |
+| `mcp-tool-materialization.test.ts`     | 5 / 5    | 100% |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
 | `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
 | `messengers.test.ts`                   | 79 / 104 | 75%  |
@@ -70,6 +70,7 @@ supported by the harness-backed Think yet".
 | `run-turn-recovery.test.ts`            | 1 / 11   | 9%   |
 | `run-turn.test.ts`                     | 13 / 35  | 37%  |
 | `scheduled-tasks.test.ts`              | 6 / 9    | 66%  |
+| `skills-tools.test.ts`                 | 2 / 2    | 100% |
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1    | 100% |
