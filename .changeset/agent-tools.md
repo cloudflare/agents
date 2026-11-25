@@ -1,0 +1,17 @@
+---
+"agents": patch
+"@cloudflare/ai-chat": patch
+"@cloudflare/think": patch
+---
+
+Agent tools and sub-agents.
+
+- An agent-tool run whose child cannot stay up ends `error` instead of staying `running` (#3073).
+- An agent-tool run whose child's turn was cut off waits for the child's recovery (#3024), and runs started together run in order (#3144).
+- `Think.startAgentToolRun` takes an optional `signal`. See [Agent tools](https://developers.cloudflare.com/agents/api-reference/agent-tools/).
+- Starting or waking many sub-agents at once no longer stalls after about 14 (#3077).
+- A sub-agent's work cut off by a reset resumes as soon as the root restarts (#3014, #3086).
+- A sub-agent of an agent addressed in a jurisdiction now reaches that agent (#3085).
+- Aged-media eviction runs for every sub-agent (#2974).
+- A sub-agent's broadcast followed by a direct send to a connection in the same call reaches that connection in that order (#3181).
+- A sub-agent upgraded from a version that kept chat streams in the old `cf_ai_chat_stream_*` tables now empties those tables instead of dropping them, so its first start cannot reset the storage of its agent tree (#3192).
