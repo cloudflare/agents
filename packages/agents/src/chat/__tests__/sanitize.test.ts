@@ -43,6 +43,9 @@ describe("enforceRowSizeLimit", () => {
     expect((output.output as { content: string }).content.length).toBeLessThan(
       largeContent.length
     );
+    expect(byteLength(JSON.stringify(result))).toBeLessThanOrEqual(
+      ROW_MAX_BYTES
+    );
   });
 
   it("falls back to a compact marker when object shape is too large to preserve", () => {
