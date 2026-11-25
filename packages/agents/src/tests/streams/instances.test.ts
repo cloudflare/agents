@@ -71,7 +71,13 @@ describe("Streams instances", () => {
         "cf_agents_streams",
         "idx_cf_agents_streams_tag"
       ]);
-      expect(storage.kv.get("cf_agents:streams_schema_version")).toBe(2);
+      expect(
+        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
+          ?.streams
+      ).toBe(2);
+      expect(
+        storage.kv.get("cf_agents:streams_schema_version")
+      ).toBeUndefined();
     });
   });
 
@@ -221,7 +227,9 @@ describe("Streams instances", () => {
       resumed.close();
       expect(await collect(plain.read("live"))).toHaveLength(2);
       expect(
-        storage.kv.get("cf_agents:streams/audit:streams_schema_version")
+        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")?.[
+          "streams/audit"
+        ]
       ).toBe(2);
     });
   });
@@ -275,6 +283,48 @@ describe("Streams instances", () => {
           )
           .toArray()
       ).toEqual([]);
+    });
+  });
+
+  it("starts on the one schema record: no sqlite_master read, and no v1 probe on a fresh object", async () => {
+    const queries = async (
+      storage: DurableObjectStorage,
+      fn: () => Promise<void>
+    ): Promise<string[]> => {
+      const sql = storage.sql;
+      const exec = sql.exec.bind(sql);
+      const seen: string[] = [];
+      sql.exec = ((query: string, ...params: SqlStorageValue[]) => {
+        seen.push(query);
+        return exec(query, ...params);
+      }) as typeof sql.exec;
+      try {
+        await fn();
+      } finally {
+        sql.exec = exec;
+      }
+      return seen;
+    };
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { lifecycle } = install(new Streams());
+      const fresh = await queries(storage, () => lifecycle.start());
+      expect(
+        fresh.filter((q) => /sqlite_master|stream_chunks/.test(q))
+      ).toEqual([]);
+    });
+    await withCapabilityHarness(async ({ install, storage }) => {
+      // An object the release left at schema 2, under its own key.
+      await storage.put("cf_agents:streams_schema_version", 2);
+      const { lifecycle } = install(new Streams());
+      const started = await queries(storage, () => lifecycle.start());
+      expect(started.filter((q) => /sqlite_master/.test(q))).toEqual([]);
+      expect(
+        storage.kv.get("cf_agents:streams_schema_version")
+      ).toBeUndefined();
+      expect(
+        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
+          ?.streams
+      ).toBe(2);
     });
   });
 });

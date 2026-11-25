@@ -14,6 +14,7 @@
  */
 
 import { LifecycleCapability } from "../lifecycle/capability";
+import { hasTable } from "../lifecycle/schema";
 import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import { SqlError } from "../sql-error";
 import { SqlName } from "../sql-name";
@@ -321,15 +322,22 @@ export class Streams extends LifecycleCapability {
   // ── Lifecycle capability hooks ───────────────────────────────────────────
 
   /** Migrate stream storage during Lifecycle startup. */
-  async onStart(): Promise<void> {
-    const storage = this.lifecycle.storage;
-    const version = (await storage.get<number>(this.#schemaVersionKey)) ?? 0;
-    if (version < CURRENT_STREAM_SCHEMA_VERSION) {
-      this.#ensureTables();
-      await storage.put(this.#schemaVersionKey, CURRENT_STREAM_SCHEMA_VERSION);
-    }
+  onStart(): void {
+    // Step 1 runs only for an object with no streams schema yet: it never
+    // had schema v1's chunk table, so there is nothing to look for.
+    let fresh = false;
+    this.lifecycle.schema.migrateSync({
+      version: CURRENT_STREAM_SCHEMA_VERSION,
+      legacyKey: this.#schemaVersionKey,
+      steps: {
+        1: () => {
+          fresh = true;
+        },
+        2: () => this.#ensureTables()
+      }
+    });
     // Schema v1's chunk table only ever belonged to the default instance.
-    if (version >= 1 && this.instanceName === undefined) {
+    if (!fresh && this.instanceName === undefined) {
       this.#legacyChunkTable = this.#hasLegacyChunkTable();
     }
   }
@@ -1500,12 +1508,7 @@ export class Streams extends LifecycleCapability {
   }
 
   #hasLegacyChunkTable(): boolean {
-    return (
-      this.#sql<{ name: string }>`
-        SELECT name FROM sqlite_master
-        WHERE type = 'table' AND name = 'cf_agents_stream_chunks'
-      `.length > 0
-    );
+    return hasTable(this.lifecycle.storage.sql, "cf_agents_stream_chunks");
   }
 
   #dropLegacyChunkTableIfEmpty(): void {
