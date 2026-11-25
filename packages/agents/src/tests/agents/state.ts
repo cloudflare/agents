@@ -198,8 +198,12 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
   // Useful for testing migration behavior since getAgentByName returns
   // the same DO instance (constructor won't re-run). ctx.abort() is
   // unavailable in local dev, so we call _ensureSchema() directly.
-  runSchemaMigration() {
+  async runSchemaMigration() {
     this._ensureSchema();
+    // The rest of the host's migration runs at start: the fiber import.
+    await (
+      this as unknown as { _recoverFibers(): Promise<void> }
+    )._recoverFibers();
   }
 
   // Set state to a falsy value directly in the DB (for testing row-existence logic)
@@ -338,8 +342,12 @@ export class TestStateAgentNoInitial extends Agent {
   }
 
   // Re-run the real migration logic from the Agent base class.
-  runSchemaMigration() {
+  async runSchemaMigration() {
     this._ensureSchema();
+    // The rest of the host's migration runs at start: the fiber import.
+    await (
+      this as unknown as { _recoverFibers(): Promise<void> }
+    )._recoverFibers();
   }
 }
 
