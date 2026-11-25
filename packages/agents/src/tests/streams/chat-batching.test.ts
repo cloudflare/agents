@@ -119,4 +119,29 @@ describe("chat chunks on Streams' batched appends", () => {
       expect(chat.progressMarker()).toBe(6);
     });
   });
+
+  it("deletes a discarded stream at cutover without settling its row first", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { lifecycle, capability: streams } = install(new Streams());
+      await lifecycle.start();
+      storage.sql.exec("CREATE TABLE message (id TEXT)");
+      const writer = await streams.open("turn");
+      writer.append("a");
+      writer.append("b");
+      const written = rowsWrittenBy(storage, () =>
+        writer.close({
+          commit: () => {
+            storage.sql.exec("INSERT INTO message VALUES ('m')");
+          },
+          discard: true
+        })
+      );
+      // The message, the block and the stream row: no settle UPDATE.
+      expect(written).toBe(3);
+      expect(await streams.status("turn")).toBeNull();
+      expect(storage.sql.exec("SELECT id FROM message").toArray()).toEqual([
+        { id: "m" }
+      ]);
+    });
+  });
 });

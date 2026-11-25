@@ -1155,7 +1155,11 @@ export class Streams extends LifecycleCapability {
     const hadLegacy = this.#legacyChunkTable;
     try {
       this.lifecycle.storage.transactionSync(() => {
-        settled = this.#settleRow(streamId, state, reason);
+        // A discarded row is deleted in this transaction, so it is not
+        // stamped settled first: one read instead of an UPDATE.
+        settled = options.discard
+          ? this.#state(streamId) === "streaming"
+          : this.#settleRow(streamId, state, reason);
         if (!settled) return;
         // Reject a native async `commit` before calling it: once started,
         // its code after the first `await` runs outside the transaction and
