@@ -237,6 +237,20 @@ describe("schema version gating", () => {
     expect(idsAfter).not.toContain("cf_state_was_changed");
   });
 
+  it("folds the released schema version key into the one record", async () => {
+    const agent = await getAgentByName(
+      env.TestStateAgent,
+      `released-key-${crypto.randomUUID()}`
+    );
+    await agent.getState();
+    await agent.storeReleasedSchemaVersion(EXPECTED_SCHEMA_VERSION);
+    expect(await agent.getSchemaVersion()).toBe(0);
+
+    await agent.runSchemaMigration();
+    expect(await agent.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
+    expect(await agent.hasReleasedSchemaVersionKey()).toBe(false);
+  });
+
   it("should move a legacy schema-version row into the KV key", async () => {
     const name = `legacy-version-row-${crypto.randomUUID()}`;
     const agent = await getAgentByName(env.TestStateAgent, name);

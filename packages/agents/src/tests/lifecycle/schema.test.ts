@@ -255,8 +255,8 @@ class LateMigration extends LifecycleCapability {
     super("late");
   }
 
-  migrateNow(): Promise<void> {
-    return this.lifecycle.schema.migrate({
+  async migrateNow(): Promise<void> {
+    await this.lifecycle.schema.migrate({
       version: 1,
       legacyKey: "cf_agents:late_schema_version",
       steps: {

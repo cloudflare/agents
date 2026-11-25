@@ -1,3 +1,8 @@
+import { HOST_SCHEMA_ID } from "../../lifecycle/schema";
+import {
+  storeAsReleased,
+  storedSchemaVersion
+} from "../shared/schema-versions";
 import {
   Agent,
   callable,
@@ -88,7 +93,7 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
 
   // Get the Agent's schema version from its KV key
   getSchemaVersion(): number {
-    return this.ctx.storage.kv.get<number>("cf_agents:schema_version") ?? 0;
+    return storedSchemaVersion(this.ctx.storage, HOST_SCHEMA_ID) ?? 0;
   }
 
   // Return sorted DDL for all cf_agents_* tables from sqlite_master.
@@ -146,15 +151,37 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     );
   }
 
+  // Simulate a DO from the release: Agent's version under its own key
+  storeReleasedSchemaVersion(version: number) {
+    storeAsReleased(
+      this.ctx.storage,
+      HOST_SCHEMA_ID,
+      "cf_agents:schema_version",
+      version
+    );
+  }
+
+  hasReleasedSchemaVersionKey(): boolean {
+    return this.ctx.storage.kv.get("cf_agents:schema_version") !== undefined;
+  }
+
   // Reset schema version to 0 (simulates a pre-versioning DO)
   resetSchemaVersion() {
-    this.ctx.storage.kv.delete("cf_agents:schema_version");
+    storeAsReleased(
+      this.ctx.storage,
+      HOST_SCHEMA_ID,
+      "cf_agents:schema_version"
+    );
   }
 
   // Simulate a DO created when Agent kept its schema version as a row in
   // cf_agents_state (before the State capability owned that table).
   insertLegacySchemaVersionRow(version: number) {
-    this.ctx.storage.kv.delete("cf_agents:schema_version");
+    storeAsReleased(
+      this.ctx.storage,
+      HOST_SCHEMA_ID,
+      "cf_agents:schema_version"
+    );
     this.ctx.storage.sql.exec(
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_schema_version', ?)",
       String(version)
@@ -226,7 +253,7 @@ export class TestStateAgentNoInitial extends Agent {
   }
 
   getSchemaVersion(): number {
-    return this.ctx.storage.kv.get<number>("cf_agents:schema_version") ?? 0;
+    return storedSchemaVersion(this.ctx.storage, HOST_SCHEMA_ID) ?? 0;
   }
 
   getStateRowCount(): number {
@@ -283,13 +310,21 @@ export class TestStateAgentNoInitial extends Agent {
 
   // Reset schema version to 0 (simulates a pre-versioning DO)
   resetSchemaVersion() {
-    this.ctx.storage.kv.delete("cf_agents:schema_version");
+    storeAsReleased(
+      this.ctx.storage,
+      HOST_SCHEMA_ID,
+      "cf_agents:schema_version"
+    );
   }
 
   // Simulate a DO created when Agent kept its schema version as a row in
   // cf_agents_state (before the State capability owned that table).
   insertLegacySchemaVersionRow(version: number) {
-    this.ctx.storage.kv.delete("cf_agents:schema_version");
+    storeAsReleased(
+      this.ctx.storage,
+      HOST_SCHEMA_ID,
+      "cf_agents:schema_version"
+    );
     this.ctx.storage.sql.exec(
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_schema_version', ?)",
       String(version)
