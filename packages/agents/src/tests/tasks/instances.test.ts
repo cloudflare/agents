@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { Tasks } from "../../tasks";
 import type { TaskStep } from "../../tasks";
 import { withCapabilityHarness } from "../shared/capability-harness";
@@ -43,16 +43,7 @@ describe("Tasks instances", () => {
   describeInstanceConformance({
     kind: "tasks",
     make: (name) => tasks(name ?? "default", name),
-    smoke: async (instance) => {
-      // The check compares stored values across separate objects: the same
-      // clock for each smoke keeps the default's timestamps comparable.
-      const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
-      try {
-        await smoke(instance);
-      } finally {
-        now.mockRestore();
-      }
-    }
+    smoke
   });
 
   it("keeps the default instance on the released table and index names", async () => {
