@@ -103,7 +103,7 @@ describe("Tasks lane arrival policies", () => {
         instance.tasks.run("laned", { label: "c" }, { runId: "c", ...latest }),
         instance.tasks.run("laned", { label: "d" }, { runId: "d", ...latest })
       ]);
-      const open = [];
+      const open: string[] = [];
       for (const id of ["c", "d"]) {
         if ((await instance.tasks.get(id))?.status === "pending") open.push(id);
       }
