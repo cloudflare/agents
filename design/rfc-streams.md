@@ -101,8 +101,11 @@ duplicate-free sequence.
 
 `ResumableStream` — the store behind resumable chat streaming in
 `AIChatAgent` and `Think` — is a thin adapter over this capability:
-producer-side coalescing (~10 wire chunks packed per stored segment, for
-storage-op economy), the chat wire protocol and replay handshake, and
+batched appends through the sync aperture (`appendJson` with
+`{ maxChunks: 10, maxBytes: 512_000, fillBlocks: true }`: one seq per wire
+chunk, one row write per ten chunks, each flush filling the turn's newest
+block while it stays under 256 KB, so deleting a turn is one row per
+block), the chat wire protocol and replay handshake, and
 retention policy (10-minute completed grace; a 1-hour abandoned window
 decided in two phases — a coarse cutoff on the stream row's `updated_at`,
 then one indexed chunk-tail read per candidate to confirm the producer

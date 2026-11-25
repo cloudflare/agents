@@ -1595,11 +1595,20 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._resumableStream.getStreamChunks(streamId);
   }
 
+  /** Rows a stream's chunks are stored in. */
+  getStreamBlockRowCount(streamId: string): number {
+    return (
+      this.sql<{ cnt: number }>`
+        select count(*) as cnt from cf_agents_stream_blocks
+        where stream_id = ${streamId}
+      `[0]?.cnt ?? 0
+    );
+  }
+
   /**
-   * Number of stored segments for a stream (packed segments count as 1
-   * each): the appended-segment cursor, read from the block log's tail.
-   * Blocks pack many segments into one row, so a row count no longer
-   * reflects how the adapter batched its writes.
+   * Number of stored seqs for a stream (one per chunk; a packed segment
+   * from an older version counts as 1): the cursor, read from the block
+   * log's tail.
    */
   getStreamChunkRowCount(streamId: string): number {
     const result = this.sql<{ cnt: number | null }>`
