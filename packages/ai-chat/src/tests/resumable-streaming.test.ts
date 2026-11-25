@@ -357,7 +357,8 @@ describe("Resumable Streaming", () => {
         '{"type":"text-delta","id":"0","delta":"A2"}'
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      // Every frame the broadcasts sent ws2 is in by the barrier's reply.
+      await socketBarrier(ws2, messages2);
 
       // ws2 should NOT receive live chunks before ACK
       const preAckChunks = messages2.filter(isUseChatResponseMessage);
@@ -810,7 +811,8 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 100));
+      // Every frame the connect sent is in by the barrier's reply.
+      await socketBarrier(ws2, messages2);
 
       // Should NOT get resume notification for completed stream
       const resumeMsg = messages2.find(isStreamResumingMessage);
