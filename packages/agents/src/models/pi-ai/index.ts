@@ -12,7 +12,7 @@
  *
  * const ai = createAI({ binding: env.AI, id: "prod" });
  *
- * ai("@cf/zai-org/glm-5.3-flash");                     // Workers AI: ours
+ * ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017");     // Workers AI: ours
  * ai(getBuiltinModel("anthropic", "claude-opus-4-8")); // theirs, our transport
  * ai("anthropic/claude-opus-4-8");                     // same, via pi's catalog
  * ```
@@ -244,8 +244,8 @@ function buildModel(
  *
  * ```ts
  * const ai = createAI({ binding: env.AI, id: "prod" });
- * ai("@cf/zai-org/glm-5.3-flash");
- * ai(anthropicModel, { fallback: ["@cf/zai-org/glm-5.3-flash"] });
+ * ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
+ * ai(anthropicModel, { fallback: ["@cf/deepseek-ai/deepseek-v4.1-flash-1017"] });
  * new Agent({ streamFn: ai.streamFn, initialState: { model: ai(openaiModel) } });
  * ```
  */

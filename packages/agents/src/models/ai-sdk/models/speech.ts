@@ -2,9 +2,9 @@
  * Text-to-speech over the Cloudflare run path.
  *
  * Deepgram's Aura models take `{ text, speaker?, encoding?, container? }` and
- * answer with raw MP3 bytes (`content-type: audio/mpeg`, verified live).
- * MeloTTS takes `{ prompt, lang? }` and answers with WAV, or with JSON
- * `{ audio: "<base64>" }` — so the content type decides, never the model id.
+ * answer with raw MP3 bytes (`content-type: audio/mpeg`, verified live). A
+ * JSON answer (`{ audio: "<base64>" }`) is read too — the content type
+ * decides, never the model id.
  */
 
 import type {
@@ -26,14 +26,6 @@ import {
 } from "./modality";
 
 /**
- * MeloTTS is the odd one out: the prompt key is `prompt`, the language key is
- * `lang`, and there is no voice.
- *
- * @see https://developers.cloudflare.com/workers-ai/models/melotts/
- */
-const MELOTTS = "@cf/myshell-ai/melotts";
-
-/**
  * Output encodings Aura accepts. `outputFormat` maps onto this; anything else
  * is warned about rather than sent, because the run path validates the enum.
  *
@@ -51,7 +43,6 @@ const AURA_ENCODINGS = new Set([
 
 /** Builds the run-path body for one speech leg. */
 export function buildSpeechRequest(
-  modelId: string,
   options: SpeechModelV4CallOptions
 ): ModalityRequest {
   const warnings: SharedV4Warning[] = [];
@@ -67,20 +58,6 @@ export function buildSpeechRequest(
         "Workers AI speech models take text, not instructions."
       )
     );
-  }
-
-  if (modelId === MELOTTS) {
-    const input: Record<string, unknown> = { prompt: options.text };
-    if (options.language !== undefined) input.lang = options.language;
-    if (options.voice !== undefined) {
-      warnings.push(unsupported("voice", `${MELOTTS} has a single voice.`));
-    }
-    if (options.outputFormat !== undefined) {
-      warnings.push(
-        unsupported("outputFormat", `${MELOTTS} picks its own audio format.`)
-      );
-    }
-    return { input, warnings };
   }
 
   const input: Record<string, unknown> = { text: options.text };
@@ -151,7 +128,7 @@ export class CloudflareSpeechModel
   ): Promise<SpeechModelV4Result> {
     const answer = await this.send({
       abortSignal: options.abortSignal,
-      build: (modelId) => buildSpeechRequest(modelId, options),
+      build: () => buildSpeechRequest(options),
       check: (answer) => {
         readAudio(answer);
       },

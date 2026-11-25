@@ -17,7 +17,7 @@ This example is the only documentation for them for now.
   readonly harness = new OpenCodeHarness({
     opencode: ({ storage }) =>
       OpenCodeWorkerd.create({ storage, plugins: [this.ai.plugin] }),
-    defaults: { model: this.ai("@cf/moonshotai/kimi-k2.7-code") }
+    defaults: { model: this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017") }
   });
   ```
 

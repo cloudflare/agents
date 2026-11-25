@@ -38,11 +38,11 @@ describe("ResumableStream.progressMarker", () => {
       // Clearing history retires the live stream's segment; nothing is lost.
       expect(marker.cleared).toBe(6);
 
-      // Seeding folds the legacy counter into its own column by max, beside
-      // the retired segments: a later, larger seed replaces a smaller one
-      // and neither touches what the log already counted.
-      expect(marker.seededLow).toBe(8);
-      expect(marker.seededHigh).toBe(52);
+      // Seeding raises the marker to at least the counter, which already
+      // counts what the log retired (#2702): a counter below the marker
+      // changes nothing, a larger one becomes the marker.
+      expect(marker.seededLow).toBe(6);
+      expect(marker.seededHigh).toBe(46);
 
       // No per-chunk write exists: 36 chunks were stored along the way, and
       // the whole sequence — stream opens, block writes, settles, deletions
@@ -61,40 +61,42 @@ describe("ResumableStream.progressMarker", () => {
     });
   });
 
-  it("reports the durable marker to the host per retire and per credit, never per chunk", async () => {
-    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
-      await instance.probeProgressMarker();
-      // Cutover, reclaim, credit, clear: four reports for 36 stored chunks,
-      // each carrying the durable total as it stood, never decreasing.
-      expect(instance.progressReports).toEqual([3, 4, 5, 6]);
-    });
-  });
-
   it("retires a stream once when the adapter was constructed more than once", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {
-      const { marker, reports } = await instance.probeReconstruction();
+      const { marker } = await instance.probeReconstruction();
       // Three constructions, one cutover of a one-segment stream: the
-      // earlier hooks were replaced, so the segment is retired once and the
-      // host hears about it once.
+      // earlier hooks were replaced, so the segment is retired once.
       expect(marker).toBe(1);
-      expect(reports).toBe(1);
     });
   });
 
-  it("seeds the legacy counter beside segments retired before it, idempotently", async () => {
+  it("#2702: the marker does not grow when each isolate seeds from the mirrored counter", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      const marker = await instance.probeMirroredSeed();
+      // No new content between the turn and the first new isolate; one
+      // credit in each isolate after that.
+      expect(marker.isolate1).toBe(marker.afterTurn);
+      expect(marker.isolate2).toBe(marker.afterTurn + 1);
+      expect(marker.isolate3).toBe(marker.afterTurn + 2);
+    });
+  });
+
+  it("seeds the counter as a floor, idempotently, also with segments retired before it", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {
       const marker = await instance.probeSeedOrdering();
       // Two segments were retired by a cutover before any seed landed.
       expect(marker.retiredBeforeSeed).toBe(2);
-      // The seed adds the counter beside them; it does not replace them.
-      expect(marker.seeded).toBe(42);
+      // The marker reads at least the counter. The host's mirror wrote the
+      // counter after that cutover, so it counts those two segments
+      // already (#2702); adding them again is the bug this guards.
+      expect(marker.seeded).toBe(40);
       // Another isolate seeding the same constant changes nothing.
-      expect(marker.seededAgain).toBe(42);
-      expect(marker.seededLower).toBe(42);
-      expect(marker.credited).toBe(43);
+      expect(marker.seededAgain).toBe(40);
+      expect(marker.seededLower).toBe(40);
+      expect(marker.credited).toBe(41);
     });
   });
 });

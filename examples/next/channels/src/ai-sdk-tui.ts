@@ -7,7 +7,7 @@ const room = process.argv[2] ?? "default";
 const origin = process.env.AGENT_ORIGIN ?? "ws://localhost:5173";
 const me = `terminal-${crypto.randomUUID().slice(0, 6)}`;
 const client = new WebChannelClient(
-  `${origin}/channels/ai-sdk/${room}?as=${me}`
+  `${origin}/channels/think/${room}?as=${me}`
 );
 
 await runAgentTUI({

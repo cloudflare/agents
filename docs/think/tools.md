@@ -43,7 +43,7 @@ The default Workspace has no execution backends, so there is no `exec` tool unti
 ```typescript
 import { Think } from "@cloudflare/think";
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
 
@@ -52,11 +52,10 @@ export class MyAgent extends Think<Env> {
     storage: this.ctx.storage,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: "js",
+      new CodemodeBackend({
         loader: this.env.LOADER,
         access: "read-write",
-        modules: { "ws:git": createGitModule() }
+        modules: { "codemode:git": createGitModule() }
       })
     ]
   });
@@ -67,28 +66,27 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Computer ships a JavaScript backend and a just-bash shell backend that run in Dynamic Workers, and a container backend with a full Linux userland. See the [Computer README](https://github.com/cloudflare/computer/tree/main/packages/computer#choosing-a-backend) for each backend's bindings.
+Computer ships a codemode backend for JavaScript and a just-bash shell backend that run in Dynamic Workers, and a container backend with a full Linux userland. See the [Computer README](https://github.com/cloudflare/computer/tree/main/packages/computer#choosing-a-backend) for each backend's bindings.
 
 ### Calling the agent's tools from code
 
-Give a JavaScript backend a `ws:tools` module, and code the model runs with `exec` can import the agent's tools. Files come from `node:fs/promises`, so serve `getTools()` rather than the workspace tools:
+Give a codemode backend a `codemode:tools` module, and code the model runs with `exec` can import the agent's tools. Files come from `node:fs/promises`, so serve `getTools()` rather than the workspace tools:
 
 ```typescript
 import { createToolBindings } from "@cloudflare/computer/modules/tools";
 import { forAISDKTools } from "@cloudflare/computer/tools/ai-sdk";
 
-new WorkerJavaScriptBackend({
-  id: "js",
+new CodemodeBackend({
   loader: this.env.LOADER,
   modules: {
-    "ws:tools": createToolBindings(forAISDKTools(() => this.getTools()))
+    "codemode:tools": createToolBindings(forAISDKTools(() => this.getTools()))
   }
 });
 ```
 
 ```ts
 import { readFile } from "node:fs/promises";
-import { getWeather } from "ws:tools";
+import { getWeather } from "codemode:tools";
 
 export default async function () {
   const cities = JSON.parse(await readFile("/workspace/cities.json", "utf8"));
@@ -98,7 +96,7 @@ export default async function () {
 }
 ```
 
-Tools that need approval, and tools that run in the browser, are not exported: nothing can approve or run them from code. Calls from code do not go through `beforeToolCall`. See [`ws:tools`](https://github.com/cloudflare/computer/blob/main/docs/17_isolate_javascript.md#wstools) for how calls and results work.
+Tools that need approval, and tools that run in the browser, are not exported: nothing can approve or run them from code. Calls from code do not go through `beforeToolCall`. See [`codemode:tools`](https://github.com/cloudflare/computer/blob/main/docs/17_isolate_javascript.md#codemodetools) for how calls and results work.
 
 ### Changing the tools
 
@@ -257,7 +255,7 @@ See [Connecting to MCP Servers](https://github.com/cloudflare/agents/blob/main/d
 
 ## Code Execution Tool
 
-> **Deprecated.** Use `exec` on a JavaScript backend with `ws:tools` instead; see [Calling the agent's tools from code](#calling-the-agents-tools-from-code). `createExecuteTool` will be removed along with `@cloudflare/codemode`.
+> **Deprecated.** Use `exec` on a codemode backend with `codemode:tools` instead; see [Calling the agent's tools from code](#calling-the-agents-tools-from-code). `createExecuteTool` will be removed along with `@cloudflare/codemode`.
 
 Let the LLM write and run TypeScript in a sandboxed Worker, recorded on a durable codemode runtime (abort-and-replay, human approvals, audit trail, reusable snippets). Requires `@cloudflare/codemode` and a `worker_loaders` binding.
 
@@ -334,9 +332,9 @@ Either way, the text and reasoning the model wrote after the paused output (its 
 
 - `pendingExecutions()` — pending actions (with full args) for rendering approval UI.
 
-> **Render approval cards from `pendingExecutions()`, not the transcript.** The `pending` array in the paused tool output is a _truncated preview_ — args are bounded (~2 KB each) so they don't blow up model context, but the full args (up to 1 MB) are what actually execute on approve. A human approving a gated call must see the authoritative args, so fetch them via `pendingExecutions(executionId)` before enabling the Approve button. `examples/assistant`'s `PausedExecutionCard` shows the pattern.
+> **Render approval cards from `pendingExecutions()`, not the transcript.** The `pending` array in the paused tool output is a _truncated preview_ — args are bounded (~2 KB each) so they don't blow up model context, but the full args (up to 1 MB) are what actually execute on approve. A human approving a gated call must see the authoritative args, so fetch them via `pendingExecutions(executionId)` before enabling the Approve button. The `PausedExecutionCard` in the [assistant example](https://github.com/cloudflare/agents/tree/786d30e305baebc5fbf5ad5ed80461f88a728468/examples/assistant/src) shows the pattern.
 
-See `examples/assistant` for a working approval card, and `design/think-execute-hitl.md` for the design.
+See `design/think-execute-hitl.md` for the design.
 
 ### The runtime handle
 

@@ -19,7 +19,7 @@ import {
   workersAIToolStream
 } from "./helpers";
 
-const WORKERS_AI = "@cf/zai-org/glm-4.7-flash";
+const WORKERS_AI = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /**
  * `ai.streamFn` is `streamSimple`, bound, for code that takes a stream
@@ -112,8 +112,9 @@ describe("pi-ai: ai.streamFn", () => {
 
     expect(message.stopReason).toBe("stop");
     const input = binding.calls[0]?.input;
-    // A pi thinking level, mapped onto Workers AI's effort scale.
-    expect(field(input, "reasoning_effort")).toBe("low");
+    // A pi thinking level, mapped through the model's registry entry: this
+    // one supports only high and max, so "minimal" clamps up to "high".
+    expect(field(input, "reasoning_effort")).toBe("high");
     expect(field(input, "max_tokens")).toBe(32);
   });
 

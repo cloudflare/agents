@@ -60,6 +60,15 @@ export class ChatAgent extends AIChatAgent {
     return await this.addMcpServer(name, url);
   }
 
+  /**
+   * Try a failed server again: forgets why it stopped and connects now,
+   * returning a new authorization link if the server needs one.
+   */
+  @callable()
+  async reconnectServer(serverId: string) {
+    return await this.reconnectMcpServer(serverId);
+  }
+
   @callable()
   async removeServer(serverId: string) {
     await this.removeMcpServer(serverId);
@@ -148,7 +157,7 @@ export class ChatAgent extends AIChatAgent {
 
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions:

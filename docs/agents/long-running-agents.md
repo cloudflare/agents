@@ -255,7 +255,7 @@ export class ProjectManager extends Agent<Env, ProjectState> {
 
 The pattern is: **checkpoint before expensive work, recover from the last checkpoint.** This is not automatic replay — you decide what recovery means for your domain.
 
-> **Testing recovery locally:** In `wrangler dev`, fiber recovery works identically to production. Kill the wrangler process (Ctrl-C or SIGKILL), restart it, and recovery fires automatically. If a request or WebSocket connection arrives first, `onStart()` runs `_checkRunFibers()` eagerly. If the agent has no incoming connections, the persisted alarm fires on its own and triggers recovery via `_onAlarmHousekeeping()` — this is critical for background agents that have no clients. Either path calls your `onFiberRecovered` hook. SQLite and alarm state persist to disk between restarts.
+> **Testing recovery locally:** In `wrangler dev`, fiber recovery works identically to production. Kill the wrangler process (Ctrl-C or SIGKILL), restart it, and recovery fires automatically. If a request or WebSocket connection arrives first, startup runs fiber recovery eagerly, before `onStart()`. If the agent has no incoming connections, the persisted alarm fires on its own and runs the same recovery — this is critical for background agents that have no clients. Either path calls your `onFiberRecovered` hook. SQLite and alarm state persist to disk between restarts.
 
 For the full API reference — `FiberContext`, `FiberRecoveryContext`, concurrent fibers, inline vs fire-and-forget patterns — see [Durable Execution](./durable-execution.md).
 

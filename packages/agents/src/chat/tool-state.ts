@@ -6,47 +6,71 @@
  * in their own way; this module provides the state matching and update logic.
  */
 
+import { transferToolPartMarks, type MessagePart } from "./message-builder";
+
 /**
  * Describes an update to apply to a tool part.
  */
 export type ToolPartUpdate = {
   toolCallId: string;
   matchStates: string[];
+  /**
+   * When set, only a part whose `approval.id` is this matches: a provider
+   * can reuse a tool-call id across replies, and the approval id tells their
+   * requests apart.
+   */
+  approvalId?: string;
   apply: (part: Record<string, unknown>) => Record<string, unknown>;
 };
 
 /**
- * Apply a tool part update to a parts array.
- * Finds the first part matching `update.toolCallId` in one of `update.matchStates`,
- * applies the update immutably, and returns the new parts array with the index.
+ * Apply a tool part update to a parts array: to every part for
+ * `update.toolCallId` in one of `update.matchStates`. A legacy message can
+ * hold the same call twice; leaving one copy unanswered would leave the call
+ * pending for ever.
  *
- * Returns `null` if no matching part was found.
+ * Immutable: `parts` is not changed. Returns the new array (the same array
+ * when no matched part changed) and whether one changed, or `null` when no
+ * part matched.
  */
 export function applyToolUpdate(
   parts: Array<Record<string, unknown>>,
   update: ToolPartUpdate
-): { parts: Array<Record<string, unknown>>; index: number } | null {
+): { parts: Array<Record<string, unknown>>; changed: boolean } | null {
+  let next: Array<Record<string, unknown>> | undefined;
+  let matched = false;
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     if (
       "toolCallId" in part &&
       part.toolCallId === update.toolCallId &&
       "state" in part &&
-      update.matchStates.includes(part.state as string)
+      update.matchStates.includes(part.state as string) &&
+      (update.approvalId === undefined ||
+        (part.approval as { id?: unknown } | undefined)?.id ===
+          update.approvalId)
     ) {
-      const updatedParts = [...parts];
-      updatedParts[i] = update.apply(part);
-      return { parts: updatedParts, index: i };
+      matched = true;
+      const applied = update.apply(part);
+      if (applied !== part) {
+        next ??= [...parts];
+        next[i] = applied;
+      }
     }
   }
-  return null;
+  if (!matched) return null;
+  return next ? { parts: next, changed: true } : { parts, changed: false };
 }
 
 /**
  * Build an update descriptor for applying a tool result.
  *
- * Matches parts in `input-available`, `approval-requested`, or `approval-responded` state.
- * Sets state to `output-available` (with output) or `output-error` (with errorText).
+ * Matches the pre-terminal states (`input-available`, `approval-requested`,
+ * `approval-responded`) and sets `output-available` (with output) or
+ * `output-error` (with errorText). First write wins: a part that already
+ * holds a terminal result is matched and returned as the same reference, so
+ * a duplicate frame, a second tab or a provider replay is an idempotent
+ * no-op (`unchanged`), not a miss, and never overwrites the first result.
  */
 export function toolResultUpdate(
   toolCallId: string,
@@ -59,18 +83,161 @@ export function toolResultUpdate(
     matchStates: [
       "input-available",
       "approval-requested",
-      "approval-responded"
+      "approval-responded",
+      "output-available",
+      "output-error",
+      "output-denied"
     ],
-    apply: (part) => ({
-      ...part,
-      ...(overrideState === "output-error"
-        ? {
-            state: "output-error",
-            errorText: errorText ?? "Tool execution denied by user"
-          }
-        : { state: "output-available", output, preliminary: false })
-    })
+    apply: (part) => {
+      if (isTerminalToolState(part.state)) return part;
+      return {
+        ...part,
+        ...(overrideState === "output-error"
+          ? {
+              state: "output-error",
+              errorText: errorText ?? "Tool execution denied by user"
+            }
+          : { state: "output-available", output, preliminary: false })
+      };
+    }
   };
+}
+
+function isTerminalToolState(state: unknown): boolean {
+  return (
+    state === "output-available" ||
+    state === "output-error" ||
+    state === "output-denied"
+  );
+}
+
+/**
+ * The reply a host is streaming or storing now, whose parts an update may
+ * change in place.
+ *
+ * @internal
+ */
+export type InFlightToolReply<TMessage> = {
+  readonly id: string;
+  /** The reply's live parts array. A changed part is replaced in it. */
+  readonly parts: Array<Record<string, unknown>>;
+  /** The reply as a message, for the broadcast. */
+  readonly snapshot: () => TMessage;
+  /** A part changed in place: a store of the reply already under way must run again. */
+  readonly changed: () => void;
+};
+
+/**
+ * Where {@link applyToolPartUpdate} finds, writes and announces the part.
+ *
+ * @internal
+ */
+export type ToolPartTarget<TMessage extends { id: string; parts: unknown[] }> =
+  {
+    /** The reply in flight, or `null`. */
+    readonly inFlight: InFlightToolReply<TMessage> | null;
+    /**
+     * The stored message holding the call, or `null`. `inFlightId` is set when
+     * the reply in flight holds it: a row under that id exists only when part
+     * of the reply was stored before it finished.
+     */
+    readonly storedOwner: (
+      toolCallId: string,
+      inFlightId: string | undefined,
+      update: ToolPartUpdate
+    ) => Promise<TMessage | null>;
+    /** Store a changed message. Returns the form to broadcast. */
+    readonly write: (message: TMessage) => Promise<TMessage>;
+    /** Tell clients the message changed. */
+    readonly broadcast: (message: TMessage) => void;
+  };
+
+/**
+ * Apply a tool result, approval or outcome to its part, wherever the part
+ * is: in the reply in flight, in the stored transcript, or both. Both, because
+ * a reply can be partly stored while it streams (stall recovery, #1649) and a
+ * result written only to one copy would be lost when the other is stored.
+ *
+ * An update that leaves the matched part as the same reference changed
+ * nothing: no write and no broadcast.
+ *
+ * @returns `changed` with the message a continuation answers (the reply in
+ *   flight when it holds the call), `unchanged` when the part was found and
+ *   already settled, or `missing`.
+ *
+ * @internal
+ */
+export async function applyToolPartUpdate<
+  TMessage extends { id: string; parts: unknown[] }
+>(
+  update: ToolPartUpdate,
+  target: ToolPartTarget<TMessage>
+): Promise<
+  | { status: "changed"; messageId: string }
+  | { status: "unchanged" }
+  | { status: "missing" }
+> {
+  // One broadcast per message. When the reply in flight and its stored
+  // copy both changed, the reply in flight is the newer: it may hold text
+  // the stored copy does not have yet.
+  const broadcasts = new Map<string, TMessage>();
+  // `undefined`: no part found; `null`: found, already settled.
+  let changedMessageId: string | null | undefined;
+
+  const inFlight = target.inFlight;
+  let inFlightOwnsCall = false;
+  if (inFlight) {
+    const result = applyToolUpdate(inFlight.parts, update);
+    if (result) {
+      inFlightOwnsCall = true;
+      changedMessageId = null;
+      if (result.changed) {
+        result.parts.forEach((part, index) => {
+          const live = inFlight.parts[index];
+          if (part === live) return;
+          // Replaced, not changed in place: a stored copy can share this
+          // part object, and must see its own update. The stream parser's
+          // marks on the old object (input rebuilt from deltas, waiting for
+          // the final input) move to the new one.
+          transferToolPartMarks(live as MessagePart, part as MessagePart);
+          inFlight.parts[index] = part;
+        });
+        inFlight.changed();
+        const snapshot = inFlight.snapshot();
+        broadcasts.set(snapshot.id, snapshot);
+        changedMessageId = inFlight.id;
+      }
+    }
+  }
+
+  const owner = await target.storedOwner(
+    update.toolCallId,
+    inFlightOwnsCall && inFlight ? inFlight.id : undefined,
+    update
+  );
+  if (owner) {
+    const ownerParts = owner.parts as Array<Record<string, unknown>>;
+    const result = applyToolUpdate(ownerParts, update);
+    if (result) changedMessageId ??= null;
+    if (result?.changed) {
+      const stored = await target.write({
+        ...owner,
+        parts: result.parts as TMessage["parts"]
+      });
+      if (!broadcasts.has(stored.id)) broadcasts.set(stored.id, stored);
+      // The reply in flight, when it also holds the call, is the one a
+      // continuation answers: keep it as the changed message.
+      if (typeof changedMessageId !== "string") changedMessageId = owner.id;
+    }
+  }
+
+  for (const message of broadcasts.values()) target.broadcast(message);
+  if (typeof changedMessageId === "string") {
+    return { status: "changed", messageId: changedMessageId };
+  }
+  return changedMessageId === null
+    ? { status: "unchanged" }
+    : { status: "missing" };
 }
 
 /**
@@ -118,13 +285,7 @@ export function crossMessageToolResultUpdate(
       "output-denied"
     ],
     apply: (part) => {
-      if (
-        part.state === "output-available" ||
-        part.state === "output-error" ||
-        part.state === "output-denied"
-      ) {
-        return part;
-      }
+      if (isTerminalToolState(part.state)) return part;
       if (updateType === "output-error") {
         return {
           ...part,
@@ -194,11 +355,13 @@ export function pausedExecutionUpdate(
  */
 export function toolApprovalUpdate(
   toolCallId: string,
-  approved: boolean
+  approved: boolean,
+  approvalId?: string
 ): ToolPartUpdate {
   return {
     toolCallId,
     matchStates: ["input-available", "approval-requested"],
+    ...(approvalId !== undefined && { approvalId }),
     apply: (part) => {
       const approval =
         typeof part.approval === "object" &&
@@ -251,6 +414,27 @@ export function toolPartName(
 }
 
 /**
+ * Names of the tools in `tools` the server does not run: no `execute`, and
+ * not run by the provider. An app answers a call to one of them from the
+ * client, sorted so the list can be compared and stored.
+ *
+ * @internal
+ */
+export function unexecutedToolNames(tools: Record<string, unknown>): string[] {
+  return Object.entries(tools)
+    .filter(([, definition]) => {
+      const candidate = definition as { execute?: unknown; type?: unknown };
+      return (
+        typeof candidate.execute !== "function" &&
+        candidate.type !== "provider" &&
+        candidate.type !== "provider-defined"
+      );
+    })
+    .map(([name]) => name)
+    .sort();
+}
+
+/**
  * Whether a part is still awaiting a CLIENT interaction that can genuinely
  * arrive after a restart: an `approval-requested` part (a reconnecting client
  * replays the approval) or an `input-available` part for a CLIENT tool (the SPA
@@ -259,7 +443,7 @@ export function toolPartName(
  */
 export function partAwaitsClientInteraction(
   part: unknown,
-  clientResolvable: Set<string>
+  clientResolvable: ReadonlySet<string>
 ): boolean {
   if (typeof part !== "object" || part === null || !("state" in part)) {
     return false;
@@ -327,6 +511,74 @@ export function hasIncompleteToolBatch(
       hasSettled = true;
     }
     if (hasPending && hasSettled) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the chat is waiting on a client: a tool call a client still has to
+ * answer, or an approval it still has to give. The one definition both
+ * `@cloudflare/ai-chat` and `@cloudflare/think` use, for apps and for
+ * recovery alike.
+ *
+ * - In the latest stored message every `input-available` call counts,
+ *   whatever its tool. A reply is stored unanswered only when its stream
+ *   finished on that call, which is what a client tool does. A cut-off reply
+ *   has its dead calls settled before it is stored
+ *   (`settleInterruptedReply`), so the call is never a server tool whose
+ *   `execute()` died. That holds for replies this version stored. An older
+ *   version stored a cut-off reply as it was, so a host that can name the
+ *   tools only a client can answer passes them
+ *   (`clientAnswerableToolNames`), and then only those count. A dead server
+ *   call in an old row is not waited on.
+ * - In an earlier reply, one the conversation has moved past, only a call a
+ *   client is known to own counts (`clientToolNames`, from the schemas the
+ *   client sent). Nothing else there can be told apart from a dead call an
+ *   older version stored, and the next turn settles it either way.
+ * - In the reply that is streaming now, a server tool sits at
+ *   `input-available` while it runs, so only a known client tool counts.
+ * - `approval-requested` counts everywhere.
+ *
+ * @param input.streaming - The reply being streamed, if any. A stored copy
+ *   of the same message is skipped in favor of it.
+ * @param input.clientAnswerableToolNames - Every tool a client may answer,
+ *   as far as the host can tell: the tools the client sent a schema for, and
+ *   the tools the server declares without running them itself. `null` or
+ *   absent when the host cannot tell (its tools are not visible to it), in
+ *   which case any tool may be a client's.
+ */
+export function hasPendingToolInteraction(input: {
+  messages: ReadonlyArray<ToolBatchMessage & { id?: string }>;
+  streaming: (ToolBatchMessage & { id?: string }) | null | undefined;
+  clientToolNames: Set<string>;
+  clientAnswerableToolNames?: Set<string> | null;
+}): boolean {
+  const { messages, streaming, clientToolNames } = input;
+  const answerable = input.clientAnswerableToolNames ?? null;
+  if (
+    streaming?.parts.some((part) =>
+      partAwaitsClientInteraction(part, clientToolNames)
+    )
+  ) {
+    return true;
+  }
+  const latest = streaming ? undefined : messages.at(-1);
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    if (streaming && message.id !== undefined && message.id === streaming.id) {
+      continue;
+    }
+    for (const part of message.parts) {
+      if (partAwaitsClientInteraction(part, clientToolNames)) return true;
+      if (
+        message === latest &&
+        (part as { state?: unknown } | null)?.state === "input-available"
+      ) {
+        if (answerable === null) return true;
+        const toolName = toolPartName(part as Record<string, unknown>);
+        if (toolName != null && answerable.has(toolName)) return true;
+      }
+    }
   }
   return false;
 }

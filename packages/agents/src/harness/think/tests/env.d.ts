@@ -1,4 +1,4 @@
-/// <reference types="@cloudflare/vitest-pool-workers/types" />
+/// <reference types="@cloudflare/vitest-plugin/types" />
 
 declare namespace Cloudflare {
   interface Env {
@@ -7,6 +7,12 @@ declare namespace Cloudflare {
     >;
     THINK_WITH_STREAMS: DurableObjectNamespace<
       import("./worker").ThinkWithStreamsObject
+    >;
+    THINK_HARNESS_FACET_ROOT: DurableObjectNamespace<
+      import("./worker").ThinkHarnessFacetRoot
+    >;
+    THINK_HARNESS_FACET_CHILD: DurableObjectNamespace<
+      import("./worker").ThinkHarnessFacetChild
     >;
   }
 }

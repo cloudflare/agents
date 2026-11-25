@@ -227,9 +227,22 @@ function currentWebSocketContext(
  */
 class PlainHostCallables extends RpcTarget {
   readonly #greeting = "host";
+  /** How many times `bump()` ran, for the closed-connection tests. */
+  bumps = 0;
+
+  /** A callable with a side effect, for the closed-connection tests. */
+  bump(): number {
+    this.bumps += 1;
+    return this.bumps;
+  }
 
   add(a: number, b: number): number {
     return a + b;
+  }
+
+  /** A result of `mib` MiB, for the frame-limit test. */
+  huge(mib: number): string {
+    return "x".repeat(mib * 1024 * 1024);
   }
 
   fail(message: string): never {
@@ -252,6 +265,49 @@ class PlainHostCallables extends RpcTarget {
   /** A value JSON cannot carry; the JSON wire must still settle the call. */
   bigint(): { value: bigint } {
     return { value: 1n };
+  }
+
+  /** Chunks pulled from the last `hugeStream`, and whether it was cancelled. */
+  hugeStreamState = { pulled: 0, cancelled: false };
+
+  /** A small chunk, a 33 MiB chunk, then more small ones. */
+  hugeStream(): ReadableStream<string> {
+    const state = { pulled: 0, cancelled: false };
+    this.hugeStreamState = state;
+    return new ReadableStream<string>(
+      {
+        pull(controller) {
+          state.pulled += 1;
+          if (state.pulled === 2)
+            controller.enqueue("x".repeat(33 * 1024 * 1024));
+          else if (state.pulled > 5) controller.close();
+          else controller.enqueue("small");
+        },
+        cancel() {
+          state.cancelled = true;
+        }
+      },
+      { highWaterMark: 0 }
+    );
+  }
+
+  /** A 33 MiB chunk from a stream whose cancel fails. */
+  hugeStreamBadCancel(): ReadableStream<string> {
+    const state = { pulled: 0, cancelled: false };
+    this.hugeStreamState = state;
+    return new ReadableStream<string>(
+      {
+        pull(controller) {
+          state.pulled += 1;
+          controller.enqueue("x".repeat(33 * 1024 * 1024));
+        },
+        cancel() {
+          state.cancelled = true;
+          throw new Error("cancel failed");
+        }
+      },
+      { highWaterMark: 0 }
+    );
   }
 
   streamNumbers(): ReadableStream<number> {
@@ -293,11 +349,18 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   readonly #startupEvent = new StartupEventProbe();
   readonly #routedCapability = new RoutedCapabilityProbe();
   readonly #hostBoundary = new HostBoundaryProbe();
+  readonly #callables = new PlainHostCallables();
   readonly #webSockets = new WebSockets({
     handlers: {
-      onConnect: (connection) => {
+      onConnect: async (connection, { request }) => {
         this.#webSocketContexts.push(currentWebSocketContext("connect"));
         connection.send(`connected:${this.lifecycle.name}`);
+        // `?rejectAfterMs=N` stands in for async auth in onConnect: wait
+        // N ms, then reject the connection with 4001.
+        const delay = new URL(request.url).searchParams.get("rejectAfterMs");
+        if (delay === null) return;
+        await new Promise((resolve) => setTimeout(resolve, Number(delay)));
+        connection.close(4001, "Unauthorized");
       },
       onMessage: (connection, message) => {
         this.#webSocketContexts.push(currentWebSocketContext("message"));
@@ -312,7 +375,7 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       const count = Number(new URL(request.url).searchParams.get("tags") ?? 0);
       return Array.from({ length: count }, (_, i) => `t${i}`);
     },
-    callables: new PlainHostCallables()
+    callables: this.#callables
   });
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
@@ -354,6 +417,16 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   /** Open connections on either wire, for transport tests. */
   connectionCount(): number {
     return [...this.#webSockets.getConnections()].length;
+  }
+
+  /** Chunks the last `hugeStream` callable produced, and whether it was cancelled. */
+  hugeStreamState(): { pulled: number; cancelled: boolean } {
+    return { ...this.#callables.hugeStreamState };
+  }
+
+  /** How many times the `bump` callable ran, for closed-connection tests. */
+  bumpCount(): number {
+    return this.#callables.bumps;
   }
 
   /** Tags of one connection, for transport tests. */
@@ -995,5 +1068,83 @@ export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
   async getCount(): Promise<number | undefined> {
     await this.lifecycle.start();
     return this.#state.get()?.count;
+  }
+}
+
+/** The message every {@link FetchErrorObject} failure throws. */
+export const FETCH_ERROR_SECRET = "DATABASE_URL could not be resolved";
+
+/** What a {@link FetchErrorObject}'s `onFetchError` hook observed. */
+export type FetchErrorHookCall = {
+  readonly error: string;
+  readonly requestUrl: string;
+  readonly inHostContext: boolean;
+};
+
+/** Where a {@link FetchErrorObject} request fails, from its `fail` query. */
+function fetchFailure(request: Request): string | null {
+  return new URL(request.url).searchParams.get("fail");
+}
+
+/**
+ * A Lifecycle host with an `onFetchError` hook. A request's `fail` query
+ * picks where handling throws (`capability`, `host`, or `non-error`), and
+ * its `hook` query picks the hook's answer (`respond`, `socket`, `throw`, or
+ * none, which declines). `failStartup()` makes startup throw instead.
+ */
+export class FetchErrorObject extends DurableObject<Cloudflare.Env> {
+  readonly #hookCalls: FetchErrorHookCall[] = [];
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(new StoredStartFailureProbe())
+    .use({
+      onRequest: ({ request }) => {
+        if (fetchFailure(request) === "capability") {
+          throw new Error(FETCH_ERROR_SECRET);
+        }
+      }
+    });
+
+  onRequest(request: Request): Response {
+    const failure = fetchFailure(request);
+    if (failure === "host") throw new Error(FETCH_ERROR_SECRET);
+    if (failure === "non-error") {
+      throw FETCH_ERROR_SECRET;
+    }
+    return new Response("ok");
+  }
+
+  onFetchError(request: Request, error: unknown): Response | undefined {
+    const message = error instanceof Error ? error.message : String(error);
+    this.#hookCalls.push({
+      error: message,
+      requestUrl: request.url,
+      inHostContext: getCurrentAgent().agent === this
+    });
+
+    switch (new URL(request.url).searchParams.get("hook")) {
+      case "respond":
+        return Response.json({ error: message }, { status: 503 });
+      case "socket": {
+        const pair = new WebSocketPair();
+        pair[1].accept();
+        pair[1].send(JSON.stringify({ error: message }));
+        pair[1].close(4000, "startup failed");
+        return new Response(null, { status: 101, webSocket: pair[0] });
+      }
+      case "throw":
+        throw new Error("onFetchError failed");
+      default:
+        return undefined;
+    }
+  }
+
+  /** Make every later startup throw {@link StoredStartFailureProbe}'s error. */
+  async failStartup(): Promise<void> {
+    await this.ctx.storage.put("fail-start", true);
+  }
+
+  getHookCalls(): FetchErrorHookCall[] {
+    return this.#hookCalls;
   }
 }

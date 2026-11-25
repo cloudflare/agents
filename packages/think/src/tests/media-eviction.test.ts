@@ -1,3 +1,4 @@
+import { ROW_VALUE_BYTES } from "agents/chat";
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
@@ -24,6 +25,8 @@ type MediaEvictionStub = {
     backlogRemains: boolean;
   } | null>;
   getStoredMessageForTest(id: string): Promise<UIMessage | null>;
+  seedLargeTextAboveMediaForTest(largeRows: number): Promise<void>;
+  lateMediaOnHiddenRowForTest(): Promise<number>;
   getContinuationRowCountForTest(): Promise<number>;
   readEvictedFileForTest(path: string): Promise<{
     byteLength: number;
@@ -51,8 +54,8 @@ const PAYLOAD_BYTES = 12_000;
  * rows. The part is still an inline `data:` URL, so eviction decodes it in
  * place exactly as it does a small one.
  */
-const SPLIT_MEDIA_CHARS = 1_600_000;
-const SPLIT_PAYLOAD_BYTES = 1_200_000;
+const SPLIT_MEDIA_CHARS = 4 * Math.ceil((ROW_VALUE_BYTES + 400_000) / 4);
+const SPLIT_PAYLOAD_BYTES = (SPLIT_MEDIA_CHARS / 4) * 3;
 
 async function evictionAgent(name: string): Promise<MediaEvictionStub> {
   return (await getAgentByName(
@@ -138,6 +141,22 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
       "/workspace/attachments/evicted/m1-0.png"
     );
     expect(file?.byteLength).toBe(PAYLOAD_BYTES);
+  });
+
+  it("starts a pass where the last one got to, so it re-reads only new rows", async () => {
+    const agent = (await evictionAgent(uniqueName("evict-cursor"))) as Awaited<
+      ReturnType<typeof evictionAgent>
+    > & {
+      evictionPassRowsForTest(
+        count: number
+      ): Promise<{ first: number; second: number }>;
+    };
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    const { first, second } = await agent.evictionPassRowsForTest(300);
+    // The first pass counts the path and examines every aged row.
+    expect(first).toBeGreaterThanOrEqual(300);
+    // The second reads from the leaf down to the first pass's cursor.
+    expect(second).toBeLessThan(40);
   });
 
   it("evicts a payload larger than one row, leaving the bytes in one place", async () => {
@@ -228,6 +247,24 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     );
   });
 
+  it("reaches older media past large text rows that fill a pass", async () => {
+    const agent = await evictionAgent(uniqueName("evict-large-text"));
+    await agent.seedLargeTextAboveMediaForTest(3);
+    await agent.setMediaEvictionForTest({ ...AGED_POLICY, maxRowsPerPass: 2 });
+
+    await agent.runEvictionForTest();
+    await agent.runEvictionForTest();
+    expect(
+      JSON.stringify(await agent.getStoredMessageForTest("media"))
+    ).toContain("[evicted image/png,");
+  });
+
+  it("evicts media a late update puts on a row the cache does not hold", async () => {
+    const agent = await evictionAgent(uniqueName("evict-late-hidden"));
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    expect(await agent.lateMediaOnHiddenRowForTest()).toBe(1);
+  });
+
   it("mediaEviction:false keeps the image visible to the model", async () => {
     const agent = await evictionAgent(uniqueName("evict-disabled"));
     await agent.seedMediaHistoryForTest();
@@ -284,6 +321,76 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
       async () => {
         const message = await agent.getStoredMessageForTest(lateId);
         expect(JSON.stringify(message)).toContain("[evicted image/png,");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("evicts aged media on a sub-agent facet", async () => {
+    const parent = (await getAgentByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-facet")
+    )) as unknown as {
+      seedFacetMediaForTest(...names: string[]): Promise<void>;
+      getFacetStoredMessageForTest(
+        name: string,
+        id: string
+      ): Promise<UIMessage | null>;
+    };
+    await parent.seedFacetMediaForTest("child");
+    await vi.waitFor(
+      async () => {
+        const message = await parent.getFacetStoredMessageForTest(
+          "child",
+          "f0"
+        );
+        expect(JSON.stringify(message)).toContain("[evicted image/png,");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("evicts aged media on sibling facets that queue passes together", async () => {
+    const parent = (await getAgentByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-facets")
+    )) as unknown as {
+      seedFacetMediaForTest(...names: string[]): Promise<void>;
+      getFacetStoredMessageForTest(
+        name: string,
+        id: string
+      ): Promise<UIMessage | null>;
+    };
+    await parent.seedFacetMediaForTest("left", "right");
+    await vi.waitFor(
+      async () => {
+        for (const name of ["left", "right"]) {
+          const message = await parent.getFacetStoredMessageForTest(name, "f0");
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("evicts on facets of different classes with the same name", async () => {
+    const parent = (await getAgentByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-facets-same-name")
+    )) as unknown as {
+      seedFacetMediaForTest(...names: string[]): Promise<void>;
+      getFacetStoredMessageForTest(
+        name: string,
+        id: string
+      ): Promise<UIMessage | null>;
+    };
+    await parent.seedFacetMediaForTest("a", "auto:a");
+    await vi.waitFor(
+      async () => {
+        for (const name of ["a", "auto:a"]) {
+          const message = await parent.getFacetStoredMessageForTest(name, "f0");
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
       },
       { timeout: 10_000, interval: 100 }
     );

@@ -13,7 +13,13 @@ import {
   WarningCircleIcon
 } from "@phosphor-icons/react";
 import { code } from "@streamdown/code";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState
+} from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Streamdown } from "streamdown";
 
@@ -100,20 +106,47 @@ function useStickToBottom() {
  */
 export function ChatFeed({
   children,
-  userMessageCount
+  sent,
+  earlier,
+  oldestId
 }: {
   children: ReactNode;
-  /** Increases when the user sends a message, which always scrolls down. */
-  userMessageCount: number;
+  /**
+   * Increases when the user sends a message from this tab, which always
+   * scrolls down. Messages from elsewhere, and earlier ones loading above,
+   * do not.
+   */
+  sent: number;
+  /** The transcript continues above: offer to load the page before it. */
+  earlier?: { readonly loading: boolean; readonly onLoad: () => void };
+  /** The oldest message's id; it changes when earlier messages load. */
+  oldestId?: string;
 }) {
   const { scrollRef, contentRef, isAtBottom, scrollToBottom } =
     useStickToBottom();
 
-  const previousCount = useRef(userMessageCount);
+  // Earlier messages loaded above: keep what was on screen in place.
+  const keepFromBottom = useRef<number | null>(null);
+  const loading = earlier?.loading ?? false;
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && keepFromBottom.current !== null) {
+      el.scrollTop = el.scrollHeight - keepFromBottom.current;
+    }
+    if (!loading) keepFromBottom.current = null;
+  }, [oldestId, loading, scrollRef]);
+
+  const loadEarlier = () => {
+    const el = scrollRef.current;
+    if (el) keepFromBottom.current = el.scrollHeight - el.scrollTop;
+    earlier?.onLoad();
+  };
+
+  const previousSent = useRef(sent);
   useEffect(() => {
-    if (userMessageCount > previousCount.current) scrollToBottom();
-    previousCount.current = userMessageCount;
-  }, [userMessageCount, scrollToBottom]);
+    if (sent > previousSent.current) scrollToBottom();
+    previousSent.current = sent;
+  }, [sent, scrollToBottom]);
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -122,6 +155,19 @@ export function ChatFeed({
           ref={contentRef}
           className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 pt-8 pb-6 sm:px-6"
         >
+          {earlier ? (
+            <div className="flex justify-center">
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<ArrowUpIcon size={14} />}
+                loading={earlier.loading}
+                onClick={loadEarlier}
+              >
+                Load earlier messages
+              </Button>
+            </div>
+          ) : null}
           {children}
         </div>
       </div>

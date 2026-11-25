@@ -7,6 +7,7 @@
 
 import {
   AttemptSupersededError,
+  TaskCancellation,
   type TaskStepEngine,
   type ResolvedStepPolicy
 } from "./replay";
@@ -33,11 +34,18 @@ export type TaskStepEngineDeps = {
   claimRefreshAfterMs: number;
   defaults: ResolvedStepPolicy;
   emit: (type: string, payload: Record<string, unknown>) => void;
+  /**
+   * Put before a step's idempotency key: empty for the default instance,
+   * the instance's id and `:` for a named one, so the same run id and step
+   * name in two instances never send an external service the same key.
+   */
+  stepKeyPrefix: string;
 };
 
 /** @internal Build the engine port for one claimed attempt. */
 export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
   const { runId, generation } = deps;
+  const t = deps.store.tables;
   // The newest claim deadline known durable. The queue's own backstop push
   // (a due wake observing the live attempt) only ever moves `next_at`
   // forward, so this stays a conservative lower bound.
@@ -45,103 +53,110 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
   // The last status message known durable — persisting an identical one
   // again would be a pure row-write duplicate.
   let lastStatusMessage: string | undefined;
-  const assertCurrent = (): void => {
-    const row = deps.store.getRun(runId);
-    if (!row || row.generation !== generation) {
+  // Every journal write carries the attempt's fence in its own statement
+  // (no read of the run row first): a write that lands nothing means a
+  // newer attempt owns the run.
+  const OWNS = `EXISTS (SELECT 1 FROM ${t.runs}
+                  WHERE run_id = ? AND generation = ?)`;
+  const fenced = (query: string, params: (string | number | null)[]) => {
+    if (deps.store.write(query, [...params, runId, generation]) === 0) {
       throw new AttemptSupersededError(runId);
     }
   };
   return {
     readStep: (name) => {
       const rows = deps.store.sql<TaskStepRow>`
-          SELECT * FROM cf_agents_task_steps
+          SELECT * FROM ${t.steps}
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
       return rows[0];
     },
     countSteps: () => {
       const rows = deps.store.sql<{ count: number }>`
-          SELECT COUNT(*) AS count FROM cf_agents_task_steps WHERE run_id = ${runId}
+          SELECT COUNT(*) AS count FROM ${t.steps} WHERE run_id = ${runId}
         `;
       return rows[0]?.count ?? 0;
     },
     insertStep: (name, kind, wakeAt) => {
-      assertCurrent();
       const now = Date.now();
-      deps.store.sql`
-          INSERT INTO cf_agents_task_steps
-            (run_id, step_name, kind, state, attempt, next_at, created_at,
-             started_at, updated_at)
-          VALUES
-            (${runId}, ${name}, ${kind},
-             ${kind === "do" ? "running" : wakeAt === null ? "running" : "waiting"},
-             ${kind === "do" ? 1 : 0}, ${wakeAt},
-             ${now}, ${kind === "do" ? now : null}, ${now})
-        `;
+      fenced(
+        `INSERT INTO ${t.steps}
+           (run_id, step_name, kind, state, attempt, next_at, created_at,
+            started_at, updated_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${OWNS}`,
+        [
+          runId,
+          name,
+          kind,
+          kind === "do" ? "running" : wakeAt === null ? "running" : "waiting",
+          kind === "do" ? 1 : 0,
+          wakeAt,
+          now,
+          kind === "do" ? now : null,
+          now
+        ]
+      );
     },
     insertCompletedSleep: (name) => {
-      assertCurrent();
       const now = Date.now();
       // An already-elapsed sleep is journaled born-completed: one INSERT,
       // where insert-then-complete would write the same row twice in the
       // same synchronous block (one durable commit either way, so the
       // split bought no crash evidence).
-      deps.store.sql`
-          INSERT INTO cf_agents_task_steps
-            (run_id, step_name, kind, state, attempt, next_at, created_at,
-             completed_at, updated_at)
-          VALUES
-            (${runId}, ${name}, 'sleep', 'completed', 0, NULL, ${now},
-             ${now}, ${now})
-        `;
+      fenced(
+        `INSERT INTO ${t.steps}
+           (run_id, step_name, kind, state, attempt, next_at, created_at,
+            completed_at, updated_at)
+         SELECT ?, ?, 'sleep', 'completed', 0, NULL, ?, ?, ? WHERE ${OWNS}`,
+        [runId, name, now, now, now]
+      );
     },
     claimStepAttempt: (name) => {
-      assertCurrent();
       const now = Date.now();
-      deps.store.sql`
-          UPDATE cf_agents_task_steps
+      const rows = deps.store.sql<{ attempt: number }>`
+          UPDATE ${t.steps}
           SET state = 'running', attempt = attempt + 1, next_at = NULL,
               started_at = ${now}, updated_at = ${now}
           WHERE run_id = ${runId} AND step_name = ${name}
+            AND EXISTS (SELECT 1 FROM ${t.runs}
+                        WHERE run_id = ${runId} AND generation = ${generation})
+          RETURNING attempt
         `;
-      const rows = deps.store.sql<{ attempt: number }>`
-          SELECT attempt FROM cf_agents_task_steps
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
-      return rows[0]?.attempt ?? 1;
+      if (rows[0] === undefined) throw new AttemptSupersededError(runId);
+      return rows[0].attempt;
     },
     completeStep: (name, result) => {
-      assertCurrent();
       const resultJson = serializeTaskValue(
         result,
         `result of step "${name}" in run "${runId}"`
       );
       const now = Date.now();
-      deps.store.sql`
-          UPDATE cf_agents_task_steps
-          SET state = 'completed', result = ${resultJson}, next_at = NULL,
-              completed_at = ${now}, updated_at = ${now}
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
+      fenced(
+        `UPDATE ${t.steps}
+         SET state = 'completed', result = ?, next_at = NULL,
+             completed_at = ?, updated_at = ?
+         WHERE run_id = ? AND step_name = ? AND ${OWNS}`,
+        [resultJson, now, now, runId, name]
+      );
     },
     failStep: (name, error) => {
-      assertCurrent();
       const now = Date.now();
-      deps.store.sql`
-          UPDATE cf_agents_task_steps
-          SET state = 'failed', error_name = ${error.name},
-              error_message = ${error.message}, next_at = NULL, updated_at = ${now}
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
+      fenced(
+        `UPDATE ${t.steps}
+         SET state = 'failed', error_name = ?, error_message = ?,
+             next_at = NULL, updated_at = ?
+         WHERE run_id = ? AND step_name = ? AND ${OWNS}`,
+        [error.name, error.message, now, runId, name]
+      );
     },
     waitStep: (name, wakeAt) => {
-      assertCurrent();
       const now = Date.now();
-      deps.store.sql`
-          UPDATE cf_agents_task_steps
-          SET state = 'waiting', next_at = ${wakeAt}, updated_at = ${now}
-          WHERE run_id = ${runId} AND step_name = ${name}
-        `;
+      fenced(
+        `UPDATE ${t.steps}
+         SET state = 'waiting', next_at = ?, updated_at = ?
+         WHERE run_id = ? AND step_name = ? AND ${OWNS}`,
+        [wakeAt, now, runId, name]
+      );
     },
     refreshClaim: () => {
       const now = Date.now();
@@ -149,8 +164,8 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       const written = deps.store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs SET next_at = ?, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'running'`,
+        `UPDATE ${t.runs} SET next_at = ?, updated_at = ?
+           WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [now + deps.claimTimeoutMs(), now]
       );
       if (written) lastClaimWriteAt = now;
@@ -160,20 +175,24 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       const written = deps.store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs SET status_message = ?, updated_at = ?
-           WHERE run_id = ? AND generation = ? AND state = 'running'`,
+        `UPDATE ${t.runs} SET status_message = ?, updated_at = ?
+           WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [message, Date.now()]
       );
       if (written) lastStatusMessage = message;
     },
+    // A cancel (or a lane clear) settles the run and aborts this attempt's
+    // signal with the reason: no read of the run row is needed to see it.
     cancellationRequested: () => {
-      const row = deps.store.getRun(runId);
-      if (!row || row.cancel_requested !== 1) return null;
-      return { reason: row.cancel_reason ?? undefined };
+      const reason: unknown = deps.signal.reason;
+      if (!deps.signal.aborted || !(reason instanceof TaskCancellation)) {
+        return null;
+      }
+      return { reason: reason.reason };
     },
     attemptSignal: deps.signal,
     emit: deps.emit,
-    stepIdempotencyKey: (name) => `${runId}:${name}`,
+    stepIdempotencyKey: (name) => `${deps.stepKeyPrefix}${runId}:${name}`,
     defaults: deps.defaults
   };
 }

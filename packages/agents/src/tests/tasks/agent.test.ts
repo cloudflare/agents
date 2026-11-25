@@ -17,16 +17,16 @@ import type { TaskRunSnapshot, TaskValue } from "../../tasks";
 async function waitForState(
   tasks: { get(runId: string): Promise<TaskRunSnapshot<TaskValue> | null> },
   runId: string,
-  states: ReadonlyArray<TaskRunSnapshot<TaskValue>["state"]>,
+  states: ReadonlyArray<TaskRunSnapshot<TaskValue>["status"]>,
   timeoutMs = 5_000
 ): Promise<TaskRunSnapshot<TaskValue>> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const snapshot = await tasks.get(runId);
-    if (snapshot && states.includes(snapshot.state)) return snapshot;
+    if (snapshot && states.includes(snapshot.status)) return snapshot;
     if (Date.now() > deadline) {
       throw new Error(
-        `Run ${runId} stuck in state "${snapshot?.state}" after ${timeoutMs}ms`
+        `Run ${runId} stuck in status "${snapshot?.status}" after ${timeoutMs}ms`
       );
     }
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -41,7 +41,7 @@ describe("Agent tasks integration", () => {
       const snapshot = await waitForState(instance.tasks, receipt.runId, [
         "completed"
       ]);
-      if (snapshot.state !== "completed") throw new Error("unreachable");
+      if (snapshot.status !== "completed") throw new Error("unreachable");
       expect(snapshot.result).toEqual({
         greeting: "hello matt",
         hadHostContext: true,
@@ -71,7 +71,7 @@ describe("Agent tasks integration", () => {
         runId: "agent-interrupted",
         definition: "greet",
         input: { name: "revived" },
-        state: "running",
+        status: "running",
         generation: "dead-generation",
         attempt: 1,
         nextAt: Date.now() - 1000
@@ -92,7 +92,7 @@ describe("Agent tasks integration", () => {
       const snapshot = await waitForState(instance.tasks, "agent-interrupted", [
         "completed"
       ]);
-      if (snapshot.state !== "completed") throw new Error("unreachable");
+      if (snapshot.status !== "completed") throw new Error("unreachable");
       // The journaled step replayed from storage without re-executing.
       expect(snapshot.result).toEqual({
         greeting: "hello JOURNAL",
@@ -111,9 +111,9 @@ describe("Agent tasks integration", () => {
 
       const receipt = await instance.tasks.run("napper", { ms: 60_000 });
       const parked = await waitForState(instance.tasks, receipt.runId, [
-        "waiting"
+        "pending"
       ]);
-      if (parked.state !== "waiting") throw new Error("unreachable");
+      if (parked.status !== "pending") throw new Error("unreachable");
       // The sooner task deadline wins the shared alarm...
       const deadline = Date.now() + 5_000;
       for (;;) {

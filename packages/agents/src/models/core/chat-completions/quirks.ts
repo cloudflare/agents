@@ -59,13 +59,6 @@ export interface ChatCompletionsQuirks {
   modelEchoSuffix: string | undefined;
   /** Whether a replayed assistant turn may carry `content: null`. */
   nullAssistantContent: "allowed" | "empty-string";
-  /**
-   * Where the answer lands in a stream once reasoning has been turned off.
-   * `reasoning` means the model's streaming parser mislabels the whole answer
-   * as reasoning (its non-streaming body is fine), so the normalizer moves
-   * those deltas back into `content`.
-   */
-  reasoningOffStreamLabel: "content" | "reasoning";
 }
 
 const STRICT_OPENAI: ChatCompletionsQuirks = {
@@ -81,7 +74,6 @@ const STRICT_OPENAI: ChatCompletionsQuirks = {
   nullAssistantContent: "allowed",
   reasoningEffortLevels: "basic",
   reasoningOff: "unsupported",
-  reasoningOffStreamLabel: "content",
   reasoningReplay: "drop",
   requiresAssistantAfterToolResult: false,
   toolCallIds: "any",
@@ -127,12 +119,7 @@ const OVERRIDES: [prefix: string, quirks: Partial<ChatCompletionsQuirks>][] = [
     }
   ],
   // 40-demos-gemma-4-26b-a4b-it-A: echoes "@cf/google/gemma-4-26b-a4b-it-external".
-  ["@cf/google/", { modelEchoSuffix: "-external" }],
-  // 41-matt-nemotron-3-120b-a12b-K_emoji / S_usage_s: with enable_thinking=false
-  // every streamed token arrives as `delta.reasoning` and `content` stays
-  // empty, while the non-streaming body (A0, 40-...-G_ctk) puts the same
-  // answer in `content` with `reasoning: null`.
-  ["@cf/nvidia/nemotron-", { reasoningOffStreamLabel: "reasoning" }]
+  ["@cf/google/", { modelEchoSuffix: "-external" }]
 ];
 
 /** The quirks for a catalog id: base profile plus the longest matching override. */

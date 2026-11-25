@@ -16,6 +16,7 @@ import {
   PoweredByCloudflare
 } from "@cloudflare/kumo";
 import {
+  ArrowClockwiseIcon,
   PaperPlaneRightIcon,
   StopIcon,
   TrashIcon,
@@ -215,6 +216,20 @@ function Chat() {
       console.error("Failed to add MCP server:", e);
     } finally {
       setIsAddingServer(false);
+    }
+  };
+
+  const handleReconnectServer = async (serverId: string) => {
+    try {
+      const result = (await agent.call("reconnectServer", [serverId])) as {
+        state: string;
+        authUrl?: string;
+      };
+      if (result.state === "authenticating" && result.authUrl) {
+        window.open(result.authUrl, "oauth", "width=600,height=800");
+      }
+    } catch (e) {
+      console.error("Failed to reconnect MCP server:", e);
     }
   };
 
@@ -421,6 +436,16 @@ function Chat() {
                                     Auth
                                   </Button>
                                 )}
+                              {server.state === "failed" && (
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  icon={<ArrowClockwiseIcon size={12} />}
+                                  onClick={() => handleReconnectServer(id)}
+                                >
+                                  Reconnect
+                                </Button>
+                              )}
                               <Button
                                 variant="ghost"
                                 size="sm"

@@ -106,16 +106,16 @@ describe("streams capability eviction e2e", () => {
     // The first poll wakes the agent; the interrupted task's overdue queue
     // job re-fires and the replayed producer resumes from the durable
     // cursor, finishing the remaining chunks.
-    let completed: { state: string; result: unknown } | null = null;
+    let completed: { status: string; result: unknown } | null = null;
     for (let i = 0; i < 30; i++) {
       await sleep(1000);
       try {
         const current = (await callStreamAgent("getRunState", [runId])) as {
-          state: string;
+          status: string;
           result: unknown;
         } | null;
-        console.log(`[test] Poll ${i + 1}: run state=${current?.state}`);
-        if (current?.state === "completed") {
+        console.log(`[test] Poll ${i + 1}: run status=${current?.status}`);
+        if (current?.status === "completed") {
           completed = current;
           break;
         }

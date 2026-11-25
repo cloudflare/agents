@@ -97,7 +97,7 @@ const IMPLICIT_WEB_CHANNEL: ChannelDefinition = {
   ingress: { transport: "websocket" }
 };
 
-export interface ResolvedChannels {
+interface ResolvedChannels {
   /** Every resolved channel keyed by id (registry for per-channel policy). */
   channels: Map<string, NormalizedChannelDefinition>;
   /** Messenger-kind channels mapped back to the runtime's input shape. */

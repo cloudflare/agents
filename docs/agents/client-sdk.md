@@ -529,6 +529,8 @@ const user = await agent.call("getUser", [id]);
 
 The client auto-reconnects and the agent automatically sends the current state on each connection. `agent.state` is updated automatically — no manual re-sync needed.
 
+The connection opens once the Agent has started and its `onConnect` has returned, and the client waits up to 15 seconds for that (`connectionTimeout`). The first retry after a dropped connection waits a delay picked per client between 1 and 5 seconds (`minReconnectionDelay`), so the clients of an Agent that restarted do not all reconnect at the same moment; with an async `query`, the hook waits that delay after a dropped connection before it opens the socket with the refreshed parameters. Both are [PartySocket](https://docs.partykit.io/reference/partysocket-api/) options, and a value you pass wins.
+
 ### 3. Optimize Query Caching
 
 ```typescript

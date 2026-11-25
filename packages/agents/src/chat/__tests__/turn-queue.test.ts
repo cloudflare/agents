@@ -326,6 +326,24 @@ describe("TurnQueue", () => {
     expect(r2).toEqual({ status: "stale" });
   });
 
+  it("reports the generation the active turn was admitted under", async () => {
+    const queue = new TurnQueue();
+    expect(queue.activeGeneration).toBeNull();
+
+    const seen: Array<[number | null, number]> = [];
+    await queue.enqueue("r1", async () => {
+      seen.push([queue.activeGeneration, queue.generation]);
+      queue.reset();
+      seen.push([queue.activeGeneration, queue.generation]);
+    });
+
+    expect(seen).toEqual([
+      [0, 0],
+      [0, 1]
+    ]);
+    expect(queue.activeGeneration).toBeNull();
+  });
+
   // ── waitForIdle on an idle queue ─────────────────────────────────
 
   it("resolves immediately when the queue is already idle", async () => {

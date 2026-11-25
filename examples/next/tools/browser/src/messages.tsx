@@ -3,6 +3,7 @@
 // them up by call id and shows each call as one line, its screenshot (if
 // any) under it.
 import type { ImageContent, JsonValue } from "@earendil-works/pi-ai";
+import { Button } from "@cloudflare/kumo";
 import { WarningCircleIcon } from "@phosphor-icons/react";
 import {
   AssistantMessage,
@@ -15,17 +16,26 @@ import type { ToolCallState } from "./chat-ui";
 import type { TranscriptMessage, TranscriptPart } from "./protocol";
 import type { PiRunningTool } from "./view";
 
+/** A message projected from a pi entry: anything but a gap. */
+type EntryMessage = Exclude<TranscriptMessage, { role: "gap" }>;
+type GapMessage = Extract<TranscriptMessage, { role: "gap" }>;
 type ToolCallPart = Extract<TranscriptPart, { type: "tool-call" }>;
 type ToolResultPart = Extract<TranscriptPart, { type: "tool-result" }>;
 
-/** A user message, or everything the agent did in reply to one. */
+/**
+ * A user message, everything the agent did in reply to one, a notice, a
+ * compaction summary, or entries this tab missed.
+ */
 export type Turn =
-  | { readonly kind: "user"; readonly message: TranscriptMessage }
-  | { readonly kind: "notice"; readonly message: TranscriptMessage }
+  | {
+      readonly kind: "user" | "notice" | "summary";
+      readonly message: EntryMessage;
+    }
+  | { readonly kind: "gap"; readonly message: GapMessage }
   | {
       readonly kind: "agent";
       readonly id: string;
-      readonly messages: readonly TranscriptMessage[];
+      readonly messages: readonly EntryMessage[];
     };
 
 /**
@@ -35,7 +45,15 @@ export type Turn =
 export function groupTurns(messages: readonly TranscriptMessage[]): Turn[] {
   const turns: Turn[] = [];
   for (const message of messages) {
-    if (message.role === "user" || message.role === "notice") {
+    if (message.role === "gap") {
+      turns.push({ kind: "gap", message });
+      continue;
+    }
+    if (
+      message.role === "user" ||
+      message.role === "notice" ||
+      message.role === "summary"
+    ) {
       if (message.role === "notice" && message.parts.length === 0) continue;
       turns.push({ kind: message.role, message });
       continue;
@@ -326,7 +344,7 @@ export function AgentTurn({
   streaming,
   onZoom
 }: {
-  messages: readonly TranscriptMessage[];
+  messages: readonly EntryMessage[];
   results: Map<string, ToolResultPart>;
   runningTools: readonly PiRunningTool[];
   /** True while the session runs and this is the last turn. */
@@ -404,6 +422,38 @@ export function AgentTurn({
         ];
       })}
     </AssistantMessage>
+  );
+}
+
+/** A compaction: the model now reads this summary instead of what came before. */
+export function SummaryNotice({ message }: { message: TranscriptMessage }) {
+  return (
+    <details className="group text-center text-xs text-kumo-inactive">
+      <summary className="cursor-pointer list-none hover:text-kumo-subtle">
+        Earlier messages summarized
+        <span className="group-open:hidden"> · Show summary</span>
+      </summary>
+      <div className="mt-2 rounded-xl border border-kumo-line px-4 py-3 text-left">
+        <Markdown text={messageText(message)} streaming={false} />
+      </div>
+    </details>
+  );
+}
+
+/** Entries this tab missed while it was away, loaded on demand. */
+export function GapNotice({
+  loading,
+  onLoad
+}: {
+  loading: boolean;
+  onLoad: () => void;
+}) {
+  return (
+    <div className="flex justify-center">
+      <Button size="sm" variant="ghost" loading={loading} onClick={onLoad}>
+        Load missing messages
+      </Button>
+    </div>
   );
 }
 

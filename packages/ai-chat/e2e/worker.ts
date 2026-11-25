@@ -72,7 +72,7 @@ export class LlmChatAgent extends AIChatAgent<Env> {
     };
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions:
@@ -98,7 +98,7 @@ export class ClientToolAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions:
@@ -130,7 +130,7 @@ export class ClientToolApprovalAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions:
@@ -287,7 +287,7 @@ export class ResponseLlmAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions:
@@ -342,7 +342,7 @@ export class ResponseChainAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions:

@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../index";
 import { MessageType } from "../types";
 
@@ -65,6 +65,22 @@ function waitForClose(
   });
 }
 
+/**
+ * Wait for the root's mirrored fiber wakes to reach `expected`. Arming
+ * happens before the fiber body starts, but removing the wake when a fiber
+ * settles is routed to the root after the call that released it returns.
+ */
+async function expectFiberWakeOwners(
+  agent: { fiberWakeOwners(): Promise<string[]> },
+  expected: number
+) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if ((await agent.fiberWakeOwners()).length === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await agent.fiberWakeOwners()).toHaveLength(expected);
+}
+
 async function expectRootKeepAliveRefCount(
   agent: { getRootKeepAliveRefCount(): Promise<number> },
   expected: number
@@ -75,6 +91,25 @@ async function expectRootKeepAliveRefCount(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   expect(await agent.getRootKeepAliveRefCount()).toBe(expected);
+}
+
+/**
+ * Wait until no fiber wake the root mirrors is due. A wake armed due now
+ * fires on the real alarm, so wait for that first; run the alarm by hand
+ * only if it has not. Running it by hand while the real one runs would let
+ * both drive the same due jobs.
+ */
+async function drainDueFiberWakes(agent: {
+  dueFiberWakeCount(): Promise<number>;
+}) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if ((await agent.dueFiberWakeCount()) === 0) return;
+    if (attempt >= 50) {
+      await runDurableObjectAlarm(agent as unknown as DurableObjectStub);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await agent.dueFiberWakeCount()).toBe(0);
 }
 
 describe("SubAgent", () => {
@@ -432,7 +467,8 @@ describe("SubAgent", () => {
     expect(row?.ownerPath).toContain("CounterSubAgent");
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     const log = await agent.subAgentScheduleLog("sched-child");
     expect(log).toEqual([
@@ -451,16 +487,13 @@ describe("SubAgent", () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    // Pushing from the facet routes the item to the root, which owns the
-    // physical alarm; the root row records the facet as its owner.
+    // The item lives in the facet's own queue; the root holds only the
+    // facet's wake.
     const itemId = await agent.subAgentQueue("queue-child", "hello");
-    const rows = await agent.rootQueueRows();
-    const row = rows.find((r) => r.id === itemId);
-    expect(row?.callback).toBe("queuedCallback");
-    expect(row?.ownerPath).toContain("CounterSubAgent");
+    expect(await agent.rootQueueRows()).toEqual([]);
 
-    // The item is due immediately; the platform alarm auto-fires and the
-    // root routes the dispatch back into the facet.
+    // The item is due immediately; the root's alarm wakes the facet, which
+    // runs it.
     const deadline = Date.now() + 5_000;
     let log = await agent.subAgentScheduleLog("queue-child");
     while (log.length === 0 && Date.now() < deadline) {
@@ -477,17 +510,247 @@ describe("SubAgent", () => {
         callback: "queuedCallback"
       }
     ]);
-    expect(await agent.rootQueueRows()).toEqual([]);
+    expect(await agent.subAgentQueueRowIds("queue-child")).toEqual([]);
   });
 
-  it("deleteSubAgent removes the sub-agent's pending queue items from the root", async () => {
+  it("runs a declared schedule inside a sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    const { beforeDelete, afterDelete } =
-      await agent.subAgentQueueThenDelete("queue-orphan-child");
-    expect(beforeDelete).toHaveLength(1);
-    expect(afterDelete).toEqual([]);
+    const ids = await agent.subAgentDeclareLoggingSchedule(
+      "declared-child",
+      "declared"
+    );
+    expect(ids).toHaveLength(1);
+    await agent.backdateSchedule(ids[0]!);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentScheduleLog("declared-child")).toEqual([
+        expect.objectContaining({ value: "declared" })
+      ]);
+    });
+  });
+
+  it("hands over a schedule the root held for a sub-agent on the root's next start, at its own time", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const before = Date.now();
+    await agent.insertLegacyRootSchedule(
+      "sched-soon",
+      "old-later",
+      "later",
+      120_000
+    );
+    await agent.restartSchedulerForTest();
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      const [row] = await agent.subAgentScheduleTimes("sched-soon");
+      expect(row?.id).toBe("old-later");
+      // Its own time, not the hand-over time.
+      expect(row!.time).toBeGreaterThanOrEqual(before + 119_000);
+    });
+    expect(
+      (await agent.rootScheduleRows()).filter((r) => r.ownerPath === null)
+    ).toEqual([]);
+  });
+
+  it("keeps one copy when a sub-agent scheduled the same thing again before the hand-over", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule(
+      "sched-dup",
+      "old-dup",
+      "same",
+      60_000
+    );
+    // The sub-agent's start schedules it again, idempotently, without seeing
+    // the root's copy.
+    const own = await agent.subAgentScheduleDelayed("sched-dup", 300, "same", {
+      idempotent: true
+    });
+    await agent.restartSchedulerForTest();
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      const rows = await agent.subAgentScheduleTimes("sched-dup");
+      // One schedule, at the earlier of the two times.
+      expect(rows.map((row) => row.id)).toEqual([own]);
+      expect(rows[0]!.time).toBeLessThan(Date.now() + 61_000);
+    });
+  });
+
+  it("drops a schedule the root held for a deleted sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule(
+      "sched-gone",
+      "old-gone",
+      "lost",
+      60_000
+    );
+    await agent.subAgentDelete("sched-gone");
+    expect(
+      (await agent.rootScheduleRows()).some((row) => row.id === "old-gone")
+    ).toBe(false);
+  });
+
+  it("hands a schedule the root held for a sub-agent to that sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule("sched-handover", "old-sched", "kept");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentScheduleLog("sched-handover")).toEqual([
+        expect.objectContaining({ value: "kept", scheduleId: "old-sched" })
+      ]);
+    });
+    expect(
+      (await agent.rootScheduleRows()).some((row) => row.id === "old-sched")
+    ).toBe(false);
+  });
+
+  it("hands a queue item the root held for a sub-agent to that sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootQueueItem("handover-child", "old-item", "kept");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentScheduleLog("handover-child")).toEqual([
+        expect.objectContaining({ value: "kept", scheduleId: "old-item" })
+      ]);
+    });
+    expect(await agent.rootQueueRows()).toEqual([]);
+  });
+
+  it("keeps a held queue item when handing it to its sub-agent fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.failNextAdoptsForTest(1);
+    const before = Date.now();
+    await agent.insertLegacyRootQueueItem("handover-fails", "kept-item", "v");
+    await runDurableObjectAlarm(agent);
+
+    // Not given up as a failure of its own: still on the root, for a later
+    // try, and nothing ran.
+    await vi.waitFor(async () => {
+      const [row] = await agent.rootQueueTimes();
+      expect(row?.id).toBe("kept-item");
+      expect(row!.time).toBeGreaterThanOrEqual(before + 25_000);
+    });
+    expect(await agent.subAgentScheduleLog("handover-fails")).toEqual([]);
+  });
+
+  it("keeps a sub-agent's held queue items in order when one hand-over fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.failNextAdoptsForTest(1);
+    await agent.insertLegacyRootQueueItem(
+      "order-child",
+      "first-item",
+      "1",
+      60_000
+    );
+    // Pushed 50 s later: the gap must not become a wait once both are due.
+    await agent.insertLegacyRootQueueItem(
+      "order-child",
+      "second-item",
+      "2",
+      110_000
+    );
+    await agent.makeRootQueueDueForTest();
+    await runDurableObjectAlarm(agent);
+
+    // The second item waits behind the first, not ahead of it.
+    await vi.waitFor(async () => {
+      const rows = (await agent.rootQueueTimes()).sort(
+        (a, b) => a.time - b.time
+      );
+      expect(rows.map((row) => row.id)).toEqual(["first-item", "second-item"]);
+      expect(rows[0]!.time).toBeGreaterThan(Date.now() + 20_000);
+      expect(rows[1]!.time - rows[0]!.time).toBeLessThan(1_000);
+    });
+  });
+
+  it("does not bring back a held schedule dropped while its hand-over fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.holdNextFailingAdoptForTest();
+    await agent.insertLegacyRootSchedule("sched-drop", "old-drop", "v");
+    const alarm = runDurableObjectAlarm(agent).catch(() => {});
+    await vi.waitFor(async () => {
+      expect(await agent.failingAdoptEnteredForTest()).toBe(true);
+    });
+    // Dropped while the hand-over is in flight, as a sub-agent delete does.
+    await agent.dropRootJobForTest("old-drop");
+    await agent.releaseFailingAdoptForTest();
+    await alarm;
+    // Whichever alarm reached the gate, wait for its failure to come back;
+    // what is left of the hand-over then is one row check and its outcome.
+    await vi.waitFor(async () => {
+      expect(await agent.failingAdoptThrownForTest()).toBe(true);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(await agent.rootJobPayload("old-drop")).toBeUndefined();
+  });
+
+  it("keeps a held schedule's own time when its hand-over fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.failNextAdoptsForTest(1);
+    const before = Date.now();
+    await agent.insertLegacyRootSchedule("sched-fail", "old-fail", "v");
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      const payload = (await agent.rootJobPayload("old-fail")) as {
+        handover_time?: number;
+      };
+      expect(payload?.handover_time).toBeGreaterThanOrEqual(before);
+      expect(payload!.handover_time).toBeLessThan(before + 5_000);
+    });
+  });
+
+  it("leaves other owners' jobs alone when a sub-agent is deleted", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertOtherOwnerJobNamingSubAgent("named-child");
+    await agent.subAgentDelete("named-child");
+    expect(await agent.otherOwnerJobCount()).toBe(1);
+  });
+
+  it("drops a queue item the root held for a deleted sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // Not due yet, so it is still on the root when the sub-agent goes.
+    await agent.insertLegacyRootQueueItem(
+      "gone-child",
+      "orphan",
+      "lost",
+      60_000
+    );
+    await agent.subAgentDelete("gone-child");
+    // Deleting the sub-agent drops the item at once: a sub-agent created
+    // later on the same path must not receive it.
+    expect(await agent.rootQueueRows()).toEqual([]);
+    await runDurableObjectAlarm(agent);
+    expect(await agent.subAgentScheduleLog("gone-child")).toEqual([]);
   });
 
   it("should keep sub-agent interval schedules recurring and idempotent", async () => {
@@ -507,7 +770,8 @@ describe("SubAgent", () => {
     expect(second).toBe(first);
 
     await agent.backdateSchedule(first);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(await agent.subAgentScheduleLog("interval-child")).toHaveLength(1);
     const rows = await agent.rootScheduleRows();
@@ -528,12 +792,39 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(await agent.subAgentScheduleLog("cancel-child")).toEqual([]);
     expect(
       (await agent.rootScheduleRows()).some((r) => r.id === scheduleId)
     ).toBe(false);
+  });
+
+  it("does not retry a sub-agent schedule cancelled while it waits to retry", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleFlaky("flaky-child", "x");
+    await agent.backdateSchedule(scheduleId);
+
+    expect(
+      await agent.runAlarmCancellingDuringRetry("flaky-child", scheduleId)
+    ).toBe(1);
+    expect(
+      (await agent.rootScheduleRows()).some((r) => r.id === scheduleId)
+    ).toBe(false);
+  });
+
+  it("stops a sub-agent queue retry once the item is pushed again, even unchanged", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // First attempt fails; the replacement then runs once. The old item's
+    // retry must not run as well.
+    expect(await agent.subAgentQueueReplacedDuringRetry("replace-child")).toBe(
+      2
+    );
   });
 
   it("should read sub-agent schedules through the async APIs", async () => {
@@ -570,7 +861,7 @@ describe("SubAgent", () => {
     ]);
   });
 
-  it("should throw from sync schedule query APIs inside a sub-agent", async () => {
+  it("reads a sub-agent's schedules through the sync query APIs", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -582,10 +873,10 @@ describe("SubAgent", () => {
 
     await expect(
       agent.subAgentTrySyncGetSchedule("sync-query-child", scheduleId)
-    ).resolves.toMatch(/getSchedule\(\) is synchronous/);
+    ).resolves.toBe(scheduleId);
     await expect(
       agent.subAgentTrySyncGetSchedules("sync-query-child")
-    ).resolves.toMatch(/getSchedules\(\) is synchronous/);
+    ).resolves.toBe(scheduleId);
   });
 
   it("should prune a stale sub-agent schedule when the registry entry is gone", async () => {
@@ -622,7 +913,8 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     expect(
       await agent.nestedGetValue(
@@ -704,7 +996,8 @@ describe("SubAgent", () => {
     // Backdate and run the alarm; the cron callback should dispatch
     // into the facet, then the row's `time` is rescheduled forward.
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     const log = await agent.subAgentScheduleLog("cron-child");
     expect(log).toHaveLength(1);
@@ -816,7 +1109,8 @@ describe("SubAgent", () => {
     );
 
     await agent.backdateSchedule(scheduleId);
-    await runDurableObjectAlarm(agent);
+    // The real alarm may be the one that drives it; wait for the drive.
+    await drainDueFiberWakes(agent);
 
     // The callback ran (log entry written) and the row is gone
     // (one-shot rows are deleted post-execute regardless).
@@ -874,7 +1168,7 @@ describe("SubAgent", () => {
     expect(log).toEqual([]);
   });
 
-  it("deleteSubAgent clears root-side facet fiber leases for that sub-tree", async () => {
+  it("deleteSubAgent clears root-side fiber wakes for that sub-tree", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -883,16 +1177,14 @@ describe("SubAgent", () => {
       "delete-fiber-1",
       "delete-work"
     );
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      "delete-fiber-1"
-    );
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
 
     await agent.subAgentDelete("delete-fiber-child");
 
-    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.fiberWakeOwners()).toEqual([]);
   });
 
-  it("destroy() inside a sub-agent clears root-side facet fiber leases immediately", async () => {
+  it("destroy() inside a sub-agent clears root-side fiber wakes immediately", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -901,13 +1193,11 @@ describe("SubAgent", () => {
       "self-destruct-fiber-1",
       "self-destruct-work"
     );
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      "self-destruct-fiber-1"
-    );
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
 
     await agent.subAgentSelfDestruct("self-destruct-fiber-child");
 
-    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.fiberWakeOwners()).toEqual([]);
   });
 
   it("destroy() inside an outer sub-agent transitively cleans up inner descendants", async () => {
@@ -1035,6 +1325,27 @@ describe("SubAgent", () => {
     await expectRootKeepAliveRefCount(agent, 0);
   });
 
+  it("keeps the jurisdiction its root hands down (#2470)", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    // Its later calls to the root resolve the root in that jurisdiction;
+    // the same name outside it is another Durable Object. Checked on a
+    // deployment: local runs have no jurisdictions.
+    expect(await agent.childRootJurisdictionForTest("jur-child", "eu")).toBe(
+      "eu"
+    );
+  });
+
+  it("lets many new sub-agents reach the root in one call", async () => {
+    // Each sub-agent's keep-alive is a call to the root. Through a root stub,
+    // calls from more than about 14 new sub-agents in one invocation hit the
+    // subrequest depth limit (measured on a deployment).
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const errors = await agent.keepAliveInNewSubAgentsForTest(30);
+    expect(errors.filter((error) => error !== "")).toEqual([]);
+  });
+
   it("keepAliveWhile() runs to completion inside a sub-agent", async () => {
     // Mirror AIChatAgent._reply's exact call shape.
     const name = uniqueName();
@@ -1064,39 +1375,39 @@ describe("SubAgent", () => {
     await agent.subAgentAcquireHeldKeepAlive("keepalive-sibling-a");
     await agent.subAgentAcquireHeldKeepAlive("keepalive-sibling-b");
 
-    expect(await agent.getRootKeepAliveRefCount()).toBe(3);
+    // Each sub-agent holds its own heartbeat; the root holds one wake per
+    // sub-agent path, which keeps the whole tree awake.
+    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+    await expectFiberWakeOwners(agent, 2);
 
     await agent.subAgentReleaseHeldKeepAlives("keepalive-sibling-a");
-    await expectRootKeepAliveRefCount(agent, 1);
+    await expectFiberWakeOwners(agent, 1);
 
     await agent.subAgentReleaseHeldKeepAlives("keepalive-sibling-b");
-    await expectRootKeepAliveRefCount(agent, 0);
+    await expectFiberWakeOwners(agent, 0);
   });
 
-  it("holds root keepAlive and root facet-run leases while a sub-agent fiber is active", async () => {
+  it("mirrors a sub-agent's fiber wake on the root while the fiber is active", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    const fiberId = await agent.subAgentHoldFiber("fiber-child", "held");
+    await agent.subAgentHoldFiber("fiber-child", "held");
 
-    await expectRootKeepAliveRefCount(agent, 1);
+    // The mirrored wake is the heartbeat; the fiber takes no keepAlive ref.
+    await expectRootKeepAliveRefCount(agent, 0);
     expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(1);
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      fiberId
-    );
+    await expectFiberWakeOwners(agent, 1);
 
-    // The root alarm may check the active fiber, but the child sees
-    // it in `_runFiberActiveFibers`, so recovery must not run.
-    await runDurableObjectAlarm(agent);
+    // The root alarm may check the active fiber, but the child knows it
+    // runs there, so recovery must not run.
+    await drainDueFiberWakes(agent);
     expect(await agent.subAgentRecoveredFibers("fiber-child")).toEqual([]);
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      fiberId
-    );
+    await expectFiberWakeOwners(agent, 1);
 
     await agent.subAgentReleaseHeldFiber("fiber-child");
 
     expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(0);
-    expect(await agent.facetRunRows()).toEqual([]);
+    await expectFiberWakeOwners(agent, 0);
     await expectRootKeepAliveRefCount(agent, 0);
   });
 
@@ -1104,7 +1415,7 @@ describe("SubAgent", () => {
     ["succeeded", false],
     ["failed", true]
   ])(
-    "keeps the root facet-run lease until a %s sub-agent fiber's leftover row is gone (#2305)",
+    "cleans up a %s sub-agent fiber's leftover row from the root's wake (#2305)",
     async (_outcome, failBody) => {
       const name = uniqueName();
       const agent = await getAgentByName(env.TestSubAgentParent, name);
@@ -1116,18 +1427,40 @@ describe("SubAgent", () => {
           failBody
         )
       ).resolves.toBe("done");
-      expect(await agent.subAgentRunningFiberCount("cleanup-child")).toBe(1);
-      expect(await agent.facetRunRows()).toHaveLength(1);
 
-      await runDurableObjectAlarm(agent);
+      // The leftover row keeps a wake, due now, so the root's alarm (real
+      // or run here) cleans it up without calling the recovery hook.
+      await drainDueFiberWakes(agent);
 
       expect(await agent.subAgentRunningFiberCount("cleanup-child")).toBe(0);
-      expect(await agent.facetRunRows()).toEqual([]);
+      await expectFiberWakeOwners(agent, 0);
       expect(await agent.subAgentRecoveredFibers("cleanup-child")).toEqual([]);
     }
   );
 
-  it("holds root keepAlive and facet-run leases for managed sub-agent fibers", async () => {
+  it("keeps a wake for a sub-agent fiber that started while another fiber's wake write failed", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const first =
+      await agent.subAgentStartTwoFibersFirstWakeFails("wake-failure-child");
+
+    // The first fiber's report to the root fails. The held second one found
+    // the wake row in place, but its start asks the Lifecycle to arm it, so
+    // the root has the wake at once, without waiting for the report retry.
+    expect(first).toBe("simulated fiber wake route failure");
+    expect(await agent.subAgentRunningFiberCount("wake-failure-child")).toBe(1);
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+
+    await agent.subAgentReleaseHeldFiber("wake-failure-child");
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if ((await agent.fiberWakeOwners()).length === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await agent.fiberWakeOwners()).toEqual([]);
+  });
+
+  it("mirrors the fiber wake on the root for managed sub-agent fibers", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -1137,13 +1470,11 @@ describe("SubAgent", () => {
       "managed-key"
     );
 
-    await expectRootKeepAliveRefCount(agent, 1);
+    await expectRootKeepAliveRefCount(agent, 0);
     expect(await agent.subAgentRunningFiberCount("managed-fiber-child")).toBe(
       1
     );
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      fiberId
-    );
+    await expectFiberWakeOwners(agent, 1);
     await expect(
       agent.subAgentManagedFiber("managed-fiber-child", fiberId)
     ).resolves.toMatchObject({
@@ -1153,7 +1484,7 @@ describe("SubAgent", () => {
     });
 
     await agent.subAgentReleaseHeldFiber("managed-fiber-child");
-    await expectRootKeepAliveRefCount(agent, 0);
+    await expectFiberWakeOwners(agent, 0);
     await expect(
       agent.subAgentManagedFiber("managed-fiber-child", fiberId)
     ).resolves.toMatchObject({
@@ -1172,14 +1503,18 @@ describe("SubAgent", () => {
       "recover-work",
       { value: "checkpoint" }
     );
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      "fiber-recover-1"
-    );
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
 
-    await runDurableObjectAlarm(agent);
+    await drainDueFiberWakes(agent);
 
     expect(await agent.subAgentRunningFiberCount("recover-child")).toBe(0);
-    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.fiberWakeOwners()).toEqual([]);
+    // A facet empties the old tables instead of dropping them: a facet's
+    // drop reset its tree's storage on a deployment (RUNTIME-FACTS).
+    expect(await agent.subAgentLegacyFiberTables("recover-child")).toEqual({
+      cf_agents_runs: 0,
+      cf_agents_fibers: 0
+    });
     expect(await agent.subAgentRecoveredFibers("recover-child")).toEqual([
       expect.objectContaining({
         id: "fiber-recover-1",
@@ -1200,14 +1535,79 @@ describe("SubAgent", () => {
     );
 
     // Startup recovery throws, so the orphaned row survives the wake. The
-    // root's facet-run lease owns the retry; the facet queues nothing.
+    // root's mirrored wake owns the retry; the facet queues nothing.
     await expect(
       agent.subAgentLocalJobIdsAfterRestart("orphan-wake-child")
     ).resolves.toEqual([]);
     expect(await agent.subAgentRunningFiberCount("orphan-wake-child")).toBe(1);
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      "fiber-orphan-wake-1"
-    );
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+  });
+
+  it("keeps the root's alarm within 5 s while a facet's run executes past its dispatch (#2847)", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    const { status, alarmIn } =
+      await agent.subAgentRootAlarmDuringLongRun("long-child");
+    expect(status).toBe("running");
+    expect(alarmIn).not.toBeNull();
+    expect(alarmIn!).toBeLessThanOrEqual(5_000);
+  }, 20_000);
+
+  it("restarts a facet with an open Task run through a stub it already had", async () => {
+    // Tasks wakes open runs while capabilities start, before Agent's own
+    // startup reads the stored facet flag. A wake that took the facet for a
+    // root would arm an alarm the facet does not have, and the first call
+    // after the reset would fail.
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentHangingRunAfterKeptStubRestart("hanging-child")
+    ).resolves.toBe("running");
+  });
+
+  it("keeps a facet's terminal report alive across a reset with the facet's report job", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentJobsDuringTerminalReport("report-child")
+    ).resolves.toContain("tasks:reports");
+  });
+
+  it("runs a facet's lane runs one after the other, woken through the root", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(agent.subAgentRunLane("lane-child")).resolves.toEqual([
+      "completed",
+      "completed"
+    ]);
+  });
+
+  it("keeps a named Streams in a facet apart from the facet's own Streams", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentWriteNamedStreams("named-streams-child")
+    ).resolves.toEqual([["default"], ["audit"]]);
+  });
+
+  it("retries a delivery in a facet until its sink acknowledges, woken through the root", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentDeliverThroughFlakySink("delivery-child")
+    ).resolves.toEqual({ status: "completed", attempts: [1, 2] });
+  });
+
+  it("runs a named Tasks in a facet apart from the facet's own Tasks", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentRunNamedTasks("named-tasks-child")
+    ).resolves.toEqual(["kept", "imports:1"]);
+  });
+
+  it("runs a Task in a facet with its local and checkpoint, and clears the checkpoint on settle", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentRunRememberTask("remember-child")
+    ).resolves.toEqual({
+      status: "completed",
+      seen: [{ local: { from: "caller" }, rows: 1 }],
+      rowsAfter: 0
+    });
   });
 
   it("drops host jobs an earlier release left in a sub-agent's queue (#2299)", async () => {
@@ -1244,7 +1644,7 @@ describe("SubAgent", () => {
       { value: "checkpoint" }
     );
 
-    await runDurableObjectAlarm(agent);
+    await drainDueFiberWakes(agent);
 
     await expect(
       agent.subAgentManagedFiber(
@@ -1255,7 +1655,7 @@ describe("SubAgent", () => {
       status: "completed",
       snapshot: { recovered: true }
     });
-    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.fiberWakeOwners()).toEqual([]);
   });
 
   it("lets internal sub-agent fiber recovery schedule continuation work in the child", async () => {
@@ -1268,15 +1668,21 @@ describe("SubAgent", () => {
       "__test_internal_chat"
     );
 
-    await runDurableObjectAlarm(agent);
+    await drainDueFiberWakes(agent);
 
-    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.fiberWakeOwners()).toEqual([]);
     expect(await agent.subAgentRecoveredFibers("chat-recovery-child")).toEqual(
       []
     );
 
-    await runDurableObjectAlarm(agent);
-
+    // The continuation is a schedule due now, on the root's real alarm,
+    // which reaches the child through its facet wake: allow it 5 s.
+    for (let attempt = 0; attempt < 500; attempt++) {
+      if ((await agent.subAgentScheduleLog("chat-recovery-child")).length > 0) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     expect(await agent.subAgentScheduleLog("chat-recovery-child")).toEqual([
       expect.objectContaining({
         value: "recovered:chat-fiber-1",
@@ -1297,13 +1703,11 @@ describe("SubAgent", () => {
       { value: "nested-checkpoint" }
     );
 
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      "nested-fiber-1"
-    );
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
 
-    await runDurableObjectAlarm(agent);
+    await drainDueFiberWakes(agent);
 
-    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.fiberWakeOwners()).toEqual([]);
     expect(
       await agent.nestedRecoveredFibers("fiber-outer", "fiber-inner")
     ).toEqual([
@@ -1315,39 +1719,59 @@ describe("SubAgent", () => {
     ]);
   });
 
-  it("prunes stale root facet-run leases when the facet has no run rows", async () => {
+  it("moves the old root facet fiber index onto facet wakes", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    await agent.registerSubAgentFacetRunLeaseOnly(
-      "stale-fiber-child",
-      "stale-fiber-1"
+    await agent.insertSubAgentInterruptedFiberWithLegacyIndex(
+      "legacy-index-child",
+      "legacy-index-fiber-1",
+      "legacy-work",
+      { value: "legacy-checkpoint" }
     );
-    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
-      "stale-fiber-1"
-    );
+    await agent.restartFibers();
 
-    // There is a root-side lease but no child cf_agents_runs row.
-    // Root housekeeping should dispatch into the child, observe zero
-    // remaining rows, and prune the stale root index entry.
-    await runDurableObjectAlarm(agent);
+    expect(await agent.legacyFacetRunIndexExists()).toBe(false);
 
-    expect(await agent.facetRunRows()).toEqual([]);
+    // The index became a wake for the sub-agent's path, due now: the
+    // sub-agent starts and recovers the fiber, and then the wake goes.
+    await vi.waitFor(async () => {
+      expect(await agent.subAgentRecoveredFibers("legacy-index-child")).toEqual(
+        [
+          expect.objectContaining({
+            id: "legacy-index-fiber-1",
+            snapshot: { value: "legacy-checkpoint" }
+          })
+        ]
+      );
+      expect(await agent.fiberWakeOwners()).toEqual([]);
+    });
   });
 
-  it("prunes root facet-run leases when the facet registry entry is gone", async () => {
+  it("prunes a stale root fiber wake when the facet has no run rows", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    await agent.registerSubAgentFacetRunLeaseOnly(
-      "missing-fiber-child",
-      "missing-fiber-1"
-    );
+    await agent.armSubAgentFiberWakeOnly("stale-fiber-child");
+    expect(await agent.fiberWakeOwners()).toHaveLength(1);
+
+    // There is a root-side wake but no child cf_agents_runs row. The
+    // wake dispatches into the child, finds nothing, and is dropped.
+    await drainDueFiberWakes(agent);
+
+    expect(await agent.fiberWakeOwners()).toEqual([]);
+  });
+
+  it("drops a root fiber wake when the facet registry entry is gone", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.armSubAgentFiberWakeOnly("missing-fiber-child");
     await agent.forgetCounterSubAgentRegistry("missing-fiber-child");
 
-    await runDurableObjectAlarm(agent);
+    await drainDueFiberWakes(agent);
 
-    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.fiberWakeOwners()).toEqual([]);
   });
 
   describe("parentAgent()", () => {

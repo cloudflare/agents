@@ -31,6 +31,7 @@ export {
   ThinkDefaultSystemPromptSkillsAgent,
   ThinkInheritedSystemPromptSkillsAgent,
   ThinkSystemPromptFieldSkillsAgent,
+  ThinkWorkspaceSkillsAgent,
   ThinkMissingClassifierWarningAgent,
   ThinkClassifierMethodAgent,
   ThinkInheritedClassifierAgent,
@@ -43,15 +44,19 @@ export {
   ThinkScheduledTasksTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
+  ThinkAdmissionTestAgent,
+  ThinkLatestAdmissionTestAgent,
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   ThinkNestedMiddleAgent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
+  ThinkExtensionNetworkAgent,
   ThinkExtensionBeforeTurnModelAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
+  ThinkSkillsToolsTestAgent,
   ThinkMessengerDeliveryTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkMcpToolMaterializationAgent,
@@ -60,6 +65,7 @@ export {
   ThinkWindowedHydrationAgent,
   ThinkMediaEvictionAgent,
   ThinkPromptCacheTestAgent,
+  ThinkUpgradeTestAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
@@ -83,6 +89,7 @@ import type {
   ThinkDefaultSystemPromptSkillsAgent,
   ThinkInheritedSystemPromptSkillsAgent,
   ThinkSystemPromptFieldSkillsAgent,
+  ThinkWorkspaceSkillsAgent,
   ThinkMissingClassifierWarningAgent,
   ThinkClassifierMethodAgent,
   ThinkInheritedClassifierAgent,
@@ -95,15 +102,19 @@ import type {
   ThinkScheduledTasksTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
+  ThinkAdmissionTestAgent,
+  ThinkLatestAdmissionTestAgent,
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   ThinkNestedMiddleAgent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
+  ThinkExtensionNetworkAgent,
   ThinkExtensionBeforeTurnModelAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
+  ThinkSkillsToolsTestAgent,
   ThinkMessengerDeliveryTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkMcpToolMaterializationAgent,
@@ -112,6 +123,7 @@ import type {
   ThinkWindowedHydrationAgent,
   ThinkMediaEvictionAgent,
   ThinkPromptCacheTestAgent,
+  ThinkUpgradeTestAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
@@ -239,6 +251,7 @@ export type Env = {
   ThinkDefaultSystemPromptSkillsAgent: DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>;
   ThinkInheritedSystemPromptSkillsAgent: DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>;
   ThinkSystemPromptFieldSkillsAgent: DurableObjectNamespace<ThinkSystemPromptFieldSkillsAgent>;
+  ThinkWorkspaceSkillsAgent: DurableObjectNamespace<ThinkWorkspaceSkillsAgent>;
   ThinkMissingClassifierWarningAgent: DurableObjectNamespace<ThinkMissingClassifierWarningAgent>;
   ThinkClassifierMethodAgent: DurableObjectNamespace<ThinkClassifierMethodAgent>;
   ThinkInheritedClassifierAgent: DurableObjectNamespace<ThinkInheritedClassifierAgent>;
@@ -251,11 +264,14 @@ export type Env = {
   ThinkScheduledTasksTestAgent: DurableObjectNamespace<ThinkScheduledTasksTestAgent>;
   ThinkAsyncHookTestAgent: DurableObjectNamespace<ThinkAsyncHookTestAgent>;
   ThinkRecoveryTestAgent: DurableObjectNamespace<ThinkRecoveryTestAgent>;
+  ThinkAdmissionTestAgent: DurableObjectNamespace<ThinkAdmissionTestAgent>;
+  ThinkLatestAdmissionTestAgent: DurableObjectNamespace<ThinkLatestAdmissionTestAgent>;
   ThinkNonRecoveryTestAgent: DurableObjectNamespace<ThinkNonRecoveryTestAgent>;
   ThinkAgentToolParent: DurableObjectNamespace<ThinkAgentToolParent>;
   ThinkNestedMiddleAgent: DurableObjectNamespace<ThinkNestedMiddleAgent>;
   StuckThinkAgentToolChild: DurableObjectNamespace<StuckThinkAgentToolChild>;
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
+  ThinkExtensionNetworkAgent: DurableObjectNamespace<ThinkExtensionNetworkAgent>;
   ThinkExtensionBeforeTurnModelAgent: DurableObjectNamespace<ThinkExtensionBeforeTurnModelAgent>;
   ThinkMessengerDeliveryTestAgent: DurableObjectNamespace<ThinkMessengerDeliveryTestAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
@@ -263,11 +279,13 @@ export type Env = {
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   ThinkFetchToolsTestAgent: DurableObjectNamespace<ThinkFetchToolsTestAgent>;
+  ThinkSkillsToolsTestAgent: DurableObjectNamespace<ThinkSkillsToolsTestAgent>;
   ThinkOnStartReconcileFailureAgent: DurableObjectNamespace<ThinkOnStartReconcileFailureAgent>;
   ThinkOnStartHydrationFailureAgent: DurableObjectNamespace<ThinkOnStartHydrationFailureAgent>;
   ThinkWindowedHydrationAgent: DurableObjectNamespace<ThinkWindowedHydrationAgent>;
   ThinkMediaEvictionAgent: DurableObjectNamespace<ThinkMediaEvictionAgent>;
   ThinkPromptCacheTestAgent: DurableObjectNamespace<ThinkPromptCacheTestAgent>;
+  ThinkUpgradeTestAgent: DurableObjectNamespace<ThinkUpgradeTestAgent>;
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   ThinkPointerHydrationAgent: DurableObjectNamespace<ThinkPointerHydrationAgent>;
   ThinkLegacySessionApiAgent: DurableObjectNamespace<ThinkLegacySessionApiAgent>;

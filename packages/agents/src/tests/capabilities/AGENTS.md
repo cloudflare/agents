@@ -13,8 +13,9 @@ per capability, all registered in the shared workers project
 - `lifecycle.ts` — fixtures for the Lifecycle core itself:
   `PlainLifecycleObject` (probe capabilities for phases, alarms, context,
   routing, events, WebSockets), `RetryableStartObject` (startup-failure
-  retry) and `EvictableStartObject` (evicted instances are garbage
-  collected; counted with `../shared/live-instances.ts`).
+  retry), `EvictableStartObject` (evicted instances are garbage
+  collected; counted with `../shared/live-instances.ts`) and
+  `FetchErrorObject` (failed fetches and the host's `onFetchError`).
 - `scheduler.ts` — `SchedulerHarnessObject` (Scheduler with registered
   callbacks, driven through real platform alarms), `SchedulerStartupWarnObject`,
   `ScheduledLifecycleObject` (Scheduler through full Lifecycle + eviction),
@@ -28,6 +29,9 @@ per capability, all registered in the shared workers project
 - `streams.ts` — `StreamHarnessObject` (Streams as the only capability) and
   `TaskStreamComposeObject` (the checkpointed-cursor contract with Tasks,
   including recovery from stream evidence).
+- `event-log.ts` — `EventLogObject` (WebSockets with three event logs:
+  small retention and batches, no snapshot, and a `canSubscribe` guard),
+  with RPC methods to publish, batch, crash, and read the stored rows.
 - `mcp-client.ts` — `PlainMcpClientObject` (manager as an installed
   capability); its driver `withMcpHarness()` (in `../shared/mcp-harness.ts`)
   creates per-test managers over shared real storage, simulating hibernation
@@ -47,7 +51,7 @@ Tests mirror source modules (`src/<module>` ↔ `src/tests/<module>`):
 
 - `../lifecycle/*.test.ts` — Lifecycle core, one file per functionality
   (runtime handlers, startup, alarm arbitration, capability events, routing,
-  host context, WebSockets, identity, disposal).
+  host context, WebSockets, identity, disposal, fetch failures).
 - `../schedules/capability.test.ts` and `../schedules/timing.test.ts` — the
   Scheduler capability contract and its pure timing rules.
 - `../streams/capability.test.ts` — the Streams capability contract and its

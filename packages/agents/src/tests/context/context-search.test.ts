@@ -114,10 +114,20 @@ describe("Search blocks in system prompt", () => {
       }
     ]);
     await blocks.load();
-    const prompt = await blocks.freezeSystemPrompt();
+    const prompt = await blocks.renderSystemPrompt();
     expect(prompt).toContain("KNOWLEDGE");
     expect(prompt).toContain("[searchable]");
     expect(prompt).toContain("Product docs");
+  });
+
+  it("renders an empty read-only searchable block", async () => {
+    const blocks = new ContextBlocks([
+      { label: "knowledge", provider: new ReadonlySearchProvider() }
+    ]);
+    await blocks.load();
+    const prompt = await blocks.renderSystemPrompt();
+    expect(prompt).toContain("KNOWLEDGE");
+    expect(prompt).toContain("[searchable]");
   });
 
   it("renders searchable block even when content is empty", async () => {
@@ -128,7 +138,7 @@ describe("Search blocks in system prompt", () => {
       }
     ]);
     await blocks.load();
-    const prompt = await blocks.freezeSystemPrompt();
+    const prompt = await blocks.renderSystemPrompt();
     // Empty search provider returns null → content is ""
     // But isSearchable means it still renders
     expect(prompt).toContain("KNOWLEDGE");

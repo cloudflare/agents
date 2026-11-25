@@ -10,6 +10,7 @@
  */
 
 import {
+  backoffDelay,
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
   isPlatformFailure
@@ -23,6 +24,7 @@ import {
 } from "./errors";
 import { deserializeTaskValue } from "./serialization";
 import type {
+  TaskCheckpoint,
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,
@@ -168,7 +170,12 @@ export function computeRetryDelayMs(
       delay = base * failedAttempt;
       break;
     case "exponential":
-      delay = base * 2 ** (failedAttempt - 1);
+      // Jittered, so runs that failed together do not retry together;
+      // capped first, so steps at the cap keep their jitter.
+      delay = backoffDelay(failedAttempt, {
+        baseMs: base,
+        maxMs: MAX_RETRY_DELAY_MS
+      });
       break;
   }
   return Math.min(delay, MAX_RETRY_DELAY_MS);
@@ -215,17 +222,35 @@ export class ReplayStep implements TaskStep {
     readonly name: string;
     readonly attempt: number;
   } | null;
+  readonly local: unknown;
+  readonly checkpoint: TaskCheckpoint;
+  readonly createdAt: number;
+  readonly id: string;
+  readonly attempt: number;
+  readonly signal: AbortSignal;
 
   constructor(
     engine: TaskStepEngine,
     options: {
       startsLive: boolean;
       interrupted?: { name: string; attempt: number } | null;
+      local?: unknown;
+      checkpoint: TaskCheckpoint;
+      createdAt: number;
+      id: string;
+      attempt: number;
+      signal: AbortSignal;
     }
   ) {
     this.#engine = engine;
     this.#live = options.startsLive;
     this.interrupted = options.interrupted ?? null;
+    this.local = options.local;
+    this.checkpoint = options.checkpoint;
+    this.createdAt = options.createdAt;
+    this.id = options.id;
+    this.attempt = options.attempt;
+    this.signal = options.signal;
   }
 
   do<T extends TaskValue>(
@@ -487,12 +512,19 @@ function restoreStepError(row: TaskStepRow): Error {
 }
 
 /** Safe name/message projection of an arbitrary thrown value. */
+/** Longest error message a run keeps; a longer one is cut, not lost. */
+const MAX_ERROR_MESSAGE = 10_000;
+
 export function toErrorSummary(error: unknown): {
   name: string;
   message: string;
 } {
-  if (error instanceof Error) {
-    return { name: error.name, message: error.message };
+  const summary =
+    error instanceof Error
+      ? { name: error.name, message: error.message }
+      : { name: "Error", message: String(error) };
+  if (summary.message.length > MAX_ERROR_MESSAGE) {
+    summary.message = `${summary.message.slice(0, MAX_ERROR_MESSAGE)}…`;
   }
-  return { name: "Error", message: String(error) };
+  return summary;
 }

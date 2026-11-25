@@ -1,8 +1,8 @@
 {
-  "total": 1225,
-  "passed": 427,
-  "needThink": 991,
-  "needThinkPassed": 193,
+  "total": 1553,
+  "passed": 529,
+  "needThink": 1261,
+  "needThinkPassed": 237,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -13,7 +13,7 @@
       "passed": 0
     },
     "actions-durable-pause.test.ts": {
-      "total": 40,
+      "total": 56,
       "passed": 2
     },
     "agent-tool-reattach-recovery.test.ts": {
@@ -25,12 +25,12 @@
       "passed": 0
     },
     "agent-tools.test.ts": {
-      "total": 47,
+      "total": 64,
       "passed": 12
     },
     "assistant-agent-loop.test.ts": {
-      "total": 26,
-      "passed": 8
+      "total": 33,
+      "passed": 9
     },
     "assistant-agent.test.ts": {
       "total": 5,
@@ -39,10 +39,6 @@
     "assistant-message-metadata.test.ts": {
       "total": 9,
       "passed": 1
-    },
-    "assistant-tools.test.ts": {
-      "total": 34,
-      "passed": 34
     },
     "attachment-consumption.test.ts": {
       "total": 4,
@@ -54,7 +50,7 @@
     },
     "channel-policy.test.ts": {
       "total": 3,
-      "passed": 2
+      "passed": 1
     },
     "channel-recovery.test.ts": {
       "total": 5,
@@ -69,8 +65,8 @@
       "passed": 8
     },
     "client-tools.test.ts": {
-      "total": 100,
-      "passed": 31
+      "total": 136,
+      "passed": 33
     },
     "cold-rpc-initialization.test.ts": {
       "total": 4,
@@ -80,8 +76,20 @@
       "total": 2,
       "passed": 2
     },
+    "context-upgrade.test.ts": {
+      "total": 11,
+      "passed": 4
+    },
     "deliver-notice.test.ts": {
       "total": 7,
+      "passed": 0
+    },
+    "durable-admission.test.ts": {
+      "total": 7,
+      "passed": 1
+    },
+    "empty-reply.test.ts": {
+      "total": 10,
       "passed": 0
     },
     "errored-stream-replay.test.ts": {
@@ -93,31 +101,31 @@
       "passed": 0
     },
     "execute-hitl.test.ts": {
-      "total": 12,
+      "total": 16,
       "passed": 0
     },
     "execute-tool.test.ts": {
       "total": 6,
-      "passed": 3
+      "passed": 6
     },
     "extension-manager.test.ts": {
-      "total": 34,
-      "passed": 34
+      "total": 45,
+      "passed": 42
     },
     "fetch-tools.test.ts": {
-      "total": 51,
-      "passed": 50
+      "total": 53,
+      "passed": 52
     },
     "fiber.test.ts": {
       "total": 7,
       "passed": 7
     },
     "hooks.test.ts": {
-      "total": 140,
-      "passed": 28
+      "total": 149,
+      "passed": 38
     },
     "hydration-budget.test.ts": {
-      "total": 9,
+      "total": 19,
       "passed": 1
     },
     "max-concurrent-agent-tools.test.ts": {
@@ -125,11 +133,11 @@
       "passed": 1
     },
     "mcp-tool-materialization.test.ts": {
-      "total": 2,
-      "passed": 0
+      "total": 5,
+      "passed": 5
     },
     "media-eviction.test.ts": {
-      "total": 16,
+      "total": 22,
       "passed": 3
     },
     "message-reconciliation.test.ts": {
@@ -137,15 +145,15 @@
       "passed": 4
     },
     "messengers.test.ts": {
-      "total": 103,
+      "total": 104,
       "passed": 79
     },
     "nested-agent-tools.test.ts": {
       "total": 3,
-      "passed": 0
+      "passed": 1
     },
     "onconnect-broadcast.test.ts": {
-      "total": 13,
+      "total": 14,
       "passed": 1
     },
     "onstart-degraded.test.ts": {
@@ -156,21 +164,65 @@
       "total": 8,
       "passed": 0
     },
+    "periphery-action-tools.test.ts": {
+      "total": 9,
+      "passed": 9
+    },
+    "periphery-channels.test.ts": {
+      "total": 12,
+      "passed": 12
+    },
+    "periphery-extensions.test.ts": {
+      "total": 12,
+      "passed": 12
+    },
+    "periphery-inference.test.ts": {
+      "total": 19,
+      "passed": 19
+    },
+    "periphery-modules.test.ts": {
+      "total": 19,
+      "passed": 11
+    },
+    "periphery-transcript.test.ts": {
+      "total": 12,
+      "passed": 12
+    },
+    "periphery-turn-policy.test.ts": {
+      "total": 13,
+      "passed": 13
+    },
     "prompt-cache.test.ts": {
       "total": 10,
-      "passed": 3
+      "passed": 4
+    },
+    "queued-order.test.ts": {
+      "total": 5,
+      "passed": 0
+    },
+    "rpc-chat-turns.test.ts": {
+      "total": 5,
+      "passed": 0
     },
     "run-turn-recovery.test.ts": {
-      "total": 10,
+      "total": 11,
       "passed": 1
     },
     "run-turn.test.ts": {
-      "total": 34,
+      "total": 35,
       "passed": 13
     },
     "scheduled-tasks.test.ts": {
-      "total": 17,
-      "passed": 1
+      "total": 9,
+      "passed": 6
+    },
+    "skills-tools.test.ts": {
+      "total": 2,
+      "passed": 2
+    },
+    "stop-reason.test.ts": {
+      "total": 46,
+      "passed": 0
     },
     "stream-cleanup.test.ts": {
       "total": 5,
@@ -181,24 +233,24 @@
       "passed": 1
     },
     "submissions.test.ts": {
-      "total": 92,
-      "passed": 8
+      "total": 116,
+      "passed": 9
     },
     "telegram-messenger.test.ts": {
       "total": 2,
       "passed": 2
     },
     "terminal-frame-order.test.ts": {
-      "total": 3,
+      "total": 4,
       "passed": 0
     },
     "think-eviction.test.ts": {
-      "total": 4,
-      "passed": 1
+      "total": 3,
+      "passed": 2
     },
     "think-session.test.ts": {
-      "total": 276,
-      "passed": 65
+      "total": 305,
+      "passed": 59
     },
     "turn-metadata.test.ts": {
       "total": 4,
@@ -207,6 +259,10 @@
     "workflows.test.ts": {
       "total": 3,
       "passed": 3
+    },
+    "workspace-tools.test.ts": {
+      "total": 10,
+      "passed": 8
     },
     "ws-web-channel.test.ts": {
       "total": 10,
@@ -236,46 +292,13 @@
     "assistant-agent-loop.test.ts > Think — agentic loop > defaultContextOverflowClassifier > classifies common provider context-overflow errors",
     "assistant-agent-loop.test.ts > Think — agentic loop > defaultContextOverflowClassifier > returns undefined for unrelated errors",
     "assistant-agent-loop.test.ts > Think — agentic loop > getModel() error > returns an error when getModel is not overridden",
+    "assistant-agent-loop.test.ts > Think — agentic loop > mid-turn context-overflow recovery (opt-in) > recovers a context overflow during continueLastTurn",
     "assistant-agent.test.ts > Think — cancel > cancel message does not crash the agent",
     "assistant-agent.test.ts > Think — clear > clears all messages",
     "assistant-agent.test.ts > Think — message persistence > messages survive across agent instances",
     "assistant-agent.test.ts > Think — streaming flow > persists assistant message after streaming",
     "assistant-agent.test.ts > Think — streaming flow > sends a chat request and receives streamed response",
     "assistant-message-metadata.test.ts > Think — server-authored assistant-message metadata > stamps no metadata keys when no writer is configured (opt-in)",
-    "assistant-tools.test.ts > assistant tools — bash > does not overwrite workspace files skipped during mounting",
-    "assistant-tools.test.ts > assistant tools — bash > does not persist synthetic shell paths (/bin, /usr, …) to the workspace",
-    "assistant-tools.test.ts > assistant tools — bash > mounts workspace directories beyond the first readDir page",
-    "assistant-tools.test.ts > assistant tools — bash > persists empty directory creates and deletes",
-    "assistant-tools.test.ts > assistant tools — bash > returns non-zero bash exits with output",
-    "assistant-tools.test.ts > assistant tools — bash > returns structured output for bash timeouts",
-    "assistant-tools.test.ts > assistant tools — bash > runs bash against workspace files and persists changes",
-    "assistant-tools.test.ts > assistant tools — edit > creates new file with empty old_string",
-    "assistant-tools.test.ts > assistant tools — edit > fuzzy matches on whitespace differences",
-    "assistant-tools.test.ts > assistant tools — edit > replaces exact match",
-    "assistant-tools.test.ts > assistant tools — edit > returns error for ambiguous fuzzy match",
-    "assistant-tools.test.ts > assistant tools — edit > returns error for missing file",
-    "assistant-tools.test.ts > assistant tools — edit > returns error when old_string has multiple matches",
-    "assistant-tools.test.ts > assistant tools — edit > returns error when old_string not found",
-    "assistant-tools.test.ts > assistant tools — find > finds files by glob pattern",
-    "assistant-tools.test.ts > assistant tools — grep > returns context lines when requested",
-    "assistant-tools.test.ts > assistant tools — grep > searches file contents with regex",
-    "assistant-tools.test.ts > assistant tools — grep > searches with fixed string",
-    "assistant-tools.test.ts > assistant tools — grep > skips files larger than 1 MB",
-    "assistant-tools.test.ts > assistant tools — grep > supports case-sensitive search",
-    "assistant-tools.test.ts > assistant tools — list > lists files and directories",
-    "assistant-tools.test.ts > assistant tools — read > does not line-number unknown binary files",
-    "assistant-tools.test.ts > assistant tools — read > reads a file with line numbers",
-    "assistant-tools.test.ts > assistant tools — read > returns compact image metadata and image-data model content",
-    "assistant-tools.test.ts > assistant tools — read > returns error for directory",
-    "assistant-tools.test.ts > assistant tools — read > returns error for missing file",
-    "assistant-tools.test.ts > assistant tools — read > returns file-data model output for PDFs",
-    "assistant-tools.test.ts > assistant tools — read > sniffs gif image bytes when MIME is generic",
-    "assistant-tools.test.ts > assistant tools — read > sniffs jpeg image bytes when MIME is generic",
-    "assistant-tools.test.ts > assistant tools — read > sniffs png image bytes when MIME is generic",
-    "assistant-tools.test.ts > assistant tools — read > sniffs webp image bytes when MIME is generic",
-    "assistant-tools.test.ts > assistant tools — read > supports offset and limit",
-    "assistant-tools.test.ts > assistant tools — write > creates parent directories",
-    "assistant-tools.test.ts > assistant tools — write > writes a file and reports stats",
     "browser-tools.test.ts > createBrowserTools > accepts cdpUrl instead of browser binding (Quick Actions skipped without a binding)",
     "browser-tools.test.ts > createBrowserTools > accepts optional timeout and session mode",
     "browser-tools.test.ts > createBrowserTools > exposes the runtime handle and connector via createBrowserRuntime",
@@ -283,7 +306,6 @@
     "browser-tools.test.ts > createBrowserTools > requires a browser binding or cdpUrl",
     "browser-tools.test.ts > createBrowserTools > returns browser_execute plus the default Quick Action tools when a binding is present",
     "channel-policy.test.ts > per-channel policy (Phase 4b) > does not apply channel policy for turns on other channels",
-    "channel-policy.test.ts > per-channel policy (Phase 4b) > narrows the tool set via the channel policy (removes, not just adds)",
     "channel-threading.test.ts > channel threading (Phase 4a) > has no channel context when none is supplied",
     "channels.test.ts > resolveChannels > absorbs getMessengers() entries as messenger channels and feeds the runtime",
     "channels.test.ts > resolveChannels > allows overriding the web channel's policy with a kind: web entry",
@@ -293,6 +315,7 @@
     "channels.test.ts > resolveChannels > throws on a duplicate id across configureChannels() and getMessengers()",
     "channels.test.ts > resolveChannels > throws when configureChannels() replaces web with a non-web kind",
     "channels.test.ts > resolveChannels > throws when getMessengers() declares a messenger named web",
+    "client-tools.test.ts > Think — a client copy of a reply that is behind > does not shorten the stored reply",
     "client-tools.test.ts > Think — auto-continuation > autoContinue: true triggers continuation",
     "client-tools.test.ts > Think — auto-continuation > continues after approving a tool that shares its message with a settled tool (#2185)",
     "client-tools.test.ts > Think — auto-continuation > does not continue a standalone errored tool (autoContinue:false, no opted-in sibling) (#1650)",
@@ -314,7 +337,6 @@
     "client-tools.test.ts > Think — regeneration > regeneration preserves conversation history before the branch point",
     "client-tools.test.ts > Think — tool approval > does NOT update tool in output-available state",
     "client-tools.test.ts > Think — tool approval > non-existent toolCallId is a no-op",
-    "client-tools.test.ts > Think — tool approval > preserves approval data",
     "client-tools.test.ts > Think — tool broadcast and persistence > other tabs receive continuation stream chunks",
     "client-tools.test.ts > Think — tool broadcast and persistence > tool state survives across agent instances",
     "client-tools.test.ts > Think — tool result application > applies to tool in approval-responded state",
@@ -322,6 +344,8 @@
     "client-tools.test.ts > Think — tool result application > does NOT update tool in output-denied state",
     "client-tools.test.ts > Think — tool result application > sets output-error state with errorText",
     "client-tools.test.ts > Think — tool result application > updates tool part to output-available",
+    "client-tools.test.ts > Think — tool results with nothing to continue > a result for an older reply does not continue the newer reply",
+    "client-tools.test.ts > Think — tool results with nothing to continue > a second tab's result for an answered call does not continue again",
     "client-tools.test.ts > resume coordination during pending continuation > correlates idle STREAM_RESUME_NONE after a continuation completes",
     "client-tools.test.ts > resume coordination during pending continuation > does not send STREAM_RESUME_NONE for an immediate resume request after tool output",
     "cold-rpc-initialization.test.ts > native RPC initialization > hydrates persisted Think history when native RPC is first after eviction",
@@ -329,13 +353,23 @@
     "cold-rpc-initialization.test.ts > native RPC initialization > initializes Think before the first subclass RPC method executes",
     "connection-state.test.ts > preserves onConnect state for the first Think root client message",
     "connection-state.test.ts > preserves onConnect state for the first Think sub-agent client message",
+    "context-upgrade.test.ts > Think context upgrade > does not send a change twice when the turn that recorded it failed",
+    "context-upgrade.test.ts > Think context upgrade > ignores a context record a client sends in message metadata",
+    "context-upgrade.test.ts > Think context upgrade > rebuilds the prompt from the blocks at the turn after a compaction",
+    "context-upgrade.test.ts > Think context upgrade > stores the prompt only on the session, never in a _system_prompt row",
+    "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a clear before the replay drops it",
     "execute-tool.test.ts > execute tool on the codemode runtime > maps needsApproval AI SDK tools to requiresApproval — the call pauses durably",
+    "execute-tool.test.ts > execute tool on the codemode runtime > one-liner: createExecuteTool(agent) runs without state.* and records on this.codemode",
+    "execute-tool.test.ts > execute tool on the codemode runtime > runs sandbox code against the workspace tools",
     "execute-tool.test.ts > execute tool on the codemode runtime > runs sandbox code against tools.* (ToolSetConnector)",
+    "execute-tool.test.ts > execute tool on the codemode runtime > shares one durable history across explicit and one-liner runtimes (same name)",
     "execute-tool.test.ts > execute tool on the codemode runtime > surfaces sandbox errors as error outcomes with an executionId",
+    "extension-manager.test.ts > ExtensionManager > getTools > offers the model the same tool definitions as before the extension core",
     "extension-manager.test.ts > ExtensionManager > getTools > should merge tools from multiple extensions",
     "extension-manager.test.ts > ExtensionManager > getTools > should prefix tool names with extension name",
     "extension-manager.test.ts > ExtensionManager > getTools > should return AI SDK tools from loaded extensions",
     "extension-manager.test.ts > ExtensionManager > getTools > should return empty object when no extensions loaded",
+    "extension-manager.test.ts > ExtensionManager > getTools > warns once per manager that a context block's type is ignored",
     "extension-manager.test.ts > ExtensionManager > lifecycle after unload > should allow reloading after unload",
     "extension-manager.test.ts > ExtensionManager > lifecycle after unload > should not include tools from unloaded extensions",
     "extension-manager.test.ts > ExtensionManager > lifecycle after unload > should throw when executing a tool from an unloaded extension",
@@ -366,7 +400,15 @@
     "extension-manager.test.ts > ExtensionManager > tool execution > should propagate tool execution errors",
     "extension-manager.test.ts > ExtensionManager > unload > should return false for unknown extension",
     "extension-manager.test.ts > ExtensionManager > unload > should unload an extension",
+    "extension-manager.test.ts > ExtensionManager hook timeout > runs a manager the agent was given under the agent's timeout",
+    "extension-manager.test.ts > ExtensionManager network hosts with an app's own host binding > keeps the agent's network, since the binding may not serve fetch",
+    "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > changes the id when the context labels change",
+    "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > gives different agents different ids for the same host extension",
+    "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > never reuses a host extension id without a scope",
+    "extension-manager.test.ts > ExtensionManager worker id stability > reuses the same worker id across managers for identical extensions",
     "fetch-tools.test.ts > Think — fetchTools integration > does not register fetch tools by default",
+    "fetch-tools.test.ts > Think — fetchTools integration > hands the model a fetched body when it calls a fetch tool",
+    "fetch-tools.test.ts > Think — fetchTools integration > sends the workspace and fetch tools as they are given directly, in that order, byte for byte",
     "fetch-tools.test.ts > createFetchTools — config > generates one fetch_<name> tool per binding with a sanitized name",
     "fetch-tools.test.ts > createFetchTools — config > registers fetch_url only when a public allowlist is set",
     "fetch-tools.test.ts > createFetchTools — config > throws when neither allowlist nor bindings are configured",
@@ -383,7 +425,7 @@
     "fetch-tools.test.ts > fetch — redirects > follows same-origin redirects through the binding",
     "fetch-tools.test.ts > fetch — size limits > returns too_large for JSON that exceeds the byte cap",
     "fetch-tools.test.ts > fetch — size limits > truncates oversized text and flags truncated",
-    "fetch-tools.test.ts > fetch — workspace spill > writes binary bodies via writeFileBytes when spill is enabled in auto",
+    "fetch-tools.test.ts > fetch — workspace spill > writes binary bodies when spill is enabled in auto",
     "fetch-tools.test.ts > fetch — workspace spill > writes text bodies to the workspace in workspace mode",
     "fetch-tools.test.ts > fetch_<binding> — responses > parses JSON bodies",
     "fetch-tools.test.ts > fetch_<binding> — responses > rejects binary content in auto mode without spill",
@@ -428,6 +470,7 @@
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > collapses Promise<AsyncIterable> returns to the last yielded value",
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > collapses sync AsyncIterable returns to the last yielded value",
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > void decision runs the original execute with original input",
+    "hooks.test.ts > Think — actions compile into guarded tools > hashes action input by value: key order is ignored, dates are told apart",
     "hooks.test.ts > Think — beforeToolCall gates whether execute runs > never runs execute when the result is substituted",
     "hooks.test.ts > Think — beforeToolCall gates whether execute runs > runs execute exactly once on a void decision",
     "hooks.test.ts > Think — beforeToolCall gates whether execute runs > runs execute exactly once when 'allow' substitutes the input",
@@ -441,7 +484,16 @@
     "hooks.test.ts > Think — beforeTurn hook > keeps the default gateway when getGateway returns undefined",
     "hooks.test.ts > Think — beforeTurn hook > returns a LanguageModel object unchanged",
     "hooks.test.ts > Think — beforeTurn hook > routes @hf/ ids to Workers AI like @cf/ ids",
+    "hooks.test.ts > Think — dynamic context > addContext block appears in system prompt after refresh",
+    "hooks.test.ts > Think — dynamic context > addContext coexists with configureSession blocks",
+    "hooks.test.ts > Think — dynamic context > addContext registers a new block",
+    "hooks.test.ts > Think — dynamic context > dynamic block content can be written via setContextBlock",
+    "hooks.test.ts > Think — dynamic context > dynamic block is writable by default",
     "hooks.test.ts > Think — dynamic context > dynamic block visible in chat turn tools",
+    "hooks.test.ts > Think — dynamic context > removeContext removes the block",
+    "hooks.test.ts > Think — dynamic context > removeContext returns false for non-existent block",
+    "hooks.test.ts > Think — dynamic context > removed block disappears from system prompt after refresh",
+    "hooks.test.ts > Think — dynamic context > session tools include set_context after adding writable block",
     "hooks.test.ts > Think — hook convergence > beforeTurn fires from chat() RPC path",
     "hooks.test.ts > Think — hook convergence > beforeTurn fires from saveMessages path",
     "hooks.test.ts > Think — maxSteps property > respects maxSteps override on class",
@@ -453,6 +505,11 @@
     "hooks.test.ts > Think — tool-call hooks expose typed input/output > beforeToolCall receives toolName and typed input",
     "hydration-budget.test.ts > hydrationByteBudget — windowed hydration (#1710) > chat works on a windowed-boot agent and persists past the window",
     "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > DOES count an in-flight `running` run toward the cap",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > automatically exposes MCP tools by default for compatibility",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > hands the model an MCP tool's result when it calls one",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > sends the MCP tools as getAITools() gives them, byte for byte, after the workspace's",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > skips automatic AI tool conversion while preserving MCP connector access",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > waits for MCP connections before it builds the agent's own tools",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > ignores text, markers, remote urls and small payloads",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees a payload nested inside a tool output",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees an inline file payload at or above the threshold",
@@ -539,11 +596,101 @@
     "messengers.test.ts > think messengers core > typing indicator (#2324) > still posts the reply when the refresh typing request never settles",
     "messengers.test.ts > think messengers core > typing indicator (#2324) > still runs the turn when the typing indicator fails",
     "messengers.test.ts > think messengers core > typing indicator (#2324) > stops refreshing when the turn fails",
+    "nested-agent-tools.test.ts > nested agent-tools (grandparent → middle → grandchild) > does not bridge grandchild observation up to the grandparent",
     "onconnect-broadcast.test.ts > Think — onConnect broadcast policy > broadcasts CHAT_MESSAGES on connect when no stream is active",
     "onstart-degraded.test.ts > Think onStart degradation (#1710) > scheduled-task reconcile failure > chat still works on the degraded agent",
+    "periphery-action-tools.test.ts > action context bindings > reads the agent's env when the action runs, not when it compiles",
+    "periphery-action-tools.test.ts > action helpers > aborts on timeout",
+    "periphery-action-tools.test.ts > action helpers > normalizes authorization decisions",
+    "periphery-action-tools.test.ts > action helpers > reads approved inputs from the transcript",
+    "periphery-action-tools.test.ts > action helpers > truncates large outputs for the model",
+    "periphery-action-tools.test.ts > compileActionTools > records metadata for gated actions and parks durable pauses",
+    "periphery-action-tools.test.ts > compileActionTools > rejects an entry not made with action()",
+    "periphery-action-tools.test.ts > compileActionTools > returns the authorization envelope when denied",
+    "periphery-action-tools.test.ts > compileActionTools > runs a server action through the ledger",
+    "periphery-channels.test.ts > MediaEvictionPasses > does nothing when eviction is off",
+    "periphery-channels.test.ts > MediaEvictionPasses > writes every payload of a pass to the workspace it opened with",
+    "periphery-channels.test.ts > channel runtime > appends a web notice to the transcript",
+    "periphery-channels.test.ts > channel runtime > posts to a messenger surface and fails without one",
+    "periphery-channels.test.ts > channel runtime > resolves a registered channel and reports it",
+    "periphery-channels.test.ts > channel runtime > warns about an unknown channel only when a registry exists",
+    "periphery-channels.test.ts > declaredOverrides > tells a subclass declaration from an inherited method",
+    "periphery-channels.test.ts > reply attachments > posts what renders and survives failures",
+    "periphery-channels.test.ts > reply attachments > renders cards and email drafts, skips the rest",
+    "periphery-channels.test.ts > turn metadata > reads the latest user message's stamp",
+    "periphery-channels.test.ts > turn metadata > stamps user messages only",
+    "periphery-channels.test.ts > turn metadata > strips and reads the reserved keys",
+    "periphery-extensions.test.ts > ThinkExtensionHooks observations > does nothing without an extension manager",
+    "periphery-extensions.test.ts > ThinkExtensionHooks observations > sends a snapshot to each subscriber and ignores failures",
+    "periphery-extensions.test.ts > ThinkExtensionHooks.beforeTurn > pipes the config through extensions in order",
+    "periphery-extensions.test.ts > ThinkExtensionHooks.beforeTurn > returns the subclass config when no extension subscribes",
+    "periphery-extensions.test.ts > ThinkExtensionHooks.beforeTurn > skips an extension that fails or times out",
+    "periphery-extensions.test.ts > ThinkSkills > logs and continues when getSkills throws",
+    "periphery-extensions.test.ts > ThinkSkills > registers the catalog block and gives the turn skill tools",
+    "periphery-extensions.test.ts > ThinkSkills > stays off without sources",
+    "periphery-extensions.test.ts > createThinkHostApi > appends a sent message as a user message",
+    "periphery-extensions.test.ts > createThinkHostApi > dispatches by name and rejects unknown operations",
+    "periphery-extensions.test.ts > createThinkHostApi > reads and writes context blocks",
+    "periphery-extensions.test.ts > createThinkHostApi > reads messages as text, sliced from the end",
+    "periphery-inference.test.ts > inference stream helpers > drains a registered stream once, through either result",
+    "periphery-inference.test.ts > inference stream helpers > ignores a result it never registered",
+    "periphery-inference.test.ts > inference stream helpers > registers the wrapped result for draining too",
+    "periphery-inference.test.ts > inference stream helpers > turns any stream error into text",
+    "periphery-inference.test.ts > modelMessagesFromHistory > converts the repaired history",
+    "periphery-inference.test.ts > modelMessagesFromHistory > refuses a history that still waits on a client tool",
+    "periphery-inference.test.ts > modelMessagesFromHistory > reports calls that survived repair",
+    "periphery-inference.test.ts > read-time truncation > keeps the recent window, stepping the cutoff",
+    "periphery-inference.test.ts > read-time truncation > never moves the cutoff with an infinite step",
+    "periphery-inference.test.ts > read-time truncation > puts the eviction cutoff below the truncation cutoff",
+    "periphery-inference.test.ts > read-time truncation > treats an invalid step as one",
+    "periphery-inference.test.ts > request shaping > adds a continue checkpoint after a trailing assistant message",
+    "periphery-inference.test.ts > request shaping > carries the reminder inside the last user message",
+    "periphery-inference.test.ts > request shaping > gives a trailing assistant message the checkpoint with the reminder",
+    "periphery-inference.test.ts > request shaping > shows execution outcome notes to providers as user messages",
+    "periphery-inference.test.ts > structured output > recognises the final-answer tool and its suffixed names",
+    "periphery-inference.test.ts > turn telemetry > builds v7 options with the runtime context included",
+    "periphery-inference.test.ts > turn telemetry > keeps an explicit functionId",
+    "periphery-inference.test.ts > turn telemetry > names the agent and turn, and lets the caller win",
+    "periphery-modules.test.ts > ThinkModelResolver > builds string models through one provider",
+    "periphery-modules.test.ts > ThinkModelResolver > recognises Workers AI ids",
+    "periphery-modules.test.ts > ThinkModelResolver > rejects a getGateway that returns a Promise",
+    "periphery-modules.test.ts > ThinkModelResolver > rejects malformed ids",
+    "periphery-modules.test.ts > ThinkModelResolver > returns a LanguageModel as-is without reading the binding",
+    "periphery-modules.test.ts > legacy workflow notification migration > keeps a row whose send failed, and drops the table once a later start sends it",
+    "periphery-modules.test.ts > legacy workflow notification migration > sends each undelivered notification as a delivery and drops the legacy table",
+    "periphery-modules.test.ts > systemPromptForTurn > appends a capability line per kind of tool",
+    "periphery-modules.test.ts > systemPromptForTurn > leaves a prompt that already has the block alone",
+    "periphery-modules.test.ts > systemPromptForTurn > lists no tool lines for a turn without tools",
+    "periphery-modules.test.ts > tableExists > tells a present table from a missing one, and the store keeps working",
+    "periphery-transcript.test.ts > ThinkTranscriptCache > hydrates a window and reports it once per change",
+    "periphery-transcript.test.ts > ThinkTranscriptCache > leaves the cache unreliable when a refresh throws",
+    "periphery-transcript.test.ts > ThinkTranscriptCache > measures messages in UTF-8 bytes",
+    "periphery-transcript.test.ts > ThinkTranscriptCache > reads everything when no budget applies",
+    "periphery-transcript.test.ts > ThinkTranscriptCache > stops covering the path once growth passes the budget",
+    "periphery-transcript.test.ts > action() > brands and freezes the descriptor",
+    "periphery-transcript.test.ts > action() > rejects a durable pause that never parks",
+    "periphery-transcript.test.ts > incomingMessageWrite > keeps the stored reserved metadata over the client's",
+    "periphery-transcript.test.ts > incomingMessageWrite > skips a message the server already holds",
+    "periphery-transcript.test.ts > incomingMessageWrite > stamps a new user message with the channel",
+    "periphery-transcript.test.ts > incomingMessageWrite > writes a new message without reserved metadata as the client sent it",
+    "periphery-transcript.test.ts > withoutFinalAnswerParts > drops the final-answer tool parts only",
+    "periphery-turn-policy.test.ts > ThinkContextOverflow > compacts before a step over budget and keeps the in-flight tail",
+    "periphery-turn-policy.test.ts > ThinkContextOverflow > finalizes an overflow through onChatError",
+    "periphery-turn-policy.test.ts > ThinkContextOverflow > finds transient errors",
+    "periphery-turn-policy.test.ts > ThinkContextOverflow > is off without config",
+    "periphery-turn-policy.test.ts > ThinkContextOverflow > lets the app's classifier win over the provider's error",
+    "periphery-turn-policy.test.ts > ThinkContextOverflow > reads the provider's error when no classifier is overridden, with no warning",
+    "periphery-turn-policy.test.ts > ThinkContextOverflow > reports whether compaction shortened history",
+    "periphery-turn-policy.test.ts > ThinkContextOverflow > treats a thrown classifier as unclassified",
+    "periphery-turn-policy.test.ts > wrapToolsWithDecision > collapses a promised iterable to its last value",
+    "periphery-turn-policy.test.ts > wrapToolsWithDecision > leaves a tool without execute alone",
+    "periphery-turn-policy.test.ts > wrapToolsWithDecision > refuses changed input for an approved action",
+    "periphery-turn-policy.test.ts > wrapToolsWithDecision > runs, blocks or substitutes as the decision says",
+    "periphery-turn-policy.test.ts > wrapToolsWithDecision > streams an async generator tool through",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > extends the previous request every turn with no reduction",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > never rewrites the prefix when truncationStep is Infinity",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > rewrites the prefix once per compaction",
+    "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > sends a changed remind block once, where it was delivered, until a refresh promotes it (#2089)",
     "run-turn-recovery.test.ts > recovery × runTurn > wraps a runTurn turn in a recovery fiber and cleans it up",
     "run-turn.test.ts > Think — runTurn > concurrent non-nested wait enqueues behind an active turn",
     "run-turn.test.ts > Think — runTurn > emits no chat:turn metadata for skipped empty wait input",
@@ -558,18 +705,27 @@
     "run-turn.test.ts > Think — runTurn > wait mode returns TurnResult equivalent to saveMessages",
     "run-turn.test.ts > Think — runTurn > wait mode supports array input",
     "run-turn.test.ts > Think — runTurn > wait mode supports function input",
+    "scheduled-tasks.test.ts > Think scheduled tasks > arms declared tasks on a sub-agent too, without a warning",
+    "scheduled-tasks.test.ts > Think scheduled tasks > arms the next occurrence when scheduled task handlers keep failing",
     "scheduled-tasks.test.ts > Think scheduled tasks > does not arm a keepAlive heartbeat on alarm() when no workflow notifications are pending (#1703)",
+    "scheduled-tasks.test.ts > Think scheduled tasks > leaves the application's own declared schedules alone",
+    "scheduled-tasks.test.ts > Think scheduled tasks > reconciles declared tasks without touching unrelated schedules",
+    "scheduled-tasks.test.ts > Think scheduled tasks > retries scheduled task handlers before recording failure",
+    "skills-tools.test.ts > Think skills > sends a changed catalog once, as a reminder, without rewriting the system prompt",
+    "skills-tools.test.ts > Think skills > sends the workspace and skill tools as they are given directly, in that order, byte for byte",
     "streaming-message-id.test.ts > Think — streaming assistant message-id alignment > stamps the persisted assistant id onto a new turn's start chunk",
     "submissions.test.ts > Think durable submissions > completes multiple submissions in FIFO order",
     "submissions.test.ts > Think durable submissions > deduplicates by submission id",
     "submissions.test.ts > Think durable submissions > deduplicates concurrent first submissions with the same idempotency key",
     "submissions.test.ts > Think durable submissions > deduplicates retries by idempotency key without appending duplicate messages",
-    "submissions.test.ts > Think durable submissions > does not treat client body workflow-shaped data as workflow configuration",
     "submissions.test.ts > Think durable submissions > does not treat public workflow-shaped metadata as workflow configuration",
+    "submissions.test.ts > Think durable submissions > stores a submitted message over 1.8 MB whole",
     "submissions.test.ts > Think durable submissions > stores error status and message when an in-band stream error occurs",
     "submissions.test.ts > Think durable submissions > stores error status and message when turn setup throws",
+    "submissions.test.ts > Think durable submissions > takes no keep-alive hold when it starts with no stored requests to replay",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > allows unverified adapter webhooks only when Think verifies them",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > forwards nativeStreaming to the adapter",
+    "think-eviction.test.ts > Think recovery after forced Durable Object eviction > keeps a declared task's pending occurrence and runs it after eviction",
     "think-eviction.test.ts > Think recovery after forced Durable Object eviction > rebuilds the in-memory transcript cache without running a turn",
     "think-session.test.ts > Think — Session integration > does not append missing messages to cache on direct session updateMessage calls",
     "think-session.test.ts > Think — Session integration > keeps cache aligned for direct session appendMessage calls",
@@ -578,6 +734,7 @@
     "think-session.test.ts > Think — Session integration > should use tree-structured messages via Session",
     "think-session.test.ts > Think — abort > should expose chat request ids for cross-RPC cancellation",
     "think-session.test.ts > Think — abort > should stop streaming on abort and not call onDone",
+    "think-session.test.ts > Think — abort > stores no reply for a turn stopped before it has any content",
     "think-session.test.ts > Think — addMessages > appends without starting a model turn",
     "think-session.test.ts > Think — addMessages > chains an array linearly into one path",
     "think-session.test.ts > Think — addMessages > does not re-parent on upsert",
@@ -589,12 +746,17 @@
     "think-session.test.ts > Think — addMessages > updates in place in upsert mode",
     "think-session.test.ts > Think — async configureSession > should initialize and chat with async configureSession",
     "think-session.test.ts > Think — async configureSession > should support multiple turns after async init",
+    "think-session.test.ts > Think — async onChatResponse > awaits async hook before next turn starts",
+    "think-session.test.ts > Think — async onChatResponse > does not drop results during rapid sequential turns",
     "think-session.test.ts > Think — body persistence > should default to undefined when no body set",
     "think-session.test.ts > Think — chatRecovery > chat turn with recovery=true works normally and cleans up fibers",
     "think-session.test.ts > Think — chatRecovery > multiple sequential turns don't leak fibers",
     "think-session.test.ts > Think — chatRecovery > saveMessages with recovery wraps in fiber and cleans up",
     "think-session.test.ts > Think — context blocks > does not warn when classifyChatError is overridden",
+    "think-session.test.ts > Think — context blocks > does not warn when reactive overflow recovery has no classifier: the provider's error is read",
     "think-session.test.ts > Think — context blocks > should configure session with context blocks",
+    "think-session.test.ts > Think — context blocks > should freeze system prompt from context blocks",
+    "think-session.test.ts > Think — context blocks > should persist context block content across turns",
     "think-session.test.ts > Think — continueLastTurn > should set continuation: true on continueLastTurn",
     "think-session.test.ts > Think — core > should accumulate messages across multiple turns",
     "think-session.test.ts > Think — core > should broadcast RPC chat message updates to connected clients",
@@ -604,22 +766,13 @@
     "think-session.test.ts > Think — core > should forward routed props to onStart",
     "think-session.test.ts > Think — core > should return empty messages before first chat",
     "think-session.test.ts > Think — error handling > bounds a turn that streams a chunk and stalls on every attempt",
-    "think-session.test.ts > Think — error handling > does not retry an aborted turn under a transient classifier (inStream: false)",
-    "think-session.test.ts > Think — error handling > does not retry an aborted turn under a transient classifier (inStream: true)",
-    "think-session.test.ts > Think — error handling > never schedules live recovery for a Durable Object 'code-update-reset' (inStream: false)",
-    "think-session.test.ts > Think — error handling > never schedules live recovery for a Durable Object 'code-update-reset' (inStream: true)",
-    "think-session.test.ts > Think — error handling > never schedules live recovery for a Durable Object 'storage-reset' (inStream: false)",
     "think-session.test.ts > Think — error handling > should persist partial assistant message on error",
     "think-session.test.ts > Think — error handling > surfaces the stall as a terminal error when onChatRecovery throws",
-    "think-session.test.ts > Think — getConfig inside configureSession > should not throw when getConfig() is called in configureSession on first start",
-    "think-session.test.ts > Think — onChatRecovery > does not duplicate an already-persisted completed stream on recovery",
-    "think-session.test.ts > Think — onChatRecovery > { continue: false } persists but does not schedule continuation",
-    "think-session.test.ts > Think — onChatRecovery > { persist: false, continue: false } skips both",
+    "think-session.test.ts > Think — onChatRecovery > a superseded continuation (leaf moved to another assistant message) skips benignly without erroring the submission",
+    "think-session.test.ts > Think — onChatRecovery > does not continue a reply again when the recovery callback is delivered again after a reset cut its turn off",
     "think-session.test.ts > Think — pre-Sessions session API keeps working > accepts the positional appendMessage / getHistory / getRecentHistory forms",
+    "think-session.test.ts > Think — pre-Sessions session API keeps working > folds withContext() blocks into the prompt and serves the context forwards",
     "think-session.test.ts > Think — pre-Sessions session API keeps working > routes a failing compaction function through onCompactionError()",
-    "think-session.test.ts > Think — row size enforcement > should compact large tool outputs",
-    "think-session.test.ts > Think — row size enforcement > should pass through small messages unchanged",
-    "think-session.test.ts > Think — row size enforcement > should truncate large text parts for non-assistant messages",
     "think-session.test.ts > Think — sanitization > should filter empty reasoning parts without providerMetadata",
     "think-session.test.ts > Think — sanitization > should pass through messages without OpenAI metadata unchanged",
     "think-session.test.ts > Think — sanitization > should preserve reasoning parts with providerMetadata",
@@ -631,15 +784,20 @@
     "think-session.test.ts > Think — saveMessages > should support function form",
     "think-session.test.ts > Think — saveMessages with external AbortSignal > runs to completion when the signal is never aborted",
     "think-session.test.ts > Think — tool call preservation > preserves earlier client-side tool results across turns",
-    "think-session.test.ts > Think — waitUntilStable > detects a pending CLIENT-tool interaction (the SPA can still replay the tool-result)",
     "think-session.test.ts > Think — waitUntilStable > detects pending approval",
-    "think-session.test.ts > Think — waitUntilStable > does NOT report pending for a dead SERVER-tool input-available in the accumulator",
     "think-session.test.ts > Think — waitUntilStable > returns false when no pending after tool result applied",
-    "think-session.test.ts > Think — waitUntilStable > stops reporting pending once the accumulator's client-tool part resolves",
     "turn-metadata.test.ts > turn metadata > returns undefined when the latest user message carries none",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes submitMessages and waitForEvent results after copying serializable data",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes the submitMessages result before cancelling a timed-out prompt",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > keeps the waitForEvent result alive while validating nested output",
+    "workspace-tools.test.ts > Think workspace tools > adds exec when the Workspace has a backend",
+    "workspace-tools.test.ts > Think workspace tools > lets a same-name tool from getTools() replace a built-in",
+    "workspace-tools.test.ts > Think workspace tools > lets code run with exec import the agent's tools from codemode:tools",
+    "workspace-tools.test.ts > Think workspace tools > reads files through node:fs, not codemode:tools",
+    "workspace-tools.test.ts > Think workspace tools > runs code on the Workspace's backend through exec",
+    "workspace-tools.test.ts > Think workspace tools > sends the workspace tools to the model as they are given directly, byte for byte",
+    "workspace-tools.test.ts > Think workspace tools > writes a file when the model calls the write tool, and keeps the call",
+    "workspace-tools.test.ts > Think workspace tools > writes and reads files through the tools",
     "ws-web-channel.test.ts > Think — WebSocket chat runs on the web channel (#2255) > still runs server-driven turns without a channel by default"
   ]
 }

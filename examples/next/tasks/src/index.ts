@@ -98,13 +98,22 @@ export class ReportObject extends DurableObject<Env> {
       };
       const topic = body.topic ?? "durable execution";
       // The receipt means the run and its wake-up deadline are durable, not
-      // that the run has finished. Repeating the same idempotency key joins
-      // the existing run (`accepted: false`) instead of starting a second.
-      const receipt = await this.tasks.run(
-        "publish-report@v1",
-        { topic, holdSeconds: body.holdSeconds ?? 10 },
-        { idempotencyKey: `report:${topic}` }
-      );
+      // that the run has finished. Repeating the same idempotency key with the
+      // same input joins the existing run (`accepted: false`) instead of
+      // starting a second; the same key with other input is a conflict.
+      let receipt;
+      try {
+        receipt = await this.tasks.run(
+          "publish-report@v1",
+          { topic, holdSeconds: body.holdSeconds ?? 10 },
+          { idempotencyKey: `report:${topic}` }
+        );
+      } catch (error) {
+        if (error instanceof Error && error.name === "TaskInputConflictError") {
+          return Response.json({ error: error.message }, { status: 409 });
+        }
+        throw error;
+      }
       return Response.json(
         { receipt },
         { status: receipt.accepted ? 201 : 200 }

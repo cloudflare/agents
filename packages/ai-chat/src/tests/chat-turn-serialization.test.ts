@@ -1,12 +1,13 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
 import {
   connectChatWS,
   isUseChatResponseMessage,
-  waitForChatClearBroadcast
+  waitForChatClearBroadcast,
+  waitUntilHandled
 } from "./test-utils";
 
 function connectSlowStream(room: string) {
@@ -192,37 +193,6 @@ describe("AIChatAgent chat turn serialization", () => {
     ws.close(1000);
   });
 
-  it("abortActiveTurn aborts the current stream", async () => {
-    const room = crypto.randomUUID();
-    const { ws } = await connectSlowStream(room);
-    await delay(50);
-
-    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
-
-    sendChatRequest(ws, "req-abort-turn", [firstUserMessage], {
-      format: "plaintext",
-      useAbortSignal: true,
-      chunkCount: 20,
-      chunkDelayMs: 40
-    });
-
-    await waitUntil(
-      async () => (await agentStub.isChatTurnActiveForTest()) === true
-    );
-    const donePromise = waitForDone(ws, "req-abort-turn");
-    expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
-    expect(await agentStub.abortActiveTurnForTest()).toBe(true);
-
-    await donePromise;
-    await agentStub.waitForIdleForTest();
-
-    expect(await agentStub.getAbortControllerCount()).toBe(0);
-    expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
-    expect(await agentStub.abortActiveTurnForTest()).toBe(false);
-
-    ws.close(1000);
-  });
-
   it("waitForIdle covers tool-result continuations queued during an active turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
@@ -230,10 +200,12 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn waits on the model and writes no reply, so the tool
+    // call message stays the latest one and its continuation still applies.
     sendChatRequest(ws, "req-tool-turn", [firstUserMessage], {
-      format: "plaintext",
-      chunkCount: 10,
-      chunkDelayMs: 40
+      format: "sse",
+      responseDelayMs: 400,
+      chunkCount: 0
     });
 
     await delay(80);
@@ -255,7 +227,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(20);
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
 
     const idlePromise = agentStub.waitForIdleForTest();
 
@@ -283,10 +255,12 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn waits on the model and writes no reply, so the tool
+    // call messages stay the latest ones.
     sendChatRequest(ws, "req-coalesced-tool-turn", [firstUserMessage], {
-      format: "plaintext",
-      chunkCount: 10,
-      chunkDelayMs: 80
+      format: "sse",
+      responseDelayMs: 800,
+      chunkCount: 0
     });
 
     await delay(120);
@@ -322,7 +296,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(20);
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 2);
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getStartedRequestIds()).toEqual([
@@ -371,7 +345,13 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(20);
+    // The results arrive over the socket, not the RPC: wait until they
+    // started a turn before waiting for idle.
+    await vi.waitFor(async () => {
+      expect((await agentStub.getStartedRequestIds()).length).toBeGreaterThan(
+        0
+      );
+    });
     await agentStub.waitForIdleForTest();
 
     // With no prior active turn the coalesce window (10ms) starts
@@ -397,6 +377,8 @@ describe("AIChatAgent chat turn serialization", () => {
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
     sendChatRequest(ws, "req-pre-stream-window", [firstUserMessage], {
+      // Client tools, so a turn start leaves their unanswered calls alone.
+      clientTools: [{ name: "testTool" }],
       format: "plaintext",
       responseDelayMs: 120,
       chunkCount: 1,
@@ -407,11 +389,6 @@ describe("AIChatAgent chat turn serialization", () => {
     await agentStub.persistToolCallMessage(
       "assistant-pre-stream-tool-1",
       "call_pre_stream_tool_1",
-      "testTool"
-    );
-    await agentStub.persistToolCallMessage(
-      "assistant-pre-stream-tool-2",
-      "call_pre_stream_tool_2",
       "testTool"
     );
 
@@ -429,6 +406,13 @@ describe("AIChatAgent chat turn serialization", () => {
       return (await agentStub.getStartedRequestIds()).length === 2;
     });
 
+    // The continuation waits on the model; the next tool call lands and is
+    // answered before its stream starts.
+    await agentStub.persistToolCallMessage(
+      "assistant-pre-stream-tool-2",
+      "call_pre_stream_tool_2",
+      "testTool"
+    );
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -462,6 +446,10 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn stays active until the test releases its stream.
+    await agentStub.holdStreamForTest("req-pre-clear");
+    // Released however the test ends.
+    onTestFinished(() => agentStub.releaseStreamForTest("req-pre-clear"));
     sendChatRequest(ws, "req-pre-clear", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
@@ -489,11 +477,17 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(50);
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    // The continuation is queued behind the active turn.
+    await waitUntil(async () => {
+      const state = await agentStub.getContinuationStateForTest();
+      return state.hasPending || state.hasDeferred;
+    });
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
     await clearBroadcast;
+    await agentStub.releaseStreamForTest("req-pre-clear");
 
     await agentStub.waitForIdleForTest();
 

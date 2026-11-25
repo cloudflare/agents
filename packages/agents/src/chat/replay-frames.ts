@@ -13,6 +13,8 @@ import type { ChatTurnOutcome } from "./wire-types";
 /**
  * Send stored chunk bodies to a connection as replay frames.
  *
+ * @param continuationMessageId - For a continuation, the message the server
+ *   stores it in. See `messageId` on the response frame in `wire-types.ts`.
  * @returns False when the connection closed mid-replay — the caller leaves
  * its stream state untouched so the next reconnect can retry.
  */
@@ -21,7 +23,8 @@ export function sendReplayBodies(
   requestId: string,
   bodies: Iterable<string>,
   continuation: boolean,
-  firstSeq = 0
+  firstSeq = 0,
+  continuationMessageId?: string
 ): boolean {
   let seq = firstSeq;
   for (const body of bodies) {
@@ -34,7 +37,12 @@ export function sendReplayBodies(
         type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
         replay: true,
         seq: seq++,
-        ...(continuation && { continuation: true })
+        ...(continuation && { continuation: true }),
+        // The message a continuation is stored in, as on its live frames.
+        ...(continuation &&
+          continuationMessageId !== undefined && {
+            messageId: continuationMessageId
+          })
       })
     );
     if (!sent) return false;

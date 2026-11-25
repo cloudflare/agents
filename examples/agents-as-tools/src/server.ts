@@ -29,7 +29,7 @@ function inputText(input: unknown): string {
 
 class DemoToolAgent extends Think<Env> {
   override getModel() {
-    return "@cf/moonshotai/kimi-k2.7-code";
+    return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
   }
 
   formatAgentToolInput(input: unknown) {
@@ -171,7 +171,7 @@ export class Assistant extends Think<Env> {
   override maxConcurrentAgentTools = 4;
 
   override getModel() {
-    return "@cf/moonshotai/kimi-k2.7-code";
+    return "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
   }
 
   override getSystemPrompt(): string {

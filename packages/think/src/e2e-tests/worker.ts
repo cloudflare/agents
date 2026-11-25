@@ -14,6 +14,12 @@ import {
   wrapChatFiberSnapshot
 } from "agents/chat";
 import type { ResumableStream } from "agents/chat";
+import {
+  EFFECT_TASK,
+  effectKeyOf,
+  effectRunId,
+  stableHash
+} from "../action-ledger";
 import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
@@ -45,6 +51,27 @@ import type {
   TurnConfig,
   TurnContext
 } from "../think";
+
+/** The fiber run table of a release before fibers ran on Tasks. */
+function createLegacyFiberTableForTest(storage: DurableObjectStorage): void {
+  // As a release before the one schema record left the Agent: its version
+  // under its own key, so the start's fiber import is still to run.
+  const record = storage.kv.get<Record<string, number>>(
+    "cf_agents:schema_versions"
+  );
+  if (record && " " in record) {
+    delete record[" "];
+    storage.kv.put("cf_agents:schema_versions", record);
+  }
+  storage.kv.put("cf_agents:schema_version", 14);
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS cf_agents_runs (
+      id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, snapshot TEXT,
+      created_at INTEGER NOT NULL, completed_at INTEGER, outcome TEXT,
+      error_message TEXT, recovery_crashes INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+}
 
 type Env = {
   TestAssistant: DurableObjectNamespace<TestAssistant>;
@@ -175,6 +202,27 @@ const TOOL_ROLLBACK_EXEC_DELAY_MS = 600;
  * execution appends a ledger row. A completed step that re-runs after an
  * eviction shows up as a duplicate index.
  */
+
+/** The table submissions lived in before Tasks; a restart moves its rows. */
+const LEGACY_SUBMISSIONS_TABLE = `
+  CREATE TABLE IF NOT EXISTS cf_think_submissions (
+    submission_id TEXT PRIMARY KEY,
+    idempotency_key TEXT UNIQUE,
+    request_id TEXT,
+    stream_id TEXT,
+    status TEXT NOT NULL,
+    messages_json TEXT NOT NULL,
+    metadata_json TEXT,
+    error_message TEXT,
+    created_at INTEGER NOT NULL,
+    messages_applied_at INTEGER,
+    started_at INTEGER,
+    completed_at INTEGER,
+    result_status TEXT,
+    output_json TEXT,
+    message_id TEXT
+  )`;
+
 export class ThinkToolRollbackE2EAgent extends Think<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
   override maxSteps = 500;
@@ -233,8 +281,7 @@ export class ThinkToolRollbackE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     return {
       totalExecutions: rows.reduce((n, r) => n + r.count, 0),
@@ -324,8 +371,7 @@ export class ThinkPersistFalseE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     const assistant = this.messages.filter((m) => m.role === "assistant");
     const settledToolPartsInTranscript = assistant.reduce((n, m) => {
@@ -381,7 +427,7 @@ export class TestAssistant extends Think<Env> {
 
   getModel(): LanguageModel {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code",
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
       { sessionAffinity: this.sessionAffinity }
     );
   }
@@ -540,11 +586,10 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
   @callable()
   async hasFiberRows(): Promise<boolean> {
     // Chat turns run on the Tasks capability (cf_agents_task_runs); facet
-    // turns stay on the legacy fiber engine (cf_agents_runs). An in-flight
+    // turns an older release ran as fibers are fiber runs. An in-flight
     // durable turn exists if either engine holds a row.
     const rows = this.sql<{ count: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as count
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as count
     `;
     return rows[0].count > 0;
   }
@@ -635,8 +680,7 @@ export class ThinkStallRecoveryE2EAgent extends Think<Env> {
           .join("")
       : "";
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     return {
       assistantMessages: assistant.length,
@@ -787,8 +831,7 @@ export class ThinkTaskParentE2EAgent extends Think<Env> {
       this.sql<{ c: number }>`SELECT COUNT(*) as c FROM parent_task_log`[0]
         ?.c ?? 0;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     let child: {
       totalExecutions: number;
@@ -894,8 +937,7 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
       LIMIT 1
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     let child: {
       totalExecutions: number;
@@ -1013,8 +1055,7 @@ export class ThinkSlowChildE2EAgent extends Think<Env> {
       SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     return {
       totalExecutions: rows.reduce((n, r) => n + r.count, 0),
@@ -1086,8 +1127,7 @@ export class ThinkSlowChildParentE2EAgent extends Think<Env> {
       LIMIT 1
     `;
     const fiberRows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     let child: {
       maxIndex: number;
@@ -1275,7 +1315,7 @@ export class TestStructuredAgent extends Think<Env> {
         );
       default:
         return createWorkersAI({ binding: this.env.AI })(
-          "@cf/moonshotai/kimi-k2.7-code",
+          "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
           { sessionAffinity: this.sessionAffinity }
         );
     }
@@ -1880,8 +1920,8 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     requestId: string,
     applied: boolean
   ): Promise<void> {
-    // Ensure the submissions table exists (inspect goes through the ensure path).
-    await this.inspectSubmission(submissionId);
+    // Written as an older release left it: the restart moves it into a run.
+    this.ctx.storage.sql.exec(LEGACY_SUBMISSIONS_TABLE);
     const now = Date.now();
     const messagesJson = JSON.stringify([
       {
@@ -1911,7 +1951,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
    */
   @callable()
   async seedRecoverableEmptySubmission(submissionId: string): Promise<void> {
-    await this.inspectSubmission(submissionId);
+    this.ctx.storage.sql.exec(LEGACY_SUBMISSIONS_TABLE);
     const now = Date.now();
     const userMessage: UIMessage = {
       id: `user-${submissionId}`,
@@ -1951,6 +1991,8 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
       snapshot,
       null
     );
+    createLegacyFiberTableForTest(this.ctx.storage);
+
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (
@@ -1969,6 +2011,23 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   @callable()
   async startRecoveryAtLedgerGap(submissionId: string): Promise<void> {
     await this.seedRunningSubmission(submissionId, submissionId, true);
+    // No restart here: move the seeded row now, as recovery owning it, so
+    // the recovery below finds it and nothing else runs it.
+    await (
+      this as unknown as { _migrateLegacySubmissions(): Promise<void> }
+    )._migrateLegacySubmissions();
+    // Parked, as a submission whose turn chat recovery owns.
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_task_runs
+       SET status = 'pending', wait_reason = 'park', generation = NULL,
+           next_at = NULL
+       WHERE run_id = ?`,
+      submissionId
+    );
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_jobs WHERE id = ?",
+      `task:${submissionId}`
+    );
     const userMessage: UIMessage = {
       id: `user-${submissionId}`,
       role: "user",
@@ -1979,11 +2038,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     // SAFETY: this inert e2e fixture intercepts the existing bookkeeping seam;
     // Tasks, inference, cutover, submission settlement, and restart stay real.
     const internals = this as unknown as {
-      _updateChatRecoveryIncident(
-        id: string | undefined,
-        status: string,
-        reason?: string
-      ): Promise<void>;
+      _chatRecoveryEngine(): unknown;
       _enqueueChatRecovery(
         callback: "_chatRecoveryRetry",
         data: Record<string, unknown>,
@@ -1991,8 +2046,15 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
         delay: number
       ): Promise<void>;
     };
-    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
-    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+    const recoveryEngine = internals._chatRecoveryEngine() as {
+      updateIncident(
+        id: string | undefined,
+        status: string,
+        reason?: string
+      ): Promise<void>;
+    };
+    const updateIncident = recoveryEngine.updateIncident.bind(recoveryEngine);
+    recoveryEngine.updateIncident = async (id, status, reason) => {
       if (id === incidentId && status === "completed") {
         this._submissionBookkeepingPaused = true;
         // The test kills this process at the barrier; there is no live release.
@@ -2041,12 +2103,11 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
         ? (stream.latestStreamInfoForRequest(submission.requestId)?.status ??
           null)
         : null,
-      resultStatus:
-        this.sql<{ result_status: string | null }>`
-          SELECT result_status FROM cf_think_submissions
-          WHERE submission_id = ${submissionId}
-          LIMIT 1
-        `[0]?.result_status ?? null
+      resultStatus: ((
+        this.tasks.peek(submissionId)?.metadata?.__cf_progress as
+          | { resultStatus?: string }
+          | undefined
+      )?.resultStatus ?? null) as string | null
     };
   }
 
@@ -2055,11 +2116,13 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   async hasWaitingRecoveryRetry(submissionId: string): Promise<boolean> {
     const runs = await this.tasks.list({
       definition: CHAT_RECOVERY_TASK_NAME,
-      status: ["waiting"],
+      status: ["pending"],
       limit: Number.MAX_SAFE_INTEGER
     });
     return runs.some(
       (run) =>
+        run.status === "pending" &&
+        run.waitReason !== undefined &&
         run.metadata?.callback === "_chatRecoveryRetry" &&
         typeof run.metadata.incidentId === "string" &&
         run.metadata.recoveredRequestId === submissionId
@@ -2109,8 +2172,7 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   async hasFiberRows(): Promise<boolean> {
     // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     return (rows[0]?.c ?? 0) > 0;
   }
@@ -2288,8 +2350,7 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
   async hasFiberRows(): Promise<boolean> {
     // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     return (rows[0]?.c ?? 0) > 0;
   }
@@ -2454,8 +2515,9 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
       (await this.ctx.storage.get<number>("e2e:delivered_notifications")) ?? 0;
     const pending =
       this.sql<{ c: number }>`
-        SELECT COUNT(*) as c FROM cf_agents_jobs
-        WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
+        SELECT COUNT(*) as c FROM cf_agents_task_runs
+        WHERE definition = '__cf_delivery:think-workflow-notification'
+          AND status IN ('pending', 'running')
       `[0]?.c ?? 0;
     return { total: delivered + pending, delivered };
   }
@@ -2464,8 +2526,7 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
   async hasFiberRows(): Promise<boolean> {
     // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     return (rows[0]?.c ?? 0) > 0;
   }
@@ -2477,7 +2538,7 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
 // resume with NO live client connection. This agent drives the full path
 // against the wrangler-dev runtime:
 //   1. a chat turn calls a `kind: "durable-pause"` action, which parks a row in
-//      `cf_think_action_pending_approvals` and ends the turn
+//      a decision run and ends the turn
 //   2. a real SIGKILL + restart proves the pending row + its descriptor survive
 //      the deploy (rebuilt from the durable store on cold start)
 //   3. `approveExecution` with no open socket runs the action exactly once and
@@ -2649,8 +2710,7 @@ export class ThinkActionPauseRecoveryE2EAgent extends Think<Env> {
   async hasFiberRows(): Promise<boolean> {
     // Either durable engine may hold the in-flight turn (see hasFiberRows above).
     const rows = this.sql<{ c: number }>`
-      SELECT (SELECT COUNT(*) FROM cf_agents_runs)
-           + (SELECT COUNT(*) FROM cf_agents_task_runs) as c
+      SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
     return (rows[0]?.c ?? 0) > 0;
   }
@@ -2663,7 +2723,7 @@ export class ThinkActionPauseRecoveryE2EAgent extends Think<Env> {
 
 // ── Action ledger pending-retry lease recovery (crash → reclaim) ────
 //
-// A crashed executor leaves a `pending` row in `cf_think_action_ledger`. We
+// A crashed executor leaves an effect run in doubt. We
 // represent that crash artifact deterministically by seeding a stale `pending`
 // row (a crash leaves exactly such a row), then prove it survives a REAL deploy
 // (SIGKILL + restart) and is reclaimed by a subsequent invocation: an action
@@ -2783,25 +2843,18 @@ export class ThinkActionLedgerRecoveryE2EAgent extends Think<Env> {
    */
   @callable()
   async seedStalePendingRow(): Promise<void> {
-    const ensure = this as unknown as {
-      _ensureActionLedgerTable: () => void;
-      _actionInputHash: (input: unknown) => string;
-    };
-    ensure._ensureActionLedgerTable();
-    const inputHash = ensure._actionInputHash({
-      message: LEDGER_RECOVERY_MESSAGE
-    });
     const past = Date.now() - 600_000;
-    this.sql`
-      INSERT INTO cf_think_action_ledger (
-        key, action_name, request_id, tool_call_id, input_hash, status,
-        result_json, created_at, updated_at
-      )
-      VALUES (
-        ${`action:slowAction:${LEDGER_RECOVERY_KEY}`}, ${"slowAction"}, ${null},
-        ${"tc-crashed"}, ${inputHash}, ${"pending"}, ${null}, ${past}, ${past}
-      )
-    `;
+    await this.tasks.importRun({
+      runId: effectRunId(`action:slowAction:${LEDGER_RECOVERY_KEY}`),
+      definition: EFFECT_TASK,
+      status: "running",
+      attempt: 1,
+      input: {
+        name: "slowAction",
+        inputHash: stableHash({ message: LEDGER_RECOVERY_MESSAGE })
+      },
+      createdAt: past
+    });
   }
 
   @callable()
@@ -2815,13 +2868,13 @@ export class ThinkActionLedgerRecoveryE2EAgent extends Think<Env> {
   async listLedgerRows(): Promise<
     Array<{ key: string; status: string; updated_at: number }>
   > {
-    (
-      this as unknown as { _ensureActionLedgerTable: () => void }
-    )._ensureActionLedgerTable();
-    return this.sql<{ key: string; status: string; updated_at: number }>`
-      SELECT key, status, updated_at FROM cf_think_action_ledger
-      ORDER BY key ASC
-    `;
+    return this.tasks
+      .peekList({ definition: EFFECT_TASK, order: "oldest" })
+      .map((record) => ({
+        key: effectKeyOf(record.runId),
+        status: record.status === "completed" ? "settled" : "pending",
+        updated_at: record.settledAt ?? record.createdAt
+      }));
   }
 
   @callable()

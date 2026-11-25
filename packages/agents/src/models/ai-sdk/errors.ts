@@ -8,8 +8,7 @@ import {
   type CloudflareAIAttempt,
   type CloudflareAIErrorCode,
   CloudflareAIError as CoreCloudflareAIError,
-  isRetryableStatus,
-  normalizeThrownError as normalizeCoreError
+  isRetryableStatus
 } from "../core/errors";
 
 export {
@@ -31,7 +30,7 @@ export function notAModelId(
 ): TypeError {
   return new TypeError(
     accepts === "language"
-      ? `"${modelId}" is not a model id this provider knows. Use a Workers AI id ("@cf/zai-org/glm-4.7-flash"), an AI Gateway catalog id ("<author>/<model>", e.g. "openai/gpt-5.5" or "anthropic/claude-opus-4.8"), or a dynamic route ("dynamic/<route>").`
+      ? `"${modelId}" is not a model id this provider knows. Use a Workers AI id ("@cf/deepseek-ai/deepseek-v4.1-flash-1017"), an AI Gateway catalog id ("<author>/<model>", e.g. "openai/gpt-5.5" or "anthropic/claude-opus-4.8"), or a dynamic route ("dynamic/<route>").`
       : `"${modelId}" is not a Workers AI model id. The embedding, image, speech, transcription and reranking methods take Workers AI ids, which start with "@cf/".`
   );
 }
@@ -150,16 +149,4 @@ export function toAISDKError(error: unknown): unknown {
   return error instanceof CoreCloudflareAIError
     ? CloudflareAIError.fromCore(error)
     : error;
-}
-
-/**
- * Normalizes a thrown Workers AI binding error into a {@link CloudflareAIError}.
- * Abort errors and errors that are already `APICallError`s pass through.
- */
-export function normalizeThrownError(
-  error: unknown,
-  context: Parameters<typeof normalizeCoreError>[1]
-): unknown {
-  if (APICallError.isInstance(error)) return error;
-  return toAISDKError(normalizeCoreError(error, context));
 }

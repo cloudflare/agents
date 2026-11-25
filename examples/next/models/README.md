@@ -20,9 +20,9 @@ import { createAI } from "agents/models/ai-sdk";
 
 const ai = createAI({ binding: env.AI });
 
-ai("@cf/zai-org/glm-4.7-flash");
+ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017");
 ai("anthropic/claude-opus-4.8", {
-  fallback: ["@cf/zai-org/glm-4.7-flash"]
+  fallback: ["@cf/deepseek-ai/deepseek-v4.1-flash-1017"]
 });
 ai.embedding("@cf/baai/bge-base-en-v1.5");
 ai.image("@cf/black-forest-labs/flux-1-schnell");
@@ -48,7 +48,7 @@ Every text route takes `?model=` in any of the three forms.
 | `/rerank`     | `query`, `doc` (repeatable) | `rerank` with `@cf/baai/bge-reranker-base`                             |
 | `/fallback`   | `prompt`                    | `ai("anthropic/claude-opus-4.8", { fallback: ["@cf/..."] })`           |
 
-`model` defaults to `@cf/zai-org/glm-4.7-flash`. The modality routes are Workers
+`model` defaults to `@cf/deepseek-ai/deepseek-v4.1-flash-1017`. The modality routes are Workers
 AI only — that is where the catalog is.
 
 The pi-ai twin of each text route lives under `/pi/*`, built with `createAI`
@@ -74,7 +74,7 @@ const claude = anthropicProvider()
 await ai.complete(ai(claude), { messages });
 new Agent({
   streamFn: ai.streamFn,
-  initialState: { model: ai("@cf/zai-org/glm-4.7-flash") }
+  initialState: { model: ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017") }
 });
 ```
 
@@ -94,10 +94,10 @@ pnpm dev
 Workers AI:
 
 ```sh
-curl 'http://localhost:8787/?model=@cf/zai-org/glm-4.7-flash&prompt=hello'
-curl 'http://localhost:8787/stream?model=@cf/zai-org/glm-4.7-flash&prompt=explain+durable+objects'
-curl 'http://localhost:8787/tools?model=@cf/zai-org/glm-4.7-flash&prompt=weather+in+Lisbon'
-curl 'http://localhost:8787/json?model=@cf/zai-org/glm-4.7-flash&prompt=a+fact+about+octopuses'
+curl 'http://localhost:8787/?model=@cf/deepseek-ai/deepseek-v4.1-flash-1017&prompt=hello'
+curl 'http://localhost:8787/stream?model=@cf/deepseek-ai/deepseek-v4.1-flash-1017&prompt=explain+durable+objects'
+curl 'http://localhost:8787/tools?model=@cf/deepseek-ai/deepseek-v4.1-flash-1017&prompt=weather+in+Lisbon'
+curl 'http://localhost:8787/json?model=@cf/deepseek-ai/deepseek-v4.1-flash-1017&prompt=a+fact+about+octopuses'
 curl 'http://localhost:8787/embed?text=hello&text=world'
 curl 'http://localhost:8787/image?prompt=a+cyberpunk+lizard' -o image.jpg
 curl 'http://localhost:8787/speech?text=hello+from+Cloudflare' -o speech.mp3
@@ -122,7 +122,7 @@ curl 'http://localhost:8787/fallback'
 pi-ai, the same two forms under `/pi`:
 
 ```sh
-curl 'http://localhost:8787/pi?model=@cf/zai-org/glm-4.7-flash&prompt=hello'
+curl 'http://localhost:8787/pi?model=@cf/deepseek-ai/deepseek-v4.1-flash-1017&prompt=hello'
 curl 'http://localhost:8787/pi?vendor=anthropic:claude-opus-4-8&prompt=hello'
 curl 'http://localhost:8787/pi/stream?vendor=anthropic:claude-opus-4-8&prompt=explain+durable+objects'
 curl 'http://localhost:8787/pi/tools?vendor=openai:gpt-5-mini&prompt=weather+in+Lisbon'

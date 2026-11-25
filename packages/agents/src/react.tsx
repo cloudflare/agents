@@ -23,6 +23,12 @@ import {
   splitCallOptions
 } from "./client";
 import {
+  firstRetryDelay,
+  isLocalClose,
+  reconnectDefaults,
+  reconnectTimingFor
+} from "./reconnect-timing";
+import {
   boundCapnWebSocket,
   type CapnWebSocket
 } from "./websockets/capnweb-socket";
@@ -103,6 +109,16 @@ function createReadyEntry(): ReadyEntry {
   };
   return entry;
 }
+
+/**
+ * Sockets that opened since their last close. PartySocket reports a failed
+ * upgrade with the same synthetic close as `reconnect()`; a failed upgrade
+ * never opened, so only a socket that did can have closed on purpose. A
+ * `reconnect()` during a handshake is therefore treated as a failure and
+ * waits the reconnect delay; the hook's own internal reconnects make the
+ * call itself no signal.
+ */
+const openedSockets = new WeakSet<PartySocket>();
 
 /** The host `usePartySocket` connects to when none is given. */
 function defaultSocketHost(): string {
@@ -660,11 +676,22 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     }
   }
 
-  // Re-enable socket after async query resolves
+  // Re-enable socket after async query resolves. Fresh parameters make
+  // PartySocket open a new socket, whose first dial has no delay; after a
+  // drop (not a clean local close) wait until this hook's reconnect time
+  // first, so the clients of an Agent that restarted do not all come back
+  // at once. The time is fixed at the drop, so query refreshes arriving
+  // meanwhile do not push it back.
+  const reopenAtRef = useRef(0);
   useEffect(() => {
-    if (awaitingQueryRefresh && resolvedQuery !== undefined) {
+    if (!awaitingQueryRefresh || resolvedQuery === undefined) return;
+    const delay = reopenAtRef.current - Date.now();
+    if (delay <= 0) {
       setAwaitingQueryRefresh(false);
+      return;
     }
+    const timer = setTimeout(() => setAwaitingQueryRefresh(false), delay);
+    return () => clearTimeout(timer);
   }, [awaitingQueryRefresh, resolvedQuery]);
 
   // Track agent state for reactivity — updated on server broadcasts and client setState
@@ -692,6 +719,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // `destination` records which socket destination the identity came from,
   // so an address change can stop exposing the previous agent's identity
   // before the new socket reports its own.
+  // Picked once per hook: PartySocket recreates the socket when these
+  // options change.
+  const [reconnectTiming] = useState(reconnectDefaults);
   const [identity, setIdentity] = useState(() => ({
     name: leafName,
     agent: camelCaseToKebabCase(leafAgent),
@@ -754,6 +784,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         path: combinedPath || undefined,
         query: socketQuery,
         ...restOptions,
+        ...reconnectTimingFor(restOptions, reconnectTiming),
         ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       }
@@ -764,6 +795,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         path: combinedPath || undefined,
         query: socketQuery,
         ...restOptions,
+        ...reconnectTimingFor(restOptions, reconnectTiming),
         ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       };
@@ -890,6 +922,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     ...socketOptions,
     enabled: socketEnabled,
     onOpen: (event: Event) => {
+      const opened = event.target as PartySocket | null;
+      if (opened) openedSockets.add(opened);
       connectionErrorAddressKeyRef.current = null;
       setConnectionError(null);
       // The socket is open: transmit any RPC requests that were issued
@@ -1007,6 +1041,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       const finalClose = closeClassifier.takeFinalClose();
       if (closedSocket) connectProgressRef.current.delete(closedSocket);
       const reconnecting = !!closedSocket?.shouldReconnect && !finalClose;
+      const wasOpen =
+        closedSocket !== null && openedSockets.delete(closedSocket);
 
       // Calls transmitted on the closed socket can never receive their
       // response — reject them. Calls still queued (never transmitted)
@@ -1032,6 +1068,15 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         if (reconnecting) {
           // Pause reconnection for async queries until fresh query params are ready.
           if (isAsyncQuery) {
+            reopenAtRef.current =
+              wasOpen && isLocalClose(event)
+                ? 0
+                : Date.now() +
+                  firstRetryDelay(
+                    reconnectTimingFor(restOptions, reconnectTiming)
+                      .minReconnectionDelay,
+                    restOptions.maxReconnectionDelay
+                  );
             setAwaitingQueryRefresh(true);
           }
 

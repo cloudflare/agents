@@ -9,7 +9,7 @@ export const DEFAULT_ASSEMBLYAI_PROMPT =
   "A helpful Cloudflare voice assistant. Users may ask about Cloudflare Workers, Durable Objects, Workers AI, voice agents, reminders, dates, times, and weather.";
 
 export const DEFAULT_ASSEMBLYAI_KEYTERMS =
-  "Cloudflare, Workers AI, Durable Objects, VoiceAgent, Kimi, GLM, GPT OSS";
+  "Cloudflare, Workers AI, Durable Objects, VoiceAgent, DeepSeek, Qwen";
 
 export function getAssemblyAIQuery(
   settings: SttSettings

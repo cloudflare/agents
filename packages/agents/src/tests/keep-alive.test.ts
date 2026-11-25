@@ -5,7 +5,7 @@ import { getAgentByName } from "..";
 import type { TestKeepAliveAgent } from "./agents/keep-alive";
 
 describe("keepAlive", () => {
-  it("should increment _keepAliveRefs when started", async () => {
+  it("should open a hold when started", async () => {
     const agent = await getAgentByName(
       env.TestKeepAliveAgent,
       "create-heartbeat"
@@ -230,6 +230,6 @@ async function getKeepAliveRefs(
   stub: DurableObjectStub<TestKeepAliveAgent>
 ): Promise<number> {
   return runInDurableObject(stub, (instance) => {
-    return instance._keepAliveRefs;
+    return instance._keepAlive.holds;
   });
 }

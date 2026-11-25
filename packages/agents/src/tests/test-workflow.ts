@@ -246,6 +246,84 @@ export class FacetEventStateWorkflow extends AgentWorkflow<
 }
 
 /**
+ * Calls the Agent through `this.agent` after the Agent was reset, in one
+ * step with no retries: the call must reach the restarted Agent.
+ */
+export class AgentResetWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  Record<string, never>
+> {
+  async run(
+    _event: AgentWorkflowEvent<Record<string, never>>,
+    step: AgentWorkflowStep
+  ) {
+    return await step.do(
+      "call-across-reset",
+      { retries: { limit: 0, delay: 0 } },
+      async () => {
+        await this.agent.crashForTest().catch(() => {});
+        const echo = await this.agent.echoForTest("after reset");
+        // Synchronous: only renewal's startup call starts the Agent.
+        const started = await this.agent.startedForTest();
+        // A remote getter reads through the renewed stub too.
+        const settings = await (
+          this.agent as unknown as {
+            settingsForTest: Promise<{ enabled: boolean }>;
+          }
+        ).settingsForTest;
+        return { echo, started, settings };
+      }
+    );
+  }
+}
+
+/**
+ * The Agent is reset by someone else between two steps, and the run's next
+ * call to it is outside a step (#1918).
+ */
+export class AgentResetBetweenStepsWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  { agentName: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ agentName: string }>,
+    step: AgentWorkflowStep
+  ) {
+    await step.do("reset-agent", async () => {
+      const other = (
+        this.env as { TestWorkflowAgent: DurableObjectNamespace }
+      ).TestWorkflowAgent.getByName(event.payload.agentName) as unknown as {
+        crashForTest(): Promise<void>;
+      };
+      await other.crashForTest().catch(() => {});
+      return true;
+    });
+    await this.reportProgress({ step: "after-reset", percent: 0.5 });
+    return await step.do("after-reset", async () =>
+      this.agent.echoForTest("after reset")
+    );
+  }
+}
+
+/** Its progress callback makes the Agent's hook throw, outside a step. */
+export class HookThrowsWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  Record<string, never>
+> {
+  async run(
+    _event: AgentWorkflowEvent<Record<string, never>>,
+    _step: AgentWorkflowStep
+  ) {
+    try {
+      await this.reportProgress({ step: "throw" });
+      return "no error";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+}
+
+/**
  * Test workflow that throws directly in run() (outside any step.do).
  * Used to verify that unhandled errors trigger onWorkflowError on the Agent.
  */

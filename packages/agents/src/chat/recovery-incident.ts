@@ -24,6 +24,7 @@
  * RFC's "Cutover invariants" table) and MUST NOT change without a migration.
  */
 
+import { KV_DELETE_MAX_KEYS } from "../internal/platform-limits";
 import type {
   ChatRecoveryConfig,
   ChatRecoveryProgressContext,
@@ -99,6 +100,20 @@ export type ChatRecoveryIncident = {
   lastProgressAt?: number;
   reason?: string;
   /**
+   * The reply this incident was to continue held nothing and was removed, so
+   * the attempt answers the question again. Written before the reply is
+   * removed: the same continue payload is delivered again after a platform
+   * transient, an eviction or a stable-timeout reschedule, and without this
+   * that run would find no reply, take the conversation for changed and skip.
+   */
+  replyRemoved?: boolean;
+  /**
+   * The question the removed reply answered, recorded with
+   * {@link replyRemoved}. A later run of the attempt answers it again only
+   * while it is still the latest message.
+   */
+  replyRemovedFor?: string;
+  /**
    * High-water mark of the durable, monotonic recovery-progress counter
    * observed for this incident. Distinguishes a turn making forward progress
    * but repeatedly interrupted by isolate resets (deploys) — which must NOT
@@ -135,6 +150,37 @@ export type ChatRecoveryIncident = {
    */
   attemptsInFlight?: ChatRecoveryAttempt[];
   /**
+   * What the recovery attempt scheduled for this incident will do: the
+   * callback, and for a continue the reply it targets. A turn that continues
+   * a reply reads it to tell whether this recovery was going to continue the
+   * same one. Optional for backward-compat.
+   */
+  scheduled?: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    targetMessageId?: string;
+  };
+  /**
+   * How many times a recovery attempt was scheduled for this incident. A
+   * running attempt compares it before and after its turn to tell that the
+   * turn was cut off again and scheduled the next attempt. Optional for
+   * backward-compat.
+   */
+  scheduleCount?: number;
+  /**
+   * The schedule ({@link scheduleCount}) whose turn has started. A recovery
+   * callback is delivered at least once: after an isolate reset the same
+   * payload runs again. If its turn had started, that turn was cut off, and
+   * the interrupted turn's own recovery stores its partial and schedules the
+   * next attempt. The callback delivered again reads this and leaves the
+   * turn to it, so one interruption is continued once.
+   */
+  startedDelivery?: number;
+  /**
+   * The platform transient the last attempt hit, while the incident waits
+   * for that attempt to run again. Cleared by the next schedule.
+   */
+  deferredError?: string;
+  /**
    * Recoveries scheduled for this incident after a transient or rate-limited
    * stream error. Drives the retry backoff and is capped by `maxAttempts`.
    * Unlike `attempt`, it is not debounced and does not reset on progress: a
@@ -152,10 +198,10 @@ export const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
  * credited chunk. The marker is now derived from the stream log
  * (`ResumableStream.progressMarker`), and this key is only read — once per
  * isolate, to seed the derived marker so it never reads lower than the
- * high-water mark an incident recorded before the upgrade. Current code
- * writes it only as a mirror of the derived marker's durable part — one put
- * per stream retired, none per chunk — so a build rolled back to the
- * counter never reads a marker lower than an incident recorded here.
+ * high-water mark an incident recorded before the upgrade. The chat hosts
+ * no longer write it (earlier versions mirrored the derived marker's
+ * durable part into it); `bumpChatRecoveryProgress` is for hosts that keep
+ * the counter themselves.
  */
 export const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 /**
@@ -235,8 +281,6 @@ export const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
  * abandoned and swept so durable storage does not grow without bound.
  */
 export const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
-/** Max keys per Durable Object KV `delete([...])` call. */
-export const KV_DELETE_MAX_KEYS = 128;
 /**
  * PRIMARY recovery bound (#1637): seal an incident that has made no forward
  * progress for this long. Keyed to `lastProgressAt`, which resets on every
@@ -554,10 +598,25 @@ export async function recordChatTerminal(
   await storage.put(CHAT_LAST_TERMINAL_KEY, record);
 }
 
-/** Clear the durable terminal record once a later turn supersedes it (#1645). */
+/**
+ * Clear the durable terminal record once a later turn supersedes it (#1645).
+ *
+ * @param endedRequestId - The turn that just ended without an error, when
+ *   that is why the record is cleared. A record made for that same turn is
+ *   kept: recovery gave up on it while it was still running (a live stall
+ *   with the budget spent), and the turn then ended as aborted. The record
+ *   is the only trace of the give-up for a client that was away.
+ */
 export async function clearChatTerminal(
-  storage: Pick<DurableObjectStorage, "delete">
+  storage: Pick<DurableObjectStorage, "get" | "delete">,
+  endedRequestId?: string
 ): Promise<void> {
+  if (endedRequestId !== undefined) {
+    const record = await storage.get<ChatTerminalRecord>(
+      CHAT_LAST_TERMINAL_KEY
+    );
+    if (record?.requestId === endedRequestId) return;
+  }
   await storage.delete(CHAT_LAST_TERMINAL_KEY);
 }
 
@@ -877,6 +936,17 @@ export async function evaluateChatRecoveryIncident(
     ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
     ...attemptsInFlightAfter(trigger, existing, exhausted),
     ...(transientRetries > 0 ? { transientRetries } : {}),
+    // Carried across evaluations: a running attempt compares it before and
+    // after its turn.
+    ...(existing?.scheduleCount
+      ? { scheduleCount: existing.scheduleCount }
+      : {}),
+    // Carried until the next schedule replaces the count it names: a
+    // callback delivered again while this evaluation's recovery is still
+    // deciding must not run the turn in the meantime.
+    ...(existing?.startedDelivery !== undefined
+      ? { startedDelivery: existing.startedDelivery }
+      : {}),
     ...(exhausted
       ? {
           reason: interruptedBudgetExceeded

@@ -139,7 +139,7 @@ Multiple workspaces in one DO share the same SQLite database and alarm lifecycle
 
 ## Testing
 
-Tests in `packages/shell/src/tests/workspace.test.ts`, running inside the Workers runtime via `@cloudflare/vitest-pool-workers`:
+Tests in `packages/shell/src/tests/workspace.test.ts`, running inside the Workers runtime via `@cloudflare/vitest-plugin`:
 
 - **File I/O:** read/write roundtrip, missing files, overwrite, binary, streaming, mime types
 - **Directories:** mkdir, readDir, recursive mkdir, nested listings

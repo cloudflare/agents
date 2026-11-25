@@ -1,5 +1,5 @@
 import type { Tool, ToolSet } from "ai";
-import type { ServerTool } from "@tanstack/ai";
+import type { SchemaInput, ServerTool } from "@tanstack/ai";
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { expectTypeOf } from "vitest";
 import {
@@ -40,7 +40,7 @@ const tanStackTool = tanStackBrowserTool({
   browser: new Browser({ provider: browserRun(env.BROWSER) }),
   loader: env.LOADER
 });
-expectTypeOf(tanStackTool).toExtend<ServerTool>();
+expectTypeOf(tanStackTool).toExtend<ServerTool<SchemaInput, SchemaInput>>();
 expectTypeOf(tanStackTool.name).toEqualTypeOf<"browser">();
 expectTypeOf(
   tanStackBrowserTool({

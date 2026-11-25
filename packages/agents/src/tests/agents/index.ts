@@ -15,6 +15,8 @@ export {
 export {
   TestStateAgent,
   TestStateAgentNoInitial,
+  TestSlowConnectAgent,
+  TestResetAgent,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
   TestBothHooksAgent,
@@ -40,6 +42,7 @@ export {
   TestAgentToolStubChild
 } from "./agent-tool-replay";
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
+export { McpIntegrationAgent } from "./mcp-integration";
 export { TestReadonlyAgent } from "./readonly";
 export { TestProtocolMessagesAgent } from "./protocol-messages";
 export { TestCallableAgent, TestParentAgent, TestChildAgent } from "./callable";
@@ -55,6 +58,7 @@ export { TestNativeRpcAgent } from "./native-rpc";
 export { RoutingOwnerAgent, RoutedChatAgent } from "./routed-agents";
 export type { RoutedChatMetadata } from "./routed-agents";
 export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
+export { EventLogSubAgent, EventLogFacetParent } from "./event-log-sub-agent";
 export {
   TestSubAgentParent,
   CustomBoundSubAgentParent,
@@ -76,3 +80,5 @@ export {
   BodyProbeSubAgent,
   BodyProbeRootAgent
 } from "./sub-agent";
+export { TestFetchErrorAgent } from "./fetch-error";
+export { FacetWakeRoot, FacetWakeMiddle, FacetWakeLeaf } from "./facet-wake";

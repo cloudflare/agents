@@ -253,7 +253,11 @@ export class Channels extends LifecycleCapability {
     // The surface joins the conversation, so every turn reaches it.
     const { surface } = origin;
     this.lifecycle.storage.kv.put(
-      surfaceKey(origin.conversationId, surface.channelKey, surface.address),
+      surfaceKey(
+        origin.conversationId,
+        surface.channelKey,
+        surface.key !== undefined ? { key: surface.key } : surface.address
+      ),
       surface
     );
     await this.#dispatch(

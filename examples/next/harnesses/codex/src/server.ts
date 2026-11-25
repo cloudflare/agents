@@ -9,7 +9,7 @@ import { WebSockets } from "agents/websockets";
 import { createWorkersAI } from "workers-ai-provider";
 import { CodexHarness } from "./codex-harness";
 
-const MODEL = "@cf/moonshotai/kimi-k2.7-code";
+const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /** Plain Durable Object composed with the Codex Lifecycle capability. */
 export class Coder extends DurableObject<Env> {

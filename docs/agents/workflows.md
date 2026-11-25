@@ -2,6 +2,8 @@
 
 Integrate [Cloudflare Workflows](https://developers.cloudflare.com/workflows/) with Agents for durable, multi-step background processing while Agents handle real-time communication.
 
+Cloudflare Workflows is a separate product. A Workflow instance runs on the Workflows service, not inside your agent. The agent's workflow methods start instances, send them events, pause, resume, terminate and restart them, and keep a record of each instance it started. They do not run the steps themselves. To run durable multi-step work inside the agent's own Durable Object, with steps journaled in its SQLite, use [Tasks](./tasks.md) instead.
+
 ## Quick Links
 
 - [Start a workflow](#2-start-workflow-from-agent)

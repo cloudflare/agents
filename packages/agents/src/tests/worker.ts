@@ -13,6 +13,7 @@ export {
   AlarmStartFailureObject,
   ConcurrentStartObject,
   EvictableStartObject,
+  FetchErrorObject,
   PlainLifecycleObject,
   RetryableStartObject,
   StatefulPlainObject
@@ -21,10 +22,13 @@ import type {
   AlarmStartFailureObject,
   ConcurrentStartObject,
   EvictableStartObject,
+  FetchErrorObject,
   PlainLifecycleObject,
   RetryableStartObject,
   StatefulPlainObject
 } from "./capabilities/lifecycle.ts";
+export { EventLogObject } from "./capabilities/event-log.ts";
+import type { EventLogObject } from "./capabilities/event-log.ts";
 export {
   ScheduledLifecycleObject,
   SchedulerHarnessObject,
@@ -47,10 +51,16 @@ export {
   TaskStreamComposeObject
 } from "./capabilities/streams.ts";
 export { StreamBenchObject } from "./capabilities/streams-bench.ts";
-export { ChannelsHarnessObject } from "./capabilities/channels.ts";
-import type { ChannelsHarnessObject } from "./capabilities/channels.ts";
-export { AiSdkHarnessObject } from "./capabilities/ai-sdk-harness.ts";
-import type { AiSdkHarnessObject } from "./capabilities/ai-sdk-harness.ts";
+export { ThinkChannelsObject } from "./capabilities/think-channels.ts";
+import type { ThinkChannelsObject } from "./capabilities/think-channels.ts";
+export {
+  ChannelsDeliveryObject,
+  ChannelsHarnessObject
+} from "./capabilities/channels.ts";
+import type {
+  ChannelsDeliveryObject,
+  ChannelsHarnessObject
+} from "./capabilities/channels.ts";
 export { SqliteStrategiesBench } from "./capabilities/sqlite-strategies-bench.ts";
 export {
   SessionBenchObject,
@@ -106,7 +116,10 @@ export {
   TestCaseSensitiveAgent,
   TestUserNotificationAgent,
   TestStateAgent,
+  TestFetchErrorAgent,
   TestStateAgentNoInitial,
+  TestSlowConnectAgent,
+  TestResetAgent,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
   TestBothHooksAgent,
@@ -125,6 +138,7 @@ export {
   TestAgentToolStubChild,
   TestOAuthAgent,
   TestCustomOAuthAgent,
+  McpIntegrationAgent,
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestCallableAgent,
@@ -143,6 +157,9 @@ export {
   RoutingOwnerAgent,
   RoutedChatAgent,
   TestSubAgentParent,
+  FacetWakeRoot,
+  FacetWakeMiddle,
+  FacetWakeLeaf,
   CustomBoundSubAgentParent,
   CounterSubAgent,
   OuterSubAgent,
@@ -151,6 +168,8 @@ export {
   LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
+  EventLogSubAgent,
+  EventLogFacetParent,
   SlowReplySubAgent,
   TestConnectionUriAgent,
   SpikeSubParent,
@@ -176,6 +195,9 @@ export {
   TestProcessingWorkflow,
   SimpleTestWorkflow,
   ThrowInRunWorkflow,
+  AgentResetWorkflow,
+  AgentResetBetweenStepsWorkflow,
+  HookThrowsWorkflow,
   ReportErrorThenThrowWorkflow,
   ReportErrorOnlyWorkflow,
   ThrowNonErrorWorkflow,
@@ -196,6 +218,7 @@ import type {
   TestUserNotificationAgent,
   TestOAuthAgent,
   TestCustomOAuthAgent,
+  McpIntegrationAgent,
   TestMcpJurisdiction,
   TestAlarmInitAgent,
   TestDestroyScheduleAgent,
@@ -211,7 +234,10 @@ import type {
   TestAddMcpServerAgent,
   TestHttpMcpDedupAgent,
   TestStateAgent,
+  TestFetchErrorAgent,
   TestStateAgentNoInitial,
+  TestSlowConnectAgent,
+  TestResetAgent,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
   TestBothHooksAgent,
@@ -230,6 +256,8 @@ import type {
   RoutingOwnerAgent,
   RoutedChatAgent,
   TestSubAgentParent,
+  EventLogFacetParent,
+  FacetWakeRoot,
   CustomBoundSubAgentParent,
   TestConnectionUriAgent,
   SpikeSubParent,
@@ -242,13 +270,16 @@ import type {
 
 export type Env = {
   LOADER: WorkerLoader;
+  SKILLS_BUCKET: R2Bucket;
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
   AlarmStartFailureObject: DurableObjectNamespace<AlarmStartFailureObject>;
   ConcurrentStartObject: DurableObjectNamespace<ConcurrentStartObject>;
   EvictableStartObject: DurableObjectNamespace<EvictableStartObject>;
+  FetchErrorObject: DurableObjectNamespace<FetchErrorObject>;
   StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;
+  EventLogObject: DurableObjectNamespace<EventLogObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
   SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
@@ -257,7 +288,8 @@ export type Env = {
   TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
   StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;
   ChannelsHarnessObject: DurableObjectNamespace<ChannelsHarnessObject>;
-  AiSdkHarnessObject: DurableObjectNamespace<AiSdkHarnessObject>;
+  ChannelsDeliveryObject: DurableObjectNamespace<ChannelsDeliveryObject>;
+  ThinkChannelsObject: DurableObjectNamespace<ThinkChannelsObject>;
   CutoverHarnessObject: DurableObjectNamespace<CutoverHarnessObject>;
   SqliteStrategiesBench: DurableObjectNamespace<SqliteStrategiesBench>;
   STREAMS_R2: R2Bucket;
@@ -278,6 +310,7 @@ export type Env = {
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TestCustomOAuthAgent: DurableObjectNamespace<TestCustomOAuthAgent>;
+  McpIntegrationAgent: DurableObjectNamespace<McpIntegrationAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestAlarmInitAgent: DurableObjectNamespace<TestAlarmInitAgent>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
@@ -294,7 +327,10 @@ export type Env = {
   TestRpcMcpClientAgent: DurableObjectNamespace<TestRpcMcpClientAgent>;
   TestHttpMcpDedupAgent: DurableObjectNamespace<TestHttpMcpDedupAgent>;
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
+  TestFetchErrorAgent: DurableObjectNamespace<TestFetchErrorAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
+  TestSlowConnectAgent: DurableObjectNamespace<TestSlowConnectAgent>;
+  TestResetAgent: DurableObjectNamespace<TestResetAgent>;
   TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
   TestPersistedStateAgent: DurableObjectNamespace<TestPersistedStateAgent>;
   TestBothHooksAgent: DurableObjectNamespace<TestBothHooksAgent>;
@@ -314,6 +350,8 @@ export type Env = {
   RoutingOwnerAgent: DurableObjectNamespace<RoutingOwnerAgent>;
   RoutedChatAgent: DurableObjectNamespace<RoutedChatAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
+  EventLogFacetParent: DurableObjectNamespace<EventLogFacetParent>;
+  FacetWakeRoot: DurableObjectNamespace<FacetWakeRoot>;
   CUSTOM_BOUND_SUB_AGENT_PARENT: DurableObjectNamespace<CustomBoundSubAgentParent>;
   TestUnboundParentAgent: DurableObjectNamespace<TestUnboundParentAgent>;
   TestMinifiedNameParentAgent: DurableObjectNamespace<TestMinifiedNameParentAgent>;
@@ -331,6 +369,9 @@ export type Env = {
   FACET_APPROVAL_WORKFLOW: Workflow;
   FACET_EVENT_STATE_WORKFLOW: Workflow;
   THROW_IN_RUN_WORKFLOW: Workflow;
+  AGENT_RESET_WORKFLOW: Workflow;
+  AGENT_RESET_BETWEEN_STEPS_WORKFLOW: Workflow;
+  HOOK_THROWS_WORKFLOW: Workflow;
   REPORT_ERROR_THEN_THROW_WORKFLOW: Workflow;
   REPORT_ERROR_ONLY_WORKFLOW: Workflow;
   THROW_NON_ERROR_WORKFLOW: Workflow;

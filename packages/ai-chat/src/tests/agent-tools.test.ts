@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import type {
   AgentToolEventMessage,
   AgentToolLifecycleResult,
@@ -13,11 +14,16 @@ import {
   AGENT_TOOL_PROGRESS_PART,
   getAgentByName
 } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Env } from "./worker";
 import { connectChatWS } from "./test-utils";
 
 type ParentStub = DurableObjectStub & {
+  resetChildForTest(childName: string): Promise<void>;
+  seedChildLegacyChatTablesForTest(childName: string): Promise<void>;
+  childLegacyChatTablesForTest(
+    childName: string
+  ): Promise<{ tables: string[]; rowsLeft: number; importedChunks: number }>;
   runChild(
     input: {
       prompt: string;
@@ -239,6 +245,7 @@ type ParentStub = DurableObjectStub & {
     injectAfterMs: number,
     runId?: string
   ): Promise<RunAgentToolResult>;
+  startThreeChildRunsForTest(): Promise<AgentToolRunInspection>;
   startChildWithoutTailForTest(
     input: {
       prompt: string;
@@ -258,6 +265,46 @@ type ParentStub = DurableObjectStub & {
     path: "continue" | "retry",
     withAssistantTurn: boolean
   ): Promise<{ before: string | null; after: string | null }>;
+  childRunWithDateInputForTest(): Promise<unknown>;
+  childRunWithCircularOutputForTest(): Promise<{
+    status: string | undefined;
+    output: unknown;
+  }>;
+  childResetWhileRunStreamsForTest(): Promise<AgentToolRunInspection | null>;
+  childCancelQueuedRunForTest(thenReset: boolean): Promise<{
+    queued: AgentToolRunInspection | null;
+    userTexts: string[];
+    chatCalls: string[];
+  }>;
+  childCancelFinishedRunForTest(): Promise<{
+    status: string | undefined;
+    otherTurnAborted: boolean;
+    ownRequestAborted: boolean;
+    after: { status: string; cancelledAt: number | null } | null;
+  }>;
+  childCancelRecoveredRunForTest(): Promise<{
+    recoveredTurnAborted: boolean;
+    attemptAborted: boolean;
+    otherTurnAborted: boolean;
+    otherAttemptAborted: boolean;
+  }>;
+  childRecoverCancelledRunForTest(
+    path: "continue" | "retry",
+    cancelled?: boolean
+  ): Promise<{
+    incident: { status: string; reason?: string } | null;
+    chatCalls: number;
+  }>;
+  childSignalCancelsQueuedRunForTest(): Promise<{
+    atAbort: AgentToolRunInspection | null;
+    userTexts: string[];
+    chatCalls: string[];
+  }>;
+  childQueuedRunsKeepTheirOwnBodyForTest(): Promise<{
+    storedWhileQueued: unknown;
+    second: { status: string | undefined; error: string | undefined };
+  }>;
+  childCancelStartingRunForTest(): Promise<string | null>;
   childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{
     abortedBefore: boolean;
     abortedAfter: boolean;
@@ -271,7 +318,7 @@ type ParentStub = DurableObjectStub & {
     childName: string,
     incidentId: string
   ): Promise<string | null>;
-  rootHasRoutedTaskWakeForTest(runId: string): Promise<boolean>;
+  childHasTaskWakeForTest(childName: string, runId: string): Promise<boolean>;
   driveFacetRecoveryOomBackoffForTest(executing: {
     childName: string;
     incidentId: string;
@@ -280,7 +327,7 @@ type ParentStub = DurableObjectStub & {
     childName: string,
     runId: string
   ): Promise<{
-    state: string;
+    status: string;
     generation: string | null;
     next_at: number | null;
   } | null>;
@@ -288,9 +335,25 @@ type ParentStub = DurableObjectStub & {
     childName: string;
     incidentId: string;
   }): Promise<string>;
+  runChildTurnStoresForTest(): Promise<{
+    status: string;
+    stores: Array<{ taskRuns: number; fibers: number }>;
+  }>;
+  seedInterruptedFacetTurnForTest(childName: string): Promise<string>;
+  facetWakeTimeForTest(childName: string): Promise<number | null>;
+  childOomStrikesForTest(childName: string): Promise<number | null>;
+  facetRunStateForTest(
+    childName: string,
+    runId: string
+  ): Promise<string | null>;
+  facetOrphanTurnReplayForTest(childName: string): Promise<{
+    mirrored: number;
+    recoveries: string[];
+    state: string | null;
+  }>;
   driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
     taskRunOnChild: number;
-    routedWakeOnRoot: number;
+    facetWakeOnRoot: number;
     schedules: number;
   }>;
 };
@@ -303,6 +366,146 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
+  it("a chat sub-agent empties the old chat stream tables at its next start instead of dropping them", async () => {
+    // A facet that drops old indexed tables at its first start after an
+    // upgrade can reset its tree's storage on a deployment. The facet is
+    // known only from storage this early: its Agent start has not restored
+    // its parent path yet when the stream adapter is built.
+    const parent = await getParent();
+    const childName = `legacy-${crypto.randomUUID()}`;
+    await parent.seedChildLegacyChatTablesForTest(childName);
+    await parent.resetChildForTest(childName);
+    expect(await parent.childLegacyChatTablesForTest(childName)).toEqual({
+      tables: ["cf_ai_chat_stream_chunks", "cf_ai_chat_stream_metadata"],
+      rowsLeft: 0,
+      importedChunks: 1
+    });
+  });
+
+  it("returns an error, and settles its row, when the start call fails and the child has no such run", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildWhoseStartCallFailsForTest(childHasRun: boolean): Promise<{
+          result: unknown;
+          parentRow: string | null;
+        }>;
+      }
+    ).runChildWhoseStartCallFailsForTest(false);
+    expect(outcome).toEqual({
+      result: { status: "error", error: "test: forced reset" },
+      parentRow: "error"
+    });
+  });
+
+  it("waits for the run when the start call fails but the child did start it", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildWhoseStartCallFailsForTest(childHasRun: boolean): Promise<{
+          result: unknown;
+          parentRow: string | null;
+        }>;
+      }
+    ).runChildWhoseStartCallFailsForTest(true);
+    expect(outcome).toEqual({
+      result: { status: "completed" },
+      parentRow: "completed"
+    });
+  });
+
+  it("numbers the chunks it forwards after a re-attach past the ones it already sent, so clients do not drop them as repeats", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildRecoveredOnAShorterStreamForTest(): Promise<{
+          status: string;
+          sequences: number[];
+        }>;
+      }
+    ).runChildRecoveredOnAShorterStreamForTest();
+    expect(outcome.status).toBe("completed");
+    // Five chunks before the break, two after. A client keys a chunk by its
+    // sequence, so each of the seven needs its own.
+    expect(outcome.sequences).toHaveLength(7);
+    expect(new Set(outcome.sequences).size).toBe(7);
+    expect(outcome.sequences).toEqual(
+      [...outcome.sequences].sort((a, b) => a - b)
+    );
+  });
+
+  it("does not wait for good on a tail the child never closes: it asks the child, and returns the run's status", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildWhoseTailNeverClosesForTest(): Promise<{
+          status: string;
+          inspections: number;
+          parentRow: string | null;
+        }>;
+      }
+    ).runChildWhoseTailNeverClosesForTest();
+    expect(outcome.status).toBe("aborted");
+    expect(outcome.parentRow).toBe("aborted");
+  });
+
+  it("gives up as interrupted, not error, when the run stays open past the parent's no-progress budget", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildThatNeverRecoversForTest(): Promise<{
+          status: string;
+          reason?: string;
+          childStillRunning?: boolean;
+          parentRow: string | null;
+        }>;
+      }
+    ).runChildThatNeverRecoversForTest();
+    expect(outcome).toEqual({
+      status: "interrupted",
+      reason: "no-progress",
+      childStillRunning: true,
+      parentRow: "interrupted"
+    });
+  });
+
+  it("waits for a run whose child isolate reset, and returns the status the child's recovery reached", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildThroughResetForTest(): Promise<{
+          result: { status: string; error?: string };
+          parentRow: string | null;
+          child: { status: string; error?: string } | null;
+        }>;
+      }
+    ).runChildThroughResetForTest();
+    // The reset broke the parent's tail. The child's chat recovery finished
+    // the turn, and that is what the parent's model is told.
+    expect(outcome.child?.status).toBe("completed");
+    expect(outcome.result.status).toBe("completed");
+    expect(outcome.result.error).toBeUndefined();
+    expect(outcome.parentRow).toBe("completed");
+  }, 30_000);
+
   it("seals the executing facet's recovery incident when the root alarm breaker seals", async () => {
     const parentName = crypto.randomUUID();
     const parent = await getParent(parentName);
@@ -323,11 +526,14 @@ describe("AIChatAgent as an agent-tool child", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     const freshParent = await getParent(parentName);
 
-    // The struck run's wake mirror is gone and its incident sealed on the
-    // owning facet, through the routed memory-limit forwarding.
-    expect(await freshParent.rootHasRoutedTaskWakeForTest(executingRunId)).toBe(
-      false
-    );
+    // The struck run's wake is gone and its incident sealed, by the
+    // breaker in the sub-agent that owns the run.
+    expect(
+      await freshParent.childHasTaskWakeForTest(
+        executing.childName,
+        executingRunId
+      )
+    ).toBe(false);
     expect(
       await freshParent.facetRecoveryIncidentStatusForTest(
         executing.childName,
@@ -338,9 +544,9 @@ describe("AIChatAgent as an agent-tool child", () => {
     // Tasks backs off per struck run instead of Scheduler's old blanket
     // purge-on-seal: a pending incident that never came due this cycle
     // keeps its wake and stays scheduled.
-    expect(await freshParent.rootHasRoutedTaskWakeForTest(pendingRunId)).toBe(
-      true
-    );
+    expect(
+      await freshParent.childHasTaskWakeForTest(pending.childName, pendingRunId)
+    ).toBe(true);
     expect(
       await freshParent.facetRecoveryIncidentStatusForTest(
         pending.childName,
@@ -372,9 +578,49 @@ describe("AIChatAgent as an agent-tool child", () => {
     // facet startup before the backoff elapses read it as an interrupted
     // attempt and reconcile it due again now, resurrecting the run through
     // the breaker.
-    expect(runState?.state).toBe("running");
+    expect(runState?.status).toBe("running");
     expect(runState?.generation).toBeNull();
     expect(runState?.next_at).toBeGreaterThan(Date.now());
+  });
+
+  it("does not wake a struck facet run early when the root restarts, so its strikes stand", async () => {
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
+    const executing = {
+      childName: crypto.randomUUID(),
+      incidentId: `facet-backoff-restart-${crypto.randomUUID()}`
+    };
+    await parent.driveFacetRecoveryOomBackoffForTest(executing);
+    // The strike resets the root's isolate. A request then restarts it,
+    // during the breaker's backoff.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const restarted = await getParent(parentName);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // The struck run keeps the backoff deadline: the root's wake for the
+    // sub-agent may drive it, but the run is not due, so no early attempt
+    // reads as a clean pass that clears the strike.
+    expect(
+      await restarted.facetWakeTimeForTest(executing.childName)
+    ).toBeGreaterThan(Date.now() + 1_000);
+    expect(await restarted.childOomStrikesForTest(executing.childName)).toBe(1);
+
+    // The facet starts again and re-sends its deadline, which knows nothing
+    // of the strike. A second root restart must still leave the run alone.
+    await restarted.facetRecoveryIncidentStatusForTest(
+      executing.childName,
+      executing.incidentId
+    );
+    // A root eviction takes its sub-agents with it; the test runtime keeps
+    // them, so reset the sub-agent here as the platform would.
+    await restarted.resetChildForTest(executing.childName);
+    await evictDurableObject(restarted as unknown as DurableObjectStub);
+    const again = await getParent(parentName);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(
+      await again.facetWakeTimeForTest(executing.childName)
+    ).toBeGreaterThan(Date.now() + 1_000);
+    expect(await again.childOomStrikesForTest(executing.childName)).toBe(1);
   });
 
   it("seals a routed run whose failure lands after root detaches at the dispatch budget", async () => {
@@ -392,19 +638,25 @@ describe("AIChatAgent as an agent-tool child", () => {
     // The failure that arrives after root detached must still be seen:
     // this is exactly the gap a routed dispatch that discards its
     // still-pending call (instead of tracking it) would miss entirely.
-    await new Promise((resolve) => setTimeout(resolve, 4_000));
-    const freshParent = await getParent(parentName);
-
-    expect(
-      await freshParent.facetRecoveryIncidentStatusForTest(
-        executing.childName,
-        executing.incidentId
-      )
-    ).toBe("exhausted");
+    await vi.waitFor(
+      async () => {
+        const freshParent = await getParent(parentName);
+        expect(
+          await freshParent.facetRecoveryIncidentStatusForTest(
+            executing.childName,
+            executing.incidentId
+          )
+        ).toBe("exhausted");
+      },
+      { timeout: 12_000, interval: 200 }
+    );
   }, 20_000);
 
   it("keeps a routed run's claim mirrored on root after root detaches at the dispatch budget", async () => {
-    const parent = await getParent();
+    // Its own root: the run's late failure seals that root's breaker and
+    // resets its isolate, which must not land in a later test.
+    const parentName = crypto.randomUUID();
+    const parent = await getParent(parentName);
     const executing = {
       childName: crypto.randomUUID(),
       incidentId: `facet-slow-oom-mirror-${crypto.randomUUID()}`
@@ -418,8 +670,83 @@ describe("AIChatAgent as an agent-tool child", () => {
     // attempt eventually settles cleanly.
     const runId = await parent.driveFacetRecoverySlowOomSealForTest(executing);
 
-    expect(await parent.rootHasRoutedTaskWakeForTest(runId)).toBe(true);
-  }, 10_000);
+    expect(
+      await parent.childHasTaskWakeForTest(executing.childName, runId)
+    ).toBe(true);
+
+    // The delayed failure lands and seals inside this test.
+    await vi.waitFor(
+      async () => {
+        const freshParent = await getParent(parentName);
+        expect(
+          await freshParent.facetRecoveryIncidentStatusForTest(
+            executing.childName,
+            executing.incidentId
+          )
+        ).toBe("exhausted");
+      },
+      { timeout: 12_000, interval: 200 }
+    );
+  }, 20_000);
+
+  it("runs a facet's chat turn as a Task run on the facet, not a legacy fiber", async () => {
+    const parent = await getParent();
+
+    const { status, stores } = await parent.runChildTurnStoresForTest();
+
+    expect(status).toBe("completed");
+    // Read while the child's turn ran: its durable record is the chat-turn
+    // Task run, so an interrupted turn replays like a root agent's.
+    expect(stores).toEqual([{ taskRuns: 1, fibers: 0 }]);
+  });
+
+  it("recovers a facet's chat turn soon after the root restarts, not at its claim deadline", async () => {
+    const name = crypto.randomUUID();
+    const childName = crypto.randomUUID();
+    const parent = await getParent(name);
+    const runId = await parent.seedInterruptedFacetTurnForTest(childName);
+    expect(await parent.facetWakeTimeForTest(childName)).toBeGreaterThan(
+      Date.now() + 300_000
+    );
+
+    // The root resets and takes its facets with it. Nothing calls the facet,
+    // nor the root: its own alarm (keep-alive or deadman, well before the
+    // claim deadline) starts it and drives what is due in one invocation.
+    await evictDurableObject(parent as unknown as DurableObjectStub);
+    const namespace = (env as Env).AIChatAgentToolParent;
+    // The alarm ran: the start came from it, not from the request below.
+    expect(
+      await runDurableObjectAlarm(namespace.get(namespace.idFromName(name)))
+    ).toBe(true);
+    const restarted = await getParent(name);
+
+    // The restarted root re-drives the facet's wake at once: the facet starts,
+    // reclaims the interrupted attempt and settles the run, which removes the
+    // mirror. Read only the root until then: a call to the facet would start
+    // it and hide a wake left at the claim deadline.
+    const deadline = Date.now() + 5_000;
+    let wake = await restarted.facetWakeTimeForTest(childName);
+    while (wake !== null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      wake = await restarted.facetWakeTimeForTest(childName);
+    }
+    expect(wake).toBeNull();
+    expect(await restarted.facetRunStateForTest(childName, runId)).toBe(
+      "completed"
+    );
+  }, 15_000);
+
+  it("replays a facet's interrupted chat-turn Task run from the root alarm into chat recovery", async () => {
+    const parent = await getParent();
+    const result = await parent.facetOrphanTurnReplayForTest(
+      crypto.randomUUID()
+    );
+    expect(result).toEqual({
+      mirrored: 1,
+      recoveries: ["req-orphan"],
+      state: "completed"
+    });
+  });
 
   it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {
     const parent = await getParent();
@@ -436,7 +763,7 @@ describe("AIChatAgent as an agent-tool child", () => {
     // dead.
     expect(transport).toEqual({
       taskRunOnChild: 1,
-      routedWakeOnRoot: 1,
+      facetWakeOnRoot: 1,
       schedules: 0
     });
   });
@@ -1062,6 +1389,14 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(second).toEqual(first);
   });
 
+  // A run's input goes with its turn. Three runs started together: the
+  // second used to read whatever body was stored when its turn started.
+  it("runs each of three queued runs with its own input", async () => {
+    const parent = await getParent();
+    const inspection = await parent.startThreeChildRunsForTest();
+    expect(inspection).toMatchObject({ status: "error", error: "boom" });
+  });
+
   it("marks AIChatAgent stream error chunks as failed agent-tool runs", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
@@ -1294,6 +1629,111 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result.abortedBefore).toBe(false);
     expect(result.abortedAfter).toBe(true);
     expect(result.childStatus).toBe("aborted");
+  });
+
+  it("hands a live run's output hook the input as it was passed, not its stored copy", async () => {
+    await expect(
+      (await getParent()).childRunWithDateInputForTest()
+    ).resolves.toEqual({ inputIsDate: true });
+  });
+
+  it("completes a run whose output JSON cannot hold, storing it as its string", async () => {
+    await expect(
+      (await getParent()).childRunWithCircularOutputForTest()
+    ).resolves.toEqual({ status: "completed", output: "[object Object]" });
+  });
+
+  it("records a chat reset while the run streams as an error, like a reset in the queue", async () => {
+    const inspection = await (
+      await getParent()
+    ).childResetWhileRunStreamsForTest();
+    expect(inspection).toMatchObject({
+      status: "error",
+      error: "Agent tool run was skipped because the chat was cleared."
+    });
+  });
+
+  it("never starts a run cancelled while its turn waited in the queue", async () => {
+    const result = await (await getParent()).childCancelQueuedRunForTest(false);
+    expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
+    // Its input was not stored and the model was not called for it.
+    expect(result.userTexts).toEqual(["first run"]);
+    expect(result.chatCalls).toEqual(["first run"]);
+  });
+
+  it("keeps a cancelled run aborted when a chat reset then skips its queued turn", async () => {
+    const result = await (await getParent()).childCancelQueuedRunForTest(true);
+    expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
+  });
+
+  it("a cancel for a run that already finished aborts no other turn", async () => {
+    const result = await (await getParent()).childCancelFinishedRunForTest();
+    expect(result.status).toBe("completed");
+    expect(result.otherTurnAborted).toBe(false);
+    // The finished run is left exactly as it was: nothing is stopped under
+    // its old request id, and its row is not marked cancelled.
+    expect(result.ownRequestAborted).toBe(false);
+    expect(result.after).toEqual({ status: "completed", cancelledAt: null });
+  });
+
+  it("a cancel of a run being recovered stops the requests on its row and nothing else", async () => {
+    await expect(
+      (await getParent()).childCancelRecoveredRunForTest()
+    ).resolves.toEqual({
+      recoveredTurnAborted: true,
+      attemptAborted: true,
+      otherTurnAborted: false,
+      otherAttemptAborted: false
+    });
+  });
+
+  for (const path of ["continue", "retry"] as const) {
+    it(`does not ${path} the turn of a run cancelled before the isolate died, and says why`, async () => {
+      const result = await (
+        await getParent()
+      ).childRecoverCancelledRunForTest(path);
+      expect(result).toEqual({
+        incident: { status: "skipped", reason: "user_cancelled" },
+        chatCalls: 0
+      });
+    });
+  }
+
+  it("recovers the turn of a run that is aborted but that no parent cancelled", async () => {
+    const result = await (
+      await getParent()
+    ).childRecoverCancelledRunForTest("continue", false);
+    expect(result.chatCalls).toBe(1);
+    expect(result.incident?.reason).not.toBe("user_cancelled");
+  });
+
+  it("the parent's signal cancels a queued run at once, and the run never starts", async () => {
+    const result = await (
+      await getParent()
+    ).childSignalCancelsQueuedRunForTest();
+    // Recorded while the run ahead of it still held the queue.
+    expect(result.atAbort).toMatchObject({
+      status: "aborted",
+      error: "parent stopped"
+    });
+    expect(result.userTexts).toEqual(["first run"]);
+    expect(result.chatCalls).toEqual(["first run"]);
+  });
+
+  it("runs each queued run with its own input, and never stores it as the request context", async () => {
+    const result = await (
+      await getParent()
+    ).childQueuedRunsKeepTheirOwnBodyForTest();
+    // A run's input goes to its own turn only: it is never the stored
+    // request context, while the run waits or while it runs.
+    expect(result.storedWhileQueued).toBeUndefined();
+    expect(result.second).toEqual({ status: "error", error: "boom" });
+  });
+
+  it("treats a starting run as open: a cancel settles it", async () => {
+    await expect(
+      (await getParent()).childCancelStartingRunForTest()
+    ).resolves.toBe("aborted");
   });
 
   it("keeps suppressing a recovered terminal-only child's chunks after a restart (#2298)", async () => {

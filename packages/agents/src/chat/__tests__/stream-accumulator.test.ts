@@ -104,6 +104,87 @@ describe("StreamAccumulator", () => {
       });
     });
 
+    it("keeps providerMetadata from a part's start chunk, merged with its end", () => {
+      const a = acc();
+      a.applyChunk({
+        type: "reasoning-start",
+        id: "r",
+        providerMetadata: { anthropic: { redacted: false } }
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "reasoning-end",
+        id: "r",
+        providerMetadata: { anthropic2: { signature: "sig" } }
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "text-start",
+        id: "t",
+        providerMetadata: { openai: { itemId: "msg_1" } }
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "text-delta",
+        id: "t",
+        delta: "Hi"
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "text-end",
+        id: "t",
+        providerMetadata: { openai2: { done: true } }
+      } as StreamChunkData);
+
+      expect(
+        a.parts.map(
+          (part) => (part as Record<string, unknown>).providerMetadata
+        )
+      ).toEqual([
+        { anthropic: { redacted: false }, anthropic2: { signature: "sig" } },
+        { openai: { itemId: "msg_1" }, openai2: { done: true } }
+      ]);
+    });
+
+    it("routes deltas of overlapping parts by their chunk id", () => {
+      const a = acc();
+      for (const chunk of [
+        { type: "text-start", id: "a" },
+        { type: "text-start", id: "b" },
+        { type: "text-delta", id: "a", delta: "first" },
+        { type: "text-delta", id: "b", delta: "second" },
+        { type: "text-end", id: "a", providerMetadata: { p: { a: 1 } } },
+        { type: "text-end", id: "b" }
+      ]) {
+        a.applyChunk(chunk as StreamChunkData);
+      }
+      expect(a.parts).toEqual([
+        {
+          type: "text",
+          text: "first",
+          state: "done",
+          providerMetadata: { p: { a: 1 } }
+        },
+        { type: "text", text: "second", state: "done" }
+      ]);
+    });
+
+    it("keeps a streamed file's filename and providerMetadata", () => {
+      const a = acc();
+      a.applyChunk({
+        type: "file",
+        mediaType: "image/png",
+        url: "data:image/png;base64,AA==",
+        filename: "chart.png",
+        providerMetadata: { google: { id: "f1" } }
+      } as StreamChunkData);
+      expect(a.parts).toEqual([
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: "data:image/png;base64,AA==",
+          filename: "chart.png",
+          providerMetadata: { google: { id: "f1" } }
+        }
+      ]);
+    });
+
     it("reasoning-delta preserves providerMetadata when streamed mid-block", () => {
       const a = acc();
       a.applyChunk({ type: "reasoning-start" } as StreamChunkData);
@@ -897,6 +978,28 @@ describe("StreamAccumulator", () => {
       expect(r.handled).toBe(false);
       expect(r.action).toBeUndefined();
       expect(a.parts).toHaveLength(0);
+    });
+  });
+
+  describe("mergeInto a continuation whose message is the first one", () => {
+    it("updates that message, not the last assistant message", () => {
+      const a = acc({
+        messageId: "greeting",
+        continuation: true,
+        existingParts: [{ type: "text", text: "Hello" }]
+      });
+      a.applyChunk({ type: "text-delta", delta: " again" } as StreamChunkData);
+      const messages: UIMessage[] = [
+        { id: "greeting", role: "assistant", parts: [] },
+        { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] },
+        { id: "a2", role: "assistant", parts: [{ type: "text", text: "Yes" }] }
+      ];
+
+      const merged = a.mergeInto(messages);
+
+      expect(merged.map((m) => m.id)).toEqual(["greeting", "u1", "a2"]);
+      expect(merged[2]).toBe(messages[2]);
+      expect(merged[0].parts.length).toBeGreaterThan(0);
     });
   });
 });

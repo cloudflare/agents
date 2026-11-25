@@ -211,6 +211,46 @@ describe("facet RPC replies under concurrent frames (issue #1991)", () => {
     }
   });
 
+  it("ends a sub-agent stream at a chunk over the frame limit", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const id = `huge-${crypto.randomUUID()}`;
+      const frames: RPCResponse[] = [];
+      ws.addEventListener("message", (event: MessageEvent) => {
+        try {
+          const frame = JSON.parse(event.data as string) as RPCResponse;
+          if (frame.type === MessageType.RPC && frame.id === id) {
+            frames.push(frame);
+          }
+        } catch {
+          // not JSON
+        }
+      });
+      ws.send(
+        JSON.stringify({
+          type: MessageType.RPC,
+          id,
+          method: "hugeStream",
+          args: []
+        } satisfies RPCRequest)
+      );
+      await vi.waitFor(() => expect(frames.length).toBeGreaterThanOrEqual(2), {
+        timeout: 10_000
+      });
+      // Anything after the error would have arrived by now.
+      await callRPC(ws, "fastEcho", ["after"]);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(frames).toHaveLength(2);
+      expect(frames[0]).toMatchObject({ success: true, result: "small" });
+      expect(frames[1]).toMatchObject({ success: false });
+      expect(String((frames[1] as { error?: string }).error)).toContain(
+        "message limit"
+      );
+    } finally {
+      ws.close();
+    }
+  }, 20_000);
+
   it("delivers a streaming reply through its originating frame", async () => {
     const ws = await connectWS(uniqueName(), uniqueName());
     try {
@@ -411,6 +451,45 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("keeps a broadcast queued behind a send ahead of the next send (#2055)", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const first = `queued-first-${crypto.randomUUID()}`;
+      const broadcast = `queued-broadcast-${crypto.randomUUID()}`;
+      const direct = `queued-direct-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessages(
+        ws,
+        new Set([first, broadcast, direct])
+      );
+
+      const response = await callRPC(ws, "sendBroadcastSendNow", [
+        first,
+        broadcast,
+        direct
+      ]);
+      expectSuccessfulResult(response, "sent");
+      await expect(delivered).resolves.toEqual([first, broadcast, direct]);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("keeps a send after a queued broadcast out of an older open send batch (#2055)", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const ids = ["first", "second", "broadcast", "direct"].map(
+        (name) => `batched-${name}-${crypto.randomUUID()}`
+      );
+      const delivered = waitForTextMessages(ws, new Set(ids));
+
+      const response = await callRPC(ws, "sendTwiceBroadcastSendNow", ids);
+      expectSuccessfulResult(response, "sent");
+      await expect(delivered).resolves.toEqual(ids);
+    } finally {
+      ws.close();
+    }
+  });
+
   it("preserves consecutive message order after frame completion", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());
@@ -424,6 +503,79 @@ describe("facet connection operations after frame completion (issue #2055)", () 
       ]);
       expectSuccessfulResult(response, "scheduled");
       await expect(delivered).resolves.toEqual([first, second]);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("sends a burst of messages from a live frame in at most one root call (#2820)", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentConnectionSendCallCount();
+      const messages = Array.from(
+        { length: 20 },
+        (_, index) => `live-burst-${index}-${crypto.randomUUID()}`
+      );
+      const delivered = waitForTextMessages(ws, new Set(messages));
+
+      const response = await callRPC(ws, "sendConnectionMessagesNow", [
+        messages
+      ]);
+      expectSuccessfulResult(response, "sent");
+
+      await expect(delivered).resolves.toEqual(messages);
+      expect(
+        (await parent.subAgentConnectionSendCallCount()) - before
+      ).toBeLessThanOrEqual(1);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("sends a burst of messages after frame completion in one root call (#2820)", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentConnectionSendCallCount();
+      const messages = Array.from(
+        { length: 20 },
+        (_, index) => `detached-burst-${index}-${crypto.randomUUID()}`
+      );
+      const delivered = waitForTextMessages(ws, new Set(messages));
+
+      const response = await callRPC(ws, "sendConnectionMessagesAfterDelay", [
+        messages
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+
+      await expect(delivered).resolves.toEqual(messages);
+      expect((await parent.subAgentConnectionSendCallCount()) - before).toBe(1);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("starts a new root call rather than grow a batch past its size limit", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentConnectionSendCallCount();
+      const messages = ["a", "b"].map((prefix) =>
+        `${prefix}-${crypto.randomUUID()}-`.padEnd(600_000, "x")
+      );
+      const delivered = waitForTextMessages(ws, new Set(messages), 5000);
+
+      const response = await callRPC(ws, "sendConnectionMessagesAfterDelay", [
+        messages
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+
+      await expect(delivered).resolves.toEqual(messages);
+      expect((await parent.subAgentConnectionSendCallCount()) - before).toBe(2);
     } finally {
       ws.close();
     }

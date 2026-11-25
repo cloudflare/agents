@@ -20,7 +20,7 @@ import { z } from "zod";
  * id (`anthropic/claude-opus-4.8`, `openai/gpt-5.5`), or a dynamic route
  * (`dynamic/<route>`). All of them run on `env.AI.run`.
  */
-const DEFAULT_MODEL = "@cf/zai-org/glm-4.7-flash";
+const DEFAULT_MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 

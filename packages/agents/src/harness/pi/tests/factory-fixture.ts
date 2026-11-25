@@ -3,16 +3,16 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
-  Type,
   type AssistantMessage,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
+import { arr, num, obj, str } from "@earendil-works/pi-schema";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
-import { fromManifest } from "../../../skills/manifest";
+import { manifest } from "../../../skills/manifest";
 import {
   createRegistry,
   Harness,
@@ -83,8 +83,8 @@ function script(context: TranscriptContext): AssistantMessage {
   return fauxAssistantMessage([fauxText(`echo: ${prompt}`)]);
 }
 
-const Shout = Type.Object({ text: Type.String() });
-const Sum = Type.Object({ values: Type.Array(Type.Number()) });
+const Shout = obj({ text: str() });
+const Sum = obj({ values: arr(num()) });
 
 function text(value: string) {
   return { output: [{ type: "text" as const, text: value }] };
@@ -110,20 +110,15 @@ const sum: ToolRegistration<typeof Sum> = {
   }
 };
 
-const notes = fromManifest({
+const notes = manifest({
   id: "test-skills",
-  fingerprint: "v1",
   skills: [
     {
       name: "haiku",
       description: "Write haiku.",
       body: "Five, seven, five syllables.",
       resources: [
-        {
-          path: "examples.md",
-          kind: "reference",
-          content: "An old silent pond"
-        }
+        { path: "references/examples.md", content: "An old silent pond" }
       ]
     }
   ]

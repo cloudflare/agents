@@ -1,28 +1,17 @@
-import { Think, type SkillSource } from "@cloudflare/think";
+import { skills, Think, type SkillSource } from "@cloudflare/think";
 import type { ContextConfig } from "agents/context";
 import { agentThinkContext, type RunContext } from "../src/agent";
 
-const promptTestSkillSource: SkillSource = {
+const promptTestSkillSource: SkillSource = skills.manifest({
   id: "agent-think-prompt-test",
-  fingerprint: "agent-think-prompt-test-v1",
-  async list() {
-    return [
-      {
-        name: "prompt-test",
-        description: "Verify agent-think prompt composition."
-      }
-    ];
-  },
-  async load(name) {
-    return name === "prompt-test"
-      ? {
-          name,
-          description: "Verify agent-think prompt composition.",
-          body: "Follow the prompt composition test procedure."
-        }
-      : null;
-  }
-};
+  skills: [
+    {
+      name: "prompt-test",
+      description: "Verify agent-think prompt composition.",
+      body: "Follow the prompt composition test procedure."
+    }
+  ]
+});
 
 export class AgentThinkPromptTestAgent extends Think<Env> {
   #runContext: RunContext = {

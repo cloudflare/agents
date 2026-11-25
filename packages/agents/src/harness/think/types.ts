@@ -18,11 +18,25 @@ import type {
 import type { ClientToolSchema } from "../../chat/client-tools";
 import type {
   HarnessInput,
+  HarnessInputFrom,
   OperationResult,
   Receipt,
   ToolAnswer
 } from "../../experimental/channels/harness";
 import type { Session } from "../../sessions/handle";
+import type { Context } from "../../context/context";
+import type { Tasks } from "../../tasks/tasks";
+import type { ThinkExtension } from "./extensions/types";
+
+/**
+ * @internal An extension a host installs with the harness, by name.
+ */
+export type ThinkShippedExtension = {
+  readonly name: string;
+  readonly extension: ThinkExtension;
+  /** Load it after the harness's own instead of ahead of them. */
+  readonly after?: boolean;
+};
 
 /**
  * A session id. The root session is `""`, the Sessions capability's default
@@ -41,14 +55,18 @@ export type ThinkSessionId = string;
  * - a tool result or an approval (`ToolAnswer`), which continues the turn
  *   that was waiting for it.
  *
+ * The shared harness input and answers may name the participant they come
+ * from (`from`); a turn's client tools belong to the participant who
+ * started it.
+ *
  * @experimental
  */
 export type ThinkInput =
   | string
   | UIMessage
   | readonly UIMessage[]
-  | HarnessInput
-  | ToolAnswer;
+  | (HarnessInput & HarnessInputFrom)
+  | (ToolAnswer & HarnessInputFrom);
 
 /**
  * What a submission does when the session is already running. Only
@@ -188,7 +206,8 @@ export type ThinkRecoveryOptions = {
   readonly maxAttempts?: number;
   /**
    * Delay before the second recovery attempt, doubled for each after it,
-   * up to a minute. The first is immediate. Default 1000.
+   * up to a minute, and spread over its upper half so recoveries do not
+   * line up. The first is immediate. Default 1000.
    */
   readonly backoffMs?: number;
   /**
@@ -212,10 +231,18 @@ export type ThinkTurnContext = ThinkHookContext & {
   readonly continuation: boolean;
   /** The transcript the model will see, with compaction applied. */
   readonly messages: readonly UIMessage[];
-  /** The system prompt from the options, if any. */
+  /**
+   * The system prompt: the `system` option followed by the session's
+   * context prompt (see the `context` option), if either is set.
+   */
   readonly system: string | undefined;
   /** Names of the tools on offer. */
   readonly tools: readonly string[];
+  /**
+   * @internal The tools on offer as built, for a host that hands them to
+   * a hook of its own (the harness-backed Think's `beforeTurn`).
+   */
+  readonly toolSet: ToolSet;
 };
 
 /**
@@ -409,5 +436,30 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
    * uses it, for example its compaction function and threshold.
    */
   readonly configureSession?: (session: Session, id: ThinkSessionId) => void;
+  /**
+   * The context for a session, built on its handle the first time the
+   * harness uses it. Its prompt follows `system`, its tools join `tools`,
+   * and the harness records on each turn's user message the prompt and
+   * changes that turn was sent with (see `Context` in `agents/context`).
+   *
+   * @experimental May change before stabilizing.
+   */
+  readonly context?: (
+    session: Session,
+    id: ThinkSessionId
+  ) => Context | undefined;
   readonly hooks?: ThinkHarnessHooks;
+  /**
+   * @internal The Tasks capability the operations run on, installed by the
+   * host before the harness. Default: the harness's own, which it installs
+   * with itself. For a host whose rows are already in its default Tasks.
+   */
+  readonly tasks?: Tasks;
+  /**
+   * @internal Shipped extensions the host installs, in order, ahead of the
+   * harness's own (the context's tools, then these options), or after them
+   * when marked `after`. A later extension's tool of the same name replaces
+   * an earlier one's in place.
+   */
+  readonly extensions?: readonly ThinkShippedExtension[];
 };

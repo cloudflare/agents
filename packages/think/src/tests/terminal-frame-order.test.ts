@@ -148,4 +148,41 @@ describe("Think — terminal frame ordering (#2119)", () => {
     expect(recorded.at(-1)).toEqual({ kind: "done", error: true });
     ws.close();
   });
+
+  it("tells every tab after the terminal frame when a stopped reply held nothing", async () => {
+    const { agent, ws } = await freshAgent();
+    await agent.setReasoningResponse("Answer", "Let me think");
+    await settle();
+    const frames: Frame[] = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+      if (msg.type === MSG_CHAT_MESSAGES) {
+        frames.push({
+          kind: "messages",
+          messages: msg.messages as UIMessage[]
+        });
+      } else if (msg.type === MSG_CHAT_RESPONSE && msg.done === true) {
+        frames.push({ kind: "done", error: msg.error === true });
+      }
+    });
+
+    // Stopped after `start`, `start-step`, `reasoning-start` and the first
+    // reasoning delta: the reply is reasoning alone, which is not stored.
+    await agent.testChatWithAbort("think about it", 4);
+    await settle();
+
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored.map((message) => message.role)).toEqual(["user"]);
+    // The tab drew the reasoning. A snapshot before `done` is merged with
+    // the stream it is still reading, so one must follow `done`.
+    const done = frames.findIndex((frame) => frame.kind === "done");
+    expect(done).toBeGreaterThanOrEqual(0);
+    const after = frames.slice(done + 1);
+    expect(after.length).toBeGreaterThan(0);
+    const last = after.at(-1);
+    expect(
+      last?.kind === "messages" && last.messages.map((message) => message.role)
+    ).toEqual(["user"]);
+    ws.close();
+  });
 });

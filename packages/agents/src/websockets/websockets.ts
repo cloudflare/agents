@@ -13,6 +13,7 @@ import { camelCaseToKebabCase } from "../utils";
 import {
   ConnectionManager,
   createConnection,
+  isClosedByHost,
   isManagedWebSocket
 } from "./connection";
 import {
@@ -23,6 +24,14 @@ import {
   setConnectionReadonly
 } from "./connection-flags";
 import { exposableMethods, type CallableInvoker } from "./callables-target";
+import { serializeRpcResponse } from "./frame-limit";
+import { EventLog, type EventLogOptions } from "./event-log";
+import {
+  EVENT_LOG_ERROR,
+  EVENT_LOG_SUBSCRIBE,
+  parseEventLogClientFrame,
+  type EventLogClientFrame
+} from "./event-log-protocol";
 import type {
   SyncedState,
   WebSocketHandlers,
@@ -143,6 +152,77 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  * broadcasts changes with `broadcastState()`. Per-connection readonly
  * and no-protocol flags live here as well, for every host.
  */
+let declareEventLogOn: <T, S>(
+  webSockets: WebSockets,
+  name: string,
+  options: EventLogOptions<S>
+) => EventLog<T, S>;
+
+/**
+ * Declare a replayable event log on `webSockets`. Every event it publishes
+ * gets the log's next seq, is stored, and goes to the connections following
+ * it. A client follows with `followEventLog()`, and on reconnect gets the
+ * events it missed, or a resync from `options.snapshot` when they are gone.
+ *
+ * Declare logs where you construct the capability: a client's subscribe
+ * frame can arrive in a fresh isolate, and a log declared later does not
+ * exist yet then. Declaring a name twice throws. A log over a Streams a
+ * composer composed is named `<composer id>/<name>`, and clients follow it
+ * by that name.
+ *
+ * @internal Sibling-package support (`agents/internal`). Not a public API.
+ */
+export function declareEventLog<T = unknown, S = unknown>(
+  webSockets: WebSockets,
+  name: string,
+  options: EventLogOptions<S>
+): EventLog<T, S> {
+  return declareEventLogOn<T, S>(webSockets, name, options);
+}
+
+let applyLogFrameOn: (
+  webSockets: WebSockets,
+  connection: Connection,
+  frame: unknown
+) => boolean;
+
+/**
+ * Apply a parsed event-log frame from a client (`cf_agent_log_subscribe`
+ * or `cf_agent_log_unsubscribe`), for hosts with `protocol: false`. Call it
+ * inside the host's invocation context, so a log's `snapshot` and
+ * `canSubscribe` see the connection.
+ *
+ * @returns Whether the frame was an event-log frame (handled either way).
+ * @internal Not a public API (event logs are internal).
+ */
+export function applyEventLogFrame(
+  webSockets: WebSockets,
+  connection: Connection,
+  frame: unknown
+): boolean {
+  return applyLogFrameOn(webSockets, connection, frame);
+}
+
+let setLogConnectionsOn: (
+  webSockets: WebSockets,
+  connections: () => Iterable<Connection>
+) => void;
+
+/**
+ * Set the connections `webSockets`' event logs fan out to and look up
+ * followers in. Default: the capability's own open connections. A host
+ * whose clients are not all its own sockets sets its own source, such as an
+ * `Agent` facet, whose sockets the root owns and bridges in.
+ *
+ * @internal Not a public API (event logs are internal).
+ */
+export function setEventLogConnections(
+  webSockets: WebSockets,
+  connections: () => Iterable<Connection>
+): void {
+  setLogConnectionsOn(webSockets, connections);
+}
+
 export class WebSockets extends LifecycleCapability {
   /** Claims every upgrade, so Lifecycle dispatches it after all others. */
   override readonly claims = "catch-all";
@@ -152,6 +232,8 @@ export class WebSockets extends LifecycleCapability {
   readonly #added: WebSocketHandlers[] = [];
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #protocol: WebSocketsOptions["protocol"];
+  /** Where event logs find followers; see `setEventLogConnections`. */
+  #logConnections: (() => Iterable<Connection>) | undefined;
   readonly #readonly: WebSocketsOptions["readonly"];
   readonly #state: SyncedState | undefined;
   /**
@@ -163,6 +245,10 @@ export class WebSockets extends LifecycleCapability {
   readonly #connecting = new Set<Connection>();
   readonly #callables: ReadonlyMap<string, CallableInvoker>;
   readonly #sessions = new Map<string, CapnWebSession>();
+  readonly #logs = new Map<
+    string,
+    Pick<EventLog, "subscribe" | "unsubscribe" | "dispose">
+  >();
   #manager: ConnectionManager | undefined;
 
   constructor(options: WebSocketsOptions = {}) {
@@ -199,6 +285,11 @@ export class WebSockets extends LifecycleCapability {
     message: WebSocketMessage
   ): Promise<boolean> {
     if (!isManagedWebSocket(ws)) return false;
+    // A socket the host closed runs no more client messages. This covers
+    // a client that `onConnect` rejected: the close happens before the
+    // client has the upgrade response, so all it sends arrives after.
+    // Consumed, so no later capability sees the message either.
+    if (isClosedByHost(ws)) return true;
     await this.#message(createConnection(ws), message);
     return true;
   }
@@ -232,6 +323,7 @@ export class WebSockets extends LifecycleCapability {
    * them down.
    */
   dispose(): void {
+    for (const log of this.#logs.values()) log.dispose();
     for (const connection of this.getConnections()) {
       try {
         connection.close(1001, "Durable Object destroyed");
@@ -248,6 +340,57 @@ export class WebSockets extends LifecycleCapability {
    */
   use(handlers: WebSocketHandlers): void {
     this.#added.push(handlers);
+  }
+
+  // ── Event logs ─────────────────────────────────────────────────────────
+
+  static {
+    setLogConnectionsOn = (webSockets, connections) => {
+      webSockets.#logConnections = connections;
+    };
+    applyLogFrameOn = (webSockets, connection, frame) => {
+      if (webSockets.#logs.size === 0) return false;
+      const logFrame = parseEventLogClientFrame(frame);
+      if (!logFrame) return false;
+      webSockets.#logFrame(connection, logFrame);
+      return true;
+    };
+    declareEventLogOn = <T, S>(
+      webSockets: WebSockets,
+      name: string,
+      options: EventLogOptions<S>
+    ): EventLog<T, S> => {
+      const log = new EventLog<T, S>(name, options, {
+        connections: () =>
+          webSockets.#logConnections?.() ?? webSockets.getConnections()
+      });
+      if (webSockets.#logs.has(log.name)) {
+        throw new Error(`Event log "${log.name}" is already declared`);
+      }
+      webSockets.#logs.set(log.name, log);
+      return log;
+    };
+  }
+
+  /** Answer a subscribe or unsubscribe frame from a client. */
+  #logFrame(connection: Connection, frame: EventLogClientFrame): void {
+    const log = this.#logs.get(frame.log);
+    if (!log) {
+      if (frame.type === EVENT_LOG_SUBSCRIBE) {
+        this.#sendFrame(connection, {
+          type: EVENT_LOG_ERROR,
+          log: frame.log,
+          error: `No event log named "${frame.log}"`,
+          ...(frame.id !== undefined && { id: frame.id })
+        });
+      }
+      return;
+    }
+    if (frame.type === EVENT_LOG_SUBSCRIBE) {
+      log.subscribe(connection, frame.cursor, frame.id);
+    } else {
+      log.unsubscribe(connection);
+    }
   }
 
   // ── Connections ────────────────────────────────────────────────────────
@@ -313,6 +456,25 @@ export class WebSockets extends LifecycleCapability {
     connection: Connection,
     message: WebSocketMessage
   ): Promise<void> {
+    if (
+      this.#logs.size > 0 &&
+      this.#protocol !== false &&
+      typeof message === "string" &&
+      // Skip the second JSON parse for every other frame (chat messages
+      // can be megabytes).
+      message.includes("cf_agent_log_")
+    ) {
+      const frame = parseEventLogClientFrame(parseJson(message));
+      if (frame) {
+        // Host context, so `snapshot` and `canSubscribe` see the
+        // connection. The answer itself runs synchronously inside.
+        await this.lifecycle.runInHostContext(
+          () => this.#logFrame(connection, frame),
+          { connection }
+        );
+        return;
+      }
+    }
     if (
       this.#state &&
       this.#protocol !== false &&
@@ -679,6 +841,8 @@ export class WebSockets extends LifecycleCapability {
       return true;
     }
 
+    /** The call's terminal frame went out; nothing more may follow. */
+    let ended = false;
     try {
       const result = await this.#dispatchCallable(
         method,
@@ -694,14 +858,22 @@ export class WebSockets extends LifecycleCapability {
       }
       if (result instanceof ReadableStream) {
         for await (const chunk of result) {
-          this.#reply(connection, {
+          const sent = this.#reply(connection, {
             type: "rpc",
             id,
             success: true,
             done: false,
             result: chunk
           });
+          // The chunk was answered with the call's terminal error: leaving
+          // the loop cancels the stream, and no final frame follows, even
+          // if the cancel itself fails.
+          if (!sent) {
+            ended = true;
+            break;
+          }
         }
+        if (ended) return true;
         this.#reply(connection, {
           type: "rpc",
           id,
@@ -719,6 +891,7 @@ export class WebSockets extends LifecycleCapability {
         });
       }
     } catch (error) {
+      if (ended) return true;
       this.#reply(connection, {
         type: "rpc",
         id,
@@ -729,10 +902,12 @@ export class WebSockets extends LifecycleCapability {
     return true;
   }
 
-  #reply(connection: Connection, response: RpcResponse): void {
+  /** Returns false when the frame was replaced by the call's terminal error. */
+  #reply(connection: Connection, response: RpcResponse): boolean {
     let text: string;
+    let replaced = false;
     try {
-      text = JSON.stringify(response);
+      ({ text, replaced } = serializeRpcResponse(response));
     } catch (error) {
       // A result that JSON cannot carry (a BigInt, a cycle) must still
       // settle the caller: answer with an error instead of silence.
@@ -744,8 +919,10 @@ export class WebSockets extends LifecycleCapability {
           error instanceof Error ? error.message : String(error)
         }`
       } satisfies RpcResponse);
+      replaced = true;
     }
     this.#send(connection, text);
+    return !replaced;
   }
 
   async #dispatchCallable(

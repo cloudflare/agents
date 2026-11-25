@@ -27,7 +27,7 @@ export type {
   TaskReceipt,
   TaskRunOptions,
   TaskRunSnapshot,
-  TaskRunState,
+  TaskStatus,
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,

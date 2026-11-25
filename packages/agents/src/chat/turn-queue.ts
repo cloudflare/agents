@@ -1,6 +1,10 @@
 /**
  * TurnQueue — serial async queue with generation-based invalidation.
  *
+ * Kept for released `@cloudflare/ai-chat` (0.12) and `@cloudflare/think`
+ * (0.24), which import it from `agents/chat`; this release's hosts queue
+ * their turns on the chat lane (`turn-lane.ts`).
+ *
  * Serializes async work via a promise chain, tracks which request is
  * currently active, and lets callers invalidate all queued work by
  * advancing a generation counter.
@@ -28,6 +32,7 @@ export class TurnQueue {
   private _queue: Promise<void> = Promise.resolve();
   private _generation = 0;
   private _activeRequestId: string | null = null;
+  private _activeGeneration: number | null = null;
   private _countsByGeneration = new Map<number, number>();
 
   get generation(): number {
@@ -36,6 +41,15 @@ export class TurnQueue {
 
   get activeRequestId(): string | null {
     return this._activeRequestId;
+  }
+
+  /**
+   * The generation the active turn was admitted under, or `null` when no turn
+   * is active. A turn whose generation is older than {@link generation} was
+   * invalidated by a {@link reset} while it ran.
+   */
+  get activeGeneration(): number | null {
+    return this._activeGeneration;
   }
 
   get isActive(): boolean {
@@ -69,11 +83,13 @@ export class TurnQueue {
     }
 
     this._activeRequestId = requestId;
+    this._activeGeneration = capturedGeneration;
     try {
       const value = await fn();
       return { status: "completed", value };
     } finally {
       this._activeRequestId = null;
+      this._activeGeneration = null;
       this._decrementCount(capturedGeneration);
       releaseTurn();
     }

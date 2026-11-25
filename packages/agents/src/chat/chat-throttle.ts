@@ -32,7 +32,7 @@
  */
 export const DEFAULT_CHAT_THROTTLE_MS = 50;
 
-export type ChatThrottleOptions = {
+type ChatThrottleOptions = {
   /**
    * Milliseconds to coalesce chat updates, or `false` to render every chunk.
    */

@@ -170,7 +170,7 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
  * reach it.
  *
  * @deprecated Code execution is moving to the Workspace: give it a
- * JavaScript backend with a `ws:tools` module
+ * codemode backend with a `codemode:tools` module
  * (`createToolBindings(forAISDKTools(() => this.getTools()))` from
  * `@cloudflare/computer`), so code the model runs with `exec` imports the
  * agent's tools and reads files through `node:fs`.
@@ -381,7 +381,7 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  * (approvals, audit, snippets) and the connector set.
  *
  * @deprecated Code execution is moving to the Workspace: give it a
- * JavaScript backend with a `ws:tools` module
+ * codemode backend with a `codemode:tools` module
  * (`createToolBindings(forAISDKTools(() => this.getTools()))` from
  * `@cloudflare/computer`), so code the model runs with `exec` imports the
  * agent's tools and reads files through `node:fs`.

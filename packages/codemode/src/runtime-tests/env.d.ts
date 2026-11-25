@@ -1,4 +1,4 @@
-/// <reference types="@cloudflare/vitest-pool-workers/types" />
+/// <reference types="@cloudflare/vitest-plugin/types" />
 
 // Makes the `cloudflare:test` module (evictDurableObject, evictAllDurableObjects,
 // etc.) resolvable to TypeScript for the runtime-tests project. Mirrors

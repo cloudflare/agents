@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName, getSubAgentByName } from "agents";
 import { ThinkTestAgent } from "./agents/think-session";
 
@@ -307,6 +307,46 @@ describe("Think — unacknowledged resume offers", () => {
       }
     }
   );
+});
+
+describe("Think — message lists inside a facet", () => {
+  it("sends the list on connect and after a turn to a sub-agent's socket", async () => {
+    const parentRoom = crypto.randomUUID();
+    const childRoom = crypto.randomUUID();
+    const parent = await freshAgent(parentRoom);
+    const { ws } = await connectSubAgentWS(parentRoom, childRoom);
+    try {
+      const onConnect = await collectMessages(ws);
+      expect(onConnect).toContainEqual(
+        expect.objectContaining({ type: MSG_CHAT_MESSAGES, connect: true })
+      );
+
+      const child = await getSubAgentByName(parent, ThinkTestAgent, childRoom);
+      const lists: Array<Array<{ role: string }>> = [];
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const frame = JSON.parse(event.data as string) as {
+          type?: string;
+          messages?: Array<{ role: string }>;
+        };
+        if (frame.type === MSG_CHAT_MESSAGES && frame.messages) {
+          lists.push(frame.messages);
+        }
+      });
+      const result = await child.testChat("hello from the facet");
+      expect(result.done).toBe(true);
+      // Forwarding to a facet's sockets is not awaited by the broadcast.
+      await vi.waitFor(
+        () =>
+          expect(lists.at(-1)?.map((message) => message.role)).toEqual([
+            "user",
+            "assistant"
+          ]),
+        { timeout: 5000 }
+      );
+    } finally {
+      await closeWS(ws);
+    }
+  });
 });
 
 describe("Think — sub-agent stream frame ordering", () => {

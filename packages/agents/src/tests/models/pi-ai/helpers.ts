@@ -245,7 +245,7 @@ function cfChunk(
     choices: [{ delta, finish_reason: null, index: 0, logprobs: null }],
     created: 1788432944,
     id: "chatcmpl-976ebec0943daf97",
-    model: "@cf/zai-org/glm-4.7-flash",
+    model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
     object: "chat.completion.chunk",
     usage: {
       completion_tokens: 1,
@@ -258,9 +258,10 @@ function cfChunk(
 }
 
 /**
- * The live `@cf/zai-org/glm-4.7-flash` stream shape: reasoning deltas, text
- * deltas, a finish_reason on the last delta, a `choices: []` heartbeat, the
- * native `{ response: "", usage }` tail, then `[DONE]`.
+ * The live Workers AI compat stream shape (captured on glm-4.7-flash):
+ * reasoning deltas, text deltas, a finish_reason on the last delta, a
+ * `choices: []` heartbeat, the native `{ response: "", usage }` tail, then
+ * `[DONE]`.
  */
 export function workersAITextStream(): string[] {
   return [
@@ -278,14 +279,14 @@ export function workersAITextStream(): string[] {
         }
       ],
       id: "chatcmpl-976ebec0943daf97",
-      model: "@cf/zai-org/glm-4.7-flash",
+      model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
       object: "chat.completion.chunk",
       usage: { completion_tokens: 1, prompt_tokens: 0, total_tokens: 1 }
     }),
     JSON.stringify({
       choices: [],
       id: "chatcmpl-976ebec0943daf97",
-      model: "@cf/zai-org/glm-4.7-flash",
+      model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
       object: "chat.completion.chunk",
       usage: { completion_tokens: 0, prompt_tokens: 0, total_tokens: 0 }
     }),
@@ -328,7 +329,7 @@ export function workersAIToolStream(): string[] {
         }
       ],
       id: "chatcmpl-8a89690ae79d2cd2",
-      model: "@cf/zai-org/glm-4.7-flash",
+      model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
       object: "chat.completion.chunk"
     }),
     JSON.stringify({
@@ -361,7 +362,7 @@ export function workersAIToolJson(): Record<string, unknown> {
       }
     ],
     id: "chatcmpl-1",
-    model: "@cf/zai-org/glm-4.7-flash",
+    model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
     object: "chat.completion",
     usage: { completion_tokens: 20, prompt_tokens: 100, total_tokens: 120 }
   };

@@ -162,7 +162,11 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
     recoveredSnapshots: unknown[];
   } {
     const rows = this.sql<{ id: string; snapshot: string | null }>`
-      SELECT id, snapshot FROM cf_agents_runs
+      SELECT r.run_id AS id, r.checkpoint -> '$.snapshot' AS snapshot
+      FROM cf_agents_task_runs r
+      WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND (r.status = 'running'
+          OR (r.status = 'pending' AND coalesce(r.wait_reason, '') != 'park'))
     `;
     return {
       hasRunningFibers: rows.length > 0,
@@ -191,7 +195,10 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
     fiber: FiberInspection | null;
   }> {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND (status = 'running'
+          OR (status = 'pending' AND coalesce(wait_reason, '') != 'park'))
     `;
     return {
       runCount: rows[0]?.count ?? 0,
@@ -203,7 +210,12 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
   @callable()
   getRunningFiberSnapshot(): unknown {
     const rows = this.sql<{ snapshot: string | null }>`
-      SELECT snapshot FROM cf_agents_runs LIMIT 1
+      SELECT r.checkpoint -> '$.snapshot' AS snapshot
+      FROM cf_agents_task_runs r
+      WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND r.status = 'running'
+        AND r.checkpoint -> '$.snapshot' IS NOT NULL
+      LIMIT 1
     `;
     if (rows.length === 0) return null;
     return rows[0].snapshot ? JSON.parse(rows[0].snapshot) : null;
@@ -278,7 +290,11 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
     recoveredSnapshots: unknown[];
   } {
     const rows = this.sql<{ id: string; snapshot: string | null }>`
-      SELECT id, snapshot FROM cf_agents_runs
+      SELECT r.run_id AS id, r.checkpoint -> '$.snapshot' AS snapshot
+      FROM cf_agents_task_runs r
+      WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND (r.status = 'running'
+          OR (r.status = 'pending' AND coalesce(r.wait_reason, '') != 'park'))
     `;
     return {
       hasRunningFibers: rows.length > 0,
@@ -304,7 +320,10 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
     fiber: FiberInspection | null;
   }> {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND (status = 'running'
+          OR (status = 'pending' AND coalesce(wait_reason, '') != 'park'))
     `;
     return {
       runCount: rows[0]?.count ?? 0,
@@ -315,7 +334,12 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
 
   getRunningFiberSnapshot(): unknown {
     const rows = this.sql<{ snapshot: string | null }>`
-      SELECT snapshot FROM cf_agents_runs LIMIT 1
+      SELECT r.checkpoint -> '$.snapshot' AS snapshot
+      FROM cf_agents_task_runs r
+      WHERE r.definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND r.status = 'running'
+        AND r.checkpoint -> '$.snapshot' IS NOT NULL
+      LIMIT 1
     `;
     if (rows.length === 0) return null;
     return rows[0].snapshot ? JSON.parse(rows[0].snapshot) : null;
@@ -439,7 +463,10 @@ abstract class RecoveryRecorderAgent extends Agent<Record<string, unknown>> {
 
   protected _runRowCount(): number {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_runs
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND (status = 'running'
+          OR (status = 'pending' AND coalesce(wait_reason, '') != 'park'))
     `;
     return rows[0]?.count ?? 0;
   }
@@ -483,7 +510,7 @@ abstract class RecoveryRecorderAgent extends Agent<Record<string, unknown>> {
 // ── PoisonRowAgent (test 1: poison-row aging → max_age_exceeded) ───────
 //
 // An unmanaged fiber whose recovery hook ALWAYS throws. The orphaned
-// `cf_agents_runs` row is retained for retry across alarm passes until it
+// fiber run is retained for retry across alarm passes until it
 // exceeds `fiberRecoveryMaxAgeMs`, at which point it is dropped and a
 // `max_age_exceeded` skip is emitted.
 
@@ -869,12 +896,12 @@ export class TaskKillTestAgent extends Agent<Record<string, unknown>> {
   @callable()
   async getRunState(
     runId: string
-  ): Promise<{ state: string; result: unknown } | null> {
+  ): Promise<{ status: string; result: unknown } | null> {
     const snapshot = await this.tasks.get(runId);
     if (!snapshot) return null;
     return {
-      state: snapshot.state,
-      result: snapshot.state === "completed" ? snapshot.result : null
+      status: snapshot.status,
+      result: snapshot.status === "completed" ? snapshot.result : null
     };
   }
 
@@ -973,12 +1000,12 @@ export class StreamKillTestAgent extends Agent<Record<string, unknown>> {
   @callable()
   async getRunState(
     runId: string
-  ): Promise<{ state: string; result: unknown } | null> {
+  ): Promise<{ status: string; result: unknown } | null> {
     const snapshot = await this.tasks.get(runId);
     if (!snapshot) return null;
     return {
-      state: snapshot.state,
-      result: snapshot.state === "completed" ? snapshot.result : null
+      status: snapshot.status,
+      result: snapshot.status === "completed" ? snapshot.result : null
     };
   }
 
@@ -1164,5 +1191,60 @@ export class CutoverKillAgent extends Agent<Record<string, unknown>> {
       blocks,
       messageRows
     };
+  }
+}
+
+// ── AbortingRecoveryHookAgent (a recovery hook that kills the isolate) ───
+//
+// A managed fiber aborts the isolate mid-body; its recovery hook aborts it
+// again before any I/O. The scan must commit the `interrupted` mark before
+// it runs the hook, or the reset rolls the mark back and every startup runs
+// the hook again, so the agent never serves another request.
+
+export class AbortingRecoveryHookAgent extends Agent<Record<string, unknown>> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  override async onFiberRecovered(ctx: RunFiberRecoveryContext): Promise<void> {
+    if (ctx.name !== "aborting-hook" && ctx.name !== "aborting-plain") return;
+    // No storage writes here: the scan's own commit is what is under test.
+    // The log line is how the test counts runs; it survives the reset.
+    console.log("[aborting-hook] ran");
+    this.ctx.abort("recovery hook aborts");
+  }
+
+  @callable()
+  async startAbortingFiber(): Promise<string> {
+    const result = await this.startFiber("aborting-hook", async () => {
+      await fiberSleep(300);
+      this.ctx.abort("fiber body aborts");
+    });
+    return result.fiberId;
+  }
+
+  @callable()
+  startAbortingPlainFiber(): string {
+    void this.runFiber("aborting-plain", async () => {
+      await fiberSleep(300);
+      this.ctx.abort("fiber body aborts");
+    }).catch(() => {});
+    return "started";
+  }
+
+  @callable()
+  runRowCount(): number {
+    return (
+      this.sql<{
+        count: number;
+      }>`SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND (status = 'running'
+          OR (status = 'pending' AND coalesce(wait_reason, '') != 'park'))`[0]
+        ?.count ?? 0
+    );
+  }
+
+  @callable()
+  async fiberStatus(fiberId: string): Promise<string | null> {
+    return (await this.inspectFiber(fiberId))?.status ?? null;
   }
 }

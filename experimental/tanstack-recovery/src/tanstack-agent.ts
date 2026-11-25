@@ -70,8 +70,6 @@ import {
   type ChatRecoveryOptions,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
-  type ClassifyRecoveredTurnInput,
-  type DispatchRecoveredTurnInput,
   type RecoveryPartial,
   type ResolvedRecoveryStream,
   type ResumeHandshakeHost,
@@ -105,9 +103,6 @@ interface RecoverySummary {
   /** Chars of the survived partial prefix (0 on a regenerate). */
   prefixChars: number;
 }
-
-/** No classification detail needed — `recoveryKind` captures continue vs retry. */
-type TanStackClassify = undefined;
 
 const RECOVERING_MESSAGE_TYPE = CHAT_MESSAGE_TYPES.CHAT_RECOVERING;
 const RECOVERY_SUMMARY_KEY = "tanstack:recovery:summary";
@@ -151,7 +146,10 @@ function replyFor(userText: string): string {
 }
 
 export class TanStackAgent extends Agent<Env> {
-  static readonly FIBER_PREFIX = "__cf_internal_tanstack_turn:";
+  // Agent exempts `${CHAT_FIBER_NAME}:<id>` fibers from its recovery crash
+  // budget: the chat engine keeps its own.
+  static readonly CHAT_FIBER_NAME = "__cf_internal_tanstack_turn";
+  static readonly FIBER_PREFIX = `${TanStackAgent.CHAT_FIBER_NAME}:`;
   static readonly SNAPSHOT_KEY = "__cfTanStackFiberSnapshot";
 
   // Recovery is keyed off the live config; assigned as a class field (NOT in
@@ -578,7 +576,10 @@ export class TanStackAgent extends Agent<Env> {
             ? tail
             : undefined;
         if (partial) this._continuationTargetId = partial.id;
-        await this._runTurn(crypto.randomUUID(), true);
+        await this._runTurn(
+          crypto.randomUUID(),
+          this._continuationTargetId !== null
+        );
         await this._engine().updateIncident(incidentId, "completed");
         return;
       }
@@ -612,7 +613,13 @@ export class TanStackAgent extends Agent<Env> {
         this._faux.setNextTurnText(full);
       }
 
-      await this._runTurn(crypto.randomUUID(), true);
+      await this._runTurn(
+        crypto.randomUUID(),
+        // Only a continue of the partial is a continuation. A full
+        // regenerate answers the question again, so a reset during it
+        // retries the question rather than continuing nothing.
+        this._continuationTargetId !== null
+      );
       await this._engine().updateIncident(incidentId, "completed");
     } catch (error) {
       this._continuationTargetId = null;
@@ -735,32 +742,34 @@ export class TanStackAgent extends Agent<Env> {
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    return this._engine().handleChatFiberRecovery<TanStackClassify>(
-      ctx,
+    if (!ctx.name.startsWith(TanStackAgent.FIBER_PREFIX)) return false;
+    const { snapshot, user } = unwrapChatFiberSnapshot(
+      TanStackAgent.SNAPSHOT_KEY,
+      ctx.snapshot,
+      "tanstack-turn"
+    );
+    await this._engine().recoverInterruptedTurn(
+      {
+        requestId: ctx.name.slice(TanStackAgent.FIBER_PREFIX.length),
+        snapshot,
+        recoveryData: user,
+        createdAt: ctx.createdAt
+      },
       this._wakeHooks()
     );
+    return true;
   }
 
-  private _wakeHooks(): ChatFiberWakeHooks<TanStackClassify> {
+  private _wakeHooks(): ChatFiberWakeHooks {
     return {
-      chatFiberPrefix: () => TanStackAgent.FIBER_PREFIX,
-      unwrapRecoverySnapshot: (ctx) => {
-        const { snapshot, user } = unwrapChatFiberSnapshot(
-          TanStackAgent.SNAPSHOT_KEY,
-          ctx.snapshot,
-          "tanstack-turn"
-        );
-        return { snapshot, recoveryData: user };
+      // The engine plans the turn from the latest stored message: a persisted
+      // partial is the leaf and is continued (regenerate only the suffix and
+      // merge); with no partial the question is the leaf and is answered again.
+      latestMessage: () => {
+        const entry = this._transcript.at(-1);
+        return entry && { id: entry.id, role: entry.role };
       },
-      classifyRecoveredTurn: (input: ClassifyRecoveredTurnInput) => {
-        // A surviving partial drives a `continue`; an empty partial (crash
-        // before the first delta flushed) falls back to a `retry`.
-        const recoveryKind =
-          input.partial.text.length > 0
-            ? ("continue" as const)
-            : ("retry" as const);
-        return { recoveryKind, detail: undefined };
-      },
+      partialHoldsContent: (partial) => partial.text.length > 0,
       invokeOnChatRecovery: async (): Promise<ChatRecoveryOptions> => {
         // The user-configurable `onChatRecovery` policy. A `{ persist: false }`
         // return would normally DROP the orphaned partial — but the engine's
@@ -777,22 +786,6 @@ export class TanStackAgent extends Agent<Env> {
       },
       completeRecoveredStream: (streamId) => {
         this._resumableStream.complete(streamId);
-      },
-      dispatchRecoveredTurn: async (
-        input: DispatchRecoveredTurnInput<TanStackClassify>
-      ) => {
-        const continueFromPartial = input.recoveryKind === "continue";
-        await this._engine().scheduleRecovery({
-          incident: input.incident,
-          recoveryKind: input.recoveryKind,
-          callback: continueFromPartial
-            ? "_chatRecoveryContinue"
-            : "_chatRecoveryRetry",
-          data: {
-            originalRequestId: input.recoveryRootRequestId,
-            incidentId: input.incident.incidentId
-          }
-        });
       }
     };
   }
@@ -926,7 +919,9 @@ export class TanStackAgent extends Agent<Env> {
     bufferedChars: number;
   }> {
     const fiberRows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT COUNT(*) as count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park'
     `;
     // Chars currently reconstructable from the ACTIVE stream buffer — lets the
     // real-provider e2e wait until content has actually streamed (past the

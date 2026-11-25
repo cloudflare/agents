@@ -1,3 +1,4 @@
+import { ROW_VALUE_BYTES } from "agents/chat";
 import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
@@ -73,7 +74,7 @@ describe("GET /get-messages endpoint", () => {
 
     // One row large enough that Sessions offloads its payload, so the
     // streamed response has to reconstruct across batch boundaries.
-    const hugeOutput = "Q".repeat(1_900_000);
+    const hugeOutput = "Q".repeat(ROW_VALUE_BYTES + 100_000);
     const messages: ChatMessage[] = [
       {
         id: "stream-get-1",

@@ -1,5 +1,6 @@
 import { LifecycleCapability } from "../lifecycle/capability";
 import type { Connection } from "../lifecycle/durable-object-lifecycle";
+import { SqlError } from "../sql-error";
 
 /**
  * Source of a state change: `"server"` for host code (e.g. `setState()`), or
@@ -84,25 +85,23 @@ export class State<T = unknown> extends LifecycleCapability {
   // ── Lifecycle capability hooks ─────────────────────────────────────────────
 
   /** Initialize state storage during Lifecycle startup. */
-  async onStart(): Promise<void> {
-    const version =
-      (await this.lifecycle.storage.get<number>(STATE_SCHEMA_VERSION_KEY)) ?? 0;
-    if (version >= CURRENT_STATE_SCHEMA_VERSION) {
-      this.#tableEnsured = true;
-      return;
-    }
-
-    // v1: own the table and clear the legacy wasChanged row left behind by
-    // pre-optimization SDKs (state itself lives in STATE_ROW_ID).
-    this.#ensureTable();
-    this.lifecycle.storage.sql.exec(
-      "DELETE FROM cf_agents_state WHERE id = ?",
-      LEGACY_WAS_CHANGED_ROW_ID
-    );
-    await this.lifecycle.storage.put(
-      STATE_SCHEMA_VERSION_KEY,
-      CURRENT_STATE_SCHEMA_VERSION
-    );
+  onStart(): void {
+    this.lifecycle.schema.migrateSync({
+      version: CURRENT_STATE_SCHEMA_VERSION,
+      legacyKey: STATE_SCHEMA_VERSION_KEY,
+      steps: {
+        // v1: own the table and clear the legacy wasChanged row left behind
+        // by pre-optimization SDKs (state itself lives in STATE_ROW_ID).
+        1: () => {
+          this.#ensureTable();
+          this.lifecycle.storage.sql.exec(
+            "DELETE FROM cf_agents_state WHERE id = ?",
+            LEGACY_WAS_CHANGED_ROW_ID
+          );
+        }
+      }
+    });
+    this.#tableEnsured = true;
   }
 
   #ensureTable(): void {
@@ -198,11 +197,19 @@ export class State<T = unknown> extends LifecycleCapability {
     // write must not be served by later get() calls. Row existence in
     // cf_agents_state is the signal that state was set.
     const serialized = JSON.stringify(nextState);
-    this.lifecycle.storage.sql.exec(
-      "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES (?, ?)",
-      STATE_ROW_ID,
-      serialized
-    );
+    const write =
+      "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES (?, ?)";
+    try {
+      this.lifecycle.storage.sql.exec(write, STATE_ROW_ID, serialized);
+    } catch (error) {
+      // A state larger than one row fails with SQLITE_TOOBIG: SqlError says
+      // which limit that is. Anything else is rethrown as it is, so flags
+      // such as `retryable` and `overloaded` stay on the error.
+      if (error instanceof Error && error.message.includes("SQLITE_TOOBIG")) {
+        throw new SqlError(write, error);
+      }
+      throw error;
+    }
     this.#state = nextState;
 
     let pending: void | Promise<void>;

@@ -57,7 +57,8 @@ time without storing work in Scheduler or depending on it.
 Scheduler's primary API is small: callbacks are registered by name in the
 constructor, `set()` and `every()` create schedules typed against that
 registration, and `get()`, `list()`, and `cancel()` manage them. All of these
-are asynchronous and work inside routed sub-agents.
+are asynchronous. Inside a sub-agent, schedules are stored in the sub-agent
+itself and run there; the top-level parent's alarm wakes it.
 
 Scheduler Lifecycle hooks run without ambient host context. Registered
 callbacks are user code, so they run inside the host invocation context with
@@ -380,11 +381,11 @@ This is the recommended approach since you cannot forget to dispose the heartbea
 
 ### How it works
 
-`keepAlive()` uses an in-memory reference count. Each call increments the count; the disposer decrements it. While the count is above zero, Agent contributes a wake time every 30 seconds to Lifecycle. No schedule rows are created and no observability events are emitted, so the heartbeat is invisible to `listSchedules()` and the scheduling diagnostics channel.
+`keepAlive()` opens a hold, and the disposer closes it. Holds live in memory. While at least one is open, the agent keeps one Lifecycle job due every `keepAliveIntervalMs` (30 seconds by default), so an alarm fires and the object stays active; the last release cancels the job. No schedule rows are created and no observability events are emitted, so the heartbeat is invisible to `listSchedules()` and the scheduling diagnostics channel. An eviction drops the holds along with the work they protected.
 
 The heartbeat does not conflict with scheduled work. Lifecycle selects one physical alarm from both contributions.
 
-Inside sub-agents, `keepAlive()` delegates that heartbeat ref to the top-level parent because facets do not have independent alarm slots. `keepAliveWhile()` works the same way because it calls `keepAlive()` and automatically disposes the delegated ref when the scoped work completes.
+Inside sub-agents, `keepAlive()` works the same way: the heartbeat is stored in the sub-agent, and the top-level parent's alarm wakes it, which keeps the whole tree awake. `keepAliveWhile()` works the same way because it calls `keepAlive()`.
 
 ### Multiple concurrent callers
 
@@ -482,7 +483,7 @@ if (cancelled) {
 }
 ```
 
-`cancelSchedule(id)` only matches schedules owned by the agent it is called on. A top-level agent cannot cancel a sub-agent's schedules by id, and a sub-agent cannot reach a sibling's schedules. To clear every schedule under a sub-agent (and any of its descendants), call `parent.deleteSubAgent(Cls, name)` from the parent — that bulk-cancels the prefix and tears the sub-agent down.
+`cancelSchedule(id)` only matches schedules owned by the agent it is called on. A top-level agent cannot cancel a sub-agent's schedules by id, and a sub-agent cannot reach a sibling's schedules. To clear every schedule under a sub-agent (and any of its descendants), call `parent.deleteSubAgent(Cls, name)` from the parent: the sub-agent's schedules are stored in the sub-agent, so they go with it.
 
 **Example: Cancellable reminders**
 
@@ -1001,7 +1002,7 @@ Get scheduled tasks matching the criteria. This method works in both top-level a
 getSchedule<T = string>(id: string): Schedule<T> | undefined
 ```
 
-Deprecated. Get a scheduled task by ID synchronously. This method only works in top-level agents; use `await this.getScheduleById(id)` instead.
+Deprecated. Get a scheduled task by ID synchronously. Use `await this.getScheduleById(id)` instead.
 
 #### getSchedules()
 
@@ -1013,7 +1014,7 @@ getSchedules<T = string>(criteria?: {
 }): Schedule<T>[]
 ```
 
-Deprecated. Get scheduled tasks matching the criteria synchronously. This method only works in top-level agents; use `await this.listSchedules(criteria)` instead.
+Deprecated. Get scheduled tasks matching the criteria synchronously. Use `await this.listSchedules(criteria)` instead.
 
 #### cancelSchedule()
 

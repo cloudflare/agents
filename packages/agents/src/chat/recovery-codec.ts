@@ -161,5 +161,79 @@ export class AISDKRecoveryCodec implements ChatRecoveryCodec {
   }
 }
 
+/**
+ * Whether a stream chunk must reach storage at once, not with the next
+ * packed segment.
+ *
+ * - A settled tool result (`tool-output-available`, `-error`, `-denied`)
+ *   records a finished side effect or a user's denial. Lost to an eviction,
+ *   recovery would run the tool a second time.
+ * - `tool-input-available` is the call itself, written just before the tool
+ *   runs. A tool can run for a long time with no further chunk, and lost to
+ *   an eviction the transcript would hold no trace that a call was made and
+ *   may have had side effects. Stored, recovery settles it as an error that
+ *   says so.
+ * - `tool-approval-request` waits for a user. The reply is stored when its
+ *   stream ends, so until then this chunk is the only record that the
+ *   approval was asked for.
+ * - `steering-message` is a user's message added to the running turn (AI SDK
+ *   steering). Clients see it at once; lost to an eviction, the user's words
+ *   would be missing from the recovered transcript.
+ *
+ * Both chat hosts ask this for every chunk they store.
+ */
+export function chunkMustBeStoredNow(type: string | undefined): boolean {
+  return (
+    type === "tool-input-available" ||
+    type === "tool-approval-request" ||
+    type === "tool-output-available" ||
+    type === "tool-output-error" ||
+    type === "tool-output-denied" ||
+    type === "steering-message"
+  );
+}
+
+/** Stream chunks that frame a reply and carry nothing of it. */
+const FRAMING_CHUNK_TYPES = new Set([
+  "start",
+  "start-step",
+  "finish-step",
+  "finish",
+  "error",
+  "abort",
+  "message-metadata"
+]);
+
+/**
+ * Whether a stream chunk carries part of the reply: text, reasoning, a tool
+ * call or its result, a file, a source or data. A provider that fails sends
+ * only framing chunks and an `error`, so this is the first point where a
+ * model call is known to have returned a reply.
+ */
+export function chunkCarriesContent(type: string | undefined): boolean {
+  return type !== undefined && !FRAMING_CHUNK_TYPES.has(type);
+}
+
+/**
+ * Run `take` once, before the first chunk that carries content
+ * ({@link chunkCarriesContent}). A turn that continues the latest reply
+ * takes it over from a scheduled recovery there, so a turn whose provider
+ * fails in the stream leaves the recovery in place.
+ *
+ * @returns A gate to call with each chunk's type. It returns a promise to
+ *   await for the chunk that runs `take`, and `undefined` otherwise.
+ */
+export function takeAtFirstContent(
+  take: (() => Promise<void>) | undefined
+): (type: string | undefined) => Promise<void> | undefined {
+  let pending = take;
+  return (type) => {
+    if (!pending || !chunkCarriesContent(type)) return undefined;
+    const run = pending;
+    pending = undefined;
+    return run();
+  };
+}
+
 /** Shared stateless {@link AISDKRecoveryCodec} instance. */
 export const aiSdkRecoveryCodec = new AISDKRecoveryCodec();

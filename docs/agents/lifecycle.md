@@ -93,6 +93,57 @@ A warm object skips startup but still offers every request to its middleware.
 There is no `next()` today: a capability either handles a request or declines
 it, and cannot wrap or observe a downstream response.
 
+## Failed requests
+
+When startup, a capability's request or upgrade hook, or `onRequest` throws,
+the lifecycle logs the error with `console.error` and sends a response that
+does not include it:
+
+- an HTTP request gets `500 Internal Server Error`;
+- a WebSocket upgrade gets a socket that closes at once with code `1011`.
+
+An error's message and stack can reveal internals, such as secret names or
+file paths, to callers who are not authenticated. To send something else,
+implement `onFetchError`. It runs after the error is logged, with the request
+and the thrown value:
+
+```ts
+export class MyObject extends DurableObject<Env> {
+  readonly lifecycle = Lifecycle.install(this);
+
+  onFetchError(request: Request, error: unknown): Response | undefined {
+    // Show details only in local development.
+    if (this.env.ENVIRONMENT !== "development") return;
+    const detail = error instanceof Error ? error.stack : String(error);
+    return new Response(detail, { status: 500 });
+  }
+}
+```
+
+Return nothing to send the default response. If `onFetchError` throws, the
+lifecycle logs that error and also sends the default. In both cases, if the
+original thrown value is not an `Error`, the lifecycle rethrows it to the
+runtime instead. `error` is whatever was thrown, so narrow it before you read
+it. `request` may already have had its body read.
+
+For a WebSocket upgrade, return either an HTTP error response or a `101`
+response with your own socket:
+
+```ts
+onFetchError(request: Request, error: unknown): Response | undefined {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return;
+  const pair = new WebSocketPair();
+  pair[1].accept();
+  pair[1].send(JSON.stringify({ error: "unavailable" }));
+  pair[1].close(1011, "Startup failed");
+  return new Response(null, { status: 101, webSocket: pair[0] });
+}
+```
+
+`onFetchError` runs in the object's context, so `getCurrentAgent()` returns
+the object and the request. After a failed startup, `onStart` has not
+finished, so do not rely on state it sets up.
+
 ## Reusable capabilities
 
 A capability implements only the phases it needs:
@@ -249,6 +300,29 @@ owns dispatch retries: a job's `retry` options bound in-process attempts,
 platform-class failures (a superseded isolate after a deploy, a memory-limit
 reset) preserve the job for a fresh invocation, and a terminal application
 failure reaches the owner's `onJobError()`, whose result decides advancement.
+Another platform-class failure, such as a dropped connection to a stub the job
+called, keeps that job and holds back its owner's due jobs, in their order, for
+30 seconds; other owners' due jobs still run. If the job keeps failing that
+way for 15 minutes, its owner's `onJobError()` receives the error as a terminal
+failure, so one bad item cannot block its owner forever. An owner without
+`onJobError()`, the host included, stays held for as long as the failure lasts:
+its job may be its only wake, so the Lifecycle does not end it.
+
+A job whose owning capability is not installed (removed by a deploy, or not
+constructed this time) is kept as it is and looked at again later, from a
+minute up to an hour apart, and runs once its owner is installed again. A
+capability you remove for good should delete its jobs when it goes, or each
+one keeps waking the object.
+
+An attempt that takes the isolate down (the CPU or wall-time limit, a reset)
+reports no error, so Lifecycle counts each attempt in the job's row before
+`onJob` runs and takes it off again when the attempt ends in a way the driver
+sees. `attempt` in the job context includes those unreported attempts, across
+alarms. After `maxAttempts` of them (at least 3), `onJobError()` receives an
+error named `JobAttemptsExhaustedError` instead of the job running again. An
+owner without `onJobError()` keeps the job, and each further attempt starts
+30 seconds later than the last, doubling up to an hour. A push, `{
+rescheduleAt }` or `"yield"` starts the count again.
 
 A job pushed with `exclusive: true` suppresses ordinary alarm candidates
 while it is pending — Agent's deferred destroy uses this so a condemned
@@ -465,6 +539,11 @@ The client chooses how frames travel:
 Handlers are wire-agnostic. Both kinds of connection dispatch the same
 `onConnect`/`onMessage`/`onClose`/`onError`, appear in `getConnections()`,
 and honour `connection.close(code, reason)`.
+
+Once the host closes a connection, neither wire runs another message or
+callable from it. This holds for frames the client sent before it received
+the Close frame, so a client that `onConnect` rejects cannot run anything.
+Messages the client sent before closing the connection itself still run.
 
 ## Native RPC
 

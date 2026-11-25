@@ -27,6 +27,49 @@ host's `onAlarm`.
 
 Failures stop the phase and propagate. Failed startup remains retryable.
 
+A failure that propagates out of `fetch` (startup, a capability's request or
+upgrade hook, or the host's `onRequest`) ends in one place. Lifecycle logs the
+error, then offers it to the host's optional `onFetchError(request, error)`.
+If the host returns no response, or the hook throws, Lifecycle sends a default
+that never carries the error: `500 Internal Server Error`, or for an upgrade an
+accepted socket closed with 1011. In both cases, an original thrown value
+that is not an `Error` is rethrown to the runtime instead, as before. The
+defaults used to send `err.stack`, which leaked internals to callers who were
+not authenticated ([#2828](https://github.com/cloudflare/agents/issues/2828)).
+
+Choosing that response is a host hook, not a `LifecycleOptions` flag such as
+"expose errors in development". A flag covers one policy, while a hook covers
+every policy (dev-only stacks, error codes, a reporting ID, an upgrade that
+sends one frame before it closes) with no further API. Agent's `onError` was
+not reused: it observes errors from schedules, queues, and sockets as well as
+requests, where no response exists to choose, and capability failures never
+reach it. The hook is named for `fetch`, the entry point it answers, and not
+`onRequestError`: `onRequest` handles only plain HTTP, while this hook also
+answers failed upgrades, `onConnect`, startup, and capability hooks. The name
+keeps upgrades in view: an HTTP response returned from this hook also answers
+a failed WebSocket upgrade, in place of the default 1011 close. Capabilities
+do not get the hook yet. If one needs to shape failure responses, it can join
+the same dispatch the way `onRequest` does: first response wins, then the
+host.
+
+Only `fetch` has a hook that chooses a failure response, because only `fetch`
+has a caller waiting for one. The other entry points have no response to
+choose. A failed alarm rethrows so that the platform retries it, except for a
+memory-limit reset, which the memory-limit circuit breaker handles instead. A
+failed WebSocket message is logged and dropped. A job's final failure goes to
+its capability's `onJobError`, if it has one, which decides the job's outcome;
+otherwise the job completes. A new entry point gets a hook that chooses a
+response only if a caller waits for its result.
+
+A failed Agent request (from `onStart`, `onRequest`, or `onConnect`) passes
+through two hooks: `onError` observes it and can replace it by throwing, then,
+if `onError` returns, the original error continues to `onFetchError`, which
+chooses the response. The intended direction is for `onError` to only observe
+errors, and for an Agent to shape failures in `onFetchError`. That change,
+along with removing the second `onError` call that `AIChatAgent` makes for an
+`onRequest` failure, is separate work, because it changes when existing
+overrides run.
+
 Native Durable Object RPC bypasses Lifecycle handlers, so a plain Lifecycle host
 calls `lifecycle.start()` from any RPC method that needs startup. Concurrent
 `start()` callers share one in-flight startup and all see its result. A call
@@ -34,6 +77,19 @@ made from inside that startup (a capability or `onStart` calling back into the
 host) returns immediately instead of waiting on itself; an async-context marker
 tells those nested calls apart from independent ones. `lifecycle.isStarted()`
 reports whether startup has finished.
+
+## What is a capability
+
+Code is a capability when it needs its own storage (tables, keys), or an alarm
+or scheduled work (it pushes Lifecycle jobs or must be woken). Anything else is
+a plain internal module: functions or a small class that takes what it needs.
+A harness is a capability too, as the unit a host installs
+([rfc-capability-instances.md](./rfc-capability-instances.md)).
+
+A capability has one id, and `Lifecycle.use()` refuses a second capability
+with the same id, so an object has one `Streams`, one `Tasks` and one
+`Sessions` today. [rfc-capability-instances.md](./rfc-capability-instances.md)
+is accepted and changes that; this section will describe it once it is built.
 
 ## Alarm ownership and scheduling
 
@@ -188,6 +244,12 @@ with `DurableObjectState.acceptWebSocket`, stores connection metadata in
 attachments, and reconstructs `Connection` objects after hibernation.
 
 There is no in-memory WebSocket mode.
+
+What the platform does to these sockets, measured on deployed Workers (22 Nov 2026):
+
+- A code deploy keeps them connected, and the new version serves them with the attachments the old one wrote. `ctx.abort()`, a crash or the memory-limit breaker closes all of them (the client sees 1006).
+- Idle sockets are not closed for idleness (30 minutes measured).
+- A message over 33,554,359 bytes (32 MiB less 73, measured) is dropped silently: `send()` returns normally and the peer gets nothing, not even a close. `rpc` responses go through `serializeRpcResponse` (`websockets/frame-limit.ts`), which answers an over-limit result or stream chunk with an error response for the same call, so the caller is not left waiting. That error ends the call: a `StreamingResponse` reports closed and a `ReadableStream` result is cancelled, with no further frame for the call. The check uses `WEBSOCKET_MESSAGE_BYTES` (`internal/platform-limits.ts`), 1 KiB under 32 MiB. Other senders must keep their frames under the limit themselves.
 
 ## Identity
 

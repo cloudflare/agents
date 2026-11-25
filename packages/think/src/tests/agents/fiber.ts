@@ -1,6 +1,27 @@
 import { Think } from "../../think";
 import type { FiberRecoveryContext } from "../../think";
 
+/** The fiber run table of a release before fibers ran on Tasks. */
+function createLegacyFiberTableForTest(storage: DurableObjectStorage): void {
+  // As a release before the one schema record left the Agent: its version
+  // under its own key, so the start's fiber import is still to run.
+  const record = storage.kv.get<Record<string, number>>(
+    "cf_agents:schema_versions"
+  );
+  if (record && " " in record) {
+    delete record[" "];
+    storage.kv.put("cf_agents:schema_versions", record);
+  }
+  storage.kv.put("cf_agents:schema_version", 14);
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS cf_agents_runs (
+      id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, snapshot TEXT,
+      created_at INTEGER NOT NULL, completed_at INTEGER, outcome TEXT,
+      error_message TEXT, recovery_crashes INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+}
+
 type RecoveredFiberInfo = {
   id: string;
   name: string;
@@ -70,7 +91,9 @@ export class ThinkFiberTestAgent extends Think {
 
   async getRunningFiberCount(): Promise<number> {
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
+      SELECT COUNT(*) AS count FROM cf_agents_task_runs
+      WHERE definition IN ('__cf_fiber', '__cf_managed_fiber')
+        AND status IN ('pending', 'running')
     `;
     return rows[0].count;
   }
@@ -80,6 +103,8 @@ export class ThinkFiberTestAgent extends Think {
     snapshot?: unknown
   ): Promise<void> {
     const id = `fiber-${Date.now()}`;
+    createLegacyFiberTableForTest(this.ctx.storage);
+
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
@@ -88,8 +113,8 @@ export class ThinkFiberTestAgent extends Think {
 
   async triggerRecovery(): Promise<void> {
     await (
-      this as unknown as { _checkRunFibers(): Promise<void> }
-    )._checkRunFibers();
+      this as unknown as { _recoverFibers(): Promise<void> }
+    )._recoverFibers();
   }
 
   async waitFor(ms: number): Promise<void> {

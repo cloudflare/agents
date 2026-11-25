@@ -88,6 +88,10 @@
         "name": "ThinkSystemPromptFieldSkillsAgent"
       },
       {
+        "class_name": "ThinkWorkspaceSkillsAgent",
+        "name": "ThinkWorkspaceSkillsAgent"
+      },
+      {
         "class_name": "ThinkMissingClassifierWarningAgent",
         "name": "ThinkMissingClassifierWarningAgent"
       },
@@ -136,6 +140,14 @@
         "name": "ThinkRecoveryTestAgent"
       },
       {
+        "class_name": "ThinkAdmissionTestAgent",
+        "name": "ThinkAdmissionTestAgent"
+      },
+      {
+        "class_name": "ThinkLatestAdmissionTestAgent",
+        "name": "ThinkLatestAdmissionTestAgent"
+      },
+      {
         "class_name": "ThinkNonRecoveryTestAgent",
         "name": "ThinkNonRecoveryTestAgent"
       },
@@ -154,6 +166,10 @@
       {
         "class_name": "ThinkExtensionHookAgent",
         "name": "ThinkExtensionHookAgent"
+      },
+      {
+        "class_name": "ThinkExtensionNetworkAgent",
+        "name": "ThinkExtensionNetworkAgent"
       },
       {
         "class_name": "ThinkExtensionBeforeTurnModelAgent",
@@ -184,6 +200,10 @@
         "name": "ThinkFetchToolsTestAgent"
       },
       {
+        "class_name": "ThinkSkillsToolsTestAgent",
+        "name": "ThinkSkillsToolsTestAgent"
+      },
+      {
         "class_name": "ThinkOnStartReconcileFailureAgent",
         "name": "ThinkOnStartReconcileFailureAgent"
       },
@@ -204,6 +224,10 @@
         "name": "ThinkPromptCacheTestAgent"
       },
       {
+        "class_name": "ThinkUpgradeTestAgent",
+        "name": "ThinkUpgradeTestAgent"
+      },
+      {
         "class_name": "ThinkMediaEvictionAutoAgent",
         "name": "ThinkMediaEvictionAutoAgent"
       },
@@ -219,7 +243,7 @@
         "class_name": "BrowserToolsHost",
         "name": "BrowserToolsHost"
       },
-      // Facet-only class. vitest-pool-workers needs it listed as a binding so
+      // Facet-only class. The Vitest plugin needs it listed as a binding so
       // a facet-compatible class value resolves; it stays out of
       // new_sqlite_classes below (the host agent owns the SQLite store).
       {
@@ -256,6 +280,7 @@
         "ThinkDefaultSystemPromptSkillsAgent",
         "ThinkInheritedSystemPromptSkillsAgent",
         "ThinkSystemPromptFieldSkillsAgent",
+        "ThinkWorkspaceSkillsAgent",
         "ThinkMissingClassifierWarningAgent",
         "ThinkClassifierMethodAgent",
         "ThinkInheritedClassifierAgent",
@@ -268,11 +293,14 @@
         "ThinkScheduledTasksTestAgent",
         "ThinkAsyncHookTestAgent",
         "ThinkRecoveryTestAgent",
+        "ThinkAdmissionTestAgent",
+        "ThinkLatestAdmissionTestAgent",
         "ThinkNonRecoveryTestAgent",
         "ThinkAgentToolParent",
         "ThinkNestedMiddleAgent",
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
+        "ThinkExtensionNetworkAgent",
         "ThinkExtensionBeforeTurnModelAgent",
         "ThinkMessengerDeliveryTestAgent",
         "ThinkMessengerRouteTestAgent",
@@ -280,11 +308,13 @@
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",
         "ThinkFetchToolsTestAgent",
+        "ThinkSkillsToolsTestAgent",
         "ThinkOnStartReconcileFailureAgent",
         "ThinkOnStartHydrationFailureAgent",
         "ThinkWindowedHydrationAgent",
         "ThinkMediaEvictionAgent",
         "ThinkPromptCacheTestAgent",
+        "ThinkUpgradeTestAgent",
         "ThinkMediaEvictionAutoAgent",
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",

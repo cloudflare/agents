@@ -14,14 +14,27 @@ import {
   bindLifecycleCapability,
   LifecycleCapability
 } from "../../lifecycle/capability";
+import { REPLAY_ITEM_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
-import type { MemoryLimitContext } from "../../lifecycle/capability-runner";
+import { backoffDelay, isPlatformFailure } from "../../retries";
+import {
+  AttemptSupersededError,
+  isTaskCancellation,
+  isTaskSuspension
+} from "../../tasks/replay";
+import { Tasks } from "../../tasks/tasks";
+import { hasTable } from "../../lifecycle/schema";
 import type {
-  LifecycleJobContext,
-  LifecycleJobOutcome
-} from "../../lifecycle/job-queue";
-import { createToolsFromClientSchemas } from "../../chat/client-tools";
+  TaskJson,
+  TaskRecord,
+  TaskStatus,
+  TaskStep
+} from "../../tasks/types";
+import {
+  createToolsFromClientSchemas,
+  type ClientToolSchema
+} from "../../chat/client-tools";
 import type { StreamChunkData } from "../../chat/message-builder";
 import {
   ChatStreamStalledError,
@@ -31,6 +44,7 @@ import { StreamAccumulator } from "../../chat/stream-accumulator";
 import type {
   AgentHarness,
   HarnessInput,
+  HarnessInputFrom,
   HarnessSession,
   HarnessSessions,
   SessionEvent,
@@ -40,14 +54,16 @@ import type {
 } from "../../experimental/channels/harness";
 import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
+import { CONTEXT_RECORD_KIND, type Context } from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
+  answeredMessage,
   answerToolCall,
   toResponseChunk,
   toTranscriptMessage,
   type ToolCallAnswer
-} from "../ai-sdk/turns";
+} from "../../experimental/channels/ai-sdk-conversion";
 import {
   SessionEvents,
   Watcher,
@@ -55,11 +71,15 @@ import {
   type ThinkSessionEvent,
   type ThinkSessionListener
 } from "./events";
+import { harnessHookRules } from "./extensions/hooks";
 import {
-  OperationRecords,
-  type OperationInput,
-  type OperationRecord
-} from "./records";
+  ExtensionManager,
+  type ExtensionBuild,
+  type RemindSection
+} from "./extensions/manager";
+import { contextExtension, optionsExtension, resolve } from "./extensions/own";
+import { loadInProcess } from "./extensions/in-process";
+import { ReleasedRecords, type OperationInput } from "./records";
 import {
   executeTool,
   isServerTool,
@@ -78,7 +98,6 @@ import {
   type ToolCallPart
 } from "./turn";
 import type {
-  PerSession,
   ThinkErrorClass,
   ThinkHarnessOptions,
   ThinkInFlight,
@@ -118,16 +137,26 @@ export class SteerNotSupportedError extends Error {
 /** The root session's id: the Sessions capability's default session. */
 export const ROOT_SESSION: ThinkSessionId = "";
 
-const WAKE_FN = "wake";
-const HEARTBEAT_MS = 30_000;
+/** The Tasks definition every operation is a run of. */
+const OPERATION_DEFINITION = "__cf_think_harness_operation";
+/**
+ * The session value (Sessions config) that records a session the harness
+ * knows of: `{ parent?, createdAt }`. Not a `transcript:` key, so a reset
+ * keeps it.
+ */
+const SESSION_KEY = "think-harness:session";
+/** The session value holding the client tools its client last declared. */
+const CLIENT_TOOLS_KEY = "think-harness:client-tools";
+/** Open operations carried forward from the harness store at a time. */
+const CARRY_BATCH = 50;
+/** The checkpoint key a placed operation's progress is kept under. */
+const TURN_KEY = "turn";
 const DEFAULT_MAX_STEPS = 10;
 const DEFAULT_MAX_ATTEMPTS = 10;
 const DEFAULT_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 60_000;
 const DEFAULT_STALL_TIMEOUT_MS = 120_000;
 const MAX_OVERFLOW_RETRIES = 1;
-/** Ceiling for one stored segment, under the 2 MB SQLite row limit. */
-const STREAM_MAX_CHUNK_BYTES = 1_900_000;
 /** Chunks packed into one stored stream segment. */
 const SEGMENT_CHUNKS = 10;
 /** Raw bytes packed into one stored segment before it is written. */
@@ -136,40 +165,111 @@ const SEGMENT_MAX_BYTES = 256_000;
 const FLUSH_AFTER_MS = 100;
 /** Segments read at a time when rebuilding an interrupted model call. */
 const READ_PAGE = 50;
+/**
+ * A server tool call's step: never retried by Tasks (the harness's tool
+ * recovery decides what an interrupted call does), and never timed out
+ * (the longest timer the runtime takes).
+ */
+const TOOL_STEP = { retries: { limit: 1 }, timeout: 2 ** 31 - 1 } as const;
 
 const INTERRUPTED_TOOL_ERROR =
   "The tool call was interrupted before it finished, because the agent restarted. It may or may not have taken effect.";
 
-type WakeTiming = {
-  /** Heartbeat of a session's wake job while it runs. Default 30_000. */
-  readonly heartbeatMs?: number;
+/** The operation a session is running in this isolate. */
+/** A session's tools, its client's included, and its options' prompt. */
+type SessionBuild = {
+  readonly tools: ToolSet;
+  readonly system: string | undefined;
+  readonly remind: readonly RemindSection[];
+  readonly allSections: string | undefined;
 };
 
-let setWakeTiming: (harness: ThinkHarness, timing: WakeTiming) => void;
-
-/**
- * @internal Shorten a harness's heartbeat, so a test suite does not sit on
- * the real one. Not exported from `agents/harness/think`.
- */
-export function setWakeTimingForTests(
-  harness: ThinkHarness,
-  timing: WakeTiming
-): void {
-  setWakeTiming(harness, timing);
-}
-
-/** The operation a session is running in this isolate. */
 type LiveRun = {
   readonly operationId: string;
-  readonly abort: AbortController;
   /** Chunks of the model call in progress. */
   partial: UIMessageChunk[];
   /** Whether that call continues a message already persisted. */
   continues: boolean;
+  /** The tools this run resolved, which decide which calls are a client's. */
+  tools?: ToolSet;
+  /**
+   * The build an answer placed in this attempt made, which the attempt's
+   * model loop uses rather than building again.
+   */
+  built?: SessionBuild;
+  /**
+   * The run was cancelled and its terminal report finished it from
+   * `partial`: the attempt, still unwinding, writes nothing more.
+   */
+  taken?: boolean;
 };
 
-/** What an operation's run asks of the drive when it stops early. */
-type RunOutcome = { readonly retryAt?: number };
+/** An operation's input, as its run keeps it. */
+type OperationRunInput = {
+  readonly input: OperationInput;
+  readonly source: "client" | "server";
+};
+
+/**
+ * How an operation's run ended when its handler ended it. The other ends
+ * (cancelled, failed, sealed by the memory-limit breaker) are the run's.
+ */
+type OperationOutcome =
+  | {
+      readonly status: "done";
+      readonly text: string;
+      readonly messageId?: string;
+    }
+  | {
+      readonly status: "unanswered";
+      readonly reason: string;
+      readonly messageId?: string;
+    };
+
+/**
+ * A placed operation's progress, the run's `turn` checkpoint. Written in
+ * the transaction of the transcript or stream write it goes with, so a
+ * reset leaves the two in step.
+ */
+type TurnState = {
+  /** The message a new assistant message is a child of. */
+  readonly parentId: string | null;
+  /** This operation's assistant message, once it has one. */
+  readonly messageId: string | null;
+  /** The stream of the model call in progress, if one is. */
+  readonly streamId: string | null;
+  /** Whether the model has to be called before the turn can end. */
+  readonly pendingModel: boolean;
+  /** Model calls made so far. */
+  readonly steps: number;
+  /** Interruptions since the turn last made progress. */
+  readonly interruptions: number;
+  /** Context-overflow retries spent. */
+  readonly overflowRetries: number;
+  /**
+   * Set with the transcript write that ends the turn: a reset before the
+   * run settles ends it the same way (`reason` unanswered, else done).
+   */
+  readonly ended?: { readonly reason?: string };
+  /** Tool calls an earlier version started for it and did not finish. */
+  readonly started?: string[];
+  /**
+   * Why an earlier version's memory-limit breaker sealed it: the next
+   * attempt finishes it as abandoned, with this reason.
+   */
+  readonly abandon?: string;
+};
+
+/** A change to a turn's progress; a field left out is unchanged. */
+type TurnChange = Partial<TurnState>;
+
+/** A placed operation: its run's input and progress. */
+type Turn = TurnState & {
+  readonly session: ThinkSessionId;
+  readonly operationId: string;
+  readonly input: OperationInput;
+  readonly source: "client" | "server";
+};
 
 /** A durable write: put messages and update operations, in one transaction. */
 type Put = (
@@ -180,33 +280,66 @@ type Put = (
   }
 ) => void;
 
-function wakeJobId(session: ThinkSessionId): string {
-  return `think-wake:${session}`;
+/** An operation's run id: unique per session and operation id. */
+function runIdOf(session: ThinkSessionId, operationId: string): string {
+  return JSON.stringify([session, operationId]);
 }
 
-function sessionOfJob(payload: unknown): ThinkSessionId | undefined {
-  return typeof payload === "object" &&
-    payload !== null &&
-    "session" in payload &&
-    typeof payload.session === "string"
-    ? payload.session
-    : undefined;
+/** The session and operation id a run id names. */
+function operationOf(runId: string): [ThinkSessionId, string] {
+  // SAFETY: every run of the operation definition is named by runIdOf.
+  return JSON.parse(runId) as [ThinkSessionId, string];
 }
 
-async function resolve<T>(
-  value: PerSession<T> | undefined,
-  session: ThinkSessionId
-): Promise<T | undefined> {
-  if (typeof value === "function") {
-    // SAFETY: PerSession<T> is T or a function of the session context, and
-    // no T the harness takes (a model, a system prompt, a tool set) is a
-    // function, so a function here is the per-session form.
-    const compute = value as (context: {
-      session: ThinkSessionId;
-    }) => T | Promise<T>;
-    return compute({ session });
-  }
-  return value;
+/** A session's lane: its operations run one at a time, in order. */
+function laneOf(session: ThinkSessionId): string {
+  return `think:${session}`;
+}
+
+/** A queued operation: accepted, never started. */
+function isQueued(record: TaskRecord): boolean {
+  return record.status === "pending" && record.attempt === 0;
+}
+
+const TERMINAL: readonly TaskStatus[] = [
+  "completed",
+  "error",
+  "aborted",
+  "skipped"
+];
+
+/**
+ * Whether an error ends the attempt rather than the operation: the run was
+ * cancelled or superseded, it sleeps, or the platform failed under it.
+ */
+function endsAttempt(error: unknown, run: TaskStep): boolean {
+  return (
+    run.signal.aborted ||
+    isTaskSuspension(error) ||
+    isTaskCancellation(error) ||
+    error instanceof AttemptSupersededError ||
+    isPlatformFailure(error)
+  );
+}
+
+function turnOf(
+  session: ThinkSessionId,
+  operationId: string,
+  stored: OperationRunInput,
+  state: TurnState
+): Turn {
+  return { ...state, session, operationId, ...stored };
+}
+
+function stateOf(turn: Turn): TurnState {
+  const {
+    session: _session,
+    operationId: _operationId,
+    input: _input,
+    source: _source,
+    ...state
+  } = turn;
+  return state;
 }
 
 function errorText(error: unknown): string {
@@ -229,6 +362,16 @@ function isUIMessage(input: ThinkInput): input is UIMessage {
     "role" in input &&
     "parts" in input
   );
+}
+
+/**
+ * The participant whose client runs a message's client tools, from the
+ * message metadata the turn that wrote it started with.
+ */
+function ownerOf(metadata: unknown): string | undefined {
+  return isRecord(metadata) && typeof metadata.owner === "string"
+    ? metadata.owner
+    : undefined;
 }
 
 function harnessInputMessage(input: HarnessInput, id: string): UIMessage {
@@ -271,14 +414,21 @@ function operationInput(
     return { kind: "messages", messages: input as readonly UIMessage[] };
   }
   if (isToolAnswer(input)) {
-    return { kind: "answer", answer: input, autoContinue };
+    const { from, ...answer } = input;
+    return {
+      kind: "answer",
+      answer,
+      autoContinue,
+      ...(from && { from: from.participantId })
+    };
   }
   if (isUIMessage(input)) return { kind: "messages", messages: [input] };
   // SAFETY: the remaining ThinkInput is the shared HarnessInput.
-  const harnessInput = input as HarnessInput;
+  const harnessInput = input as HarnessInput & HarnessInputFrom;
   return {
     kind: "messages",
-    messages: [harnessInputMessage(harnessInput, operationId)]
+    messages: [harnessInputMessage(harnessInput, operationId)],
+    ...(harnessInput.from && { owner: harnessInput.from.participantId })
   };
 }
 
@@ -351,17 +501,13 @@ function asSessionMessage(message: UIMessage): SessionMessage {
  * interface, so a Channels host can serve its sessions.
  *
  * Transcripts live in a Sessions capability and in-flight model output in
- * a Streams capability, both owned by the harness, and the harness's queue
- * of operations in its own table. The harness runs every server tool call itself, so after an
+ * a Streams capability. Operations are runs on a Tasks capability the
+ * harness composes, one lane per session, so a session's operations run
+ * one at a time in the order they were submitted. The harness runs every
+ * server tool call itself, as a step of its operation's run, so after an
  * eviction it knows exactly which call was cut short and applies that
- * tool's recovery policy.
- *
- * Durability is the Lifecycle's job queue, used directly: one wake job per
- * session. A submission is written, then the session's wake is scheduled.
- * While a session has work, the wake job reschedules itself as a heartbeat,
- * so an eviction leaves it due and its alarm restarts the object. Each step
- * of a turn reads only durable state, so the restarted object continues
- * where the last write left off.
+ * tool's recovery policy. Each step of a turn reads only durable state, so
+ * the run's next attempt continues where the last write left off.
  *
  * @experimental The API may change between releases.
  */
@@ -373,16 +519,36 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly sessions: ThinkSessions;
   readonly #options: ThinkHarnessOptions<TOOLS>;
   readonly #events = new SessionEvents();
-  readonly #drives = new Map<ThinkSessionId, Promise<void>>();
   readonly #live = new Map<ThinkSessionId, LiveRun>();
-  readonly #waiters = new Map<string, Set<() => void>>();
   readonly #configured = new Set<ThinkSessionId>();
+  /** Each session's context, from the `context` option, built on first use. */
+  readonly #contexts = new Map<ThinkSessionId, Context | undefined>();
   /**
-   * In-flight model output. Only the harness reads it, so the harness owns
-   * it rather than asking the host to install a Streams capability. It
-   * shares the `cf_agents_streams` tables with any Streams the host has.
+   * The latest text of each extension remind section, per context, which
+   * its block reads. Keyed by the context object, so a context made anew
+   * (after a reset) gets its blocks again, and the entry goes with it.
    */
-  readonly #streams = new Streams({ maxChunkBytes: STREAM_MAX_CHUNK_BYTES });
+  readonly #remindTexts = new WeakMap<Context, Map<string, string>>();
+  /**
+   * What builds each session's tools and prompt, and receives the hooks:
+   * the session context's tools, then the options.
+   */
+  readonly #extensions = new ExtensionManager(harnessHookRules);
+  /**
+   * The operations: one run each, on the harness's own Tasks unless the
+   * host gave it one (`options.tasks`).
+   */
+  readonly #tasks: Tasks;
+  /**
+   * In-flight model output, on a Streams instance the harness composes: its
+   * own tables, apart from any Streams the host has.
+   */
+  readonly #streams: Streams;
+  /**
+   * The default Streams over the shared tables, bound only to move a
+   * stream an earlier version left there (`#adoptStream`).
+   */
+  #sharedStreams: Streams | undefined;
   /**
    * The transcripts. The harness writes every message, and its operations
    * point at them, so it owns the Sessions capability too; a second one
@@ -399,12 +565,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly #ownMessages = new Map<ThinkSessionId, Map<string, number>>();
   /** Clears of the harness's own in progress, per session. */
   readonly #ownClears = new Map<ThinkSessionId, number>();
-  #heartbeatMs = HEARTBEAT_MS;
-  #records: OperationRecords | undefined;
-
-  static {
-    setWakeTiming = (harness, timing) => harness.#setWakeTiming(timing);
-  }
 
   /**
    * @param options - The model, tools and hooks.
@@ -412,72 +572,162 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   constructor(options: ThinkHarnessOptions<TOOLS>) {
     super("think-harness");
     this.#options = options;
+    const shipped = options.extensions ?? [];
+    for (const { name, extension } of shipped.filter((e) => !e.after)) {
+      this.#extensions.load(name, loadInProcess(name, extension));
+    }
+    this.#extensions.load(
+      "context",
+      loadInProcess(
+        "context",
+        contextExtension((session) => this.#context(session))
+      )
+    );
+    this.#extensions.load(
+      "options",
+      loadInProcess("options", optionsExtension(options))
+    );
+    for (const { name, extension } of shipped.filter((e) => e.after)) {
+      this.#extensions.load(name, loadInProcess(name, extension));
+    }
     this.#sessions = new Sessions({
       ...(options.reservedMetadataKeys && {
         reservedMetadataKeys: options.reservedMetadataKeys
       })
     });
     this.sessions = new ThinkSessions(this);
-  }
-
-  #setWakeTiming(timing: WakeTiming): void {
-    const heartbeat = timing.heartbeatMs;
-    if (heartbeat !== undefined) {
-      if (!Number.isFinite(heartbeat) || heartbeat <= 0) {
-        throw new Error("ThinkHarness heartbeatMs must be a positive number");
+    this.#tasks =
+      options.tasks ?? this.compose(new Tasks({ name: this.composedName }));
+    this.#streams = this.compose(
+      new Streams({ name: this.composedName, maxChunkBytes: REPLAY_ITEM_BYTES })
+    );
+    this.#tasks.register(
+      OPERATION_DEFINITION,
+      // SAFETY: every run of this definition was accepted by `enqueue` or
+      // carried forward by `onStart`, both with an OperationRunInput.
+      (input, run) => this.#operate(input as OperationRunInput, run),
+      {
+        onStatus: (record) => this.#onStatus(record),
+        // The terminal report of a run that ended outside its handler (an
+        // abort, the memory-limit breaker) finishes it from its progress.
+        keepCheckpoint: true
       }
-      this.#heartbeatMs = heartbeat;
-    }
+    );
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
-  /** Create the harness's tables and wake every session with open work. */
+  /**
+   * Start the transcripts and streams, and carry forward what a released
+   * version kept in the harness store.
+   */
   override async onStart(): Promise<void> {
     this.#bindOwned();
     await this.#sessions.onStart();
-    await this.#streams.onStart();
-    const store = this.#tables();
-    store.ensureSession(ROOT_SESSION);
-    const sessions = new Set(store.open().map((op) => op.session));
-    for (const session of sessions) {
-      // A wake already set for later is a recovery backoff or the alarm
-      // memory-limit breaker's delay; replacing it with one due now would
-      // skip that wait.
-      const wake = this.lifecycle.jobs.get(wakeJobId(session));
-      if (wake && wake.time > Date.now()) continue;
-      await this.#wake(session);
-    }
+    await this.lifecycle.schema.migrate({
+      version: 1,
+      steps: { 1: () => this.#carryReleased() }
+    });
+    await this.#ensureSession(ROOT_SESSION);
   }
 
   /**
-   * The alarm memory-limit breaker sealed: the work it stopped would only
-   * run out of memory again. Mark the running operations to be settled
-   * `unanswered` with reason `"out_of_memory"` rather than run again.
-   * Queued operations behind them still run. Runs after the isolate's
-   * work unwound, so it keeps to small synchronous writes.
+   * Move what a released version kept in the harness store into Tasks and
+   * Sessions, then drop the store's tables. Idempotent, as a schema step
+   * must be: a reset part way runs it again.
    */
-  onMemoryLimit(context: MemoryLimitContext): void {
-    if (!context.sealed) return;
-    // Only mark them: rebuilding a partial answer here could run out of
-    // memory again. The next drive settles each marked operation through
-    // the usual path, which keeps the partial and tells clients.
-    const store = this.#tables();
-    for (const op of store.open()) {
-      if (op.status !== "running") continue;
-      store.update(op.session, op.operationId, {
-        abandonReason: "out_of_memory"
-      });
+  async #carryReleased(): Promise<void> {
+    const released = ReleasedRecords.open(
+      this.lifecycle.storage,
+      this.lifecycle.routes.source !== undefined
+    );
+    if (!released) return;
+    await this.#carryForward(released);
+    for (let offset = 0; ; offset += CARRY_BATCH) {
+      const sessions = released.sessions(offset, CARRY_BATCH);
+      for (const session of sessions) {
+        // The Sessions handle, not `#handle`: carrying a session forward is
+        // not the host's first use of it, so `configureSession` waits.
+        const handle = this.#sessions.session(session.id);
+        await handle.internal_setConfig(
+          SESSION_KEY,
+          sessionValue(session.parent, session.createdAt)
+        );
+        if (session.clientTools.length > 0) {
+          await handle.internal_setConfig(
+            CLIENT_TOOLS_KEY,
+            JSON.stringify(session.clientTools)
+          );
+        }
+      }
+      if (sessions.length < CARRY_BATCH) break;
+    }
+    released.drop();
+  }
+
+  /**
+   * Make each open operation a released version left in the store a run,
+   * in the order it was submitted: a queued one waits its turn, a running
+   * one is interrupted and runs again from its progress. Settled ones are
+   * dropped: their answers are in the transcript.
+   */
+  async #carryForward(store: ReleasedRecords): Promise<void> {
+    // In batches, each forgotten once its runs are written, so a long
+    // queue is never held in memory whole.
+    for (;;) {
+      const left = store.leftOperations(CARRY_BATCH);
+      if (left.length === 0) break;
+      for (const op of left) {
+        const {
+          session,
+          operationId,
+          input,
+          source,
+          status,
+          abandonReason,
+          startedToolCalls,
+          createdAt,
+          ...progress
+        } = op;
+        const runId = runIdOf(session, operationId);
+        // A version rolled back to before this one may have reused the id of
+        // a settled run: the open operation is the newer.
+        const existing = this.#tasks.peek(runId);
+        if (existing && TERMINAL.includes(existing.status)) {
+          this.#tasks.deleteRun(runId);
+        }
+        const state: TurnState = {
+          ...progress,
+          ...(abandonReason !== null && { abandon: abandonReason }),
+          ...(startedToolCalls.length > 0 && { started: startedToolCalls })
+        };
+        await this.#tasks.importRun({
+          runId,
+          definition: OPERATION_DEFINITION,
+          status: status === "running" ? "running" : "pending",
+          attempt: status === "running" ? 1 : 0,
+          // SAFETY: as for enqueue's input.
+          input: { input, source } as unknown as TaskJson,
+          lane: laneOf(session),
+          createdAt,
+          ...(status === "running" && {
+            startedAt: createdAt,
+            checkpoint: { [TURN_KEY]: state }
+          })
+        });
+      }
+      store.dropOperations(left);
     }
   }
 
-  /** Run a session's wake job. */
-  async onJob(
-    context: LifecycleJobContext
-  ): Promise<LifecycleJobOutcome | void> {
-    if (context.job.fn !== WAKE_FN) return;
-    const session = sessionOfJob(context.job.payload);
-    if (session !== undefined) return this.#wakeStep(session);
+  /** Record a session, unless the harness knows it already. */
+  async #ensureSession(id: ThinkSessionId, parent?: ThinkSessionId) {
+    const handle = this.#handle(id);
+    if ((await handle.internal_config(SESSION_KEY)) !== null) return;
+    await handle.internal_setConfig(
+      SESSION_KEY,
+      sessionValue(parent, Date.now())
+    );
   }
 
   // ── The harness interface ────────────────────────────────────────────────
@@ -510,13 +760,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /** Operations not settled yet, oldest first, in one session or all. */
   async pending(session?: ThinkSessionId): Promise<ThinkPendingOperation[]> {
     await this.lifecycle.ready();
-    return this.#tables()
-      .open(session)
-      .map((op) => ({
-        operationId: op.operationId,
-        session: op.session,
-        status: op.status === "queued" ? "queued" : "running"
-      }));
+    return this.#open(session).map((record) => {
+      const [id, operationId] = operationOf(record.runId);
+      return {
+        operationId,
+        session: id,
+        status: isQueued(record) ? "queued" : "running"
+      };
+    });
   }
 
   // ── Used by ThinkSession and ThinkSessions ───────────────────────────────
@@ -533,61 +784,53 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (whenBusy === "steer") throw new SteerNotSupportedError(session);
     await this.lifecycle.ready();
     const operationId = options.operationId ?? crypto.randomUUID();
-    const store = this.#tables();
-    let accepted = false;
-    this.lifecycle.storage.transactionSync(() => {
-      store.ensureSession(session);
-      if (options.clientTools !== undefined) {
-        store.setClientTools(session, options.clientTools);
-      }
-      accepted = store.insert(
-        session,
-        operationId,
-        input,
-        options.source ?? "server"
+    await this.#ensureSession(session);
+    if (options.clientTools !== undefined) {
+      await this.#handle(session).internal_setConfig(
+        CLIENT_TOOLS_KEY,
+        JSON.stringify(options.clientTools)
       );
-    });
-    if (accepted) {
-      this.#events.emit(session, {
-        type: "operation",
-        status: { operationId, status: "queued" }
-      });
     }
-    // The wake first, so a job is due before anything runs; then run now
-    // rather than waiting for the alarm.
-    await this.#wake(session);
-    this.#ensureDrive(session);
-    return { operationId, session, accepted };
+    const stored: OperationRunInput = {
+      input,
+      source: options.source ?? "server"
+    };
+    const receipt = await this.#tasks.run(
+      OPERATION_DEFINITION,
+      // SAFETY: an OperationRunInput is plain JSON: UI messages and tool
+      // answers as clients send them.
+      stored as unknown as TaskJson,
+      { runId: runIdOf(session, operationId), lane: laneOf(session) }
+    );
+    return { operationId, session, accepted: receipt.accepted };
   }
 
   /** @internal Stop one operation, or everything open in a session. */
   async abort(session: ThinkSessionId, operationId?: string): Promise<boolean> {
     await this.lifecycle.ready();
-    const store = this.#tables();
     const targets =
       operationId === undefined
-        ? store.open(session)
-        : [store.get(session, operationId)].filter(
-            (op): op is OperationRecord =>
-              op !== undefined &&
-              (op.status === "queued" || op.status === "running")
+        ? this.#open(session)
+        : [this.#tasks.peek(runIdOf(session, operationId))].filter(
+            (record): record is TaskRecord =>
+              record !== undefined && !TERMINAL.includes(record.status)
           );
-    for (const op of targets) {
-      const live = this.#live.get(session);
-      if (live?.operationId === op.operationId) {
-        live.abort.abort();
-      } else if (op.status === "queued") {
-        store.settle(session, op.operationId, {
-          status: "unanswered",
-          reason: "withdrawn"
-        });
-        await this.#settled(session, op.operationId);
-      } else {
-        // Running, but not in this isolate: an eviction left it for the wake.
-        await this.#abandon(op, "aborted");
+    if (targets.length === 0) return false;
+    // Held while the cancelled runs finish, so the next operation starts
+    // after the partial answer of the one before it is in the transcript.
+    const lane = laneOf(session);
+    this.#tasks.holdLane(lane);
+    try {
+      for (const record of targets) {
+        await this.#tasks.cancel(
+          record.runId,
+          isQueued(record) ? "withdrawn" : "aborted"
+        );
       }
+    } finally {
+      await this.#tasks.releaseLane(lane);
     }
-    return targets.length > 0;
+    return true;
   }
 
   /** @internal Wait for an operation to settle. */
@@ -597,39 +840,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     signal?: AbortSignal
   ): Promise<ThinkOperationResult> {
     await this.lifecycle.ready();
-    for (;;) {
-      const op = this.#tables().get(session, operationId);
-      if (!op) {
-        return {
-          operationId,
-          session,
-          status: "unanswered",
-          reason: "not_found"
-        };
-      }
-      if (op.status === "done" || op.status === "unanswered") {
-        return this.#result(op);
-      }
-      await new Promise<void>((resolveWait, reject) => {
-        if (signal?.aborted) {
-          reject(signal.reason);
-          return;
-        }
-        const key = waiterKey(session, operationId);
-        const waiters = this.#waiters.get(key) ?? new Set();
-        this.#waiters.set(key, waiters);
-        const done = () => {
-          signal?.removeEventListener("abort", aborted);
-          resolveWait();
-        };
-        const aborted = () => {
-          waiters.delete(done);
-          reject(signal?.reason);
-        };
-        waiters.add(done);
-        signal?.addEventListener("abort", aborted, { once: true });
-      });
-    }
+    signal?.throwIfAborted();
+    const record = await this.#tasks.wait(runIdOf(session, operationId), {
+      ...(signal && { signal })
+    });
+    signal?.throwIfAborted();
+    return record
+      ? this.#result(record)
+      : { operationId, session, status: "unanswered", reason: "not_found" };
   }
 
   /** @internal */
@@ -638,16 +856,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     operationId: string
   ): Promise<ThinkOperationStatus | undefined> {
     await this.lifecycle.ready();
-    const op = this.#tables().get(session, operationId);
-    if (!op) return undefined;
-    switch (op.status) {
-      case "queued":
-      case "running":
-        return { operationId, session, status: op.status };
-      case "done":
-      case "unanswered":
-        return this.#result(op);
-    }
+    const record = this.#tasks.peek(runIdOf(session, operationId));
+    if (!record) return undefined;
+    if (TERMINAL.includes(record.status)) return this.#result(record);
+    return {
+      operationId,
+      session,
+      status: isQueued(record) ? "queued" : "running"
+    };
   }
 
   /** @internal The active transcript of a session. */
@@ -655,10 +871,44 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return asUIMessages(await this.#handle(session).getHistory());
   }
 
+  /** @internal Which of `ids` a session already stores (key probes). */
+  async storedIds(
+    session: ThinkSessionId,
+    ids: readonly string[]
+  ): Promise<Set<string>> {
+    return this.#handle(session).internal_existingIds(ids);
+  }
+
+  /**
+   * @internal The approval id a tool call carries, from the newest message
+   * back: a turn's approval sits near the end, so the read stops early.
+   */
+  async approvalId(
+    session: ThinkSessionId,
+    toolCallId: string
+  ): Promise<string | undefined> {
+    for await (const message of this.#handle(session).history({
+      newestFirst: true
+    })) {
+      for (const part of message.parts) {
+        const record = part as {
+          toolCallId?: unknown;
+          approval?: { id?: unknown };
+        };
+        if (
+          record.toolCallId === toolCallId &&
+          typeof record.approval?.id === "string"
+        ) {
+          return record.approval.id;
+        }
+      }
+    }
+    return undefined;
+  }
+
   /** @internal Abort everything in a session and clear its transcript. */
   async reset(session: ThinkSessionId, handoff?: string): Promise<void> {
     await this.abort(session);
-    await this.#drives.get(session);
     const handle = this.#handle(session);
     this.#ownClears.set(session, (this.#ownClears.get(session) ?? 0) + 1);
     try {
@@ -668,7 +918,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (left === 0) this.#ownClears.delete(session);
       else this.#ownClears.set(session, left);
     }
-    this.#tables().deleteSettled(session);
+    // The settled operations answered the transcript just cleared.
+    for (;;) {
+      const settled = this.#tasks.peekList({
+        definition: OPERATION_DEFINITION,
+        lane: laneOf(session),
+        status: TERMINAL,
+        results: false
+      });
+      for (const record of settled) this.#tasks.deleteRun(record.runId);
+      if (settled.length === 0) break;
+    }
+    // The session's context read records of the messages just cleared.
+    this.#contexts.delete(session);
     this.#events.emit(session, { type: "reset" });
     if (handoff) {
       const note: UIMessage = {
@@ -698,28 +960,49 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const early: SessionEvent[][] = [];
     // Listen before reading, so nothing that happens during the read is
     // lost; a message read and then re-sent only replaces itself.
+    // Client tool calls carry the participant whose client runs them.
+    const { tools } = await this.#build(session);
+    let owner: string | undefined;
     const unsubscribe = this.#events.subscribe(session, (event) => {
-      const events = toSessionEvents(event);
+      if (event.type === "chunk" && event.chunk.type === "start") {
+        owner = ownerOf(event.chunk.messageMetadata);
+      }
+      // A run resolves the session's tools again; its calls follow those.
+      const events = toSessionEvents(
+        event,
+        this.#live.get(session)?.tools ?? tools,
+        owner
+      );
       if (watcher) watcher.push(events);
       else early.push(events);
     });
+    const open = this.#open(session);
+    const running = open.find((record) => !isQueued(record));
     const live = this.#live.get(session);
-    const partial = live ? [...live.partial] : this.#recoverableChunks(session);
+    const partial = live
+      ? [...live.partial]
+      : running
+        ? this.#streamChunks(this.#state(running.runId)?.streamId)
+        : [];
+    // The call in progress started with its owner.
+    const started = partial.find((chunk) => chunk.type === "start");
+    if (started?.type === "start") owner = ownerOf(started.messageMetadata);
     const messages = await this.messages(session);
-    const open = this.#tables().open(session);
-    const running = open.find((op) => op.status === "running");
     const state: SessionState = {
-      messages: messages.map((message) => toTranscriptMessage(message)),
-      pending: open.map((op) => ({
-        operationId: op.operationId,
-        status: op.status === "queued" ? "queued" : "placed"
+      messages: messages.map((message) => transcriptOf(message, tools)),
+      pending: open.map((record) => ({
+        operationId: operationOf(record.runId)[1],
+        status: isQueued(record) ? "queued" : "placed"
       })),
       ...(running && {
         run: {
-          operations: [running.operationId],
+          operations: [operationOf(running.runId)[1]],
           ...(partial.length > 0 && {
             partial: partial.flatMap((chunk) => {
-              const converted = toResponseChunk(chunk, {});
+              const converted = toResponseChunk(chunk, {
+                tools: live?.tools ?? tools,
+                owner
+              });
               return converted ? [converted] : [];
             })
           })
@@ -734,23 +1017,25 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /** @internal The running operation and its model call's chunks so far. */
   async inFlight(session: ThinkSessionId): Promise<ThinkInFlight | undefined> {
     await this.lifecycle.ready();
-    const running = this.#tables()
-      .open(session)
-      .find((op) => op.status === "running");
+    const running = this.#open(session).find((record) => !isQueued(record));
     if (!running) return undefined;
+    const operationId = operationOf(running.runId)[1];
     const live = this.#live.get(session);
-    if (live?.operationId === running.operationId) {
+    if (live?.operationId === operationId) {
       return {
-        operationId: running.operationId,
+        operationId,
         continuation: live.continues,
         chunks: [...live.partial]
       };
     }
     // Left by an eviction: the stream holds what was durable.
+    const state = this.#state(running.runId);
     return {
-      operationId: running.operationId,
-      continuation: (await this.#message(running)) !== undefined,
-      chunks: running.streamId ? this.#streamChunks(running.streamId) : []
+      operationId,
+      continuation:
+        state?.messageId != null &&
+        (await this.#handle(session).getMessage(state.messageId)) !== null,
+      chunks: this.#streamChunks(state?.streamId)
     };
   }
 
@@ -766,7 +1051,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   async createSession(parent?: ThinkSessionId): Promise<ThinkSession> {
     await this.lifecycle.ready();
     const id = crypto.randomUUID();
-    this.#tables().ensureSession(id, parent);
+    await this.#ensureSession(id, parent);
     return this.session(id);
   }
 
@@ -783,207 +1068,204 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       await target.appendMessage(message, { parentId });
       parentId = message.id;
     }
+    // The copied turns keep the context they were sent with, so the fork's
+    // next request opens with the same prompt as the session it came from.
+    const records = await source.internal_annotations(
+      CONTEXT_RECORD_KIND,
+      rows.map((row) => row.id)
+    );
+    for (const [messageId, value] of records) {
+      await target.internal_setAnnotation(
+        CONTEXT_RECORD_KIND,
+        messageId,
+        value
+      );
+    }
     return fork;
   }
 
   /** @internal */
   async listSessions(): Promise<ThinkSessionInfo[]> {
     await this.lifecycle.ready();
-    const store = this.#tables();
-    const busy = new Set(store.open().map((op) => op.session));
-    return store.sessions().map((record) => ({
-      id: record.id,
-      ...(record.parent !== undefined && { parent: record.parent }),
-      busy: busy.has(record.id)
-    }));
-  }
-
-  // ── The wake ─────────────────────────────────────────────────────────────
-
-  /** Schedule the session's wake job, now or at `time`. */
-  #wake(session: ThinkSessionId, time = Date.now()): Promise<unknown> {
-    // A push made while the job is dispatching supersedes that dispatch's
-    // outcome, so a submit is never lost to a wake that is completing.
-    return this.lifecycle.jobs.push({
-      id: wakeJobId(session),
-      fn: WAKE_FN,
-      time,
-      payload: { session },
-      singleflight: true,
-      recoveryLoop: true
-    });
-  }
-
-  /**
-   * One run of a session's wake job. With work open, it makes sure a drive
-   * is running and keeps a heartbeat; with none, it completes.
-   */
-  #wakeStep(session: ThinkSessionId): LifecycleJobOutcome {
-    const heartbeat = { rescheduleAt: Date.now() + this.#heartbeatMs };
-    if (this.#drives.has(session)) return heartbeat;
-    if (this.#tables().open(session).length === 0) return undefined;
-    const drive = this.#ensureDrive(session);
-    // The drive runs past this dispatch, inside the alarm's work, so a
-    // memory-limit reset during it counts against the job's breaker.
-    this.lifecycle.trackAlarmWork(drive);
-    return heartbeat;
-  }
-
-  /** Run the session's open operations in order, unless already running. */
-  #ensureDrive(session: ThinkSessionId): Promise<void> {
-    const running = this.#drives.get(session);
-    if (running) return running;
-    let wakeAt: number | undefined;
-    const drive = (async () => {
-      try {
-        await this.lifecycle.runInHostContext(async () => {
-          for (;;) {
-            const op = this.#tables().open(session)[0];
-            if (!op) return;
-            const outcome = await this.#run(op);
-            if (outcome.retryAt !== undefined) {
-              wakeAt = outcome.retryAt;
-              return;
-            }
-          }
-        });
-      } catch (error) {
-        // The harness's own storage failed. The heartbeat tries again.
-        console.error("ThinkHarness drive failed", error);
-        wakeAt = Date.now() + this.#heartbeatMs;
-      } finally {
-        this.#drives.delete(session);
-      }
-      // Re-check now (or at the backoff), so the job completes as soon as
-      // the session has nothing left.
-      await this.#wake(session, wakeAt);
-    })();
-    this.#drives.set(session, drive);
-    return drive;
+    const busy = new Set(
+      this.#open().map((record) => operationOf(record.runId)[0])
+    );
+    return (await this.#sessions.internal_configs(SESSION_KEY))
+      .map(({ sessionId, value }) => ({
+        id: sessionId,
+        // SAFETY: written only by sessionValue.
+        ...(JSON.parse(value) as { parent?: string; createdAt: number })
+      }))
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))
+      .map(({ id, parent }) => ({
+        id,
+        ...(parent !== undefined && { parent }),
+        busy: busy.has(id)
+      }));
   }
 
   // ── Running one operation ────────────────────────────────────────────────
 
-  async #run(first: OperationRecord): Promise<RunOutcome> {
-    const { session, operationId } = first;
-    const live: LiveRun = {
-      operationId,
-      abort: new AbortController(),
-      partial: [],
-      continues: false
-    };
+  /**
+   * One attempt of an operation's run: place it if it is not yet, then
+   * take steps until the turn ends or waits. A later attempt, after a
+   * reset, picks up from the progress the last one wrote.
+   */
+  async #operate(
+    stored: OperationRunInput,
+    run: TaskStep
+  ): Promise<OperationOutcome> {
+    const [session, operationId] = operationOf(run.id);
+    const live: LiveRun = { operationId, partial: [], continues: false };
     this.#live.set(session, live);
+    const state = run.checkpoint.get<TurnState>(TURN_KEY);
+    let turn = state && turnOf(session, operationId, stored, state);
     try {
-      let op: OperationRecord | undefined = first;
-      if (op.status === "queued") {
-        op = await this.#place(op);
-        if (!op) return {};
+      if (turn?.ended) {
+        return outcomeOf(turn.ended, await this.#message(turn));
       }
-      const continuation = (await this.#message(op)) !== undefined;
+      if (turn?.abandon !== undefined) {
+        return this.#giveUp(run, turn, turn.abandon);
+      }
+      if (!turn) {
+        const placed = await this.#place(run, session, operationId, stored);
+        if ("status" in placed) return placed;
+        turn = placed;
+      }
+      const continuation = (await this.#message(turn)) !== undefined;
       this.#events.emit(session, {
         type: "run-start",
         operationId,
         continuation
       });
       try {
-        return await this.#steps(session, operationId, live);
+        return await this.#steps(run, turn, live);
       } finally {
         this.#events.emit(session, { type: "run-end", operationId });
       }
     } catch (error) {
+      if (endsAttempt(error, run)) throw error;
       console.error(`ThinkHarness operation ${operationId} failed`, error);
-      const op = this.#tables().get(session, operationId);
-      if (op && (op.status === "running" || op.status === "queued")) {
-        await this.#abandon(op, errorText(error));
-      }
-      return {};
-    } finally {
-      this.#live.delete(session);
-    }
-  }
-
-  async #steps(
-    session: ThinkSessionId,
-    operationId: string,
-    live: LiveRun
-  ): Promise<RunOutcome> {
-    const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
-    for (;;) {
-      const op = this.#tables().get(session, operationId);
-      if (!op || op.status !== "running") return {};
-      if (live.abort.signal.aborted) {
-        await this.#abandon(op, "aborted");
-        return {};
-      }
-      if (op.abandonReason !== undefined) {
-        await this.#abandon(op, op.abandonReason);
-        return {};
-      }
-      const message = await this.#message(op);
-      const tools = await this.#tools(session);
-      const action = nextAction(
-        op,
-        message,
-        (name) => isServerTool(tools, name),
-        maxSteps
+      const current = run.checkpoint.get<TurnState>(TURN_KEY);
+      return this.#giveUp(
+        run,
+        current && turnOf(session, operationId, stored, current),
+        errorText(error)
       );
-      switch (action._tag) {
-        case "recover-model": {
-          const outcome = await this.#recoverModel(op, message);
-          if (outcome) return outcome;
-          break;
-        }
-        case "call-model": {
-          const outcome = await this.#callModel(op, message, tools, live);
-          if (outcome) return outcome;
-          break;
-        }
-        case "run-tools":
-          if (!message) return {};
-          await this.#runTools(op, message, action.calls, tools, live);
-          break;
-        case "await-input":
-        case "end":
-          await this.#commit(session, undefined, () => {
-            this.#tables().settle(session, operationId, {
-              status: "done",
-              text: textOf(message)
-            });
-          });
-          await this.#settled(session, operationId, message);
-          return {};
-      }
+    } finally {
+      if (this.#live.get(session) === live) this.#live.delete(session);
     }
   }
 
   /**
-   * Place a queued operation: write what it brings to the transcript and
-   * mark it running, in one transaction. Returns the running operation, or
-   * undefined when placing settled it.
+   * End the operation from inside its run: keep the partial answer, fail
+   * the tool calls it left open, and mark it ended with `reason`.
    */
-  async #place(op: OperationRecord): Promise<OperationRecord | undefined> {
-    const { session, operationId } = op;
-    const store = this.#tables();
+  async #giveUp(
+    run: TaskStep,
+    turn: Turn | undefined,
+    reason: string
+  ): Promise<OperationOutcome> {
+    const kept =
+      turn &&
+      (await this.#abandon(
+        turn.session,
+        stateOf(turn),
+        this.#streamChunks(turn.streamId),
+        reason,
+        run,
+        (change) => this.#write(run, turn, change)
+      ));
+    return {
+      status: "unanswered",
+      reason,
+      ...(kept && { messageId: kept.id })
+    };
+  }
+
+  async #steps(
+    run: TaskStep,
+    first: Turn,
+    live: LiveRun
+  ): Promise<OperationOutcome> {
+    const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
+    let turn = first;
+    // One build per attempt: every model call and tool call of it sees the
+    // same tools and prompt. A change to them applies from the next turn.
+    const built = live.built ?? (await this.#build(first.session));
+    const tools = built.tools;
+    live.tools = tools;
+    for (;;) {
+      if (run.signal.aborted) throw run.signal.reason;
+      const message = await this.#message(turn);
+      const action = nextAction(
+        {
+          streamId: turn.streamId ?? undefined,
+          pendingModel: turn.pendingModel,
+          steps: turn.steps
+        },
+        message,
+        (name, part) => answersHere(tools, name, part),
+        maxSteps
+      );
+      let next: Turn | OperationOutcome;
+      switch (action._tag) {
+        case "recover-model":
+          next = await this.#recoverModel(run, turn, message);
+          break;
+        case "call-model":
+          next = await this.#callModel(run, turn, message, tools, built, live);
+          break;
+        case "run-tools":
+          if (!message) return outcomeOf({}, message);
+          next = await this.#runTools(run, turn, message, action.calls, tools);
+          break;
+        case "await-input":
+        case "end":
+          return outcomeOf({}, message);
+      }
+      if ("status" in next) return next;
+      turn = next;
+    }
+  }
+
+  /**
+   * Place an operation: write what it brings to the transcript and its
+   * progress, in one transaction. Returns the placed turn, or how the
+   * operation ended when placing ended it.
+   */
+  async #place(
+    run: TaskStep,
+    session: ThinkSessionId,
+    operationId: string,
+    stored: OperationRunInput
+  ): Promise<Turn | OperationOutcome> {
     const handle = this.#handle(session);
-    const input = op.input;
+    const { input, source } = stored;
     const placed: UIMessage[] = [];
-    let settledText: string | undefined;
+    let turn: Turn | undefined;
     let unanswered: string | undefined;
 
-    const running = (change: {
-      readonly parentId?: string;
-      readonly messageId: string;
-    }) =>
-      store.start(session, operationId, {
-        parentId: change.parentId ?? null,
-        messageId: change.messageId,
-        pendingModel: true
-      });
+    const progress = (change: TurnChange) => {
+      turn = this.#write(
+        run,
+        turnOf(session, operationId, stored, {
+          parentId: null,
+          messageId: null,
+          streamId: null,
+          pendingModel: true,
+          steps: 0,
+          interruptions: 0,
+          overflowRetries: 0
+        }),
+        change
+      );
+    };
 
     switch (input.kind) {
       case "messages": {
         let messages = input.messages;
-        if (op.source === "client") {
+        if (source === "client") {
           // Untrusted input may only add user messages. It may not rewrite
           // a stored message, even one off the active path, by reusing its
           // id: those are dropped.
@@ -1002,22 +1284,33 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "empty";
           break;
         }
-        await this.#commit(session, undefined, (put) => {
+        await this.#commit(run, session, undefined, (put) => {
           let parentId: string | undefined;
           for (const message of messages) {
-            put(message, { parentId, source: op.source });
+            put(message, { parentId, source });
             parentId = message.id;
             placed.push(message);
           }
-          running({ parentId: last.id, messageId: crypto.randomUUID() });
+          progress({ parentId: last.id, messageId: crypto.randomUUID() });
         });
         break;
       }
       case "answer": {
         const history = asUIMessages(await handle.getHistory());
-        const tools = await this.#tools(session);
+        const built = await this.#build(session);
+        const { tools } = built;
+        // The answered message is published before the model loop runs, if
+        // it runs at all: watches read its client tools from these. The
+        // loop uses this build too.
+        // Only this operation's own run: one cancelled while it built must
+        // not hand its build to the next turn.
+        const live = this.#live.get(session);
+        if (live?.operationId === operationId) {
+          live.tools = tools;
+          live.built = built;
+        }
         const answer = input.answer;
-        if (answer.type === "tool-result" && op.source === "client") {
+        if (answer.type === "tool-result" && source === "client") {
           // A client answers only its own tools. A server tool's result
           // comes from running it, under its approval policy.
           const call = history
@@ -1028,6 +1321,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             );
           if (call && isServerTool(tools, toolNameOf(call))) {
             unanswered = "not_client_tool";
+            break;
+          }
+        }
+        if (answer.type === "tool-result" && input.from !== undefined) {
+          // Only the client of the participant who started the turn runs
+          // a client tool.
+          // The call this answer settles, as answerToolCall finds it: a
+          // provider may reuse a tool-call id across replies.
+          const owner = ownerOf(
+            answeredMessage(history, toolCallAnswer(answer))?.metadata
+          );
+          if (owner !== undefined && owner !== input.from) {
+            unanswered = "not_owner";
             break;
           }
         }
@@ -1043,21 +1349,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           nextAction(
             { streamId: undefined, pendingModel: true, steps: 0 },
             answered,
-            (name) => isServerTool(tools, name),
+            (name, part) => answersHere(tools, name, part),
             Number.POSITIVE_INFINITY
           )._tag !== "await-input";
-        await this.#commit(session, undefined, (put) => {
+        await this.#commit(run, session, undefined, (put) => {
           put(answered);
           placed.push(answered);
-          if (continues) running({ messageId: answered.id });
-          else {
-            store.settle(session, operationId, {
-              status: "done",
-              text: textOf(answered)
-            });
-          }
+          // An answer that does not continue the turn ends the operation
+          // with the answered message.
+          progress(
+            continues
+              ? { messageId: answered.id }
+              : { messageId: answered.id, pendingModel: false, ended: {} }
+          );
         });
-        if (!continues) settledText = textOf(answered);
         break;
       }
       case "regenerate": {
@@ -1069,8 +1374,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "not_found";
           break;
         }
-        await this.#commit(session, undefined, () =>
-          running({ parentId: target, messageId: crypto.randomUUID() })
+        await this.#commit(run, session, undefined, () =>
+          progress({ parentId: target, messageId: crypto.randomUUID() })
         );
         break;
       }
@@ -1080,10 +1385,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "not_found";
           break;
         }
-        await this.#commit(session, undefined, () =>
+        await this.#commit(run, session, undefined, () =>
           latest.role === "assistant"
-            ? running({ messageId: latest.id })
-            : running({ parentId: latest.id, messageId: crypto.randomUUID() })
+            ? progress({ messageId: latest.id })
+            : progress({
+                parentId: latest.id,
+                messageId: crypto.randomUUID()
+              })
         );
         break;
       }
@@ -1092,23 +1400,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     for (const message of placed) {
       this.#events.emit(session, { type: "message", message, operationId });
     }
-    if (unanswered !== undefined) {
-      store.settle(session, operationId, {
-        status: "unanswered",
-        reason: unanswered
-      });
-      await this.#settled(session, operationId);
-      return undefined;
+    if (unanswered !== undefined || !turn) {
+      return { status: "unanswered", reason: unanswered ?? "not_found" };
     }
-    if (settledText !== undefined) {
-      await this.#settled(session, operationId);
-      return undefined;
-    }
+    if (turn.ended) return outcomeOf(turn.ended, placed.at(-1));
     this.#events.emit(session, {
       type: "operation",
       status: { operationId, status: "placed" }
     });
-    return store.get(session, operationId);
+    return turn;
   }
 
   // ── Model calls ──────────────────────────────────────────────────────────
@@ -1116,31 +1416,69 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /**
    * One model call. Its chunks go to a stream as they arrive; when it ends,
    * the message is persisted and the stream discarded in one transaction.
-   * Returns an outcome only when the operation must wait.
+   * Returns the turn to go on with, or how the operation ended.
    */
   async #callModel(
-    op: OperationRecord,
+    run: TaskStep,
+    start: Turn,
     existing: UIMessage | undefined,
     tools: ToolSet,
+    prompt: Pick<ExtensionBuild, "system" | "remind" | "allSections">,
     live: LiveRun
-  ): Promise<RunOutcome | undefined> {
-    const { session, operationId } = op;
-    const messageId = op.messageId ?? crypto.randomUUID();
+  ): Promise<Turn | OperationOutcome> {
+    const { session, operationId } = start;
+    const messageId = start.messageId ?? crypto.randomUUID();
+    const owner = existing
+      ? ownerOf(existing.metadata)
+      : start.input.kind === "messages"
+        ? start.input.owner
+        : undefined;
     const hooks = this.#options.hooks;
     const handle = this.#handle(session);
+    const parentId = start.parentId ?? undefined;
     const history = asUIMessages(
-      await handle.getHistory({ leafId: existing ? existing.id : op.parentId })
+      await handle.getHistory({ leafId: existing ? existing.id : parentId })
     );
-    const system = await resolve(this.#options.system, session);
+    // Every call prepares the session's context. The call that starts a
+    // turn records on its user message the prompt it is sent with and any
+    // remind block that changed; every call sends the transcript as a
+    // projection of those records, so earlier turns go out unchanged. A
+    // change that cannot be recorded (a continuation, or a regeneration
+    // from an answered message) rides on this request alone.
+    const context = this.#context(session);
+    let contextSystem = "";
+    let request = history;
+    let optionsSystem = prompt.system;
+    if (context) {
+      await this.#remindBlocks(context, prompt.remind);
+      const prepared = await context.prepare({
+        messages: history,
+        // A call after an interruption is sent as the first attempt was.
+        retry: start.interruptions > 0
+      });
+      contextSystem = prepared.system;
+      request = withReminder(
+        asUIMessages(await context.project(history)),
+        prepared.reminder
+      );
+    }
+    if (!context) {
+      // Without a context a remind section has nowhere to be recorded, so
+      // it is system text like the others, in its place.
+      optionsSystem = prompt.allSections;
+    }
+    const system = joinSystem(optionsSystem, contextSystem);
     const config =
       (await hooks?.beforeTurn?.({
         session,
         operationId,
-        step: op.steps,
+        step: start.steps,
         continuation: existing !== undefined,
-        messages: history,
+        messages: request,
         system,
-        tools: Object.keys(tools)
+        tools: Object.keys(tools),
+        // A copy: a hook that edits it does not change what is offered.
+        toolSet: { ...tools }
       })) ?? {};
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
@@ -1148,22 +1486,22 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const effectiveSystem = config.system ?? system;
     const messages: ModelMessage[] =
       config.messages ??
-      (await convertToModelMessages(history, {
+      (await convertToModelMessages(request, {
         tools,
         ignoreIncompleteToolCalls: true
       }));
 
     // The stream id is durable before the stream exists, so an eviction at
-    // any point leaves evidence the next wake recovers from.
+    // any point leaves evidence the next attempt recovers from.
     const streamId = `think:${crypto.randomUUID()}`;
-    this.#tables().update(session, operationId, { streamId, messageId });
+    const turn = this.#write(run, start, { streamId, messageId });
     const writer = await this.#streams.open(streamId, {
       tag: streamTag(session, operationId),
       metadata: { session, operationId, messageId }
     });
 
     const stall = new AbortController();
-    const signal = AbortSignal.any([live.abort.signal, stall.signal]);
+    const signal = AbortSignal.any([run.signal, stall.signal]);
     let modelError: unknown;
     let final: UIMessage | undefined;
     let finishReason: string | undefined;
@@ -1179,7 +1517,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const flush = () => {
       if (flushTimer !== undefined) clearTimeout(flushTimer);
       flushTimer = undefined;
-      if (segment.length === 0) return;
+      // An abort's report took the chunks from memory and closed the stream.
+      if (segment.length === 0 || live.taken) return;
       // SAFETY: UI message chunks are JSON by the AI SDK's contract.
       writer.append(segment as unknown as StreamJson);
       segment = [];
@@ -1218,6 +1557,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         // must not do (the last message may be a compaction summary).
         originalMessages: existing ? history : [],
         generateMessageId: () => messageId,
+        // The participant who started the turn runs its client tools.
+        messageMetadata: ({ part }) =>
+          part.type === "start" && owner !== undefined ? { owner } : undefined,
         onEnd: ({ responseMessage }) => {
           final = responseMessage;
         }
@@ -1228,7 +1570,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         iterateWithStallWatchdog(stream, stallTimeoutMs, () =>
           stall.abort(new ChatStreamStalledError("Model stream stalled"))
         ),
-        live.abort.signal
+        run.signal
       )) {
         if (chunk.type === "finish") finishReason = chunk.finishReason;
         live.partial.push(chunk);
@@ -1255,6 +1597,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       caught = error;
     }
     flush();
+    // Cancelled: the run's terminal report keeps the partial answer.
+    if (run.signal.aborted) throw run.signal.reason;
 
     const message = final ?? accumulate(messageId, existing, live.partial);
     const partial = message ? settledPartial(message) : undefined;
@@ -1263,40 +1607,33 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       caught instanceof ChatStreamStalledError || stall.signal.aborted;
     const failure = stalled ? undefined : (modelError ?? caught);
 
-    if (live.abort.signal.aborted) {
-      await this.#commit(session, streamId, (put) => {
-        if (keep) put(keep, { parentId: op.parentId });
-        this.#tables().settle(
-          session,
-          operationId,
-          { status: "unanswered", reason: "aborted" },
-          { streamId: null }
-        );
-      });
-      await this.#settled(session, operationId, keep);
-      return {};
-    }
-
     if (stalled || failure !== undefined) {
       if (failure !== undefined) {
         try {
-          await hooks?.onError?.(failure, { session, operationId });
+          await this.#extensions.hook("onError", {
+            error: failure,
+            session,
+            operationId
+          });
         } catch (error) {
           console.error("ThinkHarness onError hook failed", error);
         }
       }
       const kind = stalled
         ? "retry"
-        : (hooks?.classifyError?.(failure) ?? "fail");
+        : ((await this.#extensions.hook("classifyError", {
+            error: failure
+          })) ?? "fail");
       if (
         kind === "context-overflow" &&
-        op.overflowRetries < MAX_OVERFLOW_RETRIES
+        turn.overflowRetries < MAX_OVERFLOW_RETRIES
       ) {
-        await this.#commit(session, streamId, (put) => {
-          if (keep) put(keep, { parentId: op.parentId });
-          this.#tables().update(session, operationId, {
+        let next = turn;
+        await this.#commit(run, session, streamId, (put) => {
+          if (keep) put(keep, { parentId });
+          next = this.#write(run, turn, {
             streamId: null,
-            overflowRetries: op.overflowRetries + 1
+            overflowRetries: turn.overflowRetries + 1
           });
         });
         try {
@@ -1304,33 +1641,33 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         } catch (error) {
           console.warn("ThinkHarness could not compact the session", error);
         }
-        return undefined;
+        return next;
       }
       if (kind === "retry") {
-        return this.#interrupted(op, streamId, keep);
+        return this.#interrupted(run, turn, streamId, keep);
       }
-      await this.#commit(session, streamId, (put) => {
-        if (keep) put(keep, { parentId: op.parentId });
-        this.#tables().settle(
-          session,
-          operationId,
-          { status: "unanswered", reason: errorText(failure) },
-          { streamId: null }
-        );
+      const reason = errorText(failure);
+      await this.#commit(run, session, streamId, (put) => {
+        if (keep) put(keep, { parentId });
+        this.#write(run, turn, { streamId: null, ended: { reason } });
       });
-      await this.#settled(session, operationId, keep);
-      return {};
+      return {
+        status: "unanswered",
+        reason,
+        ...(keep && { messageId: keep.id })
+      };
     }
 
     if (!message) throw new Error("The model call produced no message");
     const toolCalls = lastStep(message).some(
       (part) => isToolCallPart(part) && !part.providerExecuted
     );
-    await this.#commit(session, streamId, (put) => {
-      put(message, { parentId: op.parentId });
-      this.#tables().update(session, operationId, {
+    let next = turn;
+    await this.#commit(run, session, streamId, (put) => {
+      put(message, { parentId });
+      next = this.#write(run, turn, {
         streamId: null,
-        steps: op.steps + 1,
+        steps: turn.steps + 1,
         interruptions: 0,
         pendingModel: toolCalls
       });
@@ -1338,14 +1675,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     live.partial = [];
     live.continues = true;
     this.#events.emit(session, { type: "message", message, operationId });
-    await hooks?.onStepFinish?.({
+    await this.#extensions.hook("onStepFinish", {
       session,
       operationId,
-      step: op.steps,
+      step: turn.steps,
       message,
       finishReason
     });
-    return undefined;
+    return next;
   }
 
   /**
@@ -1353,54 +1690,56 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * the model again to continue the same message, within the budget.
    */
   async #recoverModel(
-    op: OperationRecord,
+    run: TaskStep,
+    turn: Turn,
     existing: UIMessage | undefined
-  ): Promise<RunOutcome | undefined> {
-    const streamId = op.streamId;
-    if (streamId === undefined) return undefined;
+  ): Promise<Turn | OperationOutcome> {
+    const streamId = turn.streamId;
+    if (streamId === null) return turn;
     const chunks = this.#streamChunks(streamId);
     const rebuilt =
       chunks.length > 0
-        ? accumulate(op.messageId ?? crypto.randomUUID(), existing, chunks)
+        ? accumulate(turn.messageId ?? crypto.randomUUID(), existing, chunks)
         : undefined;
     const partial = rebuilt ? settledPartial(rebuilt) : undefined;
     const keep = partial && hasContent(partial) ? partial : undefined;
-    return this.#interrupted(op, streamId, keep);
+    return this.#interrupted(run, turn, streamId, keep);
   }
 
-  /** Count an interruption, keep the partial, and decide whether to go on. */
+  /**
+   * Count an interruption, keep the partial, and decide whether to go on.
+   * A second interruption in a row waits out a backoff first, as a sleep
+   * of the run, which keeps the session's lane.
+   */
   async #interrupted(
-    op: OperationRecord,
+    run: TaskStep,
+    turn: Turn,
     streamId: string,
     partial: UIMessage | undefined
-  ): Promise<RunOutcome | undefined> {
-    const { session, operationId } = op;
+  ): Promise<Turn | OperationOutcome> {
+    const { session, operationId } = turn;
     const recovery = this.#options.recovery;
-    const attempt = op.interruptions + 1;
+    const attempt = turn.interruptions + 1;
     const maxAttempts = recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     let decision: "continue" | "abandon" =
       attempt > maxAttempts ? "abandon" : "continue";
-    if (decision === "continue" && this.#options.hooks?.onRecovery) {
-      decision = await this.#options.hooks.onRecovery({
-        session,
-        operationId,
-        attempt,
-        partial
-      });
-    }
-    await this.#commit(session, streamId, (put) => {
-      if (partial) put(partial, { parentId: op.parentId });
-      const progress = { streamId: null, interruptions: attempt };
-      if (decision === "abandon") {
-        this.#tables().settle(
+    if (decision === "continue") {
+      decision =
+        (await this.#extensions.hook("onRecovery", {
           session,
           operationId,
-          { status: "unanswered", reason: "interrupted" },
-          progress
-        );
-      } else {
-        this.#tables().update(session, operationId, progress);
-      }
+          attempt,
+          partial
+        })) ?? "continue";
+    }
+    let next = turn;
+    await this.#commit(run, session, streamId, (put) => {
+      if (partial) put(partial, { parentId: turn.parentId ?? undefined });
+      next = this.#write(run, turn, {
+        streamId: null,
+        interruptions: attempt,
+        ...(decision === "abandon" && { ended: { reason: "interrupted" } })
+      });
     });
     if (partial) {
       this.#events.emit(session, {
@@ -1410,25 +1749,39 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       });
     }
     if (decision === "abandon") {
-      await this.#settled(session, operationId, partial);
-      return {};
+      return {
+        status: "unanswered",
+        reason: "interrupted",
+        ...(next.messageId !== null && { messageId: next.messageId })
+      };
     }
-    const delay = backoff(attempt, recovery?.backoffMs ?? DEFAULT_BACKOFF_MS);
-    return delay > 0 ? { retryAt: Date.now() + delay } : undefined;
+    if (attempt > 1) {
+      await run.sleep(
+        `backoff:${turn.steps}:${attempt}`,
+        backoffDelay(attempt - 1, {
+          baseMs: recovery?.backoffMs ?? DEFAULT_BACKOFF_MS,
+          maxMs: MAX_BACKOFF_MS
+        })
+      );
+    }
+    return next;
   }
 
   // ── Tool calls ───────────────────────────────────────────────────────────
 
+  /**
+   * Run a model step's server tool calls, each as a step of the run: the
+   * step runs the tool and writes its result to the transcript, so a call
+   * whose step was started before and has no result was cut short.
+   */
   async #runTools(
-    op: OperationRecord,
+    run: TaskStep,
+    start: Turn,
     message: UIMessage,
     calls: readonly ToolCallPart[],
-    tools: ToolSet,
-    live: LiveRun
-  ): Promise<void> {
-    const { session, operationId } = op;
-    const store = this.#tables();
-    const hooks = this.#options.hooks;
+    tools: ToolSet
+  ): Promise<Turn> {
+    const { session, operationId } = start;
     const history = asUIMessages(
       await this.#handle(session).getHistory({ leafId: message.id })
     );
@@ -1436,16 +1789,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       tools,
       ignoreIncompleteToolCalls: true
     });
-    // The drive owns this message while it runs tools; every completion
+    // The run owns this message while it runs tools; every completion
     // updates this copy and persists it whole.
     let current = message;
+    let turn = start;
 
     const toRun: ToolCallPart[] = [];
     const approvals: string[] = [];
     for (const call of calls) {
       const toolName = toolNameOf(call);
-      const tool = tools[toolName];
-      if (!tool) continue;
+      const tool = Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
+      if (!tool) {
+        toRun.push(call);
+        continue;
+      }
       if (call.state === "input-available") {
         const needsApproval =
           (await this.#options.toolApproval?.({
@@ -1480,7 +1837,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         );
       }
       const snapshot = current;
-      await this.#commit(session, undefined, (put) => put(snapshot));
+      await this.#commit(run, session, undefined, (put) => put(snapshot));
       this.#events.emit(session, {
         type: "message",
         message: snapshot,
@@ -1488,121 +1845,153 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       });
     }
 
+    const maxAttempts =
+      this.#options.recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     await Promise.all(
-      toRun.map(async (call) => {
+      toRun.map((call) => {
         const toolName = toolNameOf(call);
-        const tool = tools[toolName];
-        if (!tool) return;
+        const tool = Object.hasOwn(tools, toolName)
+          ? tools[toolName]
+          : undefined;
         const { toolCallId } = call;
-        const started = store.toolCall(session, toolCallId);
-        let outcome: ToolOutcome | undefined;
-        if (started) {
-          // Started before, with no result in the transcript: an eviction
-          // cut it short.
-          const policy = toolRecovery(tool);
-          const maxAttempts =
-            this.#options.recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-          if (policy === "report" || started.attempts >= maxAttempts) {
-            outcome = { ok: false, errorText: INTERRUPTED_TOOL_ERROR };
-          }
-        }
-        let attempt = started?.attempts ?? 0;
-        let input: unknown = call.input;
-        if (!outcome) {
-          attempt = store.startToolCall(session, toolCallId, operationId);
-          const decision = await hooks?.beforeToolCall?.({
-            session,
-            operationId,
-            toolCallId,
-            toolName,
-            input,
-            attempt
-          });
-          if (decision?.action === "block") {
-            outcome = { ok: false, errorText: decision.reason };
-          } else if (decision?.action === "substitute") {
-            outcome = { ok: true, output: decision.output };
-          } else {
-            if (decision?.action === "run" && decision.input !== undefined) {
-              input = decision.input;
+        // A provider may reuse a tool-call id in a later model step.
+        return run.do(
+          `tool:${start.steps}:${toolCallId}`,
+          TOOL_STEP,
+          async ({ attempt: stepAttempt, signal }) => {
+            // Starts before this one, including one an earlier version
+            // recorded before the call became a step.
+            const attempt =
+              stepAttempt + (start.started?.includes(toolCallId) ? 1 : 0);
+            // Removed since the model was offered it, or never offered.
+            const unavailable: ToolOutcome = {
+              ok: false,
+              errorText: `Tool "${toolName}" is no longer available.`
+            };
+            let outcome: ToolOutcome | undefined;
+            if (!tool) {
+              outcome = unavailable;
+            } else if (
+              attempt > 1 &&
+              (toolRecovery(tool) === "report" || attempt - 1 >= maxAttempts)
+            ) {
+              // Started before, with no result in the transcript: an
+              // eviction cut it short.
+              outcome = { ok: false, errorText: INTERRUPTED_TOOL_ERROR };
             }
-            outcome = await executeTool(tool, input, {
+            let input: unknown = call.input;
+            if (!outcome && tool) {
+              const decision = await this.#extensions.hook("beforeToolCall", {
+                session,
+                operationId,
+                toolCallId,
+                toolName,
+                input,
+                attempt
+              });
+              if (decision?.action === "block") {
+                outcome = { ok: false, errorText: decision.reason };
+              } else if (decision?.action === "substitute") {
+                outcome = { ok: true, output: decision.output };
+              } else {
+                if (
+                  decision?.action === "run" &&
+                  decision.input !== undefined
+                ) {
+                  input = decision.input;
+                }
+                outcome = await executeTool(tool, input, {
+                  toolCallId,
+                  messages: modelMessages,
+                  abortSignal: signal,
+                  onPreliminary: (output) =>
+                    this.#events.emit(session, {
+                      type: "chunk",
+                      operationId,
+                      chunk: {
+                        type: "tool-output-available",
+                        toolCallId,
+                        output,
+                        preliminary: true
+                      }
+                    })
+                });
+              }
+            }
+            // Aborted while it ran: the run's report settles the call.
+            if (signal.aborted) return;
+            const settled = outcome ?? unavailable;
+            await this.#extensions.hook("afterToolCall", {
+              session,
+              operationId,
               toolCallId,
-              messages: modelMessages,
-              abortSignal: live.abort.signal,
-              onPreliminary: (output) =>
-                this.#events.emit(session, {
-                  type: "chunk",
-                  operationId,
-                  chunk: {
+              toolName,
+              input,
+              attempt,
+              ...settled
+            });
+            current = withToolPart(current, toolCallId, (part) =>
+              withOutcome(part, settled)
+            );
+            const snapshot = current;
+            await this.#commit(run, session, undefined, (put) => {
+              put(snapshot);
+              turn = this.#write(run, turn, { interruptions: 0 });
+            });
+            this.#events.emit(session, {
+              type: "chunk",
+              operationId,
+              chunk: settled.ok
+                ? {
                     type: "tool-output-available",
                     toolCallId,
-                    output,
-                    preliminary: true
+                    output: settled.output
                   }
-                })
+                : {
+                    type: "tool-output-error",
+                    toolCallId,
+                    errorText: settled.errorText
+                  }
+            });
+            this.#events.emit(session, {
+              type: "message",
+              message: snapshot,
+              operationId
             });
           }
-        }
-        const settled = outcome;
-        await hooks?.afterToolCall?.({
-          session,
-          operationId,
-          toolCallId,
-          toolName,
-          input,
-          attempt,
-          ...settled
-        });
-        current = withToolPart(current, toolCallId, (part) =>
-          withOutcome(part, settled)
         );
-        const snapshot = current;
-        await this.#commit(session, undefined, (put) => {
-          put(snapshot);
-          store.finishToolCall(session, toolCallId);
-          store.update(session, operationId, { interruptions: 0 });
-        });
-        this.#events.emit(session, {
-          type: "chunk",
-          operationId,
-          chunk: settled.ok
-            ? {
-                type: "tool-output-available",
-                toolCallId,
-                output: settled.output
-              }
-            : {
-                type: "tool-output-error",
-                toolCallId,
-                errorText: settled.errorText
-              }
-        });
-        this.#events.emit(session, {
-          type: "message",
-          message: snapshot,
-          operationId
-        });
       })
     );
+    return turn;
   }
 
   // ── Settling ─────────────────────────────────────────────────────────────
 
   /**
-   * End an operation that cannot run on: keep what its interrupted model
-   * call produced, mark any tool call it left open as failed, and settle
-   * it `unanswered`.
+   * Finish an operation that cannot run on: keep what its interrupted
+   * model call produced (`chunks`), mark any tool call it left open as
+   * failed, and discard its stream. `progress` joins the write, for an
+   * attempt that ends the operation itself. Returns the operation's
+   * message as it is left.
    */
-  async #abandon(op: OperationRecord, reason: string): Promise<void> {
-    const { session, operationId } = op;
-    const existing = await this.#message(op);
+  async #abandon(
+    session: ThinkSessionId,
+    state: TurnState | undefined,
+    chunks: readonly UIMessageChunk[],
+    reason: string,
+    run?: TaskStep,
+    progress?: (change: TurnChange) => void
+  ): Promise<UIMessage | undefined> {
+    if (!state) return undefined;
+    const stored =
+      state.messageId === null
+        ? null
+        : await this.#handle(session).getMessage(state.messageId);
+    const existing = stored ? asUIMessage(stored) : undefined;
     let message = existing;
-    const chunks =
-      op.streamId === undefined ? [] : this.#streamChunks(op.streamId);
     if (chunks.length > 0) {
       const rebuilt = accumulate(
-        op.messageId ?? crypto.randomUUID(),
+        state.messageId ?? crypto.randomUUID(),
         existing,
         chunks
       );
@@ -1626,34 +2015,58 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       message && hasContent(message) && message !== existing
         ? message
         : undefined;
-    await this.#commit(session, op.streamId, (put) => {
-      if (keep) put(keep, { parentId: op.parentId });
-      this.#tables().settle(
-        session,
-        operationId,
-        { status: "unanswered", reason },
-        { streamId: null }
-      );
+    await this.#commit(run, session, state.streamId ?? undefined, (put) => {
+      if (keep) put(keep, { parentId: state.parentId ?? undefined });
+      progress?.({ streamId: null, ended: { reason } });
     });
-    if (keep) {
-      this.#events.emit(session, {
-        type: "message",
-        message: keep,
-        operationId
-      });
-    }
-    await this.#settled(session, operationId, keep ?? existing);
+    if (keep) this.#events.emit(session, { type: "message", message: keep });
+    return keep ?? existing;
   }
 
-  /** Tell everyone an operation settled. Its row is already written. */
-  async #settled(
-    session: ThinkSessionId,
-    operationId: string,
-    message?: UIMessage
-  ): Promise<void> {
-    const op = this.#tables().get(session, operationId);
-    if (!op) return;
-    const result = this.#result(op);
+  /**
+   * An operation's run changed status. When it ended, finish it if its
+   * handler did not (an abort, the memory-limit breaker), then tell
+   * everyone. Tasks calls this at least once per end, and `wait()`
+   * resolves after it returned.
+   */
+  async #onStatus(record: TaskRecord): Promise<void> {
+    const [session, operationId] = operationOf(record.runId);
+    if (isQueued(record)) {
+      this.#events.emit(session, {
+        type: "operation",
+        status: { operationId, status: "queued" }
+      });
+      return;
+    }
+    if (!TERMINAL.includes(record.status)) return;
+    const result = this.#result(record);
+    let message: UIMessage | undefined;
+    if (record.status === "completed") {
+      const outcome = record.result as OperationOutcome | undefined;
+      const stored = outcome?.messageId
+        ? await this.#handle(session).getMessage(outcome.messageId)
+        : null;
+      if (stored) message = asUIMessage(stored);
+    } else {
+      const state = this.#state(record.runId);
+      // An attempt still unwinding here has the chunks it has not written.
+      const live = this.#live.get(session);
+      let chunks: readonly UIMessageChunk[];
+      if (live?.operationId === operationId) {
+        live.taken = true;
+        chunks = live.partial;
+      } else {
+        chunks = this.#streamChunks(state?.streamId);
+      }
+      message = await this.#abandon(
+        session,
+        state,
+        chunks,
+        result.status === "unanswered"
+          ? (result.reason ?? "unanswered")
+          : "unanswered"
+      );
+    }
     this.#events.emit(session, {
       type: "operation",
       status:
@@ -1669,11 +2082,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               ...(result.reason !== undefined && { reason: result.reason })
             }
     });
-    const key = waiterKey(session, operationId);
-    for (const waiter of this.#waiters.get(key) ?? []) waiter();
-    this.#waiters.delete(key);
     try {
-      await this.#options.hooks?.onTurnEnd?.({
+      await this.#extensions.hook("onTurnEnd", {
         ...result,
         ...(message && { message })
       });
@@ -1682,42 +2092,85 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
   }
 
-  #result(op: OperationRecord): ThinkOperationResult {
-    const { operationId, session } = op;
-    return op.status === "done"
-      ? {
-          operationId,
-          session,
-          status: "done",
-          text: op.text ?? "",
-          ...(op.messageId !== undefined && { messageId: op.messageId })
-        }
-      : {
-          operationId,
-          session,
-          status: "unanswered",
-          ...(op.reason !== undefined && { reason: op.reason })
-        };
+  /** A settled operation's result, from its run. */
+  #result(record: TaskRecord): ThinkOperationResult {
+    const [session, operationId] = operationOf(record.runId);
+    const unanswered = (reason: string | undefined): ThinkOperationResult => ({
+      operationId,
+      session,
+      status: "unanswered",
+      ...(reason !== undefined && { reason })
+    });
+    switch (record.status) {
+      case "completed": {
+        // SAFETY: the handler's result is an OperationOutcome.
+        const outcome = record.result as OperationOutcome;
+        return outcome.status === "done"
+          ? {
+              operationId,
+              session,
+              status: "done",
+              text: outcome.text,
+              ...(outcome.messageId !== undefined && {
+                messageId: outcome.messageId
+              })
+            }
+          : unanswered(outcome.reason);
+      }
+      case "error":
+        return unanswered(
+          record.error?.name === "TaskMemoryLimitSealed"
+            ? "out_of_memory"
+            : record.error?.message
+        );
+      default:
+        return unanswered(record.reason ?? "aborted");
+    }
   }
 
   // ── Storage ──────────────────────────────────────────────────────────────
 
-  #tables(): OperationRecords {
-    this.#records ??= new OperationRecords(this.lifecycle.storage);
-    return this.#records;
+  /**
+   * Every open operation, oldest first, in one session's lane or in all.
+   * Open operations are what callers submitted and have not settled, so
+   * the list has no cap of its own.
+   */
+  #open(session?: ThinkSessionId): TaskRecord[] {
+    return this.#tasks.peekList({
+      definition: OPERATION_DEFINITION,
+      ...(session !== undefined && { lane: laneOf(session) }),
+      status: ["pending", "running"],
+      results: false,
+      order: "oldest",
+      limit: Number.MAX_SAFE_INTEGER
+    });
+  }
+
+  /** A placed operation's progress, read from outside its attempt. */
+  #state(runId: string): TurnState | undefined {
+    return this.#tasks.checkpointOf<TurnState>(runId, TURN_KEY);
+  }
+
+  /**
+   * Write a turn's progress to its run's checkpoint: synchronous, so it
+   * joins the transaction a transcript write or stream cutover runs in.
+   */
+  #write(run: TaskStep, turn: Turn, change: TurnChange): Turn {
+    const next = { ...turn, ...change };
+    run.checkpoint.set(TURN_KEY, stateOf(next));
+    return next;
   }
 
   /** The Sessions handle for a session, configured on first use. */
   /**
-   * Give the Sessions and Streams the harness owns this capability's
-   * Lifecycle services. Done on first use, not only in `onStart`, because an
+   * Give the Sessions the harness owns this capability's Lifecycle
+   * services. Done on first use, not only in `onStart`, because an
    * RPC can read a transcript before startup (the read itself then waits
    * for startup).
    */
   #bindOwned(): void {
     if (this.#bound) return;
     bindLifecycleCapability(this.#sessions, this.lifecycle);
-    bindLifecycleCapability(this.#streams, this.lifecycle);
     this.#bound = true;
     // Writes made on a session's Sessions handle (from `configureSession`)
     // go around the harness; pass them on as events, so listeners and chat
@@ -1738,9 +2191,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           if ((this.#ownClears.get(session) ?? 0) > 0) return;
           this.#events.emit(session, { type: "reset" });
           return;
-        case "delete":
         case "compact":
         case "compaction":
+          // Any compaction, the harness's own or Sessions' automatic one:
+          // the prefix is gone and the summary hides the turns that wrote
+          // the blocks, so the next turn rebuilds the context from them.
+          // (Built here if this object has not used it yet.)
+          void this.#context(session)
+            ?.refreshSystemPrompt()
+            .catch((error: unknown) =>
+              console.warn("ThinkHarness could not refresh the context", error)
+            );
+          this.#events.emit(session, { type: "transcript" });
+          return;
+        case "delete":
           // No one message describes these: the active path changed.
           this.#events.emit(session, { type: "transcript" });
           return;
@@ -1805,6 +2269,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return this.#handle(session).compact();
   }
 
+  /** A session's context, from the `context` option. */
+  #context(session: ThinkSessionId): Context | undefined {
+    if (!this.#contexts.has(session)) {
+      this.#contexts.set(
+        session,
+        this.#options.context?.(this.#handle(session), session)
+      );
+    }
+    return this.#contexts.get(session);
+  }
+
   #handle(session: ThinkSessionId): Session {
     this.#bindOwned();
     const handle = this.#sessions.session(session);
@@ -1815,27 +2290,90 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return handle;
   }
 
-  async #message(op: OperationRecord): Promise<UIMessage | undefined> {
-    if (op.messageId === undefined) return undefined;
-    const message = await this.#handle(op.session).getMessage(op.messageId);
-    return message ? asUIMessages([message])[0] : undefined;
+  /** A turn's assistant message, once it has one. */
+  async #message(turn: Turn): Promise<UIMessage | undefined> {
+    if (turn.messageId === null) return undefined;
+    const message = await this.#handle(turn.session).getMessage(turn.messageId);
+    return message ? asUIMessage(message) : undefined;
   }
 
-  async #tools(session: ThinkSessionId): Promise<ToolSet> {
-    const tools = (await resolve(this.#options.tools, session)) ?? {};
+  /**
+   * The extensions' remind sections as remind blocks of the session's
+   * context: added the first time a label is built, and reading the
+   * latest build's text, so a change reaches the model once as a reminder.
+   */
+  async #remindBlocks(
+    context: Context,
+    sections: readonly RemindSection[]
+  ): Promise<void> {
+    let texts = this.#remindTexts.get(context);
+    if (!texts) {
+      if (sections.length === 0) return;
+      texts = new Map();
+      this.#remindTexts.set(context, texts);
+    }
+    const current = texts;
+    const built = new Set(sections.map(({ label }) => label));
+    // A section the build no longer has leaves the context with it.
+    for (const label of [...current.keys()]) {
+      if (built.has(label)) continue;
+      current.delete(label);
+      context.removeBlock(label);
+    }
+    for (const { label, text, description, maxTokens } of sections) {
+      if (current.has(label)) {
+        current.set(label, text);
+        continue;
+      }
+      // A block the context already has under this label (the app's own)
+      // stays as it is: the section is left out, with a warning, rather
+      // than failing the turn. It is tried again on the next build.
+      current.set(label, text);
+      try {
+        await context.addBlock({
+          label,
+          ...(description !== undefined && { description }),
+          ...(maxTokens !== undefined && { maxTokens }),
+          whenChanged: "remind",
+          provider: { get: async () => current.get(label) ?? null }
+        });
+      } catch (error) {
+        current.delete(label);
+        console.warn(
+          `ThinkHarness left out the extension prompt section "${label}": the session's context already has a block with that label`,
+          error
+        );
+      }
+    }
+  }
+
+  /** A session's tools, its client's included, and its options' prompt. */
+  async #build(session: ThinkSessionId): Promise<SessionBuild> {
+    const { tools, system, remind, allSections } =
+      await this.#extensions.build(session);
+    const declared =
+      await this.#handle(session).internal_config(CLIENT_TOOLS_KEY);
+    // A client's declaration that is not a list declares nothing.
+    const parsed: unknown = declared === null ? [] : JSON.parse(declared);
     const client = createToolsFromClientSchemas(
-      this.#tables().clientTools(session)
+      // SAFETY: the list a client declared, as `enqueue` stored it; before
+      // this value existed the harness store read it the same way.
+      Array.isArray(parsed) ? (parsed as ClientToolSchema[]) : []
     );
-    // A client cannot replace a server tool: the server's definition, its
-    // execute and its approval policy win on a name clash.
-    for (const name of Object.keys(client)) {
+    // Client tools go last, as in Think. A client cannot replace a server
+    // tool: the server's definition, its execute and its approval policy
+    // win on a name clash.
+    const merged: ToolSet = { ...tools };
+    for (const [name, tool] of Object.entries(client)) {
       if (Object.hasOwn(tools, name)) {
         console.warn(
           `ThinkHarness ignored a client tool named "${name}": a server tool has that name`
         );
+        continue;
       }
+      merged[name] = tool;
     }
-    return { ...client, ...tools };
+    return { tools: merged, system, remind, allSections };
   }
 
   /**
@@ -1844,10 +2382,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * cutover), so an eviction leaves either the stream or the message.
    */
   async #commit(
+    run: TaskStep | undefined,
     session: ThinkSessionId,
     streamId: string | undefined,
     writes: (put: Put) => void
   ): Promise<void> {
+    // A cancelled attempt may still be unwinding (a hook it awaited, a tool
+    // that ignores its signal); it writes nothing more. Checked in the same
+    // synchronous block as the write, so nothing lands between the two.
+    if (run?.signal.aborted) throw run.signal.reason;
     const sync = this.#handle(session).__DO_NOT_USE_WILL_BREAK__sync();
     const afters: (() => Promise<void>)[] = [];
     const ids: string[] = [];
@@ -1886,10 +2429,72 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
   }
 
-  /** Every chunk a stream holds, without waiting for more. */
-  #streamChunks(streamId: string): UIMessageChunk[] {
+  /**
+   * Move stream `streamId` out of the default Streams tables into the
+   * harness's own, in one transaction: its row and its chunks as they are
+   * (times included), then deleted there. Through the default instance's
+   * synchronous operations only: it is never started here, so it records
+   * no schema under the harness's id.
+   *
+   * @returns Whether there was such a stream.
+   */
+  #adoptStream(streamId: string): boolean {
+    if (!hasTable(this.lifecycle.storage.sql, "cf_agents_streams")) {
+      return false;
+    }
+    if (!this.#sharedStreams) {
+      this.#sharedStreams = new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
+      bindLifecycleCapability(this.#sharedStreams, this.lifecycle);
+    }
+    const from = this.#sharedStreams.__DO_NOT_USE_WILL_BREAK__sync();
+    const row = from.getStream(streamId);
+    if (!row) return false;
+    const to = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
+    this.lifecycle.storage.transactionSync(() => {
+      to.importStream({
+        streamId,
+        state: row.state,
+        tag: row.tag,
+        // SAFETY: stream metadata is JSON the harness wrote.
+        metadata:
+          row.metadata === null
+            ? undefined
+            : (JSON.parse(row.metadata) as Record<string, StreamJson>),
+        chunkCount: row.chunk_count,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        closedAt: row.closed_at
+      });
+      for (let seq = 0; ;) {
+        const rows = from.readChunks(streamId, seq, READ_PAGE);
+        for (const chunk of rows) {
+          // SAFETY: each stored chunk is a segment the harness wrote.
+          to.importChunk(
+            streamId,
+            JSON.parse(chunk.chunk) as StreamJson,
+            chunk.created_at
+          );
+        }
+        if (rows.length < READ_PAGE) break;
+        seq = (rows.at(-1)?.seq ?? seq) + 1;
+      }
+      from.deleteUnchecked(streamId);
+    });
+    return true;
+  }
+
+  /**
+   * Every chunk a run's stream holds, without waiting for more. A stream
+   * the harness's own instance lacks may be in the default Streams tables,
+   * where earlier versions kept it (and still do after a rollback): it is
+   * moved here first.
+   */
+  #streamChunks(streamId: string | null | undefined): UIMessageChunk[] {
+    if (streamId == null) return [];
     const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
-    if (!streams.getStream(streamId)) return [];
+    if (!streams.getStream(streamId) && !this.#adoptStream(streamId)) {
+      return [];
+    }
     const chunks: UIMessageChunk[] = [];
     let from = 0;
     for (;;) {
@@ -1902,14 +2507,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (rows.length < READ_PAGE) return chunks;
       from = (rows.at(-1)?.seq ?? from) + 1;
     }
-  }
-
-  /** Chunks an evicted model call left in its stream, for a late watcher. */
-  #recoverableChunks(session: ThinkSessionId): UIMessageChunk[] {
-    const running = this.#tables()
-      .open(session)
-      .find((op) => op.status === "running");
-    return running?.streamId ? this.#streamChunks(running.streamId) : [];
   }
 }
 
@@ -2001,6 +2598,24 @@ const CONTEXT_OVERFLOW_PATTERN =
   /prompt is too long|context[_ ]length[_ ]exceeded|maximum context length|exceeds the maximum number of tokens|input token count|reduce the length of|input is too long|too many (?:input )?tokens|context window/i;
 
 /** A tool's own recovery field, or the default. */
+/**
+ * Whether the harness answers this call: a server tool's, or a call still
+ * waiting to run whose tool this build does not have (removed while the
+ * call was cut off), which is answered as no longer available. An approved
+ * call to a tool the build does not have waits, as in Think: it may be a
+ * client's tool the client did not declare again with the answer.
+ */
+function answersHere(
+  tools: ToolSet,
+  name: string,
+  part: ToolCallPart
+): boolean {
+  return (
+    isServerTool(tools, name) ||
+    (!Object.hasOwn(tools, name) && part.state === "input-available")
+  );
+}
+
 function toolRecovery(tool: object): ToolRecovery {
   return "recovery" in tool && tool.recovery === "rerun" ? "rerun" : "report";
 }
@@ -2009,21 +2624,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function backoff(attempt: number, baseMs: number): number {
-  if (attempt <= 1) return 0;
-  return Math.min(baseMs * 2 ** (attempt - 2), MAX_BACKOFF_MS);
-}
-
 function streamTag(session: ThinkSessionId, operationId: string): string {
   return `think:${JSON.stringify([session, operationId])}`;
 }
 
-function waiterKey(session: ThinkSessionId, operationId: string): string {
-  return JSON.stringify([session, operationId]);
+/** A session's `SESSION_KEY` value. */
+function sessionValue(
+  parent: ThinkSessionId | undefined,
+  createdAt: number
+): string {
+  return JSON.stringify({ ...(parent !== undefined && { parent }), createdAt });
 }
 
-/** Project a session event onto the shared harness interface's events. */
-function toSessionEvents(event: ThinkSessionEvent): SessionEvent[] {
+/** How a turn ended, from its `ended` mark and its message. */
+function outcomeOf(
+  ended: { readonly reason?: string },
+  message: UIMessage | undefined
+): OperationOutcome {
+  const messageId = message && { messageId: message.id };
+  return ended.reason === undefined
+    ? { status: "done", text: textOf(message), ...messageId }
+    : { status: "unanswered", reason: ended.reason, ...messageId };
+}
+
+/** A message as the shared harness interface carries it. */
+function transcriptOf(message: UIMessage, tools: ToolSet) {
+  return toTranscriptMessage(message, {
+    tools,
+    owner: ownerOf(message.metadata)
+  });
+}
+
+/**
+ * Project a session event onto the shared harness interface's events.
+ * `owner` is the participant who started the run the event belongs to.
+ */
+function toSessionEvents(
+  event: ThinkSessionEvent,
+  tools: ToolSet,
+  owner: string | undefined
+): SessionEvent[] {
   switch (event.type) {
     case "operation":
       return [{ type: "operation", status: event.status }];
@@ -2032,11 +2672,11 @@ function toSessionEvents(event: ThinkSessionEvent): SessionEvent[] {
     case "run-end":
       return [{ type: "run-end", operations: [event.operationId] }];
     case "chunk": {
-      const chunk = toResponseChunk(event.chunk, {});
+      const chunk = toResponseChunk(event.chunk, { tools, owner });
       return chunk ? [{ type: "chunk", chunk }] : [];
     }
     case "message":
-      return [{ type: "message", message: toTranscriptMessage(event.message) }];
+      return [{ type: "message", message: transcriptOf(event.message, tools) }];
     case "reset":
       return [{ type: "reset" }];
     case "transcript":
@@ -2271,4 +2911,37 @@ export class ThinkSessions implements HarnessSessions {
   list(): Promise<ThinkSessionInfo[]> {
     return this.#harness.listSessions();
   }
+}
+
+/** The `system` option and the context prompt, either of which may be empty. */
+function joinSystem(
+  system: string | undefined,
+  context: string
+): string | undefined {
+  if (!context) return system;
+  return system ? `${system}\n\n${context}` : context;
+}
+
+/**
+ * Carry a reminder that was not recorded on this request only: after the
+ * last user message's own content, or as a user message of its own after
+ * an assistant message.
+ */
+function withReminder(
+  messages: UIMessage[],
+  reminder: string | null
+): UIMessage[] {
+  if (!reminder) return messages;
+  const part = { type: "text" as const, text: reminder };
+  const last = messages.at(-1);
+  if (last?.role === "user") {
+    return [
+      ...messages.slice(0, -1),
+      { ...last, parts: [...last.parts, part] }
+    ];
+  }
+  return [
+    ...messages,
+    { id: "cf_agents_context_reminder", role: "user", parts: [part] }
+  ];
 }

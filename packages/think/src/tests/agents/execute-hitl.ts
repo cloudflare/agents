@@ -14,6 +14,7 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
+import { DECISION_TASK, decisionRunId } from "../../action-ledger";
 import { Think } from "../../think";
 import { createExecuteTool } from "../../tools/execute";
 
@@ -203,6 +204,60 @@ export class ThinkExecuteHitlAgent extends Think {
     };
   }
 
+  /**
+   * Leave a codemode decision as a reset after its outcome was recorded and
+   * before its terminal report leaves it.
+   */
+  async recordCodemodeOutcomeWithoutReportForTest(
+    executionId: string,
+    output: { status: string; executionId: string; result: string }
+  ): Promise<void> {
+    const runId = decisionRunId(`codemode_${crypto.randomUUID()}`);
+    await this.tasks.importRun({
+      runId,
+      definition: DECISION_TASK,
+      status: "completed",
+      attempt: 1,
+      input: {
+        kind: "codemode",
+        executionId,
+        verdict: { approved: true },
+        output
+      },
+      createdAt: Date.now()
+    });
+    this
+      .sql`UPDATE cf_agents_task_runs SET notified = NULL WHERE run_id = ${runId}`;
+  }
+
+  /** Record a codemode outcome as an approval does, through its run. */
+  async recordCodemodeOutcomeForTest(
+    executionId: string,
+    output: { status: string; executionId: string; result: string }
+  ): Promise<void> {
+    await this.tasks.run(
+      DECISION_TASK,
+      { kind: "codemode", executionId, verdict: { approved: true }, output },
+      { runId: decisionRunId(`codemode_${crypto.randomUUID()}`), start: "now" }
+    );
+  }
+
+  async decisionOutputCountForTest(): Promise<number> {
+    return (this as unknown as { _decisionOutputs: Map<string, unknown> })
+      ._decisionOutputs.size;
+  }
+
+  /** How many decision runs are stored. */
+  async decisionRunCountForTest(): Promise<number> {
+    return this.tasks.peekList({ definition: DECISION_TASK, limit: 1000 })
+      .length;
+  }
+
+  /** Start Tasks again, as a new isolate does: undelivered reports replay. */
+  async restartTasksForTest(): Promise<void> {
+    await this.tasks.onStart();
+  }
+
   /** How many times the gated tool actually executed. */
   async gatedCallCount(): Promise<number> {
     return this.#gatedCalls;
@@ -228,6 +283,12 @@ export class ThinkExecuteHitlAgent extends Think {
       }
     }
     return out;
+  }
+
+  /** How many assistant messages the transcript holds. */
+  async assistantMessageCount(): Promise<number> {
+    return this.messages.filter((message) => message.role === "assistant")
+      .length;
   }
 
   /** Text content of the last assistant message — the model's narration. */

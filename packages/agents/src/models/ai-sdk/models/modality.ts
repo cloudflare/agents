@@ -12,13 +12,12 @@ import type {
 } from "@ai-sdk/provider";
 import { CloudflareAIError, requireWorkersAIId } from "../errors";
 import {
-  DEFAULT_GATEWAY_ID,
+  isGatewayConfigured,
   parseModalityCallOptions,
   resolveOptions,
-  type ModelOptions,
-  type ResolvedGateway
+  type ModelOptions
 } from "../settings";
-import type { RawAudio } from "../../core/transport";
+import type { MultipartFields, RawAudio } from "../../core/transport";
 import {
   definedHeaders,
   errorFromResponse,
@@ -40,7 +39,39 @@ export interface ModalityRequest {
   input: Record<string, unknown>;
   /** Audio sent as a raw body, for a model that takes one. */
   audio?: RawAudio;
+  /** The whole input as form fields, for a model that takes multipart. */
+  multipart?: MultipartFields;
   warnings: SharedV4Warning[];
+}
+
+/**
+ * The body a request reports as sent (`request.body`, error
+ * `requestBodyValues`): raw audio and form files as base64, since bytes do
+ * not survive JSON.
+ */
+function sentBody(request: ModalityRequest): Record<string, unknown> {
+  if (request.multipart !== undefined) {
+    return {
+      multipart: Object.fromEntries(
+        Object.entries(request.multipart).map(([name, value]) => [
+          name,
+          typeof value === "string"
+            ? value
+            : { body: toBase64(value.bytes), contentType: value.contentType }
+        ])
+      )
+    };
+  }
+  if (request.audio !== undefined) {
+    return {
+      ...request.input,
+      audio: {
+        body: toBase64(request.audio.bytes),
+        contentType: request.audio.contentType
+      }
+    };
+  }
+  return request.input;
 }
 
 /** One call on a non-language model, before the wire body is built. */
@@ -81,12 +112,6 @@ export interface ModalityAnswer {
   timestamp: Date;
   /** The endpoint that answered, for error reporting. */
   url: string;
-}
-
-/** Whether the caller set any gateway option, the id included. */
-function gatewayConfigured(gateway: ResolvedGateway): boolean {
-  const { id, ...options } = gateway;
-  return id !== DEFAULT_GATEWAY_ID || Object.keys(options).length > 0;
 }
 
 /** The `unsupported` warning shape, which every modality needs. */
@@ -162,21 +187,14 @@ export abstract class CloudflareModalityModel {
       transport.url,
       async (modelId) => {
         const request = call.build(modelId);
-        // A raw audio body goes to Workers AI directly (see the transport),
-        // so no gateway handles it and the gateway options do not apply.
-        const direct = request.audio !== undefined;
-        const sent =
-          request.audio === undefined
-            ? request.input
-            : {
-                ...request.input,
-                audio: {
-                  body: toBase64(request.audio.bytes),
-                  contentType: request.audio.contentType
-                }
-              };
+        // A raw audio or multipart body goes to Workers AI directly (see the
+        // transport), so no gateway handles it and the gateway options do not
+        // apply.
+        const direct =
+          request.audio !== undefined || request.multipart !== undefined;
+        const sent = sentBody(request);
         const warnings =
-          direct && gatewayConfigured(resolved.gateway)
+          direct && isGatewayConfigured(resolved.gateway)
             ? [
                 ...request.warnings,
                 unsupported(
@@ -187,6 +205,9 @@ export abstract class CloudflareModalityModel {
             : request.warnings;
         const response = await transport.run({
           ...(request.audio === undefined ? {} : { audio: request.audio }),
+          ...(request.multipart === undefined
+            ? {}
+            : { multipart: request.multipart }),
           gateway: resolved.gateway,
           headers: {
             // The AI SDK types these as `string | undefined`; an undefined

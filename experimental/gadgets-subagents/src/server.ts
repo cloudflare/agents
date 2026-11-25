@@ -138,7 +138,7 @@ export class PerspectiveAgent extends Agent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions: perspective.instructions,
@@ -274,7 +274,7 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
     // Synthesize: ask the LLM to combine the three perspectives
     const workersai = createWorkersAI({ binding: this.env.AI });
     const synthesisResult = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions:
@@ -309,7 +309,7 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
     const agent = this;
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions: `You are a coordinator that manages three specialist sub-agents to analyze questions from multiple perspectives.

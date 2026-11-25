@@ -30,7 +30,7 @@ describe("a harness factory on a Durable Object", () => {
     const activated = await stub.prompt('call activate_skill {"name":"haiku"}');
     expect(activated.text).toContain("Five, seven, five syllables.");
     const resource = await stub.prompt(
-      'call read_skill_resource {"name":"haiku","path":"examples.md"}'
+      'call read_skill_resource {"name":"haiku","path":"references/examples.md"}'
     );
     expect(resource.text).toContain("An old silent pond");
   });

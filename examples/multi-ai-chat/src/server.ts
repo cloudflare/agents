@@ -322,7 +322,7 @@ export class Chat extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         sessionAffinity: this.sessionAffinity
       }),
       instructions: systemPrompt,
@@ -439,7 +439,7 @@ export class Researcher extends Agent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const { text } = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+      model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       instructions:
         "You are a concise research helper. Use only the provided chat context. " +
         "Return a short, practical answer with any uncertainty called out.",

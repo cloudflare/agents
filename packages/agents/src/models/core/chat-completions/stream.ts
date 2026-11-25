@@ -53,7 +53,7 @@ function stripEchoSuffix(chunk: Record_, modelId: string): Record_ {
     : chunk;
 }
 
-function normalizeDelta(delta: Record_, relabelReasoning: boolean): Record_ {
+function normalizeDelta(delta: Record_): Record_ {
   const out: Record_ = { ...delta };
   const reasoning =
     typeof out.reasoning_content === "string" && out.reasoning_content !== ""
@@ -63,15 +63,7 @@ function normalizeDelta(delta: Record_, relabelReasoning: boolean): Record_ {
         : undefined;
   delete out.reasoning;
   delete out.reasoning_content;
-  if (reasoning !== undefined) {
-    if (relabelReasoning) {
-      // Reasoning is off, so these tokens are the answer (nemotron-3).
-      out.content =
-        (typeof out.content === "string" ? out.content : "") + reasoning;
-    } else {
-      out.reasoning_content = reasoning;
-    }
-  }
+  if (reasoning !== undefined) out.reasoning_content = reasoning;
   if (Array.isArray(out.tool_calls)) {
     out.tool_calls = out.tool_calls.map((call, index) => {
       // Fragments and the null finalizer pass through untouched; only a
@@ -90,23 +82,13 @@ function normalizeDelta(delta: Record_, relabelReasoning: boolean): Record_ {
   return out;
 }
 
-export interface StreamNormalizationOptions {
-  /** Whether the request turned reasoning off (`PreparedRequest.reasoningOff`). */
-  reasoningOff?: boolean;
-}
-
 /**
  * The transform. Backpressure is preserved: nothing is buffered except the
  * single pending usage chunk, which must wait for the tail.
  */
 export function normalizeChatCompletionsStream(
-  modelId: string,
-  options: StreamNormalizationOptions = {}
+  modelId: string
 ): TransformStream<string, string> {
-  const quirks = quirksFor(modelId);
-  const relabelReasoning =
-    options.reasoningOff === true &&
-    quirks.reasoningOffStreamLabel === "reasoning";
   let id: string | undefined;
   let model: string | undefined;
   let created: number | undefined;
@@ -198,7 +180,7 @@ export function normalizeChatCompletionsStream(
         if (!isRecord(choice)) return choice;
         if (typeof choice.finish_reason === "string") sawFinishReason = true;
         const delta = isRecord(choice.delta)
-          ? normalizeDelta(choice.delta, relabelReasoning)
+          ? normalizeDelta(choice.delta)
           : choice.delta;
         if (isRecord(delta)) {
           if (typeof delta.content === "string" && delta.content !== "")

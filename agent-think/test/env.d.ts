@@ -1,4 +1,4 @@
-/// <reference types="@cloudflare/vitest-pool-workers/types" />
+/// <reference types="@cloudflare/vitest-plugin/types" />
 
 // `env` and `SELF` from "cloudflare:test" are typed off `Cloudflare.Env`, which
 // wrangler already populates in ../worker-configuration.d.ts (R2_SKILLS, LOADER,

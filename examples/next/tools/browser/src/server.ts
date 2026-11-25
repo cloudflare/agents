@@ -147,7 +147,7 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
           settings: {
             retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 }
           },
-          onReport: (error) => console.warn("pi report", error)
+          onReport: (report) => console.warn("pi report", report)
         },
         context
       );

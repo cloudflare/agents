@@ -517,6 +517,29 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     });
   });
 
+  it("abortActiveToolContinuation tells the server to stop a continuation that has not announced itself", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+    const sentBefore = agent.sent.length;
+
+    // No STREAM_RESUMING yet, so the tab has no request id. It names the
+    // continuation by its connection.
+    expect(transport.abortActiveToolContinuation()).toBe(true);
+
+    expect(agent.sent).toHaveLength(sentBefore + 1);
+    expect(JSON.parse(agent.sent[sentBefore])).toEqual({
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      continuation: true
+    });
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError"
+    });
+  });
+
   it("tool continuation stream cancel is local-only by default", async () => {
     transport.expectToolContinuation();
 

@@ -1,72 +1,27 @@
 /**
- * Cross-host recovery conformance.
+ * Before-turn repair conformance.
  *
- * The two AI-SDK chat hosts (`@cloudflare/think` and `@cloudflare/ai-chat`)
- * converge their interrupted-turn recovery onto the SAME shared primitives:
- * `repairInterruptedToolParts` (transcript repair before inference) and the
- * `partAwaitsClientInteraction` / `clientResolvableToolNames` predicate (is a
- * tool part still legitimately awaiting the client?). This suite pins the
- * behavioral contract of those seams under each host's wiring, side by side, so
- * the convergence can't silently drift.
+ * `@cloudflare/think` and `@cloudflare/ai-chat` used to wire the shared
+ * `repairInterruptedToolParts` differently: ai-chat skipped every part a
+ * client might still answer, Think repaired everything. This suite pinned
+ * that divergence. Both hosts now call one rule,
+ * `repairTranscriptBeforeTurn` (through `ChatTurns.settleBeforeTurn`), so
+ * there is no host wiring left to compare. What differs is the turn: one
+ * that starts a new reply, or one that continues the last message.
  *
- * It deliberately encodes the **subset** relationship, not naive "identical":
- *
- *   - **ai-chat wiring** repairs ONLY dead SERVER orphans and SKIPS a part still
- *     awaiting a client (`shouldRepair = !partAwaitsClientInteraction`), because
- *     ai-chat's default repair errors the part and the app owns inference — a
- *     pending client tool must be left for the client to replay (the turn parks).
- *   - **Think wiring** repairs everything before its own inference (no
- *     `shouldRepair`); its real `repairPart` may convert a client tool to text
- *     rather than error it, but either way the part ends SETTLED so the next
- *     provider call doesn't 400.
- *
- * So for a dead server orphan both hosts recover identically; for a pending
- * client orphan they intentionally differ (ai-chat ⊆ Think: ai-chat does less —
- * it parks). Each scenario states which.
+ * Each scenario is one of the transcripts the old suite compared the hosts
+ * on, with the outcome of every tool call under both kinds of turn.
  */
 
 import { describe, it, expect } from "vitest";
 import type { UIMessage } from "ai";
 import {
-  repairInterruptedToolParts,
-  type RepairInterruptedToolPartsOptions
-} from "../repair-transcript";
-import {
-  partAwaitsClientInteraction,
-  clientResolvableToolNames
-} from "../tool-state";
+  interruptedToolPartAsError,
+  repairTranscriptBeforeTurn
+} from "../before-turn";
+import { clientResolvableToolNames } from "../tool-state";
 
 type ChatMessage = UIMessage;
-
-/** ai-chat's default: flip an interrupted tool part to a settled errored result. */
-function flipToError(
-  part: UIMessage["parts"][number]
-): UIMessage["parts"][number] {
-  return {
-    ...part,
-    state: "output-error",
-    errorText: "The tool call was interrupted before a result was recorded."
-  } as UIMessage["parts"][number];
-}
-
-/** How each host wires the shared `repairInterruptedToolParts`. */
-function aiChatWiring(
-  clientTools: string[]
-): RepairInterruptedToolPartsOptions {
-  const clientResolvable = clientResolvableToolNames(
-    clientTools.map((name) => ({ name }))
-  );
-  return {
-    repairPart: flipToError,
-    shouldRepair: (part) => !partAwaitsClientInteraction(part, clientResolvable)
-  };
-}
-function thinkWiring(): RepairInterruptedToolPartsOptions {
-  // Think repairs every interrupted part before inference (no shouldRepair). Its
-  // real `repairPart` can convert a client tool to text; we model only the
-  // settled-ness outcome, which is what avoids the provider 400.
-  return { repairPart: flipToError };
-}
 
 type Outcome =
   | "output-error"
@@ -76,13 +31,13 @@ type Outcome =
 
 interface Scenario {
   name: string;
-  /** Tool names the client offered this turn (server tools are everything else). */
+  /** Tool names the client sent a schema for (anything else is a server tool). */
   clientTools: string[];
   messages: ChatMessage[];
-  /** Expected post-repair state per `toolCallId`, under each host wiring. */
-  expected: Record<string, { aiChat: Outcome; think: Outcome }>;
-  /** Whether the two hosts agree here (documentation for the reader). */
-  relationship: "identical" | "intentional-divergence (ai-chat ⊆ Think)";
+  /** State of each call after the repair, by `toolCallId`. */
+  expected: Record<string, { newReply: Outcome; continuation: Outcome }>;
+  /** Calls a continuation turn keeps for a client, so it must not call the model. */
+  keptByContinuation: string[];
 }
 
 function assistant(id: string, parts: Record<string, unknown>[]): ChatMessage {
@@ -117,106 +72,112 @@ function stateOf(
 
 const scenarios: Scenario[] = [
   {
-    name: "dead server-tool orphan recovers (both hosts)",
+    name: "a dead server-tool call in the last message is settled by both turns",
     clientTools: [],
     messages: [
       assistant("a1", [toolPart("previewTool", "srv", "input-available")])
     ],
-    expected: { srv: { aiChat: "output-error", think: "output-error" } },
-    relationship: "identical"
+    expected: {
+      srv: { newReply: "output-error", continuation: "output-error" }
+    },
+    keptByContinuation: []
   },
   {
-    name: "pending client-tool orphan: ai-chat parks (skips), Think repairs",
+    name: "a pending client-tool call in the last message: a new reply moves past it, a continuation keeps it",
     clientTools: ["chooseOption"],
     messages: [
       assistant("a1", [toolPart("chooseOption", "cli", "input-available")])
     ],
-    expected: { cli: { aiChat: "input-available", think: "output-error" } },
-    relationship: "intentional-divergence (ai-chat ⊆ Think)"
+    expected: {
+      cli: { newReply: "output-error", continuation: "input-available" }
+    },
+    keptByContinuation: ["cli"]
   },
   {
-    name: "mixed: buried client orphan + leaf server orphan",
+    name: "a client-tool call in an earlier message is settled by both turns, with the last message's server call",
     clientTools: ["chooseOption"],
     messages: [
       assistant("a1", [toolPart("chooseOption", "cli", "input-available")]),
       assistant("a2", [toolPart("previewTool", "srv", "input-available")])
     ],
     expected: {
-      // ai-chat keeps the buried client orphan, repairs the leaf server one.
-      cli: { aiChat: "input-available", think: "output-error" },
-      srv: { aiChat: "output-error", think: "output-error" }
+      cli: { newReply: "output-error", continuation: "output-error" },
+      srv: { newReply: "output-error", continuation: "output-error" }
     },
-    relationship: "intentional-divergence (ai-chat ⊆ Think)"
+    keptByContinuation: []
   },
   {
-    name: "approval-requested client part is preserved by ai-chat, repaired by Think",
+    name: "an approval request in the last message: a new reply moves past it, a continuation keeps it",
     clientTools: ["deploy"],
     messages: [
       assistant("a1", [toolPart("deploy", "appr", "approval-requested")])
     ],
     expected: {
-      appr: { aiChat: "approval-requested", think: "output-error" }
+      appr: { newReply: "output-error", continuation: "approval-requested" }
     },
-    relationship: "intentional-divergence (ai-chat ⊆ Think)"
+    keptByContinuation: ["appr"]
   },
   {
-    name: "approval-responded is preserved verbatim by both (awaiting continuation)",
+    name: "an approved call in the last message is kept by both turns: the AI SDK runs it",
     clientTools: [],
     messages: [
       assistant("a1", [toolPart("deploy", "appr2", "approval-responded")])
     ],
-    // Neither wiring repairs approval-responded; assert it stays as-is.
     expected: {
-      appr2: { aiChat: "approval-responded", think: "approval-responded" }
+      appr2: {
+        newReply: "approval-responded",
+        continuation: "approval-responded"
+      }
     },
-    relationship: "identical"
+    keptByContinuation: []
+  },
+  {
+    name: "an approved call in an earlier message is settled by both turns: nothing can run it",
+    clientTools: [],
+    messages: [
+      assistant("a1", [toolPart("deploy", "appr3", "approval-responded")]),
+      assistant("a2", [toolPart("previewTool", "srv", "input-available")])
+    ],
+    expected: {
+      appr3: { newReply: "output-error", continuation: "output-error" },
+      srv: { newReply: "output-error", continuation: "output-error" }
+    },
+    keptByContinuation: []
   }
 ];
 
-describe("recovery conformance (shared repair primitive, both host wirings)", () => {
+describe("before-turn repair conformance (one rule, two kinds of turn)", () => {
   for (const scenario of scenarios) {
     it(scenario.name, () => {
-      const aiChat = repairInterruptedToolParts(
-        scenario.messages,
-        aiChatWiring(scenario.clientTools)
+      const clientToolNames = clientResolvableToolNames(
+        scenario.clientTools.map((name) => ({ name }))
       );
-      const think = repairInterruptedToolParts(
-        scenario.messages,
-        thinkWiring()
-      );
+      const repair = (continuation: boolean) =>
+        repairTranscriptBeforeTurn(scenario.messages, {
+          continuation,
+          clientToolNames,
+          repairPart: (part) =>
+            interruptedToolPartAsError(part, { clientToolNames })
+        });
+      const newReply = repair(false);
+      const continuation = repair(true);
 
       for (const [toolCallId, want] of Object.entries(scenario.expected)) {
-        expect(stateOf(aiChat.messages, toolCallId)).toBe(want.aiChat);
-        expect(stateOf(think.messages, toolCallId)).toBe(want.think);
+        expect(stateOf(newReply.messages, toolCallId)).toBe(want.newReply);
+        expect(stateOf(continuation.messages, toolCallId)).toBe(
+          want.continuation
+        );
       }
 
-      // The subset invariant: anything ai-chat repairs, Think also repairs
-      // (ai-chat never repairs MORE than Think).
-      for (const toolCallId of Object.keys(scenario.expected)) {
-        const aiChatRepaired =
-          stateOf(aiChat.messages, toolCallId) === "output-error";
-        const thinkRepaired =
-          stateOf(think.messages, toolCallId) === "output-error";
-        if (aiChatRepaired) expect(thinkRepaired).toBe(true);
-      }
+      // A turn that starts a new reply never keeps a call for a client. A
+      // continuation keeps only what the scenario names, and reports it.
+      expect(newReply.keptToolCallIds).toEqual([]);
+      expect(continuation.keptToolCallIds).toEqual(scenario.keptByContinuation);
 
-      // The declared relationship must match the data: "identical" iff every
-      // part has the same outcome under both wirings.
-      const allIdentical = Object.values(scenario.expected).every(
-        (want) => want.aiChat === want.think
-      );
-      expect(allIdentical).toBe(scenario.relationship === "identical");
+      // A continuation settles a subset of what a new reply settles.
+      for (const id of continuation.toolCallIds) {
+        expect(newReply.toolCallIds).toContain(id);
+      }
     });
   }
-
-  it("server-orphan recovery is byte-for-byte identical across wirings", () => {
-    const messages = [
-      assistant("a1", [toolPart("previewTool", "srv", "input-available")])
-    ];
-    const aiChat = repairInterruptedToolParts(messages, aiChatWiring([]));
-    const think = repairInterruptedToolParts(messages, thinkWiring());
-    expect(aiChat.messages).toEqual(think.messages);
-    expect(aiChat.removedToolCalls).toBe(1);
-    expect(think.removedToolCalls).toBe(1);
-  });
 });

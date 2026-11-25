@@ -5,7 +5,7 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": [
     "nodejs_compat",
-    // vitest-pool-workers needs these flags on top of nodejs_compat.
+    // The Vitest plugin needs these flags on top of nodejs_compat.
     "enable_nodejs_tty_module",
     "enable_nodejs_fs_module",
     "enable_nodejs_http_modules",
@@ -26,7 +26,7 @@
         "name": "Assistant"
       },
       // Test-harness-only bindings: production only needs to export these
-      // facet classes, but vitest-pool-workers needs them here for ctx.exports.
+      // facet classes, but the Vitest plugin needs them here for ctx.exports.
       {
         "class_name": "Researcher",
         "name": "Researcher"

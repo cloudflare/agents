@@ -4,6 +4,7 @@ import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 import { getAgentByName } from "agents";
+import { REPLAY_CHUNK_BYTES, ROW_VALUE_BYTES } from "agents/chat";
 import { MessageType } from "../types";
 
 describe("Oversized rows and incremental persistence", () => {
@@ -170,7 +171,7 @@ describe("Oversized rows and incremental persistence", () => {
   });
 
   describe("Oversized rows offload losslessly", () => {
-    it("messages under 1.8MB pass through unchanged", async () => {
+    it("messages under the row budget pass through unchanged", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
@@ -199,7 +200,7 @@ describe("Oversized rows and incremental persistence", () => {
         (await agentStub.getPersistedMessages()) as ChatMessage[];
       expect(persisted.length).toBe(1);
 
-      // Output should be preserved at full fidelity (under 1.8MB)
+      // Output should be preserved at full fidelity (under the row budget)
       const part = persisted[0].parts[0] as { output: unknown };
       expect(part.output).toBe(toolOutput);
 
@@ -215,7 +216,7 @@ describe("Oversized rows and incremental persistence", () => {
 
       // A tool output that cannot fit one SQLite row. Sessions splits the
       // message across continuation rows instead of truncating it.
-      const hugeOutput = "X".repeat(1_900_000);
+      const hugeOutput = "X".repeat(ROW_VALUE_BYTES + 100_000);
       const message: ChatMessage = {
         id: "size-big",
         role: "assistant",
@@ -252,7 +253,7 @@ describe("Oversized rows and incremental persistence", () => {
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
-      const largeText = "Z".repeat(1_900_000);
+      const largeText = "Z".repeat(ROW_VALUE_BYTES + 100_000);
       const message: ChatMessage = {
         id: "user-big",
         role: "user",
@@ -283,8 +284,10 @@ describe("Oversized rows and incremental persistence", () => {
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // CJK character \u4e00 is 1 JS char but 3 bytes in UTF-8.
-      // 700,000 CJK chars fit a character-count limit but not a byte budget.
-      const cjkOutput = "\u4e00".repeat(700_000);
+      // This many CJK chars fit a character-count limit but not a byte budget.
+      const cjkOutput = "\u4e00".repeat(
+        Math.ceil(ROW_VALUE_BYTES / 3) + 100_000
+      );
 
       const message: ChatMessage = {
         id: "unicode-test",
@@ -349,10 +352,10 @@ describe("Oversized rows and incremental persistence", () => {
         '{"type":"text-start","id":"t1"}'
       );
 
-      // Store an oversized chunk (>1.8MB) -- should be skipped
+      // Store an oversized chunk (over the replay budget) -- should be skipped
       const hugeChunk =
         '{"type":"tool-output-available","output":"' +
-        "X".repeat(1_900_000) +
+        "X".repeat(REPLAY_CHUNK_BYTES + 100_000) +
         '"}';
       await agentStub.testStoreStreamChunk(streamId, hugeChunk);
 
@@ -379,7 +382,7 @@ describe("Oversized rows and incremental persistence", () => {
       const room = `row-chunk-wake-${crypto.randomUUID()}`;
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
-      const url = `data:image/png;base64,${btoa("o".repeat(2 * 1024 * 1024))}`;
+      const url = `data:image/png;base64,${btoa("o".repeat(ROW_VALUE_BYTES + 1_000_000))}`;
       await agentStub.persistMessages([
         {
           id: "wake-user",
@@ -404,7 +407,9 @@ describe("Oversized rows and incremental persistence", () => {
         {
           id: "wake-long",
           role: "assistant",
-          parts: [{ type: "text", text: "p".repeat(2 * 1024 * 1024) }]
+          parts: [
+            { type: "text", text: "p".repeat(ROW_VALUE_BYTES + 1_000_000) }
+          ]
         }
       ]);
       expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);

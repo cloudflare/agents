@@ -94,7 +94,7 @@ due jobs are driven. Host `getNextAlarm()` is removed.
 
 ## The dispatch contract
 
-Four named rules define what a job owner can and cannot rely on:
+Six named rules define what a job owner can and cannot rely on:
 
 1. **Job ids are scoped to their owner.** Every queue verb — push
    included — sees only the owner's own jobs. A same-id push replaces the
@@ -111,22 +111,79 @@ Four named rules define what a job owner can and cannot rely on:
    (default 30s) logs a warning and emits `job:slow_dispatch`. Work that must
    continue after a bounded handoff registers its promise with
    `trackAlarmWork()` so it remains part of the current alarm's breaker domain.
-3. **Newer pushes win over drive results.** Every dispatched job carries
-   a durable in-flight marker; a same-id `push()` or `reschedule()` made
-   while the job executes clears it, and `applyOutcome` only applies a
-   drive result to a still-marked job. The drive loop also refetches each
+3. **Newer pushes win over drive results.** Every change of a job's
+   durable intent (`push()`, `reschedule()`, `cancel()`, the breaker's
+   retimes), and a takeover of a hung single-flight job, bumps its
+   in-memory revision, which exists only while a dispatch of that job is
+   in flight. A dispatch records the revision when it claims the job; a
+   retry runs, and `applyOutcome` applies a drive result, only while the
+   revision is unchanged. Another dispatch of the
+   same unchanged job (overlapping alarms) does not bump it. Each dispatch
+   still sets the durable `running` marker, which single-flight skipping
+   and hung recovery read. The drive loop also refetches each
    due job before claiming it, so a job replaced earlier in the same
    alarm cycle dispatches with fresh data — or, if no longer due, is
    skipped. An owner can therefore never lose a wake it explicitly
    pushed mid-drive. Owners that both push and return outcomes for the
    same job (Tasks) should derive both from the same durable state so
    they always agree.
-4. **Platform failures abort the drive loop.** A platform-class failure
-   (superseded isolate, memory-limit reset, platform transient) preserves
-   the failing job and re-throws, deferring the _remaining_ due jobs to
-   the platform's alarm retry. This is deliberate: platform failures are
-   properties of the isolate, not the job, so later jobs would fail the
-   same way, and the retry runs on a fresh invocation.
+4. **A reset stops the drive loop; a transient failure holds back only
+   its owner.** A superseded isolate, a storage reset or a memory-limit
+   reset condemns the isolate: the driver preserves the failing job and
+   re-throws, and the remaining due jobs wait for a fresh invocation (or
+   the breaker engages). A downstream stub's upgrade error matches the same
+   pattern and also stops the loop; the two cannot be told apart. Any other
+   platform-class failure (a `retryable` error, "Network connection lost.")
+   belongs to something the job called. The driver keeps that job and its
+   time, skips the rest of that owner's due jobs, and drives every other
+   owner's. The alarm re-arms with the held owner's jobs no sooner than
+   30 s out, and then still fails, so the failure is visible. Keeping the
+   times keeps an owner's order: a Queue item behind a deferred one does
+   not run first, and `list()` order does not change. The hold has a limit:
+   once a job has kept failing this way for 15 minutes (`held_since`, set at
+   its first hold and cleared by any other outcome or a push), an owner with
+   `onJobError` gets the error as a terminal failure, so a callee that never
+   recovers cannot block a Queue forever. Owners without `onJobError` keep
+   being held; their job may be their only wake. Before this rule, one
+   such job stopped every job behind it, of every owner, for as long as the
+   downstream kept failing.
+5. **Unreported attempts are counted durably.** Before each dispatch
+   attempt the driver adds one to the row's `attempts` column and yields
+   one macrotask so the write starts; when the attempt ends in any way the
+   driver sees (a result, an application error, a platform failure) it
+   takes the one off again. A started write survives a CPU-limit kill or
+   `ctx.abort()` that follows; `storage.sync()` would also work but costs
+   about 38 ms per dispatch. So the column counts only attempts that took
+   their isolate down (CPU limit, the 15-minute alarm wall-time limit, a
+   reset), and `context.attempt` is that count plus this invocation's
+   attempt. When a job starts with `max(maxAttempts, 3)` of them, an owner
+   with `onJobError` gets a `JobAttemptsExhaustedError` and decides the
+   outcome; an owner without one keeps its job (it may be the owner's only
+   wake), and each further attempt first moves the job out by 30 s,
+   doubling to an hour. The floor of 3 is for deploys: a reset mid-attempt
+   also goes unreported, and a one-attempt job must survive one. A push or
+   a non-final outcome (`rescheduleAt`, `"yield"`) starts the count at
+   zero. Retries within one invocation stay bounded by `maxAttempts`.
+   Without this, a job that exceeded the CPU limit ran again every 30 s
+   forever with `attempt: 1` (measured on a deployed Worker, 22 Nov 2026).
+   An owner whose first due job has such attempts goes last in the scan,
+   its own order kept: every other owner's due job runs before the suspect
+   is tried again, so a job that keeps resetting the isolate (a memory-limit
+   reset takes every job in flight with it) no longer holds other owners
+   back until it is given up.
+6. **A job whose owner is not installed is kept.** The owner may come back
+   (a rollback, a capability installed conditionally), and the job may be
+   its only record of the work. The driver does not claim it and writes
+   nothing to it, so its time, attempts and hold survive and its owner's
+   order holds. It holds the owner back in memory for half the job's age,
+   at least a minute and at most an hour, emits `job:owner_missing` once
+   per owner per isolate, and runs the jobs once the owner is installed
+   again. pi-durable keeps a task whose definition is missing the same way,
+   and durability keeps rows of a channel nothing attached. A capability
+   that is removed for good deletes its own jobs in the migration that
+   removes it; until it does, each leftover wakes the object once per
+   hold. Exhaustion and the hold limit emit `job:exhausted` and
+   `job:hold_limit`, so a host can count crash loops.
 
 Everything else about drive order — in particular the interleaving of
 different owners' jobs within one alarm cycle — is unspecified. Owners may
@@ -158,11 +215,18 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
    - stop if alarms were disabled mid-phase (host teardown);
    - a single-flight job whose previous run is in flight is skipped until it
      crosses its hung timeout, then forcibly re-run;
+   - a job with `max(maxAttempts, 3)` unreported attempts goes to
+     `onJobError` (or, with no `onJobError`, is backed off and run once);
    - dispatch `onJob` inside `tryN` using the job's retry options (defaults
-     3 attempts / 100 ms base / 3000 ms cap);
-   - platform-class failures (superseded isolate, platform transient on
-     exhaustion, memory-limit reset) preserve the job and re-throw so the
-     platform retries a fresh invocation or the breaker engages;
+     3 attempts / 100 ms base / 3000 ms cap), counting each attempt in the
+     row and yielding one macrotask first;
+   - a reset or memory-limit failure preserves the job and re-throws so a
+     fresh invocation runs the rest or the breaker engages; any other
+     platform-class failure (on exhaustion) holds back that job's owner for
+     30 s, keeping its jobs' times, and the loop goes on with other owners;
+     the alarm re-throws it after re-arming. A job held back this way for
+     15 minutes in a row goes to its owner's `onJobError` instead (an owner
+     without the hook stays held);
    - terminal application failures reach `onJobError`, whose drive result
      decides advancement (recurring schedules reschedule; one-shots
      complete);
@@ -210,21 +274,24 @@ deduplicates still calls `jobs.rearm()` so a lost alarm recovers.
 
 ## Host-owned jobs
 
-Agent's pull contributions became pushed jobs, synchronized with durable
-state by `_syncHostJobs()` (called on startup, on state changes that used to
-trigger an alarm recalculation, and after each alarm's housekeeping):
+Agent's pull contributions became pushed jobs, and then moved into
+capabilities. Agent pushes none now. Jobs earlier releases left under the
+`host` owner complete when they fire; on a facet, which has no alarm, Agent
+drops them on start (#2299):
 
-- `cf:keep-alive` — held while keep-alive refs exist; reschedules every
-  `keepAliveIntervalMs`; cancelled at zero refs.
-- `cf:housekeeping` — held while fiber-recovery or facet-run state exists;
-  reschedules with the existing backoff math; completes when idle.
-- `cf:destroy` — exclusive; re-derived from the durable `DESTROY_PENDING_KEY`
-  marker on every sync (covering markers written by pre-queue releases), so
-  a keepAlive-holding agent cannot delay its own condemnation. The marker
-  stays authoritative: Agent's alarm preamble consumes it before Lifecycle
-  startup.
-- `think:workflow-notifications` — Think's wake for its notification drain,
-  replacing the removed `_getExtensionAlarm()`.
-
-Agent housekeeping continues to run on every alarm via its `onAlarm`
-wrapper; the host jobs exist to guarantee the wakes.
+- `cf:keep-alive` — gone. Keep-alive is the `KeepAlive` capability
+  (`lifecycle/keep-alive.ts`): one `keep-alive:heartbeat` job held while holds
+  are open, re-timed every `keepAliveIntervalMs`, cancelled at zero holds. A
+  routed Lifecycle takes its hold on the root's KeepAlive through
+  `routes.toRoot`.
+- `cf:housekeeping` — no longer pushed. Fiber recovery moved to the
+  `Fibers` capability's own `fibers:recover` job ([fibers.md](./fibers.md));
+  nothing replaces the old job.
+- `cf:destroy` — moved to the internal `DeferredDestroy` capability
+  (`lifecycle/deferred-destroy.ts`) as `deferred-destroy:wake`: exclusive,
+  re-armed from the durable `cf_agents_destroy_pending` marker on every start
+  (markers written by earlier releases included), so a keepAlive-holding
+  agent cannot delay its own condemnation. The marker stays authoritative:
+  Agent's alarm preamble reads it before Lifecycle startup.
+- `think:workflow-notifications` — gone; Think's notifications are Outbox
+  deliveries.

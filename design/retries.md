@@ -23,15 +23,17 @@ The `cloudflare/actors` library includes well-tested retry primitives (`tryN`, `
 
 Three functions, one type:
 
-| Export                                            | Purpose                                                                                                                                                                                                         |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RetryOptions`                                    | Interface: `{ maxAttempts?, baseDelayMs?, maxDelayMs? }`                                                                                                                                                        |
-| `jitterBackoff(attempt, baseDelayMs, maxDelayMs)` | Full Jitter backoff per [AWS blog post](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/). Returns `random(0, min(2^attempt * base, max))`.                                            |
-| `tryN(n, fn, options?)`                           | Retry `fn` up to `n` total attempts. Accepts optional `shouldRetry` predicate to bail early on non-retryable errors.                                                                                            |
-| `validateRetryOptions(options, defaults?)`        | Eagerly validate retry config. When `defaults` are provided, resolves partial options against them before cross-field checks.                                                                                   |
-| `isErrorRetryable(err)`                           | Returns `true` if the error has `retryable: true` but is not an overloaded Durable Object error. Follows [CF best practices](https://developers.cloudflare.com/durable-objects/best-practices/error-handling/). |
+| Export                                               | Purpose                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RetryOptions`                                       | Interface: `{ maxAttempts?, baseDelayMs?, maxDelayMs? }`                                                                                                                                                                                                                                                                                                                                |
+| `backoffDelay(attempt, { baseMs, maxMs?, jitter? })` | The one backoff formula in the SDK: `min(baseMs * 2^(attempt-1), maxMs)`, spread over `[delay / 2, delay)` by default ("equal jitter": each wait is at least half the delay and, until the cap, longer than the one before), over `[0, delay)` with `jitter: "full"`, or exact with `jitter: false` ([AWS](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)). |
+| `tryN(n, fn, options?)`                              | Retry `fn` up to `n` total attempts. Accepts optional `shouldRetry` predicate to bail early on non-retryable errors.                                                                                                                                                                                                                                                                    |
+| `validateRetryOptions(options, defaults?)`           | Eagerly validate retry config. When `defaults` are provided, resolves partial options against them before cross-field checks.                                                                                                                                                                                                                                                           |
+| `isErrorRetryable(err)`                              | Returns `true` if the error has `retryable: true` but is not an overloaded Durable Object error. Follows [CF best practices](https://developers.cloudflare.com/durable-objects/best-practices/error-handling/).                                                                                                                                                                         |
 
 `tryN` is the only retry loop. Everything else composes on top of it.
+
+Every exponential backoff in `agents` and Think calls `backoffDelay`: `tryN` (full jitter, first retry up to `2 * baseDelayMs`, as documented) and Durable Object routing retries (full jitter, as before), then with the default equal jitter a fiber's failing recovery hook, chat transient-error recovery, a Tasks step with `backoff: "exponential"`, and Think's workflow-notification and messenger-reply retries. Two sites pass `jitter: false`, each for a stated reason: the job driver's backoff for a job whose attempts ran out (it must never come sooner than the deadman delay, and one object's crash loop is not a shared retry), and the facet drive recheck (it is recomputed from a stored count on every check, so the same count must give the same time). A facet's in-memory retry of its wake report to the root uses the default equal jitter. `ThinkHarness`'s recovery backoff calls it too (equal jitter), as a sleep of the operation's Tasks run. The other harness backoffs (`harness/pi`, `harness/container`) still have their own formulas and move with the harnesses onto Tasks.
 
 ### Input validation
 
@@ -83,9 +85,9 @@ Retry option parsing from SQLite rows uses a shared `parseRetryOptions()` helper
 
 ## Key decisions
 
-### Why full jitter, not equal jitter or decorrelated jitter?
+### Why full jitter for `tryN`, and equal jitter for the durable retries?
 
-Full jitter (`random(0, cap)`) has the best p99 latency characteristics for high-contention scenarios according to the [AWS analysis](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/). The implementation is also the simplest — a single `Math.random()` call.
+Full jitter (`random(0, cap)`) has the best p99 latency characteristics for high-contention scenarios according to the [AWS analysis](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/). The implementation is also the simplest — a single `Math.random()` call. The durable retries (a recovery hook, chat recovery, a Tasks step, Think deliveries) use equal jitter instead: a wait near zero would retry a failing piece of work at once, and until the cap each wait is longer than the one before, which tests of those backoffs rely on. At the cap, waits vary within `[maxMs / 2, maxMs)`.
 
 ### Why `shouldRetry` instead of retrying everything?
 
@@ -146,6 +148,17 @@ The actors library has a `tryWhile(condition, fn)` that retries as long as a con
 1. `tryN` with `shouldRetry` covers the same use case more safely (bounded attempts)
 2. `tryWhile` with a bug in the condition function retries forever
 3. Internal-only usage does not need the flexibility
+
+### A retry after a reset needs a new stub
+
+Once a Durable Object is reset (`ctx.abort()`, a crash, the memory-limit breaker, a code update), every call through a stub obtained before the reset rejects with the same error, on that request and on later ones. A new stub from the namespace works at once. An error the callee throws itself does not break a stub. (Measured on a deployed Worker, 22 Nov 2026.)
+
+So code that retries a call, or keeps a stub for a long time, must open a new stub after a failure:
+
+- `getAgentByName` opens a new stub for every attempt of its startup call, so `routingRetry` can get past a reset. `routeAgentRequest` already did this.
+- `AgentWorkflow` keeps its `agent` stub for the whole run. `this.agent` renews itself after a failed call (`stub-renewal.ts`): the failed call still rejects, and the step's own retry reaches the restarted Agent. A renewed stub starts the Agent (`__unsafe_ensureInitialized`) before its first call, because native RPC reaches a synchronous method without running startup. Property reads (`await this.agent.someGetter`) go to the current stub's own RPC property, so they behave as on a plain stub.
+- A callback an `AgentWorkflow` run sends outside a step (`reportProgress()` and the other `notifyAgent` calls) is made once more on the renewed stub when it failed only because the stub was renewed, since nothing else retries it; callbacks are idempotent. An error thrown by the Agent's own code arrives with `remote: true`, renews nothing and is not repeated.
+- The MCP RPC client transport (`mcp/rpc.ts`) drops its stub after a failed send; the next send opens a new one through `getAgentByName` with the same props. `McpAgent` stores the client's initialize request on the RPC path, as the HTTP transports already did, so a server restarted after a reset or an eviction replays the handshake and keeps what the client negotiated.
 
 ## Schema migration
 

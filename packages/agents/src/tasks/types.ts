@@ -1,4 +1,5 @@
 import type { TaskDurationString } from "./duration";
+import type { TaskSettlement } from "./settlement";
 
 /**
  * JSON-serializable data accepted as Task input, step results, metadata,
@@ -55,6 +56,15 @@ export type TaskCallbacks = Record<
 >;
 
 /**
+ * @internal A framework definition (`Tasks.register`): it may also end its
+ * attempt with a returned {@link TaskSettlement}.
+ */
+export type TaskFrameworkDefinition = (
+  input: unknown,
+  step: TaskStep
+) => TaskValue | TaskSettlement | Promise<TaskValue | TaskSettlement>;
+
+/**
  * The input type a registered Task definition accepts.
  *
  * @experimental The API surface may change before stabilizing.
@@ -109,7 +119,11 @@ export interface TaskStepConfig {
     limit?: number;
     /** Delay before the first retry. */
     delay?: number | TaskDurationString;
-    /** Delay growth across retries. Defaults to exponential. */
+    /**
+     * Delay growth across retries. Defaults to exponential, which is
+     * jittered: retry `n` waits between half and all of
+     * `delay * 2^(n - 1)`.
+     */
     backoff?: "constant" | "linear" | "exponential";
   };
 
@@ -163,6 +177,35 @@ export interface TaskStep {
    */
   status(message: string): Promise<void>;
 
+  /**
+   * @internal The value the caller passed as `local` when it started this
+   * run in this isolate (`runAttached`). `undefined` on an attempt after a
+   * reset: decide "live or recover" on it, never on the attempt number.
+   */
+  readonly local: unknown;
+
+  /**
+   * @internal State the next attempt reads, owned by the run. `step.do()` is
+   * for work that must not repeat; the checkpoint is for state a later
+   * attempt needs. Deleted when the run settles.
+   */
+  readonly checkpoint: TaskCheckpoint;
+
+  /** @internal The run's id. */
+  readonly id: string;
+
+  /** @internal This attempt's number: 1 for the first. */
+  readonly attempt: number;
+
+  /**
+   * @internal Aborts when the run is cancelled or its lane cleared while
+   * this attempt runs.
+   */
+  readonly signal: AbortSignal;
+
+  /** @internal When the run was accepted. */
+  readonly createdAt: number;
+
   /** The stable external deduplication key `step.do(name, ...)` would get. */
   idempotencyKey(name: string): string;
 }
@@ -172,18 +215,33 @@ export interface TaskStep {
  *
  * @experimental The API surface may change before stabilizing.
  */
-export type TaskRunState =
+/**
+ * @internal A run's keyed state. Writes are synchronous and belong to the
+ * attempt that makes them: once a newer attempt claimed the run, a write is
+ * dropped.
+ */
+export interface TaskCheckpoint {
+  get<T extends TaskJson>(key: string): T | undefined;
+  set(key: string, value: TaskJson): void;
+}
+
+export type TaskStatus =
   | "pending"
   | "running"
-  | "waiting"
   | "completed"
-  | "failed"
-  | "cancelled";
+  | "error"
+  | "aborted"
+  /** @internal Ended without running to the end: its lane was cleared. */
+  | "skipped";
 
-/** Why a waiting run is waiting. */
-export type TaskWaitReason = "sleep" | "retry";
+/** Why a pending run that already ran waits (`wakeAt`). */
+export type TaskWaitReason =
+  | "sleep"
+  | "retry"
+  /** @internal Parked by its handler until `Tasks.settle()`. */
+  | "park";
 
-/** Safe projection of an error retained with a failed run. */
+/** Safe projection of an error retained with a run that ended `error`. */
 export interface TaskError {
   name: string;
   message: string;
@@ -206,6 +264,30 @@ export interface TaskRunOptions {
 
   /** Keep terminal state for inspection. Defaults to `true`. */
   retain?: boolean;
+
+  /**
+   * @internal Runs of one lane run one at a time, in the order they were
+   * accepted; a run queued behind another waits with no deadline of its own.
+   */
+  lane?: string;
+
+  /**
+   * @internal Where the first attempt runs. Omitted: in this invocation,
+   * without waiting for it. `"now"`: in this invocation, and `run()`
+   * resolves when that attempt ends. `"alarm"`: from the alarm, where
+   * `trackAlarmWork` keeps it inside the memory-limit breaker.
+   */
+  start?: "now" | "alarm";
+
+  /**
+   * @internal Handed as `step.local` to an attempt this isolate starts while
+   * the caller still waits for the first one (`start` omitted or `"now"`),
+   * whether the caller or the alarm claimed it; never stored. A lane run
+   * queued behind another keeps it until its attempt here starts. If the
+   * run ends before an attempt took it, a `dropped` function on it is
+   * called.
+   */
+  local?: unknown;
 }
 
 /**
@@ -219,12 +301,12 @@ export interface TaskReceipt {
   runId: string;
   definition: string;
   accepted: boolean;
-  state: TaskRunState;
+  status: TaskStatus;
   createdAt: number;
 }
 
 /**
- * Read-only snapshot of one Task run, discriminated by state.
+ * Read-only snapshot of one Task run, discriminated by status.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -232,14 +314,18 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "pending";
+      status: "pending";
+      /** Set when the run ran and now sleeps or backs off until `wakeAt`. */
+      waitReason?: TaskWaitReason;
+      wakeAt?: number;
       createdAt: number;
+      statusMessage?: string;
       metadata?: Record<string, TaskJson>;
     }
   | {
       runId: string;
       definition: string;
-      state: "running";
+      status: "running";
       attempt: number;
       startedAt: number;
       createdAt: number;
@@ -249,17 +335,7 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "waiting";
-      reason: TaskWaitReason;
-      wakeAt: number;
-      createdAt: number;
-      statusMessage?: string;
-      metadata?: Record<string, TaskJson>;
-    }
-  | {
-      runId: string;
-      definition: string;
-      state: "completed";
+      status: "completed";
       result: Output;
       createdAt: number;
       settledAt: number;
@@ -268,7 +344,7 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "failed";
+      status: "error";
       error: TaskError;
       createdAt: number;
       settledAt: number;
@@ -277,7 +353,16 @@ export type TaskRunSnapshot<Output extends TaskValue> =
   | {
       runId: string;
       definition: string;
-      state: "cancelled";
+      status: "aborted";
+      reason?: string;
+      createdAt: number;
+      settledAt: number;
+      metadata?: Record<string, TaskJson>;
+    }
+  | {
+      runId: string;
+      definition: string;
+      status: "skipped";
       reason?: string;
       createdAt: number;
       settledAt: number;
@@ -314,7 +399,7 @@ export type TaskRunRow = {
   run_id: string;
   definition: string;
   input: string | null;
-  state: TaskRunState;
+  status: TaskStatus;
   result: string | null;
   error_name: string | null;
   error_message: string | null;
@@ -332,7 +417,74 @@ export type TaskRunRow = {
   started_at: number | null;
   updated_at: number;
   settled_at: number | null;
+  lane: string | null;
+  seq: number | null;
+  notified: string | null;
+  /** Pieces in `cf_agents_task_parts` holding an input too large for the row. */
+  input_parts: number | null;
+  /** The run's checkpoint entries as one JSON object, until it settles. */
+  checkpoint: string | null;
 };
+
+/**
+ * @internal One run as host code reads it synchronously: every field the
+ * record keeps, whatever its status.
+ */
+export interface TaskRecord {
+  readonly runId: string;
+  readonly definition: string;
+  readonly status: TaskStatus;
+  readonly attempt: number;
+  readonly idempotencyKey?: string;
+  readonly metadata?: Record<string, TaskJson>;
+  /** A pending run that waits: `sleep`, `retry` or `park`. */
+  readonly waitReason?: TaskWaitReason;
+  readonly result?: TaskValue;
+  readonly error?: TaskError;
+  /** Why an `aborted`, `skipped` or parked run ended or waits. */
+  readonly reason?: string;
+  readonly createdAt: number;
+  readonly startedAt?: number;
+  readonly settledAt?: number;
+}
+
+/**
+ * @internal Options of a framework definition (`Tasks.register`).
+ */
+export interface TaskRegisterOptions {
+  /**
+   * Called in host context when a run of this definition is accepted, when
+   * an attempt claims it, and when it ends. The terminal call happens at
+   * least once: a throw or a reset before it returns delivers it again
+   * (30 s later after a throw), and `wait()` resolves only after it returned.
+   * It gets the run's record as stored at the call.
+   */
+  onStatus?(record: TaskRecord): void | Promise<void>;
+  /**
+   * Attempts a run may start before it ends `error`: an attempt is counted,
+   * and committed, before the handler runs. Omitted: no limit.
+   */
+  maxAttempts?: number;
+  /**
+   * Keep a run's checkpoint after it settles, until the run is deleted:
+   * managed fibers are inspected with their last snapshot.
+   */
+  keepCheckpoint?: boolean;
+  /**
+   * How long an attempt's claim lasts before its run counts as interrupted;
+   * renewed by its wake while the attempt runs in this isolate, so that
+   * wake is also the object's keep-alive. Fibers use the keep-alive
+   * interval. Omitted: the step timeout plus slack.
+   */
+  claimMs?: number;
+  /**
+   * Runs start only attached (`start: "now"`) and each attempt ends before
+   * its caller returns, so no wake job is armed for the accept or the
+   * claim. A reset still loses nothing: the next start makes an interrupted
+   * attempt due and wakes it then.
+   */
+  attached?: true;
+}
 
 /** @internal Raw `cf_agents_task_steps` SQLite row. */
 export type TaskStepRow = {

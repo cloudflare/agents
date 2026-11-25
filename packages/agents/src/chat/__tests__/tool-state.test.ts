@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
+  applyToolPartUpdate,
   applyToolUpdate,
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
-  pausedExecutionUpdate
+  pausedExecutionUpdate,
+  hasPendingToolInteraction,
+  unexecutedToolNames
 } from "../tool-state";
 
 function makePart(
@@ -22,7 +25,10 @@ describe("toolResultUpdate", () => {
     expect(update.matchStates).toEqual([
       "input-available",
       "approval-requested",
-      "approval-responded"
+      "approval-responded",
+      "output-available",
+      "output-error",
+      "output-denied"
     ]);
 
     const applied = update.apply({
@@ -51,6 +57,203 @@ describe("toolResultUpdate", () => {
       state: "input-available"
     });
     expect(applied.errorText).toBe("Tool execution denied by user");
+  });
+
+  it("leaves a settled part as it is: the first result wins", () => {
+    const update = toolResultUpdate("tc1", { result: "second" });
+    for (const state of ["output-available", "output-error", "output-denied"]) {
+      const part = makePart("tc1", state, { output: { result: "first" } });
+      expect(update.apply(part)).toBe(part);
+    }
+  });
+});
+
+describe("applyToolPartUpdate", () => {
+  type Message = { id: string; role: string; parts: unknown[] };
+
+  function setup(options: { inFlight?: Message; stored?: Message[] }) {
+    const writes: Message[] = [];
+    const broadcasts: Message[] = [];
+    let inFlightChanged = 0;
+    const stored = new Map(
+      (options.stored ?? []).map((message) => [message.id, message])
+    );
+    const inFlight = options.inFlight;
+    const target = {
+      inFlight: inFlight
+        ? {
+            id: inFlight.id,
+            parts: inFlight.parts as Array<Record<string, unknown>>,
+            snapshot: () => ({ ...inFlight, parts: [...inFlight.parts] }),
+            changed: () => {
+              inFlightChanged += 1;
+            }
+          }
+        : null,
+      storedOwner: async (toolCallId: string) => {
+        for (const message of stored.values()) {
+          if (
+            message.parts.some(
+              (part) =>
+                (part as { toolCallId?: string }).toolCallId === toolCallId
+            )
+          ) {
+            return message;
+          }
+        }
+        return null;
+      },
+      write: async (message: Message) => {
+        writes.push(message);
+        stored.set(message.id, message);
+        return message;
+      },
+      broadcast: (message: Message) => {
+        broadcasts.push(message);
+      }
+    };
+    return {
+      target,
+      writes,
+      broadcasts,
+      stored,
+      inFlightChanged: () => inFlightChanged
+    };
+  }
+
+  it("settles a part in the reply in flight, in place", async () => {
+    const reply = {
+      id: "a1",
+      role: "assistant",
+      parts: [makePart("tc1", "input-available")]
+    };
+    const env = setup({ inFlight: reply });
+    const outcome = await applyToolPartUpdate(
+      toolResultUpdate("tc1", "ok"),
+      env.target
+    );
+    expect(outcome).toEqual({ status: "changed", messageId: "a1" });
+    expect(reply.parts[0]).toMatchObject({
+      state: "output-available",
+      output: "ok"
+    });
+    expect(env.inFlightChanged()).toBe(1);
+    expect(env.writes).toEqual([]);
+    expect(env.broadcasts).toHaveLength(1);
+  });
+
+  it("settles a stored part and writes it once", async () => {
+    const env = setup({
+      stored: [
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [makePart("tc1", "input-available")]
+        }
+      ]
+    });
+    const outcome = await applyToolPartUpdate(
+      toolResultUpdate("tc1", "ok"),
+      env.target
+    );
+    expect(outcome).toEqual({ status: "changed", messageId: "a1" });
+    expect(env.writes).toHaveLength(1);
+    expect(env.writes[0].parts[0]).toMatchObject({ state: "output-available" });
+    expect(env.broadcasts).toHaveLength(1);
+  });
+
+  it("writes both copies when the reply in flight was partly stored (#1649)", async () => {
+    const reply = {
+      id: "a1",
+      role: "assistant",
+      parts: [makePart("tc1", "input-available")]
+    };
+    const env = setup({
+      inFlight: reply,
+      stored: [
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [makePart("tc1", "input-available")]
+        }
+      ]
+    });
+    const outcome = await applyToolPartUpdate(
+      toolResultUpdate("tc1", "ok"),
+      env.target
+    );
+    expect(outcome).toEqual({ status: "changed", messageId: "a1" });
+    expect(reply.parts[0]).toMatchObject({ state: "output-available" });
+    expect(env.stored.get("a1")?.parts[0]).toMatchObject({
+      state: "output-available"
+    });
+  });
+
+  it("broadcasts the reply in flight, not its older stored copy, when both change", async () => {
+    const reply = {
+      id: "a1",
+      role: "assistant",
+      parts: [
+        makePart("tc1", "input-available"),
+        { type: "text", text: "streamed after the stored copy" }
+      ]
+    };
+    const env = setup({
+      inFlight: reply,
+      stored: [
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [makePart("tc1", "input-available")]
+        }
+      ]
+    });
+    await applyToolPartUpdate(toolResultUpdate("tc1", "ok"), env.target);
+    expect(env.broadcasts).toHaveLength(1);
+    expect(env.broadcasts[0].parts).toHaveLength(2);
+  });
+
+  it("writes a stored copy that shares its part objects with the reply in flight", async () => {
+    // A reply stored early (an approval request) can keep the same part
+    // objects as the reply still streaming. Changing the live part in place
+    // would change the stored copy's view too, and its update would be lost.
+    const part = makePart("tc1", "approval-requested", {
+      approval: { id: "ap1" }
+    });
+    const env = setup({
+      inFlight: { id: "a1", role: "assistant", parts: [part] },
+      stored: [{ id: "a1", role: "assistant", parts: [part] }]
+    });
+    await applyToolPartUpdate(toolApprovalUpdate("tc1", false), env.target);
+    expect(env.writes).toHaveLength(1);
+    expect(env.writes[0].parts[0]).toMatchObject({ state: "output-denied" });
+  });
+
+  it("answers unchanged for a repeat, with no write and no broadcast", async () => {
+    const env = setup({
+      stored: [
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [makePart("tc1", "output-available", { output: "first" })]
+        }
+      ]
+    });
+    const outcome = await applyToolPartUpdate(
+      toolResultUpdate("tc1", "second"),
+      env.target
+    );
+    expect(outcome).toEqual({ status: "unchanged" });
+    expect(env.writes).toEqual([]);
+    expect(env.broadcasts).toEqual([]);
+    expect(env.stored.get("a1")?.parts[0]).toMatchObject({ output: "first" });
+  });
+
+  it("answers missing when no part holds the call", async () => {
+    const env = setup({});
+    expect(
+      await applyToolPartUpdate(toolResultUpdate("tc1", "ok"), env.target)
+    ).toEqual({ status: "missing" });
   });
 });
 
@@ -142,16 +345,14 @@ describe("crossMessageToolResultUpdate", () => {
   });
 
   it("matches a terminal part via applyToolUpdate but yields an unchanged reference", () => {
-    // toolResultUpdate would return null here (terminal not in its match
-    // states); the cross-message builder matches so a replay still resolves
-    // to the part, but apply leaves it untouched.
+    // The cross-message builder matches a terminal part so a replay still
+    // resolves to it, but apply leaves it untouched.
     const parts = [makePart("tc1", "output-available", { output: "done" })];
     const result = applyToolUpdate(
       parts,
       crossMessageToolResultUpdate("tc1", "output-available", "done-again")
     );
-    expect(result).not.toBeNull();
-    expect(result!.parts[result!.index]).toBe(parts[result!.index]);
+    expect(result).toEqual({ parts, changed: false });
   });
 
   it("transitions a fresh approval-responded part via applyToolUpdate", () => {
@@ -297,7 +498,7 @@ describe("applyToolUpdate", () => {
     );
 
     expect(result).not.toBeNull();
-    expect(result!.index).toBe(2);
+    expect(result!.changed).toBe(true);
     expect(result!.parts[2]).toEqual(
       expect.objectContaining({
         state: "output-available",
@@ -318,9 +519,15 @@ describe("applyToolUpdate", () => {
   });
 
   it("returns null when part is in wrong state", () => {
-    const parts = [makePart("tc1", "output-available")];
+    const parts = [makePart("tc1", "input-streaming")];
     const result = applyToolUpdate(parts, toolResultUpdate("tc1", "new-value"));
     expect(result).toBeNull();
+  });
+
+  it("matches a settled part without changing it", () => {
+    const parts = [makePart("tc1", "output-available")];
+    const result = applyToolUpdate(parts, toolResultUpdate("tc1", "new-value"));
+    expect(result).toEqual({ parts, changed: false });
   });
 
   it("does not mutate the original parts array", () => {
@@ -356,15 +563,159 @@ describe("applyToolUpdate", () => {
     );
   });
 
-  it("only updates the first matching part", () => {
+  it("matches only the approval an approval id names", () => {
     const parts = [
-      makePart("tc1", "input-available"),
+      makePart("tc1", "approval-requested", { approval: { id: "a" } }),
+      makePart("tc1", "approval-requested", { approval: { id: "b" } })
+    ];
+    const result = applyToolUpdate(parts, toolApprovalUpdate("tc1", true, "b"));
+    expect(result!.parts[0]).toBe(parts[0]);
+    expect(result!.parts[1]).toMatchObject({ state: "approval-responded" });
+    expect(
+      applyToolUpdate(parts, toolApprovalUpdate("tc1", true, "c"))
+    ).toBeNull();
+  });
+
+  it("updates every copy of a call a legacy message holds twice", () => {
+    const parts = [
+      makePart("tc1", "output-available", { output: "first" }),
       makePart("tc1", "input-available")
     ];
     const result = applyToolUpdate(parts, toolResultUpdate("tc1", "value"));
-    expect(result!.index).toBe(0);
-    expect((result!.parts[1] as Record<string, unknown>).state).toBe(
-      "input-available"
-    );
+    expect(result!.changed).toBe(true);
+    expect(result!.parts[0]).toBe(parts[0]);
+    expect(result!.parts[1]).toMatchObject({
+      state: "output-available",
+      output: "value"
+    });
+  });
+});
+
+describe("hasPendingToolInteraction", () => {
+  const user = { id: "user-1", role: "user", parts: [] };
+  const call = (toolName: string, state = "input-available") => ({
+    type: `tool-${toolName}`,
+    toolCallId: `call-${toolName}`,
+    state,
+    input: {}
+  });
+  const reply = (id: string, ...parts: unknown[]) => ({
+    id,
+    role: "assistant",
+    parts
+  });
+  const pending = (input: {
+    messages: Array<{ id: string; role: string; parts: unknown[] }>;
+    streaming?: { id: string; role: string; parts: unknown[] } | null;
+    clientToolNames?: string[];
+    clientAnswerableToolNames?: string[] | null;
+  }) =>
+    hasPendingToolInteraction({
+      messages: input.messages,
+      streaming: input.streaming ?? null,
+      clientToolNames: new Set(input.clientToolNames ?? []),
+      ...(input.clientAnswerableToolNames !== undefined && {
+        clientAnswerableToolNames:
+          input.clientAnswerableToolNames === null
+            ? null
+            : new Set(input.clientAnswerableToolNames)
+      })
+    });
+
+  describe("a host that cannot tell which tools are a client's", () => {
+    it("counts every unanswered call in the latest reply", () => {
+      expect(pending({ messages: [user, reply("a1", call("ask"))] })).toBe(
+        true
+      );
+      expect(
+        pending({
+          messages: [user, reply("a1", call("ask"))],
+          clientAnswerableToolNames: null
+        })
+      ).toBe(true);
+    });
+
+    it("counts only a known client's call in a reply the conversation moved past", () => {
+      const moved = [user, reply("a1", call("ask")), { ...user, id: "user-2" }];
+      expect(pending({ messages: moved })).toBe(false);
+      expect(pending({ messages: moved, clientToolNames: ["ask"] })).toBe(true);
+    });
+  });
+
+  describe("a host that knows which tools a client may answer", () => {
+    it("does not wait on a server tool call an older version stored in the latest reply", () => {
+      expect(
+        pending({
+          messages: [user, reply("a1", call("serverSearch"))],
+          clientAnswerableToolNames: []
+        })
+      ).toBe(false);
+    });
+
+    it("waits on a tool the server declares and a client answers", () => {
+      expect(
+        pending({
+          messages: [user, reply("a1", call("askUser"))],
+          clientAnswerableToolNames: ["askUser"]
+        })
+      ).toBe(true);
+    });
+
+    it("waits on a tool the client sent a schema for", () => {
+      expect(
+        pending({
+          messages: [user, reply("a1", call("pickFile"))],
+          clientToolNames: ["pickFile"],
+          clientAnswerableToolNames: ["pickFile"]
+        })
+      ).toBe(true);
+    });
+
+    it("waits on an approval whatever the tool", () => {
+      expect(
+        pending({
+          messages: [
+            user,
+            reply("a1", call("serverSearch", "approval-requested"))
+          ],
+          clientAnswerableToolNames: []
+        })
+      ).toBe(true);
+    });
+
+    it("waits on the answerable call when the reply also holds a dead server call", () => {
+      expect(
+        pending({
+          messages: [user, reply("a1", call("serverSearch"), call("askUser"))],
+          clientAnswerableToolNames: ["askUser"]
+        })
+      ).toBe(true);
+    });
+  });
+
+  it("counts only a known client's call in the reply that is streaming", () => {
+    const streaming = reply("a1", call("serverSearch"));
+    expect(pending({ messages: [user], streaming })).toBe(false);
+    expect(
+      pending({
+        messages: [user],
+        streaming: reply("a1", call("pickFile")),
+        clientToolNames: ["pickFile"]
+      })
+    ).toBe(true);
+  });
+});
+
+describe("unexecutedToolNames", () => {
+  it("names the tools the server does not run, sorted", () => {
+    expect(
+      unexecutedToolNames({
+        zebra: { description: "client answers" },
+        run: { execute: () => 1 },
+        search: { type: "provider" },
+        legacy: { type: "provider-defined" },
+        ask: {}
+      })
+    ).toEqual(["ask", "zebra"]);
   });
 });

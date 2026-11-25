@@ -4,7 +4,14 @@ import {
   runDurableObjectAlarm,
   runInDurableObject
 } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
+
+const mcpServer = setupServer();
+beforeAll(() => mcpServer.listen({ onUnhandledRequest: "error" }));
+afterEach(() => mcpServer.resetHandlers());
+afterAll(() => mcpServer.close());
 
 function uniqueName(): string {
   return `native-rpc-${crypto.randomUUID()}`;
@@ -107,11 +114,11 @@ describe("native Durable Object RPC initialization", () => {
 
     await (
       stub as unknown as {
-        _cf_checkRunFibersForFacet(
+        _cf_cleanupFacetPrefix(
           ownerPath: ReadonlyArray<{ className: string; name: string }>
-        ): Promise<number>;
+        ): Promise<void>;
       }
-    )._cf_checkRunFibersForFacet([{ className: "TestNativeRpcAgent", name }]);
+    )._cf_cleanupFacetPrefix([{ className: "TestNativeRpcAgent", name }]);
 
     const startCount = await runInDurableObject(stub, (_instance, ctx) =>
       ctx.storage.get<number>("test_start_count")
@@ -159,6 +166,45 @@ describe("native Durable Object RPC initialization", () => {
     expect(result).toMatchObject({ name, ready: true, startCount: 1 });
   });
 
+  it("registers an MCP server from a cold call before the legacy name is loaded", async () => {
+    const namespace = env.TestNativeRpcAgent;
+    const stub = namespace.get(namespace.newUniqueId());
+    await runInDurableObject(stub, (_instance, ctx) =>
+      ctx.storage.put("__ps_name", uniqueName())
+    );
+    await evictDurableObject(stub);
+
+    // No callback host and no id to migrate: the name is never needed, so
+    // the call reaches the server. It answers 503, so the call fails there,
+    // with the server registered for a retry.
+    let mcpRequests = 0;
+    mcpServer.use(
+      http.all("https://cold-mcp.example.test/mcp", () => {
+        mcpRequests++;
+        return new HttpResponse(null, { status: 503 });
+      })
+    );
+    const outcome = await runInDurableObject(stub, async (instance) => {
+      try {
+        await instance.addMcpServer(
+          "files",
+          "https://cold-mcp.example.test/mcp",
+          { retry: { maxAttempts: 1 } }
+        );
+        return { error: null, servers: instance.mcp.listServers().length };
+      } catch (error) {
+        return {
+          error: error instanceof Error ? error.message : String(error),
+          servers: instance.mcp.listServers().length
+        };
+      }
+    });
+
+    expect(outcome.error).toMatch(/Failed to connect to MCP server/);
+    expect(mcpRequests).toBeGreaterThan(0);
+    expect(outcome.servers).toBe(1);
+  });
+
   it("rejects a truly unnamed application RPC clearly", async () => {
     const namespace = env.TestNativeRpcAgent;
     const stub = namespace.get(namespace.newUniqueId());
@@ -167,7 +213,7 @@ describe("native Durable Object RPC initialization", () => {
     // native nor a migrated legacy name exists here. Failing with the
     // lifecycle's addressing guidance is safer than preserving the old bug
     // where RPC ran against uninitialized state.
-    // Invoke in-process because vitest-pool-workers reports an expected remote
+    // Invoke in-process because the Vitest plugin reports an expected remote
     // stub rejection as an unhandled rejection even when the promise is caught.
     await expect(
       runInDurableObject(stub, (instance) => instance.applicationRpc())

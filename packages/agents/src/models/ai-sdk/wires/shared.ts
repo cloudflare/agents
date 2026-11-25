@@ -10,8 +10,6 @@ import type {
 export interface WireRequest {
   body: Record<string, unknown>;
   warnings: SharedV4Warning[];
-  /** Chat completions only: the body turns reasoning off via the chat template. */
-  reasoningOff?: boolean;
 }
 
 /** A fully parsed non-streaming response, in AI SDK terms. */

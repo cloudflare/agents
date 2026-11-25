@@ -2,11 +2,13 @@
  * Tests for the Extension system: ExtensionManager, HostBridgeLoopback, and
  * the extension Worker contract.
  *
- * Uses vitest-pool-workers with a real WorkerLoader binding.
+ * Uses the Vitest plugin with a real WorkerLoader binding.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { asSchema } from "ai";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { ExtensionManager, sanitizeName } from "../extensions/manager";
+import { coreOf, ExtensionManager, sanitizeName } from "../extensions/manager";
+import { getAgentByName } from "agents";
 import type { ExtensionManifest } from "../extensions/types";
 
 // Simple extension source: a greet tool that returns a greeting
@@ -192,6 +194,73 @@ describe("ExtensionManager", () => {
       const tools = manager.getTools();
       expect(Object.keys(tools)).toContain("math_add");
       expect(Object.keys(tools)).toContain("math_multiply");
+    });
+
+    it("offers the model the same tool definitions as before the extension core", async () => {
+      await manager.load(makeManifest({ name: "math" }), MULTI_TOOL_SOURCE);
+      const descriptor = (name: string, op: string) => ({
+        description: `[math] ${op} two numbers`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            a: { type: "number", description: "First number" },
+            b: { type: "number", description: "Second number" }
+          },
+          required: ["a", "b"]
+        },
+        name
+      });
+      // What the released manager built: `tool({ description, inputSchema:
+      // jsonSchema(schema), execute })`, as the AI SDK sends it.
+      const sent = await Promise.all(
+        Object.entries(manager.getTools()).map(async ([name, tool]) => ({
+          description: tool.description,
+          inputSchema: await asSchema(tool.inputSchema).jsonSchema,
+          name
+        }))
+      );
+      expect(JSON.stringify(sent)).toBe(
+        JSON.stringify([
+          descriptor("math_add", "Add"),
+          descriptor("math_multiply", "Multiply")
+        ])
+      );
+      // A tool that does not stream returns its result, not an iterable.
+      const result = manager
+        .getTools()
+        .math_add.execute?.(
+          { a: 2, b: 3 },
+          { toolCallId: "c", messages: [], context: undefined }
+        );
+      expect(result).toBeInstanceOf(Promise);
+      expect(await result).toBe(5);
+    });
+
+    it("warns once per manager that a context block's type is ignored", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await manager.load(
+        makeManifest({
+          name: "typed",
+          context: [{ label: "notes", type: "writable" }]
+        }),
+        GREET_EXTENSION_SOURCE
+      );
+      await manager.load(
+        makeManifest({
+          name: "typed-again",
+          context: [{ label: "notes", type: "readonly" }]
+        }),
+        GREET_EXTENSION_SOURCE
+      );
+      const typeWarnings = warn.mock.calls.filter((call) =>
+        String(call[0]).includes("`type` is ignored")
+      );
+      warn.mockRestore();
+      expect(typeWarnings).toHaveLength(1);
+      expect(manager.list().map((ext) => ext.contextLabels)).toEqual([
+        ["typed_notes"],
+        ["typed_again_notes"]
+      ]);
     });
 
     it("should merge tools from multiple extensions", async () => {
@@ -700,5 +769,206 @@ describe("ExtensionManager", () => {
       const parsed = JSON.parse(resultJson);
       expect(parsed.error).toContain("hook failed");
     });
+  });
+});
+
+describe("ExtensionManager worker id stability", () => {
+  function recordingLoader() {
+    const ids: string[] = [];
+    const loader = {
+      get: (id: string, cb: () => unknown) => {
+        ids.push(id);
+        return (env.LOADER as WorkerLoader).get(id, cb as never);
+      }
+    } as unknown as WorkerLoader;
+    return { ids, loader };
+  }
+
+  it("reuses the same worker id across managers for identical extensions", async () => {
+    const { ids, loader } = recordingLoader();
+    const manifest = makeManifest({ name: "stable" });
+    await new ExtensionManager({ loader }).load(
+      manifest,
+      GREET_EXTENSION_SOURCE
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    await new ExtensionManager({ loader }).load(
+      manifest,
+      GREET_EXTENSION_SOURCE
+    );
+    expect(ids[0]).toBe(ids[1]);
+
+    await new ExtensionManager({ loader }).load(manifest, MULTI_TOOL_SOURCE);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+});
+
+describe("ExtensionManager worker id scoping for host bindings", () => {
+  function fakeLoader() {
+    const ids: string[] = [];
+    const loader = {
+      get: (id: string) => {
+        ids.push(id);
+        return {
+          // The extension runtime's entrypoint, with nothing loaded.
+          getEntrypoint: () => ({
+            describe: async () => ({ hooks: [] }),
+            build: async () => ({ tools: [], prompt: [] })
+          })
+        };
+      }
+    } as unknown as WorkerLoader;
+    return { ids, loader };
+  }
+
+  const createHostBinding = () => ({}) as Fetcher;
+  const hostManifest = (context: ExtensionManifest["context"] = []) =>
+    makeManifest({
+      name: "notes",
+      permissions: { workspace: "read" },
+      context
+    });
+
+  it("gives different agents different ids for the same host extension", async () => {
+    const { ids, loader } = fakeLoader();
+    for (const workerIdScope of ["Agent:a", "Agent:a", "Agent:b"]) {
+      await new ExtensionManager({
+        loader,
+        createHostBinding,
+        workerIdScope
+      }).load(hostManifest(), GREET_EXTENSION_SOURCE);
+    }
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+
+  it("changes the id when the context labels change", async () => {
+    const { ids, loader } = fakeLoader();
+    const load = (context: ExtensionManifest["context"]) =>
+      new ExtensionManager({
+        loader,
+        createHostBinding,
+        workerIdScope: "Agent:a"
+      }).load(hostManifest(context), GREET_EXTENSION_SOURCE);
+    await load([{ label: "draft", type: "writable" }]);
+    await load([{ label: "final", type: "writable" }]);
+    expect(ids[1]).not.toBe(ids[0]);
+  });
+
+  it("never reuses a host extension id without a scope", async () => {
+    const { ids, loader } = fakeLoader();
+    for (let i = 0; i < 2; i++) {
+      await new ExtensionManager({ loader, createHostBinding }).load(
+        hostManifest(),
+        GREET_EXTENSION_SOURCE
+      );
+    }
+    expect(ids[1]).not.toBe(ids[0]);
+  });
+});
+
+describe("ExtensionManager hook timeout", () => {
+  it("runs a manager the agent was given under the agent's timeout", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Built as a subclass would build its own, with no timeout of its own.
+    const manager = new ExtensionManager({ loader: env.LOADER });
+    await manager.load(
+      makeManifest({ name: "slow-turn" }),
+      `{
+        hooks: {
+          beforeTurn: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            return { seed: 1 };
+          }
+        }
+      }`
+    );
+    const started = Date.now();
+    const config = await coreOf(manager, () => 20)?.hook("beforeTurn", {
+      snapshot: {
+        system: "",
+        toolNames: [],
+        messageCount: 0,
+        continuation: false,
+        modelId: "test"
+      },
+      config: { maxSteps: 2 }
+    });
+    const waited = Date.now() - started;
+    const timedOut = warn.mock.calls.some((call) =>
+      String(call[1]).includes("Hook timeout: slow-turn")
+    );
+    warn.mockRestore();
+    expect(config).toEqual({ maxSteps: 2 });
+    expect(timedOut).toBe(true);
+    expect(waited).toBeLessThan(1500);
+  });
+});
+
+describe("ExtensionManager network hosts", () => {
+  async function fetchThrough(url: string) {
+    const agent = await getAgentByName(
+      env.ThinkExtensionNetworkAgent,
+      "network-hosts"
+    );
+    return agent.fetchThroughExtension(url) as Promise<{
+      status?: number;
+      body?: string;
+      thrown?: string;
+    }>;
+  }
+
+  it("refuses a host the manifest does not list", async () => {
+    const result = await fetchThrough("https://unlisted.example/path");
+    expect(result.status).toBe(403);
+    expect(result.body).toContain("The host unlisted.example is not allowed");
+  });
+
+  it("refuses a listed host that is a private or local address", async () => {
+    const result = await fetchThrough("http://127.0.0.1/secret");
+    expect(result.status).toBe(403);
+    expect(result.body).toContain("private or local address");
+  });
+
+  it("passes a listed host on to the network", async () => {
+    const result = await fetchThrough("https://allowed.example/");
+    // The host does not exist, so the request fails at the DNS lookup,
+    // after the bridge let it through.
+    expect(result.thrown).toContain("Network connection failed");
+  });
+});
+
+describe("ExtensionManager network hosts with an app's own host binding", () => {
+  it("keeps the agent's network, since the binding may not serve fetch", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const configs: { globalOutbound?: unknown; env?: unknown }[] = [];
+    const loader = {
+      get: (_id: string, make: () => { globalOutbound?: unknown }) => {
+        configs.push(make());
+        return {
+          getEntrypoint: () => ({
+            describe: async () => ({ hooks: [] }),
+            build: async () => ({ tools: [], prompt: [] })
+          })
+        };
+      }
+    } as unknown as WorkerLoader;
+    // An app's binding that serves the host operations only.
+    const createHostBinding = () => ({}) as Fetcher;
+    await new ExtensionManager({ loader, createHostBinding }).load(
+      makeManifest({
+        name: "netonly",
+        permissions: { network: ["api.example.com"] }
+      }),
+      "{ tools: {} }"
+    );
+    const warned = warn.mock.calls.some((call) =>
+      String(call[0]).includes("network hosts are not enforced")
+    );
+    warn.mockRestore();
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.globalOutbound).toBeUndefined();
+    expect(configs[0]?.env).toBeUndefined();
+    expect(warned).toBe(true);
   });
 });

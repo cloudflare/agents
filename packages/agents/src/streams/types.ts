@@ -98,7 +98,12 @@ export interface StreamWriter {
  * @experimental The API surface may change before stabilizing.
  */
 export interface StreamSettleOptions {
-  /** Synchronous writes to commit with the settlement. */
+  /**
+   * Synchronous writes to commit with the settlement. An `async` function
+   * is rejected with a `TypeError` before it runs. Any other function that
+   * returns a promise also throws and rolls back, but work it scheduled
+   * after its first `await` has already started and is not undone.
+   */
   readonly commit?: () => void;
   /**
    * Delete the stream's rows in the same transaction. The stream ceases
@@ -179,3 +184,23 @@ export type StreamChunkRow = {
   chunk: string;
   created_at: number;
 };
+
+/**
+ * Limits of a buffered append (internal sync aperture): the buffer is
+ * written once it holds `maxChunks` chunks or `maxBytes` serialized
+ * characters.
+ *
+ * @internal
+ */
+export interface StreamBatching {
+  readonly maxChunks: number;
+  readonly maxBytes: number;
+  /**
+   * Write a flush into the stream's newest block while that block stays
+   * under 256 KB, instead of a new block per flush: one row per 256 KB of
+   * chunks, for a stream that is deleted whole (a chat turn), where each
+   * block costs a row to delete. A stream trimmed from its head (an event
+   * log) leaves it off, so a trim can drop one flush at a time.
+   */
+  readonly fillBlocks?: boolean;
+}

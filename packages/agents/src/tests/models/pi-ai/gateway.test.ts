@@ -89,9 +89,9 @@ describe("pi-ai: ids this provider resolves", () => {
 
   it("refuses a workers-ai/ prefix and points at the @cf/ id", () => {
     const ai = createAI({ binding: asAi(fakeBinding(() => new Response())) });
-    expect(() => ai("workers-ai/@cf/zai-org/glm-4.7-flash")).toThrow(
-      /pass its id directly/
-    );
+    expect(() =>
+      ai("workers-ai/@cf/deepseek-ai/deepseek-v4.1-flash-1017")
+    ).toThrow(/pass its id directly/);
   });
 });
 
@@ -352,15 +352,19 @@ describe("pi-ai: string legs and Workers AI knobs on vendor models", () => {
   it("resolves a string leg like ai(string): Workers AI or registry-known only", () => {
     const ai = createAI({ binding: asAi(fakeBinding(() => sseResponse([]))) });
     expect(() =>
-      ai("@cf/zai-org/glm-4.7-flash", {
+      ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
         fallback: ["anthropic/claude-opus-4.8"]
       })
     ).not.toThrow();
     expect(() =>
-      ai("@cf/zai-org/glm-4.7-flash", { fallback: ["openai/gpt-3.5-turbo"] })
+      ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
+        fallback: ["openai/gpt-3.5-turbo"]
+      })
     ).toThrow(TypeError);
     expect(() =>
-      ai("@cf/zai-org/glm-4.7-flash", { fallback: ["gpt-5-mini"] })
+      ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
+        fallback: ["gpt-5-mini"]
+      })
     ).toThrow(TypeError);
   });
 

@@ -10,7 +10,7 @@ import type {
   ThinkSystemPromptSkillsWarningAgent,
   ThinkDefaultSystemPromptSkillsAgent,
   ThinkInheritedSystemPromptSkillsAgent,
-  ThinkSystemPromptFieldSkillsAgent,
+  ThinkWorkspaceSkillsAgent,
   ThinkMissingClassifierWarningAgent,
   ThinkClassifierMethodAgent,
   ThinkInheritedClassifierAgent,
@@ -470,6 +470,69 @@ describe("Think — error handling", () => {
     expect(errorLog[0]).toContain("Custom error for hook");
   });
 
+  it("reports a chat request whose body cannot be parsed (D140)", async () => {
+    const agent = await freshAgent(`parse-failed-${crypto.randomUUID()}`);
+    const events: Array<{ payload: { requestId?: string; stage?: string } }> =
+      [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed") events.push(event);
+    });
+    try {
+      for (const [id, body] of [
+        ["no-body", undefined],
+        ["bad-json", "{nope"],
+        ["no-messages", JSON.stringify({ text: "hi" })]
+      ] as const) {
+        await agent.sendChatProtocolMessageForTest({
+          type: "cf_agent_use_chat_request",
+          id,
+          init: { method: "POST", ...(body !== undefined && { body }) }
+        });
+      }
+    } finally {
+      unsubscribe();
+    }
+    expect(
+      events.map((event) => [event.payload.requestId, event.payload.stage])
+    ).toEqual([
+      ["no-body", "parse"],
+      ["bad-json", "parse"],
+      ["no-messages", "parse"]
+    ]);
+    expect(await agent.getChatErrorLog()).toHaveLength(3);
+    expect(await agent.getMessages()).toEqual([]);
+  });
+
+  it("emits tool:result and message:cancel for protocol messages (D142)", async () => {
+    const agent = await freshAgent(`protocol-events-${crypto.randomUUID()}`);
+    const types: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      types.push(event.type);
+    });
+    try {
+      await agent.sendChatProtocolMessageForTest({
+        type: "cf_agent_tool_result",
+        toolCallId: "call-missing",
+        toolName: "pick",
+        output: 1
+      });
+      await agent.sendChatProtocolMessageForTest({
+        type: "cf_agent_tool_approval",
+        toolCallId: "call-missing",
+        approved: true
+      });
+      await agent.sendChatProtocolMessageForTest({
+        type: "cf_agent_chat_request_cancel",
+        id: "nothing-running"
+      });
+    } finally {
+      unsubscribe();
+    }
+    expect(types).toEqual(
+      expect.arrayContaining(["tool:result", "tool:approval", "message:cancel"])
+    );
+  });
+
   it("emits chat:request:failed when a chat stream fails", async () => {
     const agent = await freshAgent(`err-event-${crypto.randomUUID()}`);
     const events: Array<{
@@ -622,6 +685,46 @@ describe("Think — error handling", () => {
     expect(result.assistantMessages).toBe(1);
   });
 
+  it("tells the caller of saveMessages that a stalled turn was interrupted, not stopped", async () => {
+    const agent = await freshAgent(`stall-save-${crypto.randomUUID()}`);
+
+    // The turn is handed to recovery, which may still finish the reply.
+    expect(await agent.testSaveMessagesWithStall(3, 50)).toEqual({
+      status: "aborted",
+      reason: "interrupted"
+    });
+  });
+
+  it("recovers an interrupted recovery continuation into the message it continues, however often (#2780)", async () => {
+    const agent = await freshAgent(
+      `continuation-orphan-${crypto.randomUUID()}`
+    );
+    const result = await agent.testRecoverContinuationStreamForTest();
+
+    // The continuation records the message it extends and its part count.
+    const earlier = result.leaf.partTypes.length;
+    expect(earlier).toBeGreaterThan(0);
+    expect(result.recorded).toEqual({
+      messageId: result.leaf.id,
+      basePartCount: earlier
+    });
+    // Recovering its stream twice rewrites that message: the earlier parts
+    // followed by the continuation's, with no second assistant message.
+    expect(result.afterRecovery.map((m) => m.id)).toEqual([result.leaf.id]);
+    const recovered = JSON.parse(result.afterRecovery[0].partsJson) as Array<{
+      type: string;
+    }>;
+    expect(recovered.slice(0, earlier).map((p) => p.type)).toEqual(
+      result.leaf.partTypes
+    );
+    expect(recovered.slice(earlier)).toMatchObject([
+      { type: "step-start" },
+      { type: "text", text: "Hello from the assistant!" }
+    ]);
+    // The live stream then finishes into the same message.
+    expect(result.finalAssistantIds).toEqual([result.leaf.id]);
+  });
+
   it("retries the user turn when the stream stalls before its first chunk (#1941)", async () => {
     const agent = await freshAgent(`stall-first-chunk-${crypto.randomUUID()}`);
     const result = await agent.testStallRecoveryForTest({
@@ -679,6 +782,53 @@ describe("Think — error handling", () => {
       expect(recovered.scheduledContinues).toBe(0);
       expect(recovered.finalRoles).toEqual(["user", "assistant"]);
     } finally {
+      await closeWS(ws);
+    }
+  });
+
+  it("sends a WebSocket client the stream error when onChatRecovery declines to continue", async () => {
+    const room = `stall-decline-ws-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.setRecoveryHookForTest({ continue: false });
+    await agent.armStallForTest(3, 50);
+    const ws = await connectThinkTestAgentWS(room);
+    try {
+      const done = waitForProtocolMessage(
+        ws,
+        (m) => m.type === "cf_agent_use_chat_response" && m.done === true
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "hello" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      const frame = (await done) as { error?: boolean; body?: string };
+      expect(frame.error).toBe(true);
+      expect(frame.body).toBeTruthy();
+      expect(frame.body).not.toContain("declined");
+
+      // Nothing is scheduled, and the terminal record says the same thing.
+      const recovered = await agent.runScheduledRecoveryForTest();
+      expect(recovered.scheduledContinues).toBe(0);
+      expect(recovered.scheduledRetries).toBe(0);
+      expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+        frame.body
+      );
+    } finally {
+      await agent.setRecoveryHookForTest(null);
       await closeWS(ws);
     }
   });
@@ -760,7 +910,9 @@ describe("Think — error handling", () => {
       expect(result.first.error).toBeUndefined();
       expect(result.first.interruptedCalls).toBe(1);
       expect(result.scheduledContinues).toBe(1);
-      expect(result.delaySeconds).toBe(1);
+      // The first retry waits between half a second and a second.
+      expect(result.delaySeconds).toBeGreaterThanOrEqual(0.5);
+      expect(result.delaySeconds).toBeLessThan(1);
       expect(result.assistantMessages).toBe(1);
       expect(result.finalAssistantText.length).toBeGreaterThan(0);
     }
@@ -792,7 +944,14 @@ describe("Think — error handling", () => {
     const agent = await freshAgent(`transient-backoff-${crypto.randomUUID()}`);
     const result = await agent.collectTransientBackoffForTest(20);
 
-    expect(result.delays).toEqual([1, 2, 4, 8, 16, 30, 30, 30, 30, 30]);
+    // Each delay is jittered within the upper half of its doubling
+    // ceiling, capped at 30s.
+    const ceilings = [1, 2, 4, 8, 16, 30, 30, 30, 30, 30];
+    expect(result.delays).toHaveLength(ceilings.length);
+    result.delays.forEach((delay, i) => {
+      expect(delay).toBeGreaterThanOrEqual(ceilings[i] / 2);
+      expect(delay).toBeLessThan(ceilings[i]);
+    });
   });
 
   it("classifies an in-stream error once when overflow recovery is on", async () => {
@@ -816,7 +975,11 @@ describe("Think — error handling", () => {
     const agent = await freshAgent(`transient-chain-${crypto.randomUUID()}`);
     const result = await agent.collectTransientBackoffForTest(3);
 
-    expect(result.delays).toEqual([1, 2, 4]);
+    expect(result.delays).toHaveLength(3);
+    result.delays.forEach((delay, i) => {
+      expect(delay).toBeGreaterThanOrEqual([1, 2, 4][i] / 2);
+      expect(delay).toBeLessThan([1, 2, 4][i]);
+    });
     // Only the first attempt joins duplicate detections; the attempts it
     // chains must not join the run that schedules them.
     expect(result.keyed).toEqual([true, false, false]);
@@ -892,7 +1055,8 @@ describe("Think — error handling", () => {
     { retryAfter: "7", inStream: true, delay: 7 },
     { retryAfter: "7", inStream: false, delay: 7 },
     { retryAfter: "600", inStream: true, delay: 60 },
-    { retryAfter: "0", inStream: true, delay: 1 }
+    // Retry-After 0 leaves the backoff: between half a second and a second.
+    { retryAfter: "0", inStream: true, delay: undefined }
   ])(
     "honors Retry-After $retryAfter on a rate limit (inStream: $inStream)",
     async ({ retryAfter, inStream, delay }) => {
@@ -902,6 +1066,33 @@ describe("Think — error handling", () => {
         inStream,
         error: "api-call-503",
         retryAfter
+      });
+
+      expect(result.scheduled).toBe(1);
+      if (delay === undefined) {
+        expect(result.delaySeconds).toBeGreaterThanOrEqual(0.5);
+        expect(result.delaySeconds).toBeLessThan(1);
+      } else {
+        expect(result.delaySeconds).toBe(delay);
+      }
+    }
+  );
+
+  it.each([
+    { name: "retry-after", retryAfter: "7", inStream: false, delay: 7 },
+    { name: "retry-after", retryAfter: "7", inStream: true, delay: 7 },
+    { name: "retry-after-ms", retryAfterMs: "4200", inStream: false, delay: 5 },
+    { name: "retry-after-ms", retryAfterMs: "4200", inStream: true, delay: 5 }
+  ])(
+    "honors $name on an error classified transient (inStream: $inStream)",
+    async ({ retryAfter, retryAfterMs, inStream, delay }) => {
+      const agent = await freshAgent(`transient-wait-${crypto.randomUUID()}`);
+      const result = await agent.testTransientScenarioForTest({
+        classification: "transient",
+        inStream,
+        error: "api-call-503",
+        retryAfter,
+        retryAfterMs
       });
 
       expect(result.scheduled).toBe(1);
@@ -939,12 +1130,46 @@ describe("Think — error handling", () => {
     expect(result.finalText).toBe(result.textBeforeCancel);
   });
 
+  it("stops a recovery the user cancels while its continuation streams", async () => {
+    const agent = await freshAgent(
+      `transient-cancel-run-${crypto.randomUUID()}`
+    );
+    const result = await agent.testCancelDuringRunningRecoveryForTest();
+
+    expect(result.incident).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+    expect(result.finalText).toBe(result.textBeforeCancel);
+  });
+
+  it("records the stop, not a give-up, when a stopped recovery attempt throws", async () => {
+    const agent = await freshAgent(
+      `transient-cancel-throw-${crypto.randomUUID()}`
+    );
+    const result = await agent.testStopThenThrowDuringRecoveryForTest();
+
+    expect(result.exhaustedReasons).toEqual([]);
+    expect(result.incident).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+  });
+
   it("bounds a turn that streams a chunk and stalls on every attempt", async () => {
     const agent = await freshAgent(`stall-progress-${crypto.randomUUID()}`);
     const result = await agent.testRepeatedStallAfterProgressForTest(40);
 
     expect(result.scheduledAtEnd).toBe(0);
     expect(result.rounds).toBeLessThanOrEqual(10);
+  });
+
+  it("keeps an incident given up when the recovered turn that gave up returns", async () => {
+    const agent = await freshAgent(`stall-sealed-${crypto.randomUUID()}`);
+    const result = await agent.testRepeatedStallAfterProgressForTest(40);
+
+    expect(result.scheduledAtEnd).toBe(0);
+    expect(result.statuses).toEqual(["exhausted"]);
   });
 
   it("routes a transient WebSocket stream error into bounded recovery (#2085)", async () => {
@@ -982,7 +1207,9 @@ describe("Think — error handling", () => {
 
       const recovered = await agent.runScheduledRecoveryForTest();
       expect(recovered.scheduledContinues).toBe(1);
-      expect(recovered.delaySeconds).toBe(1);
+      // The first retry waits between half a second and a second.
+      expect(recovered.delaySeconds).toBeGreaterThanOrEqual(0.5);
+      expect(recovered.delaySeconds).toBeLessThan(1);
       expect(recovered.finalRoles).toEqual(["user", "assistant"]);
     } finally {
       await closeWS(ws);
@@ -1021,7 +1248,7 @@ describe("Think — error handling", () => {
     expect(result.finalStreamingParts).toBe(0);
   });
 
-  it("stops stall recovery when onChatRecovery declines to continue", async () => {
+  it("ends a stalled turn as its stream error when onChatRecovery declines to continue", async () => {
     const agent = await freshAgent(`stall-decline-${crypto.randomUUID()}`);
     const result = await agent.testStallRecoveryForTest({
       afterChunks: 3,
@@ -1029,8 +1256,15 @@ describe("Think — error handling", () => {
       recovery: { continue: false }
     });
 
-    expect(result.first.error).toBeUndefined();
-    expect(result.first.interruptedCalls).toBe(1);
+    // The caller gets the stall as an error, not a clean interruption and
+    // not a generic "declined" message.
+    expect(result.first.error).toBeTruthy();
+    expect(result.first.error).not.toContain("declined");
+    expect(result.first.interruptedCalls).toBe(0);
+    // A client that was away learns the same outcome.
+    expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+      result.first.error
+    );
     expect(result.scheduledContinues).toBe(0);
     expect(result.scheduledRetries).toBe(0);
     // The settled partial is still saved.
@@ -1197,7 +1431,9 @@ describe("Think — abort", () => {
       "partial4 "
     ]);
 
-    await agent.testChatWithAbort("Abort and persist", 2);
+    // After the first text chunk. A reply stopped before it has any content
+    // holds nothing and is not stored.
+    await agent.testChatWithAbort("Abort and persist", 4);
 
     const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
@@ -1208,13 +1444,28 @@ describe("Think — abort", () => {
     };
     expect(assistantMsg.role).toBe("assistant");
     expect(assistantMsg.parts.length).toBeGreaterThan(0);
+    // Nothing will write into the text part again: it is stored closed.
+    expect(
+      (history[1] as UIMessage).parts.find((part) => part.type === "text")
+    ).toMatchObject({ state: "done" });
+  });
+
+  it("stores no reply for a turn stopped before it has any content", async () => {
+    const agent = await freshAgent("abort-empty");
+    await agent.setMultiChunkResponse(["partial1 ", "partial2 "]);
+
+    // Stopped after `start` and `start-step`: nothing a client can show.
+    await agent.testChatWithAbort("Abort before content", 2);
+
+    const history = (await agent.getStoredMessages()) as UIMessage[];
+    expect(history.map((message) => message.role)).toEqual(["user"]);
   });
 
   it("should recover and chat normally after abort", async () => {
     const agent = await freshAgent("abort-recover");
 
     await agent.setMultiChunkResponse(["a ", "b ", "c ", "d "]);
-    await agent.testChatWithAbort("Abort this", 2);
+    await agent.testChatWithAbort("Abort this", 4);
 
     await agent.clearMultiChunkResponse();
     const result = await agent.testChat("Normal after abort");
@@ -1554,118 +1805,130 @@ describe("Think — context blocks", () => {
     expect(systemPrompt).toContain("[writable]");
   });
 
-  it("does not warn when a skills agent inherits the default getSystemPrompt", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("keeps Think's default prompt out when a skills agent does not override getSystemPrompt", async () => {
+    // Construct the intermediate class first. Agent's method wrapping mutates
+    // this prototype, which used to poison later override detection.
+    await (await freshSessionAgent("skills-default-parent")).getContextLabels();
 
-    try {
-      // Construct the intermediate class first. Agent's method wrapping mutates
-      // this prototype, which used to poison later override detection.
-      await (
-        await freshSessionAgent("skills-default-parent")
-      ).getContextLabels();
-
-      for (const name of ["skills-default-first", "skills-default-second"]) {
-        const agent = await getAgentByName(
-          env.ThinkDefaultSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>,
-          `${name}-${crypto.randomUUID()}`
-        );
-        await expect(agent.testChat("Hello")).resolves.toMatchObject({
-          done: true
-        });
-        await expect(agent.getAssembledSystemPrompt()).resolves.toContain(
-          "map-reading"
-        );
-      }
-
-      const fallbackWarnings = warn.mock.calls
-        .flat()
-        .filter(
-          (value) =>
-            typeof value === "string" &&
-            value.includes(
-              "getSystemPrompt() is only used as a fallback when no context blocks are configured"
-            )
-        );
-      expect(fallbackWarnings).toEqual([]);
-    } finally {
-      warn.mockRestore();
+    for (const name of ["skills-default-first", "skills-default-second"]) {
+      const agent = await getAgentByName(
+        env.ThinkDefaultSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>,
+        `${name}-${crypto.randomUUID()}`
+      );
+      await expect(agent.testChat("Hello")).resolves.toMatchObject({
+        done: true
+      });
+      const prompt = await agent.getAssembledSystemPrompt();
+      expect(prompt).toContain("map-reading");
+      expect(prompt).not.toContain("You are a careful, capable assistant");
     }
   });
 
-  it("warns when getSkills makes an overridden getSystemPrompt fallback-only", async () => {
+  it("puts an overridden getSystemPrompt above the skills block", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const agent = await getAgentByName(
       env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
-      // Unique per run: the warning fires once per instance, so a retry
-      // against a warm object would see no call.
-      `skills-system-prompt-warning-${crypto.randomUUID()}`
+      `skills-system-prompt-${crypto.randomUUID()}`
     );
 
     try {
       await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
         done: true
       });
-      await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
-        done: true
-      });
-      const fallbackWarnings = warn.mock.calls
-        .flat()
-        .filter(
-          (value) =>
-            typeof value === "string" &&
-            value.includes(
-              "getSystemPrompt() is only used as a fallback when no context blocks are configured"
-            )
-        );
-      expect(fallbackWarnings).toHaveLength(1);
+      const prompt = await agent.getAssembledSystemPrompt();
+      expect(prompt.indexOf("You are Robbie, a pirate.")).toBe(0);
+      expect(prompt).toContain("knot-tying: How to tie useful knots.");
+      expect(
+        warn.mock.calls
+          .flat()
+          .some(
+            (value) =>
+              typeof value === "string" && value.includes("getSystemPrompt()")
+          )
+      ).toBe(false);
     } finally {
       warn.mockRestore();
     }
   });
 
-  it("warns for an inherited getSystemPrompt override", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const agent = await getAgentByName(
-      env.ThinkInheritedSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>,
-      `skills-inherited-system-prompt-warning-${crypto.randomUUID()}`
-    );
-
-    try {
+  it("keeps an inherited or class-field getSystemPrompt alongside skills", async () => {
+    for (const [namespace, name] of [
+      [env.ThinkInheritedSystemPromptSkillsAgent, "skills-inherited"],
+      [env.ThinkSystemPromptFieldSkillsAgent, "skills-field"]
+    ] as const) {
+      const agent = await getAgentByName(
+        namespace as unknown as DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>,
+        `${name}-${crypto.randomUUID()}`
+      );
       await expect(agent.testChat("Hello")).resolves.toMatchObject({
         done: true
       });
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "getSystemPrompt() is only used as a fallback when no context blocks are configured"
-        )
-      );
-    } finally {
-      warn.mockRestore();
+      const prompt = await agent.getAssembledSystemPrompt();
+      expect(prompt.indexOf("You are an experienced cartographer.")).toBe(0);
+      expect(prompt).toContain("map-reading: How to read a map.");
     }
   });
 
-  it("warns for a getSystemPrompt class-field override", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("loads skills from files in the Workspace and follows edits without rebuilding the prompt", async () => {
     const agent = await getAgentByName(
-      env.ThinkSystemPromptFieldSkillsAgent as unknown as DurableObjectNamespace<ThinkSystemPromptFieldSkillsAgent>,
-      `skills-field-system-prompt-warning-${crypto.randomUUID()}`
+      env.ThinkWorkspaceSkillsAgent as unknown as DurableObjectNamespace<ThinkWorkspaceSkillsAgent>,
+      `workspace-skills-${crypto.randomUUID()}`
     );
 
-    try {
-      await expect(agent.testChat("Hello")).resolves.toMatchObject({
-        done: true
-      });
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "getSystemPrompt() is only used as a fallback when no context blocks are configured"
-        )
-      );
-    } finally {
-      warn.mockRestore();
-    }
+    // No skills yet: no catalog and no skill tools.
+    await agent.testChat("Hello");
+    const frozen = await agent.getAssembledSystemPrompt();
+    expect(frozen).toContain("No skills are available.");
+    expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
+    await expect(agent.getContextReminder()).resolves.toBeNull();
+
+    // A new skill reaches the model as a reminder after that turn's user
+    // message; the frozen prompt (and the provider's prefix cache) stays the
+    // same, and the change counts as delivered.
+    await agent.writeSkill("map-reading", "How to read a map.");
+    await agent.testChat("Hello again");
+    await expect(agent.getAssembledSystemPrompt()).resolves.toBe(frozen);
+    expect(await agent.getTurnLastMessage()).toContain(
+      "- map-reading: How to read a map."
+    );
+    await expect(agent.getContextReminder()).resolves.toBeNull();
+    expect(await agent.getTurnToolNames()).toEqual(
+      expect.arrayContaining(["activate_skill", "read_skill_resource"])
+    );
+
+    await agent.writeSkill("map-reading", "How to read a nautical chart.");
+    await agent.testChat("And again");
+    await expect(agent.getAssembledSystemPrompt()).resolves.toBe(frozen);
+    const edited = await agent.getTurnLastMessage();
+    expect(edited).toContain("- map-reading: How to read a nautical chart.");
+    expect(edited).not.toContain("How to read a map.");
+
+    // Deleting the skill is a change too: the model last saw the chart.
+    await agent.deleteSkill("map-reading");
+    await agent.testChat("Last one");
+    expect(await agent.getTurnLastMessage()).toContain(
+      "No skills are available."
+    );
+    await expect(agent.getContextReminder()).resolves.toBeNull();
+    expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
   });
 
-  it("warns when reactive overflow recovery has no classifier", async () => {
+  it("folds a changed skills catalog into the prompt when history is cleared", async () => {
+    const agent = await getAgentByName(
+      env.ThinkWorkspaceSkillsAgent as unknown as DurableObjectNamespace<ThinkWorkspaceSkillsAgent>,
+      `workspace-skills-clear-${crypto.randomUUID()}`
+    );
+    await agent.testChat("Hello");
+    await agent.writeSkill("map-reading", "How to read a map.");
+    await agent.testChat("Hello again");
+    await agent.clearSkillHistory();
+    await expect(agent.getAssembledSystemPrompt()).resolves.toContain(
+      "- map-reading: How to read a map."
+    );
+    await expect(agent.getContextReminder()).resolves.toBeNull();
+  });
+
+  it("does not warn when reactive overflow recovery has no classifier: the provider's error is read", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const agent = await getAgentByName(
       env.ThinkMissingClassifierWarningAgent as unknown as DurableObjectNamespace<ThinkMissingClassifierWarningAgent>,
@@ -1684,7 +1947,7 @@ describe("Think — context blocks", () => {
               "contextOverflow.reactive is enabled but classifyChatError() is not overridden"
             )
         );
-      expect(classifierWarnings).toHaveLength(1);
+      expect(classifierWarnings).toHaveLength(0);
     } finally {
       warn.mockRestore();
     }
@@ -2179,72 +2442,13 @@ describe("Think — sanitization", () => {
   });
 });
 
-// ── Row size enforcement ─────────────────────────────────────────
-
-describe("Think — row size enforcement", () => {
-  it("should pass through small messages unchanged", async () => {
-    const agent = await freshAgent("rowsize-small");
-
-    const msg: UIMessage = {
-      id: "small-1",
-      role: "assistant",
-      parts: [{ type: "text", text: "Short message" }]
-    };
-
-    const result = (await agent.enforceRowSizeLimit(msg)) as UIMessage;
-    expect((result.parts[0] as { text: string }).text).toBe("Short message");
-  });
-
-  it("should compact large tool outputs", async () => {
-    const agent = await freshAgent("rowsize-tool");
-
-    const hugeOutput = "x".repeat(2_000_000);
-    const msg: UIMessage = {
-      id: "tool-big",
-      role: "assistant",
-      parts: [
-        {
-          type: "tool-read_file",
-          toolCallId: "tc-1",
-          toolName: "read_file",
-          state: "output-available",
-          input: {},
-          output: hugeOutput
-        } as UIMessage["parts"][number]
-      ]
-    };
-
-    const result = (await agent.enforceRowSizeLimit(msg)) as UIMessage;
-    const toolPart = result.parts[0] as Record<string, unknown>;
-    const output = toolPart.output as string;
-
-    expect(output).toContain("[truncated");
-    expect(output.length).toBeLessThan(hugeOutput.length);
-  });
-
-  it("should truncate large text parts for non-assistant messages", async () => {
-    const agent = await freshAgent("rowsize-user-text");
-
-    const hugeText = "y".repeat(2_000_000);
-    const msg: UIMessage = {
-      id: "user-big",
-      role: "user",
-      parts: [{ type: "text", text: hugeText }]
-    };
-
-    const result = (await agent.enforceRowSizeLimit(msg)) as UIMessage;
-    const textPart = result.parts[0] as { text: string };
-
-    expect(textPart.text).toContain("Text truncated");
-    expect(textPart.text.length).toBeLessThan(hugeText.length);
-  });
-});
-
 // ── Model message conversion ─────────────────────────────────────
 
 describe("Think — model message conversion", () => {
   it("replays truncated workspace text read outputs as text", async () => {
-    const agent = await freshAgent("model-conversion-truncated-read");
+    const agent = await freshAgent(
+      `model-conversion-truncated-read-${crypto.randomUUID()}`
+    );
     const largeContent = "read-output ".repeat(100);
 
     await agent.persistTestMessage({
@@ -2269,7 +2473,10 @@ describe("Think — model message conversion", () => {
         } as UIMessage["parts"][number]
       ]
     });
-    for (let i = 0; i < 4; i++) {
+    // Read-time truncation cuts at multiples of `truncationStep` (8), keeping
+    // 4 to 11 recent messages at full fidelity. Twelve recent messages put 15
+    // in the prompt, so the cutoff (8) is past the read result.
+    for (let i = 0; i < 12; i++) {
       await agent.persistTestMessage({
         id: `recent-${i}`,
         role: "user",
@@ -2850,12 +3057,110 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(result.status).toBe("aborted");
     expect(result.requestId).toBeTruthy();
 
-    // The user message persists (it's saved before the abort gate),
-    // but the assistant message is either entirely missing OR has
-    // strictly fewer parts than a full response.
+    // The turn was stopped before it started: nothing is stored.
     const messages = (await agent.getStoredMessages()) as UIMessage[];
-    expect(messages.length).toBeGreaterThanOrEqual(1);
-    expect(messages[0].role).toBe("user");
+    expect(messages).toEqual([]);
+  });
+
+  it("stores nothing and never calls the model for a pre-aborted signal", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre-no-model");
+
+    const result = await agent.testSaveMessagesWithSignal("Cancel before run", {
+      preAbort: true
+    });
+
+    expect(result.status).toBe("aborted");
+    // No turn reached the model.
+    expect(await agent.getCapturedOptions()).toEqual([]);
+    expect(await agent.getStoredMessages()).toEqual([]);
+    expect(await agent.getResponseLog()).toEqual([]);
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  });
+
+  it("a turn stopped after its messages are stored clears the terminal record of an earlier failure (#1645)", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-stored-terminal");
+
+    const result = await agent.testAbortedTurnAfterTerminalError("after-store");
+
+    // The message is in the transcript and the model was never called: the
+    // conversation moved, so the old failure is superseded.
+    expect(result).toEqual({
+      status: "aborted",
+      stored: 1,
+      modelCalls: 0,
+      after: null
+    });
+  });
+
+  it("a turn stopped before it starts leaves the terminal record of an earlier failure", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre-terminal");
+
+    const result = await agent.testAbortedTurnAfterTerminalError("before");
+
+    // It stored nothing and called nothing, so a client that reconnects
+    // still learns the turn before it failed.
+    expect(result).toMatchObject({
+      status: "aborted",
+      stored: 0,
+      modelCalls: 0
+    });
+    expect(result.after).toMatchObject({ requestId: "earlier-failure" });
+  });
+
+  it("abortAllRequests() stops a saveMessages turn still waiting in the queue", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-queued");
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d ", "e "], 50);
+
+    const { running, queued } =
+      await agent.testQueuedSaveMessagesStoppedByAbortAllRequests(100);
+
+    expect(running.status).toBe("aborted");
+    // The queued turn had not started. Its controller exists from the
+    // moment saveMessages is called, so the stop reaches it: it stores
+    // nothing and the model is never called for it.
+    expect(queued.status).toBe("aborted");
+    expect(await agent.getCapturedOptions()).toHaveLength(1);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.filter((message) => message.role === "user")).toHaveLength(
+      1
+    );
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  });
+
+  it("a turn whose reply finished is completed when a clear lands while onChatResponse runs", async () => {
+    const agent = await freshProgrammaticAgent("clear-during-response-hook");
+
+    const result = await agent.testClearDuringResponseHook();
+
+    // The reply was stored and the hook was handed `completed`. The clear
+    // came after, and does not turn the turn into `skipped`.
+    expect(result).toEqual({ status: "completed", hookStatus: "completed" });
+  });
+
+  it("does not ask shouldApplyMessages again once the chat was reset", async () => {
+    const agent = await freshProgrammaticAgent("should-apply-reset-messages");
+
+    const { status, asked } = await agent.testShouldApplyAcrossReset(
+      [true, true],
+      "messages"
+    );
+
+    expect(status).toBe("skipped");
+    expect(asked).toBe(1);
+    expect(await agent.getStoredMessages()).toEqual([]);
+  });
+
+  it("a turn shouldApplyMessages declines reports aborted, reset or not", async () => {
+    const agent = await freshProgrammaticAgent("should-apply-reset-decline");
+
+    const { status, asked } = await agent.testShouldApplyAcrossReset(
+      [false],
+      "first-ask"
+    );
+
+    expect(status).toBe("aborted");
+    expect(asked).toBe(1);
+    expect(await agent.getStoredMessages()).toEqual([]);
   });
 
   it("returns status: 'aborted' when aborted mid-stream", async () => {
@@ -2869,6 +3174,8 @@ describe("Think — saveMessages with external AbortSignal", () => {
       await agent.testSaveMessagesAbortMidStream("Long response", 100);
 
     expect(result.status).toBe("aborted");
+    // The caller stopped it.
+    expect(result.reason).toBe("stopped");
     // The onChatResponse hook fires with status: "aborted" too.
     expect(lastResponseStatus).toBe("aborted");
     // Both user and partial assistant messages should be persisted.
@@ -2996,12 +3303,22 @@ describe("Think — body persistence", () => {
   });
 });
 
+describe("Think — chat() over RPC", () => {
+  it("tells the caller the reply is done before onChatResponse runs", async () => {
+    const agent = await getAgentByName(env.ThinkTestAgent, crypto.randomUUID());
+    expect(await agent.rpcDoneOrderForTest()).toEqual([
+      "onDone",
+      "onChatResponse:completed"
+    ]);
+  });
+});
+
 // ── chatRecovery ────────────────────────────────────────
 
 describe("Think — chatRecovery", () => {
-  it("hands off facet recovery after durable fiber creation and before turn completion", async () => {
+  it("hands off recovery after the durable turn run exists and before turn completion", async () => {
     const agent = await freshRecoveryAgent(crypto.randomUUID());
-    await expect(agent.facetRecoveryAcceptanceForTest()).resolves.toEqual({
+    await expect(agent.recoveryAcceptanceForTest()).resolves.toEqual({
       acceptedBeforeCompletion: true,
       durableAtAcceptance: true
     });
@@ -3274,6 +3591,40 @@ describe("Think — chatRecovery", () => {
     ).resolves.toBe("completed");
   });
 
+  it("does not settle a submission as completed on a stream a reconnecting tab closed after a reset", async () => {
+    const agent = await freshRecoveryAgent(
+      `terminal-cut-off-${crypto.randomUUID()}`
+    );
+    await agent.seedRunningSubmissionForTest("cut-off-submission");
+    await agent.insertInterruptedStream(
+      "cut-off-stream",
+      "cut-off-submission",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-cut-off" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start", id: "t" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", id: "t", delta: "1 2" }),
+          index: 2
+        }
+      ],
+      "streaming",
+      { restore: true }
+    );
+    // The row now reads completed, but the model never finished the reply.
+    expect(await agent.acknowledgeResumeForTest("cut-off-submission")).toBe(
+      true
+    );
+
+    await agent.recoverSubmissionsOnStartForTest();
+
+    await expect(
+      agent.getSubmissionStatusForTest("cut-off-submission")
+    ).resolves.toBe("error");
+  });
+
   it.each(["retry", "continue"] as const)(
     "keeps pending %s recovery ahead of terminal-stream ledger settlement",
     async (recoveryKind) => {
@@ -3472,6 +3823,141 @@ describe("Think — onChatRecovery", () => {
     expect(ctx.createdAt).toBeLessThanOrEqual(Date.now());
   });
 
+  it("recovers a chat turn's fiber row an older version left", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+
+    await agent.setRecoveryOverride({ continue: false });
+    await agent.insertInterruptedStream("stream-legacy", "req-legacy", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-legacy" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Legacy" }),
+        index: 2
+      }
+    ]);
+    await agent.insertLegacyChatFiberForTest("req-legacy");
+    await agent.triggerFiberRecovery();
+
+    const contexts = await agent.getRecoveryContexts();
+    expect(contexts).toEqual([
+      expect.objectContaining({
+        incidentId: "req-legacy:",
+        streamId: "stream-legacy",
+        partialText: "Legacy"
+      })
+    ]);
+  });
+
+  it("ends a turn found interrupted whose conversation moved on for the tabs", async () => {
+    const room = crypto.randomUUID();
+    // A tab is connected while the recovery runs.
+    const response = await exports.default.fetch(
+      `http://example.com/agents/think-recovery-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(response.status).toBe(101);
+    const ws = response.webSocket as WebSocket;
+    ws.accept();
+    try {
+      const agent = await freshRecoveryAgent(room);
+      await agent.persistTestMessage({
+        id: "u-old",
+        role: "user",
+        parts: [{ type: "text", text: "old question" }]
+      });
+      await agent.insertInterruptedStream("stream-moved", "req-moved", [
+        {
+          body: JSON.stringify({ type: "start", messageId: "assistant-moved" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "Part" }),
+          index: 2
+        }
+      ]);
+      await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-moved", {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-moved",
+          continuation: true,
+          latestMessageId: "u-old",
+          latestMessageRole: "user",
+          latestUserMessageId: "u-old",
+          startedAt: Date.now()
+        },
+        user: null
+      });
+      // A newer question is the latest message: the conversation moved on.
+      await agent.persistTestMessage({
+        id: "u-new",
+        role: "user",
+        parts: [{ type: "text", text: "newer question" }]
+      });
+
+      const heard = waitForProtocolMessage(
+        ws,
+        (m) => m.id === "req-moved" && m.done === true
+      );
+      await agent.triggerFiberRecovery();
+
+      // Nothing continues it, so its end is sent and recorded.
+      expect(await heard).toMatchObject({ outcome: "aborted" });
+      expect(await agent.recentTerminalForTest("req-moved")).toMatchObject({
+        outcome: "aborted"
+      });
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
+  it("answers the question again when onChatRecovery drops a new turn's partial", async () => {
+    const agent = await freshRecoveryAgent(crypto.randomUUID());
+
+    await agent.setRecoveryOverride({ persist: false });
+    await agent.persistTestMessage({
+      id: "u-drop",
+      role: "user",
+      parts: [{ type: "text", text: "question" }]
+    });
+    await agent.insertInterruptedStream("stream-drop", "req-drop", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-drop" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Dropped" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-drop", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-drop",
+        continuation: false,
+        latestMessageId: "u-drop",
+        latestMessageRole: "user",
+        latestUserMessageId: "u-drop",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    // Nothing of the reply was stored, so the question is the latest message
+    // again: recovery answers it, it does not continue a reply that is not
+    // there.
+    await expect(agent.triggerFiberRecovery()).resolves.toEqual({
+      scheduledContinueCount: 0,
+      scheduledRetryCount: 1
+    });
+  });
+
   it("exhausts chat recovery after the configured max attempts", async () => {
     const agent = await freshRecoveryAgent("recovery-exhaustion");
 
@@ -3591,6 +4077,38 @@ describe("Think — onChatRecovery", () => {
     });
   });
 
+  it("does not continue a reply again when the recovery callback is delivered again after a reset cut its turn off", async () => {
+    const agent = await freshRecoveryAgent("recovery-redelivered");
+    const seed = {
+      incidentId: "req-redelivered:",
+      requestId: "req-redelivered",
+      recoveryKind: "continue" as const,
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now(),
+      // The first delivery's turn started, then the isolate was reset. The
+      // interrupted turn's own recovery stores its partial and schedules the
+      // next attempt. The Task also runs this same step again.
+      scheduleCount: 1,
+      startedDelivery: 1
+    };
+    await agent.seedIncidentForTest(seed);
+
+    await agent.runChatRecoveryContinueForTestWith({
+      incidentId: "req-redelivered:",
+      originalRequestId: "req-redelivered",
+      delivery: 1
+    });
+
+    expect(await agent.getTurnBodies()).toHaveLength(0);
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+    }>;
+    expect(incidents[0]?.status).toBe("scheduled");
+  });
+
   it("continuation does not replay a trailing assistant message (assistant prefill)", async () => {
     const agent = await freshRecoveryAgent("continuation-prefill");
 
@@ -3682,6 +4200,19 @@ describe("Think — onChatRecovery", () => {
     // text) are durable before the stream completes — surviving an eviction
     // that would otherwise lose the result and re-run the (non-idempotent) tool.
     expect(afterToolOutputCount).toBeGreaterThan(bufferedTextCount);
+  });
+
+  it("stores a tool call before the tool runs, so a reset mid-run leaves a record of it", async () => {
+    const agent = await freshRecoveryAgent("tool-call-durability");
+
+    const { beforeCall, afterCall } =
+      await agent.probeToolCallDurabilityForTest();
+
+    // The second reasoning chunk is still in the buffer.
+    expect(beforeCall).toBe(1);
+    // The call is in storage before `execute()` starts. A tool can run for
+    // a long time with no further chunk.
+    expect(afterCall).toBeGreaterThan(beforeCall);
   });
 
   it("replays a pre-stream error to a reconnecting client (hydration)", async () => {
@@ -4145,7 +4676,9 @@ describe("Think — onChatRecovery", () => {
       role: "user",
       parts: [{ type: "text", text: "Render a preview" }]
     } as UIMessage);
-    await agent.persistTestMessage({
+    // The reply was cut off mid-execute(), so it is stored with that call
+    // settled.
+    await agent.persistCutOffReplyForTest({
       id: "assistant-1",
       role: "assistant",
       parts: [
@@ -4741,6 +5274,61 @@ describe("Think — onChatRecovery", () => {
     ]);
     expect(messages[0].id).toBe("u-empty-opened-stream");
     expect(await agent.getTurnCallCount()).toBe(1);
+  });
+
+  it("continues a cut-off turn whose stream a reconnecting tab closed before recovery ran", async () => {
+    const agent = await freshRecoveryAgent(
+      `tab-before-recovery-${crypto.randomUUID()}`
+    );
+    await agent.persistTestMessage({
+      id: "u-tab",
+      role: "user",
+      parts: [{ type: "text", text: "Count to 40" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-tab",
+      "req-tab",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-tab" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start", id: "t" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", id: "t", delta: "1 2 3" }),
+          index: 2
+        }
+      ],
+      "streaming",
+      { restore: true }
+    );
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-tab", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-tab",
+        continuation: false,
+        latestMessageId: "u-tab",
+        latestMessageRole: "user",
+        latestUserMessageId: "u-tab",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    // The tab reconnects first. Its resume is acknowledged, which closes the
+    // stream nobody is producing and stores the partial.
+    expect(await agent.acknowledgeResumeForTest("req-tab")).toBe(true);
+
+    // Then the interrupted turn's recovery runs. The stream is closed, but
+    // the model never finished it: the turn is continued.
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents[0]).toMatchObject({ status: "scheduled" });
   });
 
   it("continues a partial stream with request context from the recovered snapshot", async () => {
@@ -5905,7 +6493,14 @@ describe("Think — onChatRecovery", () => {
         return typeof type === "string" && type.startsWith("tool-");
       });
       expect(hasSettledTool).toBe(true);
-      expect(warnSpy).not.toHaveBeenCalled();
+      // The spy sees every agent in this isolate. A recovery attempt another
+      // test left behind can time out waiting for a stable chat meanwhile.
+      expect(
+        warnSpy.mock.calls.filter(
+          ([message]) =>
+            !String(message).includes("timed out waiting for stable state")
+        )
+      ).toEqual([]);
     } finally {
       warnSpy.mockRestore();
     }
@@ -5946,7 +6541,14 @@ describe("Think — onChatRecovery", () => {
       // nothing is persisted, and there is no warning.
       const messages = (await agent.getStoredMessages()) as UIMessage[];
       expect(messages).toHaveLength(0);
-      expect(warnSpy).not.toHaveBeenCalled();
+      // The spy sees every agent in this isolate. A recovery attempt another
+      // test left behind can time out waiting for a stable chat meanwhile.
+      expect(
+        warnSpy.mock.calls.filter(
+          ([message]) =>
+            !String(message).includes("timed out waiting for stable state")
+        )
+      ).toEqual([]);
     } finally {
       warnSpy.mockRestore();
     }
@@ -6120,7 +6722,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("keeps a messenger reply pending while the platform re-runs recovery", async () => {
@@ -6134,7 +6738,9 @@ describe("Think — onChatRecovery", () => {
     });
 
     expect(result.threw).toBe(true);
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
     expect(result.messengerOutcome).toBeNull();
   });
 
@@ -6153,7 +6759,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it('re-throws "Network connection lost." (storage transient in a deploy-reset window) and does NOT terminalize (#1730)', async () => {
@@ -6171,7 +6779,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("re-throws the SqlError shape (wrapped transient, retryable flag lost) and does NOT terminalize (#1730)", async () => {
@@ -6188,7 +6798,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize", async () => {
@@ -6204,7 +6816,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
     expect(result.submissionStatus).toBe("running");
   });
 
@@ -6235,7 +6849,9 @@ describe("Think — onChatRecovery", () => {
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
-    expect(result.incidentStatus).toBe("failed");
+    // A deferral is not an outcome: the incident stays live, so a stop
+    // or a continuation during the deferral still finds it.
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)", async () => {
@@ -6372,7 +6988,9 @@ describe("Think — waitUntilStable", () => {
       parts: [{ type: "text", text: "Render a preview" }]
     } as UIMessage);
 
-    await agent.persistTestMessage({
+    // The reply was cut off mid-execute(), so it is stored with that call
+    // settled.
+    await agent.persistCutOffReplyForTest({
       id: "assistant-1",
       role: "assistant",
       parts: [

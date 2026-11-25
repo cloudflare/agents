@@ -1,0 +1,357 @@
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import { getAgentByName, getSubAgentByName } from "agents";
+import { ThinkTestAgent } from "./agents/think-session";
+import type { LanguageModel, ToolSet } from "ai";
+import { describe, expect, it } from "vitest";
+import { ThinkModelResolver, isWorkersAIModelId } from "../model";
+import { tableExists } from "../config-store";
+import { migrateWorkflowNotificationTable } from "../workflow-notifications";
+import { capabilityBlock, systemPromptForTurn } from "../system-prompt";
+
+type ConfigAccess = {
+  _cfConfig: {
+    get(key: string): string | undefined;
+    set(key: string, value: string): void;
+    delete(key: string): void;
+  };
+  _migrateLegacyConfigToThinkTable(): void;
+};
+
+/** A started Think agent's config store and the SQLite it writes. */
+async function withConfig<T>(
+  fn: (config: ConfigAccess, sql: SqlStorage) => T | Promise<T>
+) {
+  const stub = env.BareAssistantAgent.get(
+    env.BareAssistantAgent.idFromName(`periphery-${crypto.randomUUID()}`)
+  );
+  await stub.fetch("http://x/");
+  return runInDurableObject(stub, (instance, state) =>
+    fn(instance as unknown as ConfigAccess, state.storage.sql)
+  );
+}
+
+function thinkConfigValue(sql: SqlStorage, key: string): string | undefined {
+  return sql
+    .exec<{ value: string }>(
+      "SELECT value FROM think_config WHERE key = ?",
+      key
+    )
+    .toArray()[0]?.value;
+}
+
+describe("ThinkConfigStore", () => {
+  it("stores, reads and deletes keys", async () => {
+    await withConfig((config, sql) => {
+      expect(config._cfConfig.get("a")).toBeUndefined();
+      config._cfConfig.set("a", "1");
+      expect(config._cfConfig.get("a")).toBe("1");
+      expect(thinkConfigValue(sql, "a")).toBe("1");
+      config._cfConfig.delete("a");
+      expect(config._cfConfig.get("a")).toBeUndefined();
+    });
+  });
+
+  it("skips a write whose value matches the last value it saw", async () => {
+    await withConfig((config, sql) => {
+      config._cfConfig.set("a", "1");
+      sql.exec("UPDATE think_config SET value = 'other' WHERE key = 'a'");
+      config._cfConfig.set("a", "1");
+      expect(thinkConfigValue(sql, "a")).toBe("other");
+      config._cfConfig.set("a", "2");
+      expect(thinkConfigValue(sql, "a")).toBe("2");
+    });
+  });
+
+  it("lifts Think's keys out of assistant_config and drops it", async () => {
+    await withConfig((config, sql) => {
+      sql.exec(`CREATE TABLE assistant_config (
+        session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+        PRIMARY KEY (session_id, key))`);
+      sql.exec(
+        "INSERT INTO assistant_config VALUES ('', 'lastBody', '{\"x\":1}'), ('', 'unrelated', 'y'), ('s1', 'skillsFingerprint', 'other-session')"
+      );
+      config._migrateLegacyConfigToThinkTable();
+      expect(config._cfConfig.get("lastBody")).toBe('{"x":1}');
+      expect(config._cfConfig.get("unrelated")).toBeUndefined();
+      expect(config._cfConfig.get("skillsFingerprint")).toBeUndefined();
+      const tables = sql
+        .exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE name = 'assistant_config'"
+        )
+        .toArray();
+      expect(tables).toEqual([]);
+    });
+  });
+
+  it("lifts legacy rows at startup, before any config read", async () => {
+    const stub = env.BareAssistantAgent.get(
+      env.BareAssistantAgent.idFromName(`periphery-${crypto.randomUUID()}`)
+    );
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec(`CREATE TABLE assistant_config (
+        session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+        PRIMARY KEY (session_id, key))`);
+      state.storage.sql.exec(
+        "INSERT INTO assistant_config VALUES ('', 'lastBody', 'legacy')"
+      );
+    });
+    await stub.fetch("http://x/");
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(thinkConfigValue(state.storage.sql, "lastBody")).toBe("legacy");
+    });
+  });
+
+  it("keeps a think_config value over the legacy one", async () => {
+    await withConfig((config, sql) => {
+      config._cfConfig.set("lastBody", "current");
+      sql.exec(`CREATE TABLE assistant_config__lifted_v1 (
+        session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL)`);
+      sql.exec(
+        "INSERT INTO assistant_config__lifted_v1 VALUES ('', 'lastBody', 'legacy')"
+      );
+      config._migrateLegacyConfigToThinkTable();
+      expect(config._cfConfig.get("lastBody")).toBe("current");
+    });
+  });
+});
+
+describe("ThinkModelResolver", () => {
+  const fakeAi = { run: async () => ({}) } as unknown as Ai;
+
+  function resolver(gateway?: (model: string) => GatewayOptions | undefined) {
+    let bindingReads = 0;
+    const models = new ThinkModelResolver({
+      binding: () => {
+        bindingReads++;
+        return fakeAi;
+      },
+      gateway: gateway ?? (() => undefined),
+      sessionAffinity: () => "affinity"
+    });
+    return { models, bindingReads: () => bindingReads };
+  }
+
+  it("recognises Workers AI ids", () => {
+    expect(isWorkersAIModelId("@cf/meta/llama")).toBe(true);
+    expect(isWorkersAIModelId("@hf/thebloke/x")).toBe(true);
+    expect(isWorkersAIModelId("@cf/")).toBe(false);
+    expect(isWorkersAIModelId("openai/gpt-5.5")).toBe(false);
+  });
+
+  it("returns a LanguageModel as-is without reading the binding", () => {
+    const { models, bindingReads } = resolver();
+    const model = { modelId: "mine" } as unknown as LanguageModel;
+    expect(models.resolve(model)).toBe(model);
+    expect(bindingReads()).toBe(0);
+  });
+
+  it("builds string models through one provider", () => {
+    const { models, bindingReads } = resolver();
+    const workersAI = models.resolve("@cf/meta/llama") as { modelId: string };
+    const gateway = models.resolve("openai/gpt-5.5") as { modelId: string };
+    expect(workersAI.modelId).toBe("@cf/meta/llama");
+    expect(gateway.modelId).toBe("gpt-5.5");
+    expect(bindingReads()).toBe(1);
+  });
+
+  it("rejects malformed ids", () => {
+    const { models } = resolver();
+    for (const id of ["@bad", "noslash", "/model", "provider/"]) {
+      expect(() => models.resolve(id)).toThrow(/Invalid model id/);
+    }
+  });
+
+  it("rejects a getGateway that returns a Promise", () => {
+    const { models } = resolver(
+      () => Promise.resolve({ id: "g" }) as unknown as GatewayOptions
+    );
+    expect(() => models.resolve("openai/gpt-5.5")).toThrow(
+      /returned a Promise/
+    );
+  });
+});
+
+describe("systemPromptForTurn", () => {
+  const noop = { execute: async () => null } as unknown as ToolSet[string];
+
+  it("appends a capability line per kind of tool", () => {
+    const prompt = systemPromptForTurn("Base.  ", {
+      read: noop,
+      execute: noop,
+      fetch_docs: noop,
+      load_extension: noop
+    });
+    expect(
+      prompt.startsWith("Base.\n\nYou are running inside a Think agent.")
+    ).toBe(true);
+    expect(prompt).toContain("agent workspace");
+    expect(prompt).toContain("sandboxed execution");
+    expect(prompt).toContain("fetch tools");
+    expect(prompt).toContain("extension tools");
+  });
+
+  it("lists no tool lines for a turn without tools", () => {
+    const block = capabilityBlock({});
+    expect(block).not.toContain("Use the tools exposed");
+    expect(block).toContain("Do not claim access");
+  });
+
+  it("leaves a prompt that already has the block alone", () => {
+    const base = `Base.\n\n${capabilityBlock({})}`;
+    expect(systemPromptForTurn(base, { read: noop })).toBe(base);
+  });
+});
+
+describe("unexecuted tool record", () => {
+  it("stores no row for a turn whose tools all run on the server", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-unexecuted-${crypto.randomUUID()}`
+    );
+    expect((await stub.testChat("hello")).done).toBe(true);
+    expect(await stub.thinkConfigRowForTest("unexecutedTools")).toBe(null);
+  });
+
+  it("stores no row inside a facet either", async () => {
+    const parent = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-unexecuted-parent-${crypto.randomUUID()}`
+    );
+    const child = await getSubAgentByName(parent, ThinkTestAgent, "child");
+    expect((await child.testChat("hello")).done).toBe(true);
+    expect(await child.thinkConfigRowForTest("unexecutedTools")).toBe(null);
+  });
+
+  it("replaces a stored client-tool list with an empty one", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-unexecuted-reset-${crypto.randomUUID()}`
+    );
+    await stub.seedThinkConfigRowForTest(
+      "unexecutedTools",
+      JSON.stringify(["client_tool"])
+    );
+    expect((await stub.testChat("hello")).done).toBe(true);
+    expect(await stub.thinkConfigRowForTest("unexecutedTools")).toBe("[]");
+  });
+});
+
+describe("tableExists", () => {
+  it("tells a present table from a missing one, and the store keeps working", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-table-exists-${crypto.randomUUID()}`
+    );
+    await runInDurableObject(stub, (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("CREATE TABLE IF NOT EXISTS probe_present (id INTEGER)");
+      expect(tableExists(sql, "probe_present")).toBe(true);
+      expect(tableExists(sql, "probe_missing")).toBe(false);
+      sql.exec("CREATE VIEW IF NOT EXISTS probe_view AS SELECT 1 AS id");
+      expect(tableExists(sql, "probe_view")).toBe(false);
+      expect(tableExists(sql, "PROBE_PRESENT")).toBe(false);
+      sql.exec("INSERT INTO probe_present (id) VALUES (1)");
+      expect(sql.exec("SELECT id FROM probe_present").toArray()).toEqual([
+        { id: 1 }
+      ]);
+    });
+  });
+});
+
+describe("legacy workflow notification migration", () => {
+  it("sends each undelivered notification as a delivery and drops the legacy table", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-legacy-workflow-${crypto.randomUUID()}`
+    );
+    await stub.getMessages();
+    await runInDurableObject(stub, async (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec(`CREATE TABLE cf_think_workflow_notifications (
+        notification_id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      )`);
+      sql.exec(
+        `INSERT INTO cf_think_workflow_notifications VALUES
+          ('n1', 's1', 'WF', 'wf-1', 'completed', '{"ok":true}', 1, NULL),
+          ('n2', 's2', 'WF', 'wf-2', 'completed', '{"ok":true}', 2, 5)`
+      );
+      const sent: Array<{
+        id: string;
+        notification: unknown;
+        resume: unknown;
+      }> = [];
+      await migrateWorkflowNotificationTable(
+        sql,
+        async (id, notification, resume) => {
+          sent.push({ id, notification, resume });
+        }
+      );
+      expect(sent).toEqual([
+        {
+          id: "workflow-notification:s1:completed",
+          notification: {
+            workflowName: "WF",
+            workflowId: "wf-1",
+            event: { type: "completed", payload: { ok: true } }
+          },
+          resume: { sentAt: 1, attempts: 0 }
+        }
+      ]);
+      expect(tableExists(sql, "cf_think_workflow_notifications")).toBe(false);
+    });
+  });
+
+  it("keeps a row whose send failed, and drops the table once a later start sends it", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-legacy-workflow-fail-${crypto.randomUUID()}`
+    );
+    await stub.getMessages();
+    await runInDurableObject(stub, async (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec(`CREATE TABLE cf_think_workflow_notifications (
+        notification_id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      )`);
+      sql.exec(
+        `INSERT INTO cf_think_workflow_notifications VALUES
+          ('n1', 's1', 'WF', 'wf-1', 'completed', '{"ok":true}', 1, NULL),
+          ('n2', 's2', 'WF', 'wf-2', 'completed', '{"ok":true}', 2, NULL)`
+      );
+      const sent: string[] = [];
+      await migrateWorkflowNotificationTable(sql, async (id) => {
+        if (id.includes(":s1:")) throw new Error("storage full");
+        sent.push(id);
+      });
+      expect(sent).toEqual(["workflow-notification:s2:completed"]);
+      expect(
+        sql
+          .exec("SELECT notification_id FROM cf_think_workflow_notifications")
+          .toArray()
+      ).toEqual([{ notification_id: "n1" }]);
+
+      await migrateWorkflowNotificationTable(sql, async (id) => {
+        sent.push(id);
+      });
+      expect(sent).toEqual([
+        "workflow-notification:s2:completed",
+        "workflow-notification:s1:completed"
+      ]);
+      expect(tableExists(sql, "cf_think_workflow_notifications")).toBe(false);
+    });
+  });
+});

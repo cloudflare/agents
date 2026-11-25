@@ -4,11 +4,14 @@ import { CloudflareAIError, createAI } from "../../../models/ai-sdk";
 import { asAi, fakeBinding, field, jsonResponse } from "./helpers";
 
 const FLUX = "@cf/black-forest-labs/flux-1-schnell";
-const SDXL = "@cf/stabilityai/stable-diffusion-xl-base-1.0";
+const FLUX_2_KLEIN = "@cf/black-forest-labs/flux-2-klein-9b";
+const FLUX_2_DEV = "@cf/black-forest-labs/flux-2-dev";
+/** A diffusion model on the JSON body, answering raw PNG bytes. */
+const SD_IMG2IMG = "@cf/runwayml/stable-diffusion-v1-5-img2img";
 const AURA = "@cf/deepgram/aura-1";
-const MELOTTS = "@cf/myshell-ai/melotts";
+const AURA_2 = "@cf/deepgram/aura-2-en";
 const WHISPER = "@cf/openai/whisper-large-v3-turbo";
-const WHISPER_TINY = "@cf/openai/whisper-tiny-en";
+const WHISPER_V1 = "@cf/openai/whisper";
 const NOVA_3 = "@cf/deepgram/nova-3";
 const DEEPGRAM_FLUX = "@cf/deepgram/flux";
 
@@ -87,6 +90,17 @@ const fluxBody = {
   }
 };
 
+/** Reads the form a multipart call sent through the binding. */
+async function sentForm(input: Record<string, unknown>): Promise<FormData> {
+  const multipart = input.multipart as {
+    body: ReadableStream;
+    contentType: string;
+  };
+  return new Response(multipart.body, {
+    headers: { "content-type": multipart.contentType }
+  }).formData();
+}
+
 /** The live whisper-large-v3-turbo body, trimmed to the fields we read. */
 const whisperBody = {
   segments: [
@@ -159,7 +173,7 @@ describe("image generation", () => {
   it("reads a raw `image/png` body as bytes", async () => {
     const binding = fakeBinding(() => binaryResponse(PNG_BYTES, "image/png"));
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.image(SDXL).doGenerate({
+    const result = await ai.image(SD_IMG2IMG).doGenerate({
       aspectRatio: undefined,
       files: undefined,
       mask: undefined,
@@ -179,7 +193,7 @@ describe("image generation", () => {
     expect(result.images[0]).toBeInstanceOf(Uint8Array);
     expect(result.images[0]).toEqual(PNG_BYTES);
     expect(result.providerMetadata?.cloudflare.images).toMatchObject([
-      { mediaType: "image/png", model: SDXL }
+      { mediaType: "image/png", model: SD_IMG2IMG }
     ]);
     expect(result.usage).toBeUndefined();
   });
@@ -187,7 +201,7 @@ describe("image generation", () => {
   it("sends the generation knobs from providerOptions.cloudflare", async () => {
     const binding = fakeBinding(() => binaryResponse(PNG_BYTES, "image/png"));
     const ai = createAI({ binding: asAi(binding) });
-    await ai.image(SDXL).doGenerate({
+    await ai.image(SD_IMG2IMG).doGenerate({
       aspectRatio: undefined,
       files: undefined,
       mask: undefined,
@@ -244,7 +258,7 @@ describe("image generation", () => {
   it("passes an input image and mask through for img2img", async () => {
     const binding = fakeBinding(() => binaryResponse(PNG_BYTES, "image/png"));
     const ai = createAI({ binding: asAi(binding) });
-    await ai.image(SDXL).doGenerate({
+    await ai.image(SD_IMG2IMG).doGenerate({
       aspectRatio: undefined,
       files: [
         { data: PNG_BYTES, mediaType: "image/png", type: "file" },
@@ -260,6 +274,153 @@ describe("image generation", () => {
 
     expect(field(binding.calls[0].input, "image_b64")).toBe("iVBORw0KGgo=");
     expect(field(binding.calls[0].input, "mask")).toEqual([0, 1, 2]);
+  });
+
+  it("sends FLUX.2 its input as multipart form data, straight to Workers AI", async () => {
+    const binding = fakeBinding(() => jsonResponse({ image: JPEG_BASE64 }));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.image(FLUX_2_KLEIN).doGenerate({
+      aspectRatio: undefined,
+      files: [
+        { data: PNG_BYTES, mediaType: "image/png", type: "file" },
+        { data: "AAEC", mediaType: "image/jpeg", type: "file" }
+      ],
+      mask: undefined,
+      n: 1,
+      prompt: "put the fox in the snow",
+      providerOptions: { cloudflare: { guidance: 3 } },
+      seed: 7,
+      size: "512x384"
+    });
+
+    const call = binding.calls[0];
+    expect(Object.keys(call.input)).toEqual(["multipart"]);
+    const form = await sentForm(call.input);
+    expect(
+      Object.fromEntries(
+        [...form.entries()].filter(([, value]) => typeof value === "string")
+      )
+    ).toEqual({
+      guidance: "3",
+      height: "384",
+      prompt: "put the fox in the snow",
+      seed: "7",
+      width: "512"
+    });
+    const first = form.get("input_image_0") as File;
+    expect(first.type).toBe("image/png");
+    expect(new Uint8Array(await first.arrayBuffer())).toEqual(PNG_BYTES);
+    const second = form.get("input_image_1") as File;
+    expect(second.type).toBe("image/jpeg");
+    expect(new Uint8Array(await second.arrayBuffer())).toEqual(
+      new Uint8Array([0, 1, 2])
+    );
+    // AI Gateway refuses a stream body, so the call names no gateway.
+    expect(call.options).not.toHaveProperty("gateway");
+    expect(result.images).toEqual([JPEG_BASE64]);
+    expect(result.providerMetadata?.cloudflare.images).toMatchObject([
+      { mediaType: "image/jpeg", model: FLUX_2_KLEIN }
+    ]);
+    expect(result.providerMetadata?.cloudflare).not.toHaveProperty("gateway");
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("reports FLUX.2's form as the request body, files as base64", async () => {
+    const binding = fakeBinding(() =>
+      jsonResponse(
+        { errors: [{ code: 5006, message: "Bad input" }], success: false },
+        { status: 400 }
+      )
+    );
+    const error = await createAI({ binding: asAi(binding) })
+      .image(FLUX_2_KLEIN)
+      .doGenerate({
+        aspectRatio: undefined,
+        files: [{ data: "AAEC", mediaType: "image/png", type: "file" }],
+        mask: undefined,
+        n: 1,
+        prompt: "a fox",
+        providerOptions: {},
+        seed: undefined,
+        size: undefined
+      })
+      .then(
+        () => undefined,
+        (caught: unknown) => caught
+      );
+
+    expect(error).toBeInstanceOf(CloudflareAIError);
+    expect((error as CloudflareAIError).requestBodyValues).toEqual({
+      multipart: {
+        input_image_0: { body: "AAEC", contentType: "image/png" },
+        prompt: "a fox"
+      }
+    });
+  });
+
+  it("warns for what FLUX.2 cannot take", async () => {
+    const binding = fakeBinding(() => jsonResponse({ image: JPEG_BASE64 }));
+    const ai = createAI({ binding: asAi(binding), cacheTtl: 60 });
+    const file = {
+      data: PNG_BYTES,
+      mediaType: "image/png",
+      type: "file"
+    } as const;
+    const result = await ai.image(FLUX_2_KLEIN).doGenerate({
+      aspectRatio: undefined,
+      files: [
+        { type: "url", url: "https://example.com/fox.png" },
+        file,
+        file,
+        file,
+        file,
+        file
+      ],
+      mask: { data: "AAEC", mediaType: "image/png", type: "file" },
+      n: 1,
+      prompt: "a fox",
+      providerOptions: {
+        cloudflare: { negativePrompt: "blurry", steps: 8, strength: 0.5 }
+      },
+      seed: undefined,
+      size: undefined
+    });
+
+    const form = await sentForm(binding.calls[0].input);
+    expect(form.has("steps")).toBe(false);
+    expect(form.has("input_image_3")).toBe(true);
+    expect(form.has("input_image_4")).toBe(false);
+    const features = result.warnings.flatMap((warning) =>
+      warning.type === "unsupported" ? [warning.feature] : []
+    );
+    expect(features).toEqual([
+      "negativePrompt",
+      "strength",
+      "mask",
+      "steps",
+      "files",
+      "files",
+      "gateway"
+    ]);
+  });
+
+  it("sends steps to flux-2-dev, which is not distilled", async () => {
+    const binding = fakeBinding(() => jsonResponse({ image: JPEG_BASE64 }));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.image(FLUX_2_DEV).doGenerate({
+      aspectRatio: undefined,
+      files: undefined,
+      mask: undefined,
+      n: 1,
+      prompt: "a fox",
+      providerOptions: { cloudflare: { steps: 25 } },
+      seed: undefined,
+      size: undefined
+    });
+
+    const form = await sentForm(binding.calls[0].input);
+    expect(form.get("steps")).toBe("25");
+    expect(result.warnings).toEqual([]);
   });
 
   it("fans a direct doGenerate n>1 out into one call per image", async () => {
@@ -422,30 +583,29 @@ describe("speech", () => {
     ]);
   });
 
-  it("uses melotts's own { prompt, lang } shape", async () => {
+  it("keeps a JSON `{ audio }` answer as base64", async () => {
     const binding = fakeBinding(() => jsonResponse({ audio: "AAEC" }));
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.speech(MELOTTS).doGenerate({
-      language: "fr",
+    const result = await ai.speech(AURA_2).doGenerate({
       speed: 1.5,
-      text: "bonjour",
+      text: "hello",
       voice: "luna"
     });
 
-    expect(binding.calls[0].input).toEqual({ lang: "fr", prompt: "bonjour" });
+    expect(binding.calls[0].input).toEqual({ speaker: "luna", text: "hello" });
     // Base64 stays base64: the AI SDK converts on demand.
     expect(result.audio).toBe("AAEC");
     const features = result.warnings.flatMap((warning) =>
       warning.type === "unsupported" ? [warning.feature] : []
     );
-    expect(features).toEqual(["speed", "voice"]);
+    expect(features).toEqual(["speed"]);
   });
 
   it("errors when the JSON answer carries no audio", async () => {
     const binding = fakeBinding(() => jsonResponse({ nope: true }));
     const ai = createAI({ binding: asAi(binding) });
     await expect(
-      ai.speech(MELOTTS).doGenerate({ text: "hi" })
+      ai.speech(AURA_2).doGenerate({ text: "hi" })
     ).rejects.toBeInstanceOf(CloudflareAIError);
   });
 
@@ -497,7 +657,7 @@ describe("transcription", () => {
     expect(binding.calls[0].input).toEqual({ audio: "AAEC" });
   });
 
-  it("sends a byte array to the older whisper ids", async () => {
+  it("sends a byte array to the older whisper id", async () => {
     const binding = fakeBinding(() =>
       jsonResponse({
         text: "Hello",
@@ -505,7 +665,7 @@ describe("transcription", () => {
       })
     );
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.transcription(WHISPER_TINY).doGenerate({
+    const result = await ai.transcription(WHISPER_V1).doGenerate({
       audio: new Uint8Array([0, 1, 2]),
       mediaType: "audio/mpeg"
     });
@@ -810,53 +970,65 @@ describe("modality options and fallback", () => {
             },
             { status: 429 }
           )
-        : binaryResponse(PNG_BYTES, "image/png")
+        : jsonResponse({ image: JPEG_BASE64 })
     );
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.image(FLUX, { fallback: [SDXL] }).doGenerate({
-      aspectRatio: undefined,
-      files: undefined,
-      mask: undefined,
-      n: 1,
-      prompt: "a fox",
-      providerOptions: {},
-      seed: undefined,
-      size: undefined
-    });
+    const result = await ai
+      .image(FLUX, { fallback: [FLUX_2_KLEIN] })
+      .doGenerate({
+        aspectRatio: undefined,
+        files: undefined,
+        mask: undefined,
+        n: 1,
+        prompt: "a fox",
+        providerOptions: {},
+        seed: undefined,
+        size: undefined
+      });
 
-    expect(binding.calls.map((call) => call.model)).toEqual([FLUX, SDXL]);
-    // The fallback leg rebuilds the body for its own model, so sdxl gets the
-    // full shape even though flux only ever gets prompt and steps.
-    expect(result.images[0]).toEqual(PNG_BYTES);
+    expect(binding.calls.map((call) => call.model)).toEqual([
+      FLUX,
+      FLUX_2_KLEIN
+    ]);
+    // The fallback leg rebuilds the body for its own model, so FLUX.2 gets a
+    // multipart form even though flux-1 only ever gets prompt and steps.
+    expect(Object.keys(binding.calls[1].input)).toEqual(["multipart"]);
+    expect(result.images[0]).toBe(JPEG_BASE64);
     // Image metadata is typed as `{ images } & JSONObject`, so the gateway
     // fields are read off it rather than declared on it.
-    expect(field(result.providerMetadata?.cloudflare, "model")).toBe(SDXL);
+    expect(field(result.providerMetadata?.cloudflare, "model")).toBe(
+      FLUX_2_KLEIN
+    );
   });
 
   it("falls back when an image answer comes back without an image", async () => {
     const binding = fakeBinding((call) =>
       call.model === FLUX
         ? jsonResponse({})
-        : binaryResponse(PNG_BYTES, "image/png")
+        : jsonResponse({ image: JPEG_BASE64 })
     );
     const ai = createAI({ binding: asAi(binding) });
-    const result = await ai.image(FLUX, { fallback: [SDXL] }).doGenerate({
-      aspectRatio: undefined,
-      files: undefined,
-      mask: undefined,
-      n: 1,
-      prompt: "a fox",
-      providerOptions: {},
-      seed: undefined,
-      size: undefined
-    });
+    const result = await ai
+      .image(FLUX, { fallback: [FLUX_2_KLEIN] })
+      .doGenerate({
+        aspectRatio: undefined,
+        files: undefined,
+        mask: undefined,
+        n: 1,
+        prompt: "a fox",
+        providerOptions: {},
+        seed: undefined,
+        size: undefined
+      });
 
-    expect(binding.calls.map((call) => call.model)).toEqual([FLUX, SDXL]);
-    expect(result.images[0]).toEqual(PNG_BYTES);
+    expect(binding.calls.map((call) => call.model)).toEqual([
+      FLUX,
+      FLUX_2_KLEIN
+    ]);
+    expect(result.images[0]).toBe(JPEG_BASE64);
   });
 
   it("falls back when a speech answer comes back without audio", async () => {
-    const AURA_2 = "@cf/deepgram/aura-2-en";
     const binding = fakeBinding((call) =>
       call.model === AURA
         ? jsonResponse({})

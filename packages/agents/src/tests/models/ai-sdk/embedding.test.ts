@@ -5,6 +5,7 @@ import { CloudflareAIError, createAI } from "../../../models/ai-sdk";
 import { asAi, fakeBinding, field, jsonResponse } from "./helpers";
 
 const MODEL = "@cf/baai/bge-base-en-v1.5";
+const EMBEDDINGGEMMA = "@cf/google/embeddinggemma-2";
 
 /** The live bare embedding body, including the undocumented `pooling` key. */
 const embeddingBody = {
@@ -33,6 +34,54 @@ describe("embeddings", () => {
     ]);
     expect(result.usage).toEqual({ tokens: 6 });
     expect(result.warnings).toEqual([]);
+  });
+
+  it("sends embeddinggemma-2 { input } and reads its OpenAI-shaped answer", async () => {
+    // The live embeddinggemma-2 body, vectors trimmed to three dimensions.
+    const binding = fakeBinding(() =>
+      jsonResponse({
+        created: 1794922797,
+        data: [
+          { embedding: [0.1, 0.2, 0.3], index: 0, object: "embedding" },
+          { embedding: [0.4, 0.5, 0.6], index: 1, object: "embedding" }
+        ],
+        id: "embd-1",
+        model: EMBEDDINGGEMMA,
+        object: "list",
+        usage: { prompt_tokens: 4, total_tokens: 4 }
+      })
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.embedding(EMBEDDINGGEMMA).doEmbed({
+      values: ["hello", "world"]
+    });
+
+    expect(binding.calls[0].input).toEqual({ input: ["hello", "world"] });
+    expect(result.embeddings).toEqual([
+      [0.1, 0.2, 0.3],
+      [0.4, 0.5, 0.6]
+    ]);
+    expect(result.usage).toEqual({ tokens: 4 });
+  });
+
+  it("builds each fallback leg's body for its own model", async () => {
+    const binding = fakeBinding((call) =>
+      call.model === EMBEDDINGGEMMA
+        ? jsonResponse(
+            { error: [{ code: 3040, message: "Capacity exceeded" }] },
+            { status: 429 }
+          )
+        : jsonResponse(embeddingBody)
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    await ai
+      .embedding(EMBEDDINGGEMMA, { fallback: [MODEL] })
+      .doEmbed({ values: ["a", "b"] });
+
+    expect(binding.calls.map((call) => call.input)).toEqual([
+      { input: ["a", "b"] },
+      { text: ["a", "b"] }
+    ]);
   });
 
   it("unwraps the Cloudflare envelope", async () => {

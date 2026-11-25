@@ -183,6 +183,8 @@ export class MyAgent extends Think<Env> {
 | `"drop"`                                        | Ignore overlapping submits entirely. Messages are not persisted.                                                                     |
 | `{ strategy: "debounce", debounceMs?: number }` | Trailing-edge latest with a quiet window (default 750ms).                                                                            |
 
+A message that arrives while a turn runs waits until its own turn starts before it is stored in the Session, as a child of the reply it waited behind. Each turn answers its own message: the conversation reads `U1, A1, U2, A2`, and the model never sees a question queued behind the turn it is answering. Every tab sees the waiting message at once: the message list Think sends ends with it and names it in `queuedMessageIds`, and `useAgentChat` draws it after the reply that is streaming. A superseded message under `"latest"`, `"merge"` or `"debounce"`, or a message whose request is stopped while it waits, is stored when its turn would have started. A clear drops it.
+
 Concurrency strategies only apply to `submit-message` requests. Regenerations, tool continuations, approvals, clears, `saveMessages`, durable `submitMessages` submissions, and `continueLastTurn` keep their serialized behavior.
 
 ### Examples

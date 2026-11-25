@@ -12,7 +12,7 @@ import {
   sseResponse
 } from "./helpers";
 
-const MODEL = "@cf/zai-org/glm-4.7-flash";
+const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /** The live non-streaming body: reasoning only, `content: null`. */
 const reasoningOnlyBody = {

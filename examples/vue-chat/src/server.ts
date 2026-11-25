@@ -8,7 +8,7 @@ export class ChatAgent extends AIChatAgent {
     const workersAI = createWorkersAI({ binding: this.env.AI });
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersAI("@cf/moonshotai/kimi-k2.7-code"),
+      model: workersAI("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       messages: await convertToModelMessages(this.messages),
       system: "You are a concise, helpful assistant."
     });

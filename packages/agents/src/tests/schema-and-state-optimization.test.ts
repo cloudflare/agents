@@ -29,25 +29,6 @@ import { getAgentByName } from "..";
  *   3. Update this snapshot to match the new DDL
  */
 const EXPECTED_SCHEMA_DDL = [
-  `CREATE TABLE cf_agents_facet_runs (
-          owner_path TEXT NOT NULL,
-          owner_path_key TEXT NOT NULL,
-          run_id TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          PRIMARY KEY (owner_path_key, run_id)
-        )`,
-  `CREATE TABLE cf_agents_fibers (
-          fiber_id TEXT PRIMARY KEY,
-          idempotency_key TEXT UNIQUE,
-          name TEXT NOT NULL,
-          status TEXT NOT NULL,
-          snapshot TEXT,
-          metadata_json TEXT,
-          error_message TEXT,
-          created_at INTEGER NOT NULL,
-          started_at INTEGER,
-          completed_at INTEGER
-        )`,
   `CREATE TABLE cf_agents_jobs (
         id TEXT PRIMARY KEY NOT NULL,
         capability TEXT NOT NULL,
@@ -61,6 +42,8 @@ const EXPECTED_SCHEMA_DDL = [
         recovery_loop INTEGER NOT NULL DEFAULT 0,
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        held_since INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_mcp_servers (
@@ -72,15 +55,6 @@ const EXPECTED_SCHEMA_DDL = [
       auth_url TEXT,
       server_options TEXT
     )`,
-  `CREATE TABLE cf_agents_runs (
-          id TEXT PRIMARY KEY NOT NULL,
-          name TEXT NOT NULL,
-          snapshot TEXT,
-          created_at INTEGER NOT NULL,
-          completed_at INTEGER,
-          outcome TEXT,
-          error_message TEXT
-        )`,
   `CREATE TABLE cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
         state TEXT
@@ -88,20 +62,25 @@ const EXPECTED_SCHEMA_DDL = [
   // The Tasks capability creates its tables during Lifecycle startup (its own
   // version key gates the migration), so they are part of a started Agent's
   // canonical schema even though the Agent constructor does not create them.
+  `CREATE TABLE cf_agents_task_parts (
+        run_id TEXT NOT NULL,
+        piece INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        PRIMARY KEY (run_id, piece)
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_runs (
         run_id TEXT PRIMARY KEY,
         definition TEXT NOT NULL,
         input TEXT,
-        state TEXT NOT NULL CHECK (state IN (
-          'pending', 'running', 'waiting',
-          'completed', 'failed', 'cancelled'
+        status TEXT NOT NULL CHECK (status IN (
+          'pending', 'running', 'completed', 'error', 'aborted', 'skipped'
         )),
         result TEXT,
         error_name TEXT,
         error_message TEXT,
         status_message TEXT,
         metadata TEXT,
-        idempotency_key TEXT UNIQUE,
+        idempotency_key TEXT,
         retain INTEGER NOT NULL DEFAULT 1,
         attempt INTEGER NOT NULL DEFAULT 0,
         generation TEXT,
@@ -112,7 +91,12 @@ const EXPECTED_SCHEMA_DDL = [
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
-        settled_at INTEGER
+        settled_at INTEGER,
+        lane TEXT,
+        seq INTEGER,
+        notified TEXT,
+        input_parts INTEGER,
+        checkpoint TEXT
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_task_steps (
         run_id TEXT NOT NULL,
@@ -150,7 +134,9 @@ const EXPECTED_SCHEMA_DDL = [
         )`
 ];
 
-const EXPECTED_SCHEMA_VERSION = 14;
+const EXPECTED_SCHEMA_VERSION = 15;
+/** Agent's version in the release, under its own key. */
+const RELEASED_SCHEMA_VERSION = 14;
 
 describe("schema DDL snapshot", () => {
   it("should match the expected DDL for the current schema version", async () => {
@@ -186,9 +172,10 @@ describe("schema version gating", () => {
     expect(await agent.tableExists("cf_agents_jobs")).toBe(true);
     expect(await agent.tableExists("cf_agents_workflows")).toBe(true);
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);
-    expect(await agent.tableExists("cf_agents_runs")).toBe(true);
-    expect(await agent.tableExists("cf_agents_fibers")).toBe(true);
-    expect(await agent.tableExists("cf_agents_facet_runs")).toBe(true);
+    // Fibers are Task runs: their old tables are not created.
+    expect(await agent.tableExists("cf_agents_runs")).toBe(false);
+    expect(await agent.tableExists("cf_agents_fibers")).toBe(false);
+    expect(await agent.tableExists("cf_agents_facet_runs")).toBe(false);
   });
 
   it("should drop every internal table during destroy cleanup", async () => {
@@ -250,6 +237,33 @@ describe("schema version gating", () => {
     // wasChanged row should be cleaned up
     const idsAfter = await agent.getStateRowIds();
     expect(idsAfter).not.toContain("cf_state_was_changed");
+  });
+
+  it("folds the released schema version key into the one record", async () => {
+    const agent = await getAgentByName(
+      env.TestStateAgent,
+      `released-key-${crypto.randomUUID()}`
+    );
+    await agent.getState();
+    await agent.storeReleasedSchemaVersion(RELEASED_SCHEMA_VERSION);
+    expect(await agent.getSchemaVersion()).toBe(0);
+
+    await agent.runSchemaMigration();
+    expect(await agent.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
+    expect(await agent.hasReleasedSchemaVersionKey()).toBe(false);
+  });
+
+  it("folds the released key on a cold wake, in the constructor", async () => {
+    const name = `released-key-cold-${crypto.randomUUID()}`;
+    const agent = await getAgentByName(env.TestStateAgent, name);
+    await agent.getState();
+    // As the release left it, with tables in place and no record entry.
+    await agent.storeReleasedSchemaVersion(RELEASED_SCHEMA_VERSION);
+    await evictDurableObject(agent);
+
+    const woken = await getAgentByName(env.TestStateAgent, name);
+    expect(await woken.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
+    expect(await woken.hasReleasedSchemaVersionKey()).toBe(false);
   });
 
   it("should move a legacy schema-version row into the KV key", async () => {

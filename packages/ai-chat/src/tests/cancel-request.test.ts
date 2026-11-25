@@ -86,6 +86,69 @@ const userMessage: ChatMessage = {
 };
 
 describe("Cancel request", () => {
+  it("ends a cancelled request aborted when onChatMessage fails with the abort's reason", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await new Promise((r) => setTimeout(r, 50));
+    const requestId = "req-cancel-before-response";
+    const collecting = collectMessages(ws);
+
+    // `onChatMessage` waits on the turn's signal and rejects with its
+    // reason, the way `await generateText({ abortSignal })` does.
+    sendChatRequest(ws, requestId, [userMessage], {
+      failOnAbort: "before-response"
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    sendCancel(ws, requestId);
+
+    const { messages, timedOut } = await collecting;
+    expect(timedOut).toBe(false);
+    const frames = messages.filter(isUseChatResponseMessage);
+    expect(frames.filter((frame) => frame.error)).toEqual([]);
+    expect(frames.at(-1)).toMatchObject({
+      id: requestId,
+      done: true,
+      outcome: "aborted"
+    });
+    const agent = await getAgentByName(env.SlowStreamAgent, room);
+    expect(await agent.getOnErrorCallsForTest()).toEqual([]);
+    ws.close(1000);
+  });
+
+  it.each([
+    ["mid-stream", { format: "plaintext", chunkCount: 100, chunkDelayMs: 50 }],
+    ["before its response", { failOnAbort: "before-response" }]
+  ])(
+    "sends the stopping tab one terminal frame for a request stopped %s",
+    async (_when, body) => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectSlowStream(room);
+      await new Promise((r) => setTimeout(r, 50));
+      const requestId = "req-one-terminal";
+      const terminals: unknown[] = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        const data = JSON.parse(e.data as string);
+        if (
+          isUseChatResponseMessage(data) &&
+          data.id === requestId &&
+          data.done
+        ) {
+          terminals.push(data);
+        }
+      });
+
+      sendChatRequest(ws, requestId, [userMessage], body);
+      await new Promise((r) => setTimeout(r, 300));
+      sendCancel(ws, requestId);
+      // Long enough for anything sent after the stop's own work to arrive.
+      await new Promise((r) => setTimeout(r, 1000));
+
+      expect(terminals).toHaveLength(1);
+      expect(terminals[0]).toMatchObject({ outcome: "aborted" });
+      ws.close(1000);
+    }
+  );
+
   it("cancel during plaintext streaming sends done and stops chunks", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
@@ -256,7 +319,7 @@ describe("Cancel request", () => {
     const chatResponses = messages.filter(isUseChatResponseMessage);
     const doneMsg = chatResponses.find((m) => m.done === true);
     expect(doneMsg).toBeDefined();
-    expect(doneMsg?.outcome).toBeUndefined();
+    expect(doneMsg?.outcome).toBe("completed");
 
     // Should have all 3 text-delta events
     const textDeltas = chatResponses.filter((m) => {

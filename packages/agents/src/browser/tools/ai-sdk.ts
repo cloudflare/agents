@@ -43,6 +43,13 @@ export interface BrowserTool {
   toModelOutput(options: { output: BrowserToolOutput }): BrowserModelOutput;
 }
 
+/** The AI SDK's per-call `abortSignal`, typed loosely across versions. */
+function abortSignalOf(call: unknown): AbortSignal | undefined {
+  if (typeof call !== "object" || call === null) return undefined;
+  const signal = (call as { abortSignal?: unknown }).abortSignal;
+  return signal instanceof AbortSignal ? signal : undefined;
+}
+
 /**
  * Create an AI SDK tool that lets the model drive a persistent browser with
  * JavaScript and the Chrome DevTools Protocol.
@@ -86,7 +93,8 @@ export function browserTool(options: BrowserToolOptions): BrowserTool {
   return {
     description: core.description,
     inputSchema: core.inputSchema,
-    execute: (input) => core.execute(input),
+    execute: (input, call) =>
+      core.execute(input, { signal: abortSignalOf(call) }),
     toModelOutput: ({ output }) =>
       browserExecuteModelOutput(output, output.notice ? [output.notice] : [])
   };

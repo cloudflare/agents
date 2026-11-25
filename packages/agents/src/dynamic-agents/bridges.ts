@@ -1,7 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { serializeRpcResponse } from "../websockets/frame-limit";
 import { RpcTarget } from "cloudflare:workers";
 import type { Connection } from "../lifecycle/durable-object-lifecycle";
-import type { RPCResponse, StreamingResponse } from "../index";
+import {
+  setConnectionFlag,
+  withoutEventLogFlag
+} from "../websockets/connection-flags";
+import type { RPCResponse, StreamingResponse } from "../callable-rpc";
 import type {
   RootFacetRpcSurface,
   DynamicAgentConnectionBridgeLike
@@ -44,14 +49,16 @@ export function sendFacetRpcResponseIfOpen(
   response: RPCResponse
 ): FacetRPCResponseDelivery {
   try {
-    const completion = Promise.resolve(
-      target.send(JSON.stringify(response))
-    ).catch((error: unknown) => {
-      if (!isClosedWebSocketSendError(error)) {
-        console.error("[Agent] Facet RPC response delivery failed:", error);
+    const { text, replaced } = serializeRpcResponse(response);
+    const completion = Promise.resolve(target.send(text)).catch(
+      (error: unknown) => {
+        if (!isClosedWebSocketSendError(error)) {
+          console.error("[Agent] Facet RPC response delivery failed:", error);
+        }
       }
-    });
-    return { sent: true, completion };
+    );
+    // A replaced frame is the call's terminal error: nothing more is sent.
+    return { sent: !replaced, completion };
   } catch (error) {
     if (isClosedWebSocketSendError(error)) {
       return { sent: false, completion: Promise.resolve() };
@@ -132,7 +139,7 @@ export class DynamicAgentConnectionBridge
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ) => void | Promise<void>;
+  ) => void | Promise<number | void>;
 
   constructor(
     connection: Connection,
@@ -140,7 +147,7 @@ export class DynamicAgentConnectionBridge
       ownerPath: ReadonlyArray<{ className: string; name: string }>,
       message: string | ArrayBuffer | ArrayBufferView,
       without?: string[]
-    ) => void | Promise<void>
+    ) => void | Promise<number | void>
   ) {
     super();
     this.#connection = connection;
@@ -151,19 +158,29 @@ export class DynamicAgentConnectionBridge
     this.#connection.send(message);
   }
 
+  sendMany(
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): void {
+    for (const message of messages) this.#connection.send(message);
+  }
+
   close(code?: number, reason?: string): void {
     this.#connection.close(code, reason);
   }
 
   setState(state: unknown): unknown {
-    return this.#connection.setState(state);
+    return this.#connection.setState(withoutEventLogFlag(state));
+  }
+
+  setFlag(key: string, value: unknown): void {
+    setConnectionFlag(this.#connection, key, value);
   }
 
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void | Promise<void> {
+  ): void | Promise<number | void> {
     return this.#broadcast?.(ownerPath, message, without);
   }
 }
@@ -185,6 +202,15 @@ export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionB
     return this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
   }
 
+  sendMany(
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    return this.#root._cf_sendManyToSubAgentConnection(
+      this.#connectionId,
+      messages
+    );
+  }
+
   close(code?: number, reason?: string): Promise<void> {
     return this.#root._cf_closeSubAgentConnection(
       this.#connectionId,
@@ -197,11 +223,19 @@ export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionB
     return this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
   }
 
+  setFlag(key: string, value: unknown): Promise<void> {
+    return this.#root._cf_setSubAgentConnectionFlag(
+      this.#connectionId,
+      key,
+      value
+    );
+  }
+
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void> {
+  ): Promise<number | void> {
     return this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
   }
 }

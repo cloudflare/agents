@@ -10,7 +10,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import type { Session } from "../../think";
 import type { ObservabilityEvent } from "agents/observability";
-import type { ChatResponseResult } from "agents/chat";
+import type { ChatResponseResult, SaveMessagesResult } from "agents/chat";
 import { Think } from "../../think";
 import type {
   ChatErrorClassification,
@@ -812,6 +812,14 @@ type OverflowChatResult = {
   beforeTurnContinuations: boolean[];
   /** Whether each model call's prompt still contained the seeded marker. */
   promptIncludedSeedMarker: boolean[];
+  /** The turn's status, for the paths that return one. */
+  status?: string;
+  /** The terminal (`done`) frames broadcast for the turn. */
+  terminalFrames?: Array<{ error?: boolean; outcome?: string }>;
+  /** The terminal record a client that connects later would get. */
+  terminalRecord?: string | null;
+  /** Each `onChatResponse` call for the turn. */
+  responses?: Array<{ status: string; continuation: boolean }>;
 };
 
 /**
@@ -830,6 +838,7 @@ export class OverflowRecoveryTestAgent extends Think {
   alwaysOverflow = false;
   emitPartialBeforeOverflow = false;
   abortDuringRecovery = false;
+  abortDuringCompaction = false;
   combinedProactiveReactive = false;
   throwOnOverflow = false;
   compactionEvents = 0;
@@ -959,6 +968,8 @@ export class OverflowRecoveryTestAgent extends Think {
   override configureSession(session: Session): Session {
     return session.onCompaction(async (messages) => {
       this.compactionCount++;
+      // A stop that lands while the history is being compacted.
+      if (this.abortDuringCompaction) this.abortAllRequests();
       if (this.compactionThrows) throw new Error("Test compaction failed");
       // `compactionNoOp` simulates a history that can't be shortened (e.g. one
       // tool result alone exceeds the window) so the reactive backstop must
@@ -1360,6 +1371,177 @@ export class OverflowRecoveryTestAgent extends Think {
       beforeTurnContinuations: this.beforeTurnContinuations,
       promptIncludedSeedMarker: this.promptIncludedSeedMarker
     };
+  }
+
+  /** Reset the counters and seed the history whose head overflows. */
+  private async _seedReactiveOverflow(): Promise<void> {
+    this.contextOverflow = { reactive: true };
+    this.compactionNoOp = false;
+    this.proactiveMode = false;
+    this.alwaysOverflow = false;
+    this.compactionCount = 0;
+    this.modelCalls = 0;
+    this.compactionEvents = 0;
+    this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
+    this._terminalFrames = [];
+    this._responses = [];
+
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+  }
+
+  private _terminalFrames: Array<{ error?: boolean; outcome?: string }> = [];
+  private _responses: Array<{ status: string; continuation: boolean }> = [];
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._responses.push({
+      status: result.status,
+      continuation: result.continuation
+    });
+  }
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (typeof msg === "string") {
+      try {
+        const frame = JSON.parse(msg) as {
+          done?: boolean;
+          error?: boolean;
+          outcome?: string;
+        };
+        if (frame.done) {
+          this._terminalFrames.push({
+            ...(frame.error !== undefined && { error: frame.error }),
+            ...(frame.outcome !== undefined && { outcome: frame.outcome })
+          });
+        }
+      } catch {
+        // not a JSON frame
+      }
+    }
+    super.broadcast(msg, without);
+  }
+
+  private async _overflowResult(
+    result: SaveMessagesResult
+  ): Promise<OverflowChatResult> {
+    const record = await this.ctx.storage.get<{ body: string }>(
+      "cf:chat:last-terminal"
+    );
+    return {
+      status: result.status,
+      responses: [...this._responses],
+      terminalFrames: [...this._terminalFrames],
+      terminalRecord: record?.body ?? null,
+      done: result.status === "completed",
+      error: result.status === "error" ? (result.error ?? "error") : undefined,
+      compactionCount: this.compactionCount,
+      modelCalls: this.modelCalls,
+      compactionEvents: this.compactionEvents,
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
+    };
+  }
+
+  /** An overflow during `continueLastTurn` is compacted and retried too. */
+  async testContinueOverflow(
+    alwaysOverflow = false
+  ): Promise<OverflowChatResult> {
+    await this._seedReactiveOverflow();
+    this.alwaysOverflow = alwaysOverflow;
+    this._model = undefined;
+    return this._overflowResult(await this.continueLastTurn());
+  }
+
+  /**
+   * An overflow during a continuation turn is compacted and retried too. The
+   * connection-less continuation is the continuation turn with no client
+   * attached, so a test can start it directly.
+   */
+  async testContinuationOverflow(
+    alwaysOverflow = false
+  ): Promise<OverflowChatResult> {
+    await this._seedReactiveOverflow();
+    this.alwaysOverflow = alwaysOverflow;
+    this._model = undefined;
+    // A continuation answers a result: the transcript ends in one.
+    const reply = await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-lookup",
+          toolCallId: "call-lookup",
+          state: "output-available",
+          input: {},
+          output: "found"
+        }
+      ]
+    } as UIMessage);
+    await this._cfRunConnectionlessContinuation({
+      targetMessageIds: [reply.message.id]
+    });
+    return this._overflowResult({ requestId: "", status: "completed" });
+  }
+
+  /** An overflow during the recovery retry is compacted and retried too. */
+  async testRetryOverflow(
+    message: string,
+    alwaysOverflow = false
+  ): Promise<OverflowChatResult> {
+    await this._seedReactiveOverflow();
+    this.alwaysOverflow = alwaysOverflow;
+    this._model = undefined;
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: message }]
+    });
+    const retry = (
+      this as unknown as {
+        _retryLastUserTurn(): Promise<SaveMessagesResult>;
+      }
+    )._retryLastUserTurn();
+    return this._overflowResult(await retry);
+  }
+
+  /**
+   * The turn is stopped while its history is being compacted: the turn must
+   * not run the model again.
+   */
+  async testProgrammaticAbortDuringCompaction(
+    message: string
+  ): Promise<OverflowChatResult> {
+    await this._seedReactiveOverflow();
+    this.abortDuringCompaction = true;
+    try {
+      return this._overflowResult(
+        await this.saveMessages([
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: message }]
+          }
+        ])
+      );
+    } finally {
+      this.abortDuringCompaction = false;
+    }
   }
 
   /**

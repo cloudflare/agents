@@ -145,10 +145,14 @@ export const DEFAULT_MAX_EXECUTIONS = 50;
 
 /**
  * Cap for any single serialized value stored in the durable log (args, a
- * recorded result, the final result). SQLite rows in Durable Objects max out
- * at ~2MB; 1MB leaves headroom for the rest of the row. Truncating stored
- * values is never an option — replay would feed resumed code corrupted data —
- * so a breach fails the run with a model-actionable error instead.
+ * recorded result, the final result), counted in UTF-16 code units. A Durable
+ * Object's SQLite row holds 8 MiB in production but about 2.2 MB in older
+ * local workerd and the vitest pool (measured). ASCII values under the cap fit
+ * every runtime; a value of 3-byte characters can reach 3 MB of UTF-8, which
+ * fits production only. Truncating args or recorded results is never an
+ * option (replay would feed resumed code corrupted data), so a breach fails
+ * the run with a model-actionable error. A final result over the cap is
+ * replaced by a note, since replay never needs it (see `complete`).
  */
 export const MAX_DURABLE_VALUE_BYTES = 1_000_000;
 

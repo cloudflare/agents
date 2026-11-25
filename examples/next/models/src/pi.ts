@@ -1,13 +1,13 @@
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
-import {
-  type Api,
-  type AssistantMessage,
-  type Context,
-  type Model,
-  Type
+import type {
+  Api,
+  AssistantMessage,
+  Context,
+  Model
 } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { obj, str } from "@earendil-works/pi-schema";
 import { createAI } from "agents/models/pi-ai";
 
 /**
@@ -19,10 +19,10 @@ import { createAI } from "agents/models/pi-ai";
  *   model from that vendor's own pi-ai registry, routed through AI Gateway.
  *   No vendor id or wire format lives in `agents`.
  */
-const DEFAULT_MODEL = "@cf/zai-org/glm-4.7-flash";
+const DEFAULT_MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
-const weatherParameters = Type.Object({
-  city: Type.String({ description: "City name, e.g. 'Lisbon'" })
+const weatherParameters = obj({
+  city: str({ description: "City name, e.g. 'Lisbon'" })
 });
 
 /** The one tool `/pi/tools` offers, so the agent loop has something to call. */

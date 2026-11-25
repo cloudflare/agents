@@ -104,6 +104,7 @@ type TurnObservabilityEvent = {
     trigger?: string;
     admission?: string;
     continuation?: boolean;
+    generation?: number;
     status?: string;
     durationMs?: number;
     error?: string;
@@ -160,6 +161,31 @@ describe("Think — runTurn", () => {
     expect(messages).toHaveLength(2);
     expect(messages[0].role).toBe("user");
     expect(messages[1].role).toBe("assistant");
+  });
+
+  // The host queues a server-started turn under the generation the turn
+  // core captured, so the queue itself skips a turn the chat was reset under
+  // while its admission waited. The events carry that generation.
+  it("admits a saveMessages turn under the generation it was accepted with", async () => {
+    const name = `runturn-generation-${crypto.randomUUID()}`;
+    const agent = await freshProgrammaticAgent(name);
+    const { events, unsubscribe } = captureTurnEvents(name);
+    try {
+      await agent.testSaveMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "Hello" }]
+        }
+      ]);
+    } finally {
+      unsubscribe();
+    }
+    expectTurnPair(
+      events,
+      { trigger: "programmatic", generation: 0 },
+      { trigger: "programmatic", generation: 0, status: "completed" }
+    );
   });
 
   it("emits a minimal chat:turn start/finish pair for wait mode", async () => {

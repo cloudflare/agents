@@ -6,7 +6,7 @@ forms, through the `AI` binding or
 
 ```ts
 // A string runs on env.AI.run.
-ai("@cf/zai-org/glm-4.7-flash"); // Workers AI
+ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"); // Workers AI
 ai("anthropic/claude-opus-4.8"); // the AI Gateway catalog
 ai("dynamic/support"); // a dynamic route on your gateway
 
@@ -59,7 +59,7 @@ export default {
     const ai = createAI({ binding: env.AI, id: "default", cacheTtl: 60 });
 
     const workersAI = await generateText({
-      model: ai("@cf/zai-org/glm-4.7-flash"),
+      model: ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
       prompt: "Say hello in three words"
     });
 
@@ -144,7 +144,10 @@ await generateText({
 
 // Or install it globally: bare strings then resolve through this provider.
 globalThis.AI_SDK_DEFAULT_PROVIDER = createAI({ binding: env.AI });
-await generateText({ model: "@cf/zai-org/glm-4.7-flash", prompt: "Hi" });
+await generateText({
+  model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+  prompt: "Hi"
+});
 ```
 
 Every modality is on the registry too (`registry.imageModel`,
@@ -266,7 +269,9 @@ fallbacks), and the call goes through `env.AI.run` like a Workers AI model:
 const ai = createAI({ binding: env.AI, id: "prod" });
 
 await generateText({ model: ai("dynamic/support"), prompt: "Hi" });
-ai("@cf/zai-org/glm-4.7-flash", { fallback: ["dynamic/support"] });
+ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
+  fallback: ["dynamic/support"]
+});
 ```
 
 The route belongs to a gateway, so set the gateway `id` it was created on. It
@@ -308,29 +313,46 @@ const { rerankedDocuments } = await rerank({
 ```
 
 Bytes stay bytes and base64 stays base64: some models answer with a raw body
-(`image/png`, `audio/mpeg`, `audio/wav`) and some with JSON (`{ image }`,
-`{ audio }`), the content type decides, and nothing is converted on the way
-through. The media type comes off the bytes rather than the model name —
-`flux-1-schnell` answers with JPEG and MeloTTS with WAV.
+(`image/png`, `audio/mpeg`) and some with JSON (`{ image }`, `{ audio }`), the
+content type decides, and nothing is converted on the way through. The media
+type comes off the bytes rather than the model name — the flux models answer
+with JPEG where the others answer with PNG.
 
 Per-call knobs go under `providerOptions.cloudflare`, next to the gateway
 options:
 
-| Modality      | Call options used                                                                       | `providerOptions.cloudflare`                               |
-| ------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| Image         | `prompt`, `n`, `size`, `seed`, `files`, `mask`                                          | `steps`, `guidance`, `negativePrompt`, `strength`          |
-| Speech        | `text`, `voice` → `speaker`, `outputFormat` → `encoding`, `language` → `lang` (MeloTTS) | —                                                          |
-| Transcription | `audio`, `mediaType`                                                                    | `language`, `task`, `initialPrompt`, `prefix`, `vadFilter` |
-| Reranking     | `query`, `documents`, `topN` → `top_k`                                                  | —                                                          |
+| Modality      | Call options used                                        | `providerOptions.cloudflare`                               |
+| ------------- | -------------------------------------------------------- | ---------------------------------------------------------- |
+| Image         | `prompt`, `n`, `size`, `seed`, `files`, `mask`           | `steps`, `guidance`, `negativePrompt`, `strength`          |
+| Speech        | `text`, `voice` → `speaker`, `outputFormat` → `encoding` | —                                                          |
+| Transcription | `audio`, `mediaType`                                     | `language`, `task`, `initialPrompt`, `prefix`, `vadFilter` |
+| Reranking     | `query`, `documents`, `topN` → `top_k`                   | —                                                          |
 
 Anything a model cannot take comes back in `warnings` rather than being sent:
 `aspectRatio` everywhere, `size`/`seed`/`guidance` on `flux-1-schnell` (which
 takes only a prompt and steps), `speed` and `instructions` on every speech
-model, `voice` on MeloTTS. Object documents are stringified for reranking, with
+model, and `language` on Aura, which takes its language from the model id
+(`@cf/deepgram/aura-2-es`). Object documents are stringified for reranking, with
 a `compatibility` warning.
 
 The run path generates one image per call, so `maxImagesPerCall` is 1 and
 `generateImage` fans a larger `n` out into parallel calls.
+
+The FLUX.2 models (`@cf/black-forest-labs/flux-2-klein-9b`, `flux-2-klein-4b`
+and `flux-2-dev`) take multipart form data rather than JSON, and the provider
+sends it as that, straight to Workers AI, so the gateway options do not apply
+and a `warnings` entry says so when any are set. They take `size`, `seed` and
+`guidance`, `steps` on `flux-2-dev` only (the klein models always run four),
+and up to four reference images from the prompt's `images`, which the prompt
+can refer to as image 0 to image 3:
+
+```ts
+const { image } = await generateImage({
+  model: ai.image("@cf/black-forest-labs/flux-2-klein-9b"),
+  prompt: { text: "Put the lizard from image 0 in the snow", images: [lizard] },
+  size: "1024x768"
+});
+```
 
 `@cf/deepgram/nova-3` takes its audio as a raw body (`audio: { body,
 contentType }`), and the provider sends it as one. Of the transcription options
@@ -422,7 +444,7 @@ of it. A leg is any model id, or any AI SDK language model:
 
 ```ts
 const model = ai(anthropic("claude-opus-4-8"), {
-  fallback: ["openai/gpt-5.5", "@cf/zai-org/glm-4.7-flash"]
+  fallback: ["openai/gpt-5.5", "@cf/deepseek-ai/deepseek-v4.1-flash-1017"]
 });
 ```
 
@@ -539,7 +561,10 @@ so `ai`'s built-in retry loop honours `isRetryable` without extra wiring.
 import { CloudflareAIError } from "agents/models/ai-sdk";
 
 try {
-  await generateText({ model: ai("@cf/zai-org/glm-4.7-flash"), prompt: "hi" });
+  await generateText({
+    model: ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
+    prompt: "hi"
+  });
 } catch (error) {
   if (error instanceof CloudflareAIError) {
     error.status; // 402

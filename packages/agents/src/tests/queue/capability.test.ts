@@ -297,4 +297,41 @@ describe("Queue capability", () => {
       ]);
     });
   });
+
+  it("queues again after a transaction rolled back the push that created the job table", async () => {
+    const stub = env.QueueHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: QueueHarnessObject, state) => {
+        instance.hold();
+        // Start without touching the job table, so the first push creates
+        // it inside the transaction that then rolls back.
+        await instance.lifecycle.start();
+        expect(
+          state.storage.sql
+            .exec(
+              "SELECT name FROM sqlite_master WHERE name = 'cf_agents_jobs'"
+            )
+            .toArray()
+        ).toEqual([]);
+        expect(() =>
+          state.storage.transactionSync(() => {
+            void instance.queue.push("record", { value: "lost" });
+            throw new Error("roll back");
+          })
+        ).toThrow("roll back");
+        const kept = await instance.queue.push("record", { value: "kept" });
+        expect((await instance.queue.list()).map((item) => item.id)).toEqual([
+          kept.id
+        ]);
+        // The rolled-back write of the job queue's version is made again.
+        expect(
+          state.storage.kv.get<Record<string, number>>(
+            "cf_agents:schema_versions"
+          )?.[""]
+        ).toBe(1);
+        instance.release();
+      }
+    );
+  });
 });

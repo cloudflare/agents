@@ -20,6 +20,13 @@ export type MCPServerRow = {
 };
 
 /** Create the durable MCP server catalog table when it does not exist. */
+/**
+ * MCP's schema version key from before the one record. Either migration
+ * that runs first (the catalog at start, or the status columns on a cold
+ * registration) folds it in.
+ */
+export const MCP_SCHEMA_VERSION_KEY = "cf_agents:mcp_schema_version";
+
 export function ensureMcpServerTable(storage: DurableObjectStorage): void {
   storage.sql.exec(`
     CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
@@ -107,14 +114,27 @@ function persistClientOptions(
   };
 }
 
+/**
+ * Headers as a plain record, so they survive JSON: a `Headers` instance
+ * would be stored as `{}`.
+ */
+function persistHeaders(
+  headers: HeadersInit | undefined
+): Record<string, string> | undefined {
+  return headers ? Object.fromEntries(new Headers(headers)) : undefined;
+}
+
 function persistTransportOptions(
   value?: PersistableTransportOptions
 ): PersistedMcpTransportOptions | undefined {
   if (!value) return undefined;
   return {
     type: value.type,
-    headers: value.headers,
-    requestInit: value.requestInit,
+    headers: persistHeaders(value.headers),
+    requestInit: value.requestInit && {
+      ...value.requestInit,
+      headers: persistHeaders(value.requestInit.headers)
+    },
     reconnectionOptions: value.reconnectionOptions,
     skipIssuerMetadataValidation: value.skipIssuerMetadataValidation,
     onInsufficientScope: value.onInsufficientScope,

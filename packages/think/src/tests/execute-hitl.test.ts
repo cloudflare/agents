@@ -184,6 +184,75 @@ describe("Think HITL — approve/reject paused executions", () => {
     ws.close();
   });
 
+  it("applies a recorded approval after a reset without calling the runtime again", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+    // As a reset leaves it after the runtime call and the recorded outcome,
+    // before the transcript write. Approving again would resume whatever is
+    // paused now.
+    await agent.recordCodemodeOutcomeWithoutReportForTest(executionId, {
+      status: "completed",
+      executionId,
+      result: "recorded"
+    });
+
+    await agent.restartTasksForTest();
+
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "completed";
+    });
+    const parts = await agent.executeParts();
+    expect((parts[0].output as { result?: unknown }).result).toBe("recorded");
+    expect(await agent.gatedCallCount()).toBe(0);
+
+    ws.close();
+  });
+
+  it("applies a recorded approval whose outcome is past one row", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+    const result = "x".repeat(1_500_000);
+
+    await agent.recordCodemodeOutcomeForTest(executionId, {
+      status: "completed",
+      executionId,
+      result
+    });
+
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "completed";
+    });
+    expect(await agent.decisionRunCountForTest()).toBe(0);
+    expect(await agent.decisionOutputCountForTest()).toBe(0);
+    ws.close();
+  });
+
+  it("holds no outcome in memory after a codemode approval", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+    await callRpc(ws, "approveExecution", [executionId]);
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "completed";
+    });
+    expect(await agent.decisionOutputCountForTest()).toBe(0);
+    ws.close();
+  });
+
+  it("stores nothing for approvals of ids nothing is pending under", async () => {
+    const { agent, ws } = await runTurnToPause(crypto.randomUUID());
+    for (let i = 0; i < 3; i++) {
+      const answer = (await agent.approveExecution(
+        `bogus-${i}`
+      )) as PausedOutput;
+      expect(answer.status).toBe("error");
+    }
+    expect(await agent.decisionRunCountForTest()).toBe(0);
+    ws.close();
+  });
+
   it("reject applies a rejected output with the reason and continues", async () => {
     const room = crypto.randomUUID();
     const { agent, ws, executionId } = await runTurnToPause(room);
@@ -278,6 +347,13 @@ describe("Think HITL — approve/reject paused executions", () => {
         JSON.stringify(output.pending[0].args).includes("prod")
       );
     });
+
+    // The call is still paused, so nothing was settled and the model is not
+    // asked again: a reply written now would be the latest message by the
+    // time the run completes, and that outcome could not continue.
+    await delay(300);
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    expect(await agent.assistantMessageCount()).toBe(1);
 
     // Second approve completes the run.
     const done = (await callRpc(ws, "approveExecution", [

@@ -1,4 +1,5 @@
 import { env, exports } from "cloudflare:workers";
+import { waitUntilHandled } from "./test-utils";
 import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
@@ -379,7 +380,7 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -450,9 +451,11 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    // Wait for tool result to be applied and continuation to happen
-    // Note: When there's no active stream, the continuation waits 500ms before proceeding
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // The result is applied and its continuation runs to the end.
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
+      true
+    );
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -546,7 +549,7 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 2);
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
@@ -617,7 +620,9 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    // The sibling is still pending, so the agent is never stable here.
+    await agentStub.waitForIdleForTest();
     expect(await agentStub.getChatMessageCallCountForTest()).toBe(0);
 
     // Resolve the regular tool: batch complete → exactly one continuation.
@@ -631,7 +636,7 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 2);
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
@@ -711,7 +716,7 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const afterApprovalRequest =
@@ -749,7 +754,7 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
     await agentStub.waitForIdleForTest();
 
     const finalMessages =
@@ -1126,7 +1131,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -1147,6 +1152,107 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     expect(toolPart.state).toBe("approval-responded");
     expect(toolPart.approval).toEqual({ id: toolCallId, approved: true });
 
+    ws.close(1000);
+  });
+
+  it("a rejection carrying its approval id lands on that request when a tool-call id is reused", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_1";
+    const request = (approvalId: string, a: number) => ({
+      type: "tool-calculate",
+      toolCallId,
+      state: "approval-requested",
+      input: { a, b: 1 },
+      approval: { id: approvalId }
+    });
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [request("approval_a", 1)] as ChatMessage["parts"]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "two" }] },
+      {
+        id: "a2",
+        role: "assistant",
+        parts: [request("approval_b", 2)] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: false,
+        approvalId: "approval_a"
+      })
+    );
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
+    await agentStub.waitForIdleForTest();
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const part = (id: string) =>
+      persisted.find((m) => m.id === id)?.parts[0] as Record<string, unknown>;
+    expect(part("a1").state).toBe("output-denied");
+    expect(part("a2").state).toBe("approval-requested");
+    ws.close(1000);
+  });
+
+  it("a repeated decision without an approval id does not land on an older request", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_1";
+    const request = (approvalId: string, a: number) => ({
+      type: "tool-calculate",
+      toolCallId,
+      state: "approval-requested",
+      input: { a, b: 1 },
+      approval: { id: approvalId }
+    });
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [request("approval_a", 1)] as ChatMessage["parts"]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "two" }] },
+      {
+        id: "a2",
+        role: "assistant",
+        parts: [request("approval_b", 2)] as ChatMessage["parts"]
+      }
+    ]);
+    const reject = JSON.stringify({
+      type: "cf_agent_tool_approval",
+      toolCallId,
+      approved: false
+    });
+    for (let i = 0; i < 2; i++) {
+      ws.send(reject);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await agentStub.waitForIdleForTest();
+    }
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const part = (id: string) =>
+      persisted.find((m) => m.id === id)?.parts[0] as Record<string, unknown>;
+    expect(part("a2").state).toBe("output-denied");
+    expect(part("a1").state).toBe("approval-requested");
     ws.close(1000);
   });
 
@@ -1193,7 +1299,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -1255,7 +1361,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -1316,7 +1422,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -1369,7 +1475,10 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 1200)); // Wait for retries (10 * 100ms + buffer)
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
+      true
+    );
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
 
@@ -1425,7 +1534,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -1490,7 +1599,10 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
+      true
+    );
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1557,8 +1669,11 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       })
     );
 
-    // Wait for approval + continuation (500ms wait + stream)
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // The approval is applied and its continuation runs to the end.
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
+      true
+    );
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1625,7 +1740,10 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
+      true
+    );
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1691,7 +1809,10 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
+      true
+    );
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1940,7 +2061,7 @@ describe("Tool approval persistence across reconnect", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
     await agentStub.waitForIdleForTest();
 
     const updatedMessages =
@@ -2008,7 +2129,7 @@ describe("Tool approval denial produces tool_result via convertToModelMessages",
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -2081,7 +2202,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -2144,7 +2265,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -2206,7 +2327,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -2274,7 +2395,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -2333,7 +2454,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -2394,7 +2515,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -2455,7 +2576,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -2518,7 +2639,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];

@@ -9,7 +9,7 @@ import type {
 import type { WebSearchToolInput, WebSearchToolOutput } from "agents/websearch";
 
 /** The Workers AI model the chat agent runs on. */
-export const MODEL = "@cf/moonshotai/kimi-k2.7-code";
+export const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 export const MIN_PAGE_CHARS = 5_000;
 export const MAX_PAGE_CHARS = 50_000;

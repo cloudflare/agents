@@ -12,7 +12,7 @@ import {
   sseResponse
 } from "./helpers";
 
-const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const MODEL = "@cf/qwen/qwen3.8-27b";
 
 // The chunk envelope captured live from OpenAI's chat completions (before
 // `openai/*` moved to the Responses wire; every OpenAI-compatible vendor
@@ -162,7 +162,7 @@ describe("chat completions wire — non-streaming", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const result = await ai(
-      "@cf/meta/llama-4-scout-17b-16e-instruct"
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
     ).doGenerate(callOptions());
 
     expect(result.content).toEqual([
@@ -196,7 +196,7 @@ describe("chat completions wire — non-streaming", () => {
     // `extra_content.google.thought_signature` it was issued with.
     const binding = fakeBinding(() => jsonResponse({ choices: [] }));
     const ai = createAI({ binding: asAi(binding) });
-    await ai("@cf/meta/llama-4-scout-17b-16e-instruct").doGenerate(
+    await ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017").doGenerate(
       callOptions({
         prompt: [
           { content: [{ text: "weather?", type: "text" }], role: "user" },
@@ -270,7 +270,7 @@ describe("chat completions wire — non-streaming", () => {
     });
 
     const other = await ai(
-      "@cf/meta/llama-4-scout-17b-16e-instruct"
+      "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
     ).doGenerate(callOptions());
     expect(other.finishReason).toEqual({ raw: "weird", unified: "other" });
   });
@@ -308,7 +308,7 @@ describe("chat completions wire — request body", () => {
     expect(field(binding.calls[0].input, "max_tokens")).toBe(500);
     expect(binding.calls[0].input).not.toHaveProperty("max_completion_tokens");
 
-    await ai("@cf/zai-org/glm-4.7-flash").doGenerate(
+    await ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017").doGenerate(
       callOptions({ maxOutputTokens: 500 })
     );
     expect(field(binding.calls[1].input, "max_tokens")).toBe(500);
@@ -325,7 +325,9 @@ describe("chat completions wire — request body", () => {
 
     // Workers AI takes the option too; the compat layer folds its native
     // usage tail into the same final chunk.
-    await ai("@cf/zai-org/glm-4.7-flash").doStream(callOptions());
+    await ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017").doStream(
+      callOptions()
+    );
     expect(field(binding.calls[1].input, "stream_options")).toEqual({
       include_usage: true
     });

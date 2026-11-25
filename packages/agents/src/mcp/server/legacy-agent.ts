@@ -11,6 +11,7 @@ import type {
   RequestId
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  InitializeRequestSchema,
   JSONRPCMessageSchema,
   isJSONRPCErrorResponse,
   isJSONRPCResultResponse,
@@ -541,6 +542,14 @@ export abstract class McpAgent<
     }
 
     const transport = this._transport;
+
+    // Store the handshake, as the HTTP transports do, so `onStart` replays
+    // it after a reset or an eviction and the server keeps what the client
+    // negotiated.
+    const initialize = (Array.isArray(message) ? message : [message]).find(
+      (each) => InitializeRequestSchema.safeParse(each).success
+    );
+    if (initialize) await this.setInitializeRequest(initialize);
 
     // RPC waits are intentionally in-memory. While a request/continuation is
     // pending, keep the object alive so hibernation does not drop the resolver

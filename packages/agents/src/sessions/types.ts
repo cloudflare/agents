@@ -81,7 +81,13 @@ export interface RecentHistoryResult {
   messages: SessionMessage[];
   /** True when older messages were left out to satisfy the byte budget. */
   truncated: boolean;
-  /** Summed stored size of the FULL path, in bytes. */
+  /**
+   * Summed stored size of the visible path, in bytes. When `truncated`, the
+   * read stops soon after the budget, so on a long path this is the stored
+   * size of the part it measured, at most the full size. The budget also
+   * charges each message a fixed overhead that this total leaves out, so a
+   * truncated read can report less than the budget.
+   */
   totalContentBytes: number;
 }
 
@@ -153,10 +159,38 @@ export interface HistoryBatchReadOptions extends HistoryReadOptions {
 /** Policy for a Sessions capability. */
 export interface SessionsOptions {
   /**
+   * A second (or third) Sessions in the same Durable Object: its own tables,
+   * transcripts, compactions, search and attachments, apart from the default
+   * instance and from every other name. `[a-z][a-z0-9-]{0,31}`. Omit it for
+   * the default instance, whose tables are the ones every release used.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  name?: string;
+  /**
    * Message-metadata keys reserved for server-side writers. Stripped from
    * writes marked `source: "client"`. Default: none.
    */
   readonly reservedMetadataKeys?: readonly string[];
+  /**
+   * A flat legacy table of messages (`id`, `message` JSON, `created_at`) to
+   * lift into the default session on start, oldest first, as one chain.
+   * The table is dropped once every row has a copy, and left for the next
+   * start otherwise.
+   *
+   * @internal For `AIChatAgent`'s pre-Sessions table. Not a public API.
+   */
+  readonly legacyFlatMessages?: LegacyFlatMessages;
+}
+
+/**
+ * @internal A legacy flat message table and how one of its rows becomes a
+ * message. Not a public API.
+ */
+export interface LegacyFlatMessages {
+  readonly table: string;
+  /** The message a stored row holds, or `undefined` to skip the row. */
+  parse(raw: unknown, id: string): SessionMessage | undefined;
 }
 
 /** Trust policy shared by append and update writes. */

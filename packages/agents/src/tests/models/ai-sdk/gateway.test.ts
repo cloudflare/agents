@@ -18,7 +18,7 @@ import {
   rawSseResponse
 } from "./helpers";
 
-const WORKERS_AI = "@cf/zai-org/glm-4.7-flash";
+const WORKERS_AI = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /**
  * The vendor providers are the user's, not ours: the key is a placeholder,

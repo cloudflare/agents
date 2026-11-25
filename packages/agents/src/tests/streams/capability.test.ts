@@ -567,7 +567,7 @@ describe("Streams composed with Tasks", () => {
         const deadline = Date.now() + 5_000;
         for (;;) {
           const snapshot = await instance.tasks.get(receipt.runId);
-          if (snapshot?.state === "completed") break;
+          if (snapshot?.status === "completed") break;
           if (Date.now() > deadline) throw new Error("task never completed");
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
@@ -603,7 +603,7 @@ describe("Streams composed with Tasks", () => {
           runId: "lost-producer",
           definition: "generate",
           input: { streamId: "gen-lost", total: 5 },
-          state: "running",
+          status: "running",
           generation: "dead-generation",
           attempt: 1,
           nextAt: Date.now() - 1000
@@ -627,7 +627,7 @@ describe("Streams composed with Tasks", () => {
         const deadline = Date.now() + 5_000;
         for (;;) {
           const snapshot = await instance.tasks.get("lost-producer");
-          if (snapshot?.state === "completed") {
+          if (snapshot?.status === "completed") {
             expect(snapshot.result).toEqual({
               streamId: "gen-lost",
               cursor: 5

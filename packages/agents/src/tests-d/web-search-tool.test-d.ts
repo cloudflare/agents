@@ -1,5 +1,5 @@
 import type { Tool, ToolSet } from "ai";
-import type { ServerTool } from "@tanstack/ai";
+import type { SchemaInput, ServerTool } from "@tanstack/ai";
 import { expectTypeOf } from "vitest";
 import type { WebSearchSource, WebSearchToolOutput } from "../web/search";
 import { webSearchTool } from "../web/search/tools/ai-sdk";
@@ -40,4 +40,6 @@ const tools: ToolSet = { web_search: aiSdkTool };
 void tools;
 
 // The TanStack AI adapter is a ServerTool.
-expectTypeOf(tanStackWebSearchTool({ source })).toExtend<ServerTool>();
+expectTypeOf(tanStackWebSearchTool({ source })).toExtend<
+  ServerTool<SchemaInput, SchemaInput>
+>();

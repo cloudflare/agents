@@ -28,6 +28,8 @@
  * @experimental The API may change before it stabilizes.
  */
 
+import { splitPieces } from "../../internal/platform-limits";
+
 /** A JSON value, as the store keeps it. */
 export type JsonValue =
   | string
@@ -105,9 +107,9 @@ export type HarnessStoreOptions = {
 const DEFAULT_PREFIX = "harness_";
 
 /**
- * Characters per stored chunk of a JSON value. A Durable Object row holds
- * at most 2 MB and a character is at most 4 bytes of UTF-8, so a quarter of
- * a megabyte of characters always fits with room for the other columns.
+ * UTF-16 code units per stored chunk of a JSON value, split by
+ * `splitPieces` so a chunk never ends inside a surrogate pair. A code unit
+ * is at most 3 bytes of UTF-8, so a chunk stays far under the row budget.
  */
 const CHUNK_CHARS = 256 * 1024;
 
@@ -168,15 +170,6 @@ function isStatus(value: string): value is OperationStatus {
     value === "done" ||
     value === "unanswered"
   );
-}
-
-function chunks(text: string): string[] {
-  if (text.length <= CHUNK_CHARS) return [text];
-  const parts: string[] = [];
-  for (let at = 0; at < text.length; at += CHUNK_CHARS) {
-    parts.push(text.slice(at, at + CHUNK_CHARS));
-  }
-  return parts;
 }
 
 /**
@@ -310,10 +303,18 @@ export class HarnessStore {
    *
    * @returns The sessions.
    */
-  sessions(): SessionRecord[] {
+  sessions(
+    page: { readonly limit: number; readonly offset: number } = {
+      limit: -1,
+      offset: 0
+    }
+  ): SessionRecord[] {
     return this.#storage.sql
       .exec<SessionRow>(
-        `SELECT * FROM ${this.#sessions} ORDER BY created_at, id`
+        `SELECT * FROM ${this.#sessions} ORDER BY created_at, id
+         LIMIT ? OFFSET ?`,
+        page.limit,
+        page.offset
       )
       .toArray()
       .map((row) => this.#sessionOf(row));
@@ -436,6 +437,8 @@ export class HarnessStore {
     filter: {
       readonly session?: string;
       readonly status?: readonly OperationStatus[];
+      /** At most this many, the oldest. Default: all. */
+      readonly limit?: number;
     } = {}
   ): OperationRecord[] {
     const where: string[] = [];
@@ -453,8 +456,10 @@ export class HarnessStore {
       .exec<OperationRow>(
         `SELECT * FROM ${this.#operations}
          ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
-         ORDER BY seq`,
-        ...params
+         ORDER BY seq
+         ${filter.limit === undefined ? "" : "LIMIT ?"}`,
+        ...params,
+        ...(filter.limit === undefined ? [] : [filter.limit])
       )
       .toArray()
       .map((row) => this.#operationOf(row));
@@ -527,18 +532,23 @@ export class HarnessStore {
 
   /**
    * Forget a session's settled operations, as when the session starts
-   * over. Open operations are kept. A forgotten operation's id may be
-   * enqueued again.
+   * over, or every session's. Open operations are kept. A forgotten
+   * operation's id may be enqueued again. Reads none of their data.
    *
-   * @param session - The session id.
+   * @param session - The session id. Default: every session.
    * @returns How many operations were deleted.
    */
-  deleteSettled(session: string): number {
-    return this.#storage.sql.exec(
-      `DELETE FROM ${this.#operations}
-       WHERE session = ? AND status IN ('done', 'unanswered')`,
-      session
-    ).rowsWritten;
+  deleteSettled(session?: string): number {
+    return session === undefined
+      ? this.#storage.sql.exec(
+          `DELETE FROM ${this.#operations}
+           WHERE status IN ('done', 'unanswered')`
+        ).rowsWritten
+      : this.#storage.sql.exec(
+          `DELETE FROM ${this.#operations}
+           WHERE session = ? AND status IN ('done', 'unanswered')`,
+          session
+        ).rowsWritten;
   }
 
   /**
@@ -778,18 +788,20 @@ export class HarnessStore {
       log,
       seq
     );
-    chunks(JSON.stringify(entry.data)).forEach((part, index) => {
-      sql.exec(
-        `INSERT INTO ${this.#log} (session, log, seq, part, id, data, created_at)
+    splitPieces(JSON.stringify(entry.data), CHUNK_CHARS).forEach(
+      (part, index) => {
+        sql.exec(
+          `INSERT INTO ${this.#log} (session, log, seq, part, id, data, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        session,
-        log,
-        seq,
-        index,
-        entry.id ?? null,
-        part,
-        createdAt
-      );
-    });
+          session,
+          log,
+          seq,
+          index,
+          entry.id ?? null,
+          part,
+          createdAt
+        );
+      }
+    );
   }
 }

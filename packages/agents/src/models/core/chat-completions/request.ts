@@ -12,12 +12,6 @@ import { type CompatWarning, quirksFor } from "./quirks";
 export interface PreparedRequest {
   body: Record<string, unknown>;
   warnings: CompatWarning[];
-  /**
-   * Whether the body turns the model's reasoning off through the chat
-   * template. The stream normalizer needs this for models whose streaming
-   * parser mislabels the answer once thinking is off.
-   */
-  reasoningOff: boolean;
 }
 
 type Message = Record<string, unknown>;
@@ -312,8 +306,5 @@ export function prepareChatCompletionsRequest(
     body.messages = messages;
   }
 
-  const reasoningOff =
-    isRecord(body.chat_template_kwargs) &&
-    body.chat_template_kwargs.enable_thinking === false;
-  return { body, reasoningOff, warnings };
+  return { body, warnings };
 }

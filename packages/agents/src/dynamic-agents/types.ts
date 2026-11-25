@@ -48,20 +48,35 @@ export type DynamicAgentConnectionMeta = {
   tags: string[];
   state: unknown;
   requestHeaders?: [string, string][];
+  /** When the root accepted the socket (ms), see `CF_SUB_AGENT_ACCEPTED_AT_KEY`. */
+  acceptedAt?: number;
 };
 
 export type DynamicAgentConnectionBridgeLike = {
   send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
+  /** Sends `messages` in order, in one call. */
+  sendMany(
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): void | Promise<void>;
   close(code?: number, reason?: string): void | Promise<void>;
   setState(state: unknown): unknown | Promise<unknown>;
+  /**
+   * Set (or, with `undefined`, remove) one internal flag on the root
+   * socket, over whatever the root holds for it.
+   */
+  setFlag(key: string, value: unknown): void | Promise<void>;
   broadcast(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void | Promise<void>;
+  ): void | Promise<number | void>;
 };
 
-export type DynamicAgentConnectionOperationName = "send" | "setState" | "close";
+export type DynamicAgentConnectionOperationName =
+  | "send"
+  | "setState"
+  | "setFlag"
+  | "close";
 
 export type StoredDynamicAgentConnection = {
   meta: DynamicAgentConnectionMeta;
@@ -130,13 +145,6 @@ export type DynamicAgentStub<T extends Agent> = {
     : never;
 };
 
-export type FacetRunStorageRow = {
-  owner_path: string;
-  owner_path_key: string;
-  run_id: string;
-  created_at: number;
-};
-
 /**
  * Internal RPC surface exposed by the root agent for facets to
  * delegate alarm-owning operations (schedules + facet teardown).
@@ -153,29 +161,22 @@ export type RootFacetRpcSurface = {
   _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
-  _cf_acquireFacetKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string>;
-  _cf_releaseFacetKeepAlive(token: string): Promise<void>;
-  _cf_registerFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
-  _cf_unregisterFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
+  /** Resolves to when the root sent the frame (ms, root clock). */
   _cf_broadcastToSubAgent(
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void>;
+  ): Promise<number | void>;
   _cf_subAgentConnectionMetas(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<DynamicAgentConnectionMeta[]>;
   _cf_sendToSubAgentConnection(
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void>;
+  _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
   ): Promise<void>;
   _cf_closeSubAgentConnection(
     connectionId: string,
@@ -186,6 +187,11 @@ export type RootFacetRpcSurface = {
     connectionId: string,
     state: unknown
   ): Promise<unknown>;
+  _cf_setSubAgentConnectionFlag(
+    connectionId: string,
+    key: string,
+    value: unknown
+  ): Promise<void>;
   _cf_closeSubAgentConnectionsForPrefix(
     prefix: ReadonlyArray<AgentPathStep>,
     code: number,

@@ -18,7 +18,7 @@ readonly harness = new SelfModifyingHarness({
   streams: this.streams,
   workspace: this.workspace,
   loader: this.env.LOADER,
-  model: this.workersAI("@cf/moonshotai/kimi-k2.7-code")
+  model: this.workersAI("@cf/deepseek-ai/deepseek-v4.1-flash-1017")
 });
 
 readonly webSockets = new WebSockets(this.harness.webSockets());

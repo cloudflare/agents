@@ -109,7 +109,34 @@ export class TestDestroyScheduleAgent extends Agent<
   onAlarm(): void {
     throw new Error("onAlarm must not run after a scheduled destroy");
   }
+
+  /** Record, in module state that outlives the instance, abort vs return. */
+  override async alarm(): Promise<void> {
+    const order: string[] = [];
+    destroyOrders.set(this.ctx.id.toString(), order);
+    const abort = this.ctx.abort.bind(this.ctx);
+    this.ctx.abort = (reason?: string) => {
+      order.push(`abort +${Date.now() - returnedAt}`);
+      abort(reason);
+    };
+    let returnedAt = Number.POSITIVE_INFINITY;
+    await super.alarm();
+    returnedAt = Date.now();
+    order.push("alarm returned");
+  }
+
+  /** The abort and return order of the last alarm of object `id`. */
+  destroyOrderForTest(id: string): string[] {
+    return [...(destroyOrders.get(id) ?? [])];
+  }
+
+  objectIdForTest(): string {
+    return this.ctx.id.toString();
+  }
 }
+
+/** Per object, in order: its alarm handler's return and its abort. */
+const destroyOrders = new Map<string, string[]>();
 
 /**
  * Agent that calls schedule() in onStart() without idempotent — should warn.

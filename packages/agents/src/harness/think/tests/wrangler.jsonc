@@ -2,16 +2,29 @@
   "main": "worker.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
+  "worker_loaders": [{ "binding": "LOADER" }],
   "durable_objects": {
     "bindings": [
       { "name": "THINK_HARNESS_TEST", "class_name": "ThinkHarnessTestObject" },
-      { "name": "THINK_WITH_STREAMS", "class_name": "ThinkWithStreamsObject" }
+      { "name": "THINK_WITH_STREAMS", "class_name": "ThinkWithStreamsObject" },
+      {
+        "name": "THINK_HARNESS_FACET_ROOT",
+        "class_name": "ThinkHarnessFacetRoot"
+      },
+      {
+        "name": "THINK_HARNESS_FACET_CHILD",
+        "class_name": "ThinkHarnessFacetChild"
+      }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["ThinkHarnessTestObject", "ThinkWithStreamsObject"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ThinkHarnessFacetRoot", "ThinkHarnessFacetChild"]
     }
   ]
 }

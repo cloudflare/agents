@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { getCurrentAgent, Lifecycle } from "../../lifecycle";
+import { TaskSettlement } from "../../tasks/settlement";
 import { Tasks, NonRetryableError, type TaskStep } from "../../tasks";
 import { Scheduler } from "../../schedules";
 
@@ -28,11 +29,74 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   statusCounter = 0;
   /** Guarded handler entries, recorded as entry:input:interrupted-step. */
   readonly guardedEntries: string[] = [];
+  /** What each `remembering` attempt saw: its `local` and checkpoint. */
+  readonly rememberingSeen: Array<{ local: unknown; note: unknown }> = [];
+  /** What each `remembering` attempt read back after its last write. */
+  readonly rememberingAfter: unknown[] = [];
+  /** `remembering` parks on this until a test opens it. */
+  rememberingGate: Promise<void> | null = null;
+  /** Labels of `laned` runs, in the order they started. */
+  readonly lanedStarted: string[] = [];
+  /** The `local` each `laned` attempt was handed, when it had one. */
+  readonly lanedLocals: unknown[] = [];
+  /** `laned` runs park on their label's gate, when it has one. */
+  readonly lanedGates = new Map<string, Promise<void>>();
 
   readonly tasks = new Tasks({
     definitions: {
+      /**
+       * Records its `local` and checkpoint note, writes a note, parks on
+       * {@link rememberingGate} (a reset there leaves it running), then
+       * writes `after`.
+       */
+      /** A result JSON cannot hold. */
+      unstorable: async () => BigInt(1) as unknown as string,
+
+      /** Fails with a message far past what a run keeps. */
+      verbose: async () => {
+        throw new Error("x".repeat(50_000));
+      },
+
+      /** Records its label, parks on its gate, returns the label. */
+      laned: async (input: { label: string }, step: TaskStep) => {
+        this.lanedStarted.push(input.label);
+        if (step.local !== undefined) this.lanedLocals.push(step.local);
+        await this.lanedGates.get(input.label);
+        return input.label;
+      },
+
+      /** Checkpoint keys JSON paths would misread, read back. */
+      oddKeys: async (_input: undefined, step: TaskStep) => {
+        const keys = ["a.b", 'q"x', "$[0]", "plain"];
+        keys.forEach((key, i) => step.checkpoint.set(key, { i }));
+        step.checkpoint.set("plain", { i: 9 });
+        return keys.map((key) => step.checkpoint.get(key) ?? null);
+      },
+
+      /** One journaled step that waits on `stepGate` inside it. */
+      gatedStep: async (_input: undefined, step: TaskStep) =>
+        step.do("a", async () => {
+          await this.stepGate;
+          return 1;
+        }),
+
+      remembering: async (_input: undefined, step: TaskStep) => {
+        this.rememberingSeen.push({
+          local: step.local,
+          note: step.checkpoint.get("note") ?? null
+        });
+        step.checkpoint.set("note", { attempt: this.rememberingSeen.length });
+        await this.rememberingGate;
+        step.checkpoint.set("after", true);
+        this.rememberingAfter.push(step.checkpoint.get("after") ?? null);
+        return "done";
+      },
+
       /** Two journaled steps, then a host-context probe in the return value. */
-      pipeline: async (input: { label: string }, step: TaskStep) => {
+      pipeline: async (
+        input: { label: string; tags?: Record<string, number> },
+        step: TaskStep
+      ) => {
         const first = await step.do("first", () => {
           this.stepRuns.push("pipeline:first");
           return `first:${input.label}`;
@@ -367,6 +431,51 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     }
   });
 
+  /** Statuses `__cf_reported` runs reported, as `runId:status`. */
+  readonly reports: string[] = [];
+  /** `__cf_reported` terminal reports throw while this is above zero. */
+  failReports = 0;
+  /** `gatedStep` waits on this inside its step. */
+  stepGate: Promise<void> | null = null;
+  /** `__cf_reported` parks on this when set. */
+  reportedGate: Promise<void> | null = null;
+  /** `__cf_reported` terminal reports wait on this when set. */
+  terminalReportGate: Promise<void> | null = null;
+  #owedReports = 0;
+
+  /** How many terminal reports of the run "owed" have started. */
+  owedReportsForTest(): number {
+    return this.#owedReports;
+  }
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.tasks.register("__cf_echo", async (input) => (input as string).length);
+    this.tasks.register("__cf_parking", async () =>
+      TaskSettlement.park("detached")
+    );
+    this.tasks.register(
+      "__cf_reported",
+      async () => {
+        await this.reportedGate;
+        return "ok";
+      },
+      {
+        maxAttempts: 2,
+        onStatus: async (snapshot) => {
+          const terminal = !["pending", "running"].includes(snapshot.status);
+          if (terminal && snapshot.runId === "owed") this.#owedReports++;
+          if (terminal) await this.terminalReportGate;
+          if (terminal && this.failReports > 0) {
+            this.failReports--;
+            throw new Error("report failed");
+          }
+          this.reports.push(`${snapshot.runId}:${snapshot.status}`);
+        }
+      }
+    );
+  }
+
   readonly lifecycle = Lifecycle.install(this).use(this.tasks);
 }
 
@@ -451,7 +560,9 @@ export function seedTaskRun(
     readonly runId: string;
     readonly definition: string;
     readonly input?: unknown;
-    readonly state: "pending" | "running" | "waiting";
+    readonly status: "pending" | "running";
+    /** A pending run that already ran waits for its `nextAt`. */
+    readonly waitReason?: "sleep" | "retry";
     readonly generation?: string;
     readonly attempt?: number;
     readonly nextAt: number;
@@ -462,13 +573,15 @@ export function seedTaskRun(
   const now = Date.now();
   storage.sql.exec(
     `INSERT INTO cf_agents_task_runs
-       (run_id, definition, input, state, generation, attempt, next_at,
-        idempotency_key, retain, cancel_requested, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+       (run_id, definition, input, status, wait_reason, generation, attempt,
+        next_at, idempotency_key, retain, cancel_requested, created_at,
+        updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     options.runId,
     options.definition,
     options.input === undefined ? null : JSON.stringify(options.input),
-    options.state,
+    options.status,
+    options.waitReason ?? null,
     options.generation ?? null,
     options.attempt ?? 0,
     options.nextAt,

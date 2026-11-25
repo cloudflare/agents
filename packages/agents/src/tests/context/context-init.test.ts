@@ -172,6 +172,28 @@ describe("init(label) lifecycle", () => {
     expect(initCalls).toEqual(["memory"]);
   });
 
+  it("init is not called again when a remind block is read afresh", async () => {
+    const initCalls: string[] = [];
+    let reads = 0;
+    const provider: ContextProvider = {
+      init(label: string) {
+        initCalls.push(label);
+      },
+      async get() {
+        reads++;
+        return `Today is day ${reads}.`;
+      }
+    };
+    const blocks = new ContextBlocks([
+      { label: "environment", provider, whenChanged: "remind" }
+    ]);
+    await blocks.load();
+    await blocks.internal_remindSections();
+    await blocks.internal_remindSections();
+    expect(reads).toBe(3);
+    expect(initCalls).toEqual(["environment"]);
+  });
+
   it("provider can use label in get() after init", async () => {
     const provider = new TrackingReadonlyProvider();
     const blocks = new ContextBlocks([{ label: "my-block", provider }]);
@@ -195,7 +217,7 @@ describe("init(label) lifecycle", () => {
       execute: (args: {
         label: string;
         content: string;
-        key?: string;
+        metadata?: { title?: string };
       }) => Promise<string>;
     };
     type SearchFn = {
@@ -203,14 +225,15 @@ describe("init(label) lifecycle", () => {
     };
 
     const setTool = tools.set_context as unknown as SetFn;
-    await setTool.execute({
+    const written = await setTool.execute({
       label: "docs",
-      key: "readme",
+      metadata: { title: "readme" },
       content: "Hello world"
     });
+    expect(written).toBe('Indexed "readme" in docs.');
 
     const searchTool = tools.search_context as unknown as SearchFn;
     const result = await searchTool.execute({ label: "docs", query: "hello" });
-    expect(result).toContain("Hello world");
+    expect(result).toContain("[readme] Hello world");
   });
 });

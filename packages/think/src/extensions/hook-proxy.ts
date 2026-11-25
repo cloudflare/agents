@@ -7,7 +7,7 @@
  * are plain JSON-safe data objects that survive Workers RPC serialization.
  */
 
-import type { ThinkModel, TurnContext, TurnConfig } from "../think";
+import type { ThinkModel, TurnContext } from "../turn-types";
 
 /**
  * Best-effort JSON-safe normalization. Strips functions, AbortSignals,
@@ -47,7 +47,7 @@ function jsonSafe(value: unknown, depth = 0): unknown {
  * Passed to extension Workers during beforeTurn hook dispatch.
  * Plain data — no methods, no functions, no classes.
  */
-export interface TurnContextSnapshot {
+interface TurnContextSnapshot {
   system: string;
   toolNames: string[];
   messageCount: number;
@@ -84,23 +84,6 @@ export function createTurnContextSnapshot(
   };
 }
 
-/**
- * Parse a hook result from the extension Worker's JSON response.
- * Returns a TurnConfig or null if the extension skipped/errored.
- */
-export function parseHookResult(
-  json: string
-): { config: TurnConfig } | { skipped: true } | { error: string } {
-  try {
-    const parsed = JSON.parse(json) as Record<string, unknown>;
-    if (parsed.skipped) return { skipped: true };
-    if (parsed.error) return { error: parsed.error as string };
-    return { config: (parsed.result ?? {}) as TurnConfig };
-  } catch {
-    return { error: "Failed to parse hook result" };
-  }
-}
-
 // ── Per-tool / per-step / per-chunk snapshots ─────────────────────────
 // These are observation-only snapshots — extensions cannot return data
 // that influences the turn (block/substitute/cancel etc.). Keep the
@@ -109,7 +92,7 @@ export function parseHookResult(
 // stash references there.
 
 /** Snapshot for the `beforeToolCall` hook. */
-export interface ToolCallStartSnapshot {
+interface ToolCallStartSnapshot {
   toolName: string;
   toolCallId: string;
   input: unknown;
@@ -118,7 +101,7 @@ export interface ToolCallStartSnapshot {
 }
 
 /** Snapshot for the `afterToolCall` hook. */
-export interface ToolCallFinishSnapshot {
+interface ToolCallFinishSnapshot {
   toolName: string;
   toolCallId: string;
   input: unknown;
@@ -132,7 +115,7 @@ export interface ToolCallFinishSnapshot {
 }
 
 /** Snapshot for the `onStepFinish` hook. */
-export interface StepFinishSnapshot {
+interface StepFinishSnapshot {
   stepNumber: number;
   finishReason: string;
   text: string;
@@ -153,7 +136,7 @@ export interface StepFinishSnapshot {
 }
 
 /** Snapshot for the `onChunk` hook. High-frequency — keep minimal. */
-export interface ChunkSnapshot {
+interface ChunkSnapshot {
   type: string;
   text?: string;
   toolName?: string;

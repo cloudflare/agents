@@ -84,6 +84,17 @@ describe("pi adapter", () => {
         nextOffset: 31
       }
     });
+    // Code mode scripts get the window as an object, content still tagged.
+    expect(result.structuredOutput).toEqual({
+      url: "https://example.com/doc",
+      status: 200,
+      contentType: "text/html",
+      title: "Doc",
+      content: `<untrusted_web_content>\n${"a".repeat(30)}\n\n</untrusted_web_content>`,
+      offset: 0,
+      nextOffset: 31,
+      totalChars: 61
+    });
   });
 
   it("returns failures as error results with the source's detail", async () => {
@@ -141,7 +152,7 @@ describe("pi adapter", () => {
     });
   });
 
-  it("describes url, offset, and format in its TypeBox schema", () => {
+  it("describes url, offset, and format in its JSON Schema", () => {
     const { properties, required } = piWebFetchTool({ source: okSource })
       .parameters as unknown as {
       properties: Record<string, Record<string, unknown>>;
@@ -207,9 +218,11 @@ describe("TanStack AI adapter", () => {
   });
 
   it("throws so TanStack AI reports an error result", async () => {
-    const error = await tanstackWebFetchTool({ source: failingSource })
-      .execute?.({ url: "https://example.com/doc" })
-      .catch((e: unknown) => e);
+    const error = await Promise.resolve(
+      tanstackWebFetchTool({ source: failingSource }).execute?.({
+        url: "https://example.com/doc"
+      })
+    ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(WebFetchError);
     expect(error).toMatchObject({
       code: "web_fetch_unavailable",

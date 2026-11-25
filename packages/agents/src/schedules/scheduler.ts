@@ -7,9 +7,9 @@
  * timing vocabulary.
  */
 
+import { hasTable } from "../lifecycle/schema";
 import {
   LifecycleCapability,
-  type LifecycleRouteAddress,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
 import type {
@@ -17,14 +17,15 @@ import type {
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
-import {
-  isDurableObjectCodeUpdateReset,
-  isPlatformFailure,
-  resolveRetryConfig,
-  tryN,
-  validateRetryOptions
-} from "../retries";
+import { resolveRetryConfig, validateRetryOptions } from "../retries";
 import type { RetryOptions } from "../retries";
+import {
+  DeclaredScheduleSet,
+  isDeclaredJob,
+  type DeclaredScheduleInfo,
+  type DeclaredSchedulesSource,
+  type DeclareSchedulesOptions
+} from "./declared";
 import type { SchedulerEventType, SchedulerOptions } from "./options";
 import {
   isRecurring,
@@ -73,8 +74,11 @@ export function setSchedulerCallbackResolver(
 }
 
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
-/** Version 2: schedule rows live in the Lifecycle job queue. */
-const CURRENT_SCHEDULE_SCHEMA_VERSION = 2;
+/**
+ * Version 2: schedule rows live in the Lifecycle job queue.
+ * Version 3: Think's declared-task rows became declared-schedule jobs.
+ */
+const CURRENT_SCHEDULE_SCHEMA_VERSION = 3;
 
 /**
  * Legacy schedule callbacks whose rows drive chat recovery loops from before
@@ -88,6 +92,9 @@ const LEGACY_RECOVERY_LOOP_CALLBACKS = new Set([
   "_chatRecoveryContinue",
   "_chatRecoveryRetry"
 ]);
+
+/** TEMPORARY: wait before a failed hand-over to a sub-agent is tried again. */
+const HANDOVER_RETRY_MS = 30_000;
 
 const DEFAULT_RETRY: Required<RetryOptions> = {
   maxAttempts: 3,
@@ -110,34 +117,27 @@ type SchedulerJobPayload = {
   readonly delayInSeconds?: number;
   readonly cron?: string;
   readonly intervalSeconds?: number;
+  /** Set only on schedules a root held for a sub-agent before sub-agents
+      kept their own; the root hands those over on its first alarm after
+      the upgrade. TEMPORARY, with the fields below. */
   readonly owner_path?: string | null;
   readonly owner_path_key?: string | null;
+  /** A held schedule's own due time while it waits to be handed over. */
+  readonly handover_time?: number;
+  /** In a sub-agent: a schedule its root handed over. */
+  readonly adopted?: true;
 };
 
-type SchedulerRouteMessage =
-  | {
-      readonly type: "schedule";
-      readonly when: Date | string | number;
-      readonly callback: string;
-      readonly payload?: unknown;
-      readonly options?: ScheduleOptions;
-    }
-  | {
-      readonly type: "every";
-      readonly intervalSeconds: number;
-      readonly callback: string;
-      readonly payload?: unknown;
-      readonly options?: ScheduleOptions;
-    }
-  | { readonly type: "get" | "cancel"; readonly id: string }
-  | { readonly type: "list"; readonly criteria?: ScheduleCriteria }
-  | {
-      readonly type: "dispatch";
-      readonly id: string;
-      readonly fn: string;
-      readonly job: SchedulerJobPayload;
-      readonly retry?: RetryOptions;
-    };
+/** A root handing a schedule it held for a sub-agent to that sub-agent. */
+type SchedulerAdoptMessage = {
+  readonly type: "adopt";
+  readonly id: string;
+  readonly fn: string;
+  readonly job: SchedulerJobPayload;
+  readonly retry?: RetryOptions;
+  /** When the schedule is due in the sub-agent. */
+  readonly time: number;
+};
 
 type InsertResult<T> = {
   readonly schedule: Schedule<T>;
@@ -161,6 +161,40 @@ function isSchedulerJobPayload(value: unknown): value is SchedulerJobPayload {
  * event loop, and Scheduler runs registered callbacks through Lifecycle's
  * host invocation boundary when its jobs come due.
  */
+let declaredScheduleSetOf: (scheduler: Scheduler) => DeclaredScheduleSet;
+
+/**
+ * Declare a named set of recurring schedules on `scheduler` and reconcile
+ * storage to it: new names are armed at their next occurrence, names whose
+ * timing or retry changed are re-armed, names no longer declared are
+ * cancelled. Each name has one pending occurrence and never runs twice at
+ * once.
+ *
+ * Call it on every start (for example in `onStart()`), and again after data
+ * a function `source` reads changes. The declaration is read again when an
+ * occurrence runs. An invalid entry rejects the call and changes nothing.
+ *
+ * @internal Used by `@cloudflare/think`'s scheduled tasks. Not a public API.
+ */
+export function declareSchedules(
+  scheduler: Scheduler,
+  source: DeclaredSchedulesSource,
+  options?: DeclareSchedulesOptions
+): Promise<void> {
+  return declaredScheduleSetOf(scheduler).declare(source, options);
+}
+
+/**
+ * The armed declared schedules on `scheduler`, ordered by next occurrence.
+ *
+ * @internal Used by `@cloudflare/think`'s scheduled tasks. Not a public API.
+ */
+export function listDeclaredSchedules(
+  scheduler: Scheduler
+): DeclaredScheduleInfo[] {
+  return declaredScheduleSetOf(scheduler).list();
+}
+
 export class Scheduler<
   Handlers extends SchedulerHandlers = SchedulerCallbacks
 > extends LifecycleCapability {
@@ -169,6 +203,7 @@ export class Scheduler<
   readonly #hungScheduleTimeoutSeconds: number;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
   readonly #warnedStartupCallbacks = new Set<string>();
+  readonly #declared: DeclaredScheduleSet;
 
   /**
    * Create a persistent Scheduler.
@@ -192,6 +227,15 @@ export class Scheduler<
     this.#retryDefaults = resolveRetryConfig(options.retry, DEFAULT_RETRY);
     this.#hungScheduleTimeoutSeconds = options.hungScheduleTimeoutSeconds ?? 30;
     this.#onError = options.onError;
+    this.#declared = new DeclaredScheduleSet({
+      lifecycle: () => this.lifecycle,
+      retryDefaults: this.#retryDefaults,
+      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+      onError: async (error) => {
+        await this.#onError?.(error);
+      },
+      emit: (type, payload) => this.#emit(type, payload)
+    });
   }
 
   // ── Lifecycle capability hooks ───────────────────────────────────────────
@@ -199,16 +243,15 @@ export class Scheduler<
   /** Migrate legacy schedule storage into the Lifecycle job queue. */
   async onStart(): Promise<void> {
     this.#warnedStartupCallbacks.clear();
-    const storage = this.lifecycle.storage;
-    const version =
-      (await storage.get<number>(SCHEDULE_SCHEMA_VERSION_KEY)) ?? 0;
-    if (version >= CURRENT_SCHEDULE_SCHEMA_VERSION) return;
-
-    await this.#migrateLegacyScheduleTable(storage);
-    await storage.put(
-      SCHEDULE_SCHEMA_VERSION_KEY,
-      CURRENT_SCHEDULE_SCHEMA_VERSION
-    );
+    await this.#handOverSoon();
+    await this.lifecycle.schema.migrate({
+      version: CURRENT_SCHEDULE_SCHEMA_VERSION,
+      legacyKey: SCHEDULE_SCHEMA_VERSION_KEY,
+      steps: {
+        2: () => this.#migrateLegacyScheduleTable(this.lifecycle.storage),
+        3: () => this.#declared.migrateLegacy()
+      }
+    });
   }
 
   /**
@@ -219,12 +262,7 @@ export class Scheduler<
   async #migrateLegacyScheduleTable(
     storage: DurableObjectStorage
   ): Promise<void> {
-    const tables = storage.sql
-      .exec(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
-      )
-      .toArray();
-    if (tables.length === 0) return;
+    if (!hasTable(storage.sql, "cf_agents_schedules")) return;
 
     const rows = storage.sql
       .exec("SELECT * FROM cf_agents_schedules")
@@ -282,6 +320,7 @@ export class Scheduler<
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
     const { job, attempt } = context;
+    if (isDeclaredJob(job)) return this.#declared.run(context);
     const timing = job.payload;
     if (!isSchedulerJobPayload(timing)) {
       console.error(`Malformed schedule job ${job.id}; dropping it`);
@@ -300,50 +339,7 @@ export class Scheduler<
       });
     }
 
-    if (timing.owner_path) {
-      // A routed schedule executes inside its owning Lifecycle; retries run
-      // there too, so this dispatch is a single routed attempt.
-      try {
-        await this.lifecycle.routes.to(
-          {
-            key: timing.owner_path_key ?? timing.owner_path,
-            data: timing.owner_path
-          },
-          {
-            type: "dispatch",
-            id: job.id,
-            fn: job.fn,
-            job: timing,
-            retry: job.retry
-          } satisfies SchedulerRouteMessage
-        );
-      } catch (error) {
-        if (isPlatformFailure(error)) {
-          // Preserve the job; Lifecycle defers platform-class failures to a
-          // fresh invocation or the memory-limit breaker.
-          throw error;
-        }
-        console.error(
-          `error dispatching scheduled callback "${job.fn}"`,
-          error
-        );
-        this.#emit("schedule:error", {
-          callback: job.fn,
-          id: job.id,
-          error: error instanceof Error ? error.message : String(error),
-          attempts: 0
-        });
-        try {
-          await this.#onError?.(error);
-        } catch {
-          // swallow onError errors
-        }
-        // Leave the job due so a later alarm cycle can retry dispatch, for
-        // example once a transport can resolve its owner again.
-        return "yield";
-      }
-      return this.#recurrenceOutcome(timing);
-    }
+    if (timing.owner_path) return this.#handOver(job, timing);
 
     const handler = this.#resolveCallback(job.fn);
     if (!handler) {
@@ -363,6 +359,7 @@ export class Scheduler<
     error: unknown
   ): Promise<LifecycleJobOutcome | void> {
     const { job } = context;
+    if (isDeclaredJob(job)) return this.#declared.runFailed(context, error);
     const timing = job.payload;
     if (!isSchedulerJobPayload(timing)) return undefined;
     const { maxAttempts } = resolveRetryConfig(job.retry, this.#retryDefaults);
@@ -397,113 +394,120 @@ export class Scheduler<
     return undefined;
   }
 
-  /** Handle Scheduler protocol messages routed by another Lifecycle. */
-  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
-    const message = context.payload as SchedulerRouteMessage;
-    const owner = context.source ?? null;
-    switch (message.type) {
-      case "schedule":
-        return this.#insert(
-          owner,
-          parseWhen(message.when, Date.now(), message.callback),
-          message.callback,
-          message.payload,
-          message.options
-        );
-      case "every":
-        return this.#insert(
-          owner,
-          parseInterval(message.intervalSeconds, Date.now()),
-          message.callback,
-          message.payload,
-          message.options
-        );
-      case "get":
-        return this.#getForOwner(owner, message.id);
-      case "list":
-        return this.#listForOwner(owner, message.criteria);
-      case "cancel":
-        return this.#cancelForOwner(owner, message.id);
-      case "dispatch":
-        await this.#executeRouted(
-          message.id,
-          message.fn,
-          message.job,
-          message.retry
-        );
-        return true;
-      default:
-        throw new Error("Unknown routed Scheduler message");
+  /**
+   * TEMPORARY, for schedules a root held for a sub-agent before this
+   * release: when one comes due, the root hands it to the sub-agent's own
+   * Scheduler, due now, and drops its copy. A path that is gone drops the
+   * schedule. Remove with the next minor release.
+   */
+  /**
+   * TEMPORARY: make every schedule this root holds for a sub-agent due now,
+   * keeping its own time in the payload, so it is handed over on this
+   * start's first alarm instead of when it comes due. Until then the
+   * sub-agent cannot see, cancel or deduplicate against it.
+   */
+  async #handOverSoon(): Promise<void> {
+    const now = Date.now();
+    for (const { job, timing } of this.#ownedJobs()) {
+      if (!timing.owner_path || timing.handover_time !== undefined) continue;
+      if (job.time <= now) continue;
+      await this.lifecycle.jobs.push({
+        id: job.id,
+        fn: job.fn,
+        time: now,
+        payload: { ...timing, handover_time: job.time },
+        retry: job.retry,
+        singleflight: job.singleflight,
+        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+        recoveryLoop: job.recoveryLoop
+      });
     }
   }
 
-  /**
-   * Execute a routed schedule locally with the historical retry handling.
-   * Runs on the owning (facet) Scheduler, outside the root's event loop, so
-   * it applies its own in-process retry budget. Platform-class failures on a
-   * one-shot re-throw so the root preserves the job and the durable alarm
-   * retries on a fresh invocation.
-   */
-  async #executeRouted(
-    id: string,
-    fn: string,
-    timing: SchedulerJobPayload,
-    retry: RetryOptions | undefined
-  ): Promise<void> {
-    const handler = this.#resolveCallback(fn);
-    if (!handler) {
-      console.error(`callback ${fn} not found`);
-      return;
-    }
-    const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
-      retry,
-      this.#retryDefaults
-    );
-    const isOneShot = timing.type === "delayed" || timing.type === "scheduled";
-    const schedule = this.#payloadToSchedule<unknown>(id, fn, timing);
+  async #handOver(
+    job: LifecycleJob,
+    timing: SchedulerJobPayload
+  ): Promise<LifecycleJobOutcome | void> {
+    const { owner_path, owner_path_key, handover_time, ...rest } = timing;
     try {
-      await tryN(
-        maxAttempts,
-        async (attempt) => {
-          if (attempt > 1) {
-            this.#emit("schedule:retry", {
-              callback: fn,
-              id,
-              attempt,
-              maxAttempts
-            });
-          }
-          await this.lifecycle.runInHostContext(() =>
-            handler(timing.payload, schedule)
-          );
-        },
+      await this.lifecycle.routes.to(
+        { key: owner_path_key ?? owner_path!, data: owner_path! },
         {
-          baseDelayMs,
-          maxDelayMs,
-          shouldRetry: (error) =>
-            !(isOneShot && isDurableObjectCodeUpdateReset(error))
-        }
+          type: "adopt",
+          id: job.id,
+          fn: job.fn,
+          job: rest,
+          retry: job.retry,
+          time: handover_time ?? job.time
+        } satisfies SchedulerAdoptMessage
       );
     } catch (error) {
-      if (isOneShot && isPlatformFailure(error)) {
-        throw error;
-      }
-      console.error(
-        `error executing callback "${fn}" after ${maxAttempts} attempts`,
-        error
-      );
-      this.#emit("schedule:error", {
-        callback: fn,
-        id,
-        error: error instanceof Error ? error.message : String(error),
-        attempts: maxAttempts
+      // Keep the schedule and try again later, whatever failed: a failed
+      // hand-over is not the schedule's own failure, so it must never reach
+      // the driver's failure handling, which could give it up.
+      console.error(`error handing schedule "${job.id}" over`, error);
+      // A schedule cancelled meanwhile (its sub-agent deleted) stays gone.
+      if (!this.lifecycle.jobs.get(job.id)) return undefined;
+      // Try again later, keeping the schedule's own time for the sub-agent.
+      await this.lifecycle.jobs.push({
+        id: job.id,
+        fn: job.fn,
+        time: Date.now() + HANDOVER_RETRY_MS,
+        payload: {
+          ...timing,
+          handover_time: handover_time ?? job.time
+        } satisfies SchedulerJobPayload,
+        retry: job.retry,
+        singleflight: job.singleflight,
+        hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+        recoveryLoop: job.recoveryLoop
       });
-      try {
-        await this.#onError?.(error);
-      } catch {
-        // swallow onError errors
-      }
+      // The push is newer intent: this outcome defers to it.
+      return { rescheduleAt: Date.now() + HANDOVER_RETRY_MS };
     }
+    return undefined;
+  }
+
+  /**
+   * In a sub-agent: take over a schedule its root held for it, at its own
+   * time. When the sub-agent already created the same schedule itself since
+   * the upgrade (an `onStart` that schedules again, idempotent or not), the
+   * two are one: the earlier time is kept and nothing is added. Schedules
+   * handed over are never merged with each other.
+   */
+  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
+    const message = context.payload as SchedulerAdoptMessage;
+    if (message.type !== "adopt") {
+      throw new Error("Unknown routed Scheduler message");
+    }
+    const { id, fn, job, time } = message;
+    if (this.lifecycle.jobs.get(id)) return true;
+    const copy = this.#ownedJobs().find(
+      ({ job: held, timing }) =>
+        !timing.adopted &&
+        held.fn === fn &&
+        timing.type === job.type &&
+        timing.cron === job.cron &&
+        timing.intervalSeconds === job.intervalSeconds &&
+        JSON.stringify(timing.payload) === JSON.stringify(job.payload)
+    );
+    if (copy) {
+      if (time < copy.job.time) {
+        await this.lifecycle.jobs.reschedule(copy.job.id, time);
+      }
+      return true;
+    }
+    await this.lifecycle.jobs.push({
+      id,
+      fn,
+      time,
+      payload: { ...job, adopted: true } satisfies SchedulerJobPayload,
+      retry: message.retry,
+      singleflight: job.type === "interval",
+      hungTimeoutSeconds: this.#hungScheduleTimeoutSeconds,
+      recoveryLoop: LEGACY_RECOVERY_LOOP_CALLBACKS.has(fn)
+    });
+    return true;
   }
 
   // ── Scheduling API ───────────────────────────────────────────────────────
@@ -517,23 +521,12 @@ export class Scheduler<
   ): Promise<Schedule<SchedulerPayload<Handlers[Name]>>> {
     await this.lifecycle.ready();
     this.#validateSchedule(when, callback, options);
-    const result = this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "schedule",
-          when,
-          callback,
-          payload,
-          options
-        } satisfies SchedulerRouteMessage)) as InsertResult<
-          SchedulerPayload<Handlers[Name]>
-        >)
-      : await this.#insert<SchedulerPayload<Handlers[Name]>>(
-          null,
-          parseWhen(when, Date.now(), callback),
-          callback,
-          payload,
-          options
-        );
+    const result = await this.#insert<SchedulerPayload<Handlers[Name]>>(
+      parseWhen(when, Date.now(), callback),
+      callback,
+      payload,
+      options
+    );
     this.#emitCreated(result);
     return result.schedule;
   }
@@ -547,47 +540,26 @@ export class Scheduler<
   ): Promise<Schedule<SchedulerPayload<Handlers[Name]>>> {
     await this.lifecycle.ready();
     this.#validateInterval(intervalSeconds, callback, options?.retry);
-    const result = this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "every",
-          intervalSeconds,
-          callback,
-          payload,
-          options
-        } satisfies SchedulerRouteMessage)) as InsertResult<
-          SchedulerPayload<Handlers[Name]>
-        >)
-      : await this.#insert<SchedulerPayload<Handlers[Name]>>(
-          null,
-          parseInterval(intervalSeconds, Date.now()),
-          callback,
-          payload,
-          options
-        );
+    const result = await this.#insert<SchedulerPayload<Handlers[Name]>>(
+      parseInterval(intervalSeconds, Date.now()),
+      callback,
+      payload,
+      options
+    );
     this.#emitCreated(result);
     return result.schedule;
   }
 
-  /** Get a schedule by ID. Works inside routed sub-agents. */
+  /** Get a schedule by ID. */
   async get(id: string): Promise<Schedule<unknown> | undefined> {
     await this.lifecycle.ready();
-    return this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "get",
-          id
-        } satisfies SchedulerRouteMessage)) as Schedule<unknown> | undefined)
-      : this.#getForOwner(null, id);
+    return this.#get(id);
   }
 
-  /** List schedules matching criteria. Works inside routed sub-agents. */
+  /** List schedules matching criteria. */
   async list(criteria: ScheduleCriteria = {}): Promise<Schedule<unknown>[]> {
     await this.lifecycle.ready();
-    return this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "list",
-          criteria
-        } satisfies SchedulerRouteMessage)) as Schedule<unknown>[])
-      : this.#listForOwner(null, criteria);
+    return this.#list(criteria);
   }
 
   /**
@@ -598,72 +570,37 @@ export class Scheduler<
    */
   async cancel(id: string): Promise<boolean> {
     await this.lifecycle.ready();
-    const result = this.lifecycle.routes.source
-      ? ((await this.lifecycle.routes.toRoot({
-          type: "cancel",
-          id
-        } satisfies SchedulerRouteMessage)) as {
-          ok: boolean;
-          callback?: string;
-        })
-      : await this.#cancelForOwner(null, id);
+    const result = await this.#cancel(id);
     if (result.ok && result.callback) {
       this.#emit("schedule:cancel", { callback: result.callback, id });
     }
     return result.ok;
   }
 
+  static {
+    declaredScheduleSetOf = (scheduler) => scheduler.#declared;
+  }
+
   // ── Host-owned policy apertures ──────────────────────────────────────────
 
   /**
    * @internal Synchronous read backing Agent's deprecated `getSchedule()`.
-   * Not part of the primitive's contract — use {@link get}. Cannot cross
-   * Durable Object boundaries and throws inside routed sub-agents.
+   * Not part of the primitive's contract — use {@link get}.
    */
   __DO_NOT_USE_WILL_REMOVE__getSchedule<T = string>(
     id: string
   ): Schedule<T> | undefined {
-    if (this.lifecycle.routes.source) {
-      throw new Error(
-        "getSchedule() is synchronous and cannot read routed schedule storage. " +
-          "Use await getScheduleById(id) on Agent, or await scheduler.get(id) " +
-          "on a standalone Scheduler."
-      );
-    }
-    return this.#getForOwner(null, id);
+    return this.#get(id);
   }
 
   /**
    * @internal Synchronous read backing Agent's deprecated `getSchedules()`.
-   * Not part of the primitive's contract — use {@link list}. Cannot cross
-   * Durable Object boundaries and throws inside routed sub-agents.
+   * Not part of the primitive's contract — use {@link list}.
    */
   __DO_NOT_USE_WILL_REMOVE__getSchedules<T = string>(
     criteria: ScheduleCriteria = {}
   ): Schedule<T>[] {
-    if (this.lifecycle.routes.source) {
-      throw new Error(
-        "getSchedules() is synchronous and cannot read routed schedule storage. " +
-          "Use await listSchedules(criteria) on Agent, or await " +
-          "scheduler.list(criteria) on a standalone Scheduler."
-      );
-    }
-    return this.#listForOwner(null, criteria);
-  }
-
-  /** @internal Remove schedules owned by one routed Lifecycle subtree. */
-  async __DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-    prefix: string
-  ): Promise<void> {
-    for (const { job, timing } of this.#ownedJobs()) {
-      const ownerKey = timing.owner_path_key ?? timing.owner_path;
-      if (!timing.owner_path || ownerKey === null || ownerKey === undefined) {
-        continue;
-      }
-      if (ownerKey !== prefix && !ownerKey.startsWith(`${prefix}/`)) continue;
-      this.#emit("schedule:cancel", { callback: job.fn, id: job.id });
-      await this.lifecycle.jobs.cancel(job.id);
-    }
+    return this.#list(criteria);
   }
 
   // ── Validation ───────────────────────────────────────────────────────────
@@ -769,14 +706,13 @@ export class Scheduler<
   }
 
   /**
-   * Push a schedule job for the given owner, or return the existing job
+   * Push a schedule job, or return the existing job
    * when an idempotent request matches one. One-shot timings deduplicate only
    * when `idempotent: true` is passed; recurring timings deduplicate unless
    * `idempotent: false` opts out. `created: false` marks a dedup hit so
    * callers suppress the `schedule:create` event.
    */
   async #insert<T = string>(
-    owner: LifecycleRouteAddress | null,
     timing: ScheduleTiming,
     callback: string,
     payload: unknown,
@@ -794,7 +730,6 @@ export class Scheduler<
 
     if (idempotent) {
       const existing = this.#findMatchingJob(
-        owner?.key ?? null,
         timing,
         callback,
         JSON.stringify(payload)
@@ -835,9 +770,7 @@ export class Scheduler<
         timing.type === "delayed" ? timing.delayInSeconds : undefined,
       cron: timing.type === "cron" ? timing.cron : undefined,
       intervalSeconds:
-        timing.type === "interval" ? timing.intervalSeconds : undefined,
-      owner_path: owner?.data ?? null,
-      owner_path_key: owner?.key ?? null
+        timing.type === "interval" ? timing.intervalSeconds : undefined
     };
     const job = await this.lifecycle.jobs.push({
       fn: callback,
@@ -865,7 +798,6 @@ export class Scheduler<
 
   /** Find the job an idempotent insert deduplicates onto, if any. */
   #findMatchingJob(
-    ownerKey: string | null,
     timing: ScheduleTiming,
     callback: string,
     payloadJson: string
@@ -874,7 +806,7 @@ export class Scheduler<
       const { job, timing: candidate } = owned;
       if (candidate.type !== timing.type) continue;
       if (job.fn !== callback) continue;
-      if ((candidate.owner_path_key ?? null) !== ownerKey) continue;
+      if (candidate.owner_path) continue;
       if (JSON.stringify(candidate.payload) !== payloadJson) continue;
       if (timing.type === "cron" && candidate.cron !== timing.cron) continue;
       if (
@@ -935,22 +867,15 @@ export class Scheduler<
     }
   }
 
-  #getForOwner<T = string>(
-    owner: LifecycleRouteAddress | null,
-    id: string
-  ): Schedule<T> | undefined {
-    const ownerKey = owner?.key ?? null;
+  /** One schedule this Scheduler holds for itself (not for a sub-agent). */
+  #get<T = string>(id: string): Schedule<T> | undefined {
     const job = this.lifecycle.jobs.get(id);
     if (!job || !isSchedulerJobPayload(job.payload)) return undefined;
-    if ((job.payload.owner_path_key ?? null) !== ownerKey) return undefined;
+    if (job.payload.owner_path) return undefined;
     return this.#jobToSchedule<T>(job, job.payload);
   }
 
-  #listForOwner<T = string>(
-    owner: LifecycleRouteAddress | null,
-    criteria: ScheduleCriteria = {}
-  ): Schedule<T>[] {
-    const ownerKey = owner?.key ?? null;
+  #list<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
     const startSeconds = criteria.timeRange
       ? Math.floor((criteria.timeRange.start ?? new Date(0)).getTime() / 1000)
       : null;
@@ -962,7 +887,7 @@ export class Scheduler<
 
     const schedules: Schedule<T>[] = [];
     for (const { job, timing } of this.#ownedJobs()) {
-      if ((timing.owner_path_key ?? null) !== ownerKey) continue;
+      if (timing.owner_path) continue;
       if (criteria.id && job.id !== criteria.id) continue;
       if (criteria.type && timing.type !== criteria.type) continue;
       const timeSeconds = Math.floor(job.time / 1000);
@@ -973,16 +898,10 @@ export class Scheduler<
     return schedules;
   }
 
-  async #cancelForOwner(
-    owner: LifecycleRouteAddress | null,
-    id: string
-  ): Promise<{ ok: boolean; callback?: string }> {
-    const ownerKey = owner?.key ?? null;
+  async #cancel(id: string): Promise<{ ok: boolean; callback?: string }> {
     const job = this.lifecycle.jobs.get(id);
     if (!job || !isSchedulerJobPayload(job.payload)) return { ok: false };
-    if ((job.payload.owner_path_key ?? null) !== ownerKey) {
-      return { ok: false };
-    }
+    if (job.payload.owner_path) return { ok: false };
     const callback = job.fn;
     await this.lifecycle.jobs.cancel(id);
     return { ok: true, callback };

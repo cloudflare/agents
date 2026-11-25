@@ -27,7 +27,7 @@ The example composes:
 - a Browser panel in the UI: Live View of the browser's tabs and each
   host's current target.
 
-The model is Workers AI `@cf/zai-org/glm-5.3-flash`, set in
+The model is Workers AI `@cf/deepseek-ai/deepseek-v4.1-flash-1017`, set in
 `src/shared.ts`. It accepts images, so it sees the screenshots the browser
 tool returns.
 

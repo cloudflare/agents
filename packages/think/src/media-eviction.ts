@@ -29,6 +29,11 @@
  */
 
 import type { UIMessage } from "ai";
+import { LifecycleCapability } from "agents/lifecycle";
+import {
+  MODEL_RECENT_WINDOW,
+  mediaEvictionCutoff
+} from "./inference/model-messages";
 
 /** Nested tool-output walks stop here so hostile output cannot recurse forever. */
 const MAX_WALK_DEPTH = 8;
@@ -61,7 +66,7 @@ export interface MediaEvictionConfig {
   externalizeToWorkspace?: boolean;
 }
 
-export interface ResolvedMediaEvictionConfig {
+interface ResolvedMediaEvictionConfig {
   keepRecentMessages: number;
   minPartBytes: number;
   maxRowsPerPass: number;
@@ -84,7 +89,7 @@ export function resolveMediaEvictionConfig(
  * byte-identical, so a transcript evicted before and after the Sessions
  * replatform reads the same and old markers keep resolving.
  */
-export function evictionMarker(
+function evictionMarker(
   bytes: number,
   path: string,
   mediaType?: string
@@ -93,7 +98,7 @@ export function evictionMarker(
   return `[evicted ${media}${bytes} bytes; preserved at ${path}]`;
 }
 
-export interface EvictMessageOptions {
+interface EvictMessageOptions {
   /** Minimum decoded payload size to evict. */
   minPartBytes: number;
   /**
@@ -107,7 +112,7 @@ export interface EvictMessageOptions {
   ): Promise<string>;
 }
 
-export interface EvictMessageResult {
+interface EvictMessageResult {
   /** Rewritten message, or the original reference when nothing was evicted. */
   message: UIMessage;
   changed: boolean;
@@ -129,7 +134,7 @@ interface WalkState {
  * bytes to the Workspace first. Returns a new message — the input is never
  * mutated, and nothing is written when nothing qualifies.
  */
-export async function evictMediaFromMessage(
+async function evictMediaFromMessage(
   message: UIMessage,
   options: EvictMessageOptions
 ): Promise<EvictMessageResult> {
@@ -296,7 +301,7 @@ export function hasEvictableMedia(
 }
 
 /** Decode a `data:` URL into raw bytes. Returns null when it is malformed. */
-export function decodeDataUrl(
+function decodeDataUrl(
   url: string
 ): { bytes: Uint8Array; mediaType?: string } | null {
   const comma = url.indexOf(",");
@@ -331,10 +336,420 @@ export function extensionFor(mediaType: string | undefined): string {
 }
 
 /** Workspace path for the n-th value evicted from a message. */
-export function evictedFilePath(
+function evictedFilePath(
   messageId: string,
   index: number,
   mediaType: string | undefined
 ): string {
   return `/workspace/attachments/evicted/${messageId}-${index}.${extensionFor(mediaType)}`;
+}
+
+/**
+ * Totals of one eviction pass.
+ *
+ * @internal
+ */
+export interface MediaEvictionPassResult {
+  messages: number;
+  parts: number;
+  bytes: number;
+  backlogRemains: boolean;
+}
+
+/**
+ * What {@link MediaEvictionPasses} reads from and does on its agent.
+ *
+ * @internal
+ */
+interface MediaEvictionPassHost {
+  /** The resolved `mediaEviction` setting; `null` when eviction is off. */
+  config(): ResolvedMediaEvictionConfig | null;
+  truncationStep(): number;
+  /** The hydrated message cache. */
+  cachedMessages(): readonly UIMessage[];
+  /**
+   * Whether the cache cannot stand in for the stored path: the hydration is
+   * a window of it, or a compaction overlay hides rows a pass would read.
+   */
+  agedRowsHiddenFromCache(): boolean;
+  /** Stored content bytes the last hydration measured, if known. */
+  storedBytes(): number | null;
+  /** A page of the stored path from the newest row back, sizes with `measure`. */
+  storedPathRows(options: {
+    skip: number;
+    limit: number;
+    measure?: boolean;
+    after?: string;
+  }): Promise<ReadonlyArray<{ id: string; bytes: number }>>;
+  readMessage(id: string): Promise<UIMessage | null>;
+  /**
+   * A file writer for one pass, opened once at the start of the pass so every
+   * payload of the pass lands in the same Workspace.
+   */
+  openFiles(): { write(path: string, bytes: Uint8Array): Promise<void> };
+  updateMessage(message: UIMessage): Promise<unknown>;
+  emitEvicted(totals: Omit<MediaEvictionPassResult, "backlogRemains">): void;
+  /**
+   * Queue a pass on a routed Lifecycle (a sub-agent facet), which has no
+   * alarm of its own: the host's Queue routes the item through the root.
+   * Goes away with facets.
+   */
+  queueRouted(): Promise<unknown>;
+}
+
+/**
+ * The newest aged row a completed pass examined, and its position from the
+ * root: one KV key, written when a pass moves it.
+ */
+const CURSOR_KEY = "think-media-eviction:cursor";
+type EvictionCursor = { id: string; index: number };
+
+/** Aged rows one stored-path read returns. */
+const MEDIA_EVICTION_PAGE_ROWS = 256;
+
+/** One pass at a time: requests coalesce on this job id. */
+const PASS_JOB_ID = "think-media-eviction:pass";
+
+/**
+ * Schedules and runs bounded media-eviction passes for one agent, as a
+ * Lifecycle capability that owns the pass job.
+ *
+ * Durable: the pending pass job (one id, so repeated requests coalesce).
+ * In memory only: whether a pass is running, a request that arrived during
+ * it, and the last fruitless pass. The gate in {@link request} decides from
+ * memory whether a pass could evict anything before queuing one. Passes run
+ * from the alarm, never inside the request or refresh that asked for them.
+ *
+ * @internal
+ */
+export class MediaEvictionPasses extends LifecycleCapability {
+  readonly #host: MediaEvictionPassHost;
+  #running = false;
+  /**
+   * A request that arrived while a pass was running. That pass read its
+   * candidates before the request's append landed, so the request is kept
+   * and re-evaluated once the pass ends rather than dropped.
+   */
+  #pending = false;
+  /**
+   * Linear appends that landed while a pass was running. The pass read its
+   * candidates before them, so a fruitless result records them as appends
+   * since — not zero — and the request they left pending can pass the gate.
+   */
+  #appendsDuringPass = 0;
+  /**
+   * The last pass that found nothing to evict while aged rows were hidden
+   * from the cache: the stored size it saw, and how many linear appends have
+   * landed since. Until either changes enough, another pass would scan the
+   * same rows to the same answer. A refresh that measures a different size
+   * re-arms it, and so do `keepRecentMessages` appends: that is what it takes
+   * for a row the pass had to protect to age into a candidate. An update
+   * that grows a cached row clears it outright ({@link invalidate}).
+   */
+  #fruitless: { storedBytes: number; appendsSince: number } | null = null;
+  /** A row grew: the durable cursor no longer vouches for what is below it. */
+  #cursorStale = false;
+
+  constructor(host: MediaEvictionPassHost) {
+    super("think-media-eviction");
+    this.#host = host;
+  }
+
+  /** Run the queued pass. A failed pass logs and ends; the next request retries. */
+  async onJob(): Promise<void> {
+    await this.run();
+  }
+
+  /** Whether a pass is running now. */
+  get running(): boolean {
+    return this.#running;
+  }
+
+  /**
+   * A linear append landed. Appends are what age older messages, so this
+   * is where a pass becomes worth scheduling.
+   */
+  noteAppend(): void {
+    if (this.#fruitless) this.#fruitless.appendsSince++;
+    if (this.#running) this.#appendsDuringPass++;
+    this.request();
+  }
+
+  /** A cached row grew, so an aged row may now hold a payload. */
+  invalidate(): void {
+    this.#fruitless = null;
+    this.#cursorStale = true;
+  }
+
+  /**
+   * A row the cache does not hold changed (a late tool result on an older
+   * reply). It may now hold media below the cursor, so the next pass starts
+   * over. A pass's own rewrites land while it runs and are not counted.
+   */
+  rowChangedOutsideCache(): void {
+    if (this.#running) return;
+    this.#cursorStale = true;
+  }
+
+  /**
+   * Queue a pass if one could evict anything. A request that lands while a
+   * pass runs is re-evaluated once the pass ends, so media aged by an append
+   * during the pass is not left until the next one. Passes run from the
+   * alarm loop, never inside the request or cache refresh that asked.
+   */
+  request(): void {
+    if (this.#running) {
+      this.#pending = true;
+      return;
+    }
+    const config = this.#host.config();
+    if (!config) return;
+    // Decide from memory whether a pass could evict anything, so a pass is
+    // not the way to find out: its first act is a content-free scan of the
+    // whole stored path, and this runs after every cache refresh and every
+    // linear append.
+    //
+    // When the cache holds every aged row, it is the same rows the pass
+    // would read, so a pass is scheduled only when an aged cached message
+    // still carries an inline payload. When it does not — a windowed
+    // hydration, or rows hidden under a compaction overlay — a pass is
+    // scheduled once per distinct stored size, since until the bytes change
+    // it would scan the same rows to the same answer.
+    const keepRecent = Math.max(config.keepRecentMessages, MODEL_RECENT_WINDOW);
+    if (this.#host.agedRowsHiddenFromCache()) {
+      const fruitless = this.#fruitless;
+      const storedBytes = this.#host.storedBytes();
+      if (
+        fruitless !== null &&
+        storedBytes !== null &&
+        fruitless.storedBytes === storedBytes &&
+        fruitless.appendsSince < keepRecent
+      ) {
+        return;
+      }
+    } else {
+      const cached = this.#host.cachedMessages();
+      const aged = cached.slice(
+        0,
+        mediaEvictionCutoff(
+          cached.length,
+          config.keepRecentMessages,
+          this.#host.truncationStep()
+        )
+      );
+      if (
+        !aged.some((message) => hasEvictableMedia(message, config.minPartBytes))
+      ) {
+        return;
+      }
+    }
+    const queued = this.lifecycle.routes.source
+      ? this.#host.queueRouted()
+      : this.lifecycle.jobs.push({
+          id: PASS_JOB_ID,
+          fn: "pass",
+          time: Date.now()
+        });
+    void queued.catch((error) => {
+      console.error("[Think] Failed to queue media eviction pass", error);
+    });
+  }
+
+  /**
+   * Remove aged media from the conversation, leaving a Workspace pointer the
+   * agent can read back.
+   *
+   * Memory-bounded by design: candidate sizes come from the row stats (no
+   * content loaded), only rows big enough to hold an evictable payload are
+   * read, and they are processed one at a time. Bytes are written to the
+   * Workspace BEFORE the row is rewritten, so a failed pass never loses data;
+   * once the rewritten row is stored, its Sessions attachment reference is
+   * gone and the blob is reaped, so the bytes live in exactly one place.
+   *
+   * The aged cutoff is {@link mediaEvictionCutoff}: the stepped truncation
+   * cutoff, kept at least `keepRecentMessages` back. Messages the model still
+   * replays at full fidelity are never rewritten, and the cutoff moves only
+   * once per truncation step.
+   *
+   * Best-effort: failures are logged and the next pass retries. When a pass
+   * stops at `maxRowsPerPass` having made progress, the next one is scheduled
+   * so a backlog drains on its own; a pass that changed nothing does not
+   * reschedule, which is what guarantees termination.
+   *
+   * @returns `null` when eviction is off, a pass is already running, or the
+   * pass failed.
+   */
+  async run(): Promise<MediaEvictionPassResult | null> {
+    if (this.#running) return null;
+    const config = this.#host.config();
+    if (!config) return null;
+    this.#running = true;
+    this.#appendsDuringPass = 0;
+    const totals: MediaEvictionPassResult = {
+      messages: 0,
+      parts: 0,
+      bytes: 0,
+      backlogRemains: false
+    };
+    try {
+      const files = this.#host.openFiles();
+      // Where earlier passes got to: the newest aged row they examined, and
+      // its position from the root. Rows at or below it have been examined
+      // (and evicted or left), so a pass reads from the leaf down to it and
+      // no further: a restart re-reads only what was added since.
+      const storage = this.lifecycleServices?.storage;
+      if (this.#cursorStale) {
+        await storage?.delete(CURSOR_KEY);
+        this.#cursorStale = false;
+      }
+      const cursor = await storage?.get<EvictionCursor>(CURSOR_KEY);
+      // Count the rows above the cursor (ids only, one page at a time). The
+      // cutoff needs the path's length; the cursor's position stands in for
+      // everything below it. Without a cursor on this path (the first pass,
+      // a branch switch, a deleted row) the walk counts to the root.
+      let above = 0;
+      let reached = false;
+      // Pages start small and grow: the cursor is usually a few rows down.
+      for (let after: string | undefined, limit = 32; ;) {
+        const page = await this.#host.storedPathRows(
+          after === undefined ? { skip: 0, limit } : { skip: 0, limit, after }
+        );
+        limit = Math.min(limit * 4, MEDIA_EVICTION_PAGE_ROWS);
+        if (page.length === 0) break;
+        const at = cursor ? page.findIndex((row) => row.id === cursor.id) : -1;
+        if (at >= 0) {
+          above += at;
+          reached = true;
+          break;
+        }
+        above += page.length;
+        after = page[page.length - 1].id;
+      }
+      // A delete below the cursor makes `total` too large, which can only
+      // move the cut within one truncation step (`keep` depends on the
+      // length modulo the step and never drops below `keepRecentMessages`).
+      const total = reached && cursor ? cursor.index + 1 + above : above;
+      const keep =
+        total -
+        mediaEvictionCutoff(
+          total,
+          config.keepRecentMessages,
+          this.#host.truncationStep()
+        );
+      // The aged rows this pass must examine: from the cutoff down to the
+      // cursor, or to the root.
+      const end = reached ? above : total;
+      let newestAged: string | undefined;
+
+      // Collect the rows large enough to hold an evictable payload, with
+      // their depth from the leaf; smaller rows are skipped without being
+      // read, and a rewritten row drops below the line for every later pass.
+      const candidates: Array<{ id: string; depth: number }> = [];
+      let after: string | undefined;
+      for (let read = keep; read < end;) {
+        const page = (
+          await this.#host.storedPathRows(
+            after === undefined
+              ? { skip: keep, limit: MEDIA_EVICTION_PAGE_ROWS, measure: true }
+              : {
+                  skip: 0,
+                  limit: MEDIA_EVICTION_PAGE_ROWS,
+                  measure: true,
+                  after
+                }
+          )
+        ).slice(0, end - read);
+        if (page.length === 0) break;
+        newestAged ??= page[0].id;
+        page.forEach((row, at) => {
+          if (row.bytes >= config.minPartBytes) {
+            candidates.push({ id: row.id, depth: read + at });
+          }
+        });
+        read += page.length;
+        after = page[page.length - 1].id;
+      }
+
+      // Oldest first, so a pass cut short at `maxRowsPerPass` has examined
+      // everything from the cursor up to its last row, and the cursor can
+      // move there. A run of large rows without media no longer stalls it.
+      let reachedTo: { id: string; depth: number } | undefined;
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates.length - 1 - i >= config.maxRowsPerPass) {
+          totals.backlogRemains = true;
+          break;
+        }
+        const row = candidates[i];
+        reachedTo = row;
+        const message = await this.#host.readMessage(row.id);
+        if (!message) continue;
+
+        const result = await evictMediaFromMessage(message, {
+          minPartBytes: config.minPartBytes,
+          write: async (index, bytes, mediaType) => {
+            const path = evictedFilePath(message.id, index, mediaType);
+            await files.write(path, bytes);
+            return path;
+          }
+        });
+        if (!result.changed) continue;
+
+        // The rewritten row no longer carries the payload, so the bytes now
+        // exist only as the Workspace file.
+        await this.#host.updateMessage(result.message);
+        totals.messages++;
+        totals.parts += result.parts;
+        totals.bytes += result.bytes;
+      }
+
+      // Move the cursor up to what this pass examined, one write: the newest
+      // aged row, or the last candidate a pass cut short reached.
+      const advanceTo = totals.backlogRemains
+        ? reachedTo
+        : newestAged === undefined
+          ? undefined
+          : { id: newestAged, depth: keep };
+      if (storage && advanceTo) {
+        await storage.put(CURSOR_KEY, {
+          id: advanceTo.id,
+          index: total - 1 - advanceTo.depth
+        } satisfies EvictionCursor);
+      }
+      const storedBytes = this.#host.storedBytes();
+      if (totals.messages > 0) {
+        this.#fruitless = null;
+        this.#host.emitEvicted({
+          messages: totals.messages,
+          parts: totals.parts,
+          bytes: totals.bytes
+        });
+      } else if (this.#host.agedRowsHiddenFromCache() && storedBytes !== null) {
+        this.#fruitless = {
+          storedBytes,
+          appendsSince: this.#appendsDuringPass
+        };
+      }
+      return totals;
+    } catch (error) {
+      console.error(
+        "[Think] media eviction pass failed; a later pass will retry.",
+        error
+      );
+      return null;
+    } finally {
+      this.#running = false;
+      // Only chain when this pass actually shrank something: a pass that
+      // changed nothing would otherwise reschedule itself forever.
+      if (totals.backlogRemains && totals.messages > 0) {
+        this.request();
+      }
+      // A request that landed mid-pass goes back through the gate now, so
+      // media aged by an append during this pass is not left until the
+      // next one. The gate, not the request, decides whether a pass runs.
+      if (this.#pending) {
+        this.#pending = false;
+        this.request();
+      }
+    }
+  }
 }

@@ -12,7 +12,7 @@
   "durable_objects": {
     "bindings": [
       { "class_name": "CodemodeTestHost", "name": "CodemodeTestHost" },
-      // Facet-only class. vitest-pool-workers needs it listed as a binding so
+      // Facet-only class. The Vitest plugin needs it listed as a binding so
       // a facet-compatible class value resolves; it stays out of
       // new_sqlite_classes below (the host owns the SQLite store).
       { "class_name": "CodemodeRuntime", "name": "CodemodeRuntime" }

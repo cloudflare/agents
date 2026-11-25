@@ -396,7 +396,7 @@ describe("createAISDKWrapper with the real AI SDK", () => {
     });
 
     const result = await wrapped.generateText({
-      model: workersai("@cf/meta/llama-3.1-8b-instruct"),
+      model: workersai("@cf/qwen/qwen3.8-27b"),
       prompt: "Say hello"
     });
 
@@ -428,7 +428,7 @@ describe("createAISDKWrapper with the real AI SDK", () => {
     });
 
     const result = wrapped.streamText({
-      model: workersai("@cf/meta/llama-3.1-8b-instruct"),
+      model: workersai("@cf/qwen/qwen3.8-27b"),
       prompt: "Say hello"
     });
     let text = "";

@@ -45,6 +45,8 @@ export type StreamChunkData = {
   /** Optional framework-specific metadata for the approval request. */
   approvalDescriptor?: unknown;
   providerMetadata?: Record<string, unknown>;
+  /** Metadata declared by the tool, carried on tool-input-* chunks */
+  toolMetadata?: unknown;
   /** Whether the tool was executed by the provider (e.g. Gemini code execution) */
   providerExecuted?: boolean;
   /** Payload for data-* parts (developer-defined typed JSON) */
@@ -55,6 +57,8 @@ export type StreamChunkData = {
   messageId?: string;
   /** Per-message metadata attached by start/finish/message-metadata chunks */
   messageMetadata?: unknown;
+  /** Content of a `steering-message` chunk: the parts of the user message */
+  parts?: unknown;
   [key: string]: unknown;
 };
 
@@ -112,6 +116,65 @@ const rawToolInputText = new WeakMap<MessagePart, string>();
  */
 const provisionalInput = new WeakSet<MessagePart>();
 
+/**
+ * Text and reasoning parts still open, by `${type}:${chunk id}`, for each
+ * parts array. Deltas and ends go to the part their id opened, as the AI SDK
+ * routes them, so parts that overlap do not mix. A part opened before this
+ * array saw its start (a resumed stream) falls back to the last part of the
+ * type.
+ */
+const openTextParts = new WeakMap<MessagePart[], Map<string, MessagePart>>();
+
+function openTextPart(
+  parts: MessagePart[],
+  type: "text" | "reasoning",
+  id: unknown
+): MessagePart | undefined {
+  const byId =
+    typeof id === "string"
+      ? openTextParts.get(parts)?.get(`${type}:${id}`)
+      : undefined;
+  return byId ?? findLastPartByType(parts, type);
+}
+
+function startTextPart(
+  parts: MessagePart[],
+  type: "text" | "reasoning",
+  chunk: StreamChunkData
+): void {
+  const part = {
+    type,
+    text: "",
+    state: "streaming",
+    ...(chunk.providerMetadata != null
+      ? { providerMetadata: chunk.providerMetadata }
+      : {})
+  } as MessagePart;
+  parts.push(part);
+  if (typeof chunk.id !== "string") return;
+  let open = openTextParts.get(parts);
+  if (!open) {
+    open = new Map();
+    openTextParts.set(parts, open);
+  }
+  open.set(`${type}:${chunk.id}`, part);
+}
+
+function endTextPart(
+  parts: MessagePart[],
+  type: "text" | "reasoning",
+  chunk: StreamChunkData
+): void {
+  const part = openTextPart(parts, type, chunk.id);
+  if (typeof chunk.id === "string") {
+    openTextParts.get(parts)?.delete(`${type}:${chunk.id}`);
+  }
+  if (part && "state" in part) {
+    (part as { state: string }).state = "done";
+    mergeProviderMetadata(part, chunk.providerMetadata);
+  }
+}
+
 const APPROVAL_STATES = new Set(["approval-requested", "approval-responded"]);
 
 /**
@@ -130,6 +193,28 @@ export function isLateToolInputChunk(
   return APPROVAL_STATES.has(
     (existing as Record<string, unknown>).state as string
   );
+}
+
+/**
+ * Move what the parser tracks about a tool part (input text from deltas,
+ * input rebuilt from them) to the object that replaces it, so a later
+ * chunk still treats the new object the same way.
+ *
+ * @internal
+ */
+export function transferToolPartMarks(
+  from: MessagePart,
+  to: MessagePart
+): void {
+  const raw = rawToolInputText.get(from);
+  if (raw !== undefined) {
+    rawToolInputText.set(to, raw);
+    rawToolInputText.delete(from);
+  }
+  if (provisionalInput.has(from)) {
+    provisionalInput.add(to);
+    provisionalInput.delete(from);
+  }
 }
 
 /**
@@ -155,6 +240,9 @@ export function applyLateToolInput(
   }
   if (chunk.providerMetadata != null) {
     p.callProviderMetadata = chunk.providerMetadata;
+  }
+  if (chunk.toolMetadata != null) {
+    p.toolMetadata = chunk.toolMetadata;
   }
   if (chunk.title != null) {
     p.title = chunk.title;
@@ -212,6 +300,7 @@ export function lateToolInputForwardChunks(
  * - tool-input-start / tool-input-delta / tool-input-available / tool-input-error
  * - tool-output-available / tool-output-error
  * - step-start (aliased from start-step)
+ * - steering-message (a user message added to the run with AI SDK steering)
  * - data-* (developer-defined typed JSON blobs)
  *
  * @param parts - The mutable parts array to update
@@ -223,49 +312,45 @@ export function applyChunkToParts(
   chunk: StreamChunkData
 ): boolean {
   switch (chunk.type) {
+    // Provider metadata is kept as the AI SDK keeps it: from the start
+    // chunk, then merged from deltas and the end (Anthropic signs a thinking
+    // block on reasoning-end; OpenAI names a text item on text-start).
     case "text-start": {
-      parts.push({
-        type: "text",
-        text: "",
-        state: "streaming"
-      } as MessagePart);
+      startTextPart(parts, "text", chunk);
       return true;
     }
 
     case "text-delta": {
-      const lastTextPart = findLastPartByType(parts, "text");
+      const lastTextPart = openTextPart(parts, "text", chunk.id);
       if (lastTextPart && lastTextPart.type === "text") {
         (lastTextPart as { text: string }).text += chunk.delta ?? "";
+        mergeProviderMetadata(lastTextPart, chunk.providerMetadata);
       } else {
         // No text-start received — create a new text part (stream resumption fallback)
         parts.push({
           type: "text",
           text: chunk.delta ?? "",
-          state: "streaming"
+          state: "streaming",
+          ...(chunk.providerMetadata != null
+            ? { providerMetadata: chunk.providerMetadata }
+            : {})
         } as MessagePart);
       }
       return true;
     }
 
     case "text-end": {
-      const lastTextPart = findLastPartByType(parts, "text");
-      if (lastTextPart && "state" in lastTextPart) {
-        (lastTextPart as { state: string }).state = "done";
-      }
+      endTextPart(parts, "text", chunk);
       return true;
     }
 
     case "reasoning-start": {
-      parts.push({
-        type: "reasoning",
-        text: "",
-        state: "streaming"
-      } as MessagePart);
+      startTextPart(parts, "reasoning", chunk);
       return true;
     }
 
     case "reasoning-delta": {
-      const lastReasoningPart = findLastPartByType(parts, "reasoning");
+      const lastReasoningPart = openTextPart(parts, "reasoning", chunk.id);
       if (lastReasoningPart && lastReasoningPart.type === "reasoning") {
         (lastReasoningPart as { text: string }).text += chunk.delta ?? "";
         mergeProviderMetadata(lastReasoningPart, chunk.providerMetadata);
@@ -284,11 +369,7 @@ export function applyChunkToParts(
     }
 
     case "reasoning-end": {
-      const lastReasoningPart = findLastPartByType(parts, "reasoning");
-      if (lastReasoningPart && "state" in lastReasoningPart) {
-        (lastReasoningPart as { state: string }).state = "done";
-        mergeProviderMetadata(lastReasoningPart, chunk.providerMetadata);
-      }
+      endTextPart(parts, "reasoning", chunk);
       return true;
     }
 
@@ -296,7 +377,13 @@ export function applyChunkToParts(
       parts.push({
         type: "file",
         mediaType: chunk.mediaType,
-        url: chunk.url
+        url: chunk.url,
+        ...(typeof chunk.filename === "string"
+          ? { filename: chunk.filename }
+          : {}),
+        ...(chunk.providerMetadata != null
+          ? { providerMetadata: chunk.providerMetadata }
+          : {})
       } as MessagePart);
       return true;
     }
@@ -353,6 +440,9 @@ export function applyChunkToParts(
         ...(chunk.providerMetadata != null
           ? { callProviderMetadata: chunk.providerMetadata }
           : {}),
+        ...(chunk.toolMetadata != null
+          ? { toolMetadata: chunk.toolMetadata }
+          : {}),
         ...(chunk.title != null ? { title: chunk.title } : {})
       } as MessagePart);
       return true;
@@ -404,6 +494,9 @@ export function applyChunkToParts(
           if (chunk.providerMetadata != null) {
             p.callProviderMetadata = chunk.providerMetadata;
           }
+          if (chunk.toolMetadata != null) {
+            p.toolMetadata = chunk.toolMetadata;
+          }
           if (chunk.title != null) {
             p.title = chunk.title;
           }
@@ -425,6 +518,9 @@ export function applyChunkToParts(
           : {}),
         ...(chunk.providerMetadata != null
           ? { callProviderMetadata: chunk.providerMetadata }
+          : {}),
+        ...(chunk.toolMetadata != null
+          ? { toolMetadata: chunk.toolMetadata }
           : {}),
         ...(chunk.title != null ? { title: chunk.title } : {})
       } as MessagePart);
@@ -455,6 +551,9 @@ export function applyChunkToParts(
         if (chunk.providerMetadata != null) {
           p.callProviderMetadata = chunk.providerMetadata;
         }
+        if (chunk.toolMetadata != null) {
+          p.toolMetadata = chunk.toolMetadata;
+        }
       } else {
         parts.push({
           type: `tool-${chunk.toolName}`,
@@ -468,6 +567,9 @@ export function applyChunkToParts(
             : {}),
           ...(chunk.providerMetadata != null
             ? { callProviderMetadata: chunk.providerMetadata }
+            : {}),
+          ...(chunk.toolMetadata != null
+            ? { toolMetadata: chunk.toolMetadata }
             : {})
         } as MessagePart);
       }
@@ -542,9 +644,10 @@ export function applyChunkToParts(
         const p = toolPart as Record<string, unknown>;
         p.state = "output-available";
         p.output = chunk.output;
-        if (chunk.preliminary !== undefined) {
-          p.preliminary = chunk.preliminary;
-        }
+        // As the AI SDK records it: a final output carries no `preliminary`
+        // and clears an earlier one (#2635).
+        if (chunk.preliminary === undefined) delete p.preliminary;
+        else p.preliminary = chunk.preliminary;
       }
       return true;
     }
@@ -563,6 +666,26 @@ export function applyChunkToParts(
     case "step-start":
     case "start-step": {
       parts.push({ type: "step-start" } as MessagePart);
+      return true;
+    }
+
+    // AI SDK steering (`experimental_steering`) adds a user message to a
+    // running generation and emits it as a chunk between steps. It has to be
+    // persisted, or the message disappears from the transcript on reload and
+    // resume. The id is the steering message id, unique per message, so a
+    // replayed chunk never adds it twice.
+    case "steering-message": {
+      if (
+        chunk.id != null &&
+        findDataPartByTypeAndId(parts, chunk.type, chunk.id)
+      ) {
+        return true;
+      }
+      parts.push({
+        type: "steering-message",
+        id: chunk.id,
+        parts: chunk.parts
+      } as unknown as MessagePart);
       return true;
     }
 
@@ -676,6 +799,28 @@ export function isReplayChunk(
   if (chunk.type === "tool-input-start") return true;
   const state = (existing as Record<string, unknown>).state;
   return state !== "input-streaming";
+}
+
+/**
+ * Close a text or reasoning part an interruption left `streaming`.
+ *
+ * A turn that continues a cut-off reply opens text and reasoning parts of
+ * its own, after the parts the reply already holds. So its reasoning and
+ * its text follow the cut-off text in the order the model wrote them, and
+ * the continuation never writes into the old part. An end chunk closes only
+ * the newest part of its type, so a part left streaming would otherwise
+ * never be closed.
+ *
+ * Both chat hosts apply this to the parts of the message a continuation
+ * extends, before its first chunk.
+ *
+ * @returns The same part when it is not a streaming text or reasoning part.
+ */
+export function settleInterruptedPart(part: MessagePart): MessagePart {
+  return (part.type === "text" || part.type === "reasoning") &&
+    part.state === "streaming"
+    ? { ...part, state: "done" as const }
+    : part;
 }
 
 /**

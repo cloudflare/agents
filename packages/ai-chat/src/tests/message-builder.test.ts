@@ -389,6 +389,46 @@ describe("applyChunkToParts", () => {
     });
   });
 
+  describe("steering-message chunks", () => {
+    const steering = {
+      type: "steering-message",
+      id: "steer-1",
+      parts: [{ type: "text", text: "Use Paris, Texas instead." }]
+    };
+
+    it("keeps the steering message where it was delivered", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, { type: "text-start", id: "t1" });
+      applyChunkToParts(parts, { type: "text-delta", id: "t1", delta: "Hi" });
+      applyChunkToParts(parts, { type: "text-end", id: "t1" });
+      const handled = applyChunkToParts(parts, steering);
+      applyChunkToParts(parts, { type: "start-step" });
+
+      expect(handled).toBe(true);
+      expect(parts).toEqual([
+        { type: "text", text: "Hi", state: "done" },
+        {
+          type: "steering-message",
+          id: "steer-1",
+          parts: [{ type: "text", text: "Use Paris, Texas instead." }]
+        },
+        { type: "step-start" }
+      ]);
+    });
+
+    it("does not add a replayed steering message twice", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, steering);
+      applyChunkToParts(parts, steering);
+      applyChunkToParts(parts, { ...steering, id: "steer-2" });
+
+      expect(parts.map((part) => (part as { id?: string }).id)).toEqual([
+        "steer-1",
+        "steer-2"
+      ]);
+    });
+  });
+
   describe("data-* chunks", () => {
     it("appends a new data part", () => {
       const parts = makeParts();
@@ -865,6 +905,139 @@ describe("applyChunkToParts", () => {
       });
       const part = parts[0] as Record<string, unknown>;
       expect(part.preliminary).toBeUndefined();
+    });
+
+    it("a final output without the flag clears an earlier preliminary one (#2635)", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "countdown",
+        input: {}
+      });
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId: "call_1",
+        output: "3",
+        preliminary: true
+      });
+      // A generator tool's last value arrives with no `preliminary` field.
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId: "call_1",
+        output: "done"
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("output-available");
+      expect(part.output).toBe("done");
+      expect(part).not.toHaveProperty("preliminary");
+    });
+  });
+
+  describe("toolMetadata", () => {
+    const toolMetadata = { placement: "answer" };
+    const find = (parts: MessageParts) =>
+      parts[0] as unknown as Record<string, unknown>;
+
+    it("is kept from tool-input-start through tool-input-available", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        toolMetadata: { placement: "steps" }
+      });
+      expect(find(parts).toolMetadata).toEqual({ placement: "steps" });
+    });
+
+    it("is kept on a new tool-input-available and tool-input-error part", () => {
+      const a = makeParts();
+      applyChunkToParts(a, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        toolMetadata
+      });
+      expect(find(a).toolMetadata).toEqual(toolMetadata);
+      const b = makeParts();
+      applyChunkToParts(b, {
+        type: "tool-input-error",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        errorText: "bad",
+        toolMetadata
+      });
+      expect(find(b).toolMetadata).toEqual(toolMetadata);
+    });
+
+    it("is retained when a later chunk omits it", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {}
+      });
+      expect(find(parts).state).toBe("input-available");
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
+
+      const errored = makeParts();
+      applyChunkToParts(errored, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      applyChunkToParts(errored, {
+        type: "tool-input-error",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        errorText: "bad"
+      });
+      expect(find(errored).state).toBe("output-error");
+      expect(find(errored).toolMetadata).toEqual(toolMetadata);
+    });
+
+    it("is added by a late tool-input-available while the approval stays pending", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-approval-request",
+        toolCallId: "c1",
+        approvalId: "ap1"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: { q: "x" },
+        toolMetadata
+      });
+      expect(find(parts).state).toBe("approval-requested");
+      expect(find(parts).approval).toEqual({ id: "ap1" });
+      expect(find(parts).input).toEqual({ q: "x" });
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
     });
   });
 

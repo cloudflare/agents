@@ -67,6 +67,24 @@ the right moment and no lock to trip over. Handlers are ordinary arrows that
 capture `this`. Version the name (`"build-report@v2"`) instead of changing an
 in-flight definition's step layout.
 
+### More than one Tasks
+
+Give a second Tasks a `name` to keep its runs apart from the first:
+
+```ts
+readonly tasks = new Tasks({ definitions: { /* … */ } });
+readonly imports = new Tasks({ name: "imports", definitions: { /* … */ } });
+readonly lifecycle = Lifecycle.install(this).use(this.tasks).use(this.imports);
+```
+
+Each has its own runs, run ids, lanes, idempotency keys and wakes; `get`,
+`list`, `wait`, `cancel`, `clear` and `delete` see only their own, and a named instance's step idempotency keys start
+with its id (`tasks/imports:`), so they never match the unnamed one's. A name is
+a lowercase letter followed by up to 31 lowercase letters, digits or hyphens,
+and two instances with the same name in one object throw at install. The
+unnamed Tasks keeps the tables it always had. The `name` option is
+experimental.
+
 ## On an Agent
 
 `Agent` installs the capability automatically as `this.tasks` (experimental).
@@ -103,7 +121,11 @@ const receipt = await this.tasks.run("build-report@v1", input, {
 `run()` durably accepts the work and returns a receipt without waiting for
 completion. The same `idempotencyKey` (or a caller-selected `runId`) joins
 the existing run instead of creating a second one; `accepted: false` on the
-receipt marks that join. Pass `metadata` to retain JSON alongside the run and
+receipt marks that join. The join needs the same input: a reused key or run ID
+with a different input throws an error named `TaskInputConflictError` rather
+than handing back a run that does other work. Object key order does not count
+as a difference, except for input nested too deeply to sort, which is
+compared exactly as stored. Pass `metadata` to retain JSON alongside the run and
 `retain: false` to remove the record after terminal settlement.
 
 `run()` and `handle()` type the definition name and its input against the
@@ -135,7 +157,8 @@ callback that ignores it still loses the attempt, and a stale attempt's late
 writes are rejected.
 
 A callback that throws retries on a durable delay (default: 5 attempts,
-exponential backoff). Throw `NonRetryableError` to fail the run immediately.
+exponential backoff with jitter: each delay is drawn between half and all
+of the doubled delay, so runs that failed together do not retry together). Throw `NonRetryableError` to fail the run immediately.
 
 ## Replay semantics
 
@@ -198,7 +221,7 @@ before re-entering irreversible work:
 ```
 
 A step callback that throws is not an interruption; the retry policy owns
-it, with the run parked `waiting` between attempts. Interruptions also emit
+it, with the run `pending` (`waitReason: "retry"`) between attempts. Interruptions also emit
 a `task:attempt:interrupted` event carrying the same step name.
 
 ## Inspection and control
@@ -211,20 +234,17 @@ await this.tasks.cancel(receipt.runId, "superseded");
 await this.tasks.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
 ```
 
-A snapshot is discriminated by `state`:
+A snapshot is discriminated by `status`:
 
-| State       | Meaning                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `pending`   | Accepted, first attempt not yet claimed.                           |
-| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`). |
-| `waiting`   | Parked on a durable deadline (`reason`: `sleep` or `retry`).       |
-| `completed` | Settled with `result`.                                             |
-| `failed`    | Settled with a safe `error` projection.                            |
-| `cancelled` | Settled by cancellation, with its optional `reason`.               |
+| Status      | Meaning                                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `pending`   | Not running. Accepted and not yet claimed, or parked on a durable deadline: `waitReason` (`sleep` or `retry`) and `wakeAt`. |
+| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`).                                                          |
+| `completed` | Settled with `result`.                                                                                                      |
+| `error`     | Settled with a safe `error` projection.                                                                                     |
+| `aborted`   | Settled by cancellation, with its optional `reason`.                                                                        |
 
-Cancellation is cooperative: a parked run settles immediately, a live attempt
-is aborted through its signal and settles at its next step boundary. An
-external effect already accepted cannot be undone.
+Cancelling settles the run `aborted` at once. A live attempt's signal aborts, and nothing that attempt writes afterwards lands, though work it already started (an outside call) may still finish.
 
 ## Choosing an API
 
@@ -238,8 +258,8 @@ external effect already accepted cannot be undone.
 ## Current limits
 
 The first release is deliberately narrow: no `waitForCompletion` mode on
-`run()`, and no runs on routed sub-agents (facet-hosted work stays on the
-legacy fiber engine until owner-path routed dispatch lands). The legacy
+`run()`. A run accepted on a sub-agent lives on the sub-agent, with its
+wake in the sub-agent's own queue; the root agent's alarm wakes it. The legacy
 `runFiber()`/`startFiber()` APIs are released public API and remain
 unchanged, still recovered by their own scan. The design and its evolution
 are recorded in

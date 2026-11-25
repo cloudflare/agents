@@ -18,7 +18,7 @@ import {
 import { scriptedAI } from "./scripted-ai";
 import { TEST_TIMING } from "./timing";
 
-const MODEL = "@cf/moonshotai/kimi-k2.7-code";
+const MODEL = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 const RELEASE_KEY = "test:hold:release";
 const HOLD_RUNS_KEY = "test:hold:runs";
 

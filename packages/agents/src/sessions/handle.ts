@@ -9,8 +9,12 @@
  */
 
 import type { CompactResult } from "./compaction-helpers";
-import { COMPACTION_PREFIX, isCompactionMessage } from "./compaction-helpers";
-import type { SessionsCore } from "./core";
+import {
+  COMPACTION_PREFIX,
+  OLDEST_PART,
+  isCompactionMessage
+} from "./compaction-helpers";
+import { COMPACT_INPUT_BYTES, type SessionsCore } from "./core";
 import { mirrorSessionChanges, type SessionMirrorOptions } from "./mirror";
 import { byteLength, sanitizeMessage } from "./sanitize";
 import type {
@@ -173,6 +177,33 @@ export class Session {
   async getHistoryRowStats(leafId?: string | null): Promise<SessionRowStat[]> {
     await this.#ready();
     return this.#core.pathRowStats(this.sessionId, leafId);
+  }
+
+  /**
+   * @internal Sibling-package support, not a public API. A page of the
+   * stored path from the newest row back: depths `skip` to
+   * `skip + limit - 1`, rows under an overlay included; with `after`, counted
+   * from that row's parent, to continue from a previous page. With
+   * `measure`, each row carries its hydrated size.
+   */
+  async internal_storedPathRows(options: {
+    skip: number;
+    limit: number;
+    measure?: boolean;
+    after?: string;
+  }): Promise<Array<{ id: string; bytes: number }>> {
+    await this.#ready();
+    return this.#core.storedPathRows(this.sessionId, options);
+  }
+
+  /**
+   * @internal Sibling-package support, not a public API. Which of `ids`
+   * this session holds: stored rows, and the summaries its overlays show
+   * (`compaction_<id>`). Key probes, no content read.
+   */
+  async internal_existingIds(ids: readonly string[]): Promise<Set<string>> {
+    await this.#ready();
+    return this.#core.existingIds(this.sessionId, ids);
   }
 
   async getMessage(id: string): Promise<SessionMessage | null> {
@@ -427,6 +458,71 @@ export class Session {
     return this.#core.getCompactions(this.sessionId);
   }
 
+  // ── Annotations and config (internal) ────────────────────────────────────
+
+  /**
+   * @internal Sibling-package support, not a public API. Server-side data a
+   * first-party module keeps about messages of this session, by kind. Never
+   * part of a message and never sent to a client; deleted with its message
+   * and on clear; an overlay carries the newest annotation of each kind
+   * from the rows it hides, and keeps it after those rows are deleted (its
+   * summary was written with them). Returns only the ids that have one.
+   */
+  async internal_annotations(
+    kind: string,
+    messageIds: readonly string[]
+  ): Promise<Map<string, string>> {
+    await this.#ready();
+    return this.#core.annotations(this.sessionId, kind, messageIds);
+  }
+
+  /** @internal Store one annotation (see {@link internal_annotations}). */
+  async internal_setAnnotation(
+    kind: string,
+    messageId: string,
+    value: string
+  ): Promise<void> {
+    await this.#ready();
+    this.#core.setAnnotation(this.sessionId, kind, messageId, value);
+  }
+
+  /**
+   * @internal The newest annotation of `kind` among the messages
+   * `getHistory({ leafId })` returns, overlay messages included.
+   */
+  async internal_latestAnnotation(
+    kind: string,
+    leafId?: string | null
+  ): Promise<{ messageId: string; value: string } | null> {
+    await this.#ready();
+    return this.#core.latestAnnotation(this.sessionId, kind, leafId);
+  }
+
+  /**
+   * @internal Sibling-package support, not a public API. The table Context
+   * keeps its blocks in for this Sessions instance: today's block table for
+   * the default, with the instance's suffix for a named one.
+   */
+  get internal_contextBlocksTable(): string {
+    return this.#core.tables.contextBlocks;
+  }
+
+  /**
+   * @internal A value a first-party module keeps for this session. Keys
+   * starting with `transcript:` are deleted by `clearMessages()`; any other
+   * key outlives a clear.
+   */
+  async internal_config(key: string): Promise<string | null> {
+    await this.#ready();
+    return this.#core.config(this.sessionId, key);
+  }
+
+  /** @internal Set, or delete with `null`, a value kept for this session. */
+  async internal_setConfig(key: string, value: string | null): Promise<void> {
+    await this.#ready();
+    this.#core.setConfig(this.sessionId, key, value);
+  }
+
   /**
    * Run the registered compaction function and store the result as an
    * overlay. When `leafId` is given, compact that root-to-leaf branch instead
@@ -442,7 +538,25 @@ export class Session {
         "No compaction function registered. Call onCompaction() first."
       );
     }
-    const history = await this.#core.getHistory(this.sessionId, { leafId });
+    // The oldest visible part that fits one round's budget: a long
+    // uncompacted path compacts in rounds instead of failing to load.
+    const {
+      messages: history,
+      omitted,
+      omittedTokens
+    } = await this.#core.oldestVisible(
+      this.sessionId,
+      COMPACT_INPUT_BYTES,
+      leafId
+    );
+    // `createCompactFunction` then protects no recent tail inside the part:
+    // the recent messages are past it, and protecting some here could
+    // leave a round with nothing to summarize, round after round.
+    if (omitted > 0) {
+      Object.defineProperty(history, OLDEST_PART, {
+        value: { messages: omitted, tokens: omittedTokens }
+      });
+    }
 
     let result: CompactResult | null;
     try {
@@ -459,24 +573,27 @@ export class Session {
     const historyIds = new Set(history.map((message) => message.id));
     if (!historyIds.has(result.toMessageId)) return null;
 
-    // Iterative compaction extends only an overlay visible on this branch.
-    const existing = this.#core
-      .getCompactions(this.sessionId)
-      .filter(
-        (compaction) =>
-          historyIds.has(`${COMPACTION_PREFIX}${compaction.id}`) ||
-          (historyIds.has(compaction.fromMessageId) &&
-            historyIds.has(compaction.toMessageId))
-      );
-    const fromId =
-      existing.length > 0 ? existing[0].fromMessageId : result.fromMessageId;
-
-    this.#core.addCompaction(
+    // Iterative compaction extends the overlay this branch shows, keeping
+    // its start and the head below it.
+    const visible = history.find((message) => isCompactionMessage(message));
+    // A range ending at a summary message re-summarizes that overlay: the
+    // new one ends where it ends and supersedes it.
+    let toMessageId = result.toMessageId;
+    if (toMessageId.startsWith(COMPACTION_PREFIX)) {
+      const ended = this.#core
+        .getCompactions(this.sessionId)
+        .find((c) => `${COMPACTION_PREFIX}${c.id}` === toMessageId);
+      if (!ended) return null;
+      toMessageId = ended.toMessageId;
+    }
+    const stored = this.#core.addCompaction(
       this.sessionId,
       result.summary,
-      fromId,
-      result.toMessageId
+      result.fromMessageId,
+      toMessageId,
+      visible?.id.slice(COMPACTION_PREFIX.length)
     );
+    const fromId = stored.fromMessageId;
     await this.#core.notify({ type: "compact", sessionId: this.sessionId });
     return { ...result, fromMessageId: fromId };
   }

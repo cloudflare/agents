@@ -149,7 +149,7 @@ export type MessengerConcurrency = ConcurrencyStrategy | ConcurrencyConfig;
  * Chat SDK default (90 seconds) drops follow-ups sent early in a long turn,
  * so Think applies this unless `queueEntryTtlMs` is set explicitly.
  */
-export const MESSENGER_QUEUE_ENTRY_TTL_MS = 30 * 60 * 1000;
+const MESSENGER_QUEUE_ENTRY_TTL_MS = 30 * 60 * 1000;
 
 export const DEFAULT_MESSENGER_CONCURRENCY: MessengerConcurrency = {
   debounceMs: 600,
@@ -268,7 +268,7 @@ export interface MessengerThinkHost extends MessengerThinkTarget {
   keepAliveWhile?<T>(fn: () => Promise<T>): Promise<T>;
 }
 
-export interface MessengerFiberStartResult {
+interface MessengerFiberStartResult {
   accepted: boolean;
   fiberId: string;
   snapshot?: unknown;
@@ -1129,7 +1129,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function toMessengerAction(action: ChatActionEvent): MessengerAction {
+function toMessengerAction(action: ChatActionEvent): MessengerAction {
   return {
     actionId: action.actionId,
     messageId: action.messageId,

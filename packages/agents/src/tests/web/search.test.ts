@@ -703,6 +703,23 @@ describe("adapters", () => {
       { type: "text", text: expect.stringContaining("2 results") }
     ]);
     expect(result.details).toEqual({ ok: true, output: RESPONSE });
+    // Code mode scripts get the results as an object, trimmed as above.
+    expect(result.structuredOutput).toEqual({
+      query: "web search api",
+      items: [
+        {
+          title: "Introducing Web Search API via AI Gateway | Cloudflare Blog",
+          url: "https://blog.cloudflare.com/introducing-web-search-api/",
+          description:
+            "# Introducing Web Search API Today, we're announcing Cloudflare's partnership with web search providers.",
+          lastModifiedDate: "2026-10-02T14:16:00.000Z"
+        },
+        {
+          title: "Web Search · Cloudflare AI Gateway docs",
+          url: "https://developers.cloudflare.com/ai-gateway/usage/web-search/"
+        }
+      ]
+    });
   });
 
   it("pi: failures are error results with the API's code", async () => {
@@ -792,10 +809,10 @@ describe("adapters", () => {
 
   it("tells the model the host's limit without rejecting more", async () => {
     const pi = piWebSearchTool({ source: okSource, limit: 3 });
-    const piLimit = pi.parameters.properties.limit as {
-      maximum?: number;
-      description?: string;
+    const { properties } = pi.parameters as unknown as {
+      properties: Record<string, { maximum?: number; description?: string }>;
     };
+    const piLimit = properties.limit;
     expect(piLimit.maximum).toBeUndefined();
     expect(piLimit.description).toContain("at most 3");
 
@@ -828,9 +845,9 @@ describe("adapters", () => {
   });
 
   it("tanstack: failures throw so TanStack AI reports an error result", async () => {
-    const error = await tanstackWebSearchTool({ source: failingSource })
-      .execute?.({ query: "a" })
-      .catch((e: unknown) => e);
+    const error = await Promise.resolve(
+      tanstackWebSearchTool({ source: failingSource }).execute?.({ query: "a" })
+    ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(WebSearchError);
     expect(error).toMatchObject({
       code: "web_search_payment_required",

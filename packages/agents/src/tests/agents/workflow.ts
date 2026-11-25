@@ -288,12 +288,27 @@ export class TestWorkflowAgent extends Agent {
     }
   }
 
+  /** How many times `onWorkflowProgress` threw for `{ step: "throw" }`. */
+  progressThrows = 0;
+
+  getProgressThrows(): number {
+    return this.progressThrows;
+  }
+
+  async runHookThrowsWorkflowTest(workflowId: string): Promise<string> {
+    return this.runWorkflow("HOOK_THROWS_WORKFLOW", {}, { id: workflowId });
+  }
+
   // Override lifecycle callbacks to track them
   async onWorkflowProgress(
     workflowName: string,
     workflowId: string,
     progress: unknown
   ): Promise<void> {
+    if ((progress as { step?: unknown } | undefined)?.step === "throw") {
+      this.progressThrows += 1;
+      throw new Error("progress hook failed");
+    }
     this._callbacksReceived.push({
       type: "progress",
       workflowName,
@@ -749,6 +764,42 @@ export class TestWorkflowAgent extends Agent {
   }
 
   // Start a throw-in-run workflow
+  /** Reset this object, as a crash or the memory-limit breaker would. */
+  crashForTest(): void {
+    this.ctx.abort("crashed by test");
+  }
+
+  echoForTest(value: string): string {
+    return value;
+  }
+
+  /** Synchronous, so native RPC alone does not start the Agent. */
+  startedForTest(): boolean {
+    return this.lifecycle.isStarted();
+  }
+
+  get startedGetterForTest(): boolean {
+    return this.lifecycle.isStarted();
+  }
+
+  get settingsForTest(): { enabled: boolean } {
+    return { enabled: true };
+  }
+
+  async runAgentResetWorkflowTest(workflowId: string): Promise<string> {
+    return this.runWorkflow("AGENT_RESET_WORKFLOW", {}, { id: workflowId });
+  }
+
+  async runAgentResetBetweenStepsWorkflowTest(
+    workflowId: string
+  ): Promise<string> {
+    return this.runWorkflow(
+      "AGENT_RESET_BETWEEN_STEPS_WORKFLOW",
+      { agentName: this.name },
+      { id: workflowId }
+    );
+  }
+
   async runThrowInRunWorkflowTest(
     workflowId: string,
     params: { message: string }

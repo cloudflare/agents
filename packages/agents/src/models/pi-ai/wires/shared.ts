@@ -121,18 +121,23 @@ export function startMessage(model: Model<Api>): AssistantMessage {
  * The cache fields are the ones pi-ai's own `parseChunkUsage` reads, spelling
  * for spelling: `prompt_tokens_details.cached_tokens` is OpenAI's, DeepSeek
  * sends `prompt_cache_hit_tokens` instead, and OpenRouter-compatible providers
- * add `prompt_tokens_details.cache_write_tokens`.
+ * add `prompt_tokens_details.cache_write_tokens`. Reasoning tokens are
+ * `completion_tokens_details.reasoning_tokens`, or a top-level
+ * `reasoning_tokens` (GitHub Copilot's spelling) when that is missing or 0.
  */
 export interface OpenAIUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
   prompt_cache_hit_tokens?: number;
+  /** Kimi's spelling, on the final usage chunk. */
+  cached_tokens?: number;
   prompt_tokens_details?: {
     cached_tokens?: number;
     cache_write_tokens?: number;
   };
   completion_tokens_details?: { reasoning_tokens?: number };
+  reasoning_tokens?: number;
 }
 
 /**
@@ -152,9 +157,13 @@ export function usageFromOpenAI(
   const cacheRead =
     raw.prompt_tokens_details?.cached_tokens ??
     raw.prompt_cache_hit_tokens ??
+    raw.cached_tokens ??
     0;
   const cacheWrite = raw.prompt_tokens_details?.cache_write_tokens ?? 0;
-  const reasoning = raw.completion_tokens_details?.reasoning_tokens;
+  const nestedReasoning = raw.completion_tokens_details?.reasoning_tokens;
+  const reasoning = nestedReasoning
+    ? nestedReasoning
+    : (raw.reasoning_tokens ?? nestedReasoning);
   const totalTokens = raw.total_tokens ?? prompt + completion;
   // Google counts reasoning outside `completion_tokens` (live: prompt 6 +
   // completion 3 + reasoning 57 = total 66); OpenAI and Workers AI satisfy

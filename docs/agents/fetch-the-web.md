@@ -45,7 +45,7 @@ const result = streamText({
 });
 ```
 
-If you convert UI messages yourself, pass the same tools to `convertToModelMessages(messages, { tools })`. Without them, the AI SDK sends earlier fetches back to the model as the JSON output: the same window, but without the header line or the `<untrusted_web_content>` wrapper. `AiSdkHarness` does this for you.
+If you convert UI messages yourself, pass the same tools to `convertToModelMessages(messages, { tools })`. Without them, the AI SDK sends earlier fetches back to the model as the JSON output: the same window, but without the header line or the `<untrusted_web_content>` wrapper. Think does this for you.
 
 TanStack AI:
 
@@ -219,6 +219,26 @@ const tools = {
   web_search: webSearchTool({ binding: this.env.AI }),
   web_fetch: webFetchTool({ binding: this.env.AI })
 };
+```
+
+## In pi's code mode
+
+With pi-durable's code mode installed beside the tool (setup in [Browse the Web](./browse-the-web.md#in-pis-code-mode)), a script calls `tools.web_fetch({ url, offset, format })` and gets the window as an object, not the model's text:
+
+```ts
+{ url, status, contentType, title?, content, offset, nextOffset, totalChars }
+```
+
+`url` is the URL after redirects. `content` stays wrapped in the `<untrusted_web_content>` tags, so text a script hands back to the model is still marked as data. Pass `nextOffset` as `offset` to read on; it is `null` at the end. A failed fetch rejects with the model's text. The model's own result is the same text as before.
+
+With `web_search` installed too, one script can search and read the results in parallel:
+
+```ts
+const found = await tools.web_search({ query: "Durable Objects alarms" });
+const pages = await Promise.all(
+  found.items.slice(0, 3).map((item) => tools.web_fetch({ url: item.url }))
+);
+return pages.map((page) => ({ title: page.title, content: page.content }));
 ```
 
 ## What It Is Not

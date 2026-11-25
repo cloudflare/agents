@@ -199,7 +199,10 @@ describe("recovery × failed final persist (#1997)", () => {
     const result = await agent.testRunTurnWait("hello");
 
     expect(result.status).toBe("error");
-    expect(await agent.getChatResponsesForTest()).toEqual([]);
+    // The turn ended, so its hook runs, with the error.
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "error" })
+    ]);
   });
 
   it("does not mark a recovery incident completed when the continuation cannot persist", async () => {
@@ -260,7 +263,9 @@ describe("recovery × failed final persist (#1997)", () => {
     }>;
     expect(incidents).toHaveLength(1);
     expect(incidents[0].status).not.toBe("completed");
-    expect(await agent.getChatResponsesForTest()).toEqual([]);
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "error" })
+    ]);
   });
 });
 
@@ -336,13 +341,14 @@ describe("recovery × onChatResponse after a reset (#2266)", () => {
     expect(await agent.getActiveFibers()).toHaveLength(0);
   });
 
-  it("replays an owed response hook on startup without a chat fiber", async () => {
+  it("replays on startup an owed response hook a released version kept, without a chat fiber", async () => {
     const agent = await freshRecoveryAgent(
       `hook-reset-start-${crypto.randomUUID()}`
     );
     await agent.resetBeforeNextResponseHookForTest();
     await agent.testRunTurnWait("hello");
     expect(await agent.getChatResponsesForTest()).toEqual([]);
+    await agent.leaveOwedHookAsReleasedForTest();
 
     await agent.replayPendingResponseHooksForTest();
     await agent.replayPendingResponseHooksForTest();
@@ -355,6 +361,18 @@ describe("recovery × onChatResponse after a reset (#2266)", () => {
         recovered: true
       })
     ]);
+  });
+
+  it("keeps the hook a turn owes on the turn's run, not in KV", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-on-run-${crypto.randomUUID()}`
+    );
+    const { kvKeys, onRun } =
+      await agent.owedHookStorageDuringTurnForTest("hello");
+    expect(onRun).toBe(true);
+    expect(
+      kvKeys.filter((key) => key.startsWith("cf_think_pending_response_hook:"))
+    ).toEqual([]);
   });
 
   it("does not replay the hook of a turn that completed normally", async () => {

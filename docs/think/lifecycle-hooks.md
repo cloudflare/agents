@@ -126,9 +126,9 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. When context blocks are configured, Think builds the system prompt from those blocks instead of using `getSystemPrompt()`. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
+A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. When context blocks are configured, Think builds the system prompt from an overridden `getSystemPrompt()` followed by those blocks. Think's default `getSystemPrompt()` is only used when there are no blocks. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
 
-The assembled blocks are available as `this.context` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior.
+The assembled blocks are available as `this.context` once the Lifecycle has started. See [Context](./context.md) for providers, tools, and what the model is sent.
 
 ---
 
@@ -142,18 +142,18 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 
 ### TurnContext
 
-| Field          | Type                            | Description                                                              |
-| -------------- | ------------------------------- | ------------------------------------------------------------------------ |
-| `system`       | `string`                        | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
-| `messages`     | `ModelMessage[]`                | Assembled model messages (truncated)                                     |
-| `tools`        | `ToolSet`                       | Merged tool set (workspace + getTools + context + MCP + client + caller) |
-| `model`        | `LanguageModel`                 | The resolved model (a string from `getModel()` is already resolved here) |
-| `continuation` | `boolean`                       | Whether this is a continuation turn (auto-continue after tool result)    |
-| `body`         | `Record<string, unknown>`       | Custom body fields from the client request                               |
-| `requestId`    | `string \| undefined`           | The request this turn runs for. See [Turn identity](#turn-identity)      |
-| `trigger`      | `TurnTrigger \| undefined`      | What admitted the turn: `"ws-chat"`, `"rpc"`, `"submission"`, and so on  |
-| `abortSignal`  | `AbortSignal \| undefined`      | Aborts when the turn is cancelled. Pass it to I/O the hook awaits        |
-| `messenger`    | `MessengerContext \| undefined` | The messenger thread this turn answers, fixed when the turn was admitted |
+| Field          | Type                            | Description                                                                 |
+| -------------- | ------------------------------- | --------------------------------------------------------------------------- |
+| `system`       | `string`                        | Assembled system prompt (`getSystemPrompt()` override, then context blocks) |
+| `messages`     | `ModelMessage[]`                | Assembled model messages (truncated)                                        |
+| `tools`        | `ToolSet`                       | Merged tool set (workspace + getTools + context + MCP + client + caller)    |
+| `model`        | `LanguageModel`                 | The resolved model (a string from `getModel()` is already resolved here)    |
+| `continuation` | `boolean`                       | Whether this is a continuation turn (auto-continue after tool result)       |
+| `body`         | `Record<string, unknown>`       | Custom body fields from the client request                                  |
+| `requestId`    | `string \| undefined`           | The request this turn runs for. See [Turn identity](#turn-identity)         |
+| `trigger`      | `TurnTrigger \| undefined`      | What admitted the turn: `"ws-chat"`, `"rpc"`, `"submission"`, and so on     |
+| `abortSignal`  | `AbortSignal \| undefined`      | Aborts when the turn is cancelled. Pass it to I/O the hook awaits           |
+| `messenger`    | `MessengerContext \| undefined` | The messenger thread this turn answers, fixed when the turn was admitted    |
 
 ### Turn identity
 
@@ -874,9 +874,9 @@ classifyChatError(error: unknown, ctx?: ChatErrorContext): ChatErrorClassificati
 
 - `"context_overflow"` runs the compact-and-retry backstop when `contextOverflow.reactive` is enabled (see [Context-window overflow recovery](./index.md#context-window-overflow-recovery)). If recovery cannot save the turn, that classification is surfaced on the terminal `onChatError` call via `ChatErrorContext.classification`.
 - `"transient"` and `"rate_limit"` route the turn into bounded chat recovery, the same path as a stream stall. Think calls `onChatRecovery`, keeps the partial response (unless the hook returns `persist: false`), and schedules a continuation. The continuation waits 1 second on the first attempt and doubles on each later attempt, up to 30 seconds. Once `chatRecovery.maxAttempts` is spent, the turn ends with the configured terminal message and `onExhausted`, not the raw error.
-- `"fatal"`, `"unknown"`, and `void` (the default) keep the existing terminal behavior.
+- `"fatal"` and `"unknown"` keep the existing terminal behavior. `void` (the default) lets Think read the provider's error itself, as described below.
 
-If `contextOverflow.reactive` is enabled but neither your class nor a parent class overrides `classifyChatError` (as a method or a class field), Think logs a one-time warning and skips overflow recovery, since the default classifier never returns `"context_overflow"`.
+When `classifyChatError` returns nothing (or is not overridden), Think reads the provider's error itself: a context-window error (OpenAI `context_length_exceeded`, Anthropic "prompt is too long", and the other common providers' wording) is `"context_overflow"`, an HTTP 429 is `"rate_limit"`, and a 408, 5xx or 529 is `"transient"`. The `agents/models` errors, AI SDK `APICallError`s and any error with an HTTP status are read this way. Your override always wins.
 
 The argument may be an `Error`, an AI SDK `APICallError` (with `statusCode`/`responseBody`), or — for in-stream provider errors that surface as a stream error part rather than a throw — the error message string. Narrow accordingly. (Think confirms provider context-overflow errors always surface as in-stream error parts, never thrown exceptions out of `streamText`, so this hook sees them whether you read the `Error` or the string form.)
 
@@ -884,27 +884,15 @@ The second argument is a [`ChatErrorContext`](#onchaterror): when consulted for 
 
 ### Example
 
-For the common case, assign the bundled `defaultContextOverflowClassifier`, which matches the context-overflow errors of Anthropic, OpenAI, Google, Bedrock, and others:
-
-```typescript
-import { Think, defaultContextOverflowClassifier } from "@cloudflare/think";
-
-export class MyAgent extends Think<Env> {
-  override classifyChatError = defaultContextOverflowClassifier;
-}
-```
-
-Or write your own, optionally delegating to the bundled classifier:
+Think already reads the common providers' errors, so override this only for errors it does not know. Return nothing to fall back to Think's own reading:
 
 ```typescript
 import type { ChatErrorClassification } from "@cloudflare/think";
-import { defaultContextOverflowClassifier } from "@cloudflare/think";
 
 classifyChatError(error: unknown): ChatErrorClassification | void {
-  if (error instanceof Error && /rate.?limit/i.test(error.message)) {
-    return "rate_limit";
+  if (error instanceof Error && /quota exhausted/i.test(error.message)) {
+    return "fatal";
   }
-  return defaultContextOverflowClassifier(error);
 }
 ```
 

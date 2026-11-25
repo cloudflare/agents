@@ -52,6 +52,16 @@ describe("parseProtocolMessage", () => {
     expect(event).toEqual({ type: "clear" });
   });
 
+  it("parses a stop from a tab that waits on a continuation", () => {
+    const event = parseProtocolMessage(
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL,
+        continuation: true
+      })
+    );
+    expect(event).toEqual({ type: "cancel-continuation" });
+  });
+
   it("parses cancel", () => {
     const msg = {
       type: CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL,

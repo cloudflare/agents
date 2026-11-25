@@ -110,9 +110,28 @@ export class TestChatSdkStateHostAgent extends Agent {
     const sleep = (ms: number) =>
       new Promise((resolve) => setTimeout(resolve, ms));
 
-    const lock = await state.acquireLock(threadId, 200);
-    await sleep(600);
-    const contender = await state.acquireLock(threadId, 200);
+    // Wait for the event, not a time: a beat that extends the lock after
+    // its first TTL ran out. A beat that finds it gone fails the test.
+    const ttlMs = 1200;
+    let firstExpiry = Number.POSITIVE_INFINITY;
+    let pastTtl!: () => void;
+    let lost!: (error: Error) => void;
+    const beatPastTtl = new Promise<void>((resolve, reject) => {
+      pastTtl = resolve;
+      lost = reject;
+    });
+    const extendLock = state.extendLock.bind(state);
+    state.extendLock = async (held, ms) => {
+      const beatAt = Date.now();
+      const extended = await extendLock(held, ms);
+      if (!extended) lost(new Error("a beat found the lock gone"));
+      else if (beatAt > firstExpiry) pastTtl();
+      return extended;
+    };
+    const lock = await state.acquireLock(threadId, ttlMs);
+    if (lock) firstExpiry = lock.expiresAt;
+    await beatPastTtl;
+    const contender = await state.acquireLock(threadId, ttlMs);
     if (lock) await state.releaseLock(lock);
     const afterRelease = await state.acquireLock(threadId, 200);
     if (afterRelease) await state.releaseLock(afterRelease);

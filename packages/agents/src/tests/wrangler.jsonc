@@ -25,6 +25,10 @@
         "name": "StatefulPlainObject"
       },
       {
+        "class_name": "EventLogObject",
+        "name": "EventLogObject"
+      },
+      {
         "class_name": "RetryableStartObject",
         "name": "RetryableStartObject"
       },
@@ -39,6 +43,14 @@
       {
         "class_name": "EvictableStartObject",
         "name": "EvictableStartObject"
+      },
+      {
+        "class_name": "FetchErrorObject",
+        "name": "FetchErrorObject"
+      },
+      {
+        "class_name": "TestFetchErrorAgent",
+        "name": "TestFetchErrorAgent"
       },
       {
         "class_name": "ScheduledLifecycleObject",
@@ -89,8 +101,12 @@
         "name": "ChannelsHarnessObject"
       },
       {
-        "class_name": "AiSdkHarnessObject",
-        "name": "AiSdkHarnessObject"
+        "class_name": "ChannelsDeliveryObject",
+        "name": "ChannelsDeliveryObject"
+      },
+      {
+        "class_name": "ThinkChannelsObject",
+        "name": "ThinkChannelsObject"
       },
       {
         "class_name": "CutoverHarnessObject",
@@ -148,6 +164,10 @@
       {
         "class_name": "TestOAuthAgent",
         "name": "TestOAuthAgent"
+      },
+      {
+        "class_name": "McpIntegrationAgent",
+        "name": "McpIntegrationAgent"
       },
       {
         "class_name": "TestCustomOAuthAgent",
@@ -226,6 +246,14 @@
       {
         "class_name": "TestStateAgentNoInitial",
         "name": "TestStateAgentNoInitial"
+      },
+      {
+        "class_name": "TestSlowConnectAgent",
+        "name": "TestSlowConnectAgent"
+      },
+      {
+        "class_name": "TestResetAgent",
+        "name": "TestResetAgent"
       },
       {
         "class_name": "TestThrowingStateAgent",
@@ -307,6 +335,18 @@
         "name": "TestSubAgentParent"
       },
       {
+        "class_name": "FacetWakeRoot",
+        "name": "FacetWakeRoot"
+      },
+      {
+        "class_name": "FacetWakeMiddle",
+        "name": "FacetWakeMiddle"
+      },
+      {
+        "class_name": "FacetWakeLeaf",
+        "name": "FacetWakeLeaf"
+      },
+      {
         "class_name": "CustomBoundSubAgentParent",
         "name": "CUSTOM_BOUND_SUB_AGENT_PARENT"
       },
@@ -345,6 +385,15 @@
       {
         "class_name": "BroadcastSubAgent",
         "name": "BroadcastSubAgent"
+      },
+      // An event log inside a facet (facet-only, no migration).
+      {
+        "class_name": "EventLogSubAgent",
+        "name": "EventLogSubAgent"
+      },
+      {
+        "class_name": "EventLogFacetParent",
+        "name": "EventLogFacetParent"
       },
       // Request-body forwarding probes (issue #2015). The sub-agent is
       // facet-only (binding is a harness requirement, no migration); the
@@ -410,6 +459,7 @@
     ]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
+  "r2_buckets": [{ "binding": "SKILLS_BUCKET", "bucket_name": "skills-test" }],
   "workflows": [
     {
       "name": "test-processing-workflow",
@@ -435,6 +485,21 @@
       "name": "facet-event-state-workflow",
       "binding": "FACET_EVENT_STATE_WORKFLOW",
       "class_name": "FacetEventStateWorkflow"
+    },
+    {
+      "name": "agent-reset-workflow",
+      "binding": "AGENT_RESET_WORKFLOW",
+      "class_name": "AgentResetWorkflow"
+    },
+    {
+      "name": "hook-throws-workflow",
+      "binding": "HOOK_THROWS_WORKFLOW",
+      "class_name": "HookThrowsWorkflow"
+    },
+    {
+      "name": "agent-reset-between-steps-workflow",
+      "binding": "AGENT_RESET_BETWEEN_STEPS_WORKFLOW",
+      "class_name": "AgentResetBetweenStepsWorkflow"
     },
     {
       "name": "throw-in-run-workflow",
@@ -464,10 +529,14 @@
         "CapabilityHarnessObject",
         "PlainLifecycleObject",
         "StatefulPlainObject",
+        "EventLogObject",
+        "EventLogFacetParent",
         "RetryableStartObject",
         "AlarmStartFailureObject",
         "ConcurrentStartObject",
         "EvictableStartObject",
+        "FetchErrorObject",
+        "TestFetchErrorAgent",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
@@ -480,7 +549,8 @@
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
         "ChannelsHarnessObject",
-        "AiSdkHarnessObject",
+        "ChannelsDeliveryObject",
+        "ThinkChannelsObject",
         "CutoverHarnessObject",
         "SqliteStrategiesBench",
         "TaskStreamComposeObject",
@@ -496,6 +566,7 @@
         "TestUserNotificationAgent",
         "TestRaceAgent",
         "TestOAuthAgent",
+        "McpIntegrationAgent",
         "TestCustomOAuthAgent",
         "TestMcpJurisdiction",
         "TestAlarmInitAgent",
@@ -514,6 +585,8 @@
         "TestHttpMcpDedupAgent",
         "TestStateAgent",
         "TestStateAgentNoInitial",
+        "TestSlowConnectAgent",
+        "TestResetAgent",
         "TestThrowingStateAgent",
         "TestPersistedStateAgent",
         "TestBothHooksAgent",
@@ -532,6 +605,9 @@
         "RoutingOwnerAgent",
         "RoutedChatAgent",
         "TestSubAgentParent",
+        "FacetWakeRoot",
+        "FacetWakeMiddle",
+        "FacetWakeLeaf",
         "CustomBoundSubAgentParent",
         "TestWorkflowSubAgent",
         "TestWorkflowOnStartSubAgent",

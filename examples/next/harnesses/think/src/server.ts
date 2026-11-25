@@ -7,7 +7,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/ai-sdk";
 import { WebSockets } from "agents/websockets";
 
-const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
+const MODEL_ID = "@cf/deepseek-ai/deepseek-v4.1-flash-1017";
 
 /**
  * Think's agent loop on a plain Durable Object: ThinkHarness keeps the

@@ -50,11 +50,20 @@ export class GenerateObject extends DurableObject<Env> {
         total?: number;
       };
       const streamId = body.id ?? "demo";
-      const receipt = await this.tasks.run(
-        "generate@v1",
-        { streamId, total: body.total ?? 10 },
-        { idempotencyKey: `generate:${streamId}` }
-      );
+      let receipt;
+      try {
+        receipt = await this.tasks.run(
+          "generate@v1",
+          { streamId, total: body.total ?? 10 },
+          { idempotencyKey: `generate:${streamId}` }
+        );
+      } catch (error) {
+        // The same stream id with another total is a different job.
+        if (error instanceof Error && error.name === "TaskInputConflictError") {
+          return Response.json({ error: error.message }, { status: 409 });
+        }
+        throw error;
+      }
       return Response.json(
         { receipt },
         { status: receipt.accepted ? 201 : 200 }

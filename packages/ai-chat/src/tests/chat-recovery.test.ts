@@ -6,6 +6,7 @@ import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 import { MessageType } from "../types";
 
 interface ChatTestStub {
+  recentTerminalForTest(requestId: string): Promise<unknown>;
   getPersistedMessages(): Promise<ChatMessage[]>;
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   getOnChatMessageCallCount(): Promise<number>;
@@ -52,7 +53,11 @@ interface ChatTestStub {
     chunks: Array<{ body: string; index: number }>,
     ageMs?: number
   ): Promise<void>;
-  insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+  insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown,
+    legacySnapshot?: boolean
+  ): Promise<void>;
   triggerFiberRecovery(): Promise<void>;
   setChatRecoveryConfigForTest(config: {
     maxAttempts?: number;
@@ -398,6 +403,34 @@ describe("chatRecovery", () => {
       ws.close(1000);
     });
 
+    it("continueLastTurn hands onError the error onChatMessage threw, and leaves nothing behind", async () => {
+      const room = crypto.randomUUID();
+      const stub = await getAgentByName(env.RecoveryThrowingAgent, room);
+
+      const outcome = await stub.testContinueLastTurnWhileThrowing();
+
+      // onError hears of the failure from the recovery task and from the
+      // turn, as it does for a client request and for saveMessages. Both
+      // times it gets the error onChatMessage threw, never its own result.
+      // The caller gets what onError threw.
+      expect(outcome.onErrorSeen).toEqual([
+        "Simulated onChatMessage error",
+        "Simulated onChatMessage error"
+      ]);
+      expect(outcome.thrown).toBe("onError(Simulated onChatMessage error)");
+      // The recovery fiber, the turn's checkpoint, the turn queue and the
+      // abort registry are clean.
+      expect(outcome.liveRecoveryTurns).toBe(0);
+      expect(outcome.checkpointEntries).toBe(0);
+      expect(outcome.fibers).toBe(0);
+      expect(outcome.abortControllers).toBe(0);
+      expect(outcome.queueIdle).toBe(true);
+
+      // The next continuation runs normally.
+      const next = await stub.callContinueLastTurn();
+      expect(next.status).toBe("completed");
+    });
+
     it("still works for subsequent requests after an error", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
@@ -527,61 +560,190 @@ describe("chatRecovery", () => {
       ws.close(1000);
     });
 
-    it("stashed data round-trips through fiber recovery via onChatRecovery", async () => {
-      const room = crypto.randomUUID();
-      const stub = (await getAgentByName(
-        env.ChatRecoveryTestAgent,
-        room
-      )) as unknown as ChatTestStub;
+    it.each([
+      ["the run's checkpoint", false],
+      ["storage, as a turn accepted before checkpoints left it", true]
+    ])(
+      "stashed data in %s round-trips through fiber recovery via onChatRecovery",
+      async (_where, legacySnapshot) => {
+        const room = crypto.randomUUID();
+        const stub = (await getAgentByName(
+          env.ChatRecoveryTestAgent,
+          room
+        )) as unknown as ChatTestStub;
 
-      await stub.setRecoveryOverride({ continue: false });
+        await stub.setRecoveryOverride({ continue: false });
 
-      await stub.persistMessages([
-        {
-          id: "user-1",
-          role: "user",
-          parts: [{ type: "text", text: "Hello" }]
-        }
-      ] as ChatMessage[]);
+        await stub.persistMessages([
+          {
+            id: "user-1",
+            role: "user",
+            parts: [{ type: "text", text: "Hello" }]
+          }
+        ] as ChatMessage[]);
 
-      const stashedData = {
-        responseId: "openai-resp-xyz",
-        provider: "openai",
-        model: "gpt-4"
-      };
+        const stashedData = {
+          responseId: "openai-resp-xyz",
+          provider: "openai",
+          model: "gpt-4"
+        };
 
-      await stub.insertInterruptedStream("stream-stash", "req-stash", [
-        {
-          body: JSON.stringify({
-            type: "start",
-            messageId: "assistant-stash"
-          }),
-          index: 0
-        },
-        { body: JSON.stringify({ type: "text-start" }), index: 1 },
-        {
-          body: JSON.stringify({
-            type: "text-delta",
-            delta: "Partial with stash"
-          }),
-          index: 2
-        }
-      ]);
-      await stub.insertInterruptedFiber(
-        "__cf_internal_chat_turn:req-stash",
-        stashedData
-      );
+        await stub.insertInterruptedStream("stream-stash", "req-stash", [
+          {
+            body: JSON.stringify({
+              type: "start",
+              messageId: "assistant-stash"
+            }),
+            index: 0
+          },
+          { body: JSON.stringify({ type: "text-start" }), index: 1 },
+          {
+            body: JSON.stringify({
+              type: "text-delta",
+              delta: "Partial with stash"
+            }),
+            index: 2
+          }
+        ]);
+        await stub.insertInterruptedFiber(
+          "__cf_internal_chat_turn:req-stash",
+          stashedData,
+          legacySnapshot
+        );
 
-      await stub.triggerFiberRecovery();
+        await stub.triggerFiberRecovery();
 
-      const contexts = await stub.getRecoveryContexts();
-      expect(contexts.length).toBeGreaterThanOrEqual(1);
+        const contexts = await stub.getRecoveryContexts();
+        expect(contexts.length).toBeGreaterThanOrEqual(1);
 
-      const lastCtx = contexts[contexts.length - 1];
-      expect(lastCtx.recoveryData).toEqual(stashedData);
-      expect(lastCtx.partialText).toBe("Partial with stash");
-      expect(lastCtx.streamId).toBe("stream-stash");
+        const lastCtx = contexts[contexts.length - 1];
+        expect(lastCtx.recoveryData).toEqual(stashedData);
+        expect(lastCtx.partialText).toBe("Partial with stash");
+        expect(lastCtx.streamId).toBe("stream-stash");
+      }
+    );
+  });
+
+  it("ends a cut-off request for the tabs when the app declines to continue it", async () => {
+    const room = crypto.randomUUID();
+    // A tab connected while recovery runs hears the end live.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const heard: unknown[] = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      heard.push(JSON.parse(event.data as string));
     });
+    const stub = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as ChatTestStub;
+    await stub.setRecoveryOverride({ continue: false });
+    await stub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+    ] as ChatMessage[]);
+    await stub.insertInterruptedStream("stream-decl", "req-decl", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-decl" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Part" }),
+        index: 2
+      }
+    ]);
+    await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-decl");
+
+    await stub.triggerFiberRecovery();
+
+    await vi.waitFor(() =>
+      expect(
+        heard.some(
+          (m) =>
+            isUseChatResponseMessage(m) &&
+            m.id === "req-decl" &&
+            m.done === true &&
+            (m as { outcome?: string }).outcome === "aborted"
+        )
+      ).toBe(true)
+    );
+    ws.close();
+    // Recorded, so a tab that comes back later learns the request ended.
+    expect(await stub.recentTerminalForTest("req-decl")).toMatchObject({
+      outcome: "aborted"
+    });
+  });
+
+  it("tells a tab that comes back how a declined, discarded reply's request ended, without its chunks", async () => {
+    const room = crypto.randomUUID();
+    const stub = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as ChatTestStub;
+    await stub.setRecoveryOverride({ persist: false, continue: false });
+    await stub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+    ] as ChatMessage[]);
+    await stub.insertInterruptedStream("stream-gone", "req-gone", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-gone" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Discarded" }),
+        index: 2
+      }
+    ]);
+    await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-gone");
+    await stub.triggerFiberRecovery();
+
+    // The tab comes back still waiting on req-gone.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const heard: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      const m = JSON.parse(event.data as string) as Record<string, unknown>;
+      heard.push(m);
+      if (m.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: m.id
+          })
+        );
+      }
+    });
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+        requestIds: ["req-gone"]
+      })
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        heard.some(
+          (m) =>
+            isUseChatResponseMessage(m) &&
+            m.id === "req-gone" &&
+            m.done === true &&
+            (m as { outcome?: string }).outcome === "aborted"
+        )
+      ).toBe(true)
+    );
+    // The reply the app discarded does not come back.
+    expect(
+      heard.some(
+        (m) =>
+          isUseChatResponseMessage(m) &&
+          typeof m.body === "string" &&
+          m.body.includes("Discarded")
+      )
+    ).toBe(false);
+    ws.close();
   });
 
   describe("recovery preserves settled work (#1631)", () => {
@@ -1015,6 +1177,15 @@ describe("chatRecovery", () => {
       await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-mid");
 
       await stub.triggerFiberRecovery();
+      // Recovery schedules the continuation; it has not started a turn yet,
+      // so the turn queue reads idle until it does. Wait for the turn
+      // itself, then for it to finish.
+      await expect
+        .poll(() => stub.getOnChatMessageCallCount(), {
+          timeout: 10_000,
+          interval: 25
+        })
+        .toBe(1);
       await stub.waitForIdleForTest();
 
       // Progress was made: the continuation re-ran inference and produced new

@@ -5,6 +5,7 @@ export {
   isReplayChunk,
   lateToolInputForwardChunks,
   normalizeToolInput,
+  settleInterruptedPart,
   type MessageParts,
   type MessagePart,
   type StreamChunkData
@@ -14,9 +15,14 @@ export {
   sanitizeMessage,
   enforceRowSizeLimit,
   byteLength,
-  ROW_MAX_BYTES,
   type EnforceRowSizeLimitOptions
 } from "./sanitize";
+export {
+  KV_DELETE_MAX_KEYS,
+  MAX_BOUND_PARAMS,
+  REPLAY_CHUNK_BYTES,
+  ROW_VALUE_BYTES
+} from "../internal/platform-limits";
 
 export {
   StreamAccumulator,
@@ -25,9 +31,31 @@ export {
   type ChunkResult
 } from "./stream-accumulator";
 
-export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
+export { TurnLane, type TurnResult, type EnqueueOptions } from "./turn-lane";
+// Released `@cloudflare/ai-chat` 0.12 and `@cloudflare/think` 0.24 import it.
+export { TurnQueue } from "./turn-queue";
 
 export { originMessageIds, withOriginMessageIds } from "./origin-message-ids";
+
+/** @internal How `AIChatAgent` and `Think` send chat frames. Not a public API. */
+export {
+  ChatFrames,
+  type ChatFrame,
+  type ChatFrameConnection,
+  type ChatFramesOptions
+} from "./chat-frames";
+
+/** @internal Host helpers for `AIChatAgent` and `Think`. Not a public API. */
+export {
+  mergeQueuedUserMessages,
+  mergeUserMessages
+} from "./merge-user-messages";
+
+/** @internal Host helpers for `AIChatAgent` and `Think`. Not a public API. */
+export {
+  PROVIDER_TOOL_MAX_STRING_LENGTH,
+  truncateProviderToolPayloads
+} from "./provider-tool-payloads";
 
 /**
  * @internal Shared text-segment separator for sibling streaming packages.
@@ -56,23 +84,51 @@ export {
   createChatStreams,
   type SqlTaggedTemplate
 } from "./resumable-stream";
+export { storedAsFacet } from "../dynamic-agents/facet-flag";
 export {
   createChatTurnTaskDefinition,
+  currentTurnCheckpoint,
   type ChatTurnClosureEntry,
   type ChatTurnTaskHooks
 } from "./turn-task";
+
+/**
+ * @internal Durable admission of client requests, for `AIChatAgent` and
+ * `Think`. Not a public API. See `admissions.ts`.
+ */
+export {
+  CHAT_ADMISSIONS_TABLE,
+  ChatAdmissions,
+  chatRecoveryNames,
+  createChatAdmissionStore,
+  newUserMessageIds,
+  type ChatAdmissionRecord,
+  type ChatAdmissionStore,
+  type ChatAdmissionsHost,
+  type HeldChatMessage,
+  type StoredSubmitDecision
+} from "./admissions";
+
+/**
+ * @internal Running one chat turn as a durable fiber, for `AIChatAgent` and
+ * `Think`. Not a public API. See `turn-fiber.ts`.
+ */
+export {
+  ChatTurnFibers,
+  type ChatTurnFiber,
+  type ChatTurnFiberHost
+} from "./turn-fiber";
 export {
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
   createChatRecoveryTaskDefinition,
   dispatchChatRecoveryToHandoff,
+  enqueueChatRecoveryTask,
   type ChatRecoveryHandoff,
   type ChatRecoveryTaskHooks,
   type ChatRecoveryTaskInput,
   type ChatRecoveryTaskReason
 } from "./recovery-task";
-
-export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
 
 /**
  * @internal Platform-failure classifier shared with the chat hosts'
@@ -116,6 +172,8 @@ export {
 
 export {
   ContinuationState,
+  addContinuationTarget,
+  continuationTargetIsLatest,
   type ContinuationConnection,
   type ContinuationPending,
   type ContinuationDeferred
@@ -138,8 +196,102 @@ export { PreStreamTurns } from "./pre-stream-turns";
 export {
   AutoContinuationController,
   type AutoContinuationHost,
-  type ContinuationSpec
+  type ContinuationSource,
+  type ContinuationSpec,
+  type ToolInteractionOutcome
 } from "./auto-continuation-controller";
+
+/**
+ * @internal The auto-continuation turn's lifecycle, from fire to settle.
+ * `ChatTurns` exposes each function as a method. Not a public API. See
+ * `continuation-turn.ts`.
+ */
+export {
+  continuationStreamEnded,
+  continuationStreamStarted,
+  dropWaitingContinuations,
+  replyFinalized,
+  runContinuationTurn,
+  settleContinuationTurn,
+  transcriptEndsInAnswer,
+  type ContinuationContext,
+  type ContinuationDropped,
+  type ContinuationTurn,
+  type ContinuationTurnParts
+} from "./continuation-turn";
+
+/**
+ * @internal The report of a turn that failed before it streamed, for a
+ * client request and a continuation. Not a public API. See
+ * `turn-failure.ts`.
+ */
+export {
+  reportTurnFailure,
+  type TurnErrorFrame,
+  type TurnFailure,
+  type TurnFailureHost,
+  type TurnFailureResult
+} from "./turn-failure";
+
+/**
+ * @internal The turn core shared by `@cloudflare/ai-chat` and
+ * `@cloudflare/think`: the turn queue, abort registry, submit concurrency,
+ * continuation slots and barrier, pre-stream set and tool-result apply chain,
+ * with the rules that tie them together. Not a public API. See
+ * `chat-turns.ts` and `design/chat-turn-core.md`.
+ */
+export {
+  ChatTurns,
+  type ChatTurnsHost,
+  type ChatTurnsOptions,
+  type ChatTurnsAdmissionOptions,
+  type ChatTurnMessage,
+  type ClientChatRequest,
+  type RecoveryAttemptHandle
+} from "./chat-turns";
+
+/**
+ * @internal A turn the server starts itself (`saveMessages`,
+ * `continueLastTurn`, a retry), run through `ChatTurns.runServerTurn`. Not a
+ * public API. See `server-turn.ts`.
+ */
+export {
+  runServerTurn,
+  mapServerTurnOutcome,
+  pinnedOr,
+  prepareTurnMessages,
+  toSaveMessagesResult,
+  type PinnedTurnContext,
+  type ServerChatTurn,
+  type ServerTurnOutcome,
+  type ServerTurnParts,
+  type ServerTurnPrepared,
+  type ServerTurnStatus
+} from "./server-turn";
+
+/**
+ * @internal The life of an agent-tool run on the child agent, shared by
+ * `@cloudflare/ai-chat` and `@cloudflare/think`: start, the bound request
+ * id, cancel, the terminal status, and the reconcile of a run an earlier
+ * isolate started. Not a public API. See `agent-tool-runs.ts`.
+ */
+export {
+  AgentToolRuns,
+  abortReasonText,
+  agentToolRunOutcome,
+  isAgentToolRunOpen,
+  type AgentToolRunsHost,
+  type AgentToolStreams,
+  type AgentToolTurnResult
+} from "./agent-tool-runs";
+export {
+  createAgentToolRunStore,
+  type AgentToolRunRecord,
+  type AgentToolRunStore,
+  type AgentToolRunTerminal,
+  type AgentToolSql,
+  type AgentToolTableNames
+} from "./agent-tool-run-store";
 
 export { AbortRegistry } from "./abort-registry";
 
@@ -156,23 +308,41 @@ export {
 
 export {
   applyToolUpdate,
+  applyToolPartUpdate,
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
   pausedExecutionUpdate,
   hasIncompleteToolBatch,
+  hasPendingToolInteraction,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
+  unexecutedToolNames,
+  type InFlightToolReply,
+  type ToolPartTarget,
   type ToolPartUpdate
 } from "./tool-state";
 
 export { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
+export {
+  dispatchChatProtocol,
+  parseChatRequest,
+  rejectionMessage,
+  releaseChatConnection,
+  type ChatProtocolHost,
+  type ParsedChatRequest,
+  type RejectedChatRequest,
+  type ToolApprovalEvent,
+  type ToolResultEvent
+} from "./protocol-dispatch";
 
 export {
   reconcileMessages,
   resolveToolMergeId,
   reconcileOrphanPartial
 } from "./message-reconciler";
+
+export { keepStoredReplies } from "./stored-replies";
 
 /**
  * @internal Shared transcript-repair primitive — flips interrupted tool calls
@@ -181,11 +351,50 @@ export {
  * and `@cloudflare/ai-chat`, not a public API. See `repair-transcript.ts`.
  */
 export {
+  persistRepairedTranscript,
+  removeEmptyReplyToContinue,
   repairInterruptedToolParts,
+  replyIsEmpty,
+  settleInterruptedReply,
+  settleReplyBeforeRecovery,
+  streamChunksFinished,
+  stripTrailingReasoning,
   toolPartHasSettledResult,
+  unsettledToolCallIds,
+  type RepairedTranscriptSink,
+  type ReplyRemoval,
   type RepairInterruptedToolPartsOptions,
-  type RepairInterruptedToolPartsResult
+  type RepairInterruptedToolPartsResult,
+  type SettleInterruptedReplyOptions
 } from "./repair-transcript";
+
+/**
+ * @internal What a turn settles before the model is called: the request
+ * context a client request stores, and the before-turn transcript repair.
+ * Sibling-package support, not a public API. See `before-turn.ts`.
+ */
+export {
+  continuationWaitsOnClient,
+  replyToContinueIsEmpty,
+  interruptedToolPartAsError,
+  INTERRUPTED_TOOL_ERROR_TEXT,
+  repairTranscriptBeforeTurn,
+  type BeforeTurnRepairOptions,
+  type BeforeTurnRepairResult
+} from "./before-turn";
+
+/**
+ * @internal The one owner of a chat's stored request context (client tools
+ * and body). Sibling-package support, not a public API. See
+ * `request-context.ts`.
+ */
+export {
+  ChatRequestContext,
+  clientRequestContext,
+  type ClientRequestContext,
+  type RequestContextKey,
+  type RequestContextStore
+} from "./request-context";
 
 export type { OrphanPersistStore } from "./orphan-store";
 
@@ -222,6 +431,9 @@ export {
  */
 export {
   aiSdkRecoveryCodec,
+  chunkCarriesContent,
+  chunkMustBeStoredNow,
+  takeAtFirstContent,
   partialHasSettledToolResults,
   shouldCreditStreamProgress,
   type ChatRecoveryCodec,
@@ -261,7 +473,6 @@ export {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
   CHAT_RECOVERY_INCIDENT_TTL_MS,
-  KV_DELETE_MAX_KEYS,
   DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
   CHAT_RECOVERY_ALARM_DEBOUNCE_MS,
   CHAT_RECOVERING_FLAG_TTL_MS,
@@ -281,25 +492,96 @@ export {
   chatRecoveryBackoffSeconds,
   retryAfterSeconds,
   CHAT_RECOVERY_CANCELLED_REASON,
+  CHAT_RECOVERY_CONTINUED_REASON,
+  chatRecoveryProgressReader,
+  chatRecoveryStorageAdapter,
+  type ChatRecoveryTurnBindings,
+  type ChatRecoveryAttemptScope,
   type ChatRecoveryScheduleReason,
+  type ChatRecoveryAttemptInput,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ChatStreamStatus,
   type ResolvedRecoveryStream,
-  type ClassifyRecoveredTurnInput,
   type InvokeOnChatRecoveryInput,
   type PersistOrphanedPartialInput,
-  type DispatchRecoveredTurnInput,
   type RecoveryPartial,
   type BeginChatRecoveryIncidentInput,
   type BeginChatRecoveryIncidentResult
 } from "./recovery-engine";
 
 export {
+  routeStreamInterruption,
+  scheduleRecoveredTurn,
+  type RecoveredTurnSchedule,
+  type StreamInterruptionHost,
+  type StreamInterruptionOutcome,
+  type StreamInterruptionRecoveryContext
+} from "./recovery-route";
+
+export {
+  runRecoveredTurn,
+  handleRecoveryAttemptError,
+  cutOffReplyToSettle,
+  type RecoveredTurnHost,
+  type RecoveredTurnResult,
+  type RecoveryAttemptData,
+  type RecoveryLeafCheck
+} from "./recovery-attempt";
+
+export {
   ChatStreamStalledError,
   iterateWithStallWatchdog
 } from "./stall-watchdog";
+
+export { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
+
+/**
+ * @internal The reply pump both chat hosts run every reply through, with
+ * its sources and its stream. Sibling-package support, not a public API.
+ */
+/**
+ * What a model provider's error means for a chat turn. Sibling-package
+ * support, not a public API.
+ */
+export {
+  classifyProviderError,
+  CONTEXT_OVERFLOW_PATTERN,
+  type ProviderErrorClassification
+} from "./provider-errors";
+
+export {
+  LiveReply,
+  pumpReply,
+  TransientChatStreamError,
+  type ReplyErrorVerdict,
+  type ReplyEvent,
+  type ReplyFrame,
+  type ReplyInterruption,
+  type ReplyPumpHost,
+  type ReplyPumpInput,
+  type ReplyResult,
+  type ReplyRouteOutcome,
+  type ReplySink,
+  type ReplyStoreContext
+} from "./reply-pump";
+export {
+  responseSource,
+  streamErrorText,
+  uiMessageStreamSource,
+  type ReplySource,
+  type UIMessageStreamResult
+} from "./reply-source";
+export {
+  ReplyStreams,
+  type OrphanReplyOptions,
+  type ReplyFlushState,
+  type ReplyStreamLog,
+  type ReplyStreamResult,
+  type ReplyStreamStart,
+  type ReplyStreamsHost
+} from "./reply-stream";
 
 export type {
   ChatResponseResult,
@@ -312,7 +594,9 @@ export type {
   ResolvedChatRecoveryConfig,
   MessageConcurrency,
   SaveMessagesOptions,
-  SaveMessagesResult
+  SaveMessagesResult,
+  AbortedTurnReason,
+  SkippedTurnReason
 } from "./lifecycle";
 export {
   truncateOlderMessages,
@@ -320,3 +604,21 @@ export {
   type TruncateOptions,
   type TruncateToolResultsOptions
 } from "./truncate-older-messages";
+
+export {
+  clearRecentChatTerminals,
+  recentChatTerminal,
+  recordRecentChatTerminal,
+  RECENT_TERMINALS_MAX,
+  type ChatRecentTerminal,
+  type RecentTerminalsKv
+} from "./recent-terminals";
+
+/** @internal The SDK's one backoff formula, for `Think`. Not a public API. */
+export { backoffDelay } from "../retries";
+
+/**
+ * Whether a host's broadcast reaches sockets it does not list yet (a
+ * starting sub-agent). Sibling-package support, not a public API.
+ */
+export { broadcastReachesUnlistedSockets } from "../dynamic-agents/unlisted-sockets";

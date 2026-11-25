@@ -3,10 +3,9 @@
  * Gateway — `/run` for a catalog model, the provider-native path otherwise.
  *
  * Everything about the wire — request shaping, thinking, tool use, stream
- * parsing, thinking-signature replay — is pi-ai's. It accepts a `client` whose
- * `messages.create(...).asResponse()` returns the raw HTTP response; the one
- * built here routes that call through the gateway instead of the Anthropic
- * SDK, and sets the vendor headers the SDK would otherwise have added.
+ * parsing, thinking-signature replay, error fallbacks — is pi-ai's, on its own
+ * Anthropic SDK client. The `fetch` given to that client sends the SDK's
+ * request through the gateway instead of to Anthropic.
  *
  * The model object is never rewritten: `api`, `provider` and `id` reach pi's
  * implementation exactly as they will be recorded on the assistant message, so
@@ -25,9 +24,9 @@ import {
 } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { adjustMaxTokensForThinking } from "@earendil-works/pi-ai/api/simple-options";
-import type { Transport } from "../../core/transport";
 import { wireModelId } from "../catalog";
-import { assertOk, failStream } from "../errors";
+import { failStream } from "../errors";
+import { errorFromResponse, type Transport } from "../../core/transport";
 import {
   anthropicVendorHeaders,
   attachCorrelation,
@@ -39,6 +38,9 @@ import {
   recordWarnings
 } from "./shared";
 import type { WireRequest } from "../settings";
+
+/** The key pi-ai's SDK client is built with. The gateway holds the real one. */
+const GATEWAY_HELD_KEY = "held-by-ai-gateway";
 
 /**
  * Maps a pi thinking level onto an Anthropic effort the way pi-ai's own
@@ -105,56 +107,73 @@ export function streamAnthropic(
   const outer = createAssistantMessageEventStream();
   const placeholder = startMessage(model);
   let correlation: ReturnType<typeof correlationDetails> | undefined;
-  // pi-ai's own implementation catches whatever `asResponse()` throws and ends
-  // the stream with its own error event, which would lose the typed
-  // Cloudflare error. Holding it here lets the wire report it instead.
+  // pi-ai's own implementation ends the stream with its own error event for a
+  // failed request, which would lose the typed Cloudflare error. Holding it
+  // here lets the wire report it instead.
   let transportError: unknown;
 
-  // pi-ai calls the SDK's beta endpoint with the beta features it chose in
-  // `params.betas`. The SDK would send those as the `anthropic-beta` header,
-  // not in the body, so this client does the same.
-  const create = (params: Record<string, unknown>) => ({
-    async asResponse(): Promise<Response> {
-      const { betas, ...vendorParams } = params;
-      // The body carries the vendor's own spelling of the id, whatever this
-      // provider lists the model under; `/run` takes the catalog id instead.
-      const body = { ...vendorParams, model: wireModelId(model) };
-      try {
-        const response = await sendGateway(
-          request,
-          transport,
-          body,
-          anthropicVendorHeaders(Array.isArray(betas) ? betas : []),
-          "messages",
-          (raw) => {
-            correlation = correlationDetails(request, raw, transport);
-          }
-        );
-        await assertOk(response, {
-          model: model.id,
-          requestBodyValues: body,
-          url: transport.url
-        });
-        if (response.body === null) return response;
-        return new Response(
-          withIdleDeadline(response.body, request.streamIdleTimeoutMs),
-          response
-        );
-      } catch (error) {
-        transportError = error;
-        throw error;
+  // pi-ai builds its own Anthropic SDK client and sends through this fetch,
+  // which routes the SDK's request through the gateway. The SDK turns a
+  // vendor's error response into its own `APIError`, which is what pi-ai's
+  // fallbacks look for: a thread it can no longer continue is resent in
+  // full, and strict tools over Anthropic's limits are sent without strict.
+  const fetch = async (
+    input: string | URL | Request,
+    init?: RequestInit
+  ): Promise<Response> => {
+    // Only the newest request's failure is the stream's: a fallback that
+    // resends after one is answered on its own.
+    transportError = undefined;
+    const sdkRequest = new Request(input, init);
+    const { model: _sdkModel, ...vendorParams } =
+      (await sdkRequest.json()) as Record<string, unknown>;
+    // The body carries the vendor's own spelling of the id, whatever this
+    // provider lists the model under; `/run` takes the catalog id instead.
+    const body = { ...vendorParams, model: wireModelId(model) };
+    // The SDK sends the beta features pi-ai chose as the `anthropic-beta`
+    // header. Its other headers, such as its placeholder key, stay behind:
+    // the gateway holds the key.
+    const betas = sdkRequest.headers.get("anthropic-beta");
+    const context = {
+      model: model.id,
+      requestBodyValues: body,
+      url: transport.url
+    };
+    try {
+      const response = await sendGateway(
+        request,
+        transport,
+        body,
+        anthropicVendorHeaders(betas ? betas.split(",") : []),
+        "messages",
+        (raw) => {
+          correlation = correlationDetails(request, raw, transport);
+        }
+      );
+      if (!response.ok) {
+        // The SDK reads the vendor's error from the response; the typed
+        // Cloudflare error is kept in case the stream ends with it.
+        transportError = await errorFromResponse(response.clone(), context);
+        return response;
       }
+      if (response.body === null) return response;
+      return new Response(
+        withIdleDeadline(response.body, request.streamIdleTimeoutMs),
+        response
+      );
+    } catch (error) {
+      transportError = error;
+      throw error;
     }
-  });
-  const client = {
-    beta: { messages: { create } },
-    messages: { create }
-  } as unknown as NonNullable<AnthropicOptions["client"]>;
+  };
 
   const anthropicOptions: AnthropicOptions = {
     ...options,
     ...(request.simple ? thinkingOptions(model, options) : {}),
-    client,
+    // pi-ai requires a credential; the gateway holds the real one, and this
+    // placeholder never leaves the fetch above.
+    apiKey: GATEWAY_HELD_KEY,
+    fetch,
     ...(request.toolChoice !== undefined
       ? {
           toolChoice:

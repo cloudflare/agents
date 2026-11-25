@@ -9,6 +9,7 @@
  * state. Payloads are opaque to the queue.
  */
 
+import { hasColumn, hasTable, type LifecycleSchema } from "./schema";
 import { nanoid } from "nanoid";
 import type { RetryOptions } from "../retries";
 import { SqlError } from "../sql-error";
@@ -100,7 +101,15 @@ export type LifecycleJobOutcome =
 export type LifecycleJobContext = {
   /** The due job being executed. */
   readonly job: LifecycleJob;
-  /** 1-indexed dispatch attempt within the current alarm invocation. */
+  /**
+   * 1-indexed dispatch attempt: this invocation's attempt plus the earlier
+   * attempts that never reported back (the isolate was reset, or exceeded
+   * its CPU or wall-time limit). Those are counted durably before `onJob`
+   * runs, so after such an attempt the next invocation runs attempt 2. A
+   * push or a non-final outcome (`rescheduleAt`, `"yield"`) starts the count
+   * again, as does a `reschedule()`. A number can repeat when its write was lost with the isolate; it
+   * is not a deduplication key.
+   */
   readonly attempt: number;
 };
 
@@ -142,6 +151,10 @@ export type JobStorageRow = {
   recovery_loop: number;
   running: number;
   execution_started_at: number | null;
+  /** Attempts that started and never reported back since the last push or progress. */
+  attempts: number;
+  /** When a transient platform failure first held this job, while it still is. */
+  held_since: number | null;
   created_at: number;
 };
 
@@ -175,6 +188,15 @@ export function isHungRow(row: JobStorageRow, nowMs: number): boolean {
   return nowMs - (row.execution_started_at ?? 0) >= hungTimeoutMs(row);
 }
 
+type RevisionEntry = { revision: number; dispatches: number };
+
+/** @internal One dispatch's claim on a job (see {@link JobQueue.claim}). */
+export type JobClaim = {
+  readonly id: string;
+  readonly entry: RevisionEntry;
+  readonly revision: number;
+};
+
 /**
  * @internal SQL-backed job queue. Lifecycle owns the single instance; the
  * scoped `LifecycleJobs` surfaces delegate here with a fixed capability id.
@@ -182,10 +204,27 @@ export function isHungRow(row: JobStorageRow, nowMs: number): boolean {
 export class JobQueue {
   readonly #storage: DurableObjectStorage;
   #tableEnsured = false;
+  /**
+   * The revision of each job a dispatch is driving, bumped by every change
+   * of durable intent (push, reschedule, cancel, the breaker's retimes and
+   * deletes) and by a hung takeover. A dispatch acts on its job only while
+   * the revision it claimed is unchanged. An entry lives while dispatches
+   * of that id are in flight, so the map stays as small as the dispatches;
+   * a dispatch never outlives its isolate, so nothing needs persisting.
+   */
+  readonly #inFlight = new Map<string, RevisionEntry>();
 
-  constructor(storage: DurableObjectStorage) {
+  /**
+   * `schema` is the Lifecycle's handle on the versions record, under which
+   * the queue's own columns are recorded; without one (a bare queue in a
+   * test), the columns are checked at every first use.
+   */
+  constructor(storage: DurableObjectStorage, schema?: LifecycleSchema) {
     this.#storage = storage;
+    this.#schema = schema;
   }
+
+  readonly #schema: LifecycleSchema | undefined;
 
   #sql<T = JobStorageRow>(
     query: string,
@@ -195,6 +234,17 @@ export class JobQueue {
     try {
       return [...this.#storage.sql.exec(query, ...params)] as T[];
     } catch (cause) {
+      // A transaction that rolled back the statement creating the table
+      // dropped it again: create it once more and retry.
+      if (/no such table: cf_agents_jobs/.test(String(cause))) {
+        this.#tableEnsured = false;
+        this.#ensureTable();
+        try {
+          return [...this.#storage.sql.exec(query, ...params)] as T[];
+        } catch (retryCause) {
+          throw new SqlError(query, retryCause);
+        }
+      }
       throw new SqlError(query, cause);
     }
   }
@@ -215,9 +265,88 @@ export class JobQueue {
         recovery_loop INTEGER NOT NULL DEFAULT 0,
         running INTEGER NOT NULL DEFAULT 0,
         execution_started_at INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        held_since INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       ) WITHOUT ROWID`);
+    // Tables created before attempts were counted get the columns; their
+    // pending jobs start at zero. Recorded once, so a start with the
+    // columns in place reads nothing more.
+    const addColumns = () => {
+      const sql = this.#storage.sql;
+      if (!hasColumn(sql, "cf_agents_jobs", "attempts")) {
+        sql.exec(
+          "ALTER TABLE cf_agents_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+        );
+      }
+      if (!hasColumn(sql, "cf_agents_jobs", "held_since")) {
+        sql.exec("ALTER TABLE cf_agents_jobs ADD COLUMN held_since INTEGER");
+      }
+    };
+    if (this.#schema) {
+      this.#schema.migrateSync({ version: 1, steps: { 1: addColumns } });
+    } else {
+      addColumns();
+    }
     this.#tableEnsured = true;
+  }
+
+  /**
+   * Whether the queue holds any job. Reads without creating the table, so
+   * an object that never pushed a job gets no schema write from asking.
+   */
+  hasJobs(): boolean {
+    if (!this.#tableEnsured && !hasTable(this.#storage.sql, "cf_agents_jobs")) {
+      return false;
+    }
+    return this.#sql("SELECT 1 FROM cf_agents_jobs LIMIT 1").length > 0;
+  }
+
+  #revise(id: string): void {
+    const entry = this.#inFlight.get(id);
+    if (entry) entry.revision += 1;
+  }
+
+  /**
+   * Claim a due job for one dispatch: mark it running and record its
+   * revision. A takeover of a hung job first invalidates the dispatches
+   * still holding it. Release the claim when the dispatch ends.
+   */
+  claim(id: string, nowMs: number, takeover = false): JobClaim {
+    let entry = this.#inFlight.get(id);
+    if (!entry) {
+      entry = { revision: 0, dispatches: 0 };
+      this.#inFlight.set(id, entry);
+    } else if (takeover) {
+      entry.revision += 1;
+    }
+    entry.dispatches += 1;
+    this.markRunning(id, nowMs);
+    return { id, entry, revision: entry.revision };
+  }
+
+  /** End one dispatch's claim. */
+  release(claim: JobClaim): void {
+    claim.entry.dispatches -= 1;
+    if (
+      claim.entry.dispatches === 0 &&
+      this.#inFlight.get(claim.id) === claim.entry
+    ) {
+      this.#inFlight.delete(claim.id);
+    }
+  }
+
+  /**
+   * Whether the job still exists as the dispatch claimed it: no cancel,
+   * push, reschedule, breaker retime or hung takeover touched it since.
+   */
+  isCurrent(claim: JobClaim): boolean {
+    return (
+      this.#inFlight.get(claim.id) === claim.entry &&
+      claim.entry.revision === claim.revision &&
+      this.#sql("SELECT id FROM cf_agents_jobs WHERE id = ?", claim.id).length >
+        0
+    );
   }
 
   push(capability: string, options: LifecycleJobPushOptions): LifecycleJob {
@@ -231,8 +360,8 @@ export class JobQueue {
     // Job ids are scoped to their owner, like every other queue verb: a
     // same-id push replaces only the pusher's own job (the conflict update
     // is a no-op against another owner's row, surfaced as the ownership
-    // error below), and it clears any in-flight dispatch marker so this
-    // newer durable intent wins over a concurrently returned drive result.
+    // error below), and it bumps the job's revision so this newer durable
+    // intent wins over a concurrently returned drive result.
     this.#sql(
       `INSERT INTO cf_agents_jobs
         (id, capability, fn, time, payload, retry_options, singleflight,
@@ -249,7 +378,9 @@ export class JobQueue {
          exclusive = excluded.exclusive,
          recovery_loop = excluded.recovery_loop,
          running = 0,
-         execution_started_at = NULL
+         execution_started_at = NULL,
+         attempts = 0,
+         held_since = NULL
        WHERE cf_agents_jobs.capability = excluded.capability`,
       id,
       capability,
@@ -263,6 +394,7 @@ export class JobQueue {
       options.recoveryLoop ? 1 : 0
     );
     const job = this.get(capability, id);
+    if (job) this.#revise(id);
     if (!job) {
       const owner = this.#sql<{ capability: string }>(
         "SELECT capability FROM cf_agents_jobs WHERE id = ?",
@@ -285,6 +417,7 @@ export class JobQueue {
       capability
     );
     if (existing.length === 0) return false;
+    this.#revise(id);
     this.#sql(
       "DELETE FROM cf_agents_jobs WHERE id = ? AND capability = ?",
       id,
@@ -303,9 +436,12 @@ export class JobQueue {
       capability
     );
     if (existing.length === 0) return false;
+    this.#revise(id);
+    // A reschedule is new intent, like a push: the count starts again.
     this.#sql(
       `UPDATE cf_agents_jobs
-       SET time = ?, running = 0, execution_started_at = NULL
+       SET time = ?, running = 0, execution_started_at = NULL, attempts = 0,
+           held_since = NULL
        WHERE id = ? AND capability = ?`,
       Math.floor(time),
       id,
@@ -347,10 +483,14 @@ export class JobQueue {
     )[0];
   }
 
+  /**
+   * Mark a claimed job running and count the attempt it starts, in the one
+   * write a claim already made, so counting attempts costs no extra row.
+   */
   markRunning(id: string, nowMs: number): void {
     this.#sql(
       `UPDATE cf_agents_jobs
-       SET running = 1, execution_started_at = ?
+       SET running = 1, execution_started_at = ?, attempts = attempts + 1
        WHERE id = ?`,
       Math.floor(nowMs),
       id
@@ -366,17 +506,70 @@ export class JobQueue {
     );
   }
 
+  /**
+   * Record that one dispatch attempt is starting. Written before `onJob`
+   * runs, so an attempt that kills its isolate is still counted.
+   */
+  setAttempts(id: string, attempts: number): void {
+    this.#sql(
+      "UPDATE cf_agents_jobs SET attempts = ? WHERE id = ?",
+      attempts,
+      id
+    );
+  }
+
+  /**
+   * Move the due time of a job this dispatch holds, without touching its
+   * running marker or revision: the dispatch's own outcome still applies.
+   */
+  setTime(id: string, time: number): void {
+    this.#sql(
+      "UPDATE cf_agents_jobs SET time = ? WHERE id = ?",
+      Math.floor(time),
+      id
+    );
+  }
+
+  /**
+   * Record that a transient platform failure held this job back, keeping
+   * the time of the first hold in an unbroken run of them.
+   * @returns When the run of holds began.
+   */
+  markHeld(id: string, nowMs: number): number {
+    this.#sql(
+      `UPDATE cf_agents_jobs SET held_since = coalesce(held_since, ?)
+       WHERE id = ?`,
+      Math.floor(nowMs),
+      id
+    );
+    return (
+      this.#sql<{ held_since: number | null }>(
+        "SELECT held_since FROM cf_agents_jobs WHERE id = ?",
+        id
+      )[0]?.held_since ?? Math.floor(nowMs)
+    );
+  }
+
+  /** One job's row, whoever owns it. */
+  row(id: string): JobStorageRow | undefined {
+    return this.#sql<JobStorageRow>(
+      "SELECT * FROM cf_agents_jobs WHERE id = ?",
+      id
+    )[0];
+  }
+
   delete(id: string): void {
+    this.#revise(id);
     this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);
   }
 
   /**
-   * Unguarded retime for the alarm memory-limit breaker's backoff: the
-   * platform-failure path clears the dispatch marker before the breaker
-   * runs, so the guarded {@link applyOutcome} would no-op — and the
-   * breaker's backoff must land regardless, it is protecting the object.
+   * Unguarded retime for the alarm memory-limit breaker's backoff, which
+   * must land regardless of any dispatch: it is protecting the object. It
+   * bumps the revision, so no dispatch's drive result overrides it.
    */
   retime(id: string, time: number): void {
+    this.#revise(id);
     this.#sql(
       `UPDATE cf_agents_jobs
        SET time = ?, running = 0, execution_started_at = NULL
@@ -390,15 +583,26 @@ export class JobQueue {
    * Back off every pending recovery-loop job that would fire before the
    * breaker's backoff time (#1825), so a doomed loop's sibling rows cannot
    * re-trigger it on the next wake. Unguarded like {@link retime}: the
-   * breaker's backoff must land regardless of dispatch markers.
+   * breaker's backoff must land regardless of any dispatch.
    */
-  delayRecoveryLoopJobs(time: number): void {
+  delayRecoveryLoopJobs(time: number, except: readonly string[] = []): void {
+    const keep = JSON.stringify(except);
+    for (const { id } of this.#sql<{ id: string }>(
+      `SELECT id FROM cf_agents_jobs WHERE recovery_loop = 1 AND time <= ?
+         AND capability NOT IN (SELECT value FROM json_each(?))`,
+      Math.floor(time),
+      keep
+    )) {
+      this.#revise(id);
+    }
     this.#sql(
       `UPDATE cf_agents_jobs
        SET time = ?, running = 0, execution_started_at = NULL
-       WHERE recovery_loop = 1 AND time <= ?`,
+       WHERE recovery_loop = 1 AND time <= ?
+         AND capability NOT IN (SELECT value FROM json_each(?))`,
       Math.floor(time),
-      Math.floor(time)
+      Math.floor(time),
+      keep
     );
   }
 
@@ -407,9 +611,19 @@ export class JobQueue {
    * policy phase uses this snapshot after the rows are purged so routed owners
    * can terminalize their own durable recovery state.
    */
-  recoveryLoopJobs(): LifecycleJob[] {
+  /** The owners of recovery-loop jobs, each once; no payload is read. */
+  recoveryLoopOwners(): string[] {
+    return this.#sql<{ capability: string }>(
+      "SELECT DISTINCT capability FROM cf_agents_jobs WHERE recovery_loop = 1"
+    ).map((row) => row.capability);
+  }
+
+  recoveryLoopJobs(except: readonly string[] = []): LifecycleJob[] {
     return this.#sql(
-      "SELECT * FROM cf_agents_jobs WHERE recovery_loop = 1 ORDER BY time ASC"
+      `SELECT * FROM cf_agents_jobs WHERE recovery_loop = 1
+         AND capability NOT IN (SELECT value FROM json_each(?))
+       ORDER BY time ASC`,
+      JSON.stringify(except)
     ).map(jobFromRow);
   }
 
@@ -417,24 +631,47 @@ export class JobQueue {
    * Purge every recovery-loop job when the breaker seals at its strike
    * budget (#1825). Unrelated jobs are untouched.
    */
-  purgeRecoveryLoopJobs(): void {
-    this.#sql("DELETE FROM cf_agents_jobs WHERE recovery_loop = 1");
+  purgeRecoveryLoopJobs(except: readonly string[] = []): void {
+    const keep = JSON.stringify(except);
+    for (const { id } of this.#sql<{ id: string }>(
+      `SELECT id FROM cf_agents_jobs WHERE recovery_loop = 1
+         AND capability NOT IN (SELECT value FROM json_each(?))`,
+      keep
+    )) {
+      this.#revise(id);
+    }
+    this.#sql(
+      `DELETE FROM cf_agents_jobs WHERE recovery_loop = 1
+         AND capability NOT IN (SELECT value FROM json_each(?))`,
+      keep
+    );
   }
 
   /**
-   * Apply one drive result, guarded on the dispatch marker: every driven
-   * job carries `running = 1` for the duration of its dispatch, and a
-   * same-id `push()` or `reschedule()` made meanwhile clears it. A cleared
-   * marker means newer durable intent exists, so the outcome quietly
-   * defers to it instead of deleting or retiming the fresher job.
+   * Apply one drive result, guarded on the revision the dispatch claimed
+   * the job at. A cancel, same-id push or reschedule made meanwhile bumped
+   * it: newer durable intent exists, so the outcome quietly defers to it
+   * instead of deleting or retiming the fresher job. Another dispatch of
+   * the same unchanged job (overlapping alarms) does not bump it, so either
+   * dispatch's result applies.
    */
-  applyOutcome(id: string, outcome: LifecycleJobOutcome): void {
+  applyOutcome(claim: JobClaim, outcome: LifecycleJobOutcome): void {
+    if (!this.isCurrent(claim)) return;
+    const { id } = claim;
     if (outcome === undefined) {
-      this.#sql("DELETE FROM cf_agents_jobs WHERE id = ? AND running = 1", id);
+      this.#sql("DELETE FROM cf_agents_jobs WHERE id = ?", id);
       return;
     }
     if (outcome === "yield") {
-      this.clearRunning(id);
+      // Due again at once, even if the driver moved it out before running.
+      this.#sql(
+        `UPDATE cf_agents_jobs
+         SET time = MIN(time, ?), running = 0, execution_started_at = NULL,
+             attempts = 0, held_since = NULL
+         WHERE id = ?`,
+        Math.floor(Date.now()),
+        id
+      );
       return;
     }
     if (
@@ -444,8 +681,9 @@ export class JobQueue {
     ) {
       this.#sql(
         `UPDATE cf_agents_jobs
-         SET time = ?, running = 0, execution_started_at = NULL
-         WHERE id = ? AND running = 1`,
+         SET time = ?, running = 0, execution_started_at = NULL, attempts = 0,
+             held_since = NULL
+         WHERE id = ?`,
         Math.floor(outcome.rescheduleAt),
         id
       );
@@ -458,29 +696,71 @@ export class JobQueue {
    * The next physical alarm time derived from queue state, or `null` when
    * the queue holds nothing to wake for.
    *
-   * Exclusive jobs suppress ordinary candidates. An ordinary candidate is
+   * Exclusive jobs suppress ordinary candidates, except those of an owner
+   * the driver holds because it is not installed (`hold.ownerless`): such a
+   * job cannot run, so it wakes like an ordinary one. An ordinary candidate is
    * the earliest ready job clamped to the future (overdue rows survive
    * restarts and must re-fire immediately), merged with the earliest
    * hung-timeout recheck for in-flight single-flight jobs.
    */
-  nextAlarmTime(nowMs: number): number | null {
-    const exclusive = this.#sql<{ time: number | null }>(
-      "SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1"
-    );
-    if (exclusive[0]?.time !== null && exclusive[0]?.time !== undefined) {
-      return exclusive[0].time;
+  nextAlarmTime(
+    nowMs: number,
+    hold?: {
+      readonly holds: ReadonlyArray<readonly [owner: string, until: number]>;
+      readonly ownerless?: readonly string[];
     }
+  ): number | null {
+    // Owners held back after a failure are left out of every candidate and
+    // come back as one wake each, at the later of their earliest job and
+    // their own hold's end. They bind as one JSON parameter, so any number
+    // of them fits.
+    const held = hold?.holds.length ? JSON.stringify(hold.holds) : null;
+    const owners =
+      held === null
+        ? ""
+        : " AND capability NOT IN (SELECT json_extract(value, '$[0]') FROM json_each(?))";
+    const excludeOwners = held === null ? [] : [held];
+    // An owner held because it is not installed cannot run its exclusive
+    // job, so that job suppresses nothing; it wakes like an ordinary one.
+    const ownerless = JSON.stringify(hold?.ownerless ?? []);
+    const heldWake = (exclusiveOnly: boolean): number | null =>
+      held === null
+        ? null
+        : (this.#sql<{ time: number | null }>(
+            `SELECT MIN(max(j.time, json_extract(h.value, '$[1]'))) AS time
+             FROM cf_agents_jobs j
+             JOIN json_each(?) h ON j.capability = json_extract(h.value, '$[0]')
+             ${
+               exclusiveOnly
+                 ? "WHERE j.exclusive = 1 AND j.capability NOT IN (SELECT value FROM json_each(?))"
+                 : ""
+             }`,
+            held,
+            ...(exclusiveOnly ? [ownerless] : [])
+          )[0]?.time ?? null);
+    const exclusive = this.#sql<{ time: number | null }>(
+      `SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}`,
+      ...excludeOwners
+    );
+    // A held owner's exclusive job is still exclusive: it wakes at the later
+    // of its time and its owner's hold's end, and still suppresses ordinary
+    // wakes.
+    const exclusiveTimes = [exclusive[0]?.time, heldWake(true)].filter(
+      (time): time is number => typeof time === "number"
+    );
+    if (exclusiveTimes.length > 0) return Math.min(...exclusiveTimes);
 
     const now = Math.floor(nowMs);
     let candidate: number | null = null;
 
     const ready = this.#sql<{ time: number | null }>(
       `SELECT MIN(time) AS time FROM cf_agents_jobs
-       WHERE singleflight = 0
+       WHERE (singleflight = 0
           OR running = 0
-          OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?`,
+          OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?)${owners}`,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
-      now
+      now,
+      ...excludeOwners
     );
     if (ready[0]?.time !== null && ready[0]?.time !== undefined) {
       candidate = Math.max(ready[0].time, now + 1);
@@ -491,14 +771,20 @@ export class JobQueue {
        FROM cf_agents_jobs
        WHERE singleflight = 1
          AND running = 1
-         AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?`,
+         AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?${owners}`,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
-      now
+      now,
+      ...excludeOwners
     );
     const recheck = inFlight[0]?.recheck;
     if (recheck !== null && recheck !== undefined) {
       candidate = candidate === null ? recheck : Math.min(candidate, recheck);
+    }
+
+    const wake = heldWake(false);
+    if (wake !== null) {
+      candidate = candidate === null ? wake : Math.min(candidate, wake);
     }
 
     return candidate;

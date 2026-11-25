@@ -15,7 +15,7 @@ URL=https://fake-model.agents-b8a.workers.dev    # or your own deployment
 BASE=$(curl -s "$URL/rooms" -H "content-type: application/json" -d '{}' | jq -r .baseUrl)
 
 ANTHROPIC_BASE_URL=$BASE ANTHROPIC_API_KEY=any \
-  claude -p "[t1] Say hello." --model claude-sonnet-4-5
+  claude -p "[t1] Say hello." --model claude-sonnet-5-5
 # Hello! How can I help you today?
 ```
 

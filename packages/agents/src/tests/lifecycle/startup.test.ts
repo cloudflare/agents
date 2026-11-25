@@ -184,7 +184,7 @@ describe("Lifecycle startup", () => {
     await withCapabilityHarness(({ install }) => {
       const { lifecycle } = install(new ServiceProbeCapability());
       expect(() => lifecycle.use(new ServiceProbeCapability())).toThrow(
-        'Lifecycle capability "service-probe" is already installed'
+        "The default ServiceProbeCapability is already installed"
       );
     });
   });

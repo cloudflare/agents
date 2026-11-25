@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { REPLAY_CHUNK_BYTES } from "../../internal/platform-limits";
 import {
   agentToolEventDedupeKey,
   applyAgentToolEvent,
@@ -534,7 +535,7 @@ describe("interceptAgentToolBroadcast", () => {
     const oversized = JSON.stringify({
       type: "text-delta",
       id: "t",
-      delta: "x".repeat(1_900_000)
+      delta: "x".repeat(REPLAY_CHUNK_BYTES + 100_000)
     });
 
     interceptAgentToolBroadcast(frame({ id: "req-1", body: "a" }), hooks);

@@ -154,9 +154,12 @@ For Workers AI integration:
 Access in your agent:
 
 ```typescript
-const response = await this.env.AI.run("@cf/moonshotai/kimi-k2.7-code", {
-  prompt: "Hello!"
-});
+const response = await this.env.AI.run(
+  "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+  {
+    prompt: "Hello!"
+  }
+);
 ```
 
 ## TypeScript Configuration

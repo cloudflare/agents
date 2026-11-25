@@ -34,9 +34,25 @@ import {
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
+import { isWorkersAIModelId } from "../model";
+import {
+  reconcileScheduledTasks,
+  type ThinkScheduledTasks
+} from "../scheduled-tasks";
+import { Workspace } from "@cloudflare/computer";
+import { workspaceExtension } from "./extensions/workspace";
+import { fetchExtension } from "./extensions/fetch";
+import { skillsExtension } from "./extensions/skills";
+import { ThinkSkills } from "../skills-runtime";
+import { declaredOverrides } from "../overrides";
+import type { SkillScriptRunner, SkillSource } from "agents/skills";
+import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
+import type { CreateFetchToolsOptions } from "../tools/fetch";
+import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
+import { Context, type ContextConfig } from "agents/context";
 import type {
   AddMessagesOptions,
   CancelSubmissionResult,
@@ -62,13 +78,8 @@ import type {
   TurnInputMessages
 } from "../think";
 
-const WORKERS_AI_MODEL_PREFIXES = ["@cf/", "@hf/"];
-
-function isWorkersAIModelId(model: string): boolean {
-  return WORKERS_AI_MODEL_PREFIXES.some(
-    (prefix) => model.startsWith(prefix) && model.length > prefix.length
-  );
-}
+const { snapshot: snapshotDeclaredMembers, isOverridden: isMethodOverridden } =
+  declaredOverrides(() => Think.prototype);
 
 function toInput(
   input: Exclude<TurnInputMessages, (current: UIMessage[]) => unknown>
@@ -137,22 +148,102 @@ export class Think<
   /** The conversation, configured by {@link configureSession}. */
   session!: ThinkSession;
 
+  /**
+   * The agent's Workspace, as in Think: a subclass may assign its own; by
+   * default one on this Durable Object's storage, made at start.
+   */
+  workspace!: ThinkWorkspace;
+
+  /** Offer the connected MCP servers' tools each turn, as on Think. */
+  includeMcpTools = true;
+
+  /** Wait for MCP connections before a turn's tools are built, as on Think. */
+  waitForMcpConnections: boolean | { timeout: number } = false;
+
+  /** Think's opt-in fetch tools, as on Think: off unless set. */
+  fetchTools: false | Omit<CreateFetchToolsOptions, "workspace" | "onEvent"> =
+    false;
+
   #messages: UIMessage[] = [];
+  #context: Context | undefined;
   #handle: Session | undefined;
+  /** Skills from `getSkills()`, loaded in onStart as Think loads them. */
+  readonly #skills = new ThinkSkills();
   #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
 
   constructor(ctx: AgentContext, env: Env) {
+    snapshotDeclaredMembers(new.target.prototype);
     super(ctx, env);
     const self = this;
     this.harness = new ThinkHarness({
+      // The Agent's own Tasks, which Think's runs already use.
+      tasks: this.tasks,
+      // In Think's tool order: the workspace's tools, then fetch.
+      extensions: [
+        // Think waits for MCP connections at the top of a turn, before any
+        // tool is built.
+        {
+          name: "mcp-connections",
+          extension: mcpConnectionsExtension(
+            () => this.mcp,
+            () => this.waitForMcpConnections
+          )
+        },
+        {
+          name: "workspace",
+          extension: workspaceExtension(() => this.workspace)
+        },
+        {
+          name: "fetch",
+          extension: fetchExtension(
+            () => this.fetchTools,
+            () => this.workspace,
+            (event) =>
+              (
+                this._emit as unknown as (
+                  type: string,
+                  payload: Record<string, unknown>
+                ) => void
+              ).call(this, "tool:fetch", { ...event })
+          )
+        },
+        // Skills, then MCP tools, come after the agent's own and the
+        // context's, as in Think.
+        {
+          name: "skills",
+          after: true,
+          extension: skillsExtension(this.#skills, () =>
+            this.getSkillScriptRunner()
+          )
+        },
+        {
+          name: "mcp",
+          after: true,
+          extension: mcpExtension({
+            manager: () => this.mcp,
+            include: () => this.includeMcpTools
+          })
+        }
+      ],
       // Think's reserved keys, so client writes are stripped the same way.
       reservedMetadataKeys: ["channel", "turnMetadata"],
       // Think's own API writes and configures the Sessions handle directly.
       configureSession: (handle, id) => {
         if (id === this.harness.session().id) this.#handle = handle;
       },
+      // The root session's blocks, built in onStart, as Think builds them.
+      context: (_handle, id) =>
+        id === this.harness.session().id ? this.#context : undefined,
       model: async () => this.resolveModel(await this.getModel()),
-      system: () => this.getSystemPrompt(),
+      // As in Think: an overridden getSystemPrompt() stays above the
+      // context blocks; the default is only the fallback for no blocks,
+      // the skill catalog's included.
+      system: () =>
+        isMethodOverridden(this, "getSystemPrompt") ||
+        ((!this.#context || this.#context.getBlocks().length === 0) &&
+          !this.#skills.loaded)
+          ? this.getSystemPrompt()
+          : undefined,
       tools: () => this.getTools(),
       get maxSteps() {
         return self.maxSteps;
@@ -216,13 +307,22 @@ export class Think<
 
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
+      if (!this.workspace) {
+        this.workspace = new Workspace({ storage: this.ctx.storage });
+      }
+      const handle = await this.#rootHandle();
       this.session = await this.configureSession(
-        new ThinkSession(await this.#rootHandle(), () => {
-          throw new Error(
-            "Context blocks are not supported by the harness-backed Think yet"
-          );
-        })
+        new ThinkSession(handle, () => this.context)
       );
+      this.#context = new Context(handle, {
+        blocks: [
+          ...(await this.configureContext()),
+          ...this.session.internal_takePendingContext()
+        ],
+        sql: this
+      });
+      await this.#context.load();
+      await this.#skills.start(() => this.getSkills());
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
         if (event.type === "reset") this.#messages = [];
@@ -250,6 +350,13 @@ export class Think<
       await this.#sync();
       this.#installProtocol();
       await onStart(props);
+      // Best-effort, as in Think: a getScheduledTasks() that throws must
+      // not stop the agent from starting.
+      try {
+        await this.internal_reconcileScheduledTasks();
+      } catch (error) {
+        console.error("[Think] Scheduled tasks were not reconciled", error);
+      }
     };
   }
 
@@ -297,14 +404,33 @@ export class Think<
     return session;
   }
 
+  /** The skill sources, as in Think: none unless overridden. */
+  getSkills(): SkillSource[] | Promise<SkillSource[]> {
+    return [];
+  }
+
+  /** A runner for `run_skill_script`, as in Think: none unless overridden. */
+  getSkillScriptRunner(): SkillScriptRunner | null {
+    return null;
+  }
+
+  /** Declare the prompt context blocks, as in Think. */
+  configureContext(): ContextConfig[] | Promise<ContextConfig[]> {
+    return [];
+  }
+
+  /** The root session's context blocks. Available once started. */
+  protected get context(): Context {
+    if (!this.#context) {
+      throw new Error(
+        "Context is not initialized yet; it is available after onStart()."
+      );
+    }
+    return this.#context;
+  }
+
   // Think calls these with a default; the harness-backed Think has none of
   // the features behind them, so each returns Think's empty default.
-  configureContext(): unknown[] | Promise<unknown[]> {
-    return [];
-  }
-  getSkills(): unknown[] | Promise<unknown[]> {
-    return [];
-  }
   getExtensions(): unknown[] {
     return [];
   }
@@ -319,10 +445,23 @@ export class Think<
     | Promise<Record<string, unknown>> {
     return {};
   }
-  getScheduledTasks():
-    | Record<string, unknown>
-    | Promise<Record<string, unknown>> {
+  getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
     return {};
+  }
+
+  getDefaultTimezone(): string | undefined | Promise<string | undefined> {
+    return undefined;
+  }
+
+  /** Reconcile code-declared scheduled tasks, as Think does. */
+  internal_reconcileScheduledTasks(): Promise<void> {
+    return reconcileScheduledTasks({
+      scheduler: this.scheduler,
+      selfPath: this.selfPath,
+      tasks: () => this.getScheduledTasks(),
+      timezone: () => this.getDefaultTimezone(),
+      submit: (messages, options) => this.submitMessages(messages, options)
+    });
   }
 
   // ── Lifecycle hooks ───────────────────────────────────────────────
@@ -674,7 +813,8 @@ export class Think<
   // ── Harness wiring ────────────────────────────────────────────────
 
   async #beforeTurn(turn: ThinkTurnContext): Promise<ThinkTurnConfig | void> {
-    const tools = await this.getTools();
+    // Every tool on offer, as Think's `beforeTurn` sees them.
+    const tools = turn.toolSet;
     const model = this.resolveModel(await this.getModel());
     this.#running = {
       requestId: turn.operationId,

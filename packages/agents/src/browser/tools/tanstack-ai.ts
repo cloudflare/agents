@@ -94,7 +94,11 @@ export function browserTool<TName extends string = "browser">(
     name: options.name ?? ("browser" as TName),
     description: core.description,
     inputSchema: core.inputSchema
-  }).server(async (input) => browserToolModelResult(await core.execute(input)));
+  }).server(async (input, context) =>
+    browserToolModelResult(
+      await core.execute(input, { signal: context?.abortSignal })
+    )
+  );
 }
 
 export {

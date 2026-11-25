@@ -9,7 +9,11 @@
 
 import { isTextFile, fetchWithTimeout, DEFAULT_TIMEOUT_MS } from "./common.ts";
 import type { InstallResult } from "./common.ts";
-import { installDependenciesPython } from "./installer-python";
+import {
+  DEFAULT_PYTHON_COMPATIBILITY_DATE,
+  installDependenciesPython,
+  type PythonRuntime
+} from "./installer-python";
 import type { PyprojectToml } from "./installer-python";
 import * as semver from "semver";
 import type { FileSystem } from "./file-system";
@@ -48,6 +52,12 @@ interface InstallOptions {
    * Registry URL (default: https://registry.npmjs.org)
    */
   registry?: string;
+
+  /**
+   * The compatibility settings a Python Worker runs with, which pick the
+   * Python its wheels must match.
+   */
+  python?: PythonRuntime;
 }
 
 /**
@@ -64,7 +74,14 @@ export async function installDependencies(
   fileSystem: FileSystem,
   options: InstallOptions = {}
 ): Promise<InstallResult> {
-  const { dev = false, registry = NPM_REGISTRY } = options;
+  const {
+    dev = false,
+    registry = NPM_REGISTRY,
+    python = {
+      compatibilityDate: DEFAULT_PYTHON_COMPATIBILITY_DATE,
+      compatibilityFlags: []
+    }
+  } = options;
 
   const result: InstallResult = {
     installed: [],
@@ -119,7 +136,11 @@ export async function installDependencies(
       )
     );
   } else if (pyprojectTomlContent) {
-    return await installDependenciesPython(fileSystem, pyprojectTomlContent);
+    return await installDependenciesPython(
+      fileSystem,
+      pyprojectTomlContent,
+      python
+    );
   }
   return result;
 }

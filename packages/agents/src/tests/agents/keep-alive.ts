@@ -35,7 +35,7 @@ export class TestKeepAliveAgent extends Agent {
   }
 
   async getKeepAliveRefCount(): Promise<number> {
-    return this._keepAliveRefs;
+    return this._keepAlive.holds;
   }
 
   async getScheduleCount(): Promise<number> {

@@ -1,3 +1,9 @@
+import {
+  createLegacyFiberTables,
+  OPEN_FIBER_RUNS_SQL,
+  storeAgentAsReleased
+} from "./legacy-fibers";
+import { importLegacyFibers } from "../../fiber-runs";
 import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
   Connection,
@@ -9,16 +15,255 @@ import type {
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 import { MessageType } from "../../types.ts";
-import type { Tasks } from "../../tasks/tasks.ts";
+import { agentPathKey } from "../../dynamic-agents/identity.ts";
+import { declareSchedules } from "../../schedules/scheduler.ts";
+import { armFacetWake } from "../../lifecycle/durable-object-lifecycle.ts";
+import { Tasks } from "../../tasks/tasks.ts";
+import { Streams } from "../../streams/streams.ts";
+import { EventLogSubAgent } from "./event-log-sub-agent.ts";
+import type { TaskStep } from "../../tasks/types.ts";
+import { registerDeliverySink, sendDelivery } from "../../internal/delivery.ts";
 
 const STALE_FRAME_PROBE = "stale-frame-probe";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
 // A SubAgent with its own SQLite counter table.
 
+/** Hand-overs into a CounterSubAgent that fail before they reach it. */
+let failingAdopts = 0;
+/** Held open while a failing hand-over is in flight, until released. */
+let failingAdoptGate:
+  | {
+      entered: boolean;
+      thrown: boolean;
+      release: () => void;
+      released: Promise<void>;
+    }
+  | undefined;
+
 export class CounterSubAgent extends Agent {
+  override async _cf_routeLifecycle(
+    target: Parameters<Agent["_cf_routeLifecycle"]>[0],
+    envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
+  ): Promise<unknown> {
+    if (
+      failingAdopts > 0 &&
+      (envelope.payload as { type?: string }).type === "adopt"
+    ) {
+      failingAdopts -= 1;
+      const gate = failingAdoptGate;
+      if (gate) {
+        gate.entered = true;
+        await gate.released;
+        gate.thrown = true;
+      }
+      throw Object.assign(new Error("simulated hand-over failure"), {
+        retryable: true
+      });
+    }
+    return super._cf_routeLifecycle(target, envelope);
+  }
+
+  async storedRootJurisdictionForTest(): Promise<string | undefined> {
+    return this.ctx.storage.get<string>("cf_agents_root_jurisdiction");
+  }
+
+  async treeScheduleRows(): Promise<TreeScheduleRow[]> {
+    return treeScheduleRows(this, false);
+  }
+
+  async treeBackdateSchedule(id: string): Promise<void> {
+    await treeBackdateSchedule(this, id);
+  }
+
   private _heldKeepAliveDisposers: Array<() => void> = [];
   private _constructorName = this.name;
+  /** What `remember` saw, and the checkpoint rows while it ran. */
+  readonly rememberSeen: Array<{ local: unknown; rows: number }> = [];
+
+  override readonly taskDefinitions = {
+    /** Never ends, so a reset leaves it running. */
+    hang: async () => new Promise<never>(() => {}),
+    /** Writes a checkpoint entry, then records `local` and the rows. */
+    remember: async (_input: undefined, step: TaskStep) => {
+      step.checkpoint.set("note", "kept");
+      this.rememberSeen.push({
+        local: step.local,
+        rows: this.checkpointRowCount()
+      });
+      return step.checkpoint.get<string>("note") ?? null;
+    }
+  };
+
+  checkpointRowCount(): number {
+    return this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE checkpoint IS NOT NULL
+    `[0].n;
+  }
+
+  /** A second, named Tasks beside the Agent's own. */
+  readonly imports = new Tasks({
+    name: "imports",
+    definitions: {
+      echo: async (input: { x: string }) => `imports:${input.x}`
+    }
+  });
+
+  /** Attempts the `flaky` delivery sink saw; it fails the first. */
+  readonly deliveryAttempts: number[] = [];
+
+  /** A default Streams and a named one beside it. */
+  readonly streams = new Streams();
+  readonly audit = new Streams({ name: "audit" });
+
+  constructor(...args: ConstructorParameters<typeof Agent>) {
+    super(...args);
+    this.lifecycle.use(this.imports).use(this.streams).use(this.audit);
+    registerDeliverySink<{ n: number }>(this.tasks, "flaky", {
+      deliver: () => {
+        this.deliveryAttempts.push(this.deliveryAttempts.length + 1);
+        if (this.deliveryAttempts.length === 1) throw new Error("sink down");
+      }
+    });
+  }
+
+  /** The same stream id in both Streams; what each reads back. */
+  async writeNamedStreamsForTest(): Promise<unknown[][]> {
+    const results: unknown[][] = [];
+    for (const [streams, text] of [
+      [this.streams, "default"],
+      [this.audit, "audit"]
+    ] as const) {
+      const writer = await streams.open("same", { tag: "t" });
+      writer.append(text);
+      writer.close();
+    }
+    for (const streams of [this.streams, this.audit]) {
+      const chunks: unknown[] = [];
+      for await (const chunk of streams.read("same")) chunks.push(chunk.chunk);
+      results.push(chunks);
+    }
+    return results;
+  }
+
+  /**
+   * Send a delivery whose sink fails once: the retry waits for the alarm,
+   * which a facet only gets through its root.
+   */
+  async deliverThroughFlakySinkForTest(): Promise<{
+    status: string | undefined;
+    attempts: number[];
+  }> {
+    await sendDelivery(this.tasks, "flaky", "d1", { n: 1 });
+    const record = await this.tasks.wait("d1", { timeoutMs: 10_000 });
+    return { status: record?.status, attempts: this.deliveryAttempts };
+  }
+
+  /**
+   * The same run id and lane in the Agent's Tasks and in the named one,
+   * both queued from the alarm (a facet's comes through its root).
+   */
+  async runNamedTasksForTest(): Promise<Array<unknown>> {
+    await this.tasks.run("remember", undefined, {
+      runId: "same",
+      lane: "facet-lane",
+      start: "alarm"
+    });
+    await this.imports.run(
+      "echo",
+      { x: "1" },
+      { runId: "same", lane: "facet-lane", start: "alarm" }
+    );
+    const records = [
+      await this.tasks.wait("same", { timeoutMs: 5_000 }),
+      await this.imports.wait("same", { timeoutMs: 5_000 })
+    ];
+    return records.map((record) =>
+      record?.status === "completed" ? record.result : record?.status
+    );
+  }
+
+  /**
+   * Queue two `remember` runs in one lane from the alarm (which a facet
+   * only gets through its root) and wait for both.
+   */
+  async runLaneForTest(): Promise<Array<string | undefined>> {
+    const first = await this.tasks.run("remember", undefined, {
+      lane: "facet-lane",
+      start: "alarm"
+    });
+    const second = await this.tasks.run("remember", undefined, {
+      lane: "facet-lane",
+      start: "alarm"
+    });
+    const records = [
+      await this.tasks.wait(first.runId, { timeoutMs: 5_000 }),
+      await this.tasks.wait(second.runId, { timeoutMs: 5_000 })
+    ];
+    return records.map((record) => record?.status);
+  }
+
+  /** Start a run that never ends, so a reset leaves it open. */
+  /** Start a run that never ends from the alarm, as a submission is. */
+  async startLongAlarmRunForTest(): Promise<void> {
+    await this.tasks.run("hang", undefined, { runId: "long", start: "alarm" });
+  }
+
+  async runStatusForTest(runId: string): Promise<string | undefined> {
+    return (await this.tasks.get(runId))?.status;
+  }
+
+  async startHangingRunForTest(): Promise<void> {
+    await this.tasks.run("hang", undefined, { runId: "hanging" });
+  }
+
+  /** Start as a call through a kept stub would, then report the run. */
+  async hangingRunAfterStartForTest(): Promise<string | undefined> {
+    await this.__unsafe_ensureInitialized();
+    return (await this.tasks.get("hanging"))?.status;
+  }
+
+  facetIdName(): string | undefined {
+    return this.ctx.id.name;
+  }
+
+  /**
+   * Run an attached framework run with a terminal report in this facet and
+   * return this facet's jobs as the report saw them.
+   */
+  async jobsDuringTerminalReportForTest(): Promise<string[]> {
+    let seen: string[] = [];
+    const name = "__cf_test_facet_report" as unknown as "remember";
+    this.tasks.register(name, async () => "done", {
+      attached: true,
+      onStatus: (record) => {
+        if (record.status !== "completed") return;
+        seen = this.ctx.storage.sql
+          .exec<{ id: string }>("SELECT id FROM cf_agents_jobs")
+          .toArray()
+          .map((row) => row.id);
+      }
+    });
+    await this.tasks.run(name, undefined as never, { start: "now" });
+    return seen;
+  }
+
+  /** Run `remember` in this facet with a `local`, and report what it saw. */
+  async runRememberForTest(): Promise<{
+    status: string | undefined;
+    seen: Array<{ local: unknown; rows: number }>;
+    rowsAfter: number;
+  }> {
+    const receipt = await this.tasks.run("remember", undefined, {
+      start: "now",
+      local: { from: "caller" }
+    });
+    return {
+      status: (await this.tasks.get(receipt.runId))?.status,
+      seen: this.rememberSeen,
+      rowsAfter: this.checkpointRowCount()
+    };
+  }
 
   onStart() {
     this.sql`
@@ -136,6 +381,39 @@ export class CounterSubAgent extends Agent {
     return this.queue("queuedCallback", { value });
   }
 
+  /** Declare one schedule every 5 minutes that logs `value` when it runs. */
+  async declareLoggingSchedule(value: string): Promise<string[]> {
+    await declareSchedules(this.scheduler, {
+      tick: {
+        schedule: "every 5 minutes",
+        run: () => {
+          this.scheduledCallback(
+            { value },
+            { id: "declared:tick", callback: "tick" }
+          );
+        }
+      }
+    });
+    return this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_jobs WHERE capability = 'scheduler'
+    `.map((row) => row.id);
+  }
+
+  /** Ids of the items in this sub-agent's own queue. */
+  queueRowIds(): string[] {
+    return this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_jobs WHERE capability = 'queue' ORDER BY time
+    `.map((row) => row.id);
+  }
+
+  /** This sub-agent's own schedule rows, with their due times. */
+  scheduleTimes(): Array<{ id: string; time: number }> {
+    return this.sql<{ id: string; time: number }>`
+      SELECT id, time FROM cf_agents_jobs WHERE capability = 'scheduler'
+      ORDER BY time
+    `;
+  }
+
   async scheduleDelayedCallback(
     delaySeconds: number,
     value: string,
@@ -171,6 +449,89 @@ export class CounterSubAgent extends Agent {
 
   async cancelOwnSchedule(id: string): Promise<boolean> {
     return this.cancelSchedule(id);
+  }
+
+  /** Schedule a callback that throws on its first attempt. */
+  async scheduleFlakyCallback(value: string): Promise<string> {
+    const schedule = await this.schedule(
+      60,
+      "flakyCancelledCallback",
+      { value },
+      { retry: { maxAttempts: 2, baseDelayMs: 300, maxDelayMs: 300 } }
+    );
+    return schedule.id;
+  }
+
+  /**
+   * Queue an item whose first attempt pushes the same item again (same id,
+   * same payload) and then fails, so the push always lands before the
+   * retry's wait, however short the jittered wait.
+   */
+  async queueRequeuingCallback(id: string, value: string): Promise<string> {
+    return this.queue(
+      "requeuingQueuedCallback",
+      { value },
+      { id, retry: { maxAttempts: 2, baseDelayMs: 300, maxDelayMs: 300 } }
+    );
+  }
+
+  async requeuingQueuedCallback(
+    payload: { value: string },
+    item: { id: string; callback: string }
+  ) {
+    const [{ count }] = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM schedule_log WHERE schedule_id = ${item.id}
+    `;
+    this.sql`
+      INSERT INTO schedule_log
+        (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+      VALUES
+        (${payload.value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${item.id}, ${item.callback})
+    `;
+    if (count === 0) {
+      await this.queueRequeuingCallback(item.id, payload.value);
+      throw new Error("first attempt fails");
+    }
+  }
+
+  /** Logs every attempt; the first one for a schedule throws. */
+  flakyScheduledCallback(
+    payload: { value: string },
+    schedule: { id: string; callback: string }
+  ) {
+    const [{ count }] = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM schedule_log WHERE schedule_id = ${schedule.id}
+    `;
+    this.sql`
+      INSERT INTO schedule_log
+        (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+      VALUES
+        (${payload.value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${schedule.id}, ${schedule.callback})
+    `;
+    if (count === 0) throw new Error("first attempt fails");
+  }
+
+  /**
+   * Fails its first attempt after cancelling its own schedule, so the
+   * cancel lands before the retry's wait however short the jittered wait.
+   */
+  async flakyCancelledCallback(
+    payload: { value: string },
+    schedule: { id: string; callback: string }
+  ) {
+    const [{ count }] = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM schedule_log WHERE schedule_id = ${schedule.id}
+    `;
+    this.sql`
+      INSERT INTO schedule_log
+        (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+      VALUES
+        (${payload.value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${schedule.id}, ${schedule.callback})
+    `;
+    if (count === 0) {
+      await this.cancelSchedule(schedule.id);
+      throw new Error("first attempt fails");
+    }
   }
 
   async selfDestruct(): Promise<void> {
@@ -232,8 +593,7 @@ export class CounterSubAgent extends Agent {
 
   trySyncGetSchedule(id: string): string {
     try {
-      this.getSchedule(id);
-      return "";
+      return this.getSchedule(id)?.id ?? "";
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
@@ -241,8 +601,9 @@ export class CounterSubAgent extends Agent {
 
   trySyncGetSchedules(): string {
     try {
-      this.getSchedules();
-      return "";
+      return this.getSchedules()
+        .map((s) => s.id)
+        .join(",");
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
@@ -421,7 +782,8 @@ export class CounterSubAgent extends Agent {
   ): Promise<string> {
     this.sql`
       CREATE TRIGGER fail_run_fiber_cleanup
-      BEFORE DELETE ON cf_agents_runs
+      BEFORE DELETE ON cf_agents_task_runs
+      WHEN json_extract(OLD.input, '$.name') = 'cleanup-failure'
       BEGIN
         SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
       END
@@ -463,6 +825,36 @@ export class CounterSubAgent extends Agent {
     return result.fiberId;
   }
 
+  /**
+   * Start two fibers together. The first one's wake write is the one the
+   * root rejects; the second is held until released.
+   */
+  async startTwoFibersFirstWakeFails(): Promise<string> {
+    const first = this.runFiber("first", async () => {}).then(
+      () => "ran",
+      (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
+    );
+    let bodyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      bodyStarted = resolve;
+    });
+    void this.runFiber("second-held", async () => {
+      // The body runs only after its wake is set up.
+      bodyStarted();
+      await new Promise<void>((resolve) => {
+        this._releaseHeldFiber = resolve;
+      });
+    }).catch((error: unknown) => {
+      // A start that fails before the body must fail the test, not hang it.
+      console.error(error);
+      bodyStarted();
+    });
+    const result = await first;
+    await started;
+    return result;
+  }
+
   async releaseHeldFiber(): Promise<void> {
     const release = this._releaseHeldFiber;
     this._releaseHeldFiber = undefined;
@@ -474,10 +866,32 @@ export class CounterSubAgent extends Agent {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
+    createLegacyFiberTables(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+    // Carried into an interrupted fiber run, as a restarted facet does; its
+    // Task wake then reaches the root.
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      async () => {}
+    );
+  }
+
+  /**
+   * Arm this facet's own fiber wake the way a fresh instance does on start
+   * when it finds fibers an earlier isolate left behind.
+   */
+  async armOwnFiberWake(): Promise<void> {
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      this.lifecycle
+    );
   }
 
   async insertInterruptedManagedFiber(
@@ -486,6 +900,7 @@ export class CounterSubAgent extends Agent {
     snapshot?: unknown
   ): Promise<void> {
     const now = Date.now();
+    createLegacyFiberTables(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agents_fibers
         (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
@@ -523,11 +938,21 @@ export class CounterSubAgent extends Agent {
     }));
   }
 
+  legacyFiberTables(): Record<string, number> {
+    const tables: Record<string, number> = {};
+    for (const { name } of this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('cf_agents_runs', 'cf_agents_fibers')
+    `) {
+      tables[name] = Number(
+        this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM ${name}`).one().n
+      );
+    }
+    return tables;
+  }
+
   getRunningFiberCount(): number {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
-    `;
-    return rows[0]?.count ?? 0;
+    return Number(this.ctx.storage.sql.exec(OPEN_FIBER_RUNS_SQL).one().count);
   }
 
   getLocalJobIds(): string[] {
@@ -620,6 +1045,14 @@ export class CounterSubAgent extends Agent {
 // A SubAgent that itself spawns a child SubAgent.
 
 export class InnerSubAgent extends Agent {
+  async treeScheduleRows(): Promise<TreeScheduleRow[]> {
+    return treeScheduleRows(this, false);
+  }
+
+  async treeBackdateSchedule(id: string): Promise<void> {
+    await treeBackdateSchedule(this, id);
+  }
+
   onStart() {
     this.sql`
       CREATE TABLE IF NOT EXISTS kv (
@@ -673,10 +1106,32 @@ export class InnerSubAgent extends Agent {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
+    createLegacyFiberTables(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+    // Carried into an interrupted fiber run, as a restarted facet does; its
+    // Task wake then reaches the root.
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      async () => {}
+    );
+  }
+
+  /**
+   * Arm this facet's own fiber wake the way a fresh instance does on start
+   * when it finds fibers an earlier isolate left behind.
+   */
+  async armOwnFiberWake(): Promise<void> {
+    await importLegacyFibers(
+      this.tasks,
+      this.ctx.storage,
+      true,
+      this.lifecycle
+    );
   }
 
   getRecoveredFibers(): Array<{
@@ -796,6 +1251,14 @@ export class InnerSubAgent extends Agent {
 }
 
 export class OuterSubAgent extends Agent {
+  async treeScheduleRows(): Promise<TreeScheduleRow[]> {
+    return treeScheduleRows(this, false);
+  }
+
+  async treeBackdateSchedule(id: string): Promise<void> {
+    await treeBackdateSchedule(this, id);
+  }
+
   async outerPing(): Promise<string> {
     return `outer:${this.name}`;
   }
@@ -921,6 +1384,7 @@ export class OuterSubAgent extends Agent {
   ): Promise<Array<{ className: string; name: string }>> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     await inner.insertInterruptedFiber(id, name, snapshot);
+    await inner.armOwnFiberWake();
     return inner.getSelfPath();
   }
 
@@ -1176,9 +1640,33 @@ class DelayedForwardingSubAgentBridge extends RpcTarget {
 }
 
 export class TestSubAgentParent extends Agent {
+  private _fiberWakeRouteFailuresRemaining = 0;
   private _rootResolutionFailuresRemaining = 0;
   private _nextRootResolutionDelayMs = 0;
   private _subAgentBroadcastFailuresRemaining = 0;
+
+  override async _cf_routeLifecycle(
+    target: Parameters<Agent["_cf_routeLifecycle"]>[0],
+    envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
+  ): Promise<unknown> {
+    if (
+      this._fiberWakeRouteFailuresRemaining > 0 &&
+      envelope.capability === "cf:facet-wake" &&
+      (envelope.payload as { type?: string }).type === "arm"
+    ) {
+      this._fiberWakeRouteFailuresRemaining -= 1;
+      throw new Error("simulated fiber wake route failure");
+    }
+    return super._cf_routeLifecycle(target, envelope);
+  }
+
+  async subAgentStartTwoFibersFirstWakeFails(
+    subAgentName: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    this._fiberWakeRouteFailuresRemaining = 1;
+    return child.startTwoFibersFirstWakeFails();
+  }
 
   failNextRootResolution(): void {
     this._rootResolutionFailuresRemaining += 1;
@@ -1248,6 +1736,7 @@ export class TestSubAgentParent extends Agent {
   }
 
   private _subAgentBroadcastCalls = 0;
+  private _subAgentConnectionSendCalls = 0;
   private _startsInThisInstance = 0;
 
   onStart(): void {
@@ -1261,6 +1750,27 @@ export class TestSubAgentParent extends Agent {
 
   subAgentBroadcastCallCount(): number {
     return this._subAgentBroadcastCalls;
+  }
+
+  /** Root calls a sub-agent has made to send on one of its connections. */
+  subAgentConnectionSendCallCount(): number {
+    return this._subAgentConnectionSendCalls;
+  }
+
+  override async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    this._subAgentConnectionSendCalls += 1;
+    await super._cf_sendToSubAgentConnection(connectionId, message);
+  }
+
+  override async _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    this._subAgentConnectionSendCalls += 1;
+    await super._cf_sendManyToSubAgentConnection(connectionId, messages);
   }
 
   async broadcastFromSubAgentDetached(
@@ -1379,6 +1889,91 @@ export class TestSubAgentParent extends Agent {
     `;
   }
 
+  async subAgentJobsDuringTerminalReport(
+    subAgentName: string
+  ): Promise<string[]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.jobsDuringTerminalReportForTest();
+  }
+
+  async subAgentWriteNamedStreams(subAgentName: string): Promise<unknown[][]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.writeNamedStreamsForTest();
+  }
+
+  async subAgentRunNamedTasks(subAgentName: string): Promise<Array<unknown>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runNamedTasksForTest();
+  }
+
+  async subAgentRunLane(
+    subAgentName: string
+  ): Promise<Array<string | undefined>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runLaneForTest();
+  }
+
+  /**
+   * Leave a Task run open in the facet, reset the facet, and start it again
+   * through a stub kept from before, with no init call from this parent.
+   */
+  /**
+   * Start a never-ending alarm run in a facet and, after its dispatch
+   * budget passed, report the root's alarm: it must stay within 5 s, so a
+   * reset of the tree is noticed in seconds (#2847).
+   */
+  async subAgentRootAlarmDuringLongRun(
+    subAgentName: string
+  ): Promise<{ status?: string; alarmIn: number | null }> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.startLongAlarmRunForTest();
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    const alarm = await this.ctx.storage.getAlarm();
+    return {
+      status: await child.runStatusForTest("long"),
+      alarmIn: alarm === null ? null : alarm - Date.now()
+    };
+  }
+
+  async subAgentHangingRunAfterKeptStubRestart(
+    subAgentName: string
+  ): Promise<string | undefined> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.startHangingRunForTest();
+    const idName = await child.facetIdName();
+    this.abortSubAgent(CounterSubAgent, subAgentName);
+    const exports = this.ctx.exports as unknown as Record<
+      string,
+      DurableObjectClass & Pick<DurableObjectNamespace, "idFromName">
+    >;
+    const stub = this.ctx.facets.get(
+      `CounterSubAgent\0${subAgentName}`,
+      () => ({
+        class: exports.CounterSubAgent,
+        id: exports.TestSubAgentParent.idFromName(idName ?? subAgentName)
+      })
+    ) as unknown as {
+      hangingRunAfterStartForTest(): Promise<string | undefined>;
+    };
+    return stub.hangingRunAfterStartForTest();
+  }
+
+  async subAgentDeliverThroughFlakySink(
+    subAgentName: string
+  ): Promise<{ status: string | undefined; attempts: number[] }> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.deliverThroughFlakySinkForTest();
+  }
+
+  async subAgentRunRememberTask(subAgentName: string): Promise<{
+    status: string | undefined;
+    seen: Array<{ local: unknown; rows: number }>;
+    rowsAfter: number;
+  }> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runRememberForTest();
+  }
+
   async subAgentIncrement(
     subAgentName: string,
     counterId: string
@@ -1474,6 +2069,110 @@ export class TestSubAgentParent extends Agent {
     return replacement.get(STALE_FRAME_PROBE);
   }
 
+  async subAgentScheduleTimes(
+    subAgentName: string
+  ): Promise<Array<{ id: string; time: number }>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.scheduleTimes();
+  }
+
+  /**
+   * Initialise a sub-agent as a root in jurisdiction `jurisdiction` would,
+   * and read back what it stored. Local runs have no jurisdictions.
+   */
+  async childRootJurisdictionForTest(
+    subAgentName: string,
+    jurisdiction: string
+  ): Promise<string | undefined> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const path = await child.getSelfPath();
+    const identity =
+      this.ctx.storage.sql
+        .exec<{ identity_name: string | null }>(
+          "SELECT identity_name FROM cf_agents_sub_agents WHERE name = ?",
+          subAgentName
+        )
+        .toArray()[0]?.identity_name ?? subAgentName;
+    await (
+      child as unknown as {
+        _cf_initAsFacet(
+          name: string,
+          parentPath: unknown,
+          identityName: string,
+          rootChannel: undefined,
+          rootJurisdiction: string
+        ): Promise<void>;
+      }
+    )._cf_initAsFacet(
+      subAgentName,
+      path.slice(0, -1),
+      identity,
+      undefined,
+      jurisdiction
+    );
+    return child.storedRootJurisdictionForTest();
+  }
+
+  failNextAdoptsForTest(count: number): void {
+    failingAdopts = count;
+  }
+
+  /** Fail the next hand-over, held open until `releaseFailingAdoptForTest`. */
+  holdNextFailingAdoptForTest(): void {
+    failingAdopts = 1;
+    let release = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    failingAdoptGate = { entered: false, thrown: false, release, released };
+  }
+
+  failingAdoptEnteredForTest(): boolean {
+    return failingAdoptGate?.entered ?? false;
+  }
+
+  releaseFailingAdoptForTest(): void {
+    failingAdoptGate?.release();
+  }
+
+  /** The held hand-over has failed back to this root. */
+  failingAdoptThrownForTest(): boolean {
+    const thrown = failingAdoptGate?.thrown ?? false;
+    if (thrown) failingAdoptGate = undefined;
+    return thrown;
+  }
+
+  dropRootJobForTest(id: string): void {
+    this.sql`DELETE FROM cf_agents_jobs WHERE id = ${id}`;
+  }
+
+  /** Make the root's queue rows due, keeping their order. */
+  async makeRootQueueDueForTest(): Promise<void> {
+    this.sql`UPDATE cf_agents_jobs SET time = time - 120000
+      WHERE capability = 'queue'`;
+    await this.lifecycle.rearmAlarm();
+  }
+
+  rootJobPayload(id: string): unknown {
+    const [row] = this.sql<{ payload: string | null }>`
+      SELECT payload FROM cf_agents_jobs WHERE id = ${id}
+    `;
+    return row?.payload ? JSON.parse(row.payload) : undefined;
+  }
+
+  rootQueueTimes(): Array<{ id: string; time: number }> {
+    return this.sql<{ id: string; time: number }>`
+      SELECT id, time FROM cf_agents_jobs WHERE capability = 'queue'
+    `;
+  }
+
+  /** Run the Scheduler's start again, as a root's next start does. */
+  async restartSchedulerForTest(): Promise<void> {
+    await (
+      this as unknown as { scheduler: { onStart(): Promise<void> } }
+    ).scheduler.onStart();
+  }
+
   async subAgentScheduleDelayed(
     subAgentName: string,
     delaySeconds: number,
@@ -1494,17 +2193,88 @@ export class TestSubAgentParent extends Agent {
    * run it, then delete the facet. Returns the root queue rows after each
    * step so a test can assert the deletion cleaned the routed item up.
    */
-  async subAgentQueueThenDelete(subAgentName: string): Promise<{
-    beforeDelete: string[];
-    afterDelete: string[];
-  }> {
-    const itemId = await this.subAgentQueue(subAgentName, "orphan");
-    this
-      .sql`UPDATE cf_agents_jobs SET time = ${Date.now() + 86_400_000} WHERE id = ${itemId}`;
-    const beforeDelete = (await this.rootQueueRows()).map((row) => row.id);
-    await this.deleteSubAgent(CounterSubAgent, subAgentName);
-    const afterDelete = (await this.rootQueueRows()).map((row) => row.id);
-    return { beforeDelete, afterDelete };
+  async subAgentQueueRowIds(subAgentName: string): Promise<string[]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.queueRowIds();
+  }
+
+  async subAgentDeclareLoggingSchedule(
+    subAgentName: string,
+    value: string
+  ): Promise<string[]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.declareLoggingSchedule(value);
+  }
+
+  /**
+   * Leave a delayed schedule for a sub-agent in this root, due now, as the
+   * previous release kept it.
+   */
+  async insertLegacyRootSchedule(
+    subAgentName: string,
+    id: string,
+    value: string,
+    delayMs = 0
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const selfPath = await child.getSelfPath();
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+      VALUES (${id}, 'scheduler', 'scheduledCallback', ${Date.now() + delayMs},
+        ${JSON.stringify({
+          payload: { value },
+          type: "delayed",
+          delayInSeconds: 1,
+          owner_path: JSON.stringify(selfPath),
+          owner_path_key: agentPathKey(selfPath)
+        })})
+    `;
+    await this.lifecycle.rearmAlarm();
+  }
+
+  /**
+   * Leave a queue item for a sub-agent in this root, due now, as the
+   * previous release kept it.
+   */
+  async insertLegacyRootQueueItem(
+    subAgentName: string,
+    id: string,
+    value: string,
+    delayMs = 0
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const selfPath = await child.getSelfPath();
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+      VALUES (${id}, 'queue', 'queuedCallback', ${Date.now() + delayMs},
+        ${JSON.stringify({
+          payload: { value },
+          owner_path: JSON.stringify(selfPath),
+          owner_path_key: agentPathKey(selfPath),
+          push_id: "old"
+        })})
+    `;
+    await this.lifecycle.rearmAlarm();
+  }
+
+  /** A job of another owner whose payload happens to name a sub-agent path. */
+  async insertOtherOwnerJobNamingSubAgent(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const selfPath = await child.getSelfPath();
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+      VALUES ('other-owner-job', 'other-owner', 'run', ${Date.now() + 60_000},
+        ${JSON.stringify({ owner_path_key: agentPathKey(selfPath) })})
+    `;
+  }
+
+  otherOwnerJobCount(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_jobs
+        WHERE capability = 'other-owner'
+      `[0]?.count ?? 0
+    );
   }
 
   async rootQueueRows(): Promise<
@@ -1567,6 +2337,69 @@ export class TestSubAgentParent extends Agent {
       // teardown actually happened, asserted by the caller.
       return e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /**
+   * Queue a flaky item from the facet; once its first attempt failed and
+   * the facet waits to retry, push the same id with the same payload.
+   * Returns how many callback calls the facet logged once the queue drains.
+   */
+  async subAgentQueueReplacedDuringRetry(
+    subAgentName: string
+  ): Promise<number> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.queueRequeuingCallback("flaky-item", "same");
+    const waitFor = async (done: () => Promise<boolean>) => {
+      const deadline = Date.now() + 5_000;
+      while (!(await done()) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    // Wait for the replacement's run, then for longer than the old item's
+    // retry delay (300 ms), so a retry that wrongly survived has run too.
+    await waitFor(
+      async () => (await this.subAgentScheduleLog(subAgentName)).length >= 2
+    );
+    await waitFor(async () => (await child.queueRowIds()).length === 0);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    return (await this.subAgentScheduleLog(subAgentName)).length;
+  }
+
+  async subAgentScheduleFlaky(
+    subAgentName: string,
+    value: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.scheduleFlakyCallback(value);
+  }
+
+  /**
+   * Let the platform alarm run the backdated schedule; once the facet's
+   * first attempt has failed and it waits to retry, cancel the schedule from
+   * the facet. Returns how many attempts the facet logged. A manual
+   * `alarm()` here would race the platform alarm that any re-arm sets for
+   * the overdue row, and both could run the first attempt.
+   */
+  /**
+   * Make the schedule due and let the sub-agent run it; its first attempt
+   * cancels it and fails. Returns how many attempts ran once a retry would
+   * have had time to.
+   */
+  async runAlarmCancellingDuringRetry(
+    subAgentName: string,
+    _id: string
+  ): Promise<number> {
+    await this.lifecycle.rearmAlarm();
+    const deadline = Date.now() + 5_000;
+    while (
+      (await this.subAgentScheduleLog(subAgentName)).length === 0 &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The retry would start within 300 ms; watch ten times that.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    return (await this.subAgentScheduleLog(subAgentName)).length;
   }
 
   async subAgentCancelSchedule(
@@ -1660,8 +2493,7 @@ export class TestSubAgentParent extends Agent {
   }
 
   async backdateSchedule(id: string): Promise<void> {
-    const past = Date.now() - 1_000;
-    this.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${id}`;
+    await treeBackdateSchedule(this, id);
   }
 
   /** Drive a routed Task wake for a facet that is not in the registry. */
@@ -1690,41 +2522,9 @@ export class TestSubAgentParent extends Agent {
     `;
   }
 
-  async rootScheduleRows(): Promise<
-    Array<{
-      id: string;
-      callback: string;
-      ownerPath: string | null;
-      ownerPathKey: string | null;
-      type: string;
-      running: number;
-    }>
-  > {
-    return this.sql<{
-      id: string;
-      callback: string;
-      owner_path: string | null;
-      owner_path_key: string | null;
-      type: string;
-      running: number | null;
-    }>`
-      SELECT id,
-             fn AS callback,
-             json_extract(payload, '$.owner_path') AS owner_path,
-             json_extract(payload, '$.owner_path_key') AS owner_path_key,
-             json_extract(payload, '$.type') AS type,
-             COALESCE(running, 0) AS running
-      FROM cf_agents_jobs
-      WHERE capability = 'scheduler'
-      ORDER BY id
-    `.map((row) => ({
-      id: row.id,
-      callback: row.callback,
-      ownerPath: row.owner_path,
-      ownerPathKey: row.owner_path_key,
-      type: row.type,
-      running: row.running ?? 0
-    }));
+  /** Schedule rows across this root and its sub-agents. */
+  async rootScheduleRows(): Promise<TreeScheduleRow[]> {
+    return treeScheduleRows(this, true);
   }
 
   async subAgentRegistryRows(): Promise<
@@ -1978,7 +2778,7 @@ export class TestSubAgentParent extends Agent {
       name,
       snapshot
     );
-    await this._cf_registerFacetRun(innerSelfPath, id);
+    await this.armFacetFiberWake(innerSelfPath);
   }
 
   async nestedRecoveredFibers(
@@ -2000,6 +2800,15 @@ export class TestSubAgentParent extends Agent {
   async subAgentTrySchedule(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.trySchedule();
+  }
+
+  /** `keepAlive()` in `count` new sub-agents, one after the other, here. */
+  async keepAliveInNewSubAgentsForTest(count: number): Promise<string[]> {
+    const errors: string[] = [];
+    for (let i = 0; i < count; i++) {
+      errors.push(await this.subAgentTryKeepAlive(`ka-many-${i}`));
+    }
+    return errors;
   }
 
   async subAgentTryKeepAlive(subAgentName: string): Promise<string> {
@@ -2027,8 +2836,13 @@ export class TestSubAgentParent extends Agent {
     child.releaseHeldKeepAlives();
   }
 
+  async subAgentArmOwnFiberWake(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.armOwnFiberWake();
+  }
+
   getRootKeepAliveRefCount(): number {
-    return this._keepAliveRefs;
+    return this._keepAlive.holds;
   }
 
   async subAgentHoldFiber(
@@ -2070,6 +2884,14 @@ export class TestSubAgentParent extends Agent {
     return child.runFiberWithFailingCleanup(value, failBody);
   }
 
+  /** Row counts of a sub-agent's old fiber tables that still exist. */
+  async subAgentLegacyFiberTables(
+    subAgentName: string
+  ): Promise<Record<string, number>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.legacyFiberTables();
+  }
+
   async subAgentRunningFiberCount(subAgentName: string): Promise<number> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.getRunningFiberCount();
@@ -2095,7 +2917,7 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedFiber(id, name, snapshot);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await child.armOwnFiberWake();
   }
 
   async insertSubAgentInterruptedManagedFiber(
@@ -2106,35 +2928,104 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedManagedFiber(id, name, snapshot);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await child.armOwnFiberWake();
   }
 
-  async registerSubAgentFacetRunLeaseOnly(
+  async armSubAgentFiberWakeOnly(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await this.armFacetFiberWake(await child.getSelfPath());
+  }
+
+  /**
+   * Hold a facet wake for a path on this root, due now, as a root does for a
+   * facet that reported a due job.
+   */
+  async armFacetFiberWake(
+    selfPath: Array<{ className: string; name: string }>
+  ): Promise<void> {
+    await armFacetWake(
+      this.lifecycle,
+      { key: agentPathKey(selfPath) ?? "", data: JSON.stringify(selfPath) },
+      Date.now()
+    );
+  }
+
+  dueFiberWakeCount(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_jobs
+        WHERE (capability LIKE 'cf:facet-wake%'
+          OR (capability = 'tasks' AND payload LIKE '%owner_path_key%'))
+          AND time <= ${Date.now()}
+      `[0]?.count ?? 0
+    );
+  }
+
+  /** Path keys of the facet wakes this root holds. */
+  fiberWakeOwners(): string[] {
+    return this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_jobs
+      WHERE capability LIKE 'cf:facet-wake%'
+        OR (capability = 'tasks' AND payload LIKE '%owner_path_key%')
+      ORDER BY id
+    `
+      .map((row) => {
+        const payload = JSON.parse(row.payload) as {
+          key?: string;
+          owner_path_key?: string;
+        };
+        return payload.key ?? payload.owner_path_key ?? "";
+      })
+      .filter((key, index, keys) => keys.indexOf(key) === index);
+  }
+
+  async insertSubAgentInterruptedFiberWithLegacyIndex(
     subAgentName: string,
-    id: string
+    id: string,
+    name: string,
+    snapshot?: { value?: string }
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
-    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+    await child.insertInterruptedFiber(id, name, snapshot);
+    this.insertLegacyFacetRunIndexRow(await child.getSelfPath(), id);
   }
 
-  facetRunRows(): Array<{
-    ownerPath: string;
-    ownerPathKey: string;
-    runId: string;
-  }> {
-    return this.sql<{
-      owner_path: string;
-      owner_path_key: string;
-      run_id: string;
-    }>`
-      SELECT owner_path, owner_path_key, run_id
-      FROM cf_agents_facet_runs
-      ORDER BY owner_path_key, run_id
-    `.map((row) => ({
-      ownerPath: row.owner_path,
-      ownerPathKey: row.owner_path_key,
-      runId: row.run_id
-    }));
+  /** Run the startup fiber recovery again, which carries old rows forward. */
+  async restartFibers(): Promise<void> {
+    await (
+      this as unknown as { _recoverFibers(): Promise<void> }
+    )._recoverFibers();
+  }
+
+  legacyFacetRunIndexExists(): boolean {
+    return (
+      this.sql`
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_agents_facet_runs'
+      `.length > 0
+    );
+  }
+
+  /** Insert the root-side facet fiber index an earlier release kept. */
+  insertLegacyFacetRunIndexRow(
+    selfPath: Array<{ className: string; name: string }>,
+    runId: string
+  ): void {
+    storeAgentAsReleased(this.ctx.storage);
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_facet_runs (
+        owner_path TEXT NOT NULL,
+        owner_path_key TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (owner_path_key, run_id)
+      )
+    `;
+    const key = agentPathKey(selfPath) ?? "";
+    this.sql`
+      INSERT INTO cf_agents_facet_runs (owner_path, owner_path_key, run_id, created_at)
+      VALUES (${JSON.stringify(selfPath)}, ${key}, ${runId}, ${Date.now()})
+    `;
   }
 
   async subAgentTryCancelSchedule(subAgentName: string): Promise<string> {
@@ -2211,6 +3102,59 @@ export class TestSubAgentParent extends Agent {
   }
 
   // ── Broadcast / setState regression tests ────────────────────────
+
+  async eventLogFacetPublish(child: string, data: string): Promise<number> {
+    return (await this.subAgent(EventLogSubAgent, child)).publish(data);
+  }
+
+  async eventLogFacetHead(
+    child: string
+  ): Promise<{ epoch: string; seq: number }> {
+    return (await this.subAgent(EventLogSubAgent, child)).head();
+  }
+
+  async eventLogFacetRows(
+    child: string
+  ): Promise<{ seq_from: number; seq_to: number }[]> {
+    return (await this.subAgent(EventLogSubAgent, child)).rows();
+  }
+
+  /** End this object (and its facets) as a crash would. */
+  crashForTest(): void {
+    this.ctx.abort("test crash");
+  }
+
+  /** The event logs each root socket is recorded as following, by id. */
+  rootEventLogFlags(): Record<string, unknown> {
+    const flags: Record<string, unknown> = {};
+    // SAFETY: a test reads the root's own sockets, child-routed ones
+    // included, which `getConnections()` leaves out.
+    const webSockets = (
+      this as unknown as {
+        _webSockets: { getConnections(): Iterable<Connection> };
+      }
+    )._webSockets;
+    for (const connection of webSockets.getConnections()) {
+      flags[connection.id] =
+        this._unsafe_getConnectionFlag(connection, "_cf_logs") ?? null;
+    }
+    return flags;
+  }
+
+  async eventLogFacetRehydrate(child: string): Promise<void> {
+    await (await this.subAgent(EventLogSubAgent, child)).rehydrateConnections();
+  }
+
+  /** Whether the root's own SQLite has a stream block table (it must not). */
+  rootHasStreamBlocks(): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          `SELECT 1 FROM sqlite_master WHERE name = 'cf_agents_stream_blocks'`
+        )
+        .toArray().length > 0
+    );
+  }
 
   async subAgentTryBroadcast(
     subAgentName: string,
@@ -2710,6 +3654,20 @@ export class SlowReplySubAgent extends Agent {
     return "sent";
   }
 
+  /** Sends several direct connection messages during the current frame. */
+  @callable()
+  sendConnectionMessagesNow(messages: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessagesNow requires an active connection"
+      );
+    }
+
+    for (const message of messages) connection.send(message);
+    return "sent";
+  }
+
   /** Sends once in the live frame and once after that frame completes. */
   @callable()
   sendLiveThenDetachedMessages(
@@ -2765,6 +3723,54 @@ export class SlowReplySubAgent extends Agent {
       );
     }
 
+    this.broadcast(broadcast);
+    connection.send(direct);
+    return "sent";
+  }
+
+  /**
+   * A send whose root call is still in flight, then a broadcast and a send:
+   * the broadcast and the second send both queue behind the first (#2055).
+   */
+  @callable()
+  sendBroadcastSendNow(
+    first: string,
+    broadcast: string,
+    direct: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendBroadcastSendNow requires an active connection"
+      );
+    }
+
+    connection.send(first);
+    this.broadcast(broadcast);
+    connection.send(direct);
+    return "sent";
+  }
+
+  /**
+   * Two sends (the second waits in an open batch), a broadcast, then a
+   * send that must not join the batch ahead of the broadcast (#2055).
+   */
+  @callable()
+  sendTwiceBroadcastSendNow(
+    first: string,
+    second: string,
+    broadcast: string,
+    direct: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendTwiceBroadcastSendNow requires an active connection"
+      );
+    }
+
+    connection.send(first);
+    connection.send(second);
     this.broadcast(broadcast);
     connection.send(direct);
     return "sent";
@@ -2920,6 +3926,15 @@ export class SlowReplySubAgent extends Agent {
     return "scheduled";
   }
 
+  /** A chunk over the frame limit, then more: nothing after the error. */
+  @callable({ streaming: true })
+  hugeStream(stream: StreamingResponse): void {
+    stream.send("small");
+    stream.send("x".repeat(33 * 1024 * 1024));
+    stream.send("chunk after");
+    stream.end("done");
+  }
+
   @callable({ streaming: true })
   async slowStreamingEcho(
     stream: StreamingResponse,
@@ -2956,7 +3971,7 @@ export { _a as TestMinifiedNameParentAgent };
 // root Agent (`BodyProbeRootAgent`). The root is the control: it
 // proves the *test harness* can stream a request body, so a hang on
 // the facet path can be attributed to the forwarder rather than to
-// vitest-pool-workers.
+// the Vitest plugin.
 
 function toHex(buf: ArrayBuffer): string {
   return Array.from(new Uint8Array(buf))
@@ -3038,5 +4053,87 @@ export class BodyProbeSubAgent extends Agent {
 export class BodyProbeRootAgent extends Agent {
   override async onRequest(request: Request): Promise<Response> {
     return handleBodyProbe(this.name, request);
+  }
+}
+
+/** A schedule row anywhere in a sub-agent tree, with the path that holds it. */
+type TreeScheduleRow = {
+  id: string;
+  callback: string;
+  ownerPath: string | null;
+  ownerPathKey: string | null;
+  type: string;
+  running: number;
+};
+
+/** Sub-agent classes the tree helpers walk into. */
+function treeClasses(): Record<
+  string,
+  typeof CounterSubAgent | typeof InnerSubAgent | typeof OuterSubAgent
+> {
+  return { CounterSubAgent, InnerSubAgent, OuterSubAgent };
+}
+
+function registeredSubAgents(
+  agent: Agent
+): Array<{ class: string; name: string }> {
+  try {
+    return agent.sql<{ class: string; name: string }>`
+      SELECT class, name FROM cf_agents_sub_agents ORDER BY class, name`;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every schedule row in `agent` and the sub-agents below it. Each sub-agent
+ * keeps its own schedules, so a test reads the tree, not only the root.
+ */
+async function treeScheduleRows(
+  agent: Agent,
+  isRoot: boolean
+): Promise<TreeScheduleRow[]> {
+  const ownerPath = isRoot ? null : JSON.stringify(agent.selfPath);
+  const ownerPathKey = isRoot ? null : (agentPathKey(agent.selfPath) ?? null);
+  const rows: TreeScheduleRow[] = agent.sql<{
+    id: string;
+    callback: string;
+    type: string;
+    running: number;
+  }>`
+    SELECT id, fn AS callback, json_extract(payload, '$.type') AS type,
+           COALESCE(running, 0) AS running
+    FROM cf_agents_jobs WHERE capability = 'scheduler'
+  `.map((row) => ({ ...row, ownerPath, ownerPathKey }));
+  for (const child of registeredSubAgents(agent)) {
+    const cls = treeClasses()[child.class];
+    if (!cls) continue;
+    const stub = (await agent.subAgent(
+      cls as typeof CounterSubAgent,
+      child.name
+    )) as unknown as {
+      treeScheduleRows(): Promise<TreeScheduleRow[]>;
+    };
+    rows.push(...(await stub.treeScheduleRows()));
+  }
+  return rows.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Make schedule `id` due, wherever in the tree it lives. */
+async function treeBackdateSchedule(agent: Agent, id: string): Promise<void> {
+  const past = Date.now() - 1_000;
+  const changed = agent.sql<{ id: string }>`
+    UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${id} RETURNING id`;
+  if (changed.length > 0) await agent.lifecycle.rearmAlarm();
+  for (const child of registeredSubAgents(agent)) {
+    const cls = treeClasses()[child.class];
+    if (!cls) continue;
+    const stub = (await agent.subAgent(
+      cls as typeof CounterSubAgent,
+      child.name
+    )) as unknown as {
+      treeBackdateSchedule(id: string): Promise<void>;
+    };
+    await stub.treeBackdateSchedule(id);
   }
 }

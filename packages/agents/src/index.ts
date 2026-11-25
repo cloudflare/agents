@@ -1,14 +1,6 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-import type {
-  Prompt,
-  Resource,
-  ServerCapabilities,
-  SSEClientTransportOptions,
-  Tool
-} from "@modelcontextprotocol/client";
+import { hasTable } from "./lifecycle/schema";
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
-  type AgentContextStore,
   type AgentEmail
 } from "./internal_context";
 export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
@@ -36,17 +28,13 @@ export type {
   SubAgentPathMatch
 } from "./sub-routing";
 import {
-  isClosedWebSocketSendError,
-  registerFacetStreamingDelivery,
-  sendFacetRpcResponseIfOpen,
-  sendFacetStreamingResponse,
   DynamicAgentConnectionBridge as SubAgentConnectionBridge,
-  dynamicAgentRpcReplyContext as subAgentRpcReplyContext,
-  waitForFacetStreamingResponseDeliveries
+  dynamicAgentRpcReplyContext as subAgentRpcReplyContext
 } from "./dynamic-agents/bridges";
 import {
   CF_SUB_AGENT_OUTER_URL_KEY,
   CF_SUB_AGENT_TAGS_KEY,
+  CF_SUB_AGENT_ACCEPTED_AT_KEY,
   SUB_AGENT_OUTER_URL_HEADER,
   rejectSubAgentWebSocket
 } from "./dynamic-agents/dynamic-agents";
@@ -68,23 +56,23 @@ export type {
   DynamicAgentClass as SubAgentClass,
   DynamicAgentStub as SubAgentStub
 } from "./dynamic-agents/types";
-import { signAgentHeaders, type SendEmailOptions } from "./email";
+import type { SendEmailOptions } from "./email";
 import { sendAgentEmail } from "./email-send";
+import {
+  agentEmailFromPayload,
+  replyToAgentEmail,
+  type AgentEmailPayload,
+  type ReplyToEmailOptions
+} from "./email-agent";
 export type { EmailSendBinding, SendEmailOptions } from "./email";
 import { nanoid } from "nanoid";
-import { EmailMessage } from "cloudflare:email";
-import {
-  DurableObject,
-  RpcTarget,
-  exports as workerExports
-} from "cloudflare:workers";
+import { DurableObject, exports as workerExports } from "cloudflare:workers";
 import {
   type LifecycleJobContext,
   type MemoryLimitContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
-  type LifecycleJobOutcome,
   setLifecycleEventSink,
   setLifecycleHostInvoker,
   setLifecycleRouteTransport,
@@ -99,8 +87,12 @@ import {
   getCurrentAgent as getCurrentLifecycleAgent,
   type CurrentAgentContext
 } from "./lifecycle/current-agent";
-import { getAgentByName, type AgentOptions } from "./agent-routing";
+import { getAgentByName } from "./agent-routing";
 import { WebSockets } from "./websockets";
+import {
+  applyEventLogFrame,
+  setEventLogConnections
+} from "./websockets/websockets";
 import {
   ensureConnectionWrapped,
   getConnectionFlag,
@@ -120,36 +112,27 @@ export {
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 export { camelCaseToKebabCase } from "./utils";
 import { SqlError } from "./sql-error";
-import {
-  type RetryOptions,
-  tryN,
-  isErrorRetryable,
-  validateRetryOptions
-} from "./retries";
+import { type RetryOptions, tryN, validateRetryOptions } from "./retries";
 export {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
   isDurableObjectStorageReset,
   isPlatformTransientError
 } from "./retries";
-import { MCPClientManager, normalizeServerId } from "./mcp/client";
+import { MCPClientManager } from "./mcp/client";
 import type {
   WorkflowCallback,
-  WorkflowTrackingRow,
-  WorkflowStatus,
   RunWorkflowOptions,
   WorkflowEventPayload,
   WorkflowInfo,
   WorkflowQueryCriteria,
-  WorkflowPage,
-  AgentWorkflowOrigin
+  WorkflowPage
 } from "./workflow-types";
 import { MCPConnectionState } from "./mcp/client/connection";
 import {
   DurableObjectOAuthClientProvider,
   type AgentMcpOAuthProvider
 } from "./mcp/client/do-oauth-client-provider";
-import type { McpClientOptions, TransportType } from "./mcp/types";
 import {
   genericObservability,
   type Observability,
@@ -158,24 +141,75 @@ import {
 import { agentSpanAttributes } from "./observability/agent-span-attributes";
 import { tracer } from "./observability/tracing/cloudflare";
 import {
-  withInvocationScope,
   writeSpanAttributes,
-  type InvocationScopeOptions,
   type TraceAttributes
 } from "./observability/tracing/tracer";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
-import { RPC_DO_PREFIX, type McpRpcAgent } from "./mcp/rpc";
+import type { McpRpcAgent } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
+import {
+  addMcpServer,
+  mcpServersState,
+  reconnectMcpServer,
+  type AddMcpServerOptions,
+  type AddMcpServerResult,
+  type AddRpcMcpServerOptions,
+  type MCPServersState
+} from "./mcp/client/agent-servers";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
+import { KeepAlive } from "./lifecycle/keep-alive";
+import { DeferredDestroy } from "./lifecycle/deferred-destroy";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
+import {
+  runInInvocation,
+  stateHookMode,
+  wrapCustomMethods
+} from "./agent-invocation";
+import {
+  DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS,
+  DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
+  resolveAgentOptions,
+  type AgentStaticOptions,
+  type ResolvedAgentOptions
+} from "./agent-options";
+export {
+  DEFAULT_AGENT_STATIC_OPTIONS,
+  type AgentStaticOptions
+} from "./agent-options";
+import { Workflows } from "./workflow-tracking/workflows";
+import {
+  FIBER_TASK,
+  MANAGED_FIBER_TASK,
+  cancelFiber,
+  createFiberTaskDefinition,
+  deleteFibers,
+  fiberByKey,
+  importLegacyFibers,
+  inspectFiber,
+  listFibers,
+  resolveFiber,
+  runFiber,
+  stashCurrentFiber,
+  startFiber,
+  withFiberStash,
+  type FiberHost
+} from "./fiber-runs";
+import type {
+  DeleteFibersOptions,
+  FiberContext,
+  FiberInspection,
+  FiberRecoveryContext,
+  FiberRecoveryResult,
+  FiberStashContext,
+  InternalFiberOptions,
+  ListFibersOptions,
+  StartFiberOptions,
+  StartFiberResult
+} from "./fiber-types";
 import type { QueueItem } from "./queue/types";
 export type { QueueItem } from "./queue/types";
-import {
-  Tasks,
-  setTaskDefinitionResolver,
-  setTaskRoutedMemoryLimitHandler
-} from "./tasks/tasks";
+import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
 import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
 import type {
   Schedule,
@@ -192,6 +226,7 @@ export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
 } from "./agent-tool-types";
+import { allChunks } from "./agent-tool-chunks";
 import {
   AGENT_TOOL_MILESTONE_PART,
   AGENT_TOOL_PROGRESS_PART,
@@ -251,16 +286,12 @@ export type {
   WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 export { MessageType } from "./types";
-
-/**
- * RPC request message from client
- */
-export type RPCRequest = {
-  type: "rpc";
-  id: string;
-  method: string;
-  args: unknown[];
-};
+import { dispatchCallableRpc, isRPCRequest } from "./callable-rpc";
+export {
+  StreamingResponse,
+  type RPCRequest,
+  type RPCResponse
+} from "./callable-rpc";
 
 /**
  * State update message from client
@@ -271,74 +302,6 @@ export type StateUpdateMessage = {
 };
 
 /**
- * RPC response message to client
- */
-export type RPCResponse = {
-  type: MessageType.RPC;
-  id: string;
-} & (
-  | {
-      success: true;
-      result: unknown;
-      done?: false;
-    }
-  | {
-      success: true;
-      result: unknown;
-      done: true;
-    }
-  | {
-      success: false;
-      error: string;
-    }
-);
-
-/**
- * Enters an agent invocation: the context every handler reads, plus the span
- * scope that stops invocation-bounded spans from outliving it. Scopes do not
- * nest, so the outermost live entry point owns the boundary — pass
- * `detached` for work that deliberately runs on past its caller.
- */
-function runInInvocation<T>(
-  store: AgentContextStore,
-  body: () => T,
-  options?: InvocationScopeOptions
-): T {
-  return agentContext.run(store, () => withInvocationScope(body, options));
-}
-
-function sendRpcResponseIfOpen(
-  connection: Connection,
-  response: RPCResponse
-): boolean {
-  try {
-    connection.send(JSON.stringify(response));
-    return true;
-  } catch (error) {
-    if (isClosedWebSocketSendError(error)) return false;
-    throw error;
-  }
-}
-
-/**
- * Type guard for RPC request messages
- */
-function isRPCRequest(msg: unknown): msg is RPCRequest {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === MessageType.RPC &&
-    "id" in msg &&
-    typeof msg.id === "string" &&
-    "method" in msg &&
-    typeof msg.method === "string" &&
-    "args" in msg &&
-    Array.isArray((msg as RPCRequest).args)
-  );
-}
-
-/**
  * Type guard for state update messages
  */
 export {
@@ -347,9 +310,7 @@ export {
   type CallableMetadata
 } from "./callable-decorator";
 import {
-  copyCallableMetadata,
   decoratedMethods,
-  getCallableMetadata,
   isCallableMethod,
   type CallableMetadata
 } from "./callable-decorator";
@@ -388,142 +349,17 @@ type AgentToolRunStorageRow = {
 type DeferredAgentToolFinish = () => Promise<void>;
 type DetachedReconcilePayload = { cadenceIndex?: number };
 
-/**
- * Context passed to the `runFiber` callback. Provides checkpoint
- * and identity for durable execution.
- */
-export type FiberContext = {
-  /** Unique identifier for this fiber execution. */
-  id: string;
-  /** Cooperative cancellation signal for managed fiber callers. */
-  signal: AbortSignal;
-  /** Checkpoint data during execution. Synchronous SQLite write. */
-  stash(data: unknown): void;
-  /** Currently null during execution; recovered snapshots are passed to onFiberRecovered(). */
-  snapshot: unknown | null;
-};
-
-export type FiberStatus =
-  | "pending"
-  | "running"
-  | "completed"
-  | "aborted"
-  | "interrupted"
-  | "error";
-
-export type StartFiberOptions = {
-  fiberId?: string;
-  idempotencyKey?: string;
-  metadata?: Record<string, unknown>;
-  waitForCompletion?: boolean;
-};
-
-export type FiberInspection = {
-  fiberId: string;
-  name: string;
-  idempotencyKey?: string;
-  status: FiberStatus;
-  snapshot?: unknown;
-  error?: string;
-  metadata?: Record<string, unknown>;
-  createdAt: number;
-  startedAt?: number;
-  settledAt?: number;
-};
-
-export type StartFiberResult = FiberInspection & {
-  accepted: boolean;
-};
-
-export type FiberRecoveryResult =
-  | {
-      status: "completed";
-      snapshot?: unknown;
-      metadata?: Record<string, unknown>;
-    }
-  | {
-      status: "error";
-      error?: unknown;
-      snapshot?: unknown;
-    }
-  | {
-      status: "aborted";
-      reason?: string;
-      snapshot?: unknown;
-    }
-  | {
-      status: "interrupted";
-      reason?: string;
-      snapshot?: unknown;
-    };
-
-export type ListFibersOptions = {
-  status?: FiberStatus | FiberStatus[];
-  name?: string;
-  limit?: number;
-};
-
-export type DeleteFibersOptions = {
-  status?: FiberStatus | FiberStatus[];
-  settledBefore?: Date;
-  limit?: number;
-};
-
-type FiberLedgerRow = {
-  fiber_id: string;
-  idempotency_key: string | null;
-  name: string;
-  status: FiberStatus;
-  snapshot: string | null;
-  metadata_json: string | null;
-  error_message: string | null;
-  created_at: number;
-  started_at: number | null;
-  completed_at: number | null;
-};
-
-/**
- * Context passed to the `onFiberRecovered` hook when an interrupted
- * fiber is detected after DO restart.
- */
-export type FiberRecoveryContext = {
-  /** Fiber ID. */
-  id: string;
-  /** Name passed to `runFiber`. */
-  name: string;
-  /** Status for managed fibers recovered through the retained ledger. */
-  status?: FiberStatus;
-  /** Idempotency key for managed fibers, if one was supplied. */
-  idempotencyKey?: string;
-  /** Metadata for managed fibers, if one was supplied. */
-  metadata?: Record<string, unknown> | null;
-  /** Last checkpoint data from `stash()`, or null if never stashed. */
-  snapshot: unknown | null;
-  /**
-   * Epoch milliseconds when the fiber row was inserted (when `runFiber`
-   * started). Use `Date.now() - createdAt` to gate stale recoveries.
-   */
-  createdAt: number;
-  /** Why this recovery hook is running. */
-  recoveryReason: "interrupted";
-  [key: string]: unknown;
-};
-
-const _fiberALS = new AsyncLocalStorage<{
-  id: string;
-  signal: AbortSignal;
-  stash: (data: unknown) => void;
-}>();
-
-type InternalFiberOptions = {
-  signal?: AbortSignal;
-  managed?: boolean;
-  initialSnapshot?: unknown;
-  wrapStash?: (data: unknown) => unknown;
-  beforeRunCleanup?: (
-    outcome: { ok: true } | { ok: false; error: unknown }
-  ) => void;
-};
+export type {
+  DeleteFibersOptions,
+  FiberContext,
+  FiberInspection,
+  FiberRecoveryContext,
+  FiberRecoveryResult,
+  FiberStatus,
+  ListFibersOptions,
+  StartFiberOptions,
+  StartFiberResult
+} from "./fiber-types";
 
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
@@ -548,174 +384,15 @@ export type MCPServerMessage = {
   mcp: MCPServersState;
 };
 
-export type MCPServersState = {
-  servers: {
-    [id: string]: MCPServer;
-  };
-  tools: (Tool & { serverId: string })[];
-  prompts: (Prompt & { serverId: string })[];
-  resources: (Resource & { serverId: string })[];
-};
+export type {
+  AddMcpServerOptions,
+  AddRpcMcpServerOptions,
+  MCPServer,
+  MCPServersState
+} from "./mcp/client/agent-servers";
 
-export type MCPServer = {
-  name: string;
-  server_url: string;
-  auth_url: string | null;
-  // This state is specifically about the temporary process of getting a token (if needed).
-  // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
-  // to communicate a change to a non-ready state.
-  state: MCPConnectionState;
-  /** May contain untrusted content from external OAuth providers. Escape appropriately for your output context. */
-  error: string | null;
-  instructions: string | null;
-  capabilities: ServerCapabilities | null;
-};
-
-/**
- * Options for adding an MCP server
- */
-export type AddMcpServerOptions = {
-  /**
-   * Optional caller-supplied stable server id. When provided, this id is used
-   * for storage, restore, and tool-name namespacing instead of a generated
-   * `nanoid`. The value is normalized via {@link normalizeServerId} — for
-   * connector-style integrations this lets `addMcpServer` keep producing
-   * keys like `tool_github_create_pull_request`.
-   *
-   * Throws if an existing server already uses the same (normalized) id but a
-   * different name or url.
-   */
-  id?: string;
-  /** OAuth callback host (auto-derived from request if omitted) */
-  callbackHost?: string;
-  /**
-   * Custom callback URL path — bypasses the default `/agents/{class}/{name}/callback` construction.
-   * Required when `sendIdentityOnConnect` is `false` to prevent leaking the instance name.
-   * When set, the callback URL becomes `{callbackHost}/{callbackPath}`.
-   * The developer must route this path to the agent instance via `getAgentByName`.
-   * Should be a plain path (e.g., `/mcp-callback`) — do not include query strings or fragments.
-   */
-  callbackPath?: string;
-  /** Agents routing prefix (default: "agents") */
-  agentsPrefix?: string;
-  /** MCP client options */
-  client?: McpClientOptions;
-  /** Transport options */
-  transport?: {
-    /** Custom headers for authentication (e.g., bearer tokens, CF Access) */
-    headers?: HeadersInit;
-    /** Transport type: "sse", "streamable-http", or "auto" (default) */
-    type?: TransportType;
-    /**
-     * Compatibility escape hatch for a trusted legacy authorization server
-     * whose RFC 8414 issuer does not match its metadata discovery URL.
-     * Security-weakening; leave false unless the server is explicitly known.
-     */
-    skipIssuerMetadataValidation?: boolean;
-  };
-  /** Retry options for connection and reconnection attempts */
-  retry?: RetryOptions;
-};
-
-/**
- * Options for adding an MCP server via RPC (Durable Object binding)
- */
-export type AddRpcMcpServerOptions = {
-  /**
-   * Optional caller-supplied stable server id. When provided, this id is used
-   * for storage, restore, and tool-name namespacing instead of a generated
-   * `nanoid`. The value is normalized via {@link normalizeServerId}.
-   *
-   * Throws if an existing server already uses the same (normalized) id but a
-   * different name or url.
-   */
-  id?: string;
-  /** Props to pass to the McpAgent instance */
-  props?: Record<string, unknown>;
-};
-
-const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
-// Durable marker that this agent is condemned: written before teardown begins
-// (and by `_cf_scheduleDestroy`, which defers teardown to an alarm invocation
-// with its own execution budget, #1625). The final `deleteAll()` in `destroy()`
-// removes it, so "marker present" always means an unfinished teardown that the
-// next wake must complete instead of resuming normal work.
-//
-// Scope: the marker is only consulted on alarm-driven paths (`alarm()` and
-// `_syncHostJobs()`). It deliberately does NOT gate request entrypoints
-// (`onRequest`/`onMessage`/RPC) — a request that lands between scheduling and
-// the teardown alarm runs normally and `_ensureSchema()` recreates tables. For
-// the MCP session-DELETE use case this is benign: the session id is unique and
-// is never addressed again after DELETE, so no further request reaches a
-// condemned session DO before its teardown alarm fires.
-const DESTROY_PENDING_KEY = "cf_agents_destroy_pending";
-
-// Stable ids for Agent-owned host jobs in the Lifecycle job queue.
-const HOST_JOB_KEEP_ALIVE_ID = "cf:keep-alive";
-const HOST_JOB_HOUSEKEEPING_ID = "cf:housekeeping";
-const HOST_JOB_DESTROY_ID = "cf:destroy";
-// Delay before the deferred-teardown alarm fires (#1625). `_cf_scheduleDestroy`
-// is awaited by an HTTP handler (the MCP session-DELETE) that then returns its
-// response. The teardown alarm runs `destroy()`, which ends in
-// `ctx.abort("destroyed")` — and an immediate (`Date.now()`) alarm fires and
-// aborts the isolate fast enough to race the still-in-flight RPC response,
-// surfacing to the caller as a 500 instead of the intended 204 (observed
-// against a real deployment; the local test runtime does not exhibit it). A
-// small delay lets the response flush before the abort. Teardown latency of a
-// second is irrelevant for an already-abandoned session.
-const DESTROY_ALARM_DELAY_MS = 1_000;
-// Ceiling for the exponential backoff applied to the runFiber-recovery
-// follow-up alarm. A scan that makes NO forward progress (every pending orphan
-// row's recovery hook threw) but still has work pending backs off so a poison
-// fiber — or a `fiberRecoveryMaxAgeMs: 0` "retain forever" row whose hook keeps
-// throwing — does not wake the DO every `keepAliveIntervalMs` indefinitely (the
-// perpetual-heartbeat hazard #1707 guards against). A scan that DID make
-// progress (recovered ≥1 row, including a scan-deadline yield that drained
-// some) resets the backoff so legitimate multi-pass draining stays prompt.
-const FIBER_RECOVERY_MAX_BACKOFF_MS = 5 * 60_000;
-// Cap the doubling exponent so `base * 2 ** n` never overflows before the
-// `FIBER_RECOVERY_MAX_BACKOFF_MS` clamp applies.
-const FIBER_RECOVERY_BACKOFF_MAX_EXP = 20;
-// Re-attaching to a still-running child agent-tool run (parent recovery /
-// duplicate-runId re-issue) tails it to its REAL terminal result instead of
-// abandoning it as `interrupted` and re-running already-completed child work
-// (#1630). The budget is PROGRESS-KEYED, not a flat wall clock: it bounds how
-// long the parent waits with NO forward progress from the child, and resets
-// every time the child forwards a chunk. A child that keeps streaming toward
-// terminal is therefore never abandoned mid-flight (the previous flat 120s
-// budget abandoned healthy, still-advancing children); only a genuinely
-// silent/hung child seals `interrupted` after a full no-progress window.
-const DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS = 120_000;
-// Optional hard wall-clock ceiling on a single re-attach. Defaults to NO cap
-// (#1672): the SDK does not impose an implicit wall-clock bound on a child that
-// keeps making forward
-// progress — a re-attached parent follows a healthy, still-streaming child for
-// as long as it advances, exactly as it would on the live (never-evicted) path.
-// A hung/silent child is already bounded by the progress-keyed no-progress
-// budget above, and a content-runaway is bounded uniformly (live AND recovery)
-// by the child's own `maxRecoveryWork` / `shouldKeepRecovering` — not by a
-// parent-only timer that would fire only after an eviction. Integrators that
-// want a hard wall-clock cap (and the `window-exceeded` child teardown it
-// triggers) can still set `agentToolReattachMaxWindowMs` to a finite value.
-const DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS = Number.POSITIVE_INFINITY;
-// Absolute safety ceiling on a DETACHED ("background") agent-tool run
-// (rfc-detached-agent-tools). A detached run has no awaiting parent turn and no
-// live observer, so unlike the re-attach window above this defaults to a FINITE
-// value: an abandoned detached run otherwise holds a concurrency slot + live
-// facet forever with nobody to notice the leak. On expiry the parent gives up
-// watching (delivers the completion hook with `interrupted`/`budget-exceeded`)
-// and tears the child down. 24h is generous enough for video renders / large
-// batch jobs while still bounding a genuinely stuck run.
-const DEFAULT_DETACHED_MAX_BUDGET_MS = 24 * 60 * 60 * 1000;
-// Resetting no-progress window for detached runs: once a child has emitted at
-// least one `reportProgress` signal, the parent gives up if it then goes silent
-// for this long (the window resets on every signal). A child that never signals
-// is bounded only by the absolute `detachedMaxBudgetMs` ceiling — we never give
-// up on a run merely for taking a long time, only for going silent after it
-// started reporting. Matches `rfc-chat-recovery-work-budget`.
-const DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS = 60 * 60 * 1000;
 // How long a detached terminal-delivery claim is leased before another delivery
 // path (a backbone reconcile racing the warm fast path, or a re-delivery after
 // a crash mid-handler) may re-claim it. Guards against a double-fire on the
@@ -750,11 +427,21 @@ type AgentToolRecoveryInspection =
 /**
  * Schema version for the Agent's internal SQLite tables.
  * Bump this when adding new tables, columns, or migrations.
- * The constructor stores this under a namespaced KV key (the same convention
- * every capability uses for its own schema version) and checks it on wake to
- * skip DDL on established DOs.
+ * The constructor keeps it in the Lifecycle's one schema record, beside every
+ * capability's version, and checks it on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 14;
+const CURRENT_SCHEMA_VERSION = 15;
+
+/** The version the constructor's DDL brings the tables to. */
+const TABLES_SCHEMA_VERSION = 14;
+/**
+ * The host version after the tables: fiber rows from a release before
+ * fibers ran on Tasks have been carried forward (at start, after the
+ * constructor's DDL, because the import awaits Tasks).
+ */
+const FIBERS_IMPORTED_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION;
+
+/** The key it had before the one record: folded in once, then deleted. */
 const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
 // Before the State capability owned `cf_agents_state`, Agent kept its schema
@@ -779,230 +466,15 @@ const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
 registerInternalConnectionKeys(
   CF_VOICE_IN_CALL_KEY,
   CF_SUB_AGENT_OUTER_URL_KEY,
-  CF_SUB_AGENT_TAGS_KEY
+  CF_SUB_AGENT_TAGS_KEY,
+  CF_SUB_AGENT_ACCEPTED_AT_KEY
 );
-
-/** Max length for error strings broadcast to clients. */
-const MAX_ERROR_STRING_LENGTH = 500;
-
-/**
- * Sanitize an error string before broadcasting to clients.
- * MCP error strings may contain untrusted content from external OAuth
- * providers — truncate and strip control characters to limit XSS risk.
- */
-// Regex to match C0 control characters (except \t, \n, \r) and DEL.
-const CONTROL_CHAR_RE = new RegExp(
-  // oxlint-disable-next-line no-control-regex -- intentionally matching control chars for sanitization
-  "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]",
-  "g"
-);
-
-function sanitizeErrorString(error: string | null): string | null {
-  if (error === null) return null;
-  // Strip control characters (keep printable ASCII + common unicode)
-  let sanitized = error.replace(CONTROL_CHAR_RE, "");
-  if (sanitized.length > MAX_ERROR_STRING_LENGTH) {
-    sanitized = sanitized.substring(0, MAX_ERROR_STRING_LENGTH) + "...";
-  }
-  return sanitized;
-}
-
-/**
- * Tracks which agent constructors have already emitted the onStateUpdate
- * deprecation warning, so it fires at most once per class.
- */
-const _onStateUpdateWarnedClasses = new WeakSet<Function>();
 
 /**
  * Tracks which agent constructors have already emitted the
  * sendIdentityOnConnect deprecation warning, so it fires at most once per class.
  */
 const _sendIdentityWarnedClasses = new WeakSet<Function>();
-
-/**
- * Default options for Agent configuration.
- * Child classes can override specific options without spreading.
- */
-export const DEFAULT_AGENT_STATIC_OPTIONS = {
-  /** Whether to send identity (name, agent) to clients on connect */
-  sendIdentityOnConnect: true,
-  /**
-   * Timeout in seconds before a running interval schedule is considered "hung"
-   * and force-reset. Increase this if you have callbacks that legitimately
-   * take longer than 30 seconds.
-   */
-  hungScheduleTimeoutSeconds: 30,
-  /**
-   * Interval in milliseconds for keepAlive() alarm heartbeats.
-   * Lower values mean faster recovery after eviction but more frequent alarms.
-   */
-  keepAliveIntervalMs: DEFAULT_KEEP_ALIVE_INTERVAL_MS,
-  /** Default retry options for schedule(), queue(), and this.retry() */
-  retry: {
-    maxAttempts: 3,
-    baseDelayMs: 100,
-    maxDelayMs: 3000
-  } satisfies Required<RetryOptions>,
-  /** Timeout for internal framework fiber recovery hooks. */
-  fiberRecoveryHookTimeoutMs: 10_000,
-  /** Soft deadline for one interrupted-fiber recovery scan. */
-  fiberRecoveryScanDeadlineMs: 10_000,
-  /**
-   * Maximum age of an unmanaged interrupted-fiber row before recovery gives
-   * up. Bounds repeated retries of a `onFiberRecovered()` hook that keeps
-   * throwing so a poison row cannot re-trigger forever across boots.
-   */
-  fiberRecoveryMaxAgeMs: 24 * 60 * 60 * 1000,
-  /**
-   * No-progress budget (ms) for re-attaching to a still-running agent-tool
-   * child after a deploy / parent recovery (#1630). Bounds how long the parent
-   * waits with NO forward progress from the child; it resets on every forwarded
-   * chunk, so a child that keeps streaming is never abandoned mid-flight. Only a
-   * genuinely silent/hung child seals `interrupted` after a full window. Raise
-   * for children with long quiet stretches between outputs.
-   */
-  agentToolReattachNoProgressTimeoutMs:
-    DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
-  /**
-   * Optional hard wall-clock ceiling (ms) on a single agent-tool re-attach
-   * (#1630). Caps the total wait even as the no-progress budget re-arms across
-   * stream-closes. Defaults to `Infinity` (no implicit cap, #1672): a healthy,
-   * still-advancing child is followed for as long as it makes progress — a
-   * hung child is bounded by
-   * the no-progress budget, and a content-runaway by the child's own
-   * `maxRecoveryWork` / `shouldKeepRecovering`. Set a finite value to impose a
-   * wall-clock cap (which also tears the child down on `window-exceeded`).
-   */
-  agentToolReattachMaxWindowMs: DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS,
-  detachedMaxBudgetMs: DEFAULT_DETACHED_MAX_BUDGET_MS,
-  detachedNoProgressBudgetMs: DEFAULT_DETACHED_NO_PROGRESS_BUDGET_MS,
-  /**
-   * Consecutive alarm invocations that may end in a Durable Object memory-limit
-   * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
-   * circuit breaker stops the platform's auto-retry loop and seals the looping
-   * work (#1825). A small budget tolerates a genuinely transient memory spike;
-   * a deterministic OOM (the work's footprint, not the platform, is the cause)
-   * is bounded here regardless of whether the in-DO recovery budgets could run.
-   */
-  maxAlarmMemoryLimitStrikes: 3
-};
-
-/**
- * Fully resolved agent options — all fields are defined with concrete values.
- */
-interface ResolvedAgentOptions {
-  sendIdentityOnConnect: boolean;
-  hungScheduleTimeoutSeconds: number;
-  keepAliveIntervalMs: number;
-  retry: Required<RetryOptions>;
-  fiberRecoveryHookTimeoutMs: number;
-  fiberRecoveryScanDeadlineMs: number;
-  fiberRecoveryMaxAgeMs: number;
-  agentToolReattachNoProgressTimeoutMs: number;
-  agentToolReattachMaxWindowMs: number;
-  detachedMaxBudgetMs: number;
-  detachedNoProgressBudgetMs: number;
-  maxAlarmMemoryLimitStrikes: number;
-}
-
-/**
- * Configuration options for the Agent.
- * Override in subclasses via `static options`.
- * All fields are optional - defaults are applied at runtime.
- */
-export interface AgentStaticOptions {
-  sendIdentityOnConnect?: boolean;
-  hungScheduleTimeoutSeconds?: number;
-  /**
-   * Interval in milliseconds for keepAlive() alarm heartbeats.
-   * Default: 30000 (30 seconds). Lower values mean faster recovery
-   * after eviction but more frequent alarms.
-   */
-  keepAliveIntervalMs?: number;
-  /** Default retry options for schedule(), queue(), and this.retry(). */
-  retry?: RetryOptions;
-  /**
-   * Timeout in milliseconds for internal framework fiber recovery hooks.
-   * User-defined `onFiberRecovered()` hooks are not timed out by default.
-   */
-  fiberRecoveryHookTimeoutMs?: number;
-  /** Soft deadline in milliseconds for one interrupted-fiber recovery scan. */
-  fiberRecoveryScanDeadlineMs?: number;
-  /**
-   * Maximum age in milliseconds of an unmanaged interrupted-fiber row before
-   * recovery stops retrying a repeatedly-throwing `onFiberRecovered()` hook
-   * and discards the row (emitting `fiber:recovery:skipped` with reason
-   * `max_age_exceeded`). Defaults to 24h.
-   *
-   * Set to `0` to retain rows indefinitely. NOTE: with `0`, a hook that keeps
-   * throwing is retried forever — the recovery alarm backs off exponentially
-   * (capped at 5 minutes) so it is not a busy-loop, but the Durable Object
-   * stays warm (never idle-evicts) for as long as the un-recoverable row
-   * exists. Prefer a finite age unless you intend to inspect/clear such rows
-   * yourself.
-   */
-  fiberRecoveryMaxAgeMs?: number;
-  /**
-   * No-progress budget in milliseconds for re-attaching to a still-running
-   * agent-tool child after a deploy / parent recovery (#1630). Resets on every
-   * forwarded chunk, so a steadily-streaming child is never abandoned; only a
-   * genuinely silent child seals `interrupted` after a full window.
-   * Default: 120000 (2 minutes). Set to `0` to skip waiting (collect only an
-   * already-terminal child). Set to `Infinity` to never seal on no-progress —
-   * a silent-but-alive child is then followed until its stream closes (or the
-   * `agentToolReattachMaxWindowMs` ceiling fires), mirroring that knob's
-   * "Infinity = off" convention.
-   */
-  agentToolReattachNoProgressTimeoutMs?: number;
-  /**
-   * Optional hard wall-clock ceiling in milliseconds on a single agent-tool
-   * re-attach (#1630). Caps the total wait even as the no-progress budget
-   * re-arms across stream-closes. Default: `Infinity` (no implicit cap,
-   * #1672) — a healthy, still-advancing child is followed for as long as it
-   * makes progress, exactly
-   * as on the live (never-evicted) path. Set a finite value to impose a
-   * wall-clock cap (which also tears the child down on `window-exceeded`); `0`
-   * also disables the ceiling.
-   */
-  agentToolReattachMaxWindowMs?: number;
-  /**
-   * Absolute safety ceiling in milliseconds for a DETACHED ("background")
-   * agent-tool run dispatched via `runAgentTool(cls, { detached: ... })`
-   * (rfc-detached-agent-tools). A detached run has no awaiting parent turn, so
-   * on expiry the parent gives up watching — delivers the completion hook with
-   * `interrupted` / `budget-exceeded` and tears the child down — rather than
-   * holding a concurrency slot + live facet forever. Unlike the re-attach
-   * window this defaults to a FINITE value (24h) precisely because an abandoned
-   * detached run has no observer to notice the leak. Override per-run via
-   * `detached: { maxBudgetMs }`.
-   */
-  detachedMaxBudgetMs?: number;
-  /**
-   * Resetting no-progress window in milliseconds for a DETACHED agent-tool run
-   * (rfc-detached-agent-tools §progress). Once the child has emitted at least
-   * one `reportProgress` signal, the parent gives up if the run then goes
-   * silent for this long; the window resets on every subsequent signal. A child
-   * that never reports progress is bounded only by `detachedMaxBudgetMs` — we
-   * never give up on a run merely for taking a long time, only for going silent
-   * after it began reporting. Default: 1h. Set `0`/`Infinity` to disable (rely
-   * on the absolute ceiling only). Override per-run via
-   * `detached: { noProgressBudgetMs }`.
-   */
-  detachedNoProgressBudgetMs?: number;
-  /**
-   * Consecutive alarm invocations that may end in a Durable Object memory-limit
-   * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
-   * circuit breaker stops the platform's auto-retry loop and seals the looping
-   * recovery work (#1825). Default: 3. Set to `0` to seal on the first such
-   * reset. The strike counter is written after the reset, so it only advances
-   * when that isolate's storage still accepts writes, for example when the
-   * reset error came from another isolate such as D1. A Durable Object's own
-   * memory-limit reset rejects every later storage call in that invocation, so
-   * chat recovery does not rely on this counter: it counts each interrupted
-   * attempt in the next isolate (`chatRecovery.maxInterruptedAttempts`, #2613).
-   */
-  maxAlarmMemoryLimitStrikes?: number;
-}
 
 // `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` live in
 // ./retries and remain re-exported from the package root so higher layers
@@ -1012,77 +484,6 @@ export interface AgentStaticOptions {
 export const getCurrentAgent = getCurrentLifecycleAgent as <
   T extends DurableObject = Agent<Cloudflare.Env>
 >() => CurrentAgentContext<T, AgentEmail>;
-
-const AsyncFunction: Function = Object.getPrototypeOf(
-  async () => {}
-).constructor;
-
-/** Functions produced by {@link withAgentContext}, so they are wrapped once. */
-const agentContextWrappers = new WeakSet<Function>();
-
-/**
- * Restore Agent context when a public method is entered outside a Lifecycle
- * hook, notably through native Durable Object RPC or cross-Agent re-entry.
- * Lifecycle already owns context for its capability and semantic user hooks.
- *
- * Native RPC bypasses the lifecycle's runtime handlers, so an `async` method
- * entered from outside this Agent's context first starts the lifecycle when
- * the call is the one that wakes a cold instance. Synchronous methods are
- * never deferred, so they keep their synchronous return type.
- */
-
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
-function withAgentContext<T extends (...args: any[]) => any>(
-  method: T
-): (
-  this: Agent<Cloudflare.Env, unknown>,
-  ...args: Parameters<T>
-) => ReturnType<T> {
-  const enter = function (
-    this: Agent<Cloudflare.Env, unknown>,
-    ...args: Parameters<T>
-  ): ReturnType<T> {
-    const { agent } = getCurrentAgent();
-
-    if (agent === this) {
-      // already wrapped, so we can just call the method
-      return method.apply(this, args);
-    }
-    // Crossing to a different Agent must not carry native I/O handles
-    // from the previous request/WebSocket/email turn into the new DO.
-    return runInInvocation(
-      {
-        agent: this,
-        connection: undefined,
-        request: undefined,
-        email: undefined
-      },
-      () => {
-        return method.apply(this, args);
-      }
-    );
-  };
-
-  if (!(method instanceof AsyncFunction)) {
-    agentContextWrappers.add(enter);
-    return enter;
-  }
-
-  const enterStarted = async function (
-    this: Agent<Cloudflare.Env, unknown>,
-    ...args: Parameters<T>
-  ): Promise<unknown> {
-    if (getCurrentAgent().agent !== this && !this.lifecycle.isStarted()) {
-      await this.lifecycle.start();
-    }
-    return enter.apply(this, args);
-  };
-  agentContextWrappers.add(enterStarted);
-  return enterStarted as unknown as (
-    this: Agent<Cloudflare.Env, unknown>,
-    ...args: Parameters<T>
-  ) => ReturnType<T>;
-}
 
 /**
  * Extract string keys from Env where the value is a Workflow binding.
@@ -1098,6 +499,17 @@ type WorkflowBinding<E> = {
  * The `string & {}` trick preserves autocomplete while allowing any string.
  */
 type WorkflowName<E> = WorkflowBinding<E> | (string & {});
+
+/**
+ * How long after an alarm handler returns a destroy inside it aborts the
+ * instance. Measured on a deployment: the handler sets an alarm (the job
+ * driver's 30 s fallback), and the destroy deletes it. An abort inside the
+ * handler (4 of 4, also with a `storage.sync()` first, 3 of 3), or right
+ * after the handler returned (1 of 1, and 3 of 3 with a sync first), still
+ * had that alarm run 30 s later and construct the object again. An abort
+ * 500 ms after the handler returned did not (4 of 4), nor 2 s (1 of 1).
+ */
+const ABORT_AFTER_ALARM_MS = 500;
 
 /**
  * Base class for creating Agent implementations
@@ -1168,6 +580,27 @@ export class Agent<
   onRequest(_request: Request): Response | Promise<Response> {
     return new Response("Not implemented", { status: 404 });
   }
+
+  /**
+   * Choose the response for a request or WebSocket upgrade whose handling
+   * threw, including a failed `onStart`. The error is already logged.
+   *
+   * Return a `Response` to send it, or nothing to send the default, which
+   * never carries the error: `500 Internal Server Error`, or for an upgrade a
+   * socket that closes with 1011. For an upgrade, return either an HTTP
+   * error response or a `101` response with your own `WebSocketPair`.
+   *
+   * Errors from `onStart`, `onRequest`, and `onConnect` pass through
+   * `onError` first. If `onError` throws, `error` is what it threw;
+   * otherwise it is the original error. Avoid sending an error's message or
+   * stack to callers you do not trust. If this hook throws, the default is
+   * sent. Whether it returns nothing or throws, an original thrown value
+   * that is not an `Error` is rethrown instead.
+   */
+  onFetchError(
+    _request: Request,
+    _error: unknown
+  ): Response | void | Promise<Response | void> {}
 
   /** Handle a newly accepted hibernating WebSocket connection. */
   onConnect(
@@ -1243,14 +676,11 @@ export class Agent<
   /** Warn-once guard: `chatRecovery` reassigned during onStart() (too late for wake recovery). */
   private _warnedChatRecoveryInOnStart = false;
 
-  /**
-   * Number of active keepAlive() callers. When > 0, `_syncHostJobs()`
-   * caps the next alarm at `keepAliveIntervalMs` so the DO stays alive.
-   * Purely in-memory — lost on eviction, which is correct because the
-   * in-memory work keepAlive was protecting is also lost.
-   * @internal
-   */
-  _keepAliveRefs = 0;
+  /** @internal Holds behind keepAlive(); see {@link KeepAlive}. */
+  readonly _keepAlive: KeepAlive;
+
+  /** @internal The durable destroy marker and its alarm (#1625). */
+  private readonly _deferredDestroy = new DeferredDestroy();
 
   /** @internal The extracted dynamic-agent (facet) machinery. */
   private _dynamicAgentsInstance: DynamicAgentsInternal | undefined;
@@ -1290,23 +720,6 @@ export class Agent<
     return this._dynamicAgentsApi;
   }
 
-  /** @internal In-memory set of fiber IDs running in this process. */
-  private _runFiberActiveFibers = new Set<string>();
-  /** @internal In-memory abort controllers for managed running fibers. */
-  private _managedFiberAbortControllers = new Map<string, AbortController>();
-  /** @internal In-memory executions for callers that want to await accepted work. */
-  private _managedFiberExecutions = new Map<string, Promise<void>>();
-  /** @internal In-memory waiters for managed fibers reaching terminal ledger state. */
-  private _managedFiberTerminalWaiters = new Map<string, Set<() => void>>();
-  /** @internal Prevents re-entrant recovery from overlapping alarm ticks. */
-  private _runFiberRecoveryInProgress = false;
-  /**
-   * @internal Consecutive runFiber-recovery scans that made NO forward progress
-   * while work was still pending. Drives the exponential backoff of the
-   * recovery follow-up alarm so a repeatedly-throwing recovery hook does not
-   * busy-loop the DO. Reset to 0 whenever a scan recovers anything.
-   */
-  private _recoveryNoProgressScans = 0;
   /** @internal Single-flight background recovery for parent agent-tool rows. */
   private _agentToolRunRecoveryPromise: Promise<void> | undefined;
   /** @internal Serializes detached-backbone arming against concurrent dispatch. */
@@ -1361,6 +774,9 @@ export class Agent<
 
   readonly mcp: MCPClientManager;
 
+  /** Workflow instances this Agent started; `runWorkflow()` and friends delegate to it. */
+  private readonly _workflows: Workflows;
+
   /**
    * Initial state for the Agent
    * Override to provide default state values
@@ -1379,7 +795,7 @@ export class Agent<
    * @example
    * ```typescript
    * const workersai = createWorkersAI({ binding: this.env.AI });
-   * const model = workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+   * const model = workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017", {
    *   sessionAffinity: this.sessionAffinity,
    * });
    * ```
@@ -1423,54 +839,9 @@ export class Agent<
    */
   private _cachedOptions?: ResolvedAgentOptions;
   private get _resolvedOptions(): ResolvedAgentOptions {
-    if (this._cachedOptions) return this._cachedOptions;
-    const ctor = this.constructor as typeof Agent;
-    const userRetry = ctor.options?.retry;
-    this._cachedOptions = {
-      sendIdentityOnConnect:
-        ctor.options?.sendIdentityOnConnect ??
-        DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect,
-      hungScheduleTimeoutSeconds:
-        ctor.options?.hungScheduleTimeoutSeconds ??
-        DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds,
-      keepAliveIntervalMs:
-        ctor.options?.keepAliveIntervalMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.keepAliveIntervalMs,
-      retry: {
-        maxAttempts:
-          userRetry?.maxAttempts ??
-          DEFAULT_AGENT_STATIC_OPTIONS.retry.maxAttempts,
-        baseDelayMs:
-          userRetry?.baseDelayMs ??
-          DEFAULT_AGENT_STATIC_OPTIONS.retry.baseDelayMs,
-        maxDelayMs:
-          userRetry?.maxDelayMs ?? DEFAULT_AGENT_STATIC_OPTIONS.retry.maxDelayMs
-      },
-      fiberRecoveryHookTimeoutMs:
-        ctor.options?.fiberRecoveryHookTimeoutMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryHookTimeoutMs,
-      fiberRecoveryScanDeadlineMs:
-        ctor.options?.fiberRecoveryScanDeadlineMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryScanDeadlineMs,
-      fiberRecoveryMaxAgeMs:
-        ctor.options?.fiberRecoveryMaxAgeMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryMaxAgeMs,
-      agentToolReattachNoProgressTimeoutMs:
-        ctor.options?.agentToolReattachNoProgressTimeoutMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachNoProgressTimeoutMs,
-      agentToolReattachMaxWindowMs:
-        ctor.options?.agentToolReattachMaxWindowMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachMaxWindowMs,
-      detachedMaxBudgetMs:
-        ctor.options?.detachedMaxBudgetMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.detachedMaxBudgetMs,
-      detachedNoProgressBudgetMs:
-        ctor.options?.detachedNoProgressBudgetMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.detachedNoProgressBudgetMs,
-      maxAlarmMemoryLimitStrikes:
-        ctor.options?.maxAlarmMemoryLimitStrikes ??
-        DEFAULT_AGENT_STATIC_OPTIONS.maxAlarmMemoryLimitStrikes
-    };
+    this._cachedOptions ??= resolveAgentOptions(
+      (this.constructor as typeof Agent).options
+    );
     return this._cachedOptions;
   }
 
@@ -1496,20 +867,23 @@ export class Agent<
     } as ObservabilityEvent);
   }
 
-  /** Run SDK work under a stable parent for platform child spans. */
-  private _withAgentSpan<T>(
+  /**
+   * Run SDK work under a stable parent for platform child spans.
+   * @internal For the chat hosts built on `Agent`.
+   */
+  protected _withAgentSpan<T>(
     operation: string,
     storagePhase: string,
     attributes: TraceAttributes,
     run: (update: (attributes: TraceAttributes) => void) => Promise<T>
   ): Promise<T>;
-  private _withAgentSpan<T>(
+  protected _withAgentSpan<T>(
     operation: string,
     storagePhase: string,
     attributes: TraceAttributes,
     run: (update: (attributes: TraceAttributes) => void) => T
   ): T;
-  private _withAgentSpan<T>(
+  protected _withAgentSpan<T>(
     operation: string,
     storagePhase: string,
     attributes: TraceAttributes,
@@ -1582,7 +956,7 @@ export class Agent<
   /**
    * Create all internal tables and run migrations if needed.
    * Called by the constructor on every wake. Idempotent — skips DDL when
-   * the stored schema version matches CURRENT_SCHEMA_VERSION.
+   * the stored schema version is TABLES_SCHEMA_VERSION or later.
    *
    * Protected so that test agents can re-run the real migration path
    * after manipulating DB state (since ctx.abort() is unavailable in
@@ -1592,118 +966,38 @@ export class Agent<
     // Schema version gating: skip all DDL on established DOs whose schema
     // is already up-to-date. `cf_agents_state` belongs to the State
     // capability (state/index.ts), which creates and migrates it itself.
-    const schemaVersion = this._readSchemaVersion();
+    const schemaVersion = this.lifecycle.hostSchema.migrateSync({
+      version: TABLES_SCHEMA_VERSION,
+      legacyKey: SCHEMA_VERSION_KEY,
+      legacyVersion: () => this._takeLegacySchemaVersionRow(),
+      steps: { [TABLES_SCHEMA_VERSION]: () => this._createAgentTables() }
+    });
 
-    if (schemaVersion < CURRENT_SCHEMA_VERSION) {
-      ensureMcpServerTable(this.ctx.storage);
+    this._schemaInitialization = {
+      previousVersion: schemaVersion,
+      currentVersion: CURRENT_SCHEMA_VERSION,
+      migrated: schemaVersion < CURRENT_SCHEMA_VERSION
+    };
+  }
 
-      // Queue and schedule schema and migrations are owned by the Queue and
-      // Scheduler capabilities.
-      const addColumnIfNotExists = (sql: string) => {
-        try {
-          this.ctx.storage.sql.exec(sql);
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          if (!message.toLowerCase().includes("duplicate column")) {
-            throw error;
-          }
+  /** Every version's DDL; each statement is idempotent. */
+  private _createAgentTables(): void {
+    ensureMcpServerTable(this.ctx.storage);
+
+    // Queue and schedule schema and migrations are owned by the Queue and
+    // Scheduler capabilities.
+    const addColumnIfNotExists = (sql: string) => {
+      try {
+        this.ctx.storage.sql.exec(sql);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.toLowerCase().includes("duplicate column")) {
+          throw error;
         }
-      };
+      }
+    };
 
-      // Workflow tracking table for Agent-Workflow integration
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_workflows (
-          id TEXT PRIMARY KEY NOT NULL,
-          workflow_id TEXT NOT NULL UNIQUE,
-          workflow_name TEXT NOT NULL,
-          status TEXT NOT NULL CHECK(status IN (
-            'queued', 'running', 'paused', 'errored',
-            'terminated', 'complete', 'waiting',
-            'waitingForPause', 'unknown'
-          )),
-          metadata TEXT,
-          error_name TEXT,
-          error_message TEXT,
-          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-          completed_at INTEGER
-        )
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_workflows_status ON cf_agents_workflows(status)
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
-      `;
-
-      // v3: durable fibers table for runFiber
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_runs (
-          id TEXT PRIMARY KEY NOT NULL,
-          name TEXT NOT NULL,
-          snapshot TEXT,
-          created_at INTEGER NOT NULL,
-          completed_at INTEGER,
-          outcome TEXT,
-          error_message TEXT
-        )
-      `;
-
-      // v5: root-side index of descendant facet fibers. The fiber's
-      // authoritative row stays in the facet's own cf_agents_runs table;
-      // this table only lets the root alarm owner know which facets need
-      // recovery checks while they are idle.
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_facet_runs (
-          owner_path TEXT NOT NULL,
-          owner_path_key TEXT NOT NULL,
-          run_id TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          PRIMARY KEY (owner_path_key, run_id)
-        )
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_facet_runs_owner_path_key
-        ON cf_agents_facet_runs(owner_path_key)
-      `;
-
-      // v8: managed fiber job ledger for idempotent acceptance,
-      // inspection, cancellation, and terminal cleanup.
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_fibers (
-          fiber_id TEXT PRIMARY KEY,
-          idempotency_key TEXT UNIQUE,
-          name TEXT NOT NULL,
-          status TEXT NOT NULL,
-          snapshot TEXT,
-          metadata_json TEXT,
-          error_message TEXT,
-          created_at INTEGER NOT NULL,
-          started_at INTEGER,
-          completed_at INTEGER
-        )
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_fibers_status_created
-        ON cf_agents_fibers(status, created_at, fiber_id)
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_fibers_name_status_created
-        ON cf_agents_fibers(name, status, created_at, fiber_id)
-      `;
-
-      this.sql`
-        CREATE INDEX IF NOT EXISTS idx_fibers_status_completed
-        ON cf_agents_fibers(status, completed_at, created_at)
-      `;
-
-      this.sql`
+    this.sql`
         CREATE TABLE IF NOT EXISTS cf_agent_tool_runs (
           run_id TEXT PRIMARY KEY,
           parent_tool_call_id TEXT,
@@ -1723,126 +1017,92 @@ export class Agent<
         )
       `;
 
-      this.sql`
+    this.sql`
         CREATE INDEX IF NOT EXISTS idx_agent_tool_runs_parent_tool_call_id
         ON cf_agent_tool_runs(parent_tool_call_id, display_order)
       `;
 
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN output_json TEXT"
-      );
-      // #1630 follow-up: persist the typed interrupted cause so it survives a
-      // reconnect replay (otherwise live clients see `reason`/`childStillRunning`
-      // but reconnecting clients replay them as `undefined`).
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN interrupted_reason TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_still_running INTEGER"
-      );
-      // Detached ("background") runs (rfc-detached-agent-tools). `detached`
-      // marks a run dispatched without an awaiting parent turn;
-      // `detached_on_finish` is the parent METHOD NAME to call on terminal
-      // (durable, eviction-surviving — like a `schedule` callback);
-      // `detached_notify_source` is a caller-controlled chat metadata source for
-      // the `notify` sugar; `detached_max_budget_at` is the absolute give-up
-      // deadline. The four ledger columns implement a two-slot (finish /
-      // give-up) claim+lease so delivery is exactly-once on the happy path and
-      // at-least-once under failure — give-up and finish are INDEPENDENT slots
-      // so a premature give-up can never dedupe a child's real late completion
-      // away (the production incident in #1752).
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_finish TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_notify_source TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_max_budget_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_claimed_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_delivered_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_claimed_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_delivered_at INTEGER"
-      );
-      // Detached progress (rfc-detached-agent-tools §progress). The resetting
-      // no-progress window DURATION (not an absolute deadline — it floats with
-      // the child's latest signal) and the parent's last-observed signal time.
-      // The backbone reconcile reads the child's authoritative `progress.at`
-      // via `inspectAgentToolRun`; this cached value is a best-effort liveness
-      // hint observed off the warm tail so a still-warm parent does not have to
-      // inspect on every tick.
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_no_progress_budget_ms INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN last_progress_at INTEGER"
-      );
-      // Chat-host `detached: { onMilestones }` convenience (4b): JSON
-      // `{ names, mode }` — the milestone names that inject an idempotent chat
-      // notification when reached, and whether to "react" (model turn) or
-      // "narrate" (synthetic assistant line). Persisted so the cold backbone
-      // reconcile can deliver them after eviction, not only the warm tail.
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_milestones TEXT"
-      );
-      // A legacy fiber body that settled whose row delete then failed. Recovery
-      // deletes it without calling `onFiberRecovered()` (#2305).
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_runs ADD COLUMN completed_at INTEGER"
-      );
-      // How that settled body ended, so recovery settles a managed ledger
-      // whose own settle write failed with the body's real outcome.
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_runs ADD COLUMN outcome TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_runs ADD COLUMN error_message TEXT"
-      );
-      // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN event_delivery TEXT"
-      );
-
-      // Mark schema as up-to-date
-      this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
-    }
-
-    this._schemaInitialization = {
-      previousVersion: schemaVersion,
-      currentVersion: CURRENT_SCHEMA_VERSION,
-      migrated: schemaVersion < CURRENT_SCHEMA_VERSION
-    };
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN output_json TEXT"
+    );
+    // #1630 follow-up: persist the typed interrupted cause so it survives a
+    // reconnect replay (otherwise live clients see `reason`/`childStillRunning`
+    // but reconnecting clients replay them as `undefined`).
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN interrupted_reason TEXT"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_still_running INTEGER"
+    );
+    // Detached ("background") runs (rfc-detached-agent-tools). `detached`
+    // marks a run dispatched without an awaiting parent turn;
+    // `detached_on_finish` is the parent METHOD NAME to call on terminal
+    // (durable, eviction-surviving — like a `schedule` callback);
+    // `detached_notify_source` is a caller-controlled chat metadata source for
+    // the `notify` sugar; `detached_max_budget_at` is the absolute give-up
+    // deadline. The four ledger columns implement a two-slot (finish /
+    // give-up) claim+lease so delivery is exactly-once on the happy path and
+    // at-least-once under failure — give-up and finish are INDEPENDENT slots
+    // so a premature give-up can never dedupe a child's real late completion
+    // away (the production incident in #1752).
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_finish TEXT"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_notify_source TEXT"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_max_budget_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_claimed_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_delivered_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_claimed_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_delivered_at INTEGER"
+    );
+    // Detached progress (rfc-detached-agent-tools §progress). The resetting
+    // no-progress window DURATION (not an absolute deadline — it floats with
+    // the child's latest signal) and the parent's last-observed signal time.
+    // The backbone reconcile reads the child's authoritative `progress.at`
+    // via `inspectAgentToolRun`; this cached value is a best-effort liveness
+    // hint observed off the warm tail so a still-warm parent does not have to
+    // inspect on every tick.
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_no_progress_budget_ms INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN last_progress_at INTEGER"
+    );
+    // Chat-host `detached: { onMilestones }` convenience (4b): JSON
+    // `{ names, mode }` — the milestone names that inject an idempotent chat
+    // notification when reached, and whether to "react" (model turn) or
+    // "narrate" (synthetic assistant line). Persisted so the cold backbone
+    // reconcile can deliver them after eviction, not only the warm tail.
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_milestones TEXT"
+    );
+    // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN event_delivery TEXT"
+    );
   }
 
   /**
-   * Read the Agent's schema version from its KV key. A DO created before the
-   * State capability owned `cf_agents_state` has the version as a row in that
-   * table instead: read it once, move it to the key, and delete the row so the
-   * table is left with a single owner. Synchronous (`storage.kv`) because the
-   * constructor gates DDL on it.
+   * A DO created before the State capability owned `cf_agents_state` kept
+   * Agent's schema version as a row in that table: read it once and delete
+   * the row, so the table is left with a single owner.
    */
-  private _readSchemaVersion(): number {
-    const stored = this.ctx.storage.kv.get<number>(SCHEMA_VERSION_KEY);
-    if (stored !== undefined) return stored;
-
-    const hasStateTable =
-      this.ctx.storage.sql
-        .exec(
-          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_state'"
-        )
-        .toArray().length > 0;
-    if (!hasStateTable) return 0;
+  private _takeLegacySchemaVersionRow(): number | undefined {
+    if (!hasTable(this.ctx.storage.sql, "cf_agents_state")) return undefined;
 
     const rows = this.ctx.storage.sql
       .exec(
@@ -1850,10 +1110,9 @@ export class Agent<
         LEGACY_SCHEMA_VERSION_ROW_ID
       )
       .toArray() as { state: string | null }[];
-    if (rows.length === 0) return 0;
+    if (rows.length === 0) return undefined;
 
     const version = Number(rows[0].state) || 0;
-    this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, version);
     this.ctx.storage.sql.exec(
       "DELETE FROM cf_agents_state WHERE id = ?",
       LEGACY_SCHEMA_VERSION_ROW_ID
@@ -1931,6 +1190,10 @@ export class Agent<
         ).call(this, payload, schedule);
     });
 
+    this._keepAlive = new KeepAlive({
+      intervalMs: this._resolvedOptions.keepAliveIntervalMs
+    });
+
     this._queue = new Queue({
       retry: this._resolvedOptions.retry,
       onError: (error: unknown) =>
@@ -1960,18 +1223,6 @@ export class Agent<
       onError: (error) => this.onError(error)
     });
 
-    // Twin bridge for a routed Task run: the physical alarm lives on the
-    // root, but the run's storage and this hook live on the owning dynamic
-    // agent, whose own Lifecycle never observes the root's alarm directly.
-    setTaskRoutedMemoryLimitHandler(this.tasks, (context) => {
-      const hook = (
-        this as unknown as {
-          onAlarmMemoryLimit?: (value: typeof context) => void | Promise<void>;
-        }
-      ).onAlarmMemoryLimit;
-      return hook?.call(this, context);
-    });
-
     // Framework-internal reserved (`__cf`-prefixed) definitions — chat
     // turns, chat recovery, messenger replies — register eagerly through
     // `this.tasks.register()` from each host subclass's own constructor
@@ -1988,6 +1239,51 @@ export class Agent<
         this.taskDefinitions?.[name] as TaskCallbacks[string] | undefined
     );
 
+    this._workflows = new Workflows({
+      env: this.env,
+      owner: () =>
+        this._isFacet
+          ? { kind: "facet", name: this.name, path: this.selfPath }
+          : {
+              kind: "agent",
+              className: this._ParentClass.name,
+              name: this.name
+            }
+    });
+
+    const fiberHost: FiberHost = {
+      tasks: this.tasks,
+      sync: () => this.ctx.storage.sync(),
+      emit: (type, payload) =>
+        this._emit(type as ObservabilityEvent["type"], payload),
+      handleInternalRecovery: (ctx) => this._handleInternalFiberRecovery(ctx),
+      // A chat host (AIChatAgent, Think, released versions included) names
+      // its legacy turn fibers `${CHAT_FIBER_NAME}:<id>` and recovers them
+      // with its own durable budget. Nothing else is exempt.
+      ownsRecoveryBudget: (name) => {
+        const chatFiber = (this.constructor as { CHAT_FIBER_NAME?: unknown })
+          .CHAT_FIBER_NAME;
+        return (
+          typeof chatFiber === "string" && name.startsWith(`${chatFiber}:`)
+        );
+      },
+      onRecovered: (ctx) => this.onFiberRecovered(ctx),
+      heartbeatMs: this._resolvedOptions.keepAliveIntervalMs,
+      recoveryHookTimeoutMs: this._resolvedOptions.fiberRecoveryHookTimeoutMs,
+      maxAgeMs: this._resolvedOptions.fiberRecoveryMaxAgeMs
+    };
+    const claimMs = this._resolvedOptions.keepAliveIntervalMs;
+    this.tasks.register(
+      FIBER_TASK,
+      createFiberTaskDefinition(fiberHost, false),
+      { claimMs }
+    );
+    this.tasks.register(
+      MANAGED_FIBER_TASK,
+      createFiberTaskDefinition(fiberHost, true),
+      { claimMs, keepCheckpoint: true }
+    );
+
     this.mcp = this._withAgentSpan(
       "agent_initialization",
       "initialization",
@@ -1995,7 +1291,9 @@ export class Agent<
       (update) => {
         if (!wrappedClasses.has(this.constructor)) {
           // Auto-wrap custom methods with agent context
-          this._autoWrapCustomMethods();
+          wrapCustomMethods(this, Agent.prototype, (name) =>
+            isCallableMethod(this[name as keyof this] as Function)
+          );
           wrappedClasses.add(this.constructor);
         }
 
@@ -2027,16 +1325,27 @@ export class Agent<
       }
     );
 
+    // Event logs fan out to the connections that end at this Agent: on a
+    // facet, the sockets the root bridges in, without those a facet only
+    // forwards to a sub-agent of its own.
+    setEventLogConnections(this._webSockets, () =>
+      [...this.getConnections()].filter(
+        (connection) => !this._dynamicAgents.connectionRoutesToChild(connection)
+      )
+    );
     // Agent's WebSocket connections ride the WebSockets capability —
     // Lifecycle itself no longer models connections. The handlers call
     // through `this.*` so they always hit the framework-wrapped hooks.
     this.lifecycle
       .use(this.scheduler)
+      .use(this._keepAlive)
+      .use(this._deferredDestroy)
       .use(this._queue)
       .use(this.mcp)
       .use(this._state)
       .use(this._webSockets)
       .use(this.tasks)
+      .use(this._workflows)
       // Registered for capability identity/services; its hot paths are
       // wired directly (see the DynamicAgentsInternal class doc).
       .use(this._dynamicAgents);
@@ -2060,55 +1369,14 @@ export class Agent<
         });
       })
     );
-    // Compute persistence-hook dispatch mode once.
-    // Throws immediately if both hooks are overridden on the same class.
-    {
-      const proto = Object.getPrototypeOf(this);
-      const hasOwnNew = Object.prototype.hasOwnProperty.call(
-        proto,
-        "onStateChanged"
-      );
-      const hasOwnOld = Object.prototype.hasOwnProperty.call(
-        proto,
-        "onStateUpdate"
-      );
-
-      if (hasOwnNew && hasOwnOld) {
-        throw new Error(
-          `[Agent] Cannot override both onStateChanged and onStateUpdate. ` +
-            `Remove onStateUpdate — it has been renamed to onStateChanged.`
-        );
-      }
-
-      if (hasOwnOld) {
-        const ctor = this.constructor;
-        if (!_onStateUpdateWarnedClasses.has(ctor)) {
-          _onStateUpdateWarnedClasses.add(ctor);
-          console.warn(
-            `[Agent] onStateUpdate is deprecated. Rename to onStateChanged — the behavior is identical.`
-          );
-        }
-      }
-
-      const base = Agent.prototype;
-      if (proto.onStateChanged !== base.onStateChanged) {
-        this._persistenceHookMode = "new";
-      } else if (proto.onStateUpdate !== base.onStateUpdate) {
-        this._persistenceHookMode = "old";
-      }
-      // default "none" already set in field initializer
-    }
+    // Which state hook to call, decided once per instance. Throws if a
+    // class overrides both onStateChanged and onStateUpdate.
+    this._persistenceHookMode = stateHookMode(this, Agent.prototype);
 
     const _onAlarm = this.onAlarm.bind(this);
     this.onAlarm = async () => {
       if (this._destroyed) return;
       await _onAlarm();
-      if (this._destroyed) return;
-      await this._onAlarmHousekeeping();
-      // Housekeeping scans change fiber/facet/keep-alive state; refresh the
-      // host jobs that guarantee their wakes before Lifecycle re-arms.
-      if (this._destroyed) return;
-      await this._syncHostJobs();
     };
 
     const _onRequest = this.onRequest.bind(this);
@@ -2151,96 +1419,21 @@ export class Agent<
             return this._tryCatch(() => _onMessage(connection, message));
           }
 
-          // State frames: readonly check, validation, error replies — all
-          // the capability's. Root sockets never reach here with one (the
-          // capability consumed it); bridged facet connections do.
-          if (this._webSockets.applyStateFrame(connection, parsed)) {
+          // State and event-log frames: the capability answers them, and
+          // Agent applies them here, after the facet forward above, so a
+          // frame for a sub-agent reaches the sub-agent's own capability.
+          if (
+            this._webSockets.applyStateFrame(connection, parsed) ||
+            applyEventLogFrame(this._webSockets, connection, parsed)
+          ) {
             return;
           }
 
           if (isRPCRequest(parsed)) {
-            try {
-              const { id, method, args } = parsed;
-
-              // Check if method exists and is callable
-              const methodFn = this[method as keyof this];
-              if (typeof methodFn !== "function") {
-                throw new Error(`Method ${method} does not exist`);
-              }
-
-              if (!this._isCallable(method)) {
-                throw new Error(`Method ${method} is not callable`);
-              }
-
-              const metadata = getCallableMetadata(methodFn as Function);
-
-              // For streaming methods, pass a StreamingResponse object
-              if (metadata?.streaming) {
-                const stream = new StreamingResponse(connection, id);
-                if (replyBridge) {
-                  registerFacetStreamingDelivery(stream, replyBridge);
-                }
-
-                this._emit("rpc", { method, streaming: true });
-
-                try {
-                  await methodFn.apply(this, [stream, ...args]);
-                } catch (err) {
-                  console.error(`Error in streaming method "${method}":`, err);
-                  this._emit("rpc:error", {
-                    method,
-                    error: err instanceof Error ? err.message : String(err)
-                  });
-                  // Auto-close stream with error if method throws before closing
-                  if (!stream.isClosed) {
-                    stream.error(
-                      err instanceof Error ? err.message : String(err)
-                    );
-                  }
-                }
-                await waitForFacetStreamingResponseDeliveries(stream);
-                return;
-              }
-
-              // For regular methods, execute and send response
-              const result = await methodFn.apply(this, args);
-
-              this._emit("rpc", { method, streaming: metadata?.streaming });
-
-              const response: RPCResponse = {
-                done: true,
-                id,
-                result,
-                success: true,
-                type: MessageType.RPC
-              };
-              if (replyBridge) {
-                await sendFacetRpcResponseIfOpen(replyBridge, response)
-                  .completion;
-              } else {
-                sendRpcResponseIfOpen(connection, response);
-              }
-            } catch (e) {
-              const response: RPCResponse = {
-                error:
-                  e instanceof Error ? e.message : "Unknown error occurred",
-                id: parsed.id,
-                success: false,
-                type: MessageType.RPC
-              };
-              if (replyBridge) {
-                await sendFacetRpcResponseIfOpen(replyBridge, response)
-                  .completion;
-              } else {
-                sendRpcResponseIfOpen(connection, response);
-              }
-
-              console.error("RPC error:", e);
-              this._emit("rpc:error", {
-                method: parsed.method,
-                error: e instanceof Error ? e.message : String(e)
-              });
-            }
+            await dispatchCallableRpc(this, connection, parsed, {
+              replyBridge,
+              emit: (type, payload) => this._emit(type, payload)
+            });
             return;
           }
 
@@ -2415,8 +1608,7 @@ export class Agent<
               "startup",
               {},
               async () => {
-                this._checkOrphanedWorkflows();
-                await this._checkRunFibers();
+                await this._recoverFibers();
                 // Interrupted Task runs (including chat turns) recover via
                 // the Lifecycle job queue: their mirror jobs are overdue and
                 // re-fire on the post-startup alarm derivation.
@@ -2429,7 +1621,7 @@ export class Agent<
                 startupAgentToolRunIds.length
             });
 
-            // Chat recovery (above, in `_checkRunFibers`) evaluates its budgets
+            // Chat recovery (above, in fiber recovery) evaluates its budgets
             // — and may seal an interrupted turn, firing `onExhausted` — BEFORE
             // the user's onStart runs. So a `chatRecovery` config produced
             // inside onStart is applied too late for the recovery that matters.
@@ -2475,10 +1667,7 @@ export class Agent<
               runIds: startupAgentToolRunIds
             });
 
-            // Push-based host jobs replace the pull-based alarm contribution:
-            // re-sync them on every wake so orphaned fiber/facet recovery
-            // state left by a dead process re-arms its housekeeping wake.
-            await this._syncHostJobs();
+            await this._dropFacetHostJobs();
             return result;
           });
         }
@@ -2494,56 +1683,6 @@ export class Agent<
     await this._withAgentSpan("restore_agent_state", "startup", {}, () =>
       this._dynamicAgents.restoreFacetContext()
     );
-  }
-
-  /**
-   * Check for workflows referencing unknown bindings and warn with migration suggestion.
-   */
-  private _checkOrphanedWorkflows(): void {
-    // Get distinct workflow names with counts by active/completed status
-    const distinctNames = this.sql<{
-      workflow_name: string;
-      total: number;
-      active: number;
-      completed: number;
-    }>`
-      SELECT 
-        workflow_name,
-        COUNT(*) as total,
-        SUM(CASE WHEN status NOT IN ('complete', 'errored', 'terminated') THEN 1 ELSE 0 END) as active,
-        SUM(CASE WHEN status IN ('complete', 'errored', 'terminated') THEN 1 ELSE 0 END) as completed
-      FROM cf_agents_workflows 
-      GROUP BY workflow_name
-    `;
-
-    const orphaned = distinctNames.filter(
-      (row) => !this._findWorkflowBindingByName(row.workflow_name)
-    );
-
-    if (orphaned.length > 0) {
-      const currentBindings = this._getWorkflowBindingNames();
-      for (const {
-        workflow_name: oldName,
-        total,
-        active,
-        completed
-      } of orphaned) {
-        const suggestion =
-          currentBindings.length === 1
-            ? `this.migrateWorkflowBinding('${oldName}', '${currentBindings[0]}')`
-            : `this.migrateWorkflowBinding('${oldName}', '<NEW_BINDING_NAME>')`;
-        const breakdown =
-          active > 0 && completed > 0
-            ? ` (${active} active, ${completed} completed)`
-            : active > 0
-              ? ` (${active} active)`
-              : ` (${completed} completed)`;
-        console.warn(
-          `[Agent] Found ${total} workflow(s) referencing unknown binding '${oldName}'${breakdown}. ` +
-            `If you renamed the binding, call: ${suggestion}`
-        );
-      }
-    }
   }
 
   /**
@@ -2794,33 +1933,8 @@ export class Agent<
    * Override this method to handle incoming emails
    * @param payload Internal wire format — plain data + RpcTarget bridge
    */
-  async _onEmail(payload: {
-    from: string;
-    to: string;
-    headers: Headers;
-    rawSize: number;
-    _secureRouted?: boolean;
-    _bridge: EmailBridge;
-  }) {
-    // nb: we use this roundabout way of getting to onEmail
-    // because of https://github.com/cloudflare/workerd/issues/4499
-
-    // Reconstruct the AgentEmail interface from the payload so the
-    // user's onEmail handler sees the same API as before
-    const email: AgentEmail = {
-      from: payload.from,
-      to: payload.to,
-      headers: payload.headers,
-      rawSize: payload.rawSize,
-      _secureRouted: payload._secureRouted,
-      getRaw: () => payload._bridge.getRaw(),
-      setReject: (reason: string) => payload._bridge.setReject(reason),
-      forward: (rcptTo: string, headers?: Headers) =>
-        payload._bridge.forward(rcptTo, headers),
-      reply: (options: { from: string; to: string; raw: string }) =>
-        payload._bridge.reply(options)
-    };
-
+  async _onEmail(payload: AgentEmailPayload) {
+    const email = agentEmailFromPayload(payload);
     return runInInvocation(
       { agent: this, connection: undefined, request: undefined, email },
       async () => {
@@ -2851,82 +1965,18 @@ export class Agent<
    * @param options.secret Secret for signing agent headers (enables secure reply routing).
    *   Required if the email was routed via createSecureReplyEmailResolver.
    *   Pass explicit `null` to opt-out of signing (not recommended for secure routing).
-   * @returns void
    */
   async replyToEmail(
     email: AgentEmail,
-    options: {
-      fromName: string;
-      subject?: string | undefined;
-      body: string;
-      contentType?: string;
-      headers?: Record<string, string>;
-      secret?: string | null;
-    }
+    options: ReplyToEmailOptions
   ): Promise<void> {
     return this._tryCatch(async () => {
-      // Enforce signing for emails routed via createSecureReplyEmailResolver
-      if (email._secureRouted && options.secret === undefined) {
-        throw new Error(
-          "This email was routed via createSecureReplyEmailResolver. " +
-            "You must pass a secret to replyToEmail() to sign replies, " +
-            "or pass explicit null to opt-out (not recommended)."
-        );
-      }
-
-      const agentName = camelCaseToKebabCase(this._ParentClass.name);
-      const agentId = this.name;
-
-      const { createMimeMessage } = await import("mimetext");
-      const msg = createMimeMessage();
-      msg.setSender({ addr: email.to, name: options.fromName });
-      msg.setRecipient(email.from);
-      msg.setSubject(
-        options.subject || `Re: ${email.headers.get("subject")}` || "No subject"
-      );
-      msg.addMessage({
-        contentType: options.contentType || "text/plain",
-        data: options.body
+      const subject = await replyToAgentEmail(email, options, {
+        agentName: camelCaseToKebabCase(this._ParentClass.name),
+        agentId: this.name
       });
-
-      const domain = email.from.split("@")[1];
-      const messageId = `<${agentId}@${domain}>`;
-      msg.setHeader("In-Reply-To", email.headers.get("Message-ID")!);
-      msg.setHeader("Message-ID", messageId);
-      msg.setHeader("X-Agent-Name", agentName);
-      msg.setHeader("X-Agent-ID", agentId);
-
-      // Sign headers if secret is provided (enables secure reply routing)
-      if (typeof options.secret === "string") {
-        const signedHeaders = await signAgentHeaders(
-          options.secret,
-          agentName,
-          agentId
-        );
-        msg.setHeader("X-Agent-Sig", signedHeaders["X-Agent-Sig"]);
-        msg.setHeader("X-Agent-Sig-Ts", signedHeaders["X-Agent-Sig-Ts"]);
-      }
-
-      if (options.headers) {
-        for (const [key, value] of Object.entries(options.headers)) {
-          msg.setHeader(key, value);
-        }
-      }
-      await email.reply({
-        from: email.to,
-        raw: msg.asRaw(),
-        to: email.from
-      });
-
-      // Emit after the send succeeds — from/to are swapped because
-      // this is a reply: the agent (email.to) is now the sender.
-      const rawSubject = email.headers.get("subject");
-      this._emit("email:reply", {
-        from: email.to,
-        to: email.from,
-        subject:
-          options.subject ?? (rawSubject ? `Re: ${rawSubject}` : undefined)
-      });
+      // A reply: the agent (email.to) is now the sender.
+      this._emit("email:reply", { from: email.to, to: email.from, subject });
     });
   }
 
@@ -2974,69 +2024,10 @@ export class Agent<
     try {
       return await fn();
     } catch (e) {
-      throw this.onError(e);
-    }
-  }
-
-  /**
-   * Wrap public subclass methods that may be entered outside Lifecycle, such as
-   * native Durable Object RPC. Lifecycle hooks already have Agent context.
-   */
-  private _autoWrapCustomMethods() {
-    // Agent.prototype traversal also covers the DurableObject base class.
-    const basePrototypes = [Agent.prototype];
-    const baseMethods = new Set<string>();
-    for (const baseProto of basePrototypes) {
-      let proto = baseProto;
-      while (proto && proto !== Object.prototype) {
-        const methodNames = Object.getOwnPropertyNames(proto);
-        for (const methodName of methodNames) {
-          baseMethods.add(methodName);
-        }
-        proto = Object.getPrototypeOf(proto);
-      }
-    }
-    // The nearest descriptor for a name is authoritative: a subclass getter
-    // or field that shadows an inherited method must not be replaced by a
-    // wrapper around the inherited method.
-    const seen = new Set<string>();
-    let proto = Object.getPrototypeOf(this);
-    while (proto && proto !== Agent.prototype && proto !== Object.prototype) {
-      const methodNames = Object.getOwnPropertyNames(proto);
-      for (const methodName of methodNames) {
-        if (seen.has(methodName)) continue;
-        seen.add(methodName);
-        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
-
-        // Skip if it's a private method, a base method, a getter, or not a function,
-        if (
-          baseMethods.has(methodName) ||
-          methodName.startsWith("_") ||
-          !descriptor ||
-          !!descriptor.get ||
-          typeof descriptor.value !== "function" ||
-          agentContextWrappers.has(descriptor.value)
-        ) {
-          continue;
-        }
-
-        const method = descriptor.value as Function;
-        /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
-        const wrappedFunction = withAgentContext(
-          method as (...args: any[]) => any
-        ) as any;
-        /* oxlint-enable @typescript-eslint/no-explicit-any */
-
-        // if the method is callable, copy the metadata from the original method
-        if (this._isCallable(methodName)) {
-          copyCallableMetadata(method, wrappedFunction);
-        }
-
-        // set the wrapped function on the prototype
-        this.constructor.prototype[methodName as keyof this] = wrappedFunction;
-      }
-
-      proto = Object.getPrototypeOf(proto);
+      // `onError` observes the error and may replace it by throwing. If it
+      // returns, the original error continues to the caller.
+      await this.onError(e);
+      throw e;
     }
   }
 
@@ -3225,10 +2216,6 @@ export class Agent<
     return this._dynamicAgents.routeLifecycle(target, envelope);
   }
 
-  private _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
-    return this._dynamicAgents.rootAlarmOwner();
-  }
-
   // ── Scheduling (delegates to agents/schedules) ─────────────────────────
 
   /**
@@ -3246,55 +2233,6 @@ export class Agent<
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
     await this._dynamicAgents.cleanupPrefix(ownerPath);
-  }
-
-  /**
-   * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
-   * Facets run in separate colocated isolates but cannot set their own
-   * physical alarm, so this lets facet work use the root alarm heartbeat.
-   * @internal
-   */
-  async _cf_acquireFacetKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string> {
-    await this.__unsafe_ensureInitialized();
-    return this._dynamicAgents.acquireKeepAlive(ownerPath);
-  }
-
-  /**
-   * Release a root-owned keepAlive ref previously acquired for a facet.
-   * Idempotent so disposer calls can safely race or run twice.
-   * @internal
-   */
-  async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
-    await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.releaseKeepAlive(token);
-  }
-
-  /**
-   * Register a facet's durable run row in the root-side index so root
-   * alarm housekeeping can dispatch recovery checks into idle facets.
-   * The facet remains authoritative for snapshots and recovery hooks.
-   * @internal
-   */
-  async _cf_registerFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.registerRun(ownerPath, runId);
-  }
-
-  /**
-   * Remove a completed facet fiber from the root-side index.
-   * @internal
-   */
-  async _cf_unregisterFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.unregisterRun(ownerPath, runId);
   }
 
   /**
@@ -3380,8 +2318,7 @@ export class Agent<
    * @template T Type of the payload data
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
-   * @deprecated Use {@link getScheduleById}. This synchronous API cannot cross
-   * Durable Object boundaries and throws inside sub-agents.
+   * @deprecated Use {@link getScheduleById}.
    */
   getSchedule<T = string>(id: string): Schedule<T> | undefined {
     return this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedule<T>(id);
@@ -3390,8 +2327,6 @@ export class Agent<
   /**
    * Get a scheduled task by ID.
    *
-   * Unlike the deprecated synchronous {@link getSchedule}, this works inside
-   * sub-agents by delegating to the top-level parent that owns the alarm.
    *
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
@@ -3405,8 +2340,7 @@ export class Agent<
    * @template T Type of the payload data
    * @param criteria Criteria to filter schedules
    * @returns Array of matching Schedule objects
-   * @deprecated Use {@link listSchedules}. This synchronous API cannot cross
-   * Durable Object boundaries and throws inside sub-agents.
+   * @deprecated Use {@link listSchedules}.
    */
   getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
     return this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedules<T>(criteria);
@@ -3415,8 +2349,6 @@ export class Agent<
   /**
    * List scheduled tasks matching the given criteria.
    *
-   * Unlike the deprecated synchronous {@link getSchedules}, this works inside
-   * sub-agents by delegating to the top-level parent that owns the alarm.
    *
    * @param criteria Criteria to filter schedules
    * @returns Array of matching Schedule objects
@@ -3466,48 +2398,8 @@ export class Agent<
    * }
    * ```
    */
-  async keepAlive(): Promise<() => void> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      const token = await root._cf_acquireFacetKeepAlive(this.selfPath);
-      let disposed = false;
-      return () => {
-        if (disposed) return;
-        disposed = true;
-        const release = root._cf_releaseFacetKeepAlive(token).catch((e) => {
-          console.error("[Agent] Failed to release facet keepAlive:", e);
-        });
-        this.ctx.waitUntil(release);
-      };
-    }
-
-    this._keepAliveRefs++;
-
-    if (this._keepAliveRefs === 1) {
-      await this._syncHostJobs();
-    }
-
-    let disposed = false;
-    return () => {
-      if (disposed) return;
-      disposed = true;
-      this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-      // When the last lease is released, recompute the alarm from persistent
-      // state so a short-lived keepAlive does not leave a stale
-      // `now + keepAliveIntervalMs` heartbeat armed. The dispose contract is
-      // synchronous, so fire-and-forget the async reschedule via waitUntil
-      // (mirrors `_cf_releaseFacetKeepAlive`).
-      if (this._keepAliveRefs === 0) {
-        this.ctx.waitUntil(
-          this._syncHostJobs().catch((e) => {
-            console.error(
-              "[Agent] Failed to reschedule alarm after keepAlive dispose:",
-              e
-            );
-          })
-        );
-      }
-    };
+  keepAlive(): Promise<() => void> {
+    return this._keepAlive.acquire();
   }
 
   /**
@@ -3527,942 +2419,149 @@ export class Agent<
    * ```
    */
   async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
-    const dispose = await this.keepAlive();
+    // Through keepAlive(), so a subclass override sees every hold.
+    const release = await this.keepAlive();
     try {
       return await fn();
     } finally {
-      dispose();
+      release();
     }
   }
 
-  // ── Managed fibers: idempotent durable jobs ────────────────────────
+  // ── Fibers (one-step Task runs, ./fiber-runs) ─────────────────────
 
-  private _isTerminalFiberStatus(status: FiberStatus): boolean {
-    return (
-      status === "completed" ||
-      status === "aborted" ||
-      status === "interrupted" ||
-      status === "error"
-    );
+  /**
+   * Run a function as a durable fiber and return its result. The fiber is
+   * recorded before it runs, checkpoints with `ctx.stash()` or
+   * `this.stash()`, and after an eviction its last checkpoint goes to
+   * `onFiberRecovered`. The function itself never runs again.
+   */
+  runFiber<T>(name: string, fn: (ctx: FiberContext) => Promise<T>): Promise<T> {
+    return runFiber(this.tasks, name, fn);
   }
 
-  private _notifyManagedFiberTerminal(fiberId: string): void {
-    const row = this._readFiber(fiberId);
-    if (row && !this._isTerminalFiberStatus(row.status)) {
-      return;
-    }
-
-    const waiters = this._managedFiberTerminalWaiters.get(fiberId);
-    if (!waiters) {
-      return;
-    }
-
-    this._managedFiberTerminalWaiters.delete(fiberId);
-    for (const resolve of waiters) {
-      resolve();
-    }
-  }
-
-  private _waitForManagedFiberTerminal(fiberId: string): Promise<void> {
-    const row = this._readFiber(fiberId);
-    if (!row || this._isTerminalFiberStatus(row.status)) {
-      return Promise.resolve();
-    }
-
-    return new Promise<void>((resolve) => {
-      let waiters = this._managedFiberTerminalWaiters.get(fiberId);
-      if (!waiters) {
-        waiters = new Set();
-        this._managedFiberTerminalWaiters.set(fiberId, waiters);
-      }
-      waiters.add(resolve);
-    });
-  }
-
-  private _normalizeFiberStatusFilter(
-    status?: FiberStatus | FiberStatus[]
-  ): Set<FiberStatus> | null {
-    if (!status) return null;
-    return new Set(Array.isArray(status) ? status : [status]);
-  }
-
-  private _parseFiberJsonObject(
-    value: string | null
-  ): Record<string, unknown> | null {
-    if (value === null) return null;
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      if (
-        parsed !== null &&
-        typeof parsed === "object" &&
-        !Array.isArray(parsed)
-      ) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Invalid metadata should not prevent inspection.
-    }
-    return null;
-  }
-
-  private _parseFiberSnapshot(value: string | null): unknown | undefined {
-    if (value === null) return undefined;
-    try {
-      return JSON.parse(value) as unknown;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private _fiberErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
-
-  private _stringifyFiberSnapshot(snapshot: unknown): string | null {
-    return snapshot === undefined ? null : JSON.stringify(snapshot);
-  }
-
-  private _fiberRecoveryErrorMessage(
-    result: FiberRecoveryResult
-  ): string | null {
-    if (result.status === "error") {
-      return result.error === undefined
-        ? null
-        : this._fiberErrorMessage(result.error);
-    }
-    if (result.status === "aborted" || result.status === "interrupted") {
-      return result.reason ?? null;
-    }
-    return null;
-  }
-
-  private _applyManagedFiberRecoveryResult(
-    fiberId: string,
-    result: FiberRecoveryResult
-  ): void {
-    const completedAt = Date.now();
-    const snapshot = this._stringifyFiberSnapshot(result.snapshot);
-    const errorMessage = this._fiberRecoveryErrorMessage(result);
-    const metadata =
-      result.status === "completed" && result.metadata !== undefined
-        ? JSON.stringify(result.metadata)
-        : undefined;
-
-    if (metadata !== undefined) {
-      this.sql`
-        UPDATE cf_agents_fibers
-        SET status = ${result.status},
-            snapshot = COALESCE(${snapshot}, snapshot),
-            metadata_json = ${metadata},
-            error_message = ${errorMessage},
-            completed_at = ${completedAt}
-        WHERE fiber_id = ${fiberId}
-          AND status = 'interrupted'
-      `;
-      this._notifyManagedFiberTerminal(fiberId);
-      return;
-    }
-
-    this.sql`
-      UPDATE cf_agents_fibers
-      SET status = ${result.status},
-          snapshot = COALESCE(${snapshot}, snapshot),
-          error_message = ${errorMessage},
-          completed_at = ${completedAt}
-      WHERE fiber_id = ${fiberId}
-        AND status = 'interrupted'
-    `;
-    this._notifyManagedFiberTerminal(fiberId);
-  }
-
-  private _settleManagedFiberExecution(
-    fiberId: string,
-    outcome: { ok: true } | { ok: false; error: unknown },
-    signal: AbortSignal
-  ): void {
-    const completedAt = Date.now();
-    if (outcome.ok) {
-      this.sql`
-        UPDATE cf_agents_fibers
-        SET status = 'completed', completed_at = ${completedAt}
-        WHERE fiber_id = ${fiberId} AND status = 'running'
-      `;
-      this._notifyManagedFiberTerminal(fiberId);
-      return;
-    }
-
-    const message = this._fiberErrorMessage(outcome.error);
-    const status: FiberStatus = signal.aborted ? "aborted" : "error";
-    this.sql`
-      UPDATE cf_agents_fibers
-      SET status = ${status},
-          error_message = ${message},
-          completed_at = ${completedAt}
-      WHERE fiber_id = ${fiberId} AND status = 'running'
-    `;
-    this._notifyManagedFiberTerminal(fiberId);
-  }
-
-  private _parseFiberRecoverySnapshot(
-    fiberId: string,
-    snapshotText: string | null
-  ): unknown | null {
-    if (!snapshotText) return null;
-    try {
-      return JSON.parse(snapshotText) as unknown;
-    } catch {
-      console.warn(
-        `[Agent] Corrupted snapshot for fiber ${fiberId}, treating as null`
-      );
-      return null;
-    }
-  }
-
-  private _fiberRecoveryPayload(
-    ctx: FiberRecoveryContext,
-    managedRow: FiberLedgerRow | null,
-    startedAt?: number
-  ): Record<string, unknown> {
-    return {
-      fiberId: ctx.id,
-      fiberName: ctx.name,
-      managed: managedRow !== null,
-      recoveryReason: ctx.recoveryReason,
-      elapsedMs: startedAt === undefined ? undefined : Date.now() - startedAt
-    };
-  }
-
-  private async _withFiberRecoveryTimeout<T>(
-    ctx: FiberRecoveryContext,
-    operation: () => Promise<T>
+  /**
+   * Run a fiber whose framework recovery data wraps the user's checkpoints.
+   * Released `@cloudflare/ai-chat` and `@cloudflare/think` versions call it
+   * for sub-agent turns, and they accept newer `agents` releases, so it
+   * stays while those versions are in range.
+   * @internal
+   */
+  protected _runFiberWithStashWrapper<T>(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<T>,
+    options: Pick<InternalFiberOptions, "initialSnapshot" | "wrapStash">
   ): Promise<T> {
-    const timeoutMs = this._resolvedOptions.fiberRecoveryHookTimeoutMs;
-    if (timeoutMs <= 0) return operation();
-
-    // Note: this bounds how long we WAIT for the operation, but does not
-    // cancel it — `operation` keeps running after the timeout rejects. It is
-    // applied to internal framework recovery only, which is idempotent and
-    // safe to abandon mid-flight.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        operation(),
-        new Promise<T>((_, reject) => {
-          timer = setTimeout(() => {
-            reject(
-              new Error(
-                `Fiber recovery hook timed out after ${timeoutMs}ms for "${ctx.name}" (${ctx.id})`
-              )
-            );
-          }, timeoutMs);
-        })
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
+    return runFiber(this.tasks, name, fn, options);
   }
 
-  private _recordFiberRecoveryFailure(
-    ctx: FiberRecoveryContext,
-    managedRow: FiberLedgerRow | null,
-    error: unknown,
-    startedAt: number,
-    reason = "handler_error"
-  ): void {
-    const errorMessage = this._fiberErrorMessage(error);
-    const completedAt = Date.now();
-    if (managedRow) {
-      this.sql`
-        UPDATE cf_agents_fibers
-        SET status = 'error',
-            error_message = ${errorMessage},
-            completed_at = ${completedAt}
-        WHERE fiber_id = ${ctx.id}
-          AND status = 'interrupted'
-      `;
-      this._notifyManagedFiberTerminal(ctx.id);
-    }
-    this._emit("fiber:recovery:failed", {
-      ...this._fiberRecoveryPayload(ctx, managedRow, startedAt),
-      error: errorMessage,
-      reason
-    });
-  }
-
-  private async _runFiberRecoveryHook(
-    ctx: FiberRecoveryContext,
-    managedRow: FiberLedgerRow | null
-  ): Promise<boolean> {
-    const startedAt = Date.now();
-    this._emit(
-      "fiber:recovery:attempt",
-      this._fiberRecoveryPayload(ctx, managedRow)
-    );
-    try {
-      const handled = await this._withFiberRecoveryTimeout(ctx, () =>
-        this._handleInternalFiberRecovery(ctx)
-      );
-      if (!handled) {
-        const recoveryResult = await this.onFiberRecovered(ctx);
-        if (managedRow && recoveryResult) {
-          this._applyManagedFiberRecoveryResult(ctx.id, recoveryResult);
-        }
-      }
-      this._emit("fiber:recovery:handled", {
-        ...this._fiberRecoveryPayload(ctx, managedRow, startedAt),
-        status: handled ? "internal" : managedRow ? "managed" : "user"
-      });
-      return true;
-    } catch (e) {
-      this._recordFiberRecoveryFailure(ctx, managedRow, e, startedAt);
-      console.error(
-        `[Agent] Fiber recovery failed for "${ctx.name}" (${ctx.id}):`,
-        e
-      );
-      return false;
-    }
-  }
-
-  private _fiberInspectionFromRow(row: FiberLedgerRow): FiberInspection {
-    const snapshot = this._parseFiberSnapshot(row.snapshot);
-    const inspection: FiberInspection = {
-      fiberId: row.fiber_id,
-      name: row.name,
-      status: row.status,
-      createdAt: row.created_at
-    };
-
-    if (row.idempotency_key !== null) {
-      inspection.idempotencyKey = row.idempotency_key;
-    }
-    if (snapshot !== undefined) {
-      inspection.snapshot = snapshot;
-    }
-    if (row.error_message !== null) {
-      inspection.error = row.error_message;
-    }
-    const metadata = this._parseFiberJsonObject(row.metadata_json);
-    if (metadata !== null) {
-      inspection.metadata = metadata;
-    }
-    if (row.started_at !== null) {
-      inspection.startedAt = row.started_at;
-    }
-    if (row.completed_at !== null) {
-      inspection.settledAt = row.completed_at;
-    }
-
-    return inspection;
-  }
-
-  private async _waitForManagedFiber(
-    fiberId: string
-  ): Promise<FiberInspection | null> {
-    const row = this._readFiber(fiberId);
-    if (!row || this._isTerminalFiberStatus(row.status)) {
-      return row ? this._fiberInspectionFromRow(row) : null;
-    }
-
-    if (this._managedFiberExecutions.has(fiberId)) {
-      await this._waitForManagedFiberTerminal(fiberId);
-      return this.inspectFiber(fiberId);
-    }
-
-    await this._checkRunFibers();
-    await this._waitForManagedFiberTerminal(fiberId);
-    return this.inspectFiber(fiberId);
-  }
-
-  private _readFiber(fiberId: string): FiberLedgerRow | null {
-    const rows = this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      WHERE fiber_id = ${fiberId}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private _readFiberByKey(idempotencyKey: string): FiberLedgerRow | null {
-    const rows = this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      WHERE idempotency_key = ${idempotencyKey}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private _listFiberRows(options?: ListFibersOptions): FiberLedgerRow[] {
-    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 100);
-    const statuses = this._normalizeFiberStatusFilter(options?.status);
-    if (statuses) {
-      return [...statuses]
-        .flatMap((status) =>
-          this._listFiberRowsByStatus(status, limit, options?.name)
-        )
-        .sort((a, b) =>
-          b.created_at === a.created_at
-            ? b.fiber_id.localeCompare(a.fiber_id)
-            : b.created_at - a.created_at
-        )
-        .slice(0, limit);
-    }
-
-    if (options?.name) {
-      return this.sql<FiberLedgerRow>`
-        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-               error_message, created_at, started_at, completed_at
-        FROM cf_agents_fibers
-        WHERE name = ${options.name}
-        ORDER BY created_at DESC, fiber_id DESC
-        LIMIT ${limit}
-      `;
-    }
-
-    return this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      ORDER BY created_at DESC, fiber_id DESC
-      LIMIT ${limit}
-    `;
-  }
-
-  private _listFiberRowsByStatus(
-    status: FiberStatus,
-    limit: number,
-    name?: string
-  ): FiberLedgerRow[] {
-    if (name) {
-      return this.sql<FiberLedgerRow>`
-        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-               error_message, created_at, started_at, completed_at
-        FROM cf_agents_fibers
-        WHERE status = ${status} AND name = ${name}
-        ORDER BY created_at DESC, fiber_id DESC
-        LIMIT ${limit}
-      `;
-    }
-
-    return this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      WHERE status = ${status}
-      ORDER BY created_at DESC, fiber_id DESC
-      LIMIT ${limit}
-    `;
+  /**
+   * Accept a managed fiber: deduplicated by `fiberId` or `idempotencyKey`,
+   * kept in a ledger you inspect, cancel, resolve and delete.
+   */
+  startFiber(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<void>,
+    options?: StartFiberOptions
+  ): Promise<StartFiberResult> {
+    return startFiber(this.tasks, name, fn, options);
   }
 
   async inspectFiber(fiberId: string): Promise<FiberInspection | null> {
-    const row = this._readFiber(fiberId);
-    return row ? this._fiberInspectionFromRow(row) : null;
+    return inspectFiber(this.tasks, this.tasks.peek(fiberId));
   }
 
   async inspectFiberByKey(
     idempotencyKey: string
   ): Promise<FiberInspection | null> {
-    const row = this._readFiberByKey(idempotencyKey);
-    return row ? this._fiberInspectionFromRow(row) : null;
+    return inspectFiber(this.tasks, fiberByKey(this.tasks, idempotencyKey));
   }
 
   async listFibers(options?: ListFibersOptions): Promise<FiberInspection[]> {
-    return this._listFiberRows(options).map((row) =>
-      this._fiberInspectionFromRow(row)
-    );
+    return listFibers(this.tasks, options);
   }
 
   async cancelFiber(fiberId: string, reason?: string): Promise<boolean> {
-    const row = this._readFiber(fiberId);
-    if (!row || this._isTerminalFiberStatus(row.status)) {
-      return false;
-    }
-
-    const now = Date.now();
-    this.sql`
-      UPDATE cf_agents_fibers
-      SET status = 'aborted',
-          error_message = ${reason ?? null},
-          completed_at = ${now}
-      WHERE fiber_id = ${fiberId}
-        AND status IN ('pending', 'running')
-    `;
-    this._managedFiberAbortControllers.get(fiberId)?.abort(reason);
-    this._notifyManagedFiberTerminal(fiberId);
-    return true;
+    return cancelFiber(this.tasks, this.tasks.peek(fiberId), reason);
   }
 
   async cancelFiberByKey(
     idempotencyKey: string,
     reason?: string
   ): Promise<boolean> {
-    const row = this._readFiberByKey(idempotencyKey);
-    return row ? this.cancelFiber(row.fiber_id, reason) : false;
+    return cancelFiber(
+      this.tasks,
+      fiberByKey(this.tasks, idempotencyKey),
+      reason
+    );
   }
 
   async resolveFiber(
     fiberId: string,
     result: FiberRecoveryResult
   ): Promise<boolean> {
-    const row = this._readFiber(fiberId);
-    if (!row || row.status !== "interrupted") {
-      return false;
-    }
-
-    this._applyManagedFiberRecoveryResult(fiberId, result);
-    return true;
+    return resolveFiber(this.tasks, fiberId, result);
   }
 
   async deleteFibers(options?: DeleteFibersOptions): Promise<number> {
-    const statuses =
-      this._normalizeFiberStatusFilter(options?.status) ??
-      new Set<FiberStatus>(["completed", "aborted", "error"]);
-    const terminalStatuses = [...statuses].filter((status) =>
-      this._isTerminalFiberStatus(status)
-    );
-    if (terminalStatuses.length === 0) {
-      return 0;
-    }
-
-    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
-    const settledBefore = options?.settledBefore?.getTime();
-    const rows = terminalStatuses
-      .flatMap((status) =>
-        this._listTerminalFiberRowsForDelete(status, limit, settledBefore)
-      )
-      .sort((a, b) =>
-        a.completed_at === b.completed_at
-          ? a.created_at - b.created_at
-          : (a.completed_at ?? 0) - (b.completed_at ?? 0)
-      )
-      .slice(0, limit);
-
-    for (const row of rows) {
-      this.sql`
-        DELETE FROM cf_agents_fibers
-        WHERE fiber_id = ${row.fiber_id}
-          AND status IN ('completed', 'aborted', 'interrupted', 'error')
-      `;
-    }
-
-    return rows.length;
-  }
-
-  private _listTerminalFiberRowsForDelete(
-    status: FiberStatus,
-    limit: number,
-    settledBefore?: number
-  ): FiberLedgerRow[] {
-    if (settledBefore !== undefined) {
-      return this.sql<FiberLedgerRow>`
-        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-               error_message, created_at, started_at, completed_at
-        FROM cf_agents_fibers
-        WHERE status = ${status}
-          AND completed_at IS NOT NULL
-          AND completed_at < ${settledBefore}
-        ORDER BY completed_at ASC, created_at ASC
-        LIMIT ${limit}
-      `;
-    }
-
-    return this.sql<FiberLedgerRow>`
-      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-             error_message, created_at, started_at, completed_at
-      FROM cf_agents_fibers
-      WHERE status = ${status}
-      ORDER BY completed_at ASC, created_at ASC
-      LIMIT ${limit}
-    `;
-  }
-
-  // ── Legacy fibers: durable execution (see agents/tasks for the new engine) ──
-
-  /**
-   * Run a function as a durable fiber. The fiber is registered in SQLite
-   * before execution, checkpointable during execution via `ctx.stash()`,
-   * and recoverable after eviction via `onFiberRecovered`.
-   *
-   * - Row created in `cf_agents_runs` at start, deleted on completion
-   * - `keepAlive()` held for the duration — prevents idle eviction
-   * - Inline (await result) or fire-and-forget (`void this.runFiber(...)`)
-   *
-   * @param name Informational name for debugging and recovery filtering
-   * @param fn Async function to execute. Receives a FiberContext with stash/snapshot.
-   * @returns The return value of fn
-   */
-  async runFiber<T>(
-    name: string,
-    fn: (ctx: FiberContext) => Promise<T>
-  ): Promise<T> {
-    return this._runFiberInternal(nanoid(), name, fn);
+    return deleteFibers(this.tasks, options);
   }
 
   /**
-   * Internal framework entry point for fibers that need to compose their own
-   * recovery metadata with user checkpoint data while preserving the public
-   * `this.stash()` behavior.
-   *
-   * This deliberately stays protected/internal rather than becoming a public
-   * `runFiber()` option until the durable execution API needs this generality.
-   * @internal
+   * Carry fiber rows from older releases forward, then recover the fibers a
+   * dead isolate left, before onStart runs.
    */
-  protected async _runFiberWithStashWrapper<T>(
-    name: string,
-    fn: (ctx: FiberContext) => Promise<T>,
-    options: Pick<InternalFiberOptions, "initialSnapshot" | "wrapStash">
-  ): Promise<T> {
-    return this._runFiberInternal(nanoid(), name, fn, options);
-  }
-
-  async startFiber(
-    name: string,
-    fn: (ctx: FiberContext) => Promise<void>,
-    options?: StartFiberOptions
-  ): Promise<StartFiberResult> {
-    const fiberId = options?.fiberId ?? nanoid();
-    const idempotencyKey = options?.idempotencyKey;
-    if (options?.fiberId !== undefined && options.fiberId.trim() === "") {
-      throw new Error("fiberId must not be blank");
-    }
-    if (
-      options?.idempotencyKey !== undefined &&
-      options.idempotencyKey.trim() === ""
-    ) {
-      throw new Error("idempotencyKey must not be blank");
-    }
-    const existingById = this._readFiber(fiberId);
-    const existingByKey = idempotencyKey
-      ? this._readFiberByKey(idempotencyKey)
-      : null;
-
-    if (
-      existingById &&
-      existingByKey &&
-      existingById.fiber_id !== existingByKey.fiber_id
-    ) {
-      throw new Error("fiberId and idempotencyKey refer to different fibers");
-    }
-    if (
-      existingByKey &&
-      options?.fiberId &&
-      existingByKey.fiber_id !== fiberId
-    ) {
-      throw new Error("fiberId and idempotencyKey refer to different fibers");
-    }
-
-    const existing = existingById ?? existingByKey;
-    if (existing) {
-      if (
-        options?.waitForCompletion &&
-        !this._isTerminalFiberStatus(existing.status)
-      ) {
-        const waited = await this._waitForManagedFiber(existing.fiber_id);
-        if (waited) {
-          return {
-            ...waited,
-            accepted: false
-          };
-        }
-        throw new Error(`Fiber ${existing.fiber_id} no longer exists`);
+  private async _recoverFibers(): Promise<void> {
+    // Recorded once as the host's next version, so a later start reads no
+    // table list. Only a release from before the record has these tables.
+    await this.lifecycle.hostSchema.migrate({
+      version: FIBERS_IMPORTED_SCHEMA_VERSION,
+      legacyKey: SCHEMA_VERSION_KEY,
+      steps: {
+        [FIBERS_IMPORTED_SCHEMA_VERSION]: () =>
+          importLegacyFibers(
+            this.tasks,
+            this.ctx.storage,
+            this._isFacet,
+            this.lifecycle
+          )
       }
-      return {
-        ...this._fiberInspectionFromRow(existing),
-        accepted: false
-      };
-    }
-
-    const now = Date.now();
-    this.sql`
-      INSERT INTO cf_agents_fibers
-        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
-         error_message, created_at, started_at, completed_at)
-      VALUES
-        (${fiberId}, ${idempotencyKey ?? null}, ${name}, 'pending', NULL,
-         ${options?.metadata ? JSON.stringify(options.metadata) : null}, NULL,
-         ${now}, NULL, NULL)
-    `;
-
-    const row = this._readFiber(fiberId);
-    if (!row) {
-      throw new Error(`Failed to create fiber ${fiberId}`);
-    }
-
-    const execution = this._executeManagedFiber(fiberId, name, fn)
-      .catch((error) => {
-        console.error(
-          `[Agent] Managed fiber "${name}" (${fiberId}) failed:`,
-          error
-        );
-      })
-      .finally(() => {
-        if (this._managedFiberExecutions.get(fiberId) === execution) {
-          this._managedFiberExecutions.delete(fiberId);
-        }
-      });
-    this._managedFiberExecutions.set(fiberId, execution);
-
-    if (options?.waitForCompletion) {
-      const completed = await this._waitForManagedFiber(fiberId);
-      if (!completed) {
-        throw new Error(`Fiber ${fiberId} no longer exists`);
-      }
-      return {
-        ...completed,
-        accepted: true
-      };
-    }
-
-    return {
-      ...this._fiberInspectionFromRow(row),
-      accepted: true
-    };
-  }
-
-  private async _executeManagedFiber(
-    fiberId: string,
-    name: string,
-    fn: (ctx: FiberContext) => Promise<void>
-  ): Promise<void> {
-    const row = this._readFiber(fiberId);
-    if (!row || row.status !== "pending") {
-      return;
-    }
-
-    const controller = new AbortController();
-    this._managedFiberAbortControllers.set(fiberId, controller);
-    const now = Date.now();
-    this.sql`
-      UPDATE cf_agents_fibers
-      SET status = 'running', started_at = ${now}
-      WHERE fiber_id = ${fiberId} AND status = 'pending'
-    `;
-
-    const updated = this._readFiber(fiberId);
-    if (!updated || updated.status !== "running") {
-      this._managedFiberAbortControllers.delete(fiberId);
-      return;
-    }
-
-    let settled = false;
-    try {
-      await this._runFiberInternal(fiberId, name, fn, {
-        signal: controller.signal,
-        managed: true,
-        beforeRunCleanup: (outcome) => {
-          settled = true;
-          this._settleManagedFiberExecution(
-            fiberId,
-            outcome,
-            controller.signal
-          );
-        }
-      });
-    } catch (error) {
-      if (!settled) {
-        this._settleManagedFiberExecution(
-          fiberId,
-          { ok: false, error },
-          controller.signal
-        );
-      }
-    } finally {
-      this._managedFiberAbortControllers.delete(fiberId);
-    }
-  }
-
-  private async _runFiberInternal<T>(
-    id: string,
-    name: string,
-    fn: (ctx: FiberContext) => Promise<T>,
-    options?: InternalFiberOptions
-  ): Promise<T> {
-    const signal = options?.signal ?? new AbortController().signal;
-    this._withAgentSpan(
-      "initialize_fiber",
-      "fiber",
-      {
-        "cloudflare.agents.fiber.id": id,
-        "cloudflare.agents.fiber.name": name
-      },
-      () => {
-        this.sql`
-          INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
-          VALUES (${id}, ${name}, NULL, ${Date.now()})
-        `;
-      }
-    );
-    const startedAt = Date.now();
-    this._emit("fiber:run:started", {
-      fiberId: id,
-      fiberName: name,
-      managed: options?.managed === true
     });
-    this._runFiberActiveFibers.add(id);
-
-    const writeSnapshot = (data: unknown) => {
-      const snapshot = JSON.stringify(data);
-      this._withAgentSpan(
-        "persist_fiber_snapshot",
-        "fiber",
-        {
-          "cloudflare.agents.fiber.id": id,
-          "cloudflare.agents.fiber.name": name
-        },
-        () => {
-          this.sql`
-            UPDATE cf_agents_runs SET snapshot = ${snapshot}
-            WHERE id = ${id}
-          `;
-          if (options?.managed) {
-            this.sql`
-              UPDATE cf_agents_fibers SET snapshot = ${snapshot}
-              WHERE fiber_id = ${id}
-            `;
-          }
-        }
-      );
-    };
-
-    let root: RootFacetRpcSurface | undefined;
-    let registeredFacetRun = false;
-    let bodyOutcome:
-      | { status: "completed" | "error" | "aborted"; error: string | null }
-      | undefined;
-    let dispose: () => void = () => {};
-    try {
-      if ("initialSnapshot" in (options ?? {})) {
-        writeSnapshot(options?.initialSnapshot);
-      }
-
-      if (this._isFacet) {
-        root = await this._rootAlarmOwner();
-        await root._cf_registerFacetRun(this.selfPath, id);
-        registeredFacetRun = true;
-      }
-
-      dispose = await this.keepAlive();
-      const stash = (data: unknown) => {
-        writeSnapshot(options?.wrapStash ? options.wrapStash(data) : data);
-      };
-
-      try {
-        let result: T;
-        try {
-          result = await _fiberALS.run({ id, signal, stash }, () =>
-            fn({ id, signal, stash, snapshot: null })
-          );
-        } catch (error) {
-          bodyOutcome = {
-            status: signal.aborted ? "aborted" : "error",
-            error: this._fiberErrorMessage(error)
-          };
-          throw error;
-        }
-        bodyOutcome = { status: "completed", error: null };
-        options?.beforeRunCleanup?.({ ok: true });
-        this._emit("fiber:run:completed", {
-          fiberId: id,
-          fiberName: name,
-          managed: options?.managed === true,
-          elapsedMs: Date.now() - startedAt
-        });
-        return result;
-      } catch (error) {
-        options?.beforeRunCleanup?.({ ok: false, error });
-        this._emit("fiber:run:failed", {
-          fiberId: id,
-          fiberName: name,
-          managed: options?.managed === true,
-          error: this._fiberErrorMessage(error),
-          elapsedMs: Date.now() - startedAt
-        });
-        throw error;
-      }
-    } finally {
-      this._runFiberActiveFibers.delete(id);
-      let rowDeleted = false;
-      try {
-        this._withAgentSpan(
-          "finalize_fiber",
-          "fiber",
-          {
-            "cloudflare.agents.fiber.id": id,
-            "cloudflare.agents.fiber.name": name
-          },
-          () => {
-            if (bodyOutcome) {
-              try {
-                this.sql`
-                  UPDATE cf_agents_runs
-                  SET completed_at = ${Date.now()},
-                      outcome = ${bodyOutcome.status},
-                      error_message = ${bodyOutcome.error}
-                  WHERE id = ${id}
-                `;
-              } catch {
-                // The delete below is still worth attempting.
-              }
-            }
-            this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
-          }
-        );
-        rowDeleted = true;
-      } catch (error) {
-        console.error(
-          `[Agent] Failed to finalize fiber "${name}" (${id}); leaving run row for recovery:`,
-          error
-        );
-      }
-      dispose();
-      // The root's registration is what brings recovery back to an idle facet,
-      // so it stays until the leftover row is gone.
-      if (root && registeredFacetRun && rowDeleted) {
-        try {
-          await root._cf_unregisterFacetRun(this.selfPath, id);
-        } catch (e) {
-          // Leave the root-side lease behind if cleanup fails; root
-          // housekeeping will re-enter the facet and prune stale rows
-          // once it observes that this fiber row no longer exists.
-          console.error("[Agent] Failed to unregister facet fiber:", e);
-        }
-      }
+    const scanMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
+    const startedAt = Date.now();
+    const deadline = scanMs > 0 ? startedAt + scanMs : undefined;
+    // What the deadline leaves runs from its own wake, after startup.
+    const left =
+      (await this.tasks.runDue(FIBER_TASK, deadline)) ??
+      (await this.tasks.runDue(MANAGED_FIBER_TASK, deadline));
+    if (left !== undefined) {
+      this._emit("fiber:recovery:skipped", {
+        fiberId: left,
+        fiberName: this.tasks.inputOf<{ name: string }>(left)?.name,
+        reason: "scan_deadline_exceeded",
+        elapsedMs: Date.now() - startedAt
+      });
     }
   }
 
   /**
-   * Checkpoint data for the currently executing fiber.
-   * Uses AsyncLocalStorage to identify the correct fiber,
-   * so it works correctly even with concurrent fibers.
-   *
-   * Throws if called outside a `runFiber` callback.
+   * Checkpoint data for the fiber running in the current async context.
+   * Throws if called outside a fiber.
    */
   stash(data: unknown): void {
-    const ctx = _fiberALS.getStore();
-    if (!ctx) {
-      throw new Error("stash() called outside a fiber");
-    }
-    ctx.stash(data);
+    stashCurrentFiber(data);
   }
 
   /**
-   * Run `fn` inside the fiber stash context so `this.stash()` keeps working
-   * for turns executing on the `tasks` capability exactly as it does inside
-   * legacy `runFiber()` closures.
+   * Run `fn` as the current fiber so `this.stash()` works for turns
+   * running on the `tasks` capability.
    * @internal
    */
   protected _withFiberStash<T>(
-    context: {
-      id: string;
-      signal: AbortSignal;
-      stash: (data: unknown) => void;
-    },
+    context: FiberStashContext,
     fn: () => Promise<T>
   ): Promise<T> {
-    return _fiberALS.run(context, fn);
+    return withFiberStash(context, fn);
   }
 
   /**
@@ -4496,223 +2595,6 @@ export class Agent<
     return false;
   }
 
-  /** @internal Detect fibers left by a dead process (runFiber system). */
-  private async _checkRunFibers(): Promise<void> {
-    if (this._runFiberRecoveryInProgress) return;
-    this._runFiberRecoveryInProgress = true;
-    const scanStartedAt = Date.now();
-    const scanDeadlineMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
-    const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
-    // Forward progress this scan = at least one fiber was resolved (orphan row
-    // deleted via recovery/age-out/managed-terminal, or a ledger-only managed
-    // fiber finalized). Drives the recovery-alarm backoff in `_syncHostJobs`.
-    let madeProgress = false;
-
-    try {
-      const rows = this.sql<{
-        id: string;
-        name: string;
-        snapshot: string | null;
-        created_at: number;
-        completed_at: number | null;
-        outcome: "completed" | "error" | "aborted" | null;
-        error_message: string | null;
-      }>`
-        SELECT id, name, snapshot, created_at, completed_at, outcome,
-               error_message
-        FROM cf_agents_runs
-      `;
-
-      for (const row of rows) {
-        if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
-          this._emit("fiber:recovery:skipped", {
-            fiberId: row.id,
-            fiberName: row.name,
-            reason: "scan_deadline_exceeded",
-            elapsedMs: Date.now() - scanStartedAt
-          });
-          break;
-        }
-        if (this._runFiberActiveFibers.has(row.id)) continue;
-
-        const managedRow = this._readFiber(row.id);
-        // A managed row needs the recorded outcome; without it the ledger
-        // can't be settled truthfully, so it falls through to recovery.
-        if (
-          row.completed_at !== null &&
-          (!managedRow || row.outcome !== null)
-        ) {
-          // The body settled and only its cleanup failed: nothing to recover.
-          // A managed ledger still non-terminal here means its settle write
-          // failed too, so record the body's own outcome.
-          if (managedRow) {
-            this.sql`
-              UPDATE cf_agents_fibers
-              SET status = ${row.outcome},
-                  error_message = ${row.error_message},
-                  completed_at = ${row.completed_at}
-              WHERE fiber_id = ${row.id}
-                AND status IN ('pending', 'running')
-            `;
-          }
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
-          madeProgress = true;
-          if (managedRow) this._notifyManagedFiberTerminal(row.id);
-          continue;
-        }
-        if (managedRow && this._isTerminalFiberStatus(managedRow.status)) {
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
-          madeProgress = true;
-          this._notifyManagedFiberTerminal(row.id);
-          continue;
-        }
-
-        const snapshot = this._parseFiberRecoverySnapshot(row.id, row.snapshot);
-        const ctx: FiberRecoveryContext = {
-          id: row.id,
-          name: row.name,
-          snapshot,
-          createdAt: row.created_at,
-          recoveryReason: "interrupted"
-        };
-
-        this._emit("fiber:recovery:detected", {
-          ...this._fiberRecoveryPayload(ctx, managedRow),
-          elapsedMs: Date.now() - row.created_at
-        });
-        this._emit("fiber:run:interrupted", {
-          fiberId: row.id,
-          fiberName: row.name,
-          managed: managedRow !== null,
-          recoveryReason: "interrupted",
-          elapsedMs: Date.now() - row.created_at
-        });
-        if (managedRow) {
-          const completedAt = Date.now();
-          this.sql`
-            UPDATE cf_agents_fibers
-            SET status = 'interrupted',
-                snapshot = ${row.snapshot},
-                completed_at = ${completedAt}
-            WHERE fiber_id = ${row.id}
-              AND status IN ('pending', 'running')
-          `;
-          ctx.idempotencyKey = managedRow.idempotency_key ?? undefined;
-          ctx.metadata = this._parseFiberJsonObject(managedRow.metadata_json);
-          ctx.status = "interrupted";
-        }
-
-        const recovered = await this._runFiberRecoveryHook(ctx, managedRow);
-        // Managed rows are always cleaned up (their ledger row records the
-        // terminal status). Unmanaged rows are retained when recovery fails so
-        // a later scan can retry — but only until they exceed the max age, at
-        // which point a repeatedly-throwing hook would otherwise loop forever.
-        const tooOld =
-          fiberRecoveryMaxAgeMs > 0 &&
-          Date.now() - row.created_at > fiberRecoveryMaxAgeMs;
-        if (recovered || managedRow || tooOld) {
-          if (!recovered && !managedRow && tooOld) {
-            this._emit("fiber:recovery:skipped", {
-              fiberId: row.id,
-              fiberName: row.name,
-              reason: "max_age_exceeded",
-              elapsedMs: Date.now() - row.created_at
-            });
-          }
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
-          madeProgress = true;
-        }
-        if (managedRow) {
-          this._notifyManagedFiberTerminal(row.id);
-        }
-      }
-
-      const ledgerOnlyRows = this.sql<FiberLedgerRow>`
-        SELECT f.fiber_id, f.idempotency_key, f.name, f.status, f.snapshot,
-               f.metadata_json, f.error_message, f.created_at, f.started_at,
-               f.completed_at
-        FROM cf_agents_fibers f
-        LEFT JOIN cf_agents_runs r ON r.id = f.fiber_id
-        WHERE f.status IN ('pending', 'running')
-          AND r.id IS NULL
-      `;
-
-      for (const row of ledgerOnlyRows) {
-        if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
-          this._emit("fiber:recovery:skipped", {
-            fiberId: row.fiber_id,
-            fiberName: row.name,
-            reason: "scan_deadline_exceeded",
-            elapsedMs: Date.now() - scanStartedAt,
-            managed: true
-          });
-          break;
-        }
-        if (this._runFiberActiveFibers.has(row.fiber_id)) continue;
-
-        const snapshot = this._parseFiberRecoverySnapshot(
-          row.fiber_id,
-          row.snapshot
-        );
-        const completedAt = Date.now();
-        this.sql`
-          UPDATE cf_agents_fibers
-          SET status = 'interrupted',
-              completed_at = ${completedAt}
-          WHERE fiber_id = ${row.fiber_id}
-            AND status IN ('pending', 'running')
-        `;
-
-        const ctx: FiberRecoveryContext = {
-          id: row.fiber_id,
-          name: row.name,
-          snapshot,
-          createdAt: row.created_at,
-          idempotencyKey: row.idempotency_key ?? undefined,
-          metadata: this._parseFiberJsonObject(row.metadata_json),
-          status: "interrupted",
-          recoveryReason: "interrupted"
-        };
-        this._emit("fiber:recovery:detected", {
-          ...this._fiberRecoveryPayload(ctx, row),
-          elapsedMs: Date.now() - row.created_at
-        });
-        this._emit("fiber:run:interrupted", {
-          fiberId: row.fiber_id,
-          fiberName: row.name,
-          managed: true,
-          recoveryReason: "interrupted",
-          elapsedMs: Date.now() - row.created_at
-        });
-
-        await this._runFiberRecoveryHook(ctx, row);
-        // A ledger-only fiber is finalized this pass regardless of hook outcome
-        // (its ledger row is marked terminal and waiters are notified), so it
-        // will not be pending next scan — that is forward progress.
-        madeProgress = true;
-        this._notifyManagedFiberTerminal(row.fiber_id);
-      }
-    } finally {
-      this._runFiberRecoveryInProgress = false;
-      // Update the recovery-alarm backoff streak: reset on any forward progress,
-      // otherwise grow it only while work is still pending (a repeatedly-failing
-      // poison hook). `_syncHostJobs` reads this to space out retries.
-      if (madeProgress) {
-        this._recoveryNoProgressScans = 0;
-      } else {
-        this._recoveryNoProgressScans = this._hasPendingFiberRecovery()
-          ? this._recoveryNoProgressScans + 1
-          : 0;
-      }
-    }
-  }
-
-  /** @internal */
-  async _onAlarmHousekeeping(): Promise<void> {
-    await this._checkRunFibers();
-    await this._checkFacetRunFibers();
-  }
-
   private _isSameAgentPathPrefix(
     prefix: ReadonlyArray<AgentPathStep>,
     path: ReadonlyArray<AgentPathStep>
@@ -4723,28 +2605,6 @@ export class Agent<
         step.className === path[index].className &&
         step.name === path[index].name
     );
-  }
-
-  /**
-   * Root-side scan for durable fibers owned by descendant facets.
-   * `cf_agents_facet_runs` is only an index; actual snapshots and
-   * recovery hooks live in each facet's own `cf_agents_runs` table.
-   * @internal
-   */
-  private _checkFacetRunFibers(): Promise<void> {
-    return this._dynamicAgents.checkRunFibers();
-  }
-
-  /**
-   * Dispatch a runFiber recovery check into the facet identified by
-   * `ownerPath`. Returns the number of remaining local `cf_agents_runs`
-   * rows on the target facet after recovery.
-   * @internal
-   */
-  _cf_checkRunFibersForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<number> {
-    return this._dynamicAgents.checkRunFibersAtPath(ownerPath);
   }
 
   /**
@@ -4782,185 +2642,27 @@ export class Agent<
   }
 
   /**
-   * Whether any runFiber recovery work is still outstanding: orphaned
-   * `cf_agents_runs` rows left by a dead process (excluding fibers currently
-   * executing in memory, which already hold a keepAlive ref) or managed
-   * ledger fibers stuck in a non-terminal state with no live run row.
-   *
-   * Used by `_syncHostJobs` to arm a follow-up alarm so multi-pass
-   * recovery (e.g. after a scan-deadline yield, or while retrying a throwing
-   * recovery hook) resumes instead of starving.
-   * @internal
+   * Agent pushes no host jobs, but earlier releases could leave some in a
+   * facet's queue (#2299). A facet has no alarm, so they would only fail
+   * every re-arm: drop them. On the root they complete when they fire.
    */
-  private _hasPendingFiberRecovery(): boolean {
-    const runRows = this.sql<{ id: string }>`
-      SELECT id FROM cf_agents_runs
-    `;
-    for (const row of runRows) {
-      if (!this._runFiberActiveFibers.has(row.id)) return true;
-    }
-
-    const ledgerOnly = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count
-      FROM cf_agents_fibers f
-      LEFT JOIN cf_agents_runs r ON r.id = f.fiber_id
-      WHERE f.status IN ('pending', 'running')
-        AND r.id IS NULL
-    `;
-    return (ledgerOnly[0]?.count ?? 0) > 0;
+  private async _dropFacetHostJobs(): Promise<void> {
+    if (!this._isFacet) return;
+    const work = this.lifecycle.jobs;
+    for (const job of work.list()) await work.cancel(job.id);
   }
 
-  /**
-   * Synchronize Agent-owned host jobs with current durable state.
-   *
-   * Replaces the old pull-based `getNextAlarm()` contribution: keep-alive
-   * refs hold a `cf:keep-alive` job, and fiber-recovery / facet-run state
-   * holds a `cf:housekeeping` job. Every state change that used to trigger
-   * an alarm recalculation now re-pushes or cancels these jobs; queue
-   * mutations re-arm the physical alarm automatically.
-   * @internal
-   */
-  private async _syncHostJobs(): Promise<void> {
-    if (this._destroyed) return;
-    if (this._isFacet) {
-      // A facet has no alarm slot (`setAlarm()` throws): the root holds its
-      // keepAlive refs and facet-run leases, and facets never write the
-      // destroy marker. Earlier releases could persist a host job here
-      // before the re-arm threw; drop it so it cannot re-arm again.
-      const work = this.lifecycle.jobs;
-      for (const id of [
-        HOST_JOB_DESTROY_ID,
-        HOST_JOB_KEEP_ALIVE_ID,
-        HOST_JOB_HOUSEKEEPING_ID
-      ]) {
-        if (work.get(id)) await work.cancel(id);
-      }
-      return;
-    }
-    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, async () => {
-      const work = this.lifecycle.jobs;
-      const nowMs = Date.now();
-
-      // A pending destroy (#1625) must keep its wake armed and exclusive
-      // through any re-sync — including markers written by a pre-job-queue
-      // release — so a keepAlive-holding agent cannot delay its own
-      // condemnation. The durable marker stays authoritative; the job is
-      // re-derived from it.
-      const pendingDestroy = await this._pendingDestroyAlarm();
-      if (pendingDestroy !== null) {
-        await work.push({
-          id: HOST_JOB_DESTROY_ID,
-          fn: "destroy",
-          time: pendingDestroy,
-          exclusive: true
-        });
-        return;
-      }
-      if (work.get(HOST_JOB_DESTROY_ID)) {
-        await work.cancel(HOST_JOB_DESTROY_ID);
-      }
-
-      if (this._keepAliveRefs > 0) {
-        await work.push({
-          id: HOST_JOB_KEEP_ALIVE_ID,
-          fn: "keepAlive",
-          time: nowMs + this._resolvedOptions.keepAliveIntervalMs
-        });
-      } else if (work.get(HOST_JOB_KEEP_ALIVE_ID)) {
-        await work.cancel(HOST_JOB_KEEP_ALIVE_ID);
-      }
-
-      const housekeepingAt = this._nextHousekeepingWakeMs(nowMs);
-      if (housekeepingAt !== null) {
-        await work.push({
-          id: HOST_JOB_HOUSEKEEPING_ID,
-          fn: "housekeeping",
-          time: housekeepingAt
-        });
-      } else if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
-        await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
-      }
-    });
-  }
-
-  /**
-   * The next wake fiber-recovery or facet-run housekeeping needs, or `null`
-   * when neither has pending durable state.
-   */
-  private _nextHousekeepingWakeMs(nowMs: number): number | null {
-    let nextTimeMs: number | null = null;
-
-    if (this._hasPendingFiberRecovery()) {
-      const base = this._resolvedOptions.keepAliveIntervalMs;
-      const exp = Math.min(
-        this._recoveryNoProgressScans,
-        FIBER_RECOVERY_BACKOFF_MAX_EXP
-      );
-      const recoveryDelayMs = Math.min(
-        FIBER_RECOVERY_MAX_BACKOFF_MS,
-        base * 2 ** exp
-      );
-      nextTimeMs = nowMs + recoveryDelayMs;
-    }
-
-    const facetRuns = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_facet_runs
-    `;
-    if ((facetRuns[0]?.count ?? 0) > 0) {
-      const facetRecoveryMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
-      nextTimeMs =
-        nextTimeMs === null
-          ? facetRecoveryMs
-          : Math.min(nextTimeMs, facetRecoveryMs);
-    }
-
-    return nextTimeMs;
-  }
-
-  /** Lifecycle alarm callback; Agent housekeeping runs after user alarm work. */
+  /** Lifecycle alarm callback; user alarm work runs in its override. */
   onAlarm(): void {}
 
   /**
-   * Drive one Agent-owned host job from the Lifecycle queue.
-   * @internal Dispatched by Lifecycle's alarm event loop; extensions add
-   * job fns through {@link _onHostJob}.
+   * Agent pushes no host jobs. The `destroy`, `keepAlive` and `housekeeping`
+   * jobs of earlier releases complete when they fire.
+   * @internal
    */
-  onJob(
-    context: LifecycleJobContext
-  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
-    return this._onHostJob(context.job.fn, context);
-  }
-
-  /**
-   * @internal Dispatch one host job fn. Agent extensions (Think) override
-   * this to add fns and delegate unknown ones to `super`.
-   */
-  protected _onHostJob(
-    fn: string,
-    _context: LifecycleJobContext
-  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
-    switch (fn) {
-      case "keepAlive":
-        // This job's only purpose is guaranteeing wakes while refs are
-        // held; housekeeping itself runs on every alarm via the onAlarm
-        // wrapper.
-        return this._keepAliveRefs > 0
-          ? {
-              rescheduleAt:
-                Date.now() + this._resolvedOptions.keepAliveIntervalMs
-            }
-          : undefined;
-      case "housekeeping": {
-        const next = this._nextHousekeepingWakeMs(Date.now());
-        return next === null ? undefined : { rescheduleAt: next };
-      }
-      case "destroy":
-        // The alarm preamble consumes pending destroys before the event
-        // loop runs; a surviving job is stale.
-        return undefined;
-      default:
-        console.warn(`Unknown Agent host job fn ${JSON.stringify(fn)}`);
-        return undefined;
+  onJob({ job }: LifecycleJobContext): void {
+    if (!["destroy", "keepAlive", "housekeeping"].includes(job.fn)) {
+      console.warn(`Unknown Agent host job fn ${JSON.stringify(job.fn)}`);
     }
   }
 
@@ -5007,13 +2709,31 @@ export class Agent<
     // alarm precisely so teardown runs here, with this invocation's full
     // execution budget) and the convergence point for a destroy that a
     // previous invocation started but couldn't finish.
-    if (await this._hasPendingDestroy()) {
-      await this.destroy();
-      return;
-    }
+    this._alarmDepth++;
+    try {
+      if ((await this._deferredDestroy.pendingAt()) !== null) {
+        await this.destroy();
+        return;
+      }
 
-    await this.lifecycle.alarm();
+      await this.lifecycle.alarm();
+    } finally {
+      this._alarmDepth--;
+      const reason = this._abortAfterAlarm;
+      if (this._alarmDepth === 0 && reason !== undefined) {
+        this._abortAfterAlarm = undefined;
+        setTimeout(
+          () => abortWithoutAlarmRetry(this.ctx, reason),
+          ABORT_AFTER_ALARM_MS
+        );
+      }
+    }
   }
+
+  /** Alarm invocations in progress on this instance. */
+  private _alarmDepth = 0;
+  /** Set by a destroy inside an alarm: abort once the alarm has returned. */
+  private _abortAfterAlarm: string | undefined;
 
   // ── Sub-agent routing (external addressability for facets) ──────────────
 
@@ -5132,9 +2852,9 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void> {
+  ): Promise<number | void> {
     await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.broadcastToPath(ownerPath, message, without);
+    return this._dynamicAgents.broadcastToPath(ownerPath, message, without);
   }
 
   async _cf_subAgentConnectionMetas(
@@ -5150,6 +2870,14 @@ export class Agent<
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
     await this._dynamicAgents.sendToConnection(connectionId, message);
+  }
+
+  async _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.sendManyToConnection(connectionId, messages);
   }
 
   async _cf_closeSubAgentConnection(
@@ -5178,8 +2906,17 @@ export class Agent<
     return this._dynamicAgents.setConnectionState(connectionId, state);
   }
 
+  async _cf_setSubAgentConnectionFlag(
+    connectionId: string,
+    key: string,
+    value: unknown
+  ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
+    this._dynamicAgents.setConnectionFlag(connectionId, key, value);
+  }
+
   protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
-    return this._dynamicAgents.connectionTargetsChild(connection);
+    return this._dynamicAgents.connectionRoutesToChild(connection);
   }
 
   /**
@@ -5402,9 +3139,17 @@ export class Agent<
   _cf_initAsFacet(
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    identityName = name
+    identityName = name,
+    rootChannel?: RootFacetRpcSurface,
+    rootJurisdiction?: string
   ): Promise<void> {
-    return this._dynamicAgents.init(name, parentPath, identityName);
+    return this._dynamicAgents.init(
+      name,
+      parentPath,
+      identityName,
+      rootChannel,
+      rootJurisdiction
+    );
   }
 
   get name(): string {
@@ -5535,7 +3280,21 @@ export class Agent<
           `exported under that class name and registered as a Durable Object binding.`
       );
     }
-    return await getAgentByName<Cloudflare.Env, T>(binding, parent.name);
+    return await getAgentByName<Cloudflare.Env, T>(
+      binding,
+      parent.name,
+      this._cf_rootJurisdictionOptions()
+    );
+  }
+
+  /** The root's jurisdiction, for a lookup of the root (#2470). */
+  private _cf_rootJurisdictionOptions():
+    | { jurisdiction: DurableObjectJurisdiction }
+    | undefined {
+    const jurisdiction = this._dynamicAgents.rootJurisdiction;
+    return jurisdiction
+      ? { jurisdiction: jurisdiction as DurableObjectJurisdiction }
+      : undefined;
   }
 
   private _cf_getTopLevelNamespaceByClassName<T extends Agent>(
@@ -5583,7 +3342,8 @@ export class Agent<
 
     const rootStubPromise = getAgentByName<Cloudflare.Env, Agent>(
       rootBinding,
-      root.name
+      root.name,
+      this._cf_rootJurisdictionOptions()
     );
     const targetPath = parentPath.map((step) => ({ ...step }));
     const invokeBridge = async (method: string, args: unknown[]) => {
@@ -5914,11 +3674,23 @@ export class Agent<
     });
 
     const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
-    const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
-    const childStart = await adapter.startAgentToolRun(options.input, {
-      runId,
-      ...(eventDelivery === "terminal" ? { eventDelivery } : {})
-    });
+    // Replaced with a fresh stub when the child's isolate goes away under
+    // the tail.
+    let adapter = this._asAgentToolChildAdapter<Input, Output>(child);
+    let childStart: AgentToolRunInspection<Output> | undefined;
+    // Set when the start call itself failed. The child may still have
+    // started the run (its isolate went away under the call): an awaited
+    // run asks the child below, like a run whose tail broke.
+    let startFailure: { error: unknown } | undefined;
+    try {
+      childStart = await adapter.startAgentToolRun(options.input, {
+        runId,
+        ...(eventDelivery === "terminal" ? { eventDelivery } : {})
+      });
+    } catch (error) {
+      if (detached) throw error;
+      startFailure = { error };
+    }
     this._markAgentToolRunning(runId);
 
     if (detached) {
@@ -5962,7 +3734,9 @@ export class Agent<
         return result;
       } else {
         parentAbortListener = () => {
-          void adapter.cancelAgentToolRun(runId, options.signal?.reason);
+          void adapter
+            .cancelAgentToolRun(runId, options.signal?.reason)
+            .catch(() => {});
         };
         options.signal.addEventListener("abort", parentAbortListener, {
           once: true
@@ -5971,27 +3745,58 @@ export class Agent<
     }
 
     try {
-      if (adapter.tailAgentToolRun) {
-        const stream = await adapter.tailAgentToolRun(runId, {
-          afterSequence: -1
-        });
-        sequence = (
+      // The tail is an RPC stream from the child. It breaks when the child's
+      // isolate goes away under it (an eviction, a reset), which says
+      // nothing about the run: the child's chat recovery may be finishing
+      // its turn. The run's row decides, below.
+      let tailBroke = startFailure !== undefined;
+      // The tail ends when the child closes it, and the child closes it
+      // when the run ends. A run nothing will end (its turn's recovery was
+      // dropped, say) would hold this call for good. So the parent also
+      // asks: every no-progress window it inspects the run, which makes
+      // the child settle a run that has nothing left to finish it, and
+      // stops following a tail whose run has ended.
+      const watch = this._watchAgentToolRunWhileTailing(() => adapter, runId);
+      // How far the tail got, also when it breaks: what follows a re-attach
+      // is numbered after it.
+      const cursor = { next: sequence };
+      try {
+        if (startFailure) throw startFailure.error;
+        if (adapter.tailAgentToolRun) {
+          const stream = await adapter.tailAgentToolRun(runId, {
+            afterSequence: -1
+          });
           await this._forwardAgentToolStream(
             stream,
             options.parentToolCallId,
             runId,
             sequence,
             options.signal
-          )
-        ).next;
-      } else {
-        const chunks = await adapter.getAgentToolChunks(runId);
-        sequence = this._broadcastAgentToolChunks(
-          options.parentToolCallId,
-          runId,
-          chunks,
-          sequence
+              ? AbortSignal.any([options.signal, watch.ended])
+              : watch.ended,
+            undefined,
+            cursor
+          );
+          sequence = cursor.next;
+        } else {
+          const chunks = await this._readAgentToolChunks(adapter, runId);
+          sequence = this._broadcastAgentToolChunks(
+            options.parentToolCallId,
+            runId,
+            chunks,
+            sequence
+          );
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        tailBroke = true;
+        sequence = cursor.next;
+        // The old stub may still name the instance that went away.
+        adapter = this._asAgentToolChildAdapter<Input, Output>(
+          await this.subAgent(cls as SubAgentClass<Agent>, runId)
         );
+      } finally {
+        watch.stop();
       }
 
       if (options.signal?.aborted) {
@@ -6010,8 +3815,58 @@ export class Agent<
         return result;
       }
 
-      const inspection =
-        (await adapter.inspectAgentToolRun(runId)) ?? childStart;
+      const inspected = await adapter.inspectAgentToolRun(runId);
+      if (
+        tailBroke &&
+        (inspected?.status === "running" || inspected?.status === "starting")
+      ) {
+        // The child still has the run open: it is recovering the turn. Wait
+        // for it the way a recovered parent does, within the same budgets,
+        // and hand back the run's own terminal status.
+        const reattach = await this._reattachAgentToolRunToTerminal<Output>(
+          adapter,
+          {
+            run_id: runId,
+            agent_type: agentType,
+            parent_tool_call_id: options.parentToolCallId ?? null
+          },
+          sequence,
+          this._resolvedOptions.agentToolReattachNoProgressTimeoutMs,
+          this._resolvedOptions.agentToolReattachMaxWindowMs
+        );
+        if (reattach.result) {
+          await this._finishAgentToolRun(runInfo, reattach.result, {
+            sequence: reattach.sequence,
+            completedAt: reattach.completedAt
+          });
+          return reattach.result;
+        }
+        // Budget spent with the run still open: the parent gives up, and
+        // says so. `interrupted` is not the run's outcome, and a later
+        // `runAgentTool` with the same run id re-attaches.
+        const childTornDown = await this._teardownGivenUpAgentToolChild(
+          adapter,
+          runId,
+          reattach.reason
+        );
+        const result: RunAgentToolResult<Output> = {
+          runId,
+          agentType,
+          status: "interrupted",
+          error: this._interruptedMessageForReason(reattach.reason),
+          ...(reattach.reason !== undefined ? { reason: reattach.reason } : {}),
+          childStillRunning: !childTornDown
+        };
+        await this._finishAgentToolRun(runInfo, result, {
+          sequence: reattach.sequence
+        });
+        return result;
+      }
+
+      const inspection = inspected ?? childStart;
+      // The start failed and the child has no such run: the run never
+      // began, and the failure is its error.
+      if (!inspection) throw startFailure?.error;
       const result = this._terminalResultFromInspection<Output>(
         agentType,
         inspection
@@ -6051,6 +3906,56 @@ export class Agent<
         options.signal.removeEventListener("abort", parentAbortListener);
       }
     }
+  }
+
+  /**
+   * While an awaited `runAgentTool` follows a child's tail, inspect the run
+   * once per no-progress window (`agentToolReattachNoProgressTimeoutMs`).
+   *
+   * The inspection is what bounds the wait. A child settles a run that has
+   * nothing left to finish it when it is inspected, and closes its tails.
+   * `ended` aborts when an inspection reports the run over while the tail
+   * is still open, so the caller stops following it and reads the result.
+   * A run the child reports as still open is followed further: a turn that
+   * is working, or one chat recovery is finishing, is not cut short here.
+   *
+   * @param currentAdapter - Read on every inspection: the caller swaps the
+   *   adapter when the child's isolate goes away.
+   */
+  private _watchAgentToolRunWhileTailing(
+    currentAdapter: () => AgentToolChildAdapter,
+    runId: string
+  ): { ended: AbortSignal; stop: () => void } {
+    const ended = new AbortController();
+    const everyMs = this._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    const inspect = async () => {
+      try {
+        const inspection = await currentAdapter().inspectAgentToolRun(runId);
+        if (
+          inspection &&
+          inspection.status !== "running" &&
+          inspection.status !== "starting"
+        ) {
+          ended.abort();
+          return;
+        }
+      } catch {
+        // The child could not be asked this time. Ask again.
+      }
+      if (!stopped) timer = setTimeout(() => void inspect(), everyMs);
+    };
+    if (everyMs > 0 && Number.isFinite(everyMs)) {
+      timer = setTimeout(() => void inspect(), everyMs);
+    }
+    return {
+      ended: ended.signal,
+      stop: () => {
+        stopped = true;
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
   }
 
   /**
@@ -7154,7 +5059,12 @@ export class Agent<
     runId: string,
     sequence: number,
     signal?: AbortSignal,
-    idleTimeoutMs?: number
+    idleTimeoutMs?: number,
+    /**
+     * Kept at the next sequence as chunks are forwarded, so a caller whose
+     * stream breaks still knows how far it got.
+     */
+    cursor?: { next: number }
   ): Promise<{
     next: number;
     ended: "done" | "idle" | "aborted";
@@ -7222,6 +5132,7 @@ export class Agent<
           typeof chunk.unstoredId === "string" ? chunk.unstoredId : undefined;
         const chunkSequence =
           lifecycle || unstoredId !== undefined ? next : next++;
+        if (cursor) cursor.next = next;
         forwarded = true;
         if (!terminalOnly || lifecycle) {
           this._broadcastAgentToolEvent(parentToolCallId, chunkSequence, {
@@ -7789,14 +5700,18 @@ export class Agent<
         // clients that already saw the stored chunks don't dedupe new ones away.
         let storedCount = 0;
         try {
-          const existing = await adapter.getAgentToolChunks(row.run_id);
+          const existing = await this._readAgentToolChunks(adapter, row.run_id);
           const last = existing[existing.length - 1];
           if (last) afterSequence = last.sequence;
           storedCount = existing.length;
         } catch {
           // Fall back to a full tail if the chunk probe fails.
         }
-        nextSequence = storedCount + 1;
+        // Never below what this parent already broadcast for the run: a
+        // recovered turn streams into a stream of its own, which can hold
+        // fewer chunks than the first turn sent, and a client keys a chunk
+        // by its sequence, so a reused one is dropped as a repeat.
+        nextSequence = Math.max(nextSequence, storedCount + 1);
 
         // Defaults to a non-`done` end so a tail that throws below does NOT
         // re-arm (we only re-arm on a verified clean stream-close).
@@ -8272,9 +6187,31 @@ export class Agent<
     timeoutMs?: number
   ): Promise<AgentToolStoredChunk[] | undefined> {
     return this._settleWithinRecoveryTimeout(
-      adapter.getAgentToolChunks(runId),
+      this._readAgentToolChunks(adapter, runId),
       timeoutMs
     );
+  }
+
+  /**
+   * Every stored chunk of a child's run. `getAgentToolChunks` answers one
+   * page per call (at most `REPLAY_PAGE_BYTES`, as an RPC reply must stay
+   * under 32 MiB), so this reads page after page.
+   */
+  private async _readAgentToolChunks(
+    adapter: AgentToolChildAdapter,
+    runId: string
+  ): Promise<AgentToolStoredChunk[]> {
+    const chunks: AgentToolStoredChunk[] = [];
+    await allChunks(
+      (afterSequence) =>
+        adapter.getAgentToolChunks(
+          runId,
+          afterSequence === undefined ? undefined : { afterSequence }
+        ),
+      undefined,
+      (chunk) => chunks.push(chunk)
+    );
+    return chunks;
   }
 
   /** Resolve to `undefined` when `promise` rejects or outlasts `timeoutMs`. */
@@ -8434,7 +6371,7 @@ export class Agent<
   async destroy() {
     if (this._isFacet) {
       this._emit("destroy");
-      const root = await this._rootAlarmOwner();
+      const root = this._dynamicAgents.rootStub();
       // The chain: root → … → direct-parent runs ctx.facets.delete
       // on this facet, which aborts this isolate. The await may
       // throw an abort error or never resolve depending on timing —
@@ -8443,14 +6380,9 @@ export class Agent<
       return;
     }
 
-    // Persist the teardown decision FIRST, so a destroy that gets cut short
-    // (e.g. the runtime cancelling a request-scoped `waitUntil` it was riding
-    // on, #1625) is finished by the next wake — see the `alarm()` preamble —
-    // instead of leaving a half-deleted agent whose tables get silently
-    // recreated by the constructor. The marker is removed by the
-    // `deleteAll()` below, which is also why it is a KV record rather than a
-    // SQL row: it must outlive live-resource disposal.
-    await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
+    // Record the teardown FIRST, so one cut short (#1625) is finished by the
+    // next alarm; `deleteAll()` below removes the record.
+    await this._deferredDestroy.begin();
     await this.lifecycle.disableAlarms();
 
     await this.lifecycle.dispose();
@@ -8464,9 +6396,16 @@ export class Agent<
     // destroy landed via the alarm preamble, suppressing the alarm retry
     // stops the platform re-running the alarm on a fresh instance whose
     // constructor would recreate the just-deleted schema.
-    setTimeout(() => {
-      abortWithoutAlarmRetry(this.ctx, "destroyed");
-    }, 0);
+    //
+    // Inside an alarm the abort waits until shortly after the alarm handler
+    // returns (#2605): see ABORT_AFTER_ALARM_MS.
+    if (this._alarmDepth > 0) {
+      this._abortAfterAlarm = "destroyed";
+    } else {
+      setTimeout(() => {
+        abortWithoutAlarmRetry(this.ctx, "destroyed");
+      }, 0);
+    }
 
     this._emit("destroy");
   }
@@ -8496,7 +6435,7 @@ export class Agent<
     // /facet bootstrap, and `destroy()` below branches on the in-memory
     // `_isFacet`. Without this, an RPC landing before init would see it as
     // `false`, fall through to `destroy()`'s top-level path, and write the
-    // destroy marker on a facet — which the `alarm()`/`_syncHostJobs()`
+    // destroy marker on a facet — which the `alarm()` preamble
     // guards forbid (only top-level agents write it; facet teardown is
     // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
     // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`
@@ -8509,45 +6448,7 @@ export class Agent<
       await this.destroy();
       return;
     }
-    // Future, not immediate: see DESTROY_ALARM_DELAY_MS — an immediate alarm
-    // aborts the isolate fast enough to race this RPC's response back to the
-    // DELETE handler, turning the intended 204 into a 500.
-    const destroyAt = Date.now() + DESTROY_ALARM_DELAY_MS;
-    await this.ctx.storage.put(DESTROY_PENDING_KEY, destroyAt);
-    // The exclusive job arms the wake; the durable marker above remains the
-    // authority the alarm preamble consumes before Lifecycle startup.
-    await this.lifecycle.jobs.push({
-      id: HOST_JOB_DESTROY_ID,
-      fn: "destroy",
-      time: destroyAt,
-      exclusive: true
-    });
-  }
-
-  /**
-   * Whether a (deferred or interrupted) destroy is pending. Reads the
-   * durable marker directly — the in-memory `_isFacet` flag may not be
-   * hydrated yet at the call sites, but facets never write the marker.
-   */
-  private async _pendingDestroyAlarm(): Promise<number | null> {
-    const pending = await this.ctx.storage.get<boolean | number>(
-      DESTROY_PENDING_KEY
-    );
-    if (typeof pending === "number") return pending;
-    return pending === true ? Date.now() : null;
-  }
-
-  private async _hasPendingDestroy(): Promise<boolean> {
-    return (await this._pendingDestroyAlarm()) !== null;
-  }
-
-  /**
-   * Check if a method is callable
-   * @param method The method name to check
-   * @returns True if the method is marked as callable
-   */
-  private _isCallable(method: string): boolean {
-    return isCallableMethod(this[method as keyof this] as Function);
+    await this._deferredDestroy.schedule();
   }
 
   /**
@@ -8559,927 +6460,115 @@ export class Agent<
   }
 
   // ==========================================
-  // Workflow Integration Methods
+  // Workflows (the `Workflows` capability, ./workflow-tracking)
   // ==========================================
 
   /**
-   * Start a workflow and track it in this Agent's database.
-   * Automatically injects agent identity into the workflow params.
+   * Start a workflow instance and track it in this Agent's database.
+   * Callbacks (`this.agent` RPC, progress, completion, errors, state
+   * updates) route back to this Agent, or this sub-agent, by name. Pass
+   * `agentBinding` when the binding name does not match the class name; on
+   * a sub-agent it is the root Agent's binding.
    *
-   * The originating Agent identity is persisted in the workflow params so
-   * callbacks (`this.agent` RPC, progress/completion/error, state updates)
-   * route back to the exact Agent or sub-agent facet that started the run.
-   * Note the following constraints:
-   *
-   * - **Resolution is by name.** Callbacks re-resolve the originating Agent via
-   *   `getAgentByName(...)`. Agents addressed by a raw Durable Object id
-   *   (`idFromString`/`get(id)`) rather than by name will not receive
-   *   callbacks on the same instance.
-   * - **Sub-agent runs are facet-local.** A workflow started from a sub-agent
-   *   is tracked in that facet's own storage; the parent's `getWorkflows()` /
-   *   `getWorkflowById()` do not see it. Aggregate across facets yourself if
-   *   you need a combined view.
-   * - **Class names must survive bundling.** The originating path is keyed by
-   *   `constructor.name`. Ensure your bundler preserves class names
-   *   (e.g. esbuild `keepNames: true`) so callbacks can be routed.
-   *
-   * @template P - Type of params to pass to the workflow
-   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
-   * @param params - Params to pass to the workflow
-   * @param options - Optional workflow options. For sub-agents, pass
-   *   `agentBinding` as the **root** Agent's Durable Object binding name, not a
-   *   child binding.
    * @returns The workflow instance ID
-   *
-   * @example
-   * ```typescript
-   * const workflowId = await this.runWorkflow(
-   *   'MY_WORKFLOW',
-   *   { taskId: '123', data: 'process this' }
-   * );
-   * ```
    */
-  async runWorkflow<P = unknown>(
+  runWorkflow<P = unknown>(
     workflowName: WorkflowName<Env>,
     params: P,
     options?: RunWorkflowOptions
   ): Promise<string> {
-    // Look up the workflow binding by name
-    const workflow = this._findWorkflowBindingByName(workflowName);
-    if (!workflow) {
-      throw new Error(
-        `Workflow binding '${workflowName}' not found in environment`
-      );
-    }
-
-    // Find the binding name for the top-level Agent namespace. Facets
-    // are resolved later from this root binding plus their selfPath.
-    const agentOrigin = this._workflowOrigin(options);
-    if (!agentOrigin) {
-      throw new Error(
-        "Could not detect Agent binding name from class name. " +
-          "Pass it explicitly via options.agentBinding"
-      );
-    }
-
-    // Workflows instance IDs must start with [a-zA-Z0-9_].
-    const workflowId = options?.id ?? `wf_${nanoid()}`;
-
-    // Inject agent identity and workflow name into params
-    const augmentedParams = {
-      ...params,
-      __agentName: this.name,
-      __agentBinding:
-        agentOrigin.kind === "agent"
-          ? agentOrigin.binding
-          : agentOrigin.rootBinding,
-      __workflowName: workflowName,
-      __agentOrigin: agentOrigin
-    };
-
-    // Create the workflow instance
-    const instance = await workflow.create({
-      id: workflowId,
-      params: augmentedParams,
-      retention: options?.retention
-    });
-
-    // Track the workflow in our database
-    const id = nanoid();
-    const metadataJson = options?.metadata
-      ? JSON.stringify(options.metadata)
-      : null;
-    try {
-      this.sql`
-        INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
-        VALUES (${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
-      `;
-    } catch (e) {
-      if (
-        e instanceof Error &&
-        e.message.includes("UNIQUE constraint failed")
-      ) {
-        throw new Error(
-          `Workflow with ID "${workflowId}" is already being tracked`
-        );
-      }
-      throw e;
-    }
-
-    this._emit("workflow:start", { workflowId: instance.id, workflowName });
-
-    return instance.id;
+    return this._workflows.run(workflowName, params, options);
   }
 
-  /**
-   * Send an event to a running workflow.
-   * The workflow can wait for this event using step.waitForEvent().
-   *
-   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
-   * @param workflowId - ID of the workflow instance
-   * @param event - Event to send
-   *
-   * @example
-   * ```typescript
-   * await this.sendWorkflowEvent(
-   *   'MY_WORKFLOW',
-   *   workflowId,
-   *   { type: 'approval', payload: { approved: true } }
-   * );
-   * ```
-   */
-  async sendWorkflowEvent(
+  /** Send an event a running workflow waits for with `step.waitForEvent()`. */
+  sendWorkflowEvent(
     workflowName: WorkflowName<Env>,
     workflowId: string,
     event: WorkflowEventPayload
   ): Promise<void> {
-    const workflow = this._findWorkflowBindingByName(workflowName);
-    if (!workflow) {
-      throw new Error(
-        `Workflow binding '${workflowName}' not found in environment`
-      );
-    }
-
-    const instance = await workflow.get(workflowId);
-    await tryN(3, async () => instance.sendEvent(event), {
-      shouldRetry: isErrorRetryable,
-      baseDelayMs: 200,
-      maxDelayMs: 3000
-    });
-
-    this._emit("workflow:event", { workflowId, eventType: event.type });
+    return this._workflows.sendEvent(workflowName, workflowId, event);
   }
 
-  /**
-   * Approve a waiting workflow.
-   * Sends an approval event to the workflow that can be received by waitForApproval().
-   *
-   * @param workflowId - ID of the workflow to approve
-   * @param data - Optional approval data (reason, metadata)
-   *
-   * @example
-   * ```typescript
-   * await this.approveWorkflow(workflowId, {
-   *   reason: 'Approved by admin',
-   *   metadata: { approvedBy: userId }
-   * });
-   * ```
-   */
-  async approveWorkflow(
+  /** Approve a tracked workflow waiting in `waitForApproval()`. */
+  approveWorkflow(
     workflowId: string,
     data?: { reason?: string; metadata?: Record<string, unknown> }
   ): Promise<void> {
-    const workflowInfo = this.getWorkflow(workflowId);
-    if (!workflowInfo) {
-      throw new Error(`Workflow ${workflowId} not found in tracking table`);
-    }
-
-    await this.sendWorkflowEvent(
-      workflowInfo.workflowName as WorkflowName<Env>,
-      workflowId,
-      {
-        type: "approval",
-        payload: {
-          approved: true,
-          reason: data?.reason,
-          metadata: data?.metadata
-        }
-      }
-    );
-
-    this._emit("workflow:approved", { workflowId, reason: data?.reason });
+    return this._workflows.approve(workflowId, data);
   }
 
-  /**
-   * Reject a waiting workflow.
-   * Sends a rejection event to the workflow that will cause waitForApproval() to throw.
-   *
-   * @param workflowId - ID of the workflow to reject
-   * @param data - Optional rejection data (reason)
-   *
-   * @example
-   * ```typescript
-   * await this.rejectWorkflow(workflowId, {
-   *   reason: 'Request denied by admin'
-   * });
-   * ```
-   */
-  async rejectWorkflow(
+  /** Reject a tracked workflow waiting in `waitForApproval()`; it throws there. */
+  rejectWorkflow(
     workflowId: string,
     data?: { reason?: string }
   ): Promise<void> {
-    const workflowInfo = this.getWorkflow(workflowId);
-    if (!workflowInfo) {
-      throw new Error(`Workflow ${workflowId} not found in tracking table`);
-    }
+    return this._workflows.reject(workflowId, data);
+  }
 
-    await this.sendWorkflowEvent(
-      workflowInfo.workflowName as WorkflowName<Env>,
-      workflowId,
-      {
-        type: "approval",
-        payload: {
-          approved: false,
-          reason: data?.reason
-        }
-      }
-    );
+  /** Stop a tracked workflow now; its status becomes `terminated`. */
+  terminateWorkflow(workflowId: string): Promise<void> {
+    return this._workflows.terminate(workflowId);
+  }
 
-    this._emit("workflow:rejected", { workflowId, reason: data?.reason });
+  /** Pause a tracked running workflow. */
+  pauseWorkflow(workflowId: string): Promise<void> {
+    return this._workflows.pause(workflowId);
+  }
+
+  /** Resume a tracked paused workflow. */
+  resumeWorkflow(workflowId: string): Promise<void> {
+    return this._workflows.resume(workflowId);
   }
 
   /**
-   * Terminate a running workflow.
-   * This immediately stops the workflow and sets its status to "terminated".
-   *
-   * @param workflowId - ID of the workflow to terminate (must be tracked via runWorkflow)
-   * @throws Error if workflow not found in tracking table
-   * @throws Error if workflow binding not found in environment
-   * @throws Error if workflow is already completed/errored/terminated (from Cloudflare)
-   *
-   * @example
-   * ```typescript
-   * await this.terminateWorkflow(workflowId);
-   * ```
+   * Re-run a tracked workflow from the start with the same ID.
+   * `resetTracking` (default true) resets its record's timestamps and error.
    */
-  async terminateWorkflow(workflowId: string): Promise<void> {
-    const workflowInfo = this.getWorkflow(workflowId);
-    if (!workflowInfo) {
-      throw new Error(`Workflow ${workflowId} not found in tracking table`);
-    }
-
-    const workflow = this._findWorkflowBindingByName(
-      workflowInfo.workflowName as WorkflowName<Env>
-    );
-    if (!workflow) {
-      throw new Error(
-        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
-      );
-    }
-
-    const instance = await workflow.get(workflowId);
-    await tryN(3, async () => instance.terminate(), {
-      shouldRetry: isErrorRetryable,
-      baseDelayMs: 200,
-      maxDelayMs: 3000
-    });
-
-    // Update tracking table with new status
-    const status = await instance.status();
-    this._updateWorkflowTracking(workflowId, status);
-
-    this._emit("workflow:terminated", {
-      workflowId,
-      workflowName: workflowInfo.workflowName
-    });
-  }
-
-  /**
-   * Pause a running workflow.
-   * The workflow can be resumed later with resumeWorkflow().
-   *
-   * @param workflowId - ID of the workflow to pause (must be tracked via runWorkflow)
-   * @throws Error if workflow not found in tracking table
-   * @throws Error if workflow binding not found in environment
-   * @throws Error if workflow is not running (from Cloudflare)
-   *
-   * @example
-   * ```typescript
-   * await this.pauseWorkflow(workflowId);
-   * ```
-   */
-  async pauseWorkflow(workflowId: string): Promise<void> {
-    const workflowInfo = this.getWorkflow(workflowId);
-    if (!workflowInfo) {
-      throw new Error(`Workflow ${workflowId} not found in tracking table`);
-    }
-
-    const workflow = this._findWorkflowBindingByName(
-      workflowInfo.workflowName as WorkflowName<Env>
-    );
-    if (!workflow) {
-      throw new Error(
-        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
-      );
-    }
-
-    const instance = await workflow.get(workflowId);
-    await tryN(3, async () => instance.pause(), {
-      shouldRetry: isErrorRetryable,
-      baseDelayMs: 200,
-      maxDelayMs: 3000
-    });
-
-    const status = await instance.status();
-    this._updateWorkflowTracking(workflowId, status);
-
-    this._emit("workflow:paused", {
-      workflowId,
-      workflowName: workflowInfo.workflowName
-    });
-  }
-
-  /**
-   * Resume a paused workflow.
-   *
-   * @param workflowId - ID of the workflow to resume (must be tracked via runWorkflow)
-   * @throws Error if workflow not found in tracking table
-   * @throws Error if workflow binding not found in environment
-   * @throws Error if workflow is not paused (from Cloudflare)
-   *
-   * @example
-   * ```typescript
-   * await this.resumeWorkflow(workflowId);
-   * ```
-   */
-  async resumeWorkflow(workflowId: string): Promise<void> {
-    const workflowInfo = this.getWorkflow(workflowId);
-    if (!workflowInfo) {
-      throw new Error(`Workflow ${workflowId} not found in tracking table`);
-    }
-
-    const workflow = this._findWorkflowBindingByName(
-      workflowInfo.workflowName as WorkflowName<Env>
-    );
-    if (!workflow) {
-      throw new Error(
-        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
-      );
-    }
-
-    const instance = await workflow.get(workflowId);
-    await tryN(3, async () => instance.resume(), {
-      shouldRetry: isErrorRetryable,
-      baseDelayMs: 200,
-      maxDelayMs: 3000
-    });
-
-    const status = await instance.status();
-    this._updateWorkflowTracking(workflowId, status);
-
-    this._emit("workflow:resumed", {
-      workflowId,
-      workflowName: workflowInfo.workflowName
-    });
-  }
-
-  /**
-   * Restart a workflow instance.
-   * This re-runs the workflow from the beginning with the same ID.
-   *
-   * @param workflowId - ID of the workflow to restart (must be tracked via runWorkflow)
-   * @param options - Optional settings
-   * @param options.resetTracking - If true (default), resets created_at and clears error fields.
-   *                                If false, preserves original timestamps.
-   * @throws Error if workflow not found in tracking table
-   * @throws Error if workflow binding not found in environment
-   *
-   * @example
-   * ```typescript
-   * // Reset tracking (default)
-   * await this.restartWorkflow(workflowId);
-   *
-   * // Preserve original timestamps
-   * await this.restartWorkflow(workflowId, { resetTracking: false });
-   * ```
-   */
-  async restartWorkflow(
+  restartWorkflow(
     workflowId: string,
     options: { resetTracking?: boolean } = {}
   ): Promise<void> {
-    const { resetTracking = true } = options;
-
-    const workflowInfo = this.getWorkflow(workflowId);
-    if (!workflowInfo) {
-      throw new Error(`Workflow ${workflowId} not found in tracking table`);
-    }
-
-    const workflow = this._findWorkflowBindingByName(
-      workflowInfo.workflowName as WorkflowName<Env>
-    );
-    if (!workflow) {
-      throw new Error(
-        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
-      );
-    }
-
-    const instance = await workflow.get(workflowId);
-    await tryN(3, async () => instance.restart(), {
-      shouldRetry: isErrorRetryable,
-      baseDelayMs: 200,
-      maxDelayMs: 3000
-    });
-
-    if (resetTracking) {
-      // Reset tracking fields for fresh start
-      const now = Math.floor(Date.now() / 1000);
-      this.sql`
-        UPDATE cf_agents_workflows
-        SET status = 'queued',
-            created_at = ${now},
-            updated_at = ${now},
-            completed_at = NULL,
-            error_name = NULL,
-            error_message = NULL
-        WHERE workflow_id = ${workflowId}
-      `;
-    } else {
-      // Just update status from Cloudflare
-      const status = await instance.status();
-      this._updateWorkflowTracking(workflowId, status);
-    }
-
-    this._emit("workflow:restarted", {
-      workflowId,
-      workflowName: workflowInfo.workflowName
-    });
+    return this._workflows.restart(workflowId, options);
   }
 
-  /**
-   * Find a workflow binding by its name.
-   */
-  private _findWorkflowBindingByName(
-    workflowName: string
-  ): Workflow | undefined {
-    const binding = (this.env as Record<string, unknown>)[workflowName];
-    if (
-      binding &&
-      typeof binding === "object" &&
-      "create" in binding &&
-      "get" in binding
-    ) {
-      return binding as Workflow;
-    }
-    return undefined;
-  }
-
-  /**
-   * Get all workflow binding names from the environment.
-   */
-  private _getWorkflowBindingNames(): string[] {
-    const names: string[] = [];
-    for (const [key, value] of Object.entries(
-      this.env as Record<string, unknown>
-    )) {
-      if (
-        value &&
-        typeof value === "object" &&
-        "create" in value &&
-        "get" in value
-      ) {
-        names.push(key);
-      }
-    }
-    return names;
-  }
-
-  /**
-   * Get the status of a workflow and update the tracking record.
-   *
-   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
-   * @param workflowId - ID of the workflow instance
-   * @returns The workflow status
-   */
-  async getWorkflowStatus(
+  /** Read a workflow's status from the service and update its record. */
+  getWorkflowStatus(
     workflowName: WorkflowName<Env>,
     workflowId: string
   ): Promise<InstanceStatus> {
-    const workflow = this._findWorkflowBindingByName(workflowName);
-    if (!workflow) {
-      throw new Error(
-        `Workflow binding '${workflowName}' not found in environment`
-      );
-    }
-
-    const instance = await workflow.get(workflowId);
-    const status = await instance.status();
-
-    // Update the tracking record
-    this._updateWorkflowTracking(workflowId, status);
-
-    return status;
+    return this._workflows.status(workflowName, workflowId);
   }
 
-  /**
-   * Get a tracked workflow by ID.
-   *
-   * @param workflowId - Workflow instance ID
-   * @returns Workflow info or undefined if not found
-   */
+  /** A tracked workflow's record, or undefined. */
   getWorkflow(workflowId: string): WorkflowInfo | undefined {
-    const rows = this.sql<WorkflowTrackingRow>`
-      SELECT * FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
-    `;
-
-    if (!rows || rows.length === 0) {
-      return undefined;
-    }
-
-    return this._rowToWorkflowInfo(rows[0]);
+    return this._workflows.get(workflowId);
   }
 
-  /**
-   * Query tracked workflows with cursor-based pagination.
-   *
-   * @param criteria - Query criteria including optional cursor for pagination
-   * @returns WorkflowPage with workflows, total count, and next cursor
-   *
-   * @example
-   * ```typescript
-   * // First page
-   * const page1 = this.getWorkflows({ status: 'running', limit: 20 });
-   *
-   * // Next page
-   * if (page1.nextCursor) {
-   *   const page2 = this.getWorkflows({
-   *     status: 'running',
-   *     limit: 20,
-   *     cursor: page1.nextCursor
-   *   });
-   * }
-   * ```
-   */
+  /** Query tracked workflows, with a cursor for the next page. */
   getWorkflows(criteria: WorkflowQueryCriteria = {}): WorkflowPage {
-    const limit = Math.min(criteria.limit ?? 50, 100);
-    const isAsc = criteria.orderBy === "asc";
-
-    // Get total count (ignores cursor and limit)
-    const total = this._countWorkflows(criteria);
-
-    // Build base query
-    let query = "SELECT * FROM cf_agents_workflows WHERE 1=1";
-    const params: (string | number | boolean)[] = [];
-
-    if (criteria.status) {
-      const statuses = Array.isArray(criteria.status)
-        ? criteria.status
-        : [criteria.status];
-      const placeholders = statuses.map(() => "?").join(", ");
-      query += ` AND status IN (${placeholders})`;
-      params.push(...statuses);
-    }
-
-    if (criteria.workflowName) {
-      query += " AND workflow_name = ?";
-      params.push(criteria.workflowName);
-    }
-
-    if (criteria.metadata) {
-      for (const [key, value] of Object.entries(criteria.metadata)) {
-        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
-        params.push(key, value);
-      }
-    }
-
-    // Apply cursor for keyset pagination
-    if (criteria.cursor) {
-      const cursor = this._decodeCursor(criteria.cursor);
-      if (isAsc) {
-        // ASC: get items after cursor
-        query +=
-          " AND (created_at > ? OR (created_at = ? AND workflow_id > ?))";
-      } else {
-        // DESC: get items before cursor
-        query +=
-          " AND (created_at < ? OR (created_at = ? AND workflow_id < ?))";
-      }
-      params.push(cursor.createdAt, cursor.createdAt, cursor.workflowId);
-    }
-
-    // Order by created_at and workflow_id for consistent keyset pagination
-    query += ` ORDER BY created_at ${isAsc ? "ASC" : "DESC"}, workflow_id ${isAsc ? "ASC" : "DESC"}`;
-
-    // Fetch limit + 1 to detect if there are more pages
-    query += " LIMIT ?";
-    params.push(limit + 1);
-
-    const rows = this.ctx.storage.sql
-      .exec(query, ...params)
-      .toArray() as WorkflowTrackingRow[];
-
-    const hasMore = rows.length > limit;
-    const resultRows = hasMore ? rows.slice(0, limit) : rows;
-    const workflows = resultRows.map((row) => this._rowToWorkflowInfo(row));
-
-    // Build next cursor from last item
-    const nextCursor =
-      hasMore && workflows.length > 0
-        ? this._encodeCursor(workflows[workflows.length - 1])
-        : null;
-
-    return { workflows, total, nextCursor };
+    return this._workflows.list(criteria);
   }
 
-  /**
-   * Count workflows matching criteria (for pagination total).
-   */
-  private _countWorkflows(
-    criteria: Omit<WorkflowQueryCriteria, "limit" | "cursor" | "orderBy"> & {
-      createdBefore?: Date;
-    }
-  ): number {
-    let query = "SELECT COUNT(*) as count FROM cf_agents_workflows WHERE 1=1";
-    const params: (string | number | boolean)[] = [];
-
-    if (criteria.status) {
-      const statuses = Array.isArray(criteria.status)
-        ? criteria.status
-        : [criteria.status];
-      const placeholders = statuses.map(() => "?").join(", ");
-      query += ` AND status IN (${placeholders})`;
-      params.push(...statuses);
-    }
-
-    if (criteria.workflowName) {
-      query += " AND workflow_name = ?";
-      params.push(criteria.workflowName);
-    }
-
-    if (criteria.metadata) {
-      for (const [key, value] of Object.entries(criteria.metadata)) {
-        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
-        params.push(key, value);
-      }
-    }
-
-    if (criteria.createdBefore) {
-      query += " AND created_at < ?";
-      params.push(Math.floor(criteria.createdBefore.getTime() / 1000));
-    }
-
-    const result = this.ctx.storage.sql.exec(query, ...params).toArray() as {
-      count: number;
-    }[];
-
-    return result[0]?.count ?? 0;
-  }
-
-  /**
-   * Encode a cursor from workflow info for pagination.
-   * Stores createdAt as Unix timestamp in seconds (matching DB storage).
-   */
-  private _encodeCursor(workflow: WorkflowInfo): string {
-    return btoa(
-      JSON.stringify({
-        c: Math.floor(workflow.createdAt.getTime() / 1000),
-        i: workflow.workflowId
-      })
-    );
-  }
-
-  /**
-   * Decode a pagination cursor.
-   * Returns createdAt as Unix timestamp in seconds (matching DB storage).
-   */
-  private _decodeCursor(cursor: string): {
-    createdAt: number;
-    workflowId: string;
-  } {
-    try {
-      const data = JSON.parse(atob(cursor));
-      if (typeof data.c !== "number" || typeof data.i !== "string") {
-        throw new Error("Invalid cursor structure");
-      }
-      return { createdAt: data.c, workflowId: data.i };
-    } catch {
-      throw new Error(
-        "Invalid pagination cursor. The cursor may be malformed or corrupted."
-      );
-    }
-  }
-
-  /**
-   * Delete a workflow tracking record.
-   *
-   * @param workflowId - ID of the workflow to delete
-   * @returns true if a record was deleted, false if not found
-   */
+  /** Delete a workflow's record. False when there was none. */
   deleteWorkflow(workflowId: string): boolean {
-    // First check if workflow exists
-    const existing = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
-    `;
-    if (!existing[0] || existing[0].count === 0) {
-      return false;
-    }
-    this.sql`DELETE FROM cf_agents_workflows WHERE workflow_id = ${workflowId}`;
-    return true;
+    return this._workflows.delete(workflowId);
   }
 
-  /**
-   * Delete workflow tracking records matching criteria.
-   * Useful for cleaning up old completed/errored workflows.
-   *
-   * @param criteria - Criteria for which workflows to delete
-   * @returns Number of records matching criteria (expected deleted count)
-   *
-   * @example
-   * ```typescript
-   * // Delete all completed workflows created more than 7 days ago
-   * const deleted = this.deleteWorkflows({
-   *   status: 'complete',
-   *   createdBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-   * });
-   *
-   * // Delete all errored and terminated workflows
-   * const deleted = this.deleteWorkflows({
-   *   status: ['errored', 'terminated']
-   * });
-   * ```
-   */
+  /** Delete the workflow records matching the criteria; returns how many. */
   deleteWorkflows(
     criteria: Omit<WorkflowQueryCriteria, "limit" | "orderBy"> & {
       createdBefore?: Date;
     } = {}
   ): number {
-    let query = "DELETE FROM cf_agents_workflows WHERE 1=1";
-    const params: (string | number | boolean)[] = [];
-
-    if (criteria.status) {
-      const statuses = Array.isArray(criteria.status)
-        ? criteria.status
-        : [criteria.status];
-      const placeholders = statuses.map(() => "?").join(", ");
-      query += ` AND status IN (${placeholders})`;
-      params.push(...statuses);
-    }
-
-    if (criteria.workflowName) {
-      query += " AND workflow_name = ?";
-      params.push(criteria.workflowName);
-    }
-
-    if (criteria.metadata) {
-      for (const [key, value] of Object.entries(criteria.metadata)) {
-        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
-        params.push(key, value);
-      }
-    }
-
-    if (criteria.createdBefore) {
-      query += " AND created_at < ?";
-      params.push(Math.floor(criteria.createdBefore.getTime() / 1000));
-    }
-
-    const cursor = this.ctx.storage.sql.exec(query, ...params);
-    return cursor.rowsWritten;
+    return this._workflows.deleteMany(criteria);
   }
 
   /**
-   * Migrate workflow tracking records from an old binding name to a new one.
-   * Use this after renaming a workflow binding in wrangler.toml.
-   *
-   * @param oldName - Previous workflow binding name
-   * @param newName - New workflow binding name
-   * @returns Number of records migrated
-   *
-   * @example
-   * ```typescript
-   * // After renaming OLD_WORKFLOW to NEW_WORKFLOW in wrangler.toml
-   * async onStart() {
-   *   const migrated = this.migrateWorkflowBinding('OLD_WORKFLOW', 'NEW_WORKFLOW');
-   * }
-   * ```
+   * Point workflow records at a renamed binding, for example from
+   * `onStart()` after renaming it in the Wrangler config.
    */
   migrateWorkflowBinding(oldName: string, newName: string): number {
-    // Validate new binding exists
-    if (!this._findWorkflowBindingByName(newName)) {
-      throw new Error(`Workflow binding '${newName}' not found in environment`);
-    }
-
-    const result = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_workflows WHERE workflow_name = ${oldName}
-    `;
-    const count = result[0]?.count ?? 0;
-
-    if (count > 0) {
-      this
-        .sql`UPDATE cf_agents_workflows SET workflow_name = ${newName} WHERE workflow_name = ${oldName}`;
-      console.log(
-        `[Agent] Migrated ${count} workflow(s) from '${oldName}' to '${newName}'`
-      );
-    }
-
-    return count;
-  }
-
-  /**
-   * Update workflow tracking record from InstanceStatus
-   */
-  private _updateWorkflowTracking(
-    workflowId: string,
-    status: InstanceStatus
-  ): void {
-    const statusName = status.status;
-    const now = Math.floor(Date.now() / 1000);
-
-    // Determine if workflow is complete
-    const completedStatuses: WorkflowStatus[] = [
-      "complete",
-      "errored",
-      "terminated"
-    ];
-    const completedAt = completedStatuses.includes(statusName) ? now : null;
-
-    // Extract error info if present
-    const errorName = status.error?.name ?? null;
-    const errorMessage = status.error?.message ?? null;
-
-    this.sql`
-      UPDATE cf_agents_workflows
-      SET status = ${statusName},
-          error_name = ${errorName},
-          error_message = ${errorMessage},
-          updated_at = ${now},
-          completed_at = ${completedAt}
-      WHERE workflow_id = ${workflowId}
-    `;
-  }
-
-  /**
-   * Convert a database row to WorkflowInfo
-   */
-  private _rowToWorkflowInfo(row: WorkflowTrackingRow): WorkflowInfo {
-    return {
-      id: row.id,
-      workflowId: row.workflow_id,
-      workflowName: row.workflow_name,
-      status: row.status,
-      metadata: row.metadata ? JSON.parse(row.metadata) : null,
-      error: row.error_name
-        ? { name: row.error_name, message: row.error_message ?? "" }
-        : null,
-      createdAt: new Date(row.created_at * 1000),
-      updatedAt: new Date(row.updated_at * 1000),
-      completedAt: row.completed_at ? new Date(row.completed_at * 1000) : null
-    };
-  }
-
-  private _workflowOrigin(
-    options: RunWorkflowOptions | undefined
-  ): AgentWorkflowOrigin | undefined {
-    if (this._isFacet) {
-      const root = this._parentPath[0];
-      const rootBindingName =
-        options?.agentBinding ??
-        (root ? this._findAgentBindingNameForClass(root.className) : undefined);
-
-      if (!rootBindingName) return undefined;
-
-      return {
-        kind: "facet",
-        version: 1,
-        rootBinding: rootBindingName,
-        path: this.selfPath.map((step) => ({ ...step }))
-      };
-    }
-
-    const agentBindingName =
-      options?.agentBinding ??
-      this._findAgentBindingNameForClass(this._ParentClass.name);
-    if (!agentBindingName) return undefined;
-
-    return {
-      kind: "agent",
-      version: 1,
-      binding: agentBindingName,
-      name: this.name
-    };
-  }
-
-  private _findAgentBindingNameForClass(className: string): string | undefined {
-    for (const [key, value] of Object.entries(
-      this.env as Record<string, unknown>
-    )) {
-      if (
-        value &&
-        typeof value === "object" &&
-        "idFromName" in value &&
-        typeof value.idFromName === "function"
-      ) {
-        // Check if this namespace's binding name matches our class name
-        if (
-          key === className ||
-          camelCaseToKebabCase(key) === camelCaseToKebabCase(className)
-        ) {
-          return key;
-        }
-      }
-    }
-    return undefined;
-  }
-
-  private _findBindingNameForNamespace(
-    namespace: DurableObjectNamespace<McpRpcAgent>
-  ): string | undefined {
-    for (const [key, value] of Object.entries(
-      this.env as Record<string, unknown>
-    )) {
-      if (value === namespace) {
-        return key;
-      }
-    }
-    return undefined;
+    return this._workflows.migrateBinding(oldName, newName);
   }
 
   // ==========================================
@@ -9496,62 +6585,32 @@ export class Agent<
    * @param callback - The callback payload
    */
   async onWorkflowCallback(callback: WorkflowCallback): Promise<void> {
-    const now = Math.floor(Date.now() / 1000);
-
+    this._workflows.record(callback);
     switch (callback.type) {
       case "progress":
-        // Update tracking status to "running" when receiving progress
-        // Only transition from queued/waiting to avoid overwriting terminal states
-        this.sql`
-          UPDATE cf_agents_workflows
-          SET status = 'running', updated_at = ${now}
-          WHERE workflow_id = ${callback.workflowId} AND status IN ('queued', 'waiting')
-        `;
-        await this.onWorkflowProgress(
+        return this.onWorkflowProgress(
           callback.workflowName,
           callback.workflowId,
           callback.progress
         );
-        break;
       case "complete":
-        // Update tracking status to "complete"
-        // Don't overwrite if already terminated/paused (race condition protection)
-        this.sql`
-          UPDATE cf_agents_workflows
-          SET status = 'complete', updated_at = ${now}, completed_at = ${now}
-          WHERE workflow_id = ${callback.workflowId}
-            AND status NOT IN ('terminated', 'paused')
-        `;
-        await this.onWorkflowComplete(
+        return this.onWorkflowComplete(
           callback.workflowName,
           callback.workflowId,
           callback.result
         );
-        break;
       case "error":
-        // Update tracking status to "errored"
-        // Don't overwrite if already terminated/paused (race condition protection)
-        this.sql`
-          UPDATE cf_agents_workflows
-          SET status = 'errored', updated_at = ${now}, completed_at = ${now},
-              error_name = 'WorkflowError', error_message = ${callback.error}
-          WHERE workflow_id = ${callback.workflowId}
-            AND status NOT IN ('terminated', 'paused')
-        `;
-        await this.onWorkflowError(
+        return this.onWorkflowError(
           callback.workflowName,
           callback.workflowId,
           callback.error
         );
-        break;
       case "event":
-        // No status change for events - they can occur at any stage
-        await this.onWorkflowEvent(
+        return this.onWorkflowEvent(
           callback.workflowName,
           callback.workflowId,
           callback.event
         );
-        break;
     }
   }
 
@@ -9724,367 +6783,39 @@ export class Agent<
       | AddRpcMcpServerOptions,
     agentsPrefix?: string,
     options?: Pick<AddMcpServerOptions, "client" | "transport">
-  ): Promise<
-    | {
-        id: string;
-        state: typeof MCPConnectionState.AUTHENTICATING;
-        authUrl: string;
-      }
-    | {
-        id: string;
-        state: typeof MCPConnectionState.READY;
-        authUrl?: undefined;
-      }
-  > {
-    const isHttpTransport = typeof urlOrBinding === "string";
-    const normalizedUrl = isHttpTransport
-      ? new URL(urlOrBinding).href
-      : undefined;
-
-    // Extract and normalize a caller-supplied stable id, if any. The same
-    // option field is accepted on both the HTTP and RPC option shapes.
-    let requestedId: string | undefined;
-    if (
-      typeof callbackHostOrOptions === "object" &&
-      callbackHostOrOptions !== null &&
-      typeof (callbackHostOrOptions as { id?: unknown }).id === "string"
-    ) {
-      const rawId = (callbackHostOrOptions as { id: string }).id;
-      requestedId = normalizeServerId(rawId);
-    }
-
-    const allServers = this.mcp.listServers();
-
-    const existingServer = allServers.find(
-      (s) =>
-        s.name === serverName &&
-        (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
-    );
-
-    if (requestedId) {
-      // Collision check 1: a caller-supplied id may only re-resolve to an
-      // existing server when the (name, url) also matches. Otherwise storage
-      // (INSERT OR REPLACE on id) would silently overwrite the existing row.
-      const idConflict = allServers.find((s) => {
-        if (s.id !== requestedId) return false;
-        if (s.name !== serverName) return true;
-        if (isHttpTransport) {
-          return new URL(s.server_url).href !== normalizedUrl;
-        }
-        return false;
-      });
-      if (idConflict) {
-        throw new Error(
-          `MCP server id "${requestedId}" is already in use by server "${idConflict.name}" (${idConflict.server_url}). ` +
-            `Stable ids must be unique per (name, url).`
-        );
-      }
-
-      // JIT-migrate: the same (name, url) is already registered under a
-      // different id (typically an auto-generated nanoid from a previous
-      // call that didn't supply `id`). This is the natural upgrade path —
-      // a user adds `{ id: "github" }` to an existing `addMcpServer` call.
-      // Rename the existing row + connection + OAuth keys to the new id in
-      // place so the caller's contract ("the id I get back is the id I
-      // asked for") holds and no stale storage rows are left behind.
-      if (existingServer && existingServer.id !== requestedId) {
-        await this.mcp.migrateServerId(
-          existingServer.id,
-          requestedId,
-          this.name
-        );
-        existingServer.id = requestedId;
-      }
-    }
-
-    if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
-      const conn = this.mcp.mcpConnections[existingServer.id];
-      if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
-        const authProvider = conn.options.transport.authProvider;
-        const authUrl =
-          (await this._redeemableAuthUrl(
-            existingServer.id,
-            authProvider?.authUrl,
-            authProvider
-          )) ??
-          (await this._redeemableAuthUrl(
-            existingServer.id,
-            existingServer.auth_url,
-            authProvider
-          ));
-        if (authUrl) {
-          return {
-            id: existingServer.id,
-            state: MCPConnectionState.AUTHENTICATING,
-            authUrl
-          };
-        }
-
-        const reconnectResult = await this.mcp.connectToServer(
-          existingServer.id
-        );
-        if (reconnectResult.state === MCPConnectionState.AUTHENTICATING) {
-          if (!reconnectResult.authUrl) {
-            throw new Error("OAuth configuration incomplete: missing authUrl");
-          }
-          return {
-            id: existingServer.id,
-            state: reconnectResult.state,
-            authUrl: reconnectResult.authUrl
-          };
-        }
-        if (reconnectResult.state === MCPConnectionState.CONNECTED) {
-          const discoverResult = await this.mcp.discoverIfConnected(
-            existingServer.id
-          );
-          if (!discoverResult?.success) {
-            throw new Error(
-              `Failed to discover MCP server capabilities: ${discoverResult?.error ?? "connection not found"}`
-            );
-          }
-          return {
-            id: existingServer.id,
-            state: MCPConnectionState.READY
-          };
-        }
-        throw new Error(
-          `Failed to connect to MCP server at ${normalizedUrl}: ${reconnectResult.error}`
-        );
-      }
-      if (conn.connectionState === MCPConnectionState.FAILED) {
-        throw new Error(
-          `MCP server "${serverName}" is in failed state: ${conn.connectionError}`
-        );
-      }
-      return { id: existingServer.id, state: MCPConnectionState.READY };
-    }
-
-    // RPC transport path: second argument is a DurableObjectNamespace
-    if (typeof urlOrBinding !== "string") {
-      const rpcOpts = callbackHostOrOptions as
-        | AddRpcMcpServerOptions
-        | undefined;
-
-      const normalizedName = serverName.toLowerCase().replace(/\s+/g, "-");
-
-      // Prefer the caller-supplied stable id, falling back to the existing
-      // server's id (for restore-through-addMcpServer), then to a generated id.
-      const reconnectId = requestedId ?? existingServer?.id;
-      const { id } = await this.mcp.connect(
-        `${RPC_DO_PREFIX}${normalizedName}`,
-        {
-          reconnect: reconnectId ? { id: reconnectId } : undefined,
-          transport: {
-            type: "rpc" as TransportType,
-            namespace:
-              urlOrBinding as unknown as DurableObjectNamespace<McpRpcAgent>,
-            name: normalizedName,
-            props: rpcOpts?.props
-          }
-        }
-      );
-
-      const conn = this.mcp.mcpConnections[id];
-      if (conn && conn.connectionState === MCPConnectionState.CONNECTED) {
-        const discoverResult = await this.mcp.discoverIfConnected(id);
-        if (discoverResult && !discoverResult.success) {
-          throw new Error(
-            `Failed to discover MCP server capabilities: ${discoverResult.error}`
-          );
-        }
-      } else if (conn && conn.connectionState === MCPConnectionState.FAILED) {
-        throw new Error(
-          `Failed to connect to MCP server "${serverName}" via RPC: ${conn.connectionError}`
-        );
-      }
-
-      const bindingName = this._findBindingNameForNamespace(
-        urlOrBinding as unknown as DurableObjectNamespace<McpRpcAgent>
-      );
-      if (bindingName) {
-        this.mcp.saveRpcServerToStorage(
-          id,
-          serverName,
-          normalizedName,
-          bindingName,
-          rpcOpts?.props
-        );
-      }
-
-      return { id, state: MCPConnectionState.READY };
-    }
-
-    // HTTP transport path
-    const httpOptions = callbackHostOrOptions as
-      | string
-      | AddMcpServerOptions
-      | undefined;
-
-    let resolvedCallbackHost: string | undefined;
-    let resolvedAgentsPrefix: string;
-    let resolvedOptions:
-      | Pick<AddMcpServerOptions, "client" | "transport" | "retry">
-      | undefined;
-
-    let resolvedCallbackPath: string | undefined;
-
-    if (typeof httpOptions === "object" && httpOptions !== null) {
-      resolvedCallbackHost = httpOptions.callbackHost;
-      resolvedCallbackPath = httpOptions.callbackPath;
-      resolvedAgentsPrefix = httpOptions.agentsPrefix ?? "agents";
-      resolvedOptions = {
-        client: httpOptions.client,
-        transport: httpOptions.transport,
-        retry: httpOptions.retry
-      };
-    } else {
-      resolvedCallbackHost = httpOptions;
-      resolvedAgentsPrefix = agentsPrefix ?? "agents";
-      resolvedOptions = options;
-    }
-
-    // Enforce callbackPath when sendIdentityOnConnect is false and callbackHost is provided
-    if (
-      !this._resolvedOptions.sendIdentityOnConnect &&
-      resolvedCallbackHost &&
-      !resolvedCallbackPath
-    ) {
-      throw new Error(
-        "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false — " +
-          "the default callback URL would expose the instance name. " +
-          "Provide a callbackPath and route the callback request to this agent via getAgentByName."
-      );
-    }
-
-    // Try to derive callbackHost from the current request or connection URI
-    if (!resolvedCallbackHost) {
-      const { request, connection } = getCurrentAgent();
-      if (request) {
-        const requestUrl = new URL(request.url);
-        resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
-      } else if (connection?.uri) {
-        const connectionUrl = new URL(connection.uri);
-        resolvedCallbackHost = `${connectionUrl.protocol}//${connectionUrl.host}`;
-      }
-    }
-
-    // Build the callback URL if we have a host (needed for OAuth, optional for non-OAuth servers)
-    let callbackUrl: string | undefined;
-    if (resolvedCallbackHost) {
-      const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
-      callbackUrl = resolvedCallbackPath
-        ? `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`
-        : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
-    }
-
-    const id = requestedId ?? existingServer?.id ?? nanoid(8);
-
-    // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
-    let authProvider:
-      | ReturnType<typeof this.createMcpOAuthProvider>
-      | undefined;
-    if (callbackUrl) {
-      authProvider = this.createMcpOAuthProvider(callbackUrl);
-      authProvider.serverId = id;
-    }
-
-    // Use the transport type specified in options, or default to "auto"
-    const transportType: TransportType =
-      resolvedOptions?.transport?.type ?? "auto";
-
-    // allows passing through transport headers if necessary
-    // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
-    let headerTransportOpts: SSEClientTransportOptions = {};
-    if (resolvedOptions?.transport?.headers) {
-      headerTransportOpts = {
-        eventSourceInit: {
-          fetch: (url, init) =>
-            fetch(url, {
-              ...init,
-              headers: resolvedOptions?.transport?.headers
-            })
-        },
-        requestInit: {
-          headers: resolvedOptions?.transport?.headers
-        }
-      };
-    }
-
-    // Register server (also saves to storage)
-    await this.mcp.registerServer(id, {
-      url: normalizedUrl!,
-      name: serverName,
-      callbackUrl,
-      client: resolvedOptions?.client,
-      transport: {
-        ...headerTransportOpts,
-        authProvider,
-        type: transportType,
-        skipIssuerMetadataValidation:
-          resolvedOptions?.transport?.skipIssuerMetadataValidation
+  ): Promise<AddMcpServerResult> {
+    return addMcpServer(
+      {
+        manager: this.mcp,
+        env: this.env,
+        // Read only where it is used: a cold native call on an agent whose
+        // stored name is not loaded yet can still register a server.
+        agentName: () => this.name,
+        agentClassName: this._ParentClass.name,
+        sendIdentityOnConnect: this._resolvedOptions.sendIdentityOnConnect,
+        createAuthProvider: (callbackUrl) =>
+          this.createMcpOAuthProvider(callbackUrl)
       },
-      retry: resolvedOptions?.retry
-    });
-
-    const result = await this.mcp.connectToServer(id);
-
-    if (result.state === MCPConnectionState.FAILED) {
-      // Server stays in storage so user can retry via connectToServer(id)
-      throw new Error(
-        `Failed to connect to MCP server at ${normalizedUrl}: ${result.error}`
-      );
-    }
-
-    if (result.state === MCPConnectionState.AUTHENTICATING) {
-      if (!callbackUrl) {
-        throw new Error(
-          "This MCP server requires OAuth authentication. " +
-            "Provide callbackHost in addMcpServer options to enable the OAuth flow."
-        );
-      }
-      return { id, state: result.state, authUrl: result.authUrl };
-    }
-
-    // State is CONNECTED - discover capabilities
-    const discoverResult = await this.mcp.discoverIfConnected(id);
-
-    if (discoverResult && !discoverResult.success) {
-      // Server stays in storage - connection is still valid, user can retry discovery
-      throw new Error(
-        `Failed to discover MCP server capabilities: ${discoverResult.error}`
-      );
-    }
-
-    return { id, state: MCPConnectionState.READY };
+      serverName,
+      urlOrBinding,
+      callbackHostOrOptions,
+      agentsPrefix,
+      options
+    );
   }
 
-  private async _redeemableAuthUrl(
-    serverId: string,
-    authUrl: string | null | undefined,
-    authProvider: AgentMcpOAuthProvider | undefined
-  ): Promise<string | undefined> {
-    if (!this._isAbsoluteHttpUrl(authUrl) || !authProvider) return;
-    const state = new URL(authUrl).searchParams.get("state");
-    if (!state) return authUrl;
-
-    authProvider.serverId = serverId;
-    try {
-      return (await authProvider.checkState(state)).valid ? authUrl : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private _isAbsoluteHttpUrl(
-    value: string | null | undefined
-  ): value is string {
-    if (!value) return false;
-    try {
-      const url = new URL(value);
-      return url.protocol === "http:" || url.protocol === "https:";
-    } catch {
-      return false;
-    }
+  /**
+   * Try an MCP server again, for example from a "Reconnect" button: forgets
+   * why it failed (unreachable, authorization refused, step-up limit
+   * reached) and its pending link, then connects now with the quick
+   * attempts. The only way to retry a failed server or get a new link;
+   * `addMcpServer()` for a registered server reports its state as is.
+   *
+   * @returns The same result as `addMcpServer()`: `ready`, or
+   * `authenticating` with a new `authUrl`. Throws when the attempt fails.
+   */
+  reconnectMcpServer(id: string): Promise<AddMcpServerResult> {
+    return reconnectMcpServer(this.mcp, id);
   }
 
   async removeMcpServer(id: string) {
@@ -10092,39 +6823,7 @@ export class Agent<
   }
 
   getMcpServers(): MCPServersState {
-    const mcpState: MCPServersState = {
-      prompts: this.mcp.listPrompts(),
-      resources: this.mcp.listResources(),
-      servers: {},
-      tools: this.mcp.listTools()
-    };
-
-    const servers = this.mcp.listServers();
-
-    if (servers && Array.isArray(servers) && servers.length > 0) {
-      for (const server of servers) {
-        const serverConn = this.mcp.mcpConnections[server.id];
-
-        // Determine the default state when no connection exists
-        let defaultState: "authenticating" | "not-connected" = "not-connected";
-        if (!serverConn && server.auth_url) {
-          // If there's an auth_url but no connection, it's waiting for OAuth
-          defaultState = "authenticating";
-        }
-
-        mcpState.servers[server.id] = {
-          auth_url: server.auth_url,
-          capabilities: serverConn?.serverCapabilities ?? null,
-          error: sanitizeErrorString(serverConn?.connectionError ?? null),
-          instructions: serverConn?.instructions ?? null,
-          name: server.name,
-          server_url: server.server_url,
-          state: serverConn?.connectionState ?? defaultState
-        };
-      }
-    }
-
-    return mcpState;
+    return mcpServersState(this.mcp);
   }
 
   /**
@@ -10187,248 +6886,4 @@ export type AgentContext = DurableObjectState;
 // Other email utilities moved to agents/email subpath
 export { createHeaderBasedEmailResolver } from "./email";
 
-import type { EmailResolver } from "./email";
-
-export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
-  resolver: EmailResolver<Env>;
-  /**
-   * Callback invoked when no routing information is found for an email.
-   * Use this to reject the email or perform custom handling.
-   * If not provided, a warning is logged and the email is dropped.
-   */
-  onNoRoute?: (email: ForwardableEmailMessage) => void | Promise<void>;
-};
-
-// RpcTarget bridge for email callbacks. Consolidates the email event's
-// mutation methods (setReject, forward, reply) into a single disposable
-// RPC target instead of anonymous closures. This allows the runtime to
-// tear down the bidirectional RPC session when _onEmail returns,
-// rather than keeping the DO pinned for the caller's entire context
-// lifetime (~100-120s for CF Email Routing handlers).
-class EmailBridge extends RpcTarget {
-  #email: ForwardableEmailMessage;
-
-  constructor(email: ForwardableEmailMessage) {
-    super();
-    this.#email = email;
-  }
-
-  async getRaw(): Promise<Uint8Array> {
-    const reader = this.#email.raw.getReader();
-    const chunks: Uint8Array[] = [];
-    let done = false;
-    while (!done) {
-      const { value, done: readerDone } = await reader.read();
-      done = readerDone;
-      if (value) {
-        chunks.push(value);
-      }
-    }
-    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-    const combined = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      combined.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return combined;
-  }
-
-  setReject(reason: string) {
-    this.#email.setReject(reason);
-  }
-
-  forward(rcptTo: string, headers?: Headers): Promise<EmailSendResult> {
-    return this.#email.forward(rcptTo, headers);
-  }
-
-  reply(options: {
-    from: string;
-    to: string;
-    raw: string;
-  }): Promise<EmailSendResult> {
-    return this.#email.reply(
-      new EmailMessage(options.from, options.to, options.raw)
-    );
-  }
-
-  [Symbol.dispose]() {
-    // Intentionally empty — the runtime calls this when the last
-    // stub is disposed, signaling that the RPC target is no longer
-    // needed and the bidirectional connection can be torn down.
-  }
-}
-
-// Cache the agent namespace map for email routing
-// This maps original names, kebab-case, and lowercase versions to namespaces
-const agentMapCache = new WeakMap<
-  Record<string, unknown>,
-  { map: Record<string, unknown>; originalNames: string[] }
->();
-
-/**
- * Route an email to the appropriate Agent
- * @param email The email to route
- * @param env The environment containing the Agent bindings
- * @param options The options for routing the email
- * @returns A promise that resolves when the email has been routed
- */
-export async function routeAgentEmail<
-  Env extends Cloudflare.Env = Cloudflare.Env
->(
-  email: ForwardableEmailMessage,
-  env: Env,
-  options: EmailRoutingOptions<Env>
-): Promise<void> {
-  const routingInfo = await options.resolver(email, env);
-
-  if (!routingInfo) {
-    if (options.onNoRoute) {
-      await options.onNoRoute(email);
-    } else {
-      console.warn("No routing information found for email, dropping message");
-    }
-    return;
-  }
-
-  // Build a map that includes original names, kebab-case, and lowercase versions
-  if (!agentMapCache.has(env as Record<string, unknown>)) {
-    const map: Record<string, unknown> = {};
-    const originalNames: string[] = [];
-    for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
-      if (
-        value &&
-        typeof value === "object" &&
-        "idFromName" in value &&
-        typeof value.idFromName === "function"
-      ) {
-        // Add the original name, kebab-case version, and lowercase version
-        map[key] = value;
-        map[camelCaseToKebabCase(key)] = value;
-        map[key.toLowerCase()] = value;
-        originalNames.push(key);
-      }
-    }
-    agentMapCache.set(env as Record<string, unknown>, {
-      map,
-      originalNames
-    });
-  }
-
-  const cached = agentMapCache.get(env as Record<string, unknown>)!;
-  const namespace = cached.map[routingInfo.agentName];
-
-  if (!namespace) {
-    // Provide helpful error message listing available agents
-    const availableAgents = cached.originalNames.join(", ");
-    throw new Error(
-      `Agent namespace '${routingInfo.agentName}' not found in environment. Available agents: ${availableAgents}`
-    );
-  }
-
-  const agent = await getAgentByName(
-    namespace as unknown as DurableObjectNamespace<Agent<Env>>,
-    routingInfo.agentId
-  );
-
-  // Use an RpcTarget bridge instead of bare closures so the runtime
-  // can cleanly tear down the bidirectional session after _onEmail returns
-  const bridge = new EmailBridge(email);
-
-  await agent._onEmail({
-    from: email.from,
-    to: email.to,
-    headers: email.headers,
-    rawSize: email.rawSize,
-    _secureRouted: routingInfo._secureRouted,
-    _bridge: bridge
-  });
-}
-
-/**
- * A wrapper for streaming responses in callable methods
- */
-export class StreamingResponse {
-  private _connection: Connection;
-  private _id: string;
-  private _closed = false;
-
-  constructor(connection: Connection, id: string) {
-    this._connection = connection;
-    this._id = id;
-  }
-
-  private _send(response: RPCResponse): boolean {
-    const facetSent = sendFacetStreamingResponse(this, response);
-    if (facetSent !== null) return facetSent;
-    return sendRpcResponseIfOpen(this._connection, response);
-  }
-
-  /**
-   * Whether the stream has been closed (via end() or error())
-   */
-  get isClosed(): boolean {
-    return this._closed;
-  }
-
-  /**
-   * Send a chunk of data to the client
-   * @param chunk The data to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  send(chunk: unknown): boolean {
-    if (this._closed) {
-      console.warn(
-        "StreamingResponse.send() called after stream was closed - data not sent"
-      );
-      return false;
-    }
-    const response: RPCResponse = {
-      done: false,
-      id: this._id,
-      result: chunk,
-      success: true,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
-
-  /**
-   * End the stream and send the final chunk (if any)
-   * @param finalChunk Optional final chunk of data to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  end(finalChunk?: unknown): boolean {
-    if (this._closed) {
-      return false;
-    }
-    this._closed = true;
-    const response: RPCResponse = {
-      done: true,
-      id: this._id,
-      result: finalChunk,
-      success: true,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
-
-  /**
-   * Send an error to the client and close the stream
-   * @param message Error message to send
-   * @returns false if stream is already closed (no-op), true if sent
-   */
-  error(message: string): boolean {
-    if (this._closed) {
-      return false;
-    }
-    this._closed = true;
-    const response: RPCResponse = {
-      error: message,
-      id: this._id,
-      success: false,
-      type: MessageType.RPC
-    };
-    return this._send(response);
-  }
-}
+export { routeAgentEmail, type EmailRoutingOptions } from "./email-agent";

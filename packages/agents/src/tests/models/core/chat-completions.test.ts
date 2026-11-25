@@ -8,8 +8,7 @@ import {
   normalizeChatCompletion,
   normalizeChatCompletionsStream,
   prepareChatCompletionsRequest,
-  quirksFor,
-  type StreamNormalizationOptions
+  quirksFor
 } from "../../../models/core/chat-completions";
 import { sseDataStream } from "../../../models/core/sse";
 
@@ -19,19 +18,17 @@ const MISTRAL = "@cf/mistralai/mistral-small-3.1-24b-instruct";
 const GEMMA = "@cf/google/gemma-4-26b-a4b-it";
 // A model with no override row: the strict OpenAI base profile.
 const STRICT = "acme/strict-model";
-const NEMOTRON = "@cf/nvidia/nemotron-3-120b-a12b";
 
 /** Runs SSE `data:` payloads through the decoder and the normalizer. */
 async function normalize(
   events: string[],
-  modelId: string,
-  options?: StreamNormalizationOptions
+  modelId: string
 ): Promise<unknown[]> {
   const body = events.map((event) => `data: ${event}\r\n\r\n`).join("");
   const stream = new Blob([body])
     .stream()
     .pipeThrough(sseDataStream())
-    .pipeThrough(normalizeChatCompletionsStream(modelId, options));
+    .pipeThrough(normalizeChatCompletionsStream(modelId));
   const out: unknown[] = [];
   const reader = stream.getReader();
   for (;;) {
@@ -122,21 +119,6 @@ describe("core compat — request preparation", () => {
     expect(body).not.toHaveProperty("reasoning_effort");
     expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
     expect(warnings).toEqual([]);
-  });
-
-  it("reports whether the body turned reasoning off", () => {
-    expect(
-      prepareChatCompletionsRequest({ reasoning_effort: null }, GLM)
-        .reasoningOff
-    ).toBe(true);
-    expect(
-      prepareChatCompletionsRequest({ reasoning_effort: "low" }, GLM)
-        .reasoningOff
-    ).toBe(false);
-    expect(
-      prepareChatCompletionsRequest({ reasoning_effort: null }, KIMI)
-        .reasoningOff
-    ).toBe(false);
   });
 
   it("warns when a model cannot turn reasoning off", () => {
@@ -696,54 +678,6 @@ describe("core compat — stream normalization", () => {
       JSON.parse(usage),
       "[DONE]"
     ]);
-  });
-
-  it("moves nemotron's mislabeled answer back into content when reasoning is off", async () => {
-    // 41-matt-nemotron-3-120b-a12b-S_usage_s: with enable_thinking=false the
-    // answer streams as `delta.reasoning`; the non-streaming body puts the
-    // same text in `content`.
-    const usage = { completion_tokens: 4, prompt_tokens: 9, total_tokens: 13 };
-    const delta = (delta: Record<string, unknown>, finish: string | null) =>
-      JSON.stringify({
-        choices: [{ delta, finish_reason: finish, index: 0 }],
-        created: 1,
-        id: "chatcmpl-n",
-        model: NEMOTRON,
-        object: "chat.completion.chunk",
-        usage
-      });
-    const events = [
-      delta({ content: "", role: "assistant" }, null),
-      delta({ reasoning: "Hi" }, null),
-      delta({ reasoning: " there" }, null),
-      delta({ reasoning: "!" }, null),
-      delta({ reasoning: "" }, "stop"),
-      JSON.stringify({ choices: [], id: "chatcmpl-n", usage }),
-      JSON.stringify({ response: "", usage }),
-      "[DONE]"
-    ];
-    const text = (chunks: unknown[], key: string) =>
-      chunks
-        .map((chunk) => {
-          const choice = (
-            chunk as { choices?: { delta?: Record<string, unknown> }[] }
-          ).choices?.[0];
-          const value = choice?.delta?.[key];
-          return typeof value === "string" ? value : "";
-        })
-        .join("");
-
-    const off = await normalize(events, NEMOTRON, { reasoningOff: true });
-    expect(text(off, "content")).toBe("Hi there!");
-    expect(text(off, "reasoning_content")).toBe("");
-    expect(off.at(-1)).toBe("[DONE]");
-
-    // With reasoning on, or on any other family, reasoning stays reasoning.
-    const on = await normalize(events, NEMOTRON);
-    expect(text(on, "content")).toBe("");
-    expect(text(on, "reasoning_content")).toBe("Hi there!");
-    const glm = await normalize(events, GLM, { reasoningOff: true });
-    expect(text(glm, "reasoning_content")).toBe("Hi there!");
   });
 
   it("does not synthesize a finish reason for a truncated stream", async () => {

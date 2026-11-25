@@ -46,6 +46,12 @@ export type ChannelMessageSurface<
   address: TAddress;
   /** Human-readable destination text captured when the surface is created. */
   label: string;
+  /**
+   * What stays the same across messages of one place when its address does
+   * not (an email thread's root, while each reply has its own headers).
+   * Channels keeps one surface per key, the latest address winning.
+   */
+  key?: string;
 }>;
 
 /** A Channel-produced destination before its Host stamps the configured key. */
@@ -55,6 +61,8 @@ export type ChannelMessageSurfaceInput<
   version: 1;
   address: TAddress;
   label: string;
+  /** See {@link ChannelMessageSurface.key}. */
+  key?: string;
 }>;
 
 /** Validate the common envelope before provider-specific address parsing. */
@@ -71,6 +79,7 @@ export function isChannelMessageSurface(
     surface.version === 1 &&
     isSurfaceValue(surface.address) &&
     typeof surface.label === "string" &&
-    surface.label.trim().length > 0
+    surface.label.trim().length > 0 &&
+    (surface.key === undefined || typeof surface.key === "string")
   );
 }

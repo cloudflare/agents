@@ -15,7 +15,4 @@ export {
 } from "./quirks";
 export { type PreparedRequest, prepareChatCompletionsRequest } from "./request";
 export { normalizeChatCompletion, normalizeToolCall } from "./response";
-export {
-  normalizeChatCompletionsStream,
-  type StreamNormalizationOptions
-} from "./stream";
+export { normalizeChatCompletionsStream } from "./stream";

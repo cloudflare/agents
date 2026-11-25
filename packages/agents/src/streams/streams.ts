@@ -14,7 +14,10 @@
  */
 
 import { LifecycleCapability } from "../lifecycle/capability";
+import { hasTable } from "../lifecycle/schema";
+import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import { SqlError } from "../sql-error";
+import { SqlName } from "../sql-name";
 import {
   StreamClosedError,
   StreamNotFoundError,
@@ -32,19 +35,26 @@ import type {
   StreamSettleOptions,
   StreamState,
   StreamStatus,
-  StreamWriter
+  StreamWriter,
+  StreamBatching
 } from "./types";
 
-const STREAM_SCHEMA_VERSION_KEY = "cf_agents:streams_schema_version";
 const CURRENT_STREAM_SCHEMA_VERSION = 2;
 
 /**
  * A block row grows by UPDATE until its body reaches this many characters,
- * then the next append opens a new block. Sized well under the 2 MiB row
- * limit so a 1 MiB chunk always fits in a fresh block, and small enough
+ * then the next append opens a new block. Sized well under the row budget
+ * so a 1 MiB chunk always fits in a fresh block, and small enough
  * that a replay page parses one block at a time.
  */
 const BLOCK_MAX_CHARS = 256 * 1024;
+
+type Buffered = { readonly firstSeq: number; readonly jsons: string[] };
+
+/** The seq after a buffer's last chunk. */
+function bufferEnd(buffer: Buffered | undefined): number | undefined {
+  return buffer && buffer.firstSeq + buffer.jsons.length;
+}
 /** Rows read per page while folding one stream's v1 chunk rows into blocks. */
 const LEGACY_FOLD_PAGE_ROWS = 500;
 
@@ -63,6 +73,15 @@ const utf8 = new TextEncoder();
  * @experimental The API surface may change before stabilizing.
  */
 export interface StreamsOptions {
+  /**
+   * This instance's name, for more than one Streams in one Durable Object:
+   * each named instance keeps its own streams, apart from the default
+   * (unnamed) one and from each other. A lowercase letter, then up to 31
+   * lowercase letters, digits or hyphens.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly name?: string;
   /** Ceiling for one serialized chunk. Default: 1 MiB. */
   readonly maxChunkBytes?: number;
 }
@@ -85,8 +104,43 @@ export interface StreamsSyncInternal {
   ): void;
   /** Replace a stream row's metadata, whatever its state. */
   setMetadata(streamId: string, metadata: Record<string, StreamJson>): void;
-  /** The read-fenced append: one chunk insert at the log tail, reader wakeup. */
-  append(streamId: string, chunk: StreamJson): number;
+  /**
+   * A buffered append of a chunk given as its JSON text and its UTF-8
+   * size: the caller serialized and measured it once and checked its own
+   * size limit (at most `ROW_VALUE_BYTES`, so it fits a row). It gets its seq now and waits in memory with the
+   * stream's earlier buffered chunks; all of them are written in one row
+   * write (a new block, or the newest one with `fillBlocks`) once
+   * `maxChunks` or `maxBytes` is reached, on `flush()`, before a writer's
+   * `append` to the same stream, or when the stream settles (dropped
+   * by a cutover that discards). A crash loses what is buffered: at most
+   * `maxChunks - 1` chunks.
+   */
+  appendJson(
+    streamId: string,
+    json: string,
+    bytes: number,
+    batch: StreamBatching
+  ): number;
+  /** Write a stream's buffered chunks now, or every stream's. */
+  flush(streamId?: string): void;
+  /**
+   * The seqs a stream holds: `oldest` is the first stored seq (`head` when
+   * none is), `head` the next seq to assign, buffered chunks included.
+   */
+  bounds(streamId: string): { oldest: number; head: number };
+  /** Whether `seq` is a stored chunk of the stream (not in a hole). */
+  holds(streamId: string, seq: number): boolean;
+  /**
+   * Bring the stream back to `maxChunks` chunks and `maxBytes` stored
+   * UTF-8 bytes by deleting its oldest blocks, never the newest, once it
+   * passes either limit by an eighth: a log at its limit trims once per
+   * eighth of it, in one range delete, not on every write. Totals are read
+   * once per isolate and kept in memory.
+   */
+  trim(
+    streamId: string,
+    retention: { maxChunks: number; maxBytes: number }
+  ): void;
   /**
    * The newest chunk's timestamp, or null for an empty log. One PK-served
    * read — the per-append liveness signal retention sweeps verify against
@@ -123,19 +177,32 @@ export interface StreamsSyncInternal {
     reason: string | null,
     options?: StreamSettleOptions
   ): boolean;
+  /**
+   * A counter kept with this Streams, 0 when never set. Its table is made
+   * by the first write, so a Streams nobody counts with has none and a
+   * start reads nothing for it.
+   */
+  counter(name: string): number;
+  /** Add `delta` to a counter: one row write. */
+  addToCounter(name: string, delta: number): void;
+  /** Set a counter: one row write. */
+  setCounter(name: string, value: number): void;
   /** Delete a stream and its chunks regardless of state. */
   deleteUnchecked(streamId: string): void;
   /** Delete many streams and their chunks regardless of state, silently. */
   deleteMany(streamIds: string[]): void;
   /**
    * One page of a stream's chunk log from `fromSeq` (inclusive), ordered by
-   * seq. Paged rather than read-it-all so replaying a large stream holds
-   * one page of segment bodies in memory, not the whole turn.
+   * seq: at most `limit` chunks, and no more chunks once the page holds
+   * `maxChars` characters of chunk JSON (always at least one). Paged rather
+   * than read-it-all so replaying a large stream holds one page of chunks
+   * in memory, not the whole turn.
    */
   readChunks(
     streamId: string,
     fromSeq: number,
-    limit: number
+    limit: number,
+    maxChars?: number
   ): StreamChunkRow[];
   /** Every stream row, newest first (created_at, then insertion order). */
   listRows(): StreamRow[];
@@ -182,8 +249,69 @@ export interface StreamsSyncInternal {
  */
 export class Streams extends LifecycleCapability {
   readonly #maxChunkBytes: number;
+  /** This instance's tables, resolved once. */
+  readonly #tables: {
+    readonly streams: SqlName;
+    readonly blocks: SqlName;
+    readonly counters: SqlName;
+  };
+  /** This instance's schema version key. */
+  readonly #schemaVersionKey: string;
+  /** The one-block INSERT, built once from this instance's table. */
+  readonly #insertBlock: string;
   /** Wakeup callbacks for readers tailing a live stream, per stream. */
   readonly #wakeups = new Map<string, Set<() => void>>();
+  /**
+   * Chunks appended with a batch and not written yet, per stream: their
+   * serialized texts, byte total and the seq of the first. Bounded by each
+   * batch's limits; an entry leaves on flush, settle or delete.
+   */
+  readonly #buffers = new Map<
+    string,
+    {
+      readonly firstSeq: number;
+      readonly jsons: string[];
+      /** Each chunk's UTF-8 size, as the caller measured it. */
+      readonly sizes: number[];
+      bytes: number;
+      /** Whether the flush fills the newest block (`fillBlocks`). */
+      readonly fill: boolean;
+    }
+  >();
+  /**
+   * Streams this isolate created or has buffered into. The first buffer of
+   * any other stream starts `maxChunks + 1` seqs past the durable head:
+   * what an earlier isolate buffered and lost (a crash, or a dropped
+   * buffer of up to `maxChunks`) is never given to a new chunk, and leaves
+   * a hole of at least one seq that a reader can detect (`holds`, or a
+   * live seq that is not the next one).
+   */
+  readonly #bufferedHere = new Set<string>();
+  /**
+   * The first seq a stream's next buffer may use, after a buffer was
+   * dropped because its write failed: one past the dropped seqs, so a
+   * follower that applied them sees a gap. Leaves with that next buffer,
+   * a settle or a delete.
+   */
+  readonly #seqFloors = new Map<string, number>();
+  /**
+   * The open block of each stream buffered into, and that it is live: read
+   * once, then kept up to date by buffered writes, so a flush costs its one
+   * row write and no reads of its own. Dropped on any other write path to
+   * the stream (direct append, settle, delete, import).
+   */
+  readonly #liveTails = new Map<
+    string,
+    { block: number; seq_to: number; len: number } | null
+  >();
+  /**
+   * Streams inside a discarding cutover's transaction. Their row still
+   * reads `streaming` (it is deleted, not stamped settled), so appends from
+   * the cutover's `commit` are refused here instead. Empty outside one.
+   */
+  readonly #discarding = new Set<string>();
+  /** Stored chunk and character totals per trimmed stream, read once. */
+  readonly #totals = new Map<string, { chunks: number; bytes: number }>();
   /**
    * Whether the schema v1 `cf_agents_stream_chunks` table still exists.
    * Its rows are folded into blocks one stream at a time, on first touch
@@ -192,7 +320,17 @@ export class Streams extends LifecycleCapability {
   #legacyChunkTable = false;
 
   constructor(options: StreamsOptions = {}) {
-    super("streams");
+    super("streams", options.name);
+    this.#tables = {
+      streams: new SqlName(this.store.table("streams")),
+      blocks: new SqlName(this.store.table("stream_blocks")),
+      counters: new SqlName(this.store.table("stream_counters"))
+    };
+    this.#schemaVersionKey = this.store.key("streams_schema_version");
+    // The default's text is the released statement's, byte for byte.
+    this.#insertBlock = `INSERT INTO ${this.#tables.blocks}
+  (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)`;
     this.#maxChunkBytes = options.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES;
   }
 
@@ -200,16 +338,19 @@ export class Streams extends LifecycleCapability {
 
   /** Migrate stream storage during Lifecycle startup. */
   async onStart(): Promise<void> {
+    // Streams keeps its own version key, not the Lifecycle's one record:
+    // ThinkHarness binds a Streams to its own services, and a record entry
+    // would land under the harness's id and take its schema version.
     const storage = this.lifecycle.storage;
-    const version = (await storage.get<number>(STREAM_SCHEMA_VERSION_KEY)) ?? 0;
+    const version = (await storage.get<number>(this.#schemaVersionKey)) ?? 0;
     if (version < CURRENT_STREAM_SCHEMA_VERSION) {
       this.#ensureTables();
-      await storage.put(
-        STREAM_SCHEMA_VERSION_KEY,
-        CURRENT_STREAM_SCHEMA_VERSION
-      );
+      await storage.put(this.#schemaVersionKey, CURRENT_STREAM_SCHEMA_VERSION);
     }
-    if (version >= 1) this.#legacyChunkTable = this.#hasLegacyChunkTable();
+    // Schema v1's chunk table only ever belonged to the default instance.
+    if (version >= 1 && this.instanceName === undefined) {
+      this.#legacyChunkTable = this.#hasLegacyChunkTable();
+    }
   }
 
   // ── Producer surface ─────────────────────────────────────────────────────
@@ -253,7 +394,7 @@ export class Streams extends LifecycleCapability {
     );
     const now = Date.now();
     this.#sql`
-      INSERT INTO cf_agents_streams
+      INSERT INTO ${this.#tables.streams}
         (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
       VALUES
         (${streamId}, 'streaming', ${options.tag ?? null}, ${metadataJson}, 0, ${now}, ${now})
@@ -300,6 +441,15 @@ export class Streams extends LifecycleCapability {
   ): AsyncGenerator<StreamChunk[], void, undefined> {
     await this.lifecycle.ready();
     const signal = options.signal;
+    if (
+      options.batchSize !== undefined &&
+      !Number.isFinite(options.batchSize)
+    ) {
+      throw new RangeError("batchSize must be a finite number");
+    }
+    if (options.from !== undefined && !Number.isInteger(options.from)) {
+      throw new RangeError("from must be an integer");
+    }
     const batchSize = Math.max(
       1,
       Math.floor(options.batchSize ?? READ_BATCH_SIZE)
@@ -375,7 +525,7 @@ export class Streams extends LifecycleCapability {
       : options.state !== undefined
         ? [options.state]
         : [];
-    let query = "SELECT * FROM cf_agents_streams WHERE 1 = 1";
+    let query = `SELECT * FROM ${this.#tables.streams} WHERE 1 = 1`;
     const params: (string | number)[] = [];
     if (states.length > 0) {
       query += ` AND state IN (${states.map(() => "?").join(", ")})`;
@@ -385,7 +535,7 @@ export class Streams extends LifecycleCapability {
       query += " AND tag = ?";
       params.push(options.tag);
     }
-    query += " ORDER BY created_at DESC, stream_id DESC LIMIT ?";
+    query += " ORDER BY created_at DESC, rowid DESC LIMIT ?";
     params.push(options.limit ?? DEFAULT_LIST_LIMIT);
     let rows: unknown[];
     try {
@@ -430,8 +580,50 @@ export class Streams extends LifecycleCapability {
    * break without notice; never use from application code.
    */
   __DO_NOT_USE_WILL_BREAK__sync(): StreamsSyncInternal {
+    // One object for every caller: building it allocates a closure per
+    // method, and hot paths reach the aperture several times per write.
+    return (this.#syncAperture ??= this.#buildSyncAperture());
+  }
+
+  #syncAperture: StreamsSyncInternal | undefined;
+
+  #buildSyncAperture(): StreamsSyncInternal {
     return {
       ensureTables: () => this.#ensureTables(),
+      counter: (name) => {
+        if (this.#countersTable === false) return 0;
+        try {
+          const rows = this.lifecycle.storage.sql
+            .exec<{
+              value: number;
+            }>(`SELECT value FROM ${this.#tables.counters} WHERE key = ?`, name)
+            .toArray();
+          this.#countersTable = true;
+          return rows[0]?.value ?? 0;
+        } catch (cause) {
+          if (
+            !hasTable(this.lifecycle.storage.sql, this.#tables.counters.name)
+          ) {
+            this.#countersTable = false;
+            return 0;
+          }
+          throw cause;
+        }
+      },
+      addToCounter: (name, delta) =>
+        this.#writeCounter(
+          `INSERT INTO ${this.#tables.counters} (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = value + excluded.value`,
+          name,
+          delta
+        ),
+      setCounter: (name, value) =>
+        this.#writeCounter(
+          `INSERT INTO ${this.#tables.counters} (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          name,
+          value
+        ),
       getStream: (streamId) => this.#getStream(streamId),
       insertStream: (streamId, tag, metadata) => {
         this.#validateStreamId(streamId);
@@ -441,11 +633,13 @@ export class Streams extends LifecycleCapability {
         );
         const now = Date.now();
         this.#sql`
-          INSERT INTO cf_agents_streams
+          INSERT INTO ${this.#tables.streams}
             (stream_id, state, tag, metadata, chunk_count, created_at, updated_at)
           VALUES
             (${streamId}, 'streaming', ${tag}, ${metadataJson}, 0, ${now}, ${now})
         `;
+        // Born in this isolate: no earlier isolate buffered into it.
+        this.#bufferedHere.add(streamId);
         this.#emit("stream:opened", { streamId });
       },
       setMetadata: (streamId, metadata) => {
@@ -454,11 +648,50 @@ export class Streams extends LifecycleCapability {
           `metadata for stream "${streamId}"`
         );
         this.#sql`
-          UPDATE cf_agents_streams SET metadata = ${metadataJson}
+          UPDATE ${this.#tables.streams} SET metadata = ${metadataJson}
           WHERE stream_id = ${streamId}
         `;
       },
-      append: (streamId, chunk) => this.#append(streamId, chunk),
+      appendJson: (streamId, json, bytes, batch) =>
+        this.#appendBuffered(streamId, json, bytes, batch),
+      flush: (streamId) => {
+        if (streamId !== undefined) {
+          this.#flushBuffer(streamId);
+          return;
+        }
+        for (const id of [...this.#buffers.keys()]) this.#flushBuffer(id);
+      },
+      bounds: (streamId) => {
+        const head =
+          bufferEnd(this.#buffers.get(streamId)) ??
+          this.#tail(streamId).nextSeq;
+        const oldest = this.#sql<{ seq_from: number | null }>`
+          SELECT MIN(seq_from) AS seq_from FROM ${this.#tables.blocks}
+          WHERE stream_id = ${streamId}
+        `[0]?.seq_from;
+        return {
+          oldest: oldest ?? this.#buffers.get(streamId)?.firstSeq ?? head,
+          head
+        };
+      },
+      holds: (streamId, seq) => {
+        const buffer = this.#buffers.get(streamId);
+        if (
+          buffer &&
+          seq >= buffer.firstSeq &&
+          seq < buffer.firstSeq + buffer.jsons.length
+        ) {
+          return true;
+        }
+        return (
+          this.#sql<{ one: number }>`
+            SELECT 1 AS one FROM ${this.#tables.blocks}
+            WHERE stream_id = ${streamId} AND seq_from <= ${seq} AND seq_to > ${seq}
+            LIMIT 1
+          `.length > 0
+        );
+      },
+      trim: (streamId, retention) => this.#trim(streamId, retention),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
       cursor: (streamId) => this.#tail(streamId).nextSeq,
       onDelete: (hook) => {
@@ -483,20 +716,20 @@ export class Streams extends LifecycleCapability {
           this.#wake(streamId);
         }
       },
-      readChunks: (streamId, fromSeq, limit) =>
-        this.#readChunks(streamId, fromSeq, limit),
+      readChunks: (streamId, fromSeq, limit, maxChars) =>
+        this.#readChunks(streamId, fromSeq, limit, maxChars),
       listRows: () => this.#sql<StreamRow>`
-        SELECT * FROM cf_agents_streams ORDER BY created_at DESC, rowid DESC
+        SELECT * FROM ${this.#tables.streams} ORDER BY created_at DESC, rowid DESC
       `,
       rowsByTag: (tag, state) =>
         state
           ? this.#sql<StreamRow>`
-              SELECT * FROM cf_agents_streams
+              SELECT * FROM ${this.#tables.streams}
               WHERE tag = ${tag} AND state = ${state}
               ORDER BY created_at DESC, rowid DESC
             `
           : this.#sql<StreamRow>`
-              SELECT * FROM cf_agents_streams
+              SELECT * FROM ${this.#tables.streams}
               WHERE tag = ${tag}
               ORDER BY created_at DESC, rowid DESC
             `,
@@ -507,7 +740,7 @@ export class Streams extends LifecycleCapability {
           `metadata for stream "${row.streamId}"`
         );
         this.#sql`
-          INSERT INTO cf_agents_streams
+          INSERT INTO ${this.#tables.streams}
             (stream_id, state, tag, metadata, chunk_count,
              created_at, updated_at, closed_at)
           VALUES
@@ -517,6 +750,7 @@ export class Streams extends LifecycleCapability {
         `;
       },
       importChunk: (streamId, chunk, createdAt) => {
+        this.#liveTails.delete(streamId);
         const chunkJson = this.#serialize(
           chunk,
           `chunk for stream "${streamId}"`
@@ -544,6 +778,11 @@ export class Streams extends LifecycleCapability {
   }
 
   #append(streamId: string, chunk: StreamJson): number {
+    // Buffered chunks hold earlier seqs: written first, in order.
+    this.#flushBuffer(streamId);
+    // This path reads and writes the tail itself; the buffered path's
+    // cached copy would go stale.
+    this.#liveTails.delete(streamId);
     // Serialization runs BEFORE the fence read: JSON.stringify can execute
     // user toJSON() methods, which may synchronously re-enter this stream.
     const chunkJson = this.#serialize(chunk, `chunk for stream "${streamId}"`);
@@ -560,7 +799,9 @@ export class Streams extends LifecycleCapability {
     // here and the write may await or call user code — either would
     // reintroduce the lost-update races the old guarded-UPDATE fence
     // prevented, at the cost of one stream-row write per append.
-    const state = this.#state(streamId);
+    const state = this.#discarding.has(streamId)
+      ? "completed"
+      : this.#state(streamId);
     if (state !== "streaming") {
       throw new StreamClosedError(
         streamId,
@@ -570,6 +811,267 @@ export class Streams extends LifecycleCapability {
     const seq = this.#writeChunk(streamId, chunkJson, Date.now());
     this.#wake(streamId);
     return seq;
+  }
+
+  #appendBuffered(
+    streamId: string,
+    chunkJson: string,
+    chunkBytes: number,
+    batch: StreamBatching
+  ): number {
+    if (this.#discarding.has(streamId)) {
+      throw new StreamClosedError(streamId, "it is being discarded");
+    }
+    let skipped = false;
+    let buffer = this.#buffers.get(streamId);
+    if (!buffer) {
+      // The fence, once per isolate: chunks join a buffer only while the
+      // stream is live, and settling or deleting it drops the cache.
+      if (!this.#liveTails.has(streamId)) {
+        const state = this.#state(streamId);
+        if (state !== "streaming") {
+          throw new StreamClosedError(
+            streamId,
+            state !== undefined
+              ? `already settled as ${state}`
+              : "it was deleted"
+          );
+        }
+        const tail = this.#blockTail(streamId);
+        this.#liveTails.set(
+          streamId,
+          tail
+            ? { block: tail.block, seq_to: tail.seq_to, len: tail.len }
+            : null
+        );
+      }
+      const durable = this.#liveTails.get(streamId)?.seq_to ?? 0;
+      const floor = this.#seqFloors.get(streamId);
+      this.#seqFloors.delete(streamId);
+      skipped = !this.#bufferedHere.has(streamId) || floor !== undefined;
+      const firstSeq = Math.max(
+        this.#bufferedHere.has(streamId)
+          ? durable
+          : durable + batch.maxChunks + 1,
+        floor ?? 0
+      );
+      this.#bufferedHere.add(streamId);
+      buffer = {
+        firstSeq,
+        jsons: [],
+        sizes: [],
+        bytes: 0,
+        fill: batch.fillBlocks === true
+      };
+      this.#buffers.set(streamId, buffer);
+    }
+    const seq = buffer.firstSeq + buffer.jsons.length;
+    buffer.jsons.push(chunkJson);
+    buffer.sizes.push(chunkBytes);
+    buffer.bytes += chunkBytes + 1;
+    // The first chunk after a skip is written at once, so the skip itself
+    // is durable: a crash before the next flush cannot make the next
+    // isolate hand out these seqs again.
+    if (
+      skipped ||
+      buffer.jsons.length >= batch.maxChunks ||
+      buffer.bytes >= batch.maxBytes
+    ) {
+      this.#flushBuffer(streamId);
+    }
+    return seq;
+  }
+
+  /**
+   * Write a stream's buffered chunks as one new block: one INSERT, no read,
+   * and no rewrite of an earlier block. With `fillBlocks`, a flush that
+   * fits goes into the newest block instead (one UPDATE). Wakes readers.
+   */
+  #flushBuffer(streamId: string): void {
+    const buffer = this.#buffers.get(streamId);
+    if (!buffer) return;
+    const tail = this.#liveTails.has(streamId)
+      ? this.#liveTails.get(streamId)
+      : this.#blockTail(streamId);
+    const firstBlock = (tail?.block ?? -1) + 1;
+    let block = firstBlock;
+    const { firstSeq, jsons, sizes } = buffer;
+    const at = Date.now();
+    // One block per flush, split only where the flush would pass the row
+    // budget: each chunk is at most ROW_VALUE_BYTES (callers check), so
+    // every block fits a row.
+    const rows: (string | number)[][] = [];
+    let start = 0;
+    while (start < jsons.length) {
+      let end = start + 1;
+      let bytes = sizes[start];
+      while (end < jsons.length && bytes + sizes[end] + 1 <= ROW_VALUE_BYTES) {
+        bytes += sizes[end] + 1;
+        end += 1;
+      }
+      const body =
+        start === 0 && end === jsons.length
+          ? jsons.length === 1
+            ? jsons[0]
+            : jsons.join(",")
+          : jsons.slice(start, end).join(",");
+      rows.push([
+        streamId,
+        block,
+        firstSeq + start,
+        firstSeq + end,
+        body,
+        at,
+        at
+      ]);
+      block += 1;
+      start = end;
+    }
+    // Filling: one flush that fits goes into the newest block, right after
+    // its last seq (no hole between them), as one UPDATE.
+    const body = rows.length === 1 ? String(rows[0][4]) : "";
+    const filled =
+      buffer.fill &&
+      rows.length === 1 &&
+      tail != null &&
+      tail.seq_to === firstSeq &&
+      tail.len + body.length + 1 <= BLOCK_MAX_CHARS
+        ? tail
+        : undefined;
+    try {
+      if (filled) {
+        this.#sqlWrite(
+          `UPDATE ${this.#tables.blocks}
+           SET body = body || ',' || ?, seq_to = ?, updated_at = ?
+           WHERE stream_id = ? AND block = ?`,
+          [body, firstSeq + jsons.length, at, streamId, filled.block]
+        );
+      } else if (rows.length === 1) this.#sqlWrite(this.#insertBlock, rows[0]);
+      else {
+        // All blocks or none: a retry writes the same seqs, never half.
+        this.lifecycle.storage.transactionSync(() => {
+          for (const row of rows) this.#sqlWrite(this.#insertBlock, row);
+        });
+      }
+    } catch (error) {
+      // A failed write drops the buffer, as a crash would: a log that kept
+      // it would retry a write that may never succeed, and stop. The next
+      // buffer starts one past the dropped seqs (a gap a follower sees)
+      // and writes its first chunk at once, so it never returns a seq
+      // before its reservation is stored. The tail is read again.
+      this.#liveTails.delete(streamId);
+      this.#buffers.delete(streamId);
+      this.#seqFloors.set(streamId, firstSeq + jsons.length + 1);
+      throw error;
+    }
+    this.#buffers.delete(streamId);
+    if (filled) block = filled.block + 1;
+    if (this.#liveTails.has(streamId)) {
+      this.#liveTails.set(streamId, {
+        block: block - 1,
+        seq_to: firstSeq + jsons.length,
+        len: filled
+          ? filled.len + body.length + 1
+          : String(rows.at(-1)![4]).length
+      });
+    }
+    const totals = this.#totals.get(streamId);
+    if (totals) {
+      totals.chunks += jsons.length;
+      // UTF-8 bytes as SQLite counts them (`length(CAST(body AS BLOB))`),
+      // so what a trim subtracts matches what a flush added. `bytes` counts
+      // a comma per chunk; a block has one fewer.
+      totals.bytes += buffer.bytes - (block - firstBlock);
+    }
+    this.#wake(streamId);
+  }
+
+  #trim(
+    streamId: string,
+    retention: { maxChunks: number; maxBytes: number }
+  ): void {
+    let totals = this.#totals.get(streamId);
+    if (!totals) {
+      const row = this.#sql<{ chunks: number | null; bytes: number | null }>`
+        SELECT SUM(seq_to - seq_from) AS chunks,
+          SUM(length(CAST(body AS BLOB))) AS bytes
+        FROM ${this.#tables.blocks} WHERE stream_id = ${streamId}
+      `[0];
+      totals = { chunks: row?.chunks ?? 0, bytes: row?.bytes ?? 0 };
+      this.#totals.set(streamId, totals);
+    }
+    const { maxChunks, maxBytes } = retention;
+    if (
+      totals.chunks <= maxChunks + Math.max(1, Math.floor(maxChunks / 8)) &&
+      totals.bytes <= maxBytes + Math.max(1, Math.floor(maxBytes / 8))
+    ) {
+      return;
+    }
+    // The newest block is never trimmed, so the head is never reused.
+    const newest = (
+      this.#liveTails.has(streamId)
+        ? this.#liveTails.get(streamId)
+        : this.#blockTail(streamId)
+    )?.block;
+    if (newest === undefined) return;
+    let { chunks, bytes } = totals;
+    let cut: number | undefined;
+    // Read the oldest blocks a page at a time until the rest is in limits.
+    // The first page is at most 8 blocks, and no more than the chunk
+    // excess (a block holds at least one chunk). After it, a page is the
+    // blocks the excess still needs at the sizes seen so far, so a log of
+    // one-event blocks and one of full batches both read about what they
+    // delete.
+    let seen = { blocks: 0, chunks: 0, bytes: 0 };
+    let limit =
+      chunks > maxChunks ? Math.min(8, Math.ceil(chunks - maxChunks)) : 8;
+    pages: while (chunks > maxChunks || bytes > maxBytes) {
+      const page = this.#sql<{ block: number; chunks: number; bytes: number }>`
+        SELECT block, seq_to - seq_from AS chunks,
+          length(CAST(body AS BLOB)) AS bytes
+        FROM ${this.#tables.blocks}
+        WHERE stream_id = ${streamId} AND block > ${cut ?? -1}
+          AND block < ${newest}
+        ORDER BY block ASC LIMIT ${limit}
+      `;
+      if (page.length === 0) break;
+      for (const row of page) {
+        if (chunks <= maxChunks && bytes <= maxBytes) break pages;
+        cut = row.block;
+        chunks -= row.chunks;
+        bytes -= row.bytes;
+        seen = {
+          blocks: seen.blocks + 1,
+          chunks: seen.chunks + row.chunks,
+          bytes: seen.bytes + row.bytes
+        };
+      }
+      // Chunks: at most the chunk excess left, since every block holds one.
+      // Bytes give no such bound (one large block can clear the excess), so
+      // their estimate asks for at most 8 blocks per page.
+      const chunkNeed =
+        chunks > maxChunks
+          ? Math.min(
+              Math.ceil((chunks - maxChunks) / (seen.chunks / seen.blocks)),
+              Math.ceil(chunks - maxChunks)
+            )
+          : 0;
+      const byteNeed =
+        bytes > maxBytes
+          ? Math.min(
+              8,
+              Math.ceil((bytes - maxBytes) / (seen.bytes / seen.blocks))
+            )
+          : 0;
+      limit = Math.min(256, Math.max(1, chunkNeed, byteNeed));
+    }
+    if (cut === undefined) return;
+    this.#sql`
+      DELETE FROM ${this.#tables.blocks}
+      WHERE stream_id = ${streamId} AND block <= ${cut}
+    `;
+    totals.chunks = chunks;
+    totals.bytes = bytes;
   }
 
   /**
@@ -584,13 +1086,13 @@ export class Streams extends LifecycleCapability {
     const seq = tail?.seq_to ?? 0;
     if (tail && tail.len + chunkJson.length + 1 <= BLOCK_MAX_CHARS) {
       this.#sql`
-        UPDATE cf_agents_stream_blocks
+        UPDATE ${this.#tables.blocks}
         SET body = body || ',' || ${chunkJson}, seq_to = ${seq + 1}, updated_at = ${at}
         WHERE stream_id = ${streamId} AND block = ${tail.block}
       `;
     } else {
       this.#sql`
-        INSERT INTO cf_agents_stream_blocks
+        INSERT INTO ${this.#tables.blocks}
           (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
         VALUES
           (${streamId}, ${(tail?.block ?? -1) + 1}, ${seq}, ${seq + 1}, ${chunkJson}, ${at}, ${at})
@@ -607,12 +1109,14 @@ export class Streams extends LifecycleCapability {
   #readChunks(
     streamId: string,
     fromSeq: number,
-    limit: number
+    limit: number,
+    maxChars = Number.POSITIVE_INFINITY
   ): StreamChunkRow[] {
     this.#foldLegacyChunks(streamId);
     const rows: StreamChunkRow[] = [];
+    let chars = 0;
     let block = -1;
-    while (rows.length < limit) {
+    while (rows.length < limit && chars < maxChars) {
       const next = this.#sql<{
         block: number;
         seq_from: number;
@@ -621,7 +1125,7 @@ export class Streams extends LifecycleCapability {
         updated_at: number;
       }>`
         SELECT block, seq_from, seq_to, body, updated_at
-        FROM cf_agents_stream_blocks
+        FROM ${this.#tables.blocks}
         WHERE stream_id = ${streamId} AND block > ${block} AND seq_to > ${fromSeq}
         ORDER BY block ASC
         LIMIT 1
@@ -631,13 +1135,15 @@ export class Streams extends LifecycleCapability {
       const chunks = JSON.parse(`[${next.body}]`) as StreamJson[];
       for (
         let seq = Math.max(fromSeq, next.seq_from);
-        seq < next.seq_to && rows.length < limit;
+        seq < next.seq_to && rows.length < limit && chars < maxChars;
         seq++
       ) {
+        const chunk = JSON.stringify(chunks[seq - next.seq_from]);
+        chars += chunk.length;
         rows.push({
           stream_id: streamId,
           seq,
-          chunk: JSON.stringify(chunks[seq - next.seq_from]),
+          chunk,
           created_at: next.updated_at
         });
       }
@@ -654,6 +1160,11 @@ export class Streams extends LifecycleCapability {
    * gone; this is the single point every delete path passes through.
    */
   #deleteRows(streamId: string): number {
+    this.#buffers.delete(streamId);
+    this.#liveTails.delete(streamId);
+    this.#totals.delete(streamId);
+    this.#bufferedHere.delete(streamId);
+    this.#seqFloors.delete(streamId);
     if (this.#deleteHooks.length > 0) {
       const row = this.#getStream(streamId);
       if (row) {
@@ -661,15 +1172,16 @@ export class Streams extends LifecycleCapability {
         for (const hook of this.#deleteHooks) hook(row, cursor);
       }
     }
-    if (this.#legacyTableLive()) {
+    if (this.#legacyChunkTable) {
       // Unfolded v1 rows die with the stream; no point folding them first.
       this.#sql`DELETE FROM cf_agents_stream_chunks WHERE stream_id = ${streamId}`;
       this.#dropLegacyChunkTableIfEmpty();
     }
-    this.#sql`DELETE FROM cf_agents_stream_blocks WHERE stream_id = ${streamId}`;
-    return this.#sqlWrite("DELETE FROM cf_agents_streams WHERE stream_id = ?", [
-      streamId
-    ]);
+    this.#sql`DELETE FROM ${this.#tables.blocks} WHERE stream_id = ${streamId}`;
+    return this.#sqlWrite(
+      `DELETE FROM ${this.#tables.streams} WHERE stream_id = ?`,
+      [streamId]
+    );
   }
 
   /**
@@ -683,6 +1195,17 @@ export class Streams extends LifecycleCapability {
     reason: string | null,
     options?: StreamSettleOptions
   ): boolean {
+    // Buffered chunks are part of what the stream produced: written first,
+    // unless the cutover discards the rows anyway. A buffer exists only
+    // while the stream is live, so this costs nothing without one.
+    if (this.#buffers.has(streamId)) {
+      if (options?.discard) this.#buffers.delete(streamId);
+      else this.#flushBuffer(streamId);
+    }
+    this.#liveTails.delete(streamId);
+    // A settled stream takes no more buffered chunks.
+    this.#bufferedHere.delete(streamId);
+    this.#seqFloors.delete(streamId);
     if (!options?.commit && !options?.discard) {
       const settled = this.#settleRow(streamId, state, reason);
       if (settled) this.#emitSettled(streamId, state, reason);
@@ -701,12 +1224,47 @@ export class Streams extends LifecycleCapability {
     const hadLegacy = this.#legacyChunkTable;
     try {
       this.lifecycle.storage.transactionSync(() => {
-        settled = this.#settleRow(streamId, state, reason);
+        // A discarded row is deleted in this transaction, so it is not
+        // stamped settled first: one read instead of an UPDATE.
+        settled = options.discard
+          ? this.#state(streamId) === "streaming"
+          : this.#settleRow(streamId, state, reason);
         if (!settled) return;
-        options.commit?.();
+        if (options.discard) this.#discarding.add(streamId);
+        // Reject a native async `commit` before calling it: once started,
+        // its code after the first `await` runs outside the transaction and
+        // cannot be rolled back, so it must never start. Checked only once
+        // the row transitioned, so a repeat stays a no-op; the throw rolls
+        // back the settle and leaves the stream live.
+        if (
+          options.commit &&
+          Object.prototype.toString.call(options.commit) ===
+            "[object AsyncFunction]"
+        ) {
+          throw new TypeError(
+            "Stream close `commit` must be synchronous; it is an async function."
+          );
+        }
+        const result: unknown = options.commit?.();
+        if (
+          result !== null &&
+          (typeof result === "object" || typeof result === "function") &&
+          typeof (result as PromiseLike<unknown>).then === "function"
+        ) {
+          // A non-async function that returns a promise is only caught
+          // after it ran: the throw below rolls back its synchronous writes,
+          // but not work it scheduled for later. Swallow a native promise's
+          // later rejection; never call another thenable's `then`, which
+          // could start work the callback only returned.
+          if (result instanceof Promise) result.catch(() => {});
+          throw new TypeError(
+            "Stream close `commit` must be synchronous; it returned a promise."
+          );
+        }
         if (options.discard) deleted = this.#deleteRows(streamId) > 0;
       });
     } finally {
+      this.#discarding.delete(streamId);
       // The settle's tail read may have folded this stream's v1 rows and,
       // if they were the last, dropped the legacy table and cleared the
       // flag — inside the transaction. A rollback restores the table but
@@ -737,7 +1295,7 @@ export class Streams extends LifecycleCapability {
   ): boolean {
     const finalCursor = this.#tail(streamId).nextSeq;
     const settled = this.#sqlWrite(
-      `UPDATE cf_agents_streams
+      `UPDATE ${this.#tables.streams}
        SET state = ?, error_message = ?, closed_at = ?, updated_at = ?,
            chunk_count = ?
        WHERE stream_id = ? AND state = 'streaming'`,
@@ -830,17 +1388,23 @@ export class Streams extends LifecycleCapability {
 
   #sql<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
-    ...values: (string | number | boolean | null)[]
+    ...values: (string | number | boolean | null | SqlName)[]
   ): T[] {
-    const query = strings.reduce(
-      (result, part, index) =>
-        result + part + (index < values.length ? "?" : ""),
-      ""
-    );
+    const params: (string | number | boolean | null)[] = [];
+    let query = strings[0];
+    for (let index = 0; index < values.length; index++) {
+      const value = values[index];
+      if (value instanceof SqlName) query += value.name;
+      else {
+        query += "?";
+        params.push(value);
+      }
+      query += strings[index + 1];
+    }
     try {
       // SAFETY: Streams queries select from its own schema; T describes the
       // projected columns of the accompanying query text.
-      return [...this.lifecycle.storage.sql.exec(query, ...values)] as T[];
+      return [...this.lifecycle.storage.sql.exec(query, ...params)] as T[];
     } catch (cause) {
       throw new SqlError(query, cause);
     }
@@ -856,7 +1420,7 @@ export class Streams extends LifecycleCapability {
 
   #getStream(streamId: string): StreamRow | undefined {
     const rows = this.#sql<StreamRow>`
-      SELECT * FROM cf_agents_streams WHERE stream_id = ${streamId}
+      SELECT * FROM ${this.#tables.streams} WHERE stream_id = ${streamId}
     `;
     return rows[0];
   }
@@ -868,7 +1432,7 @@ export class Streams extends LifecycleCapability {
    */
   #state(streamId: string): StreamState | undefined {
     const rows = this.#sql<{ state: StreamState }>`
-      SELECT state FROM cf_agents_streams WHERE stream_id = ${streamId}
+      SELECT state FROM ${this.#tables.streams} WHERE stream_id = ${streamId}
     `;
     return rows[0]?.state;
   }
@@ -897,7 +1461,7 @@ export class Streams extends LifecycleCapability {
       len: number;
     }>`
       SELECT block, seq_to, updated_at, length(body) AS len
-      FROM cf_agents_stream_blocks
+      FROM ${this.#tables.blocks}
       WHERE stream_id = ${streamId}
       ORDER BY block DESC
       LIMIT 1
@@ -914,10 +1478,10 @@ export class Streams extends LifecycleCapability {
    * per chunk. The table is dropped once the last stream's rows are gone.
    */
   #foldLegacyChunks(streamId: string): void {
-    if (!this.#legacyTableLive()) return;
+    if (!this.#legacyChunkTable) return;
     this.lifecycle.storage.transactionSync(() => {
       const tail = this.#sql<{ block: number; seq_to: number }>`
-        SELECT block, seq_to FROM cf_agents_stream_blocks
+        SELECT block, seq_to FROM ${this.#tables.blocks}
         WHERE stream_id = ${streamId}
         ORDER BY block DESC
         LIMIT 1
@@ -931,7 +1495,7 @@ export class Streams extends LifecycleCapability {
       const flush = () => {
         if (body === "") return;
         this.#sql`
-          INSERT INTO cf_agents_stream_blocks
+          INSERT INTO ${this.#tables.blocks}
             (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
           VALUES
             (${streamId}, ${block}, ${seqFrom}, ${seq}, ${body}, ${createdAt}, ${updatedAt})
@@ -975,26 +1539,8 @@ export class Streams extends LifecycleCapability {
     });
   }
 
-  /**
-   * Whether the v1 chunk table is still there. The flag is per instance,
-   * but the table is per object: another Streams instance on the same
-   * storage (a host's own, beside a harness's) may have folded the last v1
-   * rows and dropped it. Recheck before use while the flag says it exists.
-   */
-  #legacyTableLive(): boolean {
-    if (!this.#legacyChunkTable) return false;
-    if (this.#hasLegacyChunkTable()) return true;
-    this.#legacyChunkTable = false;
-    return false;
-  }
-
   #hasLegacyChunkTable(): boolean {
-    return (
-      this.#sql<{ name: string }>`
-        SELECT name FROM sqlite_master
-        WHERE type = 'table' AND name = 'cf_agents_stream_chunks'
-      `.length > 0
-    );
+    return hasTable(this.lifecycle.storage.sql, "cf_agents_stream_chunks");
   }
 
   #dropLegacyChunkTableIfEmpty(): void {
@@ -1036,6 +1582,33 @@ export class Streams extends LifecycleCapability {
     };
   }
 
+  /**
+   * Whether this instance's counters table exists, once a read or write
+   * found out: a read of a missing table then costs nothing, not a failed
+   * query and a probe each time. Only {@link #writeCounter} creates it.
+   */
+  #countersTable: boolean | undefined;
+
+  /** Run a counter write, making the counters table on the first one. */
+  #writeCounter(query: string, name: string, value: number): void {
+    const sql = this.lifecycle.storage.sql;
+    try {
+      sql.exec(query, name, value);
+      this.#countersTable = true;
+      return;
+    } catch (cause) {
+      if (hasTable(sql, this.#tables.counters.name)) {
+        throw new SqlError(query, cause);
+      }
+    }
+    sql.exec(`CREATE TABLE IF NOT EXISTS ${this.#tables.counters} (
+      key TEXT PRIMARY KEY,
+      value INTEGER NOT NULL
+    ) WITHOUT ROWID`);
+    sql.exec(query, name, value);
+    this.#countersTable = true;
+  }
+
   #ensureTables(): void {
     const rawSql = (query: string) => {
       try {
@@ -1055,7 +1628,7 @@ export class Streams extends LifecycleCapability {
     // and it costs one billed row per stream open — per turn, never per
     // chunk.
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_streams (
+      CREATE TABLE IF NOT EXISTS ${this.#tables.streams} (
         stream_id TEXT PRIMARY KEY,
         state TEXT NOT NULL CHECK (state IN (
           'streaming', 'completed', 'errored'
@@ -1069,11 +1642,11 @@ export class Streams extends LifecycleCapability {
         closed_at INTEGER
       )`);
     rawSql(`
-      CREATE INDEX IF NOT EXISTS idx_cf_agents_streams_tag
-      ON cf_agents_streams(tag, created_at)
+      CREATE INDEX IF NOT EXISTS ${this.store.index("streams_tag")}
+      ON ${this.#tables.streams}(tag, created_at)
     `);
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_stream_blocks (
+      CREATE TABLE IF NOT EXISTS ${this.#tables.blocks} (
         stream_id TEXT NOT NULL,
         block INTEGER NOT NULL,
         seq_from INTEGER NOT NULL,

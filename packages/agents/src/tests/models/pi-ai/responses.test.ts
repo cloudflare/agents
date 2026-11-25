@@ -165,6 +165,61 @@ describe("pi-ai: OpenAI Responses over the universal gateway", () => {
     });
   });
 
+  it("records the replayed reasoning OpenAI withheld from the model", async () => {
+    // From GPT-6.2 on, OpenAI drops replayed reasoning that follows an edit
+    // of earlier input (after compaction, say) and reports it on the final
+    // response. pi-ai's stream processor records it; the gateway path must
+    // carry it through next to the `cloudflare` diagnostic.
+    const events = responsesTextStream().map((event) => {
+      const parsed = JSON.parse(event) as {
+        type: string;
+        response?: Record<string, unknown>;
+      };
+      if (parsed.type !== "response.completed") return event;
+      parsed.response = {
+        ...parsed.response,
+        input_transformations: [
+          {
+            action: "removed",
+            id: "rs_1",
+            reason: "prefix_mismatch",
+            type: "reasoning"
+          },
+          {
+            action: "removed",
+            id: "rs_0",
+            reason: "turn_boundary",
+            type: "reasoning"
+          }
+        ]
+      };
+      return JSON.stringify(parsed);
+    });
+    const binding = fakeBinding(() => sseResponse(gatewayPadded(events)));
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai(MODEL), userContext("hi"))
+    );
+    expect(message.stopReason).toBe("stop");
+    expect(
+      message.diagnostics?.find(
+        (d) => d.type === "openai_input_transformations"
+      )?.details
+    ).toEqual({
+      transformations: [
+        {
+          action: "removed",
+          id: "rs_1",
+          reason: "prefix_mismatch",
+          type: "reasoning"
+        }
+      ]
+    });
+    expect(message.diagnostics?.some((d) => d.type === "cloudflare")).toBe(
+      true
+    );
+  });
+
   it("surfaces the gateway's own error envelope", async () => {
     const binding = fakeBinding(() =>
       jsonResponse(

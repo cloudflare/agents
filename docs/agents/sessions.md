@@ -6,7 +6,7 @@
 
 **Sessions stores messages. It is not a file store.** Media you attach to a message is kept out of the message row and stored separately, addressed by content, and put back verbatim when you read. That keeps a message row small however large its attachments are — but it does not reclaim database space, because the payload lives in the same Durable Object. A Durable Object's 10 GB ceiling is therefore the real bound on how much media one conversation can hold: roughly 39,000 200 KB images, measured. An application that handles files should keep them in a file store and put a reference in the message. Think does exactly that with its [Workspace](../think/index.md), which spills to R2.
 
-Prompt assembly lives in [`agents/context`](./context.md) and composes with a session handle rather than living inside it.
+Think's [context](https://github.com/cloudflare/agents/blob/main/docs/think/context.md) arranges the system prompt beside a session; it never changes a message.
 
 `Think` and `AIChatAgent` use this capability for message persistence. You can also install it on a plain Durable Object.
 
@@ -99,9 +99,9 @@ Deleting a message splices its children to its parent. Removing a message in the
 
 ### Row budget
 
-Sessions stores messages. One SQLite row holds up to 1.5 MiB of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
+Sessions stores messages. One SQLite row holds up to 7.9 MB of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
 
-A message that does not fit is split across continuation rows and reassembled on read. Nothing is truncated, nothing is summarized, and no message is too large to store — a 5 MB message is one message row plus three continuation rows, and reads back byte for byte. There is no error to catch and nothing to configure.
+A message that does not fit is split across continuation rows and reassembled on read. Nothing is truncated, nothing is summarized, and no message is too large to store — a 20 MB message is one message row plus two continuation rows, and reads back byte for byte. There is no error to catch and nothing to configure.
 
 Slices are cut on UTF-8 **byte** boundaries, never in the middle of a surrogate pair, so a message full of emoji or CJK text round-trips exactly like an ASCII one.
 
@@ -152,16 +152,16 @@ for await (const batch of session.historyBatches({
 Use a byte-budgeted recent window during Durable Object startup:
 
 ```ts
-const recent = await session.getRecentHistory(8 * 1024 * 1024, 4);
+const recent = await session.getRecentHistory(8 * 1024 * 1024);
 
 recent.messages;
 recent.truncated;
 recent.totalContentBytes;
 ```
 
-The second argument is a minimum number of recent messages. The minimum can exceed the byte budget, so choose it deliberately.
+The read walks back from the newest message and stops before the message that would pass the budget; the newest message is always returned. `truncated` is `true` when older messages were left out. `totalContentBytes` is the size of everything a full read would return; when `truncated`, it can be just the stored size of the part the read measured. Pass `{ leafId }` to read another branch.
 
-The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 1.5 MiB its first slice occupies. That is what makes the budget a bound on isolate memory.
+The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 7.9 MB its first slice occupies. That is what makes the budget a bound on isolate memory.
 
 `getHistory()` materializes the selected path and exists for consumers that require an array:
 
@@ -169,7 +169,7 @@ The budget counts what hydration actually costs. Each row is charged its full st
 const messages = await session.getHistory();
 ```
 
-Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`.
+Do not use `getHistory()` for an unbounded transcript inside a memory-constrained Durable Object. Prefer `history()`, `historyBatches()`, or `getRecentHistory()`. `getHistory()`, `history()` and `getHistoryRowStats()` start at the root, so they hold one entry per message before reading content; past 200,000 visible messages they throw, and never return a shorter history. Read newest-first, use `getRecentHistory()`, or compact the session.
 
 Other reads:
 
@@ -227,6 +227,8 @@ session
 
 `createCompactFunction` takes exactly two options. `summarize` calls the model with a prompt and returns its text. `keepRecentTokens` is the token budget for the recent tail kept verbatim, defaulting to 20,000. The first three messages are kept verbatim as the head, at least the last two are kept as the tail, and the boundaries are aligned so a tool call is never separated from its result.
 
+A compaction function is handed at most the oldest 4 MiB of the visible history, counting each message as 1 KiB more than its stored size (a single oldest message larger than that is handed over alone). A long session that never compacted therefore compacts in rounds, each one starting from the previous summary. When a round holds only the oldest part, the newer messages it left out count toward the recent tail `createCompactFunction` keeps: inside the part it protects only what they fall short of `keepRecentTokens` and of its two-message minimum.
+
 Run it explicitly:
 
 ```ts
@@ -239,6 +241,10 @@ Or store an already-produced summary:
 ```ts
 await session.addCompaction(summary, fromMessageId, toMessageId);
 ```
+
+An overlay applies wherever a read reaches the row it ends at, however long the path is and whatever a byte budget leaves out. The read shows the messages after the overlay, its summary, and then the messages before its start, such as the head the compaction function kept. When two stored overlays end on the same path, the one a read reaches first applies, which is the one ending later. Each `compact()` extends the previous overlay, so the head stays where the first compaction left it.
+
+`addCompaction()` throws when `fromMessageId` is not `toMessageId` or one of its ancestors, or when either is not a message of the session. Deleting messages keeps overlays applying: an overlay whose first, last or preceding message is deleted moves to the nearest message that remains, and an overlay whose whole range is deleted is removed.
 
 Sessions stamps each message with a token estimate when the row is written. `compactAfter()` gates on that O(1) aggregate and never reads the transcript to decide whether to compact. Auto-compaction failures are non-fatal: they log, emit `session:error`, and leave the transcript alone.
 
@@ -275,7 +281,7 @@ The common path pays nothing for it. A window of messages with no continuations 
 
 ### What it costs
 
-Splitting is not a way to shrink the database. Continuation rows live in the same Durable Object as the message they belong to, inside the same 10 GB. Billing counts rows written, not bytes, so a 500 KB message costs the same one billed row as a tiny one, and a 2 MB message costs two.
+Splitting is not a way to shrink the database. Continuation rows live in the same Durable Object as the message they belong to, inside the same 10 GB. Billing counts rows written, not bytes, so a 500 KB message costs the same one billed row as a tiny one, and a 10 MB message costs two.
 
 `SessionRowStat.bytes` and the `totalContentBytes` returned by `getRecentHistory()` report the whole message — row plus continuations — so a byte budget passed to `getRecentHistory()` bounds the memory a hydration will actually take.
 
@@ -312,7 +318,7 @@ That budget is a hard ceiling with no message-count floor beneath it. `getRecent
 const results = await session.search("deployment failed");
 ```
 
-The index is built by the first `search()` call on an object, with a one-time SQL-only backfill of the messages already stored, and maintained on every write from then on. An object that never searches never pays for an index: maintaining one costs an extra billed row on every append, so it exists only where something actually reads it.
+The index holds the first 1.9 MB of each message's text. A search returns its hits in rank order up to `limit`, and stops early once their text passes 16 MiB, so a reply always fits in memory and in one RPC reply. The index is built by the first `search()` call on an object, with a one-time backfill of the messages already stored (in SQL, except a message whose text passes 1.9 MB or that is split across rows, which is read one at a time), and maintained on every write from then on. An object that never searches never pays for an index: maintaining one costs an extra billed row on every append, so it exists only where something actually reads it.
 
 Search indexes text parts only. File contents, reasoning, and tool payloads are not indexed automatically.
 
@@ -403,7 +409,7 @@ For user-facing chat applications, prefer one Durable Object per conversation. T
 
 `Think` and `AIChatAgent` use Sessions internally.
 
-- Think uses branches, compaction, search, and the change feed. Its prompt context comes from [`agents/context`](./context.md). Aged media leaves the conversation through Think's own media eviction, which is a context-window technique and unrelated to how Sessions stores a row.
+- Think uses branches, compaction, search, and the change feed. Its prompt context is described in [Think context](https://github.com/cloudflare/agents/blob/main/docs/think/context.md). Aged media leaves the conversation through Think's own media eviction, which is a context-window technique and unrelated to how Sessions stores a row.
 - AIChatAgent uses the default handle as a linear chain. Its existing destructive regeneration, mutable `messages` array, retention option, and wire protocol remain unchanged.
 
 Existing `assistant_*` Session tables and `cf_ai_chat_agent_messages` are lifted automatically, then dropped once every row is verified copied.

@@ -1,0 +1,335 @@
+import {
+  REPLAY_ITEM_BYTES,
+  ROW_VALUE_BYTES
+} from "../../internal/platform-limits";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
+import { Lifecycle, LifecycleCapability } from "../../lifecycle";
+import { Streams } from "../../streams/streams";
+import { WebSockets } from "../../websockets";
+import {
+  declareEventLog,
+  type EventLog,
+  type EventLogBatch
+} from "../../internal";
+
+/** One stored block of a log's stream: chunk seqs `[seq_from, seq_to)`. */
+type StoredRow = { seq_from: number; seq_to: number };
+
+/** What a browser client may call: publish to `feed`. */
+class EventLogCallables extends RpcTarget {
+  readonly #publish: (data: unknown) => number;
+
+  constructor(publish: (data: unknown) => number) {
+    super();
+    this.#publish = publish;
+  }
+
+  publish(data: unknown): number {
+    return this.#publish(data);
+  }
+}
+
+/**
+ * A composer that composes its own Streams and declares a `chat` log over
+ * it on the object's WebSockets, as a harness does.
+ */
+class LogComposer extends LifecycleCapability {
+  readonly streams: Streams;
+  readonly chat: EventLog;
+
+  constructor(name: string, webSockets: WebSockets) {
+    super("log-composer", name);
+    this.streams = this.compose(new Streams({ name: this.composedName }));
+    this.chat = declareEventLog(webSockets, "chat", { streams: this.streams });
+  }
+}
+
+/**
+ * A plain Durable Object with the WebSockets capability and three event
+ * logs, for the event log contract tests:
+ *
+ * - `feed`: small retention (5 events) and batches (3 events, a long delay
+ *   so buffered events stay buffered until a test flushes or evicts), and
+ *   a snapshot that reports the head it was taken at.
+ *
+ * Each log is a stream of the object's `Streams` capability.
+ * - `bare`: no snapshot.
+ * - `guarded`: only connections opened with `?allow` may follow it.
+ */
+export class EventLogObject extends DurableObject<Cloudflare.Env> {
+  readonly #streams = new Streams();
+
+  readonly #webSockets = new WebSockets({
+    callables: new EventLogCallables((data) => this.#feed.publish(data)),
+    handlers: {
+      // `?listState` gives the connection state that is not an object.
+      onConnect: (connection, { request }) => {
+        const params = new URL(request.url).searchParams;
+        if (params.has("listState")) connection.setState(["a", "b"]);
+        if (params.has("mapState")) connection.setState(new Map([["k", "v"]]));
+      }
+    }
+  });
+
+  readonly #feed: EventLog<unknown, { at: number }> = declareEventLog<
+    unknown,
+    { at: number }
+  >(this.#webSockets, "feed", {
+    streams: this.#streams,
+    retention: { maxEvents: 5 },
+    batching: { maxEvents: 3, maxDelayMs: 60_000 },
+    maxEventBytes: 600_000,
+    snapshot: (): { at: number } => ({ at: this.#feed.head.seq })
+  });
+
+  readonly #bare = declareEventLog(this.#webSockets, "bare", {
+    streams: this.#streams
+  });
+
+  /** A fractional event retention (5.5) and batches of 10. */
+  readonly #fractional = declareEventLog(this.#webSockets, "fractional", {
+    streams: this.#streams,
+    retention: { maxEvents: 5.5 },
+    batching: { maxEvents: 10, maxDelayMs: 60_000 }
+  });
+
+  /** Retention of 20 events, for trims that read more than one page. */
+  readonly #paged = declareEventLog(this.#webSockets, "paged", {
+    streams: this.#streams,
+    retention: { maxEvents: 20 },
+    batching: { maxEvents: 100, maxDelayMs: 60_000 }
+  });
+
+  /** Byte retention (300 KB) and the highest event ceiling (`REPLAY_ITEM_BYTES`). */
+  readonly #small = declareEventLog(this.#webSockets, "small", {
+    streams: this.#streams,
+    retention: { maxBytes: 300_000 },
+    maxEventBytes: REPLAY_ITEM_BYTES
+  });
+
+  /**
+   * The highest event ceiling (`REPLAY_ITEM_BYTES`), with byte retention
+   * room for a flush past one row (`ROW_VALUE_BYTES`) and for a replay past
+   * one frame (`REPLAY_PAGE_BYTES`) of such events.
+   */
+  readonly #big = declareEventLog(this.#webSockets, "big", {
+    streams: this.#streams,
+    retention: { maxBytes: 3 * ROW_VALUE_BYTES },
+    batching: {
+      maxEvents: 100,
+      maxBytes: 2 * ROW_VALUE_BYTES,
+      maxDelayMs: 60_000
+    },
+    maxEventBytes: REPLAY_ITEM_BYTES
+  });
+
+  readonly #guarded = declareEventLog(this.#webSockets, "guarded", {
+    streams: this.#streams,
+    canSubscribe: (connection) =>
+      new URL(connection.uri ?? "https://x").searchParams.has("allow")
+  });
+
+  /** Two composers, each with a log declared as `chat`. */
+  readonly #one = new LogComposer("one", this.#webSockets);
+  readonly #two = new LogComposer("two", this.#webSockets);
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.#streams)
+    .use(this.#webSockets)
+    .use(this.#one)
+    .use(this.#two);
+
+  #batch: EventLogBatch | undefined;
+
+  #log(name: string) {
+    if (name === "feed") return this.#feed;
+    if (name === "bare") return this.#bare;
+    if (name === "small") return this.#small;
+    if (name === "fractional") return this.#fractional;
+    if (name === "paged") return this.#paged;
+    if (name === "big") return this.#big;
+    if (name === this.#one.chat.name) return this.#one.chat;
+    if (name === this.#two.chat.name) return this.#two.chat;
+    return this.#guarded;
+  }
+
+  async publish(log: string, data: unknown): Promise<number> {
+    await this.lifecycle.start();
+    return this.#log(log).publish(data);
+  }
+
+  /** Declare another log on this object; returns the error, if any. */
+  declareForTest(name: string): string | undefined {
+    try {
+      declareEventLog(this.#webSockets, name, { streams: this.#streams });
+      return undefined;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async publishMany(log: string, count: number): Promise<number[]> {
+    await this.lifecycle.start();
+    const seqs: number[] = [];
+    for (let i = 0; i < count; i++) seqs.push(this.#log(log).publish(i));
+    return seqs;
+  }
+
+  /** Publish one event of `bytes` characters; returns the error, if any. */
+  async publishSized(bytes: number): Promise<string | number> {
+    await this.lifecycle.start();
+    try {
+      return this.#feed.publish("x".repeat(bytes));
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** Publish `count` events of `text`; returns the last seq. */
+  async publishText(log: string, text: string, count = 1): Promise<number> {
+    await this.lifecycle.start();
+    let seq = 0;
+    for (let i = 0; i < count; i++) seq = this.#log(log).publish(text);
+    return seq;
+  }
+
+  /**
+   * Publish one event; returns its seq, or the error message when the
+   * publish throws (a rejected RPC would surface as unhandled).
+   */
+  async tryPublish(log: string, data: string): Promise<number | string> {
+    await this.lifecycle.start();
+    try {
+      return this.#log(log).publish(data);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /**
+   * Run `write` and return the SQL rows it read and the rows it left in the
+   * log's stream.
+   */
+  async #counted(
+    log: string,
+    write: () => void
+  ): Promise<{ rowsRead: number; rows: number }> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    const exec = sql.exec.bind(sql);
+    const cursors: Array<{ rowsRead: number }> = [];
+    sql.exec = ((query: string, ...params: SqlStorageValue[]) => {
+      const cursor = exec(query, ...params);
+      cursors.push(cursor);
+      return cursor;
+    }) as typeof sql.exec;
+    try {
+      write();
+    } finally {
+      sql.exec = exec;
+    }
+    const rowsRead = cursors.reduce((sum, cursor) => sum + cursor.rowsRead, 0);
+    return { rowsRead, rows: (await this.rows(log)).length };
+  }
+
+  /** Publish `text` and count the rows the publish read. */
+  async publishCounted(
+    log: string,
+    text: string
+  ): Promise<{ rowsRead: number; rows: number }> {
+    return this.#counted(log, () => this.#log(log).publish(text));
+  }
+
+  /** Append `count` events in one batch, close it, and count rows read. */
+  async appendBatchCounted(
+    log: string,
+    count: number
+  ): Promise<{ rowsRead: number; rows: number }> {
+    return this.#counted(log, () => {
+      const batch = this.#log(log).batch();
+      for (let i = 0; i < count; i++) batch.append(i);
+      batch.close();
+    });
+  }
+
+  /** Append `count` events in one batch and close it (one block). */
+  async appendBatch(log: string, count: number): Promise<void> {
+    await this.lifecycle.start();
+    const batch = this.#log(log).batch();
+    for (let i = 0; i < count; i++) batch.append(i);
+    batch.close();
+  }
+
+  /** Publish an object whose `toJSON` gives a new value on every call. */
+  async publishCounter(): Promise<number> {
+    await this.lifecycle.start();
+    let calls = 0;
+    return this.#feed.publish({ toJSON: () => ++calls });
+  }
+
+  async openBatch(log = "feed"): Promise<void> {
+    await this.lifecycle.start();
+    this.#batch = this.#log(log).batch();
+  }
+
+  async append(data: unknown): Promise<number> {
+    await this.lifecycle.start();
+    if (!this.#batch) throw new Error("no open batch");
+    return this.#batch.append(data);
+  }
+
+  async appendSized(bytes: number): Promise<number> {
+    await this.lifecycle.start();
+    if (!this.#batch) throw new Error("no open batch");
+    return this.#batch.append("x".repeat(bytes));
+  }
+
+  async closeBatch(): Promise<void> {
+    await this.lifecycle.start();
+    this.#batch?.close();
+    this.#batch = undefined;
+  }
+
+  /** Reset the object the way a crash does: in-memory state is gone. */
+  crash(): void {
+    this.ctx.abort("simulated crash");
+  }
+
+  async connectionState(id: string): Promise<unknown> {
+    await this.lifecycle.start();
+    return this.#webSockets.getConnection(id)?.state;
+  }
+
+  async head(log = "feed"): Promise<{ epoch: string; seq: number }> {
+    await this.lifecycle.start();
+    return this.#log(log).head;
+  }
+
+  /**
+   * Make block writes of a log's stream fail (only block number `block`
+   * when given), or stop doing so.
+   */
+  async failWrites(log: string, fail: boolean, block?: number): Promise<void> {
+    await this.lifecycle.start();
+    const trigger = `fail_${log}`;
+    this.ctx.storage.sql.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+    if (!fail) return;
+    const only = block === undefined ? "" : ` AND NEW.block = ${block}`;
+    this.ctx.storage.sql.exec(
+      `CREATE TRIGGER ${trigger} BEFORE INSERT ON cf_agents_stream_blocks
+       WHEN NEW.stream_id = 'log:${log}'${only}
+       BEGIN SELECT RAISE(ABORT, 'planted write failure'); END`
+    );
+  }
+
+  async rows(log = "feed"): Promise<StoredRow[]> {
+    await this.lifecycle.start();
+    return this.ctx.storage.sql
+      .exec<StoredRow>(
+        `SELECT seq_from, seq_to FROM cf_agents_stream_blocks
+         WHERE stream_id = ? ORDER BY block`,
+        `log:${log}`
+      )
+      .toArray();
+  }
+}

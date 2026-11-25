@@ -8,16 +8,27 @@ import {
   type LifecycleEvent,
   type LifecycleEventSink
 } from "./capability-runner";
+import { backoffDelay } from "../retries";
 import { abortWithoutAlarmRetry } from "./abort";
-import { JobDriver, type JobDispatch } from "./job-driver";
+import {
+  HOST_SCHEMA_ID,
+  LIFECYCLE_SCHEMA_ID,
+  type LifecycleSchema,
+  SchemaVersions
+} from "./schema";
+import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
   JobQueue,
+  type LifecycleJob,
   type LifecycleJobs,
   type LifecycleJobPushOptions
 } from "./job-queue";
 import {
   bindLifecycleCapability,
+  capabilityInstallOrder,
+  checkDerivedName,
+  instanceSuffix,
   lifecycleCapabilityId,
   LifecycleCapability,
   type LifecycleHostContextScope,
@@ -51,6 +62,108 @@ export {
 export * from "./types";
 
 const LEGACY_NAME_STORAGE_KEY = "__ps_name";
+
+/**
+ * Route envelope and job owner of the facet wake. A facet has no alarm:
+ * its Lifecycle asks its root to hold one job per facet path ("arm"), and
+ * the root calls down to run the facet's due jobs ("drive").
+ */
+const FACET_WAKE = "cf:facet-wake";
+
+/**
+ * How long the root waits on a facet's drive before it lets the call run on
+ * by itself: a slow job in one facet must not hold the root's own jobs and
+ * the facet's siblings for the job's whole length.
+ */
+const FACET_DRIVE_BUDGET_MS = 5_000;
+/** The root's wake for a facet whose drive outran the budget or was busy. */
+const FACET_DRIVE_RECHECK_MS = 30_000;
+/**
+ * Drives of one facet path that may end without a reply (the isolate was
+ * reset, for example by a job over the memory limit, which takes the root
+ * with it) before the root backs off that path.
+ */
+const FACET_DRIVE_UNREPORTED_LIMIT = 3;
+/** Longest back-off between drives of a path that keeps ending unreported. */
+const FACET_DRIVE_MAX_BACKOFF_MS = 60 * 60_000;
+
+type FacetDriveCount = { readonly count: number; readonly at: number };
+
+/** The root's storage key counting one path's drives that never replied. */
+function facetDriveKey(key: string): string {
+  return `cf_agents:facet_drives:${key}`;
+}
+
+/** When a path whose drives keep ending unreported may be driven again. */
+function facetDriveNotBefore(drives: FacetDriveCount | undefined): number {
+  if (!drives || drives.count < FACET_DRIVE_UNREPORTED_LIMIT) return 0;
+  const over = drives.count - FACET_DRIVE_UNREPORTED_LIMIT;
+  // No jitter: this is recomputed from the stored count on every check, so
+  // the same count must give the same time.
+  return (
+    drives.at +
+    backoffDelay(over + 1, {
+      baseMs: FACET_DRIVE_RECHECK_MS,
+      maxMs: FACET_DRIVE_MAX_BACKOFF_MS,
+      jitter: false
+    })
+  );
+}
+
+/**
+ * In a facet, per job: its attempts that started and never settled. A job
+ * over the memory limit there resets the whole tree before the facet can
+ * count a strike, and its owner may rewrite the row (and its attempt count)
+ * on the next start, so the count is kept apart from the row.
+ */
+const FACET_UNSETTLED_PREFIX = "cf_agents:facet_unsettled:";
+
+/** Unsettled attempts after which a facet seals the job instead of running it. */
+const FACET_UNSETTLED_LIMIT = 3;
+
+/** First wait before a facet reports its wake again after a failed report. */
+const FACET_REPORT_RETRY_MS = 100;
+/** Longest wait between report retries. */
+const FACET_REPORT_RETRY_MAX_MS = 30_000;
+
+/**
+ * TEMPORARY: owners that hand over rows an earlier release kept on the root
+ * for a facet. Each joins this list in the change that moves it into the
+ * facet's own queue.
+ */
+const LEGACY_HANDOVER_OWNERS: readonly string[] = [
+  "queue",
+  "scheduler",
+  "tasks"
+];
+
+type FacetWakeMessage =
+  | {
+      readonly type: "arm";
+      readonly time: number | null;
+      readonly stamp: number;
+    }
+  | { readonly type: "drive" };
+
+/** A facet's drive reply: its next due time, or busy with another drive. */
+type FacetDriveReply =
+  | { readonly next: number | null; readonly stamp: number }
+  | { readonly busy: true };
+
+/** The root's wake job payload: the facet's address and its latest stamp. */
+type FacetWakePayload = LifecycleRouteAddress & { readonly stamp?: number };
+
+/**
+ * The root's wake job for one facet path: its own owner id, so a facet that
+ * keeps failing holds back only its own wake and not its siblings'.
+ */
+function facetWakeOwner(key: string): string {
+  return `${FACET_WAKE}:${key}`;
+}
+
+function facetWakeJobId(key: string): string {
+  return `facet:${key}`;
+}
 
 function mutableRequest(request: Request): Request {
   return new Request(request);
@@ -94,6 +207,23 @@ export type LifecycleRouteTransport = {
   ) => Promise<unknown>;
 };
 
+/**
+ * The response to a failed `fetch` when the host's `onFetchError` gives none.
+ * It never carries the error: its message and stack can reveal internals to
+ * callers that are not authenticated.
+ */
+function defaultFetchErrorResponse(request: Request): Response {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("Internal Server Error", { status: 500 });
+  }
+  // Accept the socket and close it at once: browsers show a failed upgrade's
+  // close code, but devtools hide the body of an HTTP error response to one.
+  const pair = new WebSocketPair();
+  pair[1].accept();
+  pair[1].close(1011, "Uncaught exception during session setup");
+  return new Response(null, { status: 101, webSocket: pair[0] });
+}
+
 type LifecycleHost<Env extends object, Props extends object> = LifecycleObject<
   Env,
   Props
@@ -117,6 +247,81 @@ export type LifecycleHostInvoker = <T>(
 const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
 const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
 const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
+const facetWakeForgetters = new WeakMap<
+  object,
+  (key: string) => Promise<void>
+>();
+
+const facetWakeArmers = new WeakMap<
+  object,
+  (address: LifecycleRouteAddress, time: number) => Promise<void>
+>();
+
+/**
+ * @internal At the root: hold a wake job for a facet path at `time`. For a
+ * capability moving a wake it used to mirror for a facet onto the facet
+ * wake, once, when the root starts. `lifecycle` is the Lifecycle or a
+ * capability's services object. It carries the lowest stamp, so any report
+ * from the facet itself wins over it.
+ */
+export function armFacetWake(
+  lifecycle: object,
+  address: LifecycleRouteAddress,
+  time: number
+): Promise<void> {
+  return facetWakeArmers.get(lifecycle)?.(address, time) ?? Promise.resolve();
+}
+
+/**
+ * @internal At the root: drop the wake jobs of a facet path and every path
+ * below it, when that sub-tree is deleted.
+ */
+const schemaForgetters = new WeakMap<object, (id: string) => void>();
+
+/**
+ * @internal Drop capability `id`'s schema version in `lifecycle`, so its
+ * migration steps run again (tests that re-run a migration).
+ */
+export function forgetSchemaVersion(lifecycle: object, id: string): void {
+  schemaForgetters.get(lifecycle)?.(id);
+}
+
+/** What a Lifecycle holds, by capability id. */
+export type LifecycleInstances = {
+  /** Installed capability ids, in install order. */
+  readonly installed: readonly string[];
+  /**
+   * With `stored`: ids that hold data here but are not installed: owners
+   * of queued jobs, and named instances' tables (`__n_` / `__c_`).
+   */
+  readonly stored?: readonly string[];
+};
+
+const instanceListers = new WeakMap<
+  object,
+  (stored: boolean) => LifecycleInstances
+>();
+
+/**
+ * @internal The capability instances of `lifecycle`. `stored` also reads
+ * what is kept for instances nobody installed; it scans the schema and the
+ * job queue, so never call it on a hot path.
+ */
+export function lifecycleInstances(
+  lifecycle: object,
+  options: { stored?: boolean } = {}
+): LifecycleInstances {
+  const list = instanceListers.get(lifecycle);
+  if (!list) throw new Error("Not a Lifecycle");
+  return list(options.stored ?? false);
+}
+
+export function forgetFacetWakes(
+  lifecycle: object,
+  key: string
+): Promise<void> {
+  return facetWakeForgetters.get(lifecycle)?.(key) ?? Promise.resolve();
+}
 
 /**
  * Startup tokens of the Lifecycles whose startup the current async context
@@ -168,6 +373,52 @@ export type LifecycleOptions = {
  * `DurableObject`, then call {@link Lifecycle.installHandlers}
  * from that class's constructor.
  */
+/**
+ * A named instance's jobs handle: every job id it sees is its own, and is
+ * stored as `<id>:<job id>`, since a job id is unique in the queue whoever
+ * owns it.
+ */
+function namedInstanceJobs(
+  jobs: LifecycleJobs,
+  capabilityId: string
+): LifecycleJobs {
+  const prefix = `${capabilityId}:`;
+  const stored = (id: string) => `${prefix}${id}`;
+  return Object.freeze({
+    // A job with no id gets one here, so it is stored under the prefix too.
+    push: async (options: LifecycleJobPushOptions) =>
+      ownJob(
+        await jobs.push({
+          ...options,
+          id: stored(options.id ?? crypto.randomUUID())
+        }),
+        prefix
+      ),
+    cancel: (id: string) => jobs.cancel(stored(id)),
+    reschedule: (id: string, time: number) => jobs.reschedule(stored(id), time),
+    get: (id: string) => {
+      const job = jobs.get(stored(id));
+      return job && ownJob(job, prefix);
+    },
+    list: () => jobs.list().map((job) => ownJob(job, prefix)),
+    rearm: () => jobs.rearm()
+  });
+}
+
+/** A stored job as its named instance sees it: its id without the prefix. */
+function ownJob(job: LifecycleJob, prefix: string): LifecycleJob {
+  return job.id.startsWith(prefix)
+    ? { ...job, id: job.id.slice(prefix.length) }
+    : job;
+}
+
+/** A named instance's event payload carries its name. */
+function withInstance(payload: unknown, instance: string): unknown {
+  return payload !== null && typeof payload === "object"
+    ? { ...(payload as object), instance }
+    : { value: payload, instance };
+}
+
 /** The dispatch hooks a catch-all can monopolize; uniqueness is per hook. */
 const CATCH_ALL_HOOKS = ["onRequest", "onWebSocketUpgrade"] as const;
 
@@ -221,7 +472,21 @@ export class Lifecycle<
     this.#host = host as unknown as LifecycleHost<Env, Props>;
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
-    this.#jobQueue = new JobQueue(this.#ctx.storage);
+    this.#schemaVersions = new SchemaVersions(this.#ctx.storage);
+    // The queue's columns are recorded under the Lifecycle's own entry.
+    this.#jobQueue = new JobQueue(
+      this.#ctx.storage,
+      this.#schemaVersions.forCapability(
+        LIFECYCLE_SCHEMA_ID,
+        () => this.#status === "starting"
+      )
+    );
+    facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
+    instanceListers.set(this, (stored) => this.#instances(stored));
+    schemaForgetters.set(this, (id) => this.#schemaVersions.forget(id));
+    facetWakeArmers.set(this, (address, time) =>
+      this.#holdFacetWake(address, time, 0)
+    );
     this.#jobDriver = new JobDriver({
       queue: this.#jobQueue,
       storage: this.#ctx.storage,
@@ -238,7 +503,37 @@ export class Lifecycle<
       },
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
-      rearm: () => this.rearmAlarm(),
+      rearm: (deferral) => this.#rearm(deferral),
+      drivenByRoot: () => this.#drivingFromRoot,
+      commitAttempt: async (jobId, live) => {
+        if (!this.#drivingFromRoot) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return false;
+        }
+        const kv = this.#ctx.storage.kv;
+        const key = FACET_UNSETTLED_PREFIX + jobId;
+        const unsettled = kv.get<number>(key) ?? 0;
+        // A wake for an attempt still running here renews it: no new
+        // attempt, so nothing to count.
+        if (!live) {
+          if (unsettled >= FACET_UNSETTLED_LIMIT) {
+            kv.delete(key);
+            return true;
+          }
+          kv.put(key, unsettled + 1);
+        }
+        await this.#ctx.storage.sync();
+        return false;
+      },
+      attemptSettled: (jobId) => {
+        if (this.#facetAddress()) {
+          this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + jobId);
+        }
+      },
+      armFallback: async (time) => {
+        if (this.#facetAddress()) return;
+        await this.#ctx.storage.setAlarm(time);
+      },
       // Deferred a tick so the current invocation settles (its RPC/alarm
       // completes and its writes confirm) before the instance resets —
       // `abort()` throws an uncatchable error, mirroring Agent.destroy().
@@ -296,6 +591,23 @@ export class Lifecycle<
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
+    // What it composes is installed first, in order, then the capability.
+    const order =
+      capability instanceof LifecycleCapability
+        ? capabilityInstallOrder(capability)
+        : [capability];
+    // The capability given here was not reached through a composer; what
+    // it composes was.
+    if (capability instanceof LifecycleCapability) {
+      checkDerivedName(capability, false);
+    }
+    for (const each of order) {
+      this.#useOne(each as DurableObjectCapability<Props>);
+    }
+    return this;
+  }
+
+  #useOne(capability: DurableObjectCapability<Props>): void {
     const capabilityId = lifecycleCapabilityId(capability);
     if (
       capabilityId &&
@@ -303,8 +615,12 @@ export class Lifecycle<
         (candidate) => lifecycleCapabilityId(candidate) === capabilityId
       )
     ) {
+      const instance = capability as LifecycleCapability;
+      const className = capability.constructor.name;
       throw new Error(
-        `Lifecycle capability ${JSON.stringify(capabilityId)} is already installed`
+        instance.instanceName === undefined
+          ? `The default ${className} is already installed. Give this one a name: new ${className}({ name: "…" })`
+          : `${className} instance ${JSON.stringify(instance.instanceName)} is already installed. Give this one another name: new ${className}({ name: "…" })`
       );
     }
 
@@ -337,20 +653,71 @@ export class Lifecycle<
     if (capability instanceof LifecycleCapability) {
       bindLifecycleCapability(
         capability,
-        this.#servicesForCapability(capability.capabilityId)
+        this.#servicesForCapability(
+          capability.capabilityId,
+          capability.instanceName
+        )
       );
     }
-    return this;
   }
 
-  #servicesForCapability(capabilityId: string): LifecycleServices {
+  #instances(stored: boolean): LifecycleInstances {
+    const installed = this.#capabilities
+      .map((capability) => lifecycleCapabilityId(capability))
+      .filter((id): id is string => id !== undefined);
+    if (!stored) return { installed };
+    const known = new Set(installed);
+    const found = new Set<string>();
+    if (this.#jobQueue.hasJobs()) {
+      for (const { capability } of this.#ctx.storage.sql
+        .exec<{ capability: string }>(
+          "SELECT DISTINCT capability FROM cf_agents_jobs"
+        )
+        .toArray()) {
+        if (capability === HOST_JOB_CAPABILITY) continue;
+        if (capability.startsWith(`${FACET_WAKE}:`)) continue;
+        if (!known.has(capability)) found.add(capability);
+      }
+    }
+    // A named instance's tables end with its suffix; tables whose suffix no
+    // installed instance has are listed by name.
+    // A table name does not say its kind, only its instance's suffix: a
+    // table is listed when no installed instance has that suffix.
+    const suffixes = new Set(
+      this.#capabilities.flatMap((capability) =>
+        capability instanceof LifecycleCapability &&
+        capability.instanceName !== undefined
+          ? [instanceSuffix(capability.instanceName)]
+          : []
+      )
+    );
+    for (const { name } of this.#ctx.storage.sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_agents_%'"
+      )
+      .toArray()) {
+      const at = name.search(/__[nc]_/);
+      if (at === -1) continue;
+      if (!suffixes.has(name.slice(at))) found.add(name);
+    }
+    return { installed, stored: [...found] };
+  }
+
+  #servicesForCapability(
+    capabilityId: string,
+    instanceName?: string
+  ): LifecycleServices {
+    // A named instance's job ids, socket tags and event payloads carry its
+    // id; the default instance's are today's, untouched.
+    const named = instanceName !== undefined;
+    const tag = (value: string) => (named ? `${capabilityId}:${value}` : value);
     const lifecycle = this;
     const envelope = (payload: unknown): LifecycleRouteEnvelope => ({
       capability: capabilityId,
       source: lifecycleRouteTransports.get(lifecycle)?.source,
       payload
     });
-    return Object.freeze({
+    const services: LifecycleServices = Object.freeze({
       get name() {
         return lifecycle.name;
       },
@@ -358,12 +725,17 @@ export class Lifecycle<
       storage: this.#ctx.storage,
       sockets: Object.freeze({
         accept: (ws: WebSocket, tags: string[]) =>
-          this.#ctx.acceptWebSocket(ws, tags),
-        get: (tag?: string) => this.#ctx.getWebSockets(tag)
+          this.#ctx.acceptWebSocket(ws, named ? tags.map(tag) : tags),
+        get: (value?: string) =>
+          this.#ctx.getWebSockets(
+            value === undefined || !named ? value : tag(value)
+          )
       }),
       ready: () => this.#readyForCapabilityOperation(),
       status: () => this.#status,
-      jobs: this.#jobsForOwner(capabilityId),
+      jobs: named
+        ? namedInstanceJobs(this.#jobsForOwner(capabilityId), capabilityId)
+        : this.#jobsForOwner(capabilityId),
       trackAlarmWork: (work: Promise<unknown>) =>
         this.#jobDriver.trackAlarmWork(work),
       runInHostContext: async (
@@ -372,8 +744,21 @@ export class Lifecycle<
       ) => this.#runInHostBoundary(fn, scope),
       events: Object.freeze({
         emit: (type: string, payload: unknown) =>
-          this.#emitCapabilityEvent({ source: capabilityId, type, payload })
+          this.#emitCapabilityEvent({
+            // The kind's event, on the kind's channel; the payload says
+            // which instance.
+            source: named
+              ? capabilityId.slice(0, -(instanceName.length + 1))
+              : capabilityId,
+            type,
+            payload: named ? withInstance(payload, instanceName) : payload
+          })
       }),
+      // Written once at the end of startup; at once after a later migrate.
+      schema: this.#schemaVersions.forCapability(
+        capabilityId,
+        () => this.#status === "starting"
+      ),
       routes: Object.freeze({
         get source() {
           return lifecycleRouteTransports.get(lifecycle)?.source;
@@ -395,6 +780,11 @@ export class Lifecycle<
         }
       })
     });
+    // A capability reaches the facet wake through its services object.
+    facetWakeArmers.set(services, (address, time) =>
+      this.#holdFacetWake(address, time, 0)
+    );
+    return services;
   }
 
   /**
@@ -426,6 +816,7 @@ export class Lifecycle<
   }
 
   async #dispatchRoute(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    if (envelope.capability === FACET_WAKE) return this.#onFacetWake(envelope);
     await this.#ensureInitialized();
     return runWithoutCurrentAgent(() =>
       this.#capabilityRunner.route(envelope.capability, {
@@ -438,6 +829,190 @@ export class Lifecycle<
   /** @internal Deliver a generic capability envelope to this Lifecycle. */
   route(envelope: LifecycleRouteEnvelope): Promise<unknown> {
     return this.#dispatchRoute(envelope);
+  }
+
+  /** This Lifecycle's address when it runs in a facet, else undefined. */
+  #facetAddress(): LifecycleRouteAddress | undefined {
+    return lifecycleRouteTransports.get(this)?.source;
+  }
+
+  /** True while the root is driving this facet's jobs. */
+  #drivingFromRoot = false;
+  /**
+   * The wake time this facet last gave its root. It starts as "none": a
+   * facet with no jobs has nothing to tell, and a stale wake the root still
+   * holds for it drives it once and is dropped. A facet that starts with
+   * jobs still reports them once, in case the root lost its wake.
+   */
+  #reportedWake: number | null = null;
+
+  async #onFacetWake(envelope: LifecycleRouteEnvelope): Promise<unknown> {
+    const message = envelope.payload as FacetWakeMessage;
+    if (message.type === "arm") {
+      // At the root: hold, move or drop the one wake job for that facet.
+      if (!envelope.source) {
+        throw new Error("A facet wake needs the facet's address");
+      }
+      await this.#holdFacetWake(envelope.source, message.time, message.stamp);
+      return true;
+    }
+    // One drive at a time: a root that let a slow drive run on asks again
+    // later, and must not start the same jobs twice meanwhile.
+    if (this.#drivingFromRoot) return { busy: true } satisfies FacetDriveReply;
+    // In the facet: run its due jobs as a root's alarm would, and reply with
+    // the next due time. The reply re-arms the root's job, so no report is
+    // sent meanwhile; the reply is also what makes the job rows durable
+    // before the root acts on it.
+    this.#drivingFromRoot = true;
+    this.#driveDeferral = undefined;
+    try {
+      await this.alarm();
+    } catch (error) {
+      // The driver already held or retried the failing job and re-armed;
+      // the root must not treat the facet as failed for it.
+      console.error(this.#errorLogPrefix("facet wake"), error);
+    } finally {
+      this.#drivingFromRoot = false;
+    }
+    // A held owner's jobs wake after their hold, as at a root.
+    const next = this.#wakeTime(this.#driveDeferral);
+    this.#driveDeferral = undefined;
+    this.#reportedWake = next;
+    return { next, stamp: this.#nextWakeStamp() } satisfies FacetDriveReply;
+  }
+
+  #lastWakeStamp = 0;
+
+  /**
+   * Order this facet's wake messages, so the root never lets an older one
+   * (a drive reply that crossed a newer report) replace a newer one.
+   */
+  #nextWakeStamp(): number {
+    this.#lastWakeStamp = Math.max(Date.now(), this.#lastWakeStamp + 1);
+    return this.#lastWakeStamp;
+  }
+
+  /**
+   * At the root: hold, move or drop the wake job of one facet path. A path
+   * whose drives keep ending without a reply is not woken before its
+   * back-off ends, however often the facet reports. A message older than
+   * the one the wake already holds is ignored.
+   */
+  async #holdFacetWake(
+    address: LifecycleRouteAddress,
+    time: number | null,
+    stamp: number
+  ): Promise<void> {
+    const jobs = this.#jobsForOwner(facetWakeOwner(address.key));
+    const id = facetWakeJobId(address.key);
+    const held = jobs.get(id)?.payload as FacetWakePayload | undefined;
+    if ((held?.stamp ?? 0) > stamp) return;
+    if (time === null) {
+      await jobs.cancel(id);
+      return;
+    }
+    const notBefore = facetDriveNotBefore(
+      this.#ctx.storage.kv.get<FacetDriveCount>(facetDriveKey(address.key))
+    );
+    await jobs.push({
+      id,
+      fn: "wake",
+      time: Math.max(time, notBefore),
+      payload: {
+        key: address.key,
+        data: address.data,
+        stamp
+      } satisfies FacetWakePayload
+    });
+  }
+
+  /**
+   * At the root, on start: make every facet's wake due now (within its
+   * back-off). A root that starts may have been reset with its whole tree,
+   * and a facet's own start is what recovers its interrupted work, so each
+   * facet with jobs is woken once instead of at its next due time. Returns
+   * whether any wake moved.
+   */
+  #facetWakesDueNow(): boolean {
+    if (!this.#jobQueue.hasJobs()) return false;
+    const now = Date.now();
+    const prefix = `${FACET_WAKE}:`;
+    const rows = this.#ctx.storage.sql
+      .exec<{ capability: string; time: number }>(
+        `SELECT capability, time FROM cf_agents_jobs
+         WHERE substr(capability, 1, ?) = ?`,
+        prefix.length,
+        prefix
+      )
+      .toArray();
+    let moved = false;
+    for (const { capability, time } of rows) {
+      const path = capability.slice(prefix.length);
+      // Driven at once, even when its last drive never replied: that is
+      // most often an ordinary drive the reset cut off, and a job that keeps
+      // ending the isolate is sealed by the facet's own count of unsettled
+      // attempts. Only a path whose drives keep dying (the back-off, from
+      // the third) waits.
+      const drives = this.#ctx.storage.kv.get<FacetDriveCount>(
+        facetDriveKey(path)
+      );
+      const target = Math.max(Math.min(time, now), facetDriveNotBefore(drives));
+      if (target === time) {
+        // Already due: the alarm may still be a fallback set further out
+        // (by the drive the reset cut off), so it is set again. Not when
+        // this start runs inside an alarm, whose scan drives it anyway.
+        if (time <= now && this.#alarmsRunning === 0) moved = true;
+        continue;
+      }
+      // Retimed in place: its attempt count is the sign that the last drive
+      // crashed, which the scan reads to run other owners' jobs first.
+      this.#jobQueue.setTime(facetWakeJobId(path), target);
+      moved = true;
+    }
+    return moved;
+  }
+
+  /**
+   * At the root: drop the wake jobs of a facet path and its descendants,
+   * when the sub-tree is deleted.
+   */
+  async #forgetFacetWakes(key: string): Promise<void> {
+    if (!this.#jobQueue.hasJobs()) return;
+    const owner = facetWakeOwner(key);
+    const rows = this.#ctx.storage.sql
+      .exec<{ capability: string }>(
+        `SELECT capability FROM cf_agents_jobs
+         WHERE capability = ? OR substr(capability, 1, ?) = ?`,
+        owner,
+        owner.length + 1,
+        `${owner}/`
+      )
+      .toArray();
+    for (const { capability } of rows) {
+      const path = capability.slice(FACET_WAKE.length + 1);
+      await this.#jobsForOwner(capability).cancel(facetWakeJobId(path));
+      this.#ctx.storage.kv.delete(facetDriveKey(path));
+    }
+    // TEMPORARY: rows an earlier release kept on the root for this facet
+    // sub-tree, which their owners hand over when they come due. A deleted
+    // sub-tree's rows must not reach a sub-agent created later on the same
+    // path. Only the owners that hand rows over are matched, never a host's
+    // own jobs. Remove with the hand-overs, in the next minor release.
+    const legacy = this.#ctx.storage.sql
+      .exec<{ capability: string; id: string }>(
+        `SELECT capability, id FROM cf_agents_jobs
+         WHERE capability IN (${LEGACY_HANDOVER_OWNERS.map(() => "?").join(", ")})
+           AND (json_extract(payload, '$.owner_path_key') = ?
+             OR substr(json_extract(payload, '$.owner_path_key'), 1, ?) = ?)`,
+        ...LEGACY_HANDOVER_OWNERS,
+        key,
+        key.length + 1,
+        `${key}/`
+      )
+      .toArray();
+    for (const { capability, id } of legacy) {
+      await this.#jobsForOwner(capability).cancel(id);
+    }
   }
 
   #emitCapabilityEvent(event: LifecycleEvent): void {
@@ -564,24 +1139,37 @@ export class Lifecycle<
         );
       }
     } catch (err) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} fetch:`,
-        err
-      );
-      if (!(err instanceof Error)) throw err;
-      if (request.headers.get("Upgrade") === "websocket") {
-        // Annoyingly, if we return an HTTP error in response to a WebSocket request, Chrome devtools
-        // won't show us the response body! So... let's send a WebSocket response with an error
-        // frame instead.
-        const pair = new WebSocketPair();
-        pair[1].accept();
-        pair[1].send(JSON.stringify({ error: err.stack }));
-        pair[1].close(1011, "Uncaught exception during session setup");
-        return new Response(null, { status: 101, webSocket: pair[0] });
-      } else {
-        return new Response(err.stack, { status: 500 });
+      console.error(this.#errorLogPrefix("fetch"), err);
+      return this.#respondToFetchError(request, err);
+    }
+  }
+
+  /** The prefix for an error logged from one of this object's handlers. */
+  #errorLogPrefix(handler: string): string {
+    return `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} ${handler}:`;
+  }
+
+  /**
+   * Answer a failed `fetch`: the host's `onFetchError` response if it gives
+   * one, otherwise a default that never carries the error.
+   */
+  async #respondToFetchError(
+    request: Request,
+    error: unknown
+  ): Promise<Response> {
+    if (this.#host.onFetchError) {
+      try {
+        const response = await runInLifecycleHostContext(
+          { host: this.#host, request },
+          () => this.#host.onFetchError!(request, error)
+        );
+        if (response instanceof Response) return response;
+      } catch (hookError) {
+        console.error(this.#errorLogPrefix("onFetchError"), hookError);
       }
     }
+    if (!(error instanceof Error)) throw error;
+    return defaultFetchErrorResponse(request);
   }
 
   /** @internal Dispatch a hibernating WebSocket message. */
@@ -597,10 +1185,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketMessage(ws, message)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketMessage:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketMessage"), e);
     }
   }
 
@@ -619,10 +1204,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketClose(ws, code, reason, wasClean)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketClose:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketClose"), e);
     }
   }
 
@@ -642,10 +1224,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketError(ws, error)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketError:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketError"), e);
     }
   }
 
@@ -724,6 +1303,7 @@ export class Lifecycle<
           await runInLifecycleHostContext({ host: this.#host }, () =>
             this.#host.onStart?.(this.#props)
           );
+          this.#schemaVersions.flush();
           this.#status = "started";
         } catch (cause) {
           this.#status = "zero";
@@ -748,9 +1328,39 @@ export class Lifecycle<
       throw error;
     }
     this.#deliverPendingEvents();
+    if (!this.#facetAddress() && this.#facetWakesDueNow()) {
+      this.#rearmRequestedDuringStart = true;
+    }
     if (this.#rearmRequestedDuringStart) {
       this.#rearmRequestedDuringStart = false;
       await this.rearmAlarm();
+      return;
+    }
+    await this.#restoreLostAlarm();
+  }
+
+  /**
+   * Wake check: re-arm when the queue holds jobs but no alarm is set. The
+   * platform drops an alarm whose handler failed six times in a row, and
+   * user code can delete it; either way pending jobs would wait for the next
+   * queue mutation. An existing alarm is left alone. Best-effort: a failure
+   * here must not fail the startup that woke the object.
+   */
+  async #restoreLostAlarm(): Promise<void> {
+    if (this.#alarmsDisabled) return;
+    try {
+      if (!this.#jobQueue.hasJobs()) return;
+      // A facet has no alarm to read: it tells its root its next wake once
+      // per start, in case the root lost it.
+      if (
+        !this.#facetAddress() &&
+        (await this.#ctx.storage.getAlarm()) !== null
+      ) {
+        return;
+      }
+      await this.rearmAlarm();
+    } catch (error) {
+      console.error(this.#errorLogPrefix("wake check"), error);
     }
   }
 
@@ -787,6 +1397,19 @@ export class Lifecycle<
     return this.#jobsForOwner(HOST_JOB_CAPABILITY);
   }
 
+  /**
+   * @internal The host's own schema version (Agent's tables), kept in the
+   * same record as every capability's.
+   */
+  get hostSchema(): LifecycleSchema {
+    return (this.#hostSchema ??= this.#schemaVersions.forCapability(
+      HOST_SCHEMA_ID,
+      () => this.#status === "starting"
+    ));
+  }
+
+  #hostSchema: LifecycleSchema | undefined;
+
   #jobsForOwner(owner: string): LifecycleJobs {
     const rearmAfter = async <T>(mutate: () => T): Promise<T> => {
       const result = mutate();
@@ -796,8 +1419,17 @@ export class Lifecycle<
     return Object.freeze({
       push: (options: LifecycleJobPushOptions) =>
         rearmAfter(() => this.#jobQueue.push(owner, options)),
-      cancel: (id: string) =>
-        rearmAfter(() => this.#jobQueue.cancel(owner, id)),
+      // Nothing to cancel changes nothing, so the alarm is not recomputed.
+      cancel: async (id: string) => {
+        const cancelled = this.#jobQueue.cancel(owner, id);
+        if (!cancelled) return false;
+        // A job pushed again under this id starts with no crashes.
+        if (this.#facetAddress()) {
+          this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + id);
+        }
+        await this.rearmAlarm();
+        return true;
+      },
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
       get: (id: string) => this.#jobQueue.get(owner, id),
@@ -810,25 +1442,113 @@ export class Lifecycle<
    * Recompute the physical Durable Object alarm from job-queue state.
    *
    * Concurrent requests are serialized so a later durable-state change cannot
-   * be overwritten by an earlier alarm calculation. Queue mutations call this
-   * automatically; it stays public for composition roots and tests.
+   * be overwritten by an earlier alarm calculation. The alarm is written only
+   * when its time changes. Queue mutations call this automatically; it stays
+   * public for composition roots and tests.
    */
   async rearmAlarm(): Promise<void> {
+    return this.#rearm();
+  }
+
+  /**
+   * Re-arm, optionally around a deferral: the held owners' jobs wake no
+   * sooner than its end, every other job at its own time.
+   */
+  async #rearm(
+    deferral: JobDeferral | undefined = this.#jobDriver.currentDeferral()
+  ): Promise<void> {
     if (this.#alarmsDisabled) return;
     if (this.#status === "starting") {
       this.#rearmRequestedDuringStart = true;
       return;
     }
 
+    const facet = this.#facetAddress();
+    if (facet) {
+      // The root's call that is driving this facet carries the next wake in
+      // its reply, held back as this deferral says.
+      if (this.#drivingFromRoot) {
+        this.#driveDeferral = deferral;
+        return;
+      }
+      await this.#serializeAlarmWrite(async () => {
+        if (this.#alarmsDisabled) return;
+        await this.#reportWakeToRoot(facet, this.#wakeTime(deferral));
+      });
+      return;
+    }
+
     await this.#serializeAlarmWrite(async () => {
       if (this.#alarmsDisabled) return;
-      const alarm = this.#jobQueue.nextAlarmTime(Date.now());
+      const alarm = this.#wakeTime(deferral);
+      // Each setAlarm() is billed as a row written, and most queue
+      // mutations leave the earliest wake where it was.
+      const current = await this.#ctx.storage.getAlarm();
       if (alarm === null) {
-        await this.#ctx.storage.deleteAlarm();
-      } else {
+        if (current !== null) await this.#ctx.storage.deleteAlarm();
+      } else if (current !== alarm) {
         await this.#ctx.storage.setAlarm(alarm);
       }
     });
+  }
+
+  /** The next wake: every job at its own time, held owners' after the hold. */
+  #wakeTime(deferral?: JobDeferral): number | null {
+    return this.#jobQueue.nextAlarmTime(Date.now(), deferral);
+  }
+
+  /** The deferral the driver ended a drive from the root with. */
+  #driveDeferral: JobDeferral | undefined;
+
+  /**
+   * Tell the root this facet's next wake, when it changed. No sync first:
+   * the outgoing call already waits for this facet's pending writes (the
+   * output gate), and if a reset still loses a row the root was told about,
+   * the root's wake only drives the facet once for nothing.
+   */
+  async #reportWakeToRoot(
+    facet: LifecycleRouteAddress,
+    time: number | null
+  ): Promise<void> {
+    if (time === this.#reportedWake) return;
+    const transport = lifecycleRouteTransports.get(this);
+    if (!transport) return;
+    try {
+      await transport.toRoot({
+        capability: FACET_WAKE,
+        source: facet,
+        payload: {
+          type: "arm",
+          time,
+          stamp: this.#nextWakeStamp()
+        } satisfies FacetWakeMessage
+      });
+    } catch (error) {
+      // The job rows are stored; only the root does not know yet. Report
+      // again shortly, backing off, so a later mutation is not the only
+      // thing that would repair it (a fresh start reports too).
+      this.#retryReport();
+      throw error;
+    }
+    this.#reportFailures = 0;
+    this.#reportedWake = time;
+  }
+
+  /** Wake reports to the root that failed in a row, for the backoff. */
+  #reportFailures = 0;
+  #reportRetry: ReturnType<typeof setTimeout> | undefined;
+
+  #retryReport(): void {
+    if (this.#reportRetry !== undefined) return;
+    this.#reportFailures += 1;
+    const delay = backoffDelay(this.#reportFailures, {
+      baseMs: FACET_REPORT_RETRY_MS,
+      maxMs: FACET_REPORT_RETRY_MAX_MS
+    });
+    this.#reportRetry = setTimeout(() => {
+      this.#reportRetry = undefined;
+      this.rearmAlarm().catch(() => {});
+    }, delay);
   }
 
   /**
@@ -861,7 +1581,14 @@ export class Lifecycle<
   async disableAlarms(): Promise<void> {
     this.#alarmsDisabled = true;
     await this.#alarmRearmQueue.catch(() => {});
-    await this.#ctx.storage.deleteAlarm();
+    const facet = this.#facetAddress();
+    if (!facet) {
+      await this.#ctx.storage.deleteAlarm();
+      return;
+    }
+    // A facet has no alarm; its root drops its wake job. Best-effort: a
+    // facet being destroyed is also removed from the root's sub-tree.
+    await this.#reportWakeToRoot(facet, null).catch(() => {});
   }
 
   /**
@@ -872,14 +1599,43 @@ export class Lifecycle<
    * the host invocation boundary.
    */
   async alarm(): Promise<void> {
-    await this.#jobDriver.runAlarm(
-      () => this.#ensureInitialized(),
-      () =>
-        runInLifecycleHostContext({ host: this.#host }, async () => {
-          await this.#host.onAlarm?.();
-        })
-    );
+    this.#alarmsRunning++;
+    try {
+      await this.#jobDriver.runAlarm(
+        () => this.#ensureInitialized(),
+        () =>
+          runInLifecycleHostContext({ host: this.#host }, async () => {
+            await this.#host.onAlarm?.();
+          })
+      );
+    } finally {
+      this.#alarmsRunning--;
+    }
   }
+
+  /** Owners reported missing in this isolate. */
+  readonly #reportedMissing = new Set<string>();
+
+  /**
+   * A stored job's owner is not installed: the instance itself is missing
+   * (a deploy removed or renamed it). Its rows are kept. Reported once per
+   * owner per isolate, which is once per start.
+   */
+  #reportMissingCapability(owner: string): void {
+    if (this.#reportedMissing.has(owner)) return;
+    this.#reportedMissing.add(owner);
+    this.#emitCapabilityEvent({
+      source: "lifecycle",
+      type: "capability_missing",
+      payload: { capability: owner }
+    });
+  }
+
+  /** Every capability's schema version, in one record. */
+  readonly #schemaVersions: SchemaVersions;
+
+  /** Alarm invocations running on this instance. */
+  #alarmsRunning = 0;
 
   /**
    * Resolve a job owner to its dispatch hooks. Host jobs run inside the
@@ -887,6 +1643,7 @@ export class Lifecycle<
    * context, like every other capability hook.
    */
   async #resolveJobDispatch(owner: string): Promise<JobDispatch | undefined> {
+    if (owner.startsWith(`${FACET_WAKE}:`)) return this.#facetWakeDispatch();
     if (owner === HOST_JOB_CAPABILITY) {
       const host = this.#host;
       if (!host.onJob) return undefined;
@@ -898,14 +1655,133 @@ export class Lifecycle<
       };
     }
     const capability = await this.#capabilityRunner.findById(owner);
+    if (!capability) this.#reportMissingCapability(owner);
     if (!capability?.onJob) return undefined;
+    // A named instance sees its job ids without the prefix they are stored
+    // under.
+    const prefix =
+      capability instanceof LifecycleCapability &&
+      capability.instanceName !== undefined
+        ? `${capability.capabilityId}:`
+        : undefined;
+    const own = <C extends { job: LifecycleJob }>(context: C): C =>
+      prefix === undefined
+        ? context
+        : { ...context, job: ownJob(context.job, prefix) };
     return {
       onJob: async (context) =>
-        runWithoutCurrentAgent(() => capability.onJob!(context)),
+        runWithoutCurrentAgent(() => capability.onJob!(own(context))),
       onJobError: capability.onJobError
         ? async (context, error) =>
-            runWithoutCurrentAgent(() => capability.onJobError!(context, error))
+            runWithoutCurrentAgent(() =>
+              capability.onJobError!(own(context), error)
+            )
         : undefined
+    };
+  }
+
+  /**
+   * At the root: a facet wake job calls down its path and runs the facet's
+   * due jobs. The reply is the facet's next due time: the job moves there,
+   * or completes when the facet has nothing left. A path that no longer
+   * exists completes it too. A failed call goes through the driver's usual
+   * failure handling, so a reset facet is retried with a fresh stub.
+   */
+  #facetWakeDispatch(): JobDispatch | undefined {
+    const transport = lifecycleRouteTransports.get(this);
+    if (!transport) return undefined;
+    const kv = this.#ctx.storage.kv;
+    return {
+      onJob: async ({ job }) => {
+        const payload = job.payload as FacetWakePayload;
+        const target: LifecycleRouteAddress = {
+          key: payload.key,
+          data: payload.data
+        };
+        const countKey = facetDriveKey(target.key);
+        const drives = kv.get<FacetDriveCount>(countKey);
+        const notBefore = facetDriveNotBefore(drives);
+        if (Date.now() < notBefore) return { rescheduleAt: notBefore };
+
+        // Count the drive before it starts, durably: a facet job that takes
+        // the isolate down (memory limit) resets this root too, so nothing
+        // after the call would record it. A reply clears the count; a busy
+        // reply puts the previous count back.
+        const counted: FacetDriveCount = {
+          count: (drives?.count ?? 0) + 1,
+          at: Date.now()
+        };
+        kv.put(countKey, counted);
+        await this.#ctx.storage.sync();
+
+        // What the reply leaves the path's wake at. A stale path (`false`)
+        // has nothing to wake; a failed call counts as unreported and is
+        // retried after the back-off, never thrown into this root's driver,
+        // whose failure handling belongs to the root's own jobs.
+        const settle = (reply: unknown): number | null => {
+          if (reply === false) {
+            kv.delete(countKey);
+            return null;
+          }
+          if ((reply as FacetDriveReply & { busy?: true }).busy) {
+            if (drives) kv.put(countKey, drives);
+            else kv.delete(countKey);
+            return Date.now() + FACET_DRIVE_RECHECK_MS;
+          }
+          kv.delete(countKey);
+          return (reply as { next: number | null }).next;
+        };
+        const failed = (error: unknown): number => {
+          console.error(this.#errorLogPrefix("facet wake"), error);
+          return Math.max(
+            Date.now() + FACET_DRIVE_RECHECK_MS,
+            facetDriveNotBefore(counted)
+          );
+        };
+        const call = transport
+          .to(target, {
+            capability: FACET_WAKE,
+            source: transport.source,
+            payload: { type: "drive" } satisfies FacetWakeMessage
+          })
+          .then(
+            (reply) => ({
+              next: settle(reply),
+              stamp: (reply as { stamp?: number } | false)
+                ? ((reply as { stamp?: number }).stamp ?? 0)
+                : 0
+            }),
+            (error: unknown) => ({ next: failed(error), stamp: 0 })
+          );
+
+        let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+        const budget = new Promise<"budget">((resolve) => {
+          budgetTimer = setTimeout(
+            () => resolve("budget"),
+            FACET_DRIVE_BUDGET_MS
+          );
+        });
+        try {
+          const winner = await Promise.race([call, budget]);
+          if (winner !== "budget") {
+            return winner.next === null
+              ? undefined
+              : { rescheduleAt: winner.next };
+          }
+        } finally {
+          clearTimeout(budgetTimer);
+        }
+        // The facet's drive runs on by itself; its reply moves the path's
+        // wake when it comes, unless a newer report got there first.
+        // Meanwhile the path keeps a recheck wake.
+        this.trackAlarmWork(call);
+        void call.then(({ next, stamp }) =>
+          this.#holdFacetWake(target, next, stamp).catch((error: unknown) =>
+            console.error(this.#errorLogPrefix("facet wake"), error)
+          )
+        );
+        return { rescheduleAt: Date.now() + FACET_DRIVE_RECHECK_MS };
+      }
     };
   }
 }

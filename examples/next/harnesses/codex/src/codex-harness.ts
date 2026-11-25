@@ -254,10 +254,14 @@ export class CodexHarness extends LifecycleCapability {
 
   #enqueueDriver(operationId: string): Promise<unknown> {
     // Tasks dedupes on runId, so re-enqueueing an accepted operation is safe.
-    return this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+    return this.tasks.run(
       DRIVER_DEFINITION,
       { operationId },
-      { runId: `codex:${operationId}`, metadata: { operationId } }
+      {
+        runId: `codex:${operationId}`,
+        metadata: { operationId },
+        start: "alarm"
+      }
     );
   }
 

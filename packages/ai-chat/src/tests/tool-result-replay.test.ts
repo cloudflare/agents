@@ -14,7 +14,7 @@
  *    `output-available` part back to `input-streaming` if these chunks
  *    were forwarded.)
  *
- * 2. `_applyToolResult` accepts `output-available` / `output-error` as
+ * 2. `_settleToolResult` accepts `output-available` / `output-error` as
  *    starting states and short-circuits to a no-op when the incoming
  *    result matches what the part already holds. This handles duplicate
  *    cf_agent_tool_result frames (cross-tab re-runs, WS redelivery)
@@ -220,6 +220,58 @@ describe("Tool result idempotency (issue #1404)", () => {
     ws.close(1000);
   });
 
+  it("a tool-call id reused by a later reply settles the later call", async () => {
+    const room = crypto.randomUUID();
+    await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_reused";
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-changeBackgroundColor",
+            toolCallId,
+            state: "output-available",
+            input: { color: "red" },
+            output: { success: true, color: "red" }
+          }
+        ] as ChatMessage["parts"]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "two" }] },
+      {
+        id: "a2",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-changeBackgroundColor",
+            toolCallId,
+            state: "input-available",
+            input: { color: "blue" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    expect(
+      await agentStub.testApplyToolResult(toolCallId, "changeBackgroundColor", {
+        success: true,
+        color: "blue"
+      })
+    ).toBe(true);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const part = (id: string) =>
+      persisted.find((m) => m.id === id)?.parts[0] as Record<string, unknown>;
+    expect(part("a1").output).toEqual({ success: true, color: "red" });
+    expect(part("a2")).toMatchObject({
+      state: "output-available",
+      output: { success: true, color: "blue" }
+    });
+  });
+
   it("legacy duplicate tool parts: real change to one part is still persisted even if another duplicate is already terminal", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
@@ -395,9 +447,9 @@ describe("Tool replay chunks during continuation (issue #1404)", () => {
       expect(ok).toBe(true);
     }
 
-    // Seed an assistant message that already has the tool at output-available
-    // — this is what the cloned _streamingMessage will look like when the
-    // continuation begins.
+    // Seed an assistant message whose client tool call awaits its result.
+    // Once the result lands, this is what the cloned _streamingMessage will
+    // look like when the continuation begins.
     await agentStub.persistMessages([
       userMessage,
       {
@@ -407,9 +459,8 @@ describe("Tool replay chunks during continuation (issue #1404)", () => {
           {
             type: `tool-${toolName}`,
             toolCallId,
-            state: "output-available",
-            input,
-            output
+            state: "input-available",
+            input
           }
         ] as ChatMessage["parts"]
       }
@@ -417,8 +468,8 @@ describe("Tool replay chunks during continuation (issue #1404)", () => {
 
     const receivedMessages = collectMessages(ws);
 
-    // Trigger the continuation by re-sending the (already-applied)
-    // tool result with autoContinue. The continuation will hit the
+    // Trigger the continuation by sending the tool result with
+    // autoContinue. The continuation will hit the
     // replayPriorToolCall branch in onChatMessage and emit the
     // tool-input-start → delta → available → output-available
     // sequence. With the issue #1404 fix those replay chunks must

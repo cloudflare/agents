@@ -199,7 +199,7 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
   const workersai = createWorkersAI({ binding: this.env.AI });
 
   const result = streamText({
-    model: workersai("@cf/moonshotai/kimi-k2.7-code"),
+    model: workersai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
     system: "You are a helpful voice assistant. Keep responses concise.",
     messages: [
       ...context.messages.map(m => ({

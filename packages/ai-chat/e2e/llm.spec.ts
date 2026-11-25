@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
 /**
- * E2E tests that make real LLM calls via Workers AI (@cf/moonshotai/kimi-k2.7-code).
+ * E2E tests that make real LLM calls via Workers AI (@cf/deepseek-ai/deepseek-v4.1-flash-1017).
  * These verify the full streaming pipeline: streamText → SSE → WebSocket → client.
  *
  * Uses the AI binding configured in wrangler.jsonc -- no API key needed.

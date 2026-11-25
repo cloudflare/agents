@@ -1,9 +1,9 @@
 import { env } from "cloudflare:workers";
 import type { UIMessage as ChatMessage } from "ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitUntilHandled } from "./test-utils";
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -142,7 +142,7 @@ describe("AIChatAgent pending interaction helpers", () => {
 
     expect(await agentStub.hasPendingInteractionForTest()).toBe(true);
 
-    // Send tool result over WS — sets _pendingInteractionPromise
+    // Send tool result over WS — sets ChatTurns.pendingInteraction
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -177,6 +177,13 @@ describe("AIChatAgent pending interaction helpers", () => {
       chunkDelayMs: 40
     });
 
+    // The request travels over the socket: wait until its turn has started,
+    // so the hold below cannot catch it.
+    await vi.waitFor(async () => {
+      expect(await agentStub.getStartedRequestIds()).toEqual([
+        "req-prime-continuation"
+      ]);
+    });
     await agentStub.waitForIdleForTest();
 
     await agentStub.persistToolCallMessage(
@@ -184,6 +191,8 @@ describe("AIChatAgent pending interaction helpers", () => {
       "call_continuation",
       "testTool"
     );
+    // The continuation's stream stops after its first chunk until released.
+    await agentStub.holdStreamForTest();
 
     ws.send(
       JSON.stringify({
@@ -195,19 +204,22 @@ describe("AIChatAgent pending interaction helpers", () => {
       })
     );
 
-    await delay(20);
+    await vi.waitFor(async () => {
+      expect(await agentStub.isStreamHeldForTest()).toBe(true);
+    });
 
+    let resolvedWhileHeld = false;
     const waitPromise = agentStub.waitUntilStableForTest({
       timeout: 2000
     });
+    void waitPromise.then(() => {
+      resolvedWhileHeld = true;
+    });
+    // A round trip after the wait: the continuation is still held.
+    expect(await agentStub.isStreamHeldForTest()).toBe(true);
+    expect(resolvedWhileHeld).toBe(false);
 
-    await expect(
-      Promise.race([
-        waitPromise.then(() => "resolved"),
-        delay(100).then(() => "pending")
-      ])
-    ).resolves.toBe("pending");
-
+    await agentStub.releaseStreamForTest();
     await expect(waitPromise).resolves.toBe(true);
     expect(await agentStub.getStartedRequestIds()).toEqual([
       "req-prime-continuation",
@@ -283,6 +295,10 @@ describe("AIChatAgent pending interaction helpers", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn stays active until the test releases its stream.
+    await agentStub.holdStreamForTest("req-reset-turn");
+    // Released however the test ends.
+    onTestFinished(() => agentStub.releaseStreamForTest("req-reset-turn"));
     sendChatRequest(ws, "req-reset-turn", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
@@ -290,7 +306,9 @@ describe("AIChatAgent pending interaction helpers", () => {
       chunkDelayMs: 80
     });
 
-    await delay(120);
+    await vi.waitFor(async () => {
+      expect(await agentStub.isStreamHeldForTest("req-reset-turn")).toBe(true);
+    });
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
 
     await agentStub.persistToolCallMessage(
@@ -309,8 +327,14 @@ describe("AIChatAgent pending interaction helpers", () => {
       })
     );
 
-    await delay(20);
-    agentStub.resetTurnStateForTest();
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 1);
+    // The continuation is queued behind the active turn.
+    await vi.waitFor(async () => {
+      const state = await agentStub.getContinuationStateForTest();
+      expect(state.hasPending || state.hasDeferred).toBe(true);
+    });
+    await agentStub.resetTurnStateForTest();
+    await agentStub.releaseStreamForTest("req-reset-turn");
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getAbortControllerCount()).toBe(0);

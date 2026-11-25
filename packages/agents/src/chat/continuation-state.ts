@@ -11,7 +11,6 @@
  */
 
 import { CHAT_MESSAGE_TYPES } from "./protocol";
-import type { ClientToolSchema } from "./client-tools";
 import { sendIfOpen, type ChatConnection } from "./connection";
 
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
@@ -29,11 +28,16 @@ export interface ContinuationPending<
   connection: TConnection;
   connectionId: string | null;
   requestId: string;
-  clientTools?: ClientToolSchema[];
-  body?: Record<string, unknown>;
   errorPrefix: string | null;
   prerequisite: Promise<boolean> | null;
   pastCoalesce: boolean;
+  /**
+   * The messages whose tool results or approvals this continuation answers.
+   * It runs only while one of them is still the last message
+   * ({@link continuationTargetIsLatest}). Every continuation has at least
+   * one: there is no continuation that runs whatever the transcript.
+   */
+  targetMessageIds: readonly string[];
 }
 
 export interface ContinuationDeferred<
@@ -41,10 +45,9 @@ export interface ContinuationDeferred<
 > {
   connection: TConnection;
   connectionId: string | null;
-  clientTools?: ClientToolSchema[];
-  body?: Record<string, unknown>;
   errorPrefix: string;
   prerequisite: Promise<boolean> | null;
+  targetMessageIds: readonly string[];
 }
 
 export class ContinuationState<
@@ -146,11 +149,10 @@ export class ContinuationState<
       connection: d.connection,
       connectionId: d.connectionId,
       requestId: generateRequestId(),
-      clientTools: d.clientTools,
-      body: d.body,
       errorPrefix: d.errorPrefix,
       prerequisite: d.prerequisite,
-      pastCoalesce: false
+      pastCoalesce: false,
+      targetMessageIds: d.targetMessageIds
     };
 
     if (d.connectionId !== null) {
@@ -158,4 +160,40 @@ export class ContinuationState<
     }
     return this.pending;
   }
+}
+
+/** Add `id` to a continuation's targets. */
+export function addContinuationTarget(
+  targets: readonly string[] | undefined,
+  id: string
+): readonly string[] {
+  if (targets === undefined) return [id];
+  return targets.includes(id) ? targets : [...targets, id];
+}
+
+/**
+ * Whether a pending continuation still has something to answer: a message
+ * whose tool result scheduled it is the last message.
+ *
+ * A later message of any kind moves the conversation on: a newer question,
+ * a newer reply, and a message appended without a turn (a status note an
+ * app stored with `persistMessages`, a detached run's milestone). Continuing
+ * past one would make the model answer inside, or after, a message that did
+ * not ask for it, and the request would end in that message, which some
+ * providers reject. Mirrors pi's `continue()`, which settles a transcript
+ * that already ends in an answer as `nothing_to_answer`. A regenerate or a
+ * clear removes the message, which also ends the continuation.
+ *
+ * The tool result itself stays stored, and the next turn's model call
+ * reads it.
+ *
+ * @param messages - The transcript.
+ * @param pending - The pending continuation.
+ */
+export function continuationTargetIsLatest(
+  messages: ReadonlyArray<{ id: string }>,
+  pending: Pick<ContinuationPending, "targetMessageIds">
+): boolean {
+  const last = messages.at(-1)?.id;
+  return last !== undefined && pending.targetMessageIds.includes(last);
 }

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { describe, expect, it, vi } from "vitest";
 import {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
@@ -10,7 +11,8 @@ import {
   type ChatFiberWakeHooks,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
-  type DispatchRecoveredTurnInput,
+  type ChatRecoveryTurnBindings,
+  type InterruptedChatTurn,
   type RecoveryPartial,
   type ResolvedRecoveryStream
 } from "../recovery-engine";
@@ -21,7 +23,6 @@ import type {
   ResolvedChatRecoveryConfig
 } from "../lifecycle";
 import type { ChatFiberSnapshot } from "../recovery";
-import type { FiberRecoveryContext } from "../../index";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   chatRecoveryIncidentId,
@@ -556,6 +557,23 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
     expect(fake.recovering).toEqual([{ active: false, requestId: undefined }]);
   });
 
+  it("closes the agent-tool child runs a recovery that ran no turn held open", async () => {
+    for (const status of ["skipped", "failed"] as const) {
+      const fake = makeFakeAdapter();
+      let reconciled = 0;
+      const engine = new ChatRecoveryEngine({
+        ...fake.adapter,
+        turns: {
+          attemptScope: new AsyncLocalStorage(),
+          reconcileAgentToolChildRuns: async () => void reconciled++
+        } as unknown as ChatRecoveryTurnBindings
+      });
+      const { incidentId } = seedIncident(fake.storage);
+      await engine.updateIncident(incidentId, status, "continue_disabled");
+      expect(reconciled).toBe(1);
+    }
+  });
+
   it("is a no-op when the incident id is undefined", async () => {
     const fake = makeFakeAdapter();
     const engine = new ChatRecoveryEngine(fake.adapter);
@@ -698,6 +716,50 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
     expect(fake.recovering).toEqual([{ active: true, requestId: "root-1" }]);
   });
 
+  it("hands the attempt to the caller's run, or to the host's Task when the run declines it", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const data = { incidentId: "i", lastBody: { text: "x".repeat(64) } };
+
+    const taken: unknown[] = [];
+    await engine.scheduleRecovery({
+      incident: seedIncident(fake.storage),
+      recoveryKind: "continue",
+      callback: "_chatRecoveryContinue",
+      data,
+      into: (attempt) => {
+        taken.push(attempt);
+        return true;
+      }
+    });
+    expect(taken).toEqual([
+      {
+        callback: "_chatRecoveryContinue",
+        data: { ...data, delivery: 1 },
+        delaySeconds: 0
+      }
+    ]);
+    expect(fake.schedules).toEqual([]);
+
+    // Declined (too large to journal): the Task gets the intact payload.
+    await engine.scheduleRecovery({
+      incident: seedIncident(fake.storage, { incidentId: "inc-2" }),
+      recoveryKind: "continue",
+      callback: "_chatRecoveryContinue",
+      data,
+      delaySeconds: 3,
+      into: () => false
+    });
+    expect(fake.schedules).toEqual([
+      {
+        callback: "_chatRecoveryContinue",
+        data: { ...data, delivery: 1 },
+        reason: "initial",
+        delaySeconds: 3
+      }
+    ]);
+  });
+
   it("emits the scheduled event with the incident's request id + the EXPLICIT recoveryKind", async () => {
     const fake = makeFakeAdapter();
     const engine = new ChatRecoveryEngine(fake.adapter);
@@ -761,7 +823,8 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
 
     expect(fake.schedules[0]).toEqual({
       callback: "_chatRecoveryRetry",
-      data,
+      // Plus the number of this schedule, the incident's first.
+      data: { ...data, delivery: 1 },
       reason: "stable_timeout_retry",
       delaySeconds: 0
     });
@@ -1246,6 +1309,72 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
       hasSettledToolResults: false
     });
   });
+
+  describe("sealMemoryLimitedRecovery", () => {
+    const active = (
+      fake: ReturnType<typeof makeFakeAdapter>,
+      incidents: ChatRecoveryIncident[]
+    ) => {
+      fake.adapter.listActiveIncidents = () => Promise.resolve(incidents);
+    };
+    const incident = (
+      id: string,
+      recoveryKind: "retry" | "continue"
+    ): ChatRecoveryIncident => ({
+      incidentId: id,
+      requestId: `req-${id}`,
+      recoveryRootRequestId: `root-${id}`,
+      recoveryKind,
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 1_000
+    });
+
+    it("gives up every live incident, naming the out-of-memory reset", async () => {
+      const fake = makeFakeAdapter();
+      const incidents = [incident("a", "retry"), incident("b", "continue")];
+      for (const each of incidents) {
+        fake.storage.set(chatRecoveryIncidentKey(each.incidentId), each);
+      }
+      active(fake, incidents);
+
+      await new ChatRecoveryEngine(fake.adapter).sealMemoryLimitedRecovery();
+
+      expect(
+        fake.exhausts.map(({ incident: given }) => [
+          given.incidentId,
+          given.status,
+          given.reason,
+          given.recoveryKind
+        ])
+      ).toEqual([
+        ["a", "exhausted", "out_of_memory", "retry"],
+        ["b", "exhausted", "out_of_memory", "continue"]
+      ]);
+    });
+
+    it("keeps each incident's kind when its record cannot be read back", async () => {
+      // The give-up then builds the incident it reports from the callback
+      // name, which is chosen from the listed incident's kind.
+      const fake = makeFakeAdapter({ getThrows: true });
+      active(fake, [incident("a", "retry"), incident("b", "continue")]);
+
+      await new ChatRecoveryEngine(fake.adapter).sealMemoryLimitedRecovery();
+
+      expect(
+        fake.exhausts.map(({ incident: given }) => [
+          given.incidentId,
+          given.recoveryKind,
+          given.reason
+        ])
+      ).toEqual([
+        ["a", "retry", "out_of_memory"],
+        ["b", "continue", "out_of_memory"]
+      ]);
+    });
+  });
 });
 
 /**
@@ -1527,55 +1656,6 @@ describe("runChatRecoveryExhaustion", () => {
 });
 
 /**
- * Layer-2 seam test for the non-chat fiber dispatch (slice 3c). `Think` routes
- * its messenger/workflow reply fibers through `tryHandleNonChatFiberRecovery`
- * before chat recovery; `AIChatAgent` omits the hook (every fiber is a chat
- * candidate). The engine owns only the dispatch + the "handled? skip chat
- * recovery" contract.
- */
-describe("ChatRecoveryEngine.handleNonChatFiber (fake adapter)", () => {
-  // A minimal subset of the adapter — `handleNonChatFiber` only touches the one
-  // hook, so the other methods are never called here.
-  function engineWithHook(
-    hook?: ChatRecoveryAdapter["tryHandleNonChatFiberRecovery"]
-  ) {
-    const adapter = {
-      tryHandleNonChatFiberRecovery: hook
-    } as unknown as ChatRecoveryAdapter;
-    return new ChatRecoveryEngine(adapter);
-  }
-
-  const ctx: FiberRecoveryContext = {
-    id: "fiber-1",
-    name: "think:messenger-reply",
-    snapshot: null,
-    createdAt: 0,
-    recoveryReason: "interrupted"
-  };
-
-  it("returns true when the package's hook consumes the fiber", async () => {
-    const seen: FiberRecoveryContext[] = [];
-    const engine = engineWithHook(async (c) => {
-      seen.push(c);
-      return true;
-    });
-
-    expect(await engine.handleNonChatFiber(ctx)).toBe(true);
-    expect(seen).toEqual([ctx]);
-  });
-
-  it("returns false when the hook declines the fiber (falls through to chat recovery)", async () => {
-    const engine = engineWithHook(async () => false);
-    expect(await engine.handleNonChatFiber(ctx)).toBe(false);
-  });
-
-  it("returns false when the adapter omits the hook (AIChatAgent shape)", async () => {
-    const engine = engineWithHook(undefined);
-    expect(await engine.handleNonChatFiber(ctx)).toBe(false);
-  });
-});
-
-/**
  * Shared settled-tool-results predicate (slice 4d-2). Both packages' private
  * copies were byte-equivalent; this pins the lifted single source of truth that
  * the engine's persist gate now consults.
@@ -1617,29 +1697,25 @@ describe("partialHasSettledToolResults", () => {
 
 /**
  * Layer-2 seam test for the wake-recovery lifecycle (slice 4d-2). The engine owns
- * the FRAME (non-chat dispatch → chat gate → unwrap → stream/partial → classify →
+ * the FRAME (stream/partial → kind →
  * begin-incident → exhausted-branch → onChatRecovery → persist → complete →
- * dispatch → catch→failed) and the shared persist clause; the {@link
+ * plan → schedule or skip → catch→failed) and the shared persist clause; the {@link
  * ChatFiberWakeHooks} own the divergent organs. These tests pin the ordering, the
  * shared `base && (persist !== false || settled)` gate, the exhausted
  * short-circuit, and the failed-on-throw guard — the exact contract `AIChatAgent`
  * and `Think` now delegate.
  */
-describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)", () => {
-  type TestDetail = { tag: string };
-
+describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)", () => {
   type HarnessOptions = {
-    name?: string;
-    /** When set, the adapter's non-chat hook consumes the fiber first. */
-    nonChatHandled?: boolean;
     snapshot?: ChatFiberSnapshot | null;
     stream?: ResolvedRecoveryStream;
     partial?: RecoveryPartial;
     recoveryKind?: "retry" | "continue";
-    detail?: TestDetail;
+    /** The latest stored message. Defaults to an assistant reply. */
+    leaf?: { id: string; role: string };
     onChatRecovery?: ChatRecoveryOptions | void;
     basePersist?: boolean;
-    dispatchThrows?: boolean;
+    scheduleThrows?: boolean;
     seedExhausted?: boolean;
     /**
      * Drop the engine-defaulted optional hooks (`isAwaitingClientInteraction`,
@@ -1656,7 +1732,10 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const calls: string[] = [];
     const storage = new Map<string, ChatRecoveryIncident>();
     const events: ChatRecoveryIncidentEvent[] = [];
-    const dispatched: DispatchRecoveredTurnInput<TestDetail>[] = [];
+    const scheduled: Array<{
+      callback: ChatRecoveryScheduleCallback;
+      data: Record<string, unknown>;
+    }> = [];
     const persisted: string[] = [];
     const completed: string[] = [];
     const exhausted: Array<{ streamId: string; createdAt: number }> = [];
@@ -1675,14 +1754,6 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const adapter: ChatRecoveryAdapter = {
       resolveConfig: () => config,
       now: () => NOW,
-      ...(options.nonChatHandled
-        ? {
-            tryHandleNonChatFiberRecovery: () => {
-              calls.push("nonChat");
-              return Promise.resolve(true);
-            }
-          }
-        : {}),
       sweepStaleIncidents: () => {
         calls.push("sweep");
         return Promise.resolve();
@@ -1704,7 +1775,14 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         return Promise.resolve();
       },
       emitRecoveryEvent: (event) => events.push(event),
-      scheduleRecovery: () => Promise.resolve(),
+      scheduleRecovery: (callback, data) => {
+        calls.push("schedule");
+        scheduled.push({ callback, data });
+        if (options.scheduleThrows) {
+          return Promise.reject(new Error("schedule boom"));
+        }
+        return Promise.resolve();
+      },
       setRecovering: () => Promise.resolve(),
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: (
@@ -1730,19 +1808,12 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
       onGiveUpBookkeepingError: () => {}
     };
 
-    const wake: ChatFiberWakeHooks<TestDetail> = {
-      chatFiberPrefix: () => "chat:",
-      unwrapRecoverySnapshot: () => {
-        calls.push("unwrap");
-        return { snapshot: options.snapshot ?? null, recoveryData: null };
+    const wake: ChatFiberWakeHooks = {
+      latestMessage: () => {
+        calls.push("leaf");
+        return options.leaf ?? { id: "a1", role: "assistant" };
       },
-      classifyRecoveredTurn: () => {
-        calls.push("classify");
-        return {
-          recoveryKind: options.recoveryKind ?? "continue",
-          detail: options.detail ?? { tag: "d" }
-        };
-      },
+      partialHoldsContent: (p) => p.text !== "" || p.parts.length > 0,
       invokeOnChatRecovery: () => {
         calls.push("invokeOnChatRecovery");
         return Promise.resolve(options.onChatRecovery);
@@ -1759,14 +1830,6 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
       completeRecoveredStream: (streamId) => {
         calls.push("complete");
         completed.push(streamId);
-      },
-      dispatchRecoveredTurn: (dispatchInput) => {
-        calls.push("dispatch");
-        dispatched.push(dispatchInput);
-        if (options.dispatchThrows) {
-          return Promise.reject(new Error("dispatch boom"));
-        }
-        return Promise.resolve();
       }
     };
 
@@ -1804,21 +1867,21 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
       });
     }
 
-    const ctx: FiberRecoveryContext = {
-      id: "fiber-1",
-      name: options.name ?? "chat:req-1",
-      snapshot: null,
-      createdAt: 4242,
-      recoveryReason: "interrupted"
+    const turn: InterruptedChatTurn = {
+      requestId: "req-1",
+      snapshot: options.snapshot ?? null,
+      recoveryData: null,
+      createdAt: 4242
     };
 
     return {
+      adapter,
       engine: new ChatRecoveryEngine(adapter),
-      ctx,
+      turn,
       wake,
       calls,
       events,
-      dispatched,
+      scheduled,
       persisted,
       completed,
       exhausted,
@@ -1826,50 +1889,170 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     };
   }
 
-  it("dispatches a non-chat fiber first and skips chat processing", async () => {
-    const h = makeHarness({ nonChatHandled: true });
+  it("ends the stopped request for the tabs even when storing the cut-off reply fails", async () => {
+    const h = makeHarness();
+    const ended: string[] = [];
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: (requestId: string, outcome: string) =>
+        void ended.push(`${outcome}:${requestId}`)
+    } as unknown as ChatRecoveryTurnBindings;
+    h.wake.persistOrphanedStream = () =>
+      Promise.reject(new Error("storage failed"));
+    // The stop lands before the replay opened its incident.
+    expect(await h.engine.cancelScheduledRecovery("req-1")).toBe(false);
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
-    // The non-chat hook ran; the chat path never did.
-    expect(h.calls).toContain("nonChat");
-    expect(h.calls).not.toContain("classify");
-    expect(h.calls).not.toContain("dispatch");
+    await expect(
+      h.engine.recoverInterruptedTurn(h.turn, h.wake)
+    ).rejects.toThrow("storage failed");
+    expect(ended).toEqual(["aborted:req-1"]);
   });
 
-  it("returns false (not a chat fiber) when the name lacks the prefix", async () => {
-    const h = makeHarness({ name: "think:messenger-reply" });
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(false);
-    expect(h.calls).not.toContain("classify");
-    expect(h.calls).not.toContain("put");
+  it("ends the cut-off request for the tabs once its stream is closed for a recovered turn", async () => {
+    const h = makeHarness({ onChatRecovery: {} });
+    const ended: string[] = [];
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: (requestId: string, outcome: string) =>
+        void ended.push(`${outcome}:${requestId}`)
+    } as unknown as ChatRecoveryTurnBindings;
+
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+
+    expect(h.completed).toEqual(["s1"]);
+    expect(h.scheduled).toHaveLength(1);
+    // Recorded and sent, so a tab back later learns the request ended.
+    expect(ended).toEqual(["aborted:req-1"]);
   });
 
-  it("drives the wake lifecycle in order and threads the classification detail", async () => {
-    const detail: TestDetail = { tag: "carry-me" };
-    const h = makeHarness({ recoveryKind: "retry", detail });
+  it("leaves the cut-off request's end to the host when it declines the recovery", async () => {
+    // `continue: false`: the engine skips the incident, and the host's
+    // `onSkipped` reports the interruption itself.
+    const h = makeHarness({ onChatRecovery: { continue: false } });
+    const ended: string[] = [];
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: (requestId: string, outcome: string) =>
+        void ended.push(`${outcome}:${requestId}`)
+    } as unknown as ChatRecoveryTurnBindings;
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+    expect(ended).toEqual([]);
+  });
+
+  it("keeps the storage failure when ending the stopped request fails too", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const h = makeHarness();
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      endRequest: () => {
+        throw new Error("send failed");
+      }
+    } as unknown as ChatRecoveryTurnBindings;
+    h.wake.persistOrphanedStream = () =>
+      Promise.reject(new Error("storage failed"));
+    await h.engine.cancelScheduledRecovery("req-1");
+
+    try {
+      await expect(
+        h.engine.recoverInterruptedTurn(h.turn, h.wake)
+      ).rejects.toThrow("storage failed");
+      expect(error).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("ends a wake whose turn the user stopped as stopped, even with the budget spent", async () => {
+    const h = makeHarness({ seedExhausted: true });
+    const incidentId = chatRecoveryIncidentId({
+      requestId: "req-1",
+      recoveryRootRequestId: "req-1",
+      latestUserMessageId: null,
+      recoveryKind: "continue"
+    });
+    await h.engine.updateIncident(incidentId, "skipped", "user_cancelled");
+    const eventsBefore = h.events.length;
+
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+
+    expect(h.calls).not.toContain("exhaust");
+    expect(h.calls).not.toContain("schedule");
+    expect(h.calls).not.toContain("invokeOnChatRecovery");
+    expect(h.events.slice(eventsBefore)).toEqual([]);
+    // What the cut-off turn stored is kept, and its stream is closed.
+    expect(h.persisted).toEqual(["s1"]);
+    expect(h.completed).toEqual(["s1"]);
+  });
+
+  it("drives the wake lifecycle in order and schedules what the plan says", async () => {
+    // A new turn whose question is still the latest message: nothing of its
+    // reply was stored, so it answers the question again.
+    const h = makeHarness({
+      snapshot: {
+        kind: "test",
+        version: 1,
+        requestId: "req-1",
+        continuation: false,
+        latestUserMessageId: "u1",
+        startedAt: 0
+      },
+      leaf: { id: "u1", role: "user" }
+    });
+
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     const order = (label: string) => h.calls.indexOf(label);
-    // unwrap → resolveStream → getPartial → classify → begin(put) →
-    // onChatRecovery → shouldPersist → complete → dispatch.
-    expect(order("unwrap")).toBeLessThan(order("resolveStream"));
-    expect(order("resolveStream")).toBeLessThan(order("classify"));
-    expect(order("classify")).toBeLessThan(order("put"));
+    // resolveStream → getPartial → leaf → begin(put) → onChatRecovery →
+    // shouldPersist → complete → leaf again → schedule.
+    expect(order("resolveStream")).toBeLessThan(order("leaf"));
+    expect(order("leaf")).toBeLessThan(order("put"));
     expect(order("put")).toBeLessThan(order("invokeOnChatRecovery"));
     expect(order("invokeOnChatRecovery")).toBeLessThan(order("shouldPersist"));
     expect(order("shouldPersist")).toBeLessThan(order("complete"));
-    expect(order("complete")).toBeLessThan(order("dispatch"));
+    expect(h.calls.lastIndexOf("leaf")).toBeGreaterThan(order("complete"));
+    expect(order("complete")).toBeLessThan(order("schedule"));
 
-    // Dispatch receives the classify detail + the reported kind verbatim.
-    expect(h.dispatched).toHaveLength(1);
-    expect(h.dispatched[0].detail).toBe(detail);
-    expect(h.dispatched[0].recoveryKind).toBe("retry");
-    expect(h.dispatched[0].requestId).toBe("req-1");
+    expect(h.scheduled).toEqual([
+      {
+        callback: "_chatRecoveryRetry",
+        data: expect.objectContaining({
+          targetUserId: "u1",
+          originalRequestId: "req-1"
+        })
+      }
+    ]);
+    expect(h.events.find((e) => e.type === "chat:recovery:scheduled")).toEqual(
+      expect.objectContaining({ recoveryKind: "retry" })
+    );
+  });
+
+  it("continues the reply that is the latest message", async () => {
+    const h = makeHarness({ leaf: { id: "a7", role: "assistant" } });
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+    expect(h.scheduled).toEqual([
+      {
+        callback: "_chatRecoveryContinue",
+        data: expect.objectContaining({ targetAssistantId: "a7" })
+      }
+    ]);
+  });
+
+  it("skips a turn whose conversation moved on, and schedules nothing", async () => {
+    const h = makeHarness({ leaf: { id: "u9", role: "user" } });
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+    expect(h.scheduled).toEqual([]);
+    expect(h.events.at(-1)).toEqual(
+      expect.objectContaining({
+        type: "chat:recovery:skipped",
+        reason: "conversation_changed"
+      })
+    );
   });
 
   it("persists with the default clause (persist undefined) when the base gate is open", async () => {
     const h = makeHarness({ basePersist: true, onChatRecovery: {} });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.persisted).toEqual(["s1"]);
   });
 
@@ -1883,7 +2066,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         hasSettledToolResults: false
       }
     });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.persisted).toEqual([]);
   });
 
@@ -1899,7 +2082,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         hasSettledToolResults: true
       }
     });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.persisted).toEqual(["s1"]);
   });
 
@@ -1913,7 +2096,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         hasSettledToolResults: true
       }
     });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.persisted).toEqual([]);
   });
 
@@ -1921,54 +2104,52 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const h = makeHarness({
       stream: { streamId: "s1", streamStillActive: false }
     });
-    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.completed).toEqual([]);
-    // Dispatch still runs (the decision owns the not-active case).
-    expect(h.calls).toContain("dispatch");
+    // The plan still runs (it owns the not-active case).
+    expect(h.calls).toContain("schedule");
   });
 
-  it("terminalizes the exhausted budget BEFORE onChatRecovery and skips dispatch", async () => {
+  it("terminalizes the exhausted budget BEFORE onChatRecovery and schedules nothing", async () => {
     const h = makeHarness({ seedExhausted: true });
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     // Exhausted path: persist gate (no options) + exhaustChatRecovery, with the
-    // fiber's createdAt; never consults onChatRecovery or dispatch.
+    // turn's createdAt; never consults onChatRecovery or schedules.
     expect(h.calls).toContain("exhaust");
     expect(h.exhausted[0]?.createdAt).toBe(4242);
     expect(h.calls).not.toContain("invokeOnChatRecovery");
-    expect(h.calls).not.toContain("dispatch");
+    expect(h.calls).not.toContain("schedule");
   });
 
-  it("flips the incident to failed and rethrows when dispatch throws", async () => {
-    const h = makeHarness({ dispatchThrows: true });
+  it("flips the incident to failed and rethrows when scheduling throws", async () => {
+    const h = makeHarness({ scheduleThrows: true });
 
     await expect(
-      h.engine.handleChatFiberRecovery(h.ctx, h.wake)
-    ).rejects.toThrow("dispatch boom");
+      h.engine.recoverInterruptedTurn(h.turn, h.wake)
+    ).rejects.toThrow("schedule boom");
 
     // The incident was sealed `failed` (not left leaking in `attempting`).
     const sealed = [...h.events]
       .reverse()
       .find((e) => e.type === "chat:recovery:failed");
-    expect(sealed?.reason).toBe("dispatch boom");
+    expect(sealed?.reason).toBe("schedule boom");
   });
 
   it("drives a MINIMAL adapter (omitted optional hooks) via engine defaults", async () => {
     // A host with no client-interaction / shouldKeepRecovering-diagnostic /
     // user-onChatRecovery surface (e.g. the pi fixture) omits these hooks. The
     // engine must default them rather than throw on the missing functions
-    // (T2-3b). The run completing + dispatching is the proof.
+    // (T2-3b). The run completing + scheduling is the proof.
     const h = makeHarness({ omitOptionalHooks: true });
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     // `invokeOnChatRecovery` was omitted, so it is never called and the engine
-    // proceeds with empty options (`{}`) — which still flow through to dispatch.
+    // proceeds with empty options (`{}`), which continue the reply.
     expect(h.calls).not.toContain("invokeOnChatRecovery");
-    expect(h.calls).toContain("dispatch");
-    expect(h.dispatched).toHaveLength(1);
-    expect(h.dispatched[0].options).toEqual({});
+    expect(h.scheduled).toHaveLength(1);
   });
 
   it("minimal adapter still terminalizes an exhausted budget without onChatRecovery", async () => {
@@ -1977,23 +2158,96 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     // `?? false` default on the give-up-adjacent path.
     const h = makeHarness({ omitOptionalHooks: true, seedExhausted: true });
 
-    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    await h.engine.recoverInterruptedTurn(h.turn, h.wake);
     expect(h.calls).toContain("exhaust");
-    expect(h.calls).not.toContain("dispatch");
+    expect(h.calls).not.toContain("schedule");
   });
 });
 
 describe("transient recovery backoff", () => {
-  it("doubles per retry, capped at 30s", () => {
-    expect(
-      [1, 2, 3, 5, 6, 12].map((r) => chatRecoveryBackoffSeconds(r))
-    ).toEqual([1, 2, 4, 16, 30, 30]);
+  it("doubles per retry, capped at 30s, jittered within the upper half", () => {
+    const ceilings = [1, 2, 4, 16, 30, 30];
+    [1, 2, 3, 5, 6, 12].forEach((retries, i) => {
+      for (let n = 0; n < 200; n++) {
+        const seconds = chatRecoveryBackoffSeconds(retries);
+        expect(seconds).toBeGreaterThanOrEqual(ceilings[i] / 2);
+        expect(seconds).toBeLessThan(ceilings[i]);
+      }
+    });
   });
 
   it("waits at least Retry-After, capped at 60s", () => {
     expect(chatRecoveryBackoffSeconds(1, 7)).toBe(7);
-    expect(chatRecoveryBackoffSeconds(4, 2)).toBe(8);
     expect(chatRecoveryBackoffSeconds(1, 600)).toBe(60);
+    for (let n = 0; n < 200; n++) {
+      const seconds = chatRecoveryBackoffSeconds(4, 2);
+      expect(seconds).toBeGreaterThanOrEqual(4);
+      expect(seconds).toBeLessThan(8);
+    }
+  });
+
+  it("reads retry-after-ms only when it is a plain number", () => {
+    const ms = (value: string, fallback?: string) =>
+      retryAfterSeconds({
+        responseHeaders: {
+          "retry-after-ms": value,
+          ...(fallback !== undefined && { "retry-after": fallback })
+        }
+      });
+    expect(ms("1500")).toBe(2);
+    expect(ms("1500.25")).toBe(2);
+    // Surrounding whitespace is not part of the value.
+    expect(ms(" 1500 ")).toBe(2);
+    // Anything else is not a delay: the seconds header is read instead.
+    expect(ms("12abc", "9")).toBe(9);
+    expect(ms("abc12", "9")).toBe(9);
+    expect(ms("1.x", "9")).toBe(9);
+    expect(ms("soon", "9")).toBe(9);
+    expect(ms("12abc")).toBeUndefined();
+  });
+
+  it("reads only the header it is looking for, and only a string value", () => {
+    expect(
+      retryAfterSeconds({
+        responseHeaders: { "x-request-id": "5000", "retry-after": "3" }
+      })
+    ).toBe(3);
+    expect(
+      retryAfterSeconds({ responseHeaders: { "retry-after": 3 } })
+    ).toBeUndefined();
+  });
+
+  it("reads the header inside the error the AI SDK throws once its own retries are used up", () => {
+    const call = (seconds: string) => ({
+      name: "AI_APICallError",
+      statusCode: 429,
+      responseHeaders: { "retry-after": seconds }
+    });
+    // A RetryError has no `cause`: the provider's errors are in `lastError`
+    // and `errors`.
+    expect(
+      retryAfterSeconds({
+        name: "AI_RetryError",
+        reason: "maxRetriesExceeded",
+        errors: [call("2"), call("4"), call("9")],
+        lastError: call("9")
+      })
+    ).toBe(9);
+    // The newest attempt that carries a header wins.
+    expect(
+      retryAfterSeconds({ errors: [call("2"), call("4"), { name: "Other" }] })
+    ).toBe(4);
+    // Wrapped once more, as a host's own error.
+    expect(
+      retryAfterSeconds({ cause: { lastError: { cause: call("6") } } })
+    ).toBe(6);
+  });
+
+  it("stops on an error that wraps itself", () => {
+    const loop: { lastError?: unknown; errors?: unknown[] } = {};
+    loop.lastError = loop;
+    loop.errors = [loop];
+    expect(retryAfterSeconds(loop)).toBeUndefined();
   });
 
   it("reads Retry-After from response headers, headers or the cause chain", () => {

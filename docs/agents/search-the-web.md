@@ -39,7 +39,7 @@ const result = streamText({
 });
 ```
 
-If you convert UI messages yourself, pass the same tools to `convertToModelMessages(messages, { tools })`. Without them, the AI SDK sends earlier search results back to the model as the full JSON response instead of the trimmed text. `AiSdkHarness` does this for you.
+If you convert UI messages yourself, pass the same tools to `convertToModelMessages(messages, { tools })`. Without them, the AI SDK sends earlier search results back to the model as the full JSON response instead of the trimmed text. Think does this for you.
 
 TanStack AI:
 
@@ -89,6 +89,16 @@ The host gets the full API response, without trimming, as `WebSearchToolOutput`:
 The API has no pagination. The tool description tells the model to search again with a rephrased query when it wants more or different results.
 
 Results are for discovery. To let the model read the pages it finds, add the [`web_fetch` tool](./fetch-the-web.md) beside `web_search`; the `web_search` description tells the model to fetch result URLs with `web_fetch` when it is available.
+
+## In pi's code mode
+
+With pi-durable's code mode installed beside the tool (setup in [Browse the Web](./browse-the-web.md#in-pis-code-mode)), a script calls `tools.web_search({ query, limit })` and gets the results as an object, not the model's text:
+
+```ts
+{ query, items: [{ title, url, description?, lastModifiedDate? }] }
+```
+
+Descriptions are trimmed as they are for the model. A failed search rejects with the model's text. The model's own result is the same text as before. [Fetch the Web](./fetch-the-web.md#in-pis-code-mode) shows a script that searches, then reads the results.
 
 ## Failures
 

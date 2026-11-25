@@ -750,7 +750,7 @@ async function main(): Promise<void> {
     }`
   );
   if (lastStatus?.hasFiberRows) {
-    console.log("Orphaned fiber rows remain (cf_agents_runs not cleaned up).");
+    console.log("Orphaned fiber runs remain (not recovered).");
   }
   const chatErrors = lastStatus?.chatErrors ?? [];
   if (chatErrors.length) {

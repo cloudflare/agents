@@ -1,4 +1,5 @@
 import type { Agent } from "./index";
+import { backoffDelay } from "./retries";
 import { camelCaseToKebabCase } from "./utils";
 
 const namespaceMapCache = new WeakMap<
@@ -159,17 +160,6 @@ function isRetryableDurableObjectError(error: unknown): boolean {
   return typed.retryable === true && typed.overloaded !== true;
 }
 
-function routingRetryDelayMs(
-  attempt: number,
-  options: ResolvedRoutingRetryOptions
-): number {
-  const upperBoundMs = Math.min(
-    options.maxDelayMs,
-    options.baseDelayMs * 2 ** (attempt - 1)
-  );
-  return Math.floor(Math.random() * upperBoundMs);
-}
-
 async function retryDurableObjectOperation<T>(
   operation: () => Promise<T>,
   context: RoutingRetryContext,
@@ -191,7 +181,11 @@ async function retryDurableObjectOperation<T>(
         throw error;
       }
 
-      const delayMs = routingRetryDelayMs(attempt, resolved);
+      const delayMs = backoffDelay(attempt, {
+        baseMs: resolved.baseDelayMs,
+        maxMs: resolved.maxDelayMs,
+        jitter: "full"
+      });
       try {
         await resolved.onRetry?.({
           error,
@@ -400,18 +394,21 @@ export async function getAgentByName<
     ? namespace.jurisdiction(options.jurisdiction)
     : namespace;
   const id = target.idFromName(name);
-  const stub = target.get(id, durableObjectGetOptions(options));
 
-  // SAFETY: Agent exposes this internal initializer specifically for native
-  // RPC calls, which bypass the lifecycle-installed fetch handler.
-  const lifecycleStub = stub as unknown as {
-    __unsafe_ensureInitialized(props?: Props): Promise<void>;
-  };
-  await retryDurableObjectOperation(
-    () => lifecycleStub.__unsafe_ensureInitialized(options?.props),
+  // A new stub per attempt: a reset of the object (the retryable case)
+  // leaves the stub that saw it broken, so retrying through it fails again.
+  return await retryDurableObjectOperation(
+    async () => {
+      const stub = target.get(id, durableObjectGetOptions(options));
+      // SAFETY: Agent exposes this internal initializer specifically for
+      // native RPC calls, which bypass the lifecycle-installed fetch handler.
+      const lifecycleStub = stub as unknown as {
+        __unsafe_ensureInitialized(props?: Props): Promise<void>;
+      };
+      await lifecycleStub.__unsafe_ensureInitialized(options?.props);
+      return stub;
+    },
     { name },
     options?.routingRetry
   );
-
-  return stub;
 }

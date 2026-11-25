@@ -211,7 +211,7 @@ describe("transport: resumable run-path streams", () => {
       gateway: { id: "prod" },
       headers: {},
       input: { stream: true },
-      model: "@cf/zai-org/glm-4.7-flash"
+      model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
     });
 
     await expect(

@@ -20,7 +20,7 @@ import {
   type ToolCall,
   createAssistantMessageEventStream,
   getCurrentTools,
-  parseStreamingJson
+  ToolCallArgumentsStream
 } from "@earendil-works/pi-ai";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
 import {
@@ -61,9 +61,11 @@ const STRICT_OPENAI_COMPAT: Compat = {
   maxTokensField: "max_tokens",
   openRouterRouting: {},
   requiresAssistantAfterToolResult: false,
+  requiresNonNullAssistantContent: false,
   requiresReasoningContentOnAssistantMessages: false,
   requiresThinkingAsText: false,
   requiresToolResultName: false,
+  requiresToolsWithToolHistory: false,
   sendSessionAffinityHeaders: false,
   sessionAffinityFormat: "openai",
   supportsDeveloperRole: false,
@@ -124,8 +126,7 @@ interface Chunk {
 }
 
 type TextBlock = { type: "text"; text: string };
-type ToolCallBlock = ToolCall & { partialArguments?: string };
-type Block = TextBlock | ThinkingContent | ToolCallBlock;
+type Block = TextBlock | ThinkingContent | ToolCall;
 
 function mapFinishReason(reason: string): AssistantMessage["stopReason"] {
   switch (reason) {
@@ -174,7 +175,15 @@ function isFinalizer(call: ToolCallDelta): boolean {
 class CompletionAssembler {
   private textBlock: TextBlock | undefined;
   private thinkingBlock: ThinkingContent | undefined;
-  private readonly openToolCalls = new Map<number, ToolCallBlock>();
+  private readonly openToolCalls = new Map<number, ToolCall>();
+  /**
+   * Each open call's argument text, parsed as it arrives. Kept here rather
+   * than on the block, so the raw text never reaches a partial message.
+   */
+  private readonly toolCallArguments = new Map<
+    number,
+    ToolCallArgumentsStream
+  >();
   private readonly closedToolCalls = new Set<number>();
   private lastToolIndex: number | undefined;
   private readonly blocks: Block[];
@@ -189,12 +198,6 @@ class CompletionAssembler {
 
   private indexOf(block: Block): number {
     return this.blocks.indexOf(block);
-  }
-
-  stripScratch(): void {
-    for (const block of this.blocks) {
-      if (block.type === "toolCall") delete block.partialArguments;
-    }
   }
 
   private endText(): void {
@@ -273,8 +276,11 @@ class CompletionAssembler {
     const block = this.openToolCalls.get(index);
     if (block === undefined || this.closedToolCalls.has(index)) return;
     this.closedToolCalls.add(index);
-    block.arguments = parseStreamingJson(block.partialArguments ?? "");
-    delete block.partialArguments;
+    const args = this.toolCallArguments.get(index);
+    this.toolCallArguments.delete(index);
+    // One full parse of the complete text; malformed arguments set
+    // `argumentsError`, which tool validation reports back to the model.
+    Object.assign(block, (args ?? new ToolCallArgumentsStream()).finish());
     this.stream.push({
       contentIndex: this.indexOf(block),
       partial: this.output,
@@ -308,10 +314,10 @@ class CompletionAssembler {
           arguments: {},
           id: call.id ?? crypto.randomUUID(),
           name: name ?? "",
-          partialArguments: "",
           type: "toolCall"
         };
         this.openToolCalls.set(index, block);
+        this.toolCallArguments.set(index, new ToolCallArgumentsStream());
         this.blocks.push(block);
         this.stream.push({
           contentIndex: this.indexOf(block),
@@ -324,8 +330,12 @@ class CompletionAssembler {
       }
       this.lastToolIndex = index;
       if (args.length > 0) {
-        block.partialArguments = (block.partialArguments ?? "") + args;
-        block.arguments = parseStreamingJson(block.partialArguments);
+        let stream = this.toolCallArguments.get(index);
+        if (stream === undefined) {
+          stream = new ToolCallArgumentsStream();
+          this.toolCallArguments.set(index, stream);
+        }
+        block.arguments = stream.append(args);
         this.stream.push({
           contentIndex: this.indexOf(block),
           delta: args,
@@ -559,7 +569,7 @@ export function streamCompletions(
 
       const prepared = workersAI
         ? prepareChatCompletionsRequest(strict, model.id)
-        : { body: strict, reasoningOff: false, warnings: [] };
+        : { body: strict, warnings: [] };
       recordWarnings(output, [...ignored, ...prepared.warnings]);
       const overridden = await options.onPayload?.(prepared.body, model);
       const payload =
@@ -608,11 +618,7 @@ export function streamCompletions(
           request.streamIdleTimeoutMs
         ).pipeThrough(sseDataStream());
         const chunks = workersAI
-          ? decoded.pipeThrough(
-              normalizeChatCompletionsStream(model.id, {
-                reasoningOff: prepared.reasoningOff
-              })
-            )
+          ? decoded.pipeThrough(normalizeChatCompletionsStream(model.id))
           : decoded;
         const reader = chunks.getReader();
         try {
@@ -663,7 +669,6 @@ export function streamCompletions(
       if (response?.body !== null && response?.body?.locked === false) {
         void response.body.cancel().catch(() => {});
       }
-      assembler.stripScratch();
       failStream(stream, output, error, options.signal);
     }
   })();

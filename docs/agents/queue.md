@@ -47,7 +47,8 @@ circuit breaker. See [Durable Object lifecycle](./lifecycle.md#the-job-queue).
 Queue's API is small: callbacks are registered by name in the constructor,
 `push()` creates items typed against that registration, and `get()`,
 `list()`, `cancel()`, and `cancelAll()` manage them. All of these are
-asynchronous and work inside routed sub-agents.
+asynchronous. Inside a sub-agent, items are stored in the sub-agent itself
+and run there; the top-level parent's alarm wakes it.
 
 Queue Lifecycle hooks run without ambient host context. Registered callbacks
 are user code, so they run inside the host invocation context with the
@@ -144,9 +145,22 @@ class MyAgent extends Agent {
 5. **Terminal failure**: after the last attempt the item is dropped, a
    `queue:error` event is emitted, and Agent's `onError` (or the Queue's
    `onError` option) observes the error.
-6. **Recovery**: an isolate that dies mid-callback wakes again on the
+6. **Downstream outages**: a callback that fails with a transient platform
+   error (a `retryable` error, a dropped connection) keeps its item and
+   holds the queue back, in order, for 30 seconds at a time. After 15
+   minutes of that, the item is dropped as a terminal failure and the
+   items behind it run.
+7. **Recovery**: an isolate that dies mid-callback wakes again on the
    Lifecycle deadman alarm and resumes the queue, so callbacks should be
-   idempotent.
+   idempotent. Each death the Lifecycle does not see end counts as an attempt,
+   whatever caused it (the callback exceeding the CPU or wall-time limit, a
+   deploy or another reset landing mid-callback). A failure that comes back
+   as an error, such as a routed callback's reset reported by the call, is
+   handled like any other platform failure and not counted. After `maxAttempts` of them, and never fewer than
+   3, the item is dropped as a terminal failure with an error named
+   `JobAttemptsExhaustedError`, so an item that keeps taking the isolate
+   down cannot run forever. The floor of 3 is there so a single deploy does
+   not drop an item with `maxAttempts: 1`.
 
 ## Use cases
 

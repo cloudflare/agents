@@ -4,7 +4,7 @@ import {
   runInDurableObject,
   runDurableObjectAlarm
 } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "..";
 import type { TestAlarmInitAgent } from "./agents/schedule";
 
@@ -25,6 +25,38 @@ describe("scheduled destroys", () => {
     await agentStub.makeSelfDestructingAlarmDue();
     const result = await runDurableObjectAlarm(agentStub);
     expect(result).toBe(true);
+  });
+});
+
+describe("a destroy from a scheduled callback", () => {
+  it("aborts only after the alarm handler has returned (#2605)", async () => {
+    const agentStub = await getAgentByName(
+      env.TestDestroyScheduleAgent,
+      `alarm-destroy-order-${crypto.randomUUID()}`
+    );
+    const id = await agentStub.objectIdForTest();
+    await agentStub.scheduleSelfDestructingAlarm(86400);
+    await agentStub.makeSelfDestructingAlarmDue();
+    await runDurableObjectAlarm(agentStub).catch(() => {});
+
+    // An abort inside the handler, or right after it, left the fallback
+    // alarm it set to construct the object again 30 s later (measured).
+    const reader = await getAgentByName(
+      env.TestDestroyScheduleAgent,
+      "destroy-order-reader"
+    );
+    await vi.waitFor(async () => {
+      const order = await reader.destroyOrderForTest(id);
+      expect(order).toEqual([
+        "alarm returned",
+        expect.stringMatching(/^abort \+\d+$/)
+      ]);
+    });
+    const order = await reader.destroyOrderForTest(id);
+    // Not right away: an abort that soon still let the deleted alarm run.
+    expect(
+      Number(order.at(-1)!.slice("abort +".length))
+    ).toBeGreaterThanOrEqual(450);
   });
 });
 

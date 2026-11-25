@@ -57,8 +57,7 @@ export type MemoryLimitContext = {
    * backed off or purged its row before invoking memory-limit policy.
    *
    * Capabilities whose durable state outlives their queue row use this to
-   * apply the same policy to the underlying work — Tasks routes a struck
-   * routed job's owner this way (see `setTaskRoutedMemoryLimitHandler`).
+   * apply the same policy to the underlying work.
    */
   readonly executing?: LifecycleJob;
   /**

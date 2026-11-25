@@ -100,6 +100,44 @@ export interface RenderWebSearchResultsOptions {
 }
 
 /**
+ * Search results as the pi tool's `structuredOutput`, which code mode scripts
+ * get: the query and each result's title, URL, description (trimmed as the
+ * model's view trims it) and modified date.
+ */
+export function webSearchStructuredOutput(
+  response: WebSearchResponse,
+  options: RenderWebSearchResultsOptions = {}
+): WebSearchStructuredOutput {
+  const maxChars =
+    options.maxDescriptionChars ?? DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS;
+  return {
+    query: response.metadata.query,
+    items: response.items.map((item) => {
+      const result: WebSearchStructuredOutput["items"][number] = {
+        title: item.title.trim() || item.url,
+        url: item.url
+      };
+      const description = compactDescription(item.description, maxChars);
+      if (description) result.description = description;
+      if (item.lastModifiedDate)
+        result.lastModifiedDate = item.lastModifiedDate;
+      return result;
+    })
+  };
+}
+
+/** What {@link webSearchStructuredOutput} returns. */
+export type WebSearchStructuredOutput = {
+  query: string;
+  items: {
+    title: string;
+    url: string;
+    description?: string;
+    lastModifiedDate?: string;
+  }[];
+};
+
+/**
  * Render search results as the text the model reads: one numbered block per
  * result, descriptions trimmed and whitespace collapsed.
  */

@@ -6,7 +6,7 @@
  * request id so replay-by-request rides the capability's indexed lookup.
  *
  * Handles:
- * - Chunk buffering (packed segments — batched writes for storage-op economy)
+ * - Chunk buffering (Streams' batched appends: one block per 10 chunks)
  * - Stream lifecycle (start, complete, error) mapped onto Streams settlement
  * - Chunk replay for reconnecting clients (framing in `replay-frames.ts`)
  * - Stale stream cleanup (row-level retention; at most one indexed
@@ -25,29 +25,36 @@
 import { nanoid } from "nanoid";
 import type { Connection } from "agents";
 import { Streams, type StreamsSyncInternal } from "../streams/streams";
-import type { StreamJson, StreamRow, StreamState } from "../streams/types";
+import type { StreamRow } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
-import { CHUNK_MAX_BYTES, storedChunkBytes } from "./chunk-size";
+import {
+  CHAT_LEGACY_COUNTER,
+  CHAT_RETIRED_COUNTER,
+  importLegacyChatProgress,
+  importLegacyChatStreams
+} from "./legacy-chat-streams";
+import {
+  latestChatRowByTag,
+  parseChatMetadata,
+  storedBodies,
+  toPublicStatus,
+  type PublicStreamStatus
+} from "./stream-rows";
+import {
+  REPLAY_CHUNK_BYTES,
+  REPLAY_ITEM_BYTES,
+  utf8Length
+} from "../internal/platform-limits";
 import type { ChatTurnOutcome } from "./wire-types";
 
-/** Number of chunks to pack into a single stored segment before flushing */
-const CHUNK_BUFFER_SIZE = 10;
-/** Maximum buffer size to prevent memory issues on rapid reconnections */
-const CHUNK_BUFFER_MAX_SIZE = 100;
 /**
- * Max accumulated raw chunk bytes packed into one segment before forcing a
- * flush. The SQLite row limit is 2 MB; packing serializes bodies into a JSON
- * array, which re-escapes their contents (quotes/backslashes), so we keep the
- * raw total well under the limit to leave generous headroom for escaping
- * overhead. A chunk larger than this is flushed as its own (unwrapped)
- * segment.
+ * When a turn's buffered chunks are written: every 10 chunks or 512 KB, in
+ * one row write, into the stream's newest block while it stays under
+ * 256 KB (a turn's stream is deleted whole, one row per block). Each chunk
+ * keeps its own seq. A crash loses at most the 9 chunks still buffered, as
+ * a packed segment did.
  */
-const SEGMENT_MAX_BYTES = 512_000;
-/**
- * Stored segments per page when replaying a stream's chunk log. Bounds
- * replay memory to one page of segment bodies rather than the whole turn.
- */
-const REPLAY_PAGE_SEGMENTS = 10;
+const CHUNK_BATCH = { maxChunks: 10, maxBytes: 512_000, fillBlocks: true };
 /**
  * Retention for abandoned `streaming` rows, measured from LAST chunk activity.
  *
@@ -67,19 +74,12 @@ const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 const MAX_REMEMBERED_DELETED_TERMINALS = 32;
 
 /**
- * Ceiling for one stored chat segment after JSON serialization, and the
- * `maxChunkBytes` the backing Streams capability must be constructed with.
- * Kept under the 2 MB SQLite row limit with headroom for escaping.
- */
-const CHAT_STREAM_MAX_CHUNK_BYTES = 1_900_000;
-
-/**
  * Construct the Streams capability instance a chat host must install to back
  * its `ResumableStream`: identical to `new Streams()` except for the raised
  * per-chunk ceiling that chat's packed segments require.
  */
 export function createChatStreams(): Streams {
-  return new Streams({ maxChunkBytes: CHAT_STREAM_MAX_CHUNK_BYTES });
+  return new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
 }
 
 /**
@@ -88,7 +88,7 @@ export function createChatStreams(): Streams {
  * a stream some other producer opened on the same Durable Object. The turn's
  * request id lives in the stream's indexed `tag`.
  */
-type ChatStreamMetadata = {
+export type ChatStreamMetadata = {
   cfChat: 1;
   /**
    * The assistant message id this stream is producing, captured when the
@@ -104,6 +104,15 @@ type ChatStreamMetadata = {
    * appends under it so the reconstructed message lands on the same branch.
    */
   parentMessageId?: string;
+  /**
+   * Set when the stream extends an existing assistant message (`messageId`):
+   * how many parts that message held when the stream started. The stream's
+   * chunks hold only what came after, so orphan recovery replays them onto
+   * that many leading parts of the stored message, which keeps the earlier
+   * parts and makes recovering the same stream twice idempotent. Absent for a
+   * stream that produces a message of its own.
+   */
+  basePartCount?: number;
   /**
    * Whether this stream is a continuation (appends to the last assistant
    * message rather than starting a new one). Live broadcast frames carry
@@ -130,36 +139,29 @@ type ChatStreamMetadata = {
    * that completed normally.
    */
   outcome?: ChatTurnOutcome;
-  /** Terminal evidence pinned until its consumer durably settles and releases it. */
+  /**
+   * Set when the stream was closed with no producer left: an isolate reset
+   * cut the turn off, and a reconnecting tab's resume (or recovery itself)
+   * closed the row. The row reads `completed`, but the model never finished
+   * the reply, so recovery still continues the turn.
+   */
+  cutOff?: boolean;
+  /**
+   * Set on a stream whose chunks are stored one per seq (Streams' batched
+   * appends). Absent on a stream from a version that stored packed
+   * segments, one seq per up to 10 chunks: the recovery work meter counts
+   * those seqs as they are.
+   */
+  perChunk?: 1;
 };
 
-/** Public status vocabulary predates the Streams state names. */
-type PublicStreamStatus = "streaming" | "completed" | "error";
-
-function toPublicStatus(state: StreamRow["state"]): PublicStreamStatus {
-  return state === "errored" ? "error" : state;
-}
-
-function parseChatMetadata(row: StreamRow): ChatStreamMetadata | null {
-  if (row.metadata === null) return null;
-  try {
-    const parsed = JSON.parse(row.metadata) as Partial<ChatStreamMetadata>;
-    if (parsed && parsed.cfChat === 1) return parsed as ChatStreamMetadata;
-  } catch {
-    // Not chat metadata.
-  }
-  return null;
-}
-
 /**
- * A stored segment is either a single chunk body (a JSON string value) or a
- * packed segment (a JSON array of chunk body strings). Unpack to the
- * individual chunk bodies in order.
+ * The recovery work units `seqs` stored seqs of a stream are: one per seq
+ * for a stream of packed segments, one per 10 chunks (rounded up) for a
+ * stream stored one chunk per seq, so a unit is what a segment held.
  */
-function unpackSegment(rawChunkJson: string): string[] {
-  const parsed = JSON.parse(rawChunkJson) as StreamJson;
-  if (Array.isArray(parsed)) return parsed as string[];
-  return [parsed as string];
+function workUnits(chat: ChatStreamMetadata, seqs: number): number {
+  return chat.perChunk === 1 ? Math.ceil(seqs / CHUNK_BATCH.maxChunks) : seqs;
 }
 
 /**
@@ -171,19 +173,6 @@ export type SqlTaggedTemplate = {
     strings: TemplateStringsArray,
     ...values: (string | number | boolean | null)[]
   ): T[];
-};
-
-/** Host hooks for the chat stream adapter. */
-export type ResumableStreamOptions = {
-  /**
-   * Called with the durable part of the recovery progress marker (retired
-   * segments plus credits plus the seeded legacy counter) after it advances,
-   * outside any transaction. Hosts mirror it to the pre-derivation KV key so
-   * a build rolled back to the KV counter never reads a marker lower than
-   * an incident recorded under this one. Fires per stream retired and per
-   * credit, never per chunk.
-   */
-  onProgress?: (durableSegments: number) => void;
 };
 
 /**
@@ -219,9 +208,8 @@ export class ResumableStream {
    */
   private _nextChunkSeq: number | null = null;
 
-  private _chunkBuffer: Array<{ streamId: string; body: string }> = [];
-  private _chunkBufferBytes = 0;
-  private _isFlushingChunks = false;
+  /** The stream with chunks waiting in Streams' buffer, if any. */
+  private _bufferedStreamId: string | null = null;
   /**
    * A stream whose producer finished but whose row is deliberately still
    * `streaming`: the host will {@link cutover} it together with the message
@@ -233,16 +221,20 @@ export class ResumableStream {
 
   private readonly ops: StreamsSyncInternal;
 
+  /** @internal The Streams sync aperture this adapter reads and writes. */
+  get streamOps(): StreamsSyncInternal {
+    return this.ops;
+  }
+
   constructor(
     streams: Streams,
     sql: SqlTaggedTemplate,
-    options: ResumableStreamOptions = {}
+    /** Whether this is a facet, which empties the legacy chat tables. */
+    isFacet: () => boolean = () => false
   ) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
-    this._sql = sql;
-    this._onProgress = options.onProgress;
-    this._ensureProgressTable();
+    importLegacyChatProgress(sql, this.ops, isFacet);
     // Every path that removes a chat row's log — this adapter's cutover,
     // reclaim and clear, and the capability's public `delete()` — folds the
     // row's segments into the retired total first. Registered before the
@@ -254,11 +246,11 @@ export class ResumableStream {
       this.ops.onDelete((row, cursor) => {
         const chat = parseChatMetadata(row);
         if (!chat) return;
-        this._retire(cursor);
+        this._retire(workUnits(chat, cursor));
         this._rememberDeleted(row, chat);
       })
     );
-    this._migrateLegacyTables(sql);
+    importLegacyChatStreams(sql, this.ops, isFacet);
     // Restore any active stream from a previous session
     this.restore();
   }
@@ -276,61 +268,37 @@ export class ResumableStream {
   // never moves when rows go away. Nothing is written per chunk; one row is
   // written per stream retired.
 
-  private readonly _sql: SqlTaggedTemplate;
-  private readonly _onProgress: ResumableStreamOptions["onProgress"];
-
   /**
-   * Tell the host the durable part of the marker moved. Called after the
-   * write that moved it has left any transaction, never inside one: the
-   * host's mirror is an async KV put, which a synchronous transaction
-   * would reject.
+   * Two counters kept with the Streams capability: `retired` accumulates
+   * the segments of deleted streams and explicit credits; `legacy` holds
+   * the pre-derivation KV counter, folded in once. They are separate so a
+   * seed can never swallow segments retired before it landed, and a
+   * repeated seed is idempotent.
    */
-  private _notifyProgress(): void {
-    this._onProgress?.(this._retiredSegments());
-  }
-
-  /**
-   * One row: `retired` accumulates the segments of deleted streams and
-   * explicit credits; `legacy` holds the pre-derivation KV counter, folded
-   * in once. They are separate columns so a seed can never swallow
-   * segments retired before it landed, and a repeated seed is idempotent.
-   */
-  private _ensureProgressTable(): void {
-    this._sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_chat_progress (
-        key TEXT PRIMARY KEY,
-        retired INTEGER NOT NULL,
-        legacy INTEGER NOT NULL DEFAULT 0
-      ) WITHOUT ROWID
-    `;
-  }
-
   private _retiredSegments(): number {
-    const rows = this._sql<{ retired: number; legacy: number }>`
-      SELECT retired, legacy FROM cf_agents_chat_progress WHERE key = 'chat'
-    `;
-    const row = rows[0];
-    return row ? row.retired + row.legacy : 0;
+    return (
+      this.ops.counter(CHAT_RETIRED_COUNTER) +
+      this.ops.counter(CHAT_LEGACY_COUNTER)
+    );
   }
 
   /** Add `segments` to the retired total. One row write; a no-op for zero. */
   private _retire(segments: number): void {
     if (segments <= 0) return;
-    this._sql`
-      INSERT INTO cf_agents_chat_progress (key, retired, legacy)
-      VALUES ('chat', ${segments}, 0)
-      ON CONFLICT(key) DO UPDATE SET retired = retired + excluded.retired
-    `;
+    this.ops.addToCounter(CHAT_RETIRED_COUNTER, segments);
   }
 
   /**
-   * Segments a row still accounts for: a live stream's log tail, a settled
-   * stream's final cursor (stamped exact at settlement).
+   * Work units a row still accounts for, from a live stream's log tail or
+   * a settled stream's final cursor (stamped exact at settlement).
    */
-  private _segmentsOf(row: StreamRow): number {
-    return row.state === "streaming"
-      ? this.ops.cursor(row.stream_id)
-      : row.chunk_count;
+  private _segmentsOf(row: StreamRow & { chat: ChatStreamMetadata }): number {
+    return workUnits(
+      row.chat,
+      row.state === "streaming"
+        ? this.ops.cursor(row.stream_id)
+        : row.chunk_count
+    );
   }
 
   /**
@@ -362,17 +330,19 @@ export class ResumableStream {
    */
   creditProgress(): void {
     this._retire(1);
-    this._notifyProgress();
   }
 
   /**
-   * Carry the pre-derivation KV counter forward: the marker must not read
-   * lower after the upgrade than the high-water mark an in-flight incident
-   * already recorded, or a progressing turn would look stuck until the log
-   * caught up. The counter is never written again, so its value is a
-   * constant this folds into its own column by max — idempotent across
-   * isolates, and never touching segments retired before the seed landed.
-   * A no-op for zero, so a fresh object never writes.
+   * Carry the KV counter forward: the marker must not read lower than the
+   * high-water mark an in-flight incident already recorded, or a
+   * progressing turn would look stuck until the log caught up. The counter
+   * is either the pre-derivation one or the mirror of this marker's
+   * durable part that earlier versions wrote (`retired + legacy`). Either way
+   * it already counts every segment retired here, so the seed raises
+   * `legacy` only to `counter - retired`: the marker then reads at least
+   * the counter, and a mirrored value folds in as a no-op instead of adding
+   * the retired history again on every isolate (#2702). Idempotent, and a
+   * no-op for zero, so a fresh object never writes.
    *
    * The counter already credited a stream that was in flight at the
    * upgrade, and that stream's live segments count again here, so the
@@ -382,12 +352,12 @@ export class ResumableStream {
    */
   seedProgress(legacyTotal: number): void {
     if (legacyTotal <= 0) return;
-    this._sql`
-      INSERT INTO cf_agents_chat_progress (key, retired, legacy)
-      VALUES ('chat', 0, ${legacyTotal})
-      ON CONFLICT(key) DO UPDATE
-        SET legacy = MAX(legacy, excluded.legacy)
-    `;
+    const legacy = this.ops.counter(CHAT_LEGACY_COUNTER);
+    const raised = Math.max(
+      legacy,
+      legacyTotal - this.ops.counter(CHAT_RETIRED_COUNTER)
+    );
+    if (raised !== legacy) this.ops.setCounter(CHAT_LEGACY_COUNTER, raised);
   }
 
   /**
@@ -398,111 +368,6 @@ export class ResumableStream {
   private _deleteRetiring(rows: readonly StreamRow[]): void {
     if (rows.length === 0) return;
     this.ops.deleteMany(rows.map((row) => row.stream_id));
-    this._notifyProgress();
-  }
-
-  /**
-   * One-time migration of the pre-capability `cf_ai_chat_stream_*` tables
-   * into the Streams tables, preserving in-flight resumability across the
-   * upgrade (an active stream keeps its id, chunks, and last-activity), then
-   * dropping the legacy tables. Tolerates the pre-#1691/#1733 metadata
-   * schema (no `message_id` / `is_continuation` columns). The host `sql`
-   * handle touches only these chat-owned legacy tables.
-   */
-  private _migrateLegacyTables(sql: SqlTaggedTemplate): void {
-    const legacyTables = sql<{ name: string }>`
-      SELECT name FROM sqlite_master WHERE type = 'table'
-      AND name IN ('cf_ai_chat_stream_metadata', 'cf_ai_chat_stream_chunks')
-    `.map((row) => row.name);
-    if (legacyTables.length === 0) return;
-
-    if (legacyTables.includes("cf_ai_chat_stream_metadata")) {
-      const columns = sql<{ name: string }>`
-        SELECT name FROM pragma_table_info('cf_ai_chat_stream_metadata')
-      `.map((row) => row.name);
-      const hasMessageId = columns.includes("message_id");
-      const hasContinuation = columns.includes("is_continuation");
-      const hasChunks = legacyTables.includes("cf_ai_chat_stream_chunks");
-
-      const rows = sql<{
-        id: string;
-        request_id: string;
-        status: string;
-        created_at: number;
-        completed_at: number | null;
-        message_id?: string | null;
-        is_continuation?: number | null;
-      }>`SELECT * FROM cf_ai_chat_stream_metadata`;
-      for (const row of rows) {
-        const streamId = String(row.id);
-        if (this.ops.getStream(streamId)) continue;
-
-        const metadata: ChatStreamMetadata = { cfChat: 1 };
-        if (hasMessageId && row.message_id != null) {
-          metadata.messageId = String(row.message_id);
-        }
-        if (hasContinuation && row.is_continuation === 1) {
-          metadata.isContinuation = 1;
-        }
-
-        const chunkRows = hasChunks
-          ? sql<{ body: string; created_at: number }>`
-              SELECT body, created_at FROM cf_ai_chat_stream_chunks
-              WHERE stream_id = ${streamId} ORDER BY chunk_index ASC
-            `
-          : [];
-
-        const status = String(row.status);
-        const state: StreamState =
-          status === "error"
-            ? "errored"
-            : status === "completed"
-              ? "completed"
-              : "streaming";
-        const createdAt = Number(row.created_at);
-        const closedAt =
-          row.completed_at != null ? Number(row.completed_at) : null;
-        // Preserve last-activity semantics: the legacy sweep keyed off the
-        // newest chunk write, falling back to the stream's start time.
-        const lastChunkAt = chunkRows.reduce(
-          (max, chunk) => Math.max(max, Number(chunk.created_at)),
-          createdAt
-        );
-
-        // The row is imported complete: final chunk count and last-activity
-        // timestamp up front, because importChunk is a bare log INSERT that
-        // never touches the stream row. A terminal row must carry its exact
-        // cursor at rest (nothing stamps it later), and a live row's
-        // updated_at seeds the sweep's coarse cutoff until real appends
-        // resume.
-        this.ops.importStream({
-          streamId,
-          state,
-          tag: String(row.request_id),
-          metadata,
-          chunkCount: chunkRows.length,
-          createdAt,
-          updatedAt: closedAt ?? lastChunkAt,
-          closedAt
-        });
-        for (const chunk of chunkRows) {
-          const body = String(chunk.body);
-          // A legacy row body is either a packed JSON array of chunk bodies
-          // (imported verbatim as that array) or a single opaque body string.
-          let value: StreamJson = body;
-          try {
-            const parsed = JSON.parse(body) as StreamJson;
-            if (Array.isArray(parsed)) value = parsed;
-          } catch {
-            // Opaque body string.
-          }
-          this.ops.importChunk(streamId, value, Number(chunk.created_at));
-        }
-      }
-    }
-
-    sql`DROP TABLE IF EXISTS cf_ai_chat_stream_chunks`;
-    sql`DROP TABLE IF EXISTS cf_ai_chat_stream_metadata`;
   }
 
   // ── State accessors ────────────────────────────────────────────────
@@ -540,6 +405,7 @@ export class ResumableStream {
     options: {
       messageId?: string;
       parentMessageId?: string;
+      basePartCount?: number;
       continuation?: boolean;
       originMessageIds?: string[];
     } = {}
@@ -565,8 +431,12 @@ export class ResumableStream {
     if (options.parentMessageId != null) {
       metadata.parentMessageId = options.parentMessageId;
     }
+    if (options.basePartCount != null) {
+      metadata.basePartCount = options.basePartCount;
+    }
     if (this._activeIsContinuation) metadata.isContinuation = 1;
     if (seqBase > 0) metadata.seqBase = seqBase;
+    metadata.perChunk = 1;
     if (options.originMessageIds?.length) {
       metadata.originMessageIds = options.originMessageIds;
     }
@@ -576,10 +446,10 @@ export class ResumableStream {
   }
 
   private _nextSeqForRequest(requestId: string): number {
-    const prior = this._latestChatRowByTag(requestId);
+    const prior = latestChatRowByTag(this.ops, requestId);
     if (!prior) return 0;
     let count = 0;
-    for (const _body of this._storedBodies(prior.stream_id)) count++;
+    for (const _body of storedBodies(this.ops, prior.stream_id)) count++;
     return (parseChatMetadata(prior)?.seqBase ?? 0) + count;
   }
 
@@ -601,6 +471,23 @@ export class ResumableStream {
   }
 
   /**
+   * How many parts the message an orphaned stream extends held when the
+   * stream started, or null when the stream produces a message of its own.
+   */
+  getStreamBasePartCount(streamId: string): number | null {
+    const row = this.ops.getStream(streamId);
+    if (!row) return null;
+    return parseChatMetadata(row)?.basePartCount ?? null;
+  }
+
+  /** Whether a stream was started for a continuation of an earlier turn. */
+  getStreamIsContinuation(streamId: string): boolean {
+    const row = this.ops.getStream(streamId);
+    if (!row) return false;
+    return parseChatMetadata(row)?.isContinuation === 1;
+  }
+
+  /**
    * The message an orphaned stream's assistant message is a child of, or null
    * when the stream appends to the latest leaf or predates parent tracking.
    */
@@ -615,7 +502,7 @@ export class ResumableStream {
    * (#2280), or undefined when no stream recorded them.
    */
   getOriginMessageIds(requestId: string): string[] | undefined {
-    const row = this._latestChatRowByTag(requestId);
+    const row = latestChatRowByTag(this.ops, requestId);
     return (
       (row ? parseChatMetadata(row)?.originMessageIds : undefined) ??
       this._deletedTerminals.get(requestId)?.messageIds
@@ -627,7 +514,7 @@ export class ResumableStream {
    * or {@link finish}), or undefined for a normal completion.
    */
   getOutcome(requestId: string): ChatTurnOutcome | undefined {
-    const row = this._latestChatRowByTag(requestId);
+    const row = latestChatRowByTag(this.ops, requestId);
     return (
       (row ? parseChatMetadata(row)?.outcome : undefined) ??
       this._deletedTerminals.get(requestId)?.outcome
@@ -657,12 +544,20 @@ export class ResumableStream {
     }
   }
 
-  private _recordOutcome(streamId: string, outcome?: ChatTurnOutcome): void {
-    if (outcome === undefined || outcome === "completed") return;
+  private _recordOutcome(
+    streamId: string,
+    outcome?: ChatTurnOutcome,
+    cutOff = false
+  ): void {
+    if (!cutOff && (outcome === undefined || outcome === "completed")) return;
     const row = this.ops.getStream(streamId);
     const chat = row ? parseChatMetadata(row) : null;
     if (!chat) return;
-    this.ops.setMetadata(streamId, { ...chat, outcome });
+    this.ops.setMetadata(streamId, {
+      ...chat,
+      ...(outcome !== undefined && outcome !== "completed" && { outcome }),
+      ...(cutOff && { cutOff: true })
+    });
   }
 
   /**
@@ -676,7 +571,8 @@ export class ResumableStream {
     const orphaned = streamId === this._activeStreamId && !this._isLive;
     this._recordOutcome(
       streamId,
-      outcome ?? (orphaned ? "aborted" : undefined)
+      outcome ?? (orphaned ? "aborted" : undefined),
+      orphaned
     );
     this.ops.settle(streamId, "completed", null);
     if (this._pendingCutover === streamId) this._pendingCutover = null;
@@ -718,7 +614,9 @@ export class ResumableStream {
     persist: () => void,
     options: { discard?: boolean } = {}
   ): void {
-    this.flushBuffer();
+    // No flush: the settle writes the buffered chunks, or drops them with
+    // the rows it discards.
+    if (this._bufferedStreamId === streamId) this._bufferedStreamId = null;
     const discard = options.discard ?? true;
     const commit = persist;
     // The discard deletes the rows inside the settle transaction, and the
@@ -728,7 +626,6 @@ export class ResumableStream {
       commit,
       discard
     });
-    if (settled && discard) this._notifyProgress();
     // The stream was settled (or deleted) by another path first, so the
     // settle was a no-op and `persist` did not run: the message must still
     // land, just not atomically with a settlement that already happened.
@@ -786,8 +683,9 @@ export class ResumableStream {
     // Guard against chunks that would exceed the SQLite row limit, measured
     // on the stored (JSON-escaped) encoding. The chunk is still broadcast to
     // live clients; only replay storage is skipped.
-    const bodyBytes = storedChunkBytes(body);
-    if (bodyBytes > CHUNK_MAX_BYTES) {
+    const json = JSON.stringify(body);
+    const bodyBytes = utf8Length(json);
+    if (bodyBytes > REPLAY_CHUNK_BYTES) {
       console.warn(
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
           `to prevent SQLite row limit crash. Live clients still receive it.`
@@ -798,94 +696,34 @@ export class ResumableStream {
       streamId === this._activeStreamId && this._nextChunkSeq !== null
         ? this._nextChunkSeq++
         : undefined;
-
-    // Force flush if buffer is at max to prevent memory issues
-    if (this._chunkBuffer.length >= CHUNK_BUFFER_MAX_SIZE) {
-      this.flushBuffer();
-    }
-
-    // Byte guard: keep a packed segment safely under the SQLite row limit. If
-    // the buffer already holds chunks and adding this body would push the
-    // segment past the threshold, flush first so this chunk starts a fresh
-    // segment. A single large chunk therefore ends up alone and is written
-    // unwrapped by flushBuffer (no array-escaping inflation).
-    if (
-      this._chunkBuffer.length > 0 &&
-      this._chunkBufferBytes + bodyBytes > SEGMENT_MAX_BYTES
-    ) {
-      this.flushBuffer();
-    }
-
-    this._chunkBuffer.push({ streamId, body });
-    this._chunkBufferBytes += bodyBytes;
-
-    // Flush when buffer reaches the per-segment chunk threshold
-    if (this._chunkBuffer.length >= CHUNK_BUFFER_SIZE) {
-      this.flushBuffer();
+    // One stream buffers at a time: start() flushes before switching.
+    if (this._bufferedStreamId !== streamId) this.flushBuffer();
+    try {
+      this.ops.appendJson(streamId, json, bodyBytes, CHUNK_BATCH);
+      this._bufferedStreamId = streamId;
+    } catch {
+      // The stream settled or was deleted (a late writer after markError or
+      // cleanup), or its write failed; the chunk is dropped from replay.
     }
     return seq;
   }
 
   /**
-   * Flush the buffered chunks to storage as a single packed segment.
-   * Uses a lock to prevent concurrent flush operations.
-   *
-   * The whole buffer becomes one stored chunk on the backing stream: a
-   * single-chunk segment is stored unwrapped so a large chunk avoids
-   * array-escaping inflation, while a multi-chunk segment stores a JSON
-   * array of bodies. This collapses N chunk writes into one fenced append,
-   * cutting rows written / stored / scanned.
+   * Write the buffered chunks now, as one block (one INSERT). A write that
+   * fails drops them, as a crash would.
    */
   flushBuffer() {
-    if (this._isFlushingChunks || this._chunkBuffer.length === 0) {
-      return;
-    }
-
-    this._isFlushingChunks = true;
+    const streamId = this._bufferedStreamId;
+    if (streamId === null) return;
+    this._bufferedStreamId = null;
     try {
-      const chunks = this._chunkBuffer;
-      this._chunkBuffer = [];
-      this._chunkBufferBytes = 0;
-
-      // All chunks in a buffer belong to the same stream: start() flushes
-      // before switching streams, so the buffer is never cross-stream.
-      const streamId = chunks[0].streamId;
-      const segment: StreamJson =
-        chunks.length === 1
-          ? chunks[0].body
-          : chunks.map((chunk) => chunk.body);
-
-      try {
-        this.ops.append(streamId, segment);
-      } catch {
-        // The stream settled or was deleted while chunks were buffered (a
-        // late writer after markError/cleanup); the chunks are dropped.
-      }
-    } finally {
-      this._isFlushingChunks = false;
+      this.ops.flush(streamId);
+    } catch {
+      // The write failed; the buffered chunks are dropped.
     }
   }
 
   // ── Chunk replay ───────────────────────────────────────────────────
-
-  /**
-   * Stored chunk bodies for one stream, packed segments expanded, in order.
-   * A generator over paged reads, so replaying a large turn holds one page
-   * of segments in memory instead of the whole stored stream; iteration is
-   * synchronous end to end (WebSocket sends don't await), so the pages see
-   * a consistent log.
-   */
-  private *_storedBodies(streamId: string): Generator<string> {
-    let next = 0;
-    for (;;) {
-      const rows = this.ops.readChunks(streamId, next, REPLAY_PAGE_SEGMENTS);
-      for (const row of rows) {
-        next = row.seq + 1;
-        yield* unpackSegment(row.chunk);
-      }
-      if (rows.length < REPLAY_PAGE_SEGMENTS) return;
-    }
-  }
 
   /**
    * Send stored stream chunks to a connection for replay.
@@ -918,9 +756,10 @@ export class ResumableStream {
       !sendReplayBodies(
         connection,
         requestId,
-        this._storedBodies(streamId),
+        storedBodies(this.ops, streamId),
         continuation,
-        this._seqBase(streamId)
+        this._seqBase(streamId),
+        this.getStreamMessageId(streamId) ?? undefined
       )
     ) {
       // Connection closed mid-replay — leave the stream active so the
@@ -959,50 +798,6 @@ export class ResumableStream {
   }
 
   /**
-   * Latest CHAT-owned row carrying a request tag. The stream table is
-   * shared with application producers and tags are non-unique, so the
-   * newest row by tag alone could be an unrelated stream masking chat's
-   * recovery evidence — ownership is the `cfChat` metadata marker.
-   */
-  private _latestChatRowByTag(
-    requestId: string,
-    state?: StreamRow["state"]
-  ): StreamRow | undefined {
-    return this.ops
-      .rowsByTag(requestId, state)
-      .find((row) => parseChatMetadata(row) !== null);
-  }
-
-  replayCompletedChunksByRequestId(
-    connection: Connection,
-    requestId: string
-  ): boolean {
-    this.flushBuffer();
-    const row = this._latestChatRowByTag(requestId, "completed");
-    if (!row) return false;
-
-    const chat = parseChatMetadata(row);
-    const continuation = chat?.isContinuation === 1;
-    if (
-      !sendReplayBodies(
-        connection,
-        requestId,
-        this._storedBodies(row.stream_id),
-        continuation,
-        chat?.seqBase
-      )
-    ) {
-      return false;
-    }
-    return sendReplayControl(connection, requestId, {
-      done: true,
-      continuation,
-      messageIds: chat?.originMessageIds,
-      outcome: chat?.outcome
-    });
-  }
-
-  /**
    * Replay the request's just-closed stream (finished and awaiting its
    * cutover, completed for a recovery, or errored), ending in
    * `replayComplete` rather than `done`: the host has not sent the request's
@@ -1024,9 +819,10 @@ export class ResumableStream {
       !sendReplayBodies(
         connection,
         requestId,
-        this._storedBodies(row.stream_id),
+        storedBodies(this.ops, row.stream_id),
         continuation,
-        chat.seqBase
+        chat.seqBase,
+        chat.messageId
       )
     ) {
       return false;
@@ -1039,49 +835,27 @@ export class ResumableStream {
   }
 
   /**
-   * Replay the stored chunks of an errored stream for a request, WITHOUT a
-   * terminal frame — the caller follows up with the `done: true, error: true`
-   * frame carrying the durable terminal record's error text, mirroring what a
-   * live client observed (content chunks, then the error). Without this, a
-   * client that missed broadcast frames while disconnected has no other
-   * channel to the pre-error partial content (#1575).
-   *
-   * Returns true when the caller should proceed to send its terminal frame:
-   * either no errored stream existed (nothing to replay) or its chunks were
-   * replayed successfully. Returns false only when a send failed mid-replay,
-   * signalling the caller to skip the terminal frame — the connection is gone
-   * and the next reconnect retries the whole sequence.
-   */
-  replayErroredChunksByRequestId(
-    connection: Connection,
-    requestId: string
-  ): boolean {
-    this.flushBuffer();
-    const row = this._latestChatRowByTag(requestId, "errored");
-    if (!row) return true;
-    const chat = parseChatMetadata(row);
-    return sendReplayBodies(
-      connection,
-      requestId,
-      this._storedBodies(row.stream_id),
-      chat?.isContinuation === 1,
-      chat?.seqBase
-    );
-  }
-
-  /**
    * Latest chat stream row for a request regardless of status — the recovery
    * engines' stream-evidence lookup.
    */
-  latestStreamInfoForRequest(
-    requestId: string
-  ): { id: string; status: PublicStreamStatus; createdAt: number } | null {
-    const row = this._latestChatRowByTag(requestId);
+  latestStreamInfoForRequest(requestId: string): {
+    id: string;
+    status: PublicStreamStatus;
+    createdAt: number;
+    /**
+     * The stream was closed with no producer left (see
+     * {@link ChatStreamMetadata.cutOff}). Its `completed` status says the
+     * row is closed, not that the reply finished.
+     */
+    cutOff: boolean;
+  } | null {
+    const row = latestChatRowByTag(this.ops, requestId);
     if (!row) return null;
     return {
       id: row.stream_id,
       status: toPublicStatus(row.state),
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      cutOff: parseChatMetadata(row)?.cutOff === true
     };
   }
 
@@ -1091,7 +865,7 @@ export class ResumableStream {
   latestActiveStreamInfoForRequest(
     requestId: string
   ): { id: string; createdAt: number } | null {
-    const row = this._latestChatRowByTag(requestId, "streaming");
+    const row = latestChatRowByTag(this.ops, requestId, "streaming");
     if (!row) return null;
     return { id: row.stream_id, createdAt: row.created_at };
   }
@@ -1131,8 +905,7 @@ export class ResumableStream {
    * producers opened on the same Durable Object are untouched.
    */
   clearAll() {
-    this._chunkBuffer = [];
-    this._chunkBufferBytes = 0;
+    this._bufferedStreamId = null;
     this._deleteRetiring(this._chatRows());
     this._deletedTerminals.clear();
     this._lastClosedStreamId = null;
@@ -1192,10 +965,20 @@ export class ResumableStream {
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    return [...this._storedBodies(streamId)].map((body, chunk_index) => ({
-      body,
-      chunk_index
-    }));
+    return [...this.storedChunks(streamId)];
+  }
+
+  /**
+   * The same chunks as {@link getStreamChunks}, read one page of segments at
+   * a time, so a reader that stops early decodes no more than it took.
+   */
+  *storedChunks(
+    streamId: string
+  ): Generator<{ body: string; chunk_index: number }> {
+    let chunk_index = 0;
+    for (const body of storedBodies(this.ops, streamId)) {
+      yield { body, chunk_index: chunk_index++ };
+    }
   }
 
   /** @internal For testing only */
@@ -1225,31 +1008,5 @@ export class ResumableStream {
       created_at: row.created_at,
       message_id: row.chat.messageId ?? null
     }));
-  }
-
-  /** @internal For testing only */
-  insertStaleStream(streamId: string, requestId: string, ageMs: number): void {
-    const createdAt = Date.now() - ageMs;
-    this.ops.importStream({
-      streamId,
-      state: "streaming",
-      tag: requestId,
-      metadata: { cfChat: 1 },
-      chunkCount: 0,
-      createdAt,
-      updatedAt: createdAt,
-      closedAt: null
-    });
-  }
-
-  /**
-   * Append a chunk to a stream dated `ageMs` in the past. Used to exercise
-   * reclaim's phase-2 verification: a long-running streaming row with a
-   * *recent* chunk must survive even when its row `updated_at` (stamped at
-   * open, not per append) is older than the coarse cutoff.
-   * @internal For testing only
-   */
-  insertChunkAt(streamId: string, body: string, ageMs: number): void {
-    this.ops.importChunk(streamId, body, Date.now() - ageMs);
   }
 }

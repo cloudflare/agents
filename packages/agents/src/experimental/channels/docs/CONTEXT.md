@@ -91,6 +91,10 @@ One model call plus the tool calls it produced, as in the AI SDK. Used sparingly
 The current view of a conversation: the harness session's transcript plus every turn that is queued, running or awaiting input.
 _Avoid_: Hydration payload, state sync
 
+**Surface delivery**:
+One response on its way to one gateway surface (an email thread, later a Slack thread), as a durable delivery run in the agent object (`deliverToSurfaces`). Retried while the Channel says its failure is retryable; given up, and never posted twice, when it refused it or only part may have arrived.
+_Avoid_: Reply, send
+
 **Response**:
 One streamed, replayable run of agent output within a turn. It either ends, closed by its producer, or is interrupted, because its producer is gone. How the turn went is never a property of the response.
 _Avoid_: Delivery stream, reply, operation
@@ -98,7 +102,7 @@ _Avoid_: Delivery stream, reply, operation
 ## Harnesses
 
 **Harness**:
-An agent loop that keeps its own transcripts behind the shared harness interface (`submit`, `abort`, `wait`, `reset`, `watch`, and session create, fork and list), such as `AiSdkHarness` or the pi harness's adapter. It is the only way an agent connects to Channels: `Channels.forHarness` serves each harness session as one conversation with the same id. The harness's words (session, operation, run) stay in harness-facing code.
+An agent loop that keeps its own transcripts behind the shared harness interface (`submit`, `abort`, `wait`, `reset`, `watch`, and session create, fork and list), such as `ThinkHarness` or the pi harness's adapter. It is the only way an agent connects to Channels: `Channels.forHarness` serves each harness session as one conversation with the same id. The harness's words (session, operation, run) stay in harness-facing code.
 _Avoid_: Session (outside harness-facing code)
 
 **Harness adapter**:

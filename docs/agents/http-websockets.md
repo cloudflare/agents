@@ -43,6 +43,7 @@ Agents have several lifecycle hooks that are called at different points:
 | `onClose(connection, code, reason, wasClean)` | When a WebSocket connection closes                        |
 | `onError(connection, error)`                  | When a WebSocket error occurs                             |
 | `onError(error)`                              | When a server error occurs (overloaded)                   |
+| `onFetchError(request, error)`                | When an HTTP request or WebSocket upgrade fails           |
 
 ### Lifecycle Flow
 
@@ -406,6 +407,8 @@ export class MyAgent extends Agent {
 }
 ```
 
+`onError` observes errors. To choose what the client receives when a request or upgrade fails, override `onFetchError`. By default the client gets `500 Internal Server Error`, or for an upgrade a socket that closes with code `1011`, without the error's details. See [`this.onFetchError`](./agent-class.md#thisonfetcherror).
+
 ## Hibernation
 
 Agent WebSockets always use Cloudflare's Hibernation API. An idle Agent can leave memory while its WebSocket clients remain connected; there is no non-hibernating mode.
@@ -448,33 +451,37 @@ export class MyAgent extends Agent<Env, { counter: number }> {
 
 ## Common Patterns
 
-### Authentication on Connect
+### Authentication
 
-Validate users when they connect:
+Check the caller in your Worker, before `routeAgentRequest()` forwards the upgrade. A client you reject there never reaches the agent, and the agent does not wake up for it.
 
 ```typescript
-export class SecureAgent extends Agent {
-  async onConnect(connection: Connection, ctx: ConnectionContext) {
-    const url = new URL(ctx.request.url);
-    const token = url.searchParams.get("token");
+import { routeAgentRequest } from "agents";
 
-    if (!token || !(await this.validateToken(token))) {
-      connection.close(4001, "Unauthorized");
-      return;
-    }
-
-    const user = await this.getUserFromToken(token);
-    connection.setState({ userId: user.id, role: user.role });
-
-    connection.send(JSON.stringify({ type: "authenticated", user }));
+export default {
+  async fetch(request: Request, env: Env) {
+    return (
+      (await routeAgentRequest(request, env, {
+        onBeforeConnect: async (req) => {
+          const token = new URL(req.url).searchParams.get("token");
+          const user = token ? await verifyToken(token, env) : null;
+          if (!user) {
+            return new Response("Unauthorized", { status: 401 });
+          }
+          // `set` replaces any value the client sent.
+          const forwarded = new Request(req);
+          forwarded.headers.set("x-user-id", user.id);
+          return forwarded;
+        }
+      })) ?? new Response("Not found", { status: 404 })
+    );
   }
-
-  private async validateToken(token: string): Promise<boolean> {
-    // Validate JWT, check database, etc.
-    return true;
-  }
-}
+};
 ```
+
+In `onConnect`, read the checked identity from `ctx.request.headers.get("x-user-id")` and keep it with `connection.setState()`.
+
+You can also reject a connection from `onConnect` by calling `connection.close()`. The agent runs no message, callable, or state update the client sends after that close. That includes frames the client sends as soon as it connects, before it has received the Close frame. Prefer the Worker check anyway: `onConnect` runs inside the agent, so every rejected client still wakes it.
 
 ### Chat Room with Broadcast
 
@@ -616,16 +623,17 @@ export class PresenceAgent extends Agent {
 
 ### Agent Lifecycle Methods
 
-| Method                       | Signature                                                       | Description                                            |
-| ---------------------------- | --------------------------------------------------------------- | ------------------------------------------------------ |
-| `onStart`                    | `(props?) => void \| Promise<void>`                             | Called once when agent starts                          |
-| `onRequest`                  | `(request: Request) => Response \| Promise<Response>`           | Handle HTTP requests                                   |
-| `onConnect`                  | `(connection, ctx) => void \| Promise<void>`                    | WebSocket connected                                    |
-| `onMessage`                  | `(connection, message) => void \| Promise<void>`                | Message received                                       |
-| `onClose`                    | `(connection, code, reason, wasClean) => void \| Promise<void>` | Connection closed                                      |
-| `onError`                    | `(connection, error) => void \| Promise<void>`                  | WebSocket error                                        |
-| `onError`                    | `(error) => void \| Promise<void>`                              | Server error (overload)                                |
-| `shouldSendProtocolMessages` | `(connection, ctx) => boolean`                                  | Control per-connection protocol frames (default: true) |
+| Method                       | Signature                                                           | Description                                            |
+| ---------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------ |
+| `onStart`                    | `(props?) => void \| Promise<void>`                                 | Called once when agent starts                          |
+| `onRequest`                  | `(request: Request) => Response \| Promise<Response>`               | Handle HTTP requests                                   |
+| `onConnect`                  | `(connection, ctx) => void \| Promise<void>`                        | WebSocket connected                                    |
+| `onMessage`                  | `(connection, message) => void \| Promise<void>`                    | Message received                                       |
+| `onClose`                    | `(connection, code, reason, wasClean) => void \| Promise<void>`     | Connection closed                                      |
+| `onError`                    | `(connection, error) => void \| Promise<void>`                      | WebSocket error                                        |
+| `onError`                    | `(error) => void \| Promise<void>`                                  | Server error (overload)                                |
+| `onFetchError`               | `(request, error) => Response \| void \| Promise<Response \| void>` | Choose the response for a failed request or upgrade    |
+| `shouldSendProtocolMessages` | `(connection, ctx) => boolean`                                      | Control per-connection protocol frames (default: true) |
 
 ### Connection Management Methods
 

@@ -17,10 +17,11 @@ test names the missing feature.
 
 An agent that moves onto this class keeps its transcript: the harness reads
 and writes the same Sessions tables (`cf_agents_session_*`) and the root
-session is Think's default session `""`. Work in flight at the moment of the
+session is Think's default session `""`. Its operations are runs of the
+Agent's own Tasks (`this.tasks`), which the class gives the harness. Work in flight at the moment of the
 move (a running turn, a parked approval, a queued submission, a recovery in
 progress) is allowed to die. Think's own tables (`think_config`,
-`cf_think_submissions`, `cf_think_scheduled_tasks`, the action ledger, agent
+submissions in `cf_agents_task_runs`, the action ledger, agent
 tool runs) are not read yet; a feature ported from Think must read the tables
 Think wrote.
 

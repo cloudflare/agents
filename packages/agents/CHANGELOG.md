@@ -1,5 +1,176 @@
 # @cloudflare/agents
 
+## 0.34.0
+
+This release adds support for [Pi 1.6](https://github.com/earendil-works/pi/blob/v1.6.0/packages/durable/CHANGELOG.md#160---2026-11-20), which lets a Pi tool wait for a person, a deadline or another session without keeping the agent awake, and lets a Pi session start from an existing history. MCP clients now say when a user needs to authorize again, and failed requests no longer send error details to the client.
+
+### Highlights
+
+- **Pi 1.6 support:** `agents/harness/pi`, `agents/models/pi-ai` and the Pi tools now run on Pi 1.6, which brings:
+  - **Tools that wait:** a tool can park until a signal arrives or a deadline passes, and the agent can sleep meanwhile. Deliver signals with `harness.signal()`. See [Tools that wait](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md#tools-that-wait).
+  - **Wait for a subagent:** `submit()` and `continue()` take `notify`, so a parked tool wakes when another session's input settles. See [Wait for a subagent](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md#wait-for-a-subagent).
+  - **Keep queued input across an abort:** with `submit(input, { onAbort: "keep" })`, stopping an answer doesn't drop the message the user sent next.
+  - **Steadier runs:** more dropped provider connections are retried, and `PiHarness.dispose()` frees pi-ai's per-session state.
+- **Start a Pi session from an existing history:** `harness.root()`, `sessions.create()` and `sessions.fork()` take Pi's `init`. See [Seed a session with an existing history](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md#seed-a-session-with-an-existing-history).
+- **Anthropic message threads recover when they expire:** pi-ai sends the whole conversation again as a new thread instead of failing the turn.
+- **MCP re-authorization:** a request that needs the user to sign in again throws `MCPAuthorizationRequiredError` with a link, and a failed server stays failed until `reconnectMcpServer(id)`. See [Failures and reconnecting](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md#failures-and-reconnecting).
+- **Failed requests no longer leak errors:** clients get a generic 500, or a 1011 close for WebSockets. Use `onFetchError()` to choose the response. See [Failed requests](https://github.com/cloudflare/agents/blob/main/docs/agents/lifecycle.md#failed-requests).
+- **Chat races fixed:** stop, clear, regenerate and resume now work across tabs and during recovery.
+- **Other changes:** FLUX.2 image models in `ai.image()` and pi-ai's `ai.images()`. `claudeCode()` defaults to `claude-sonnet-5-5`. Examples move off the retired Workers AI models. Cancelled schedules, queue items and Tasks no longer rerun.
+
+### Upgrading
+
+You only need to make changes if you use the Pi harness, `agents/models/pi-ai` or the Pi tools, an MCP client, or error details in failed responses.
+
+1. **Update Pi to `~1.6.0`** (`@earendil-works/pi-durable`, `pi-ai`, `pi-schema`, `chord`). Once a conversation runs on Pi 1.6, Pi 1.5 cannot run its tool calls or model requests, so a deployment cannot roll back past this release. Roll forward to fix a bad deploy instead.
+2. **Check [pi-durable's 1.6.0 changelog](https://github.com/earendil-works/pi/blob/v1.6.0/packages/durable/CHANGELOG.md#160---2026-11-20)** if you use pi-durable directly: `RunEndTask` is now `HookTask`, a tool's `execute()` may return a park, `until` is optional on sleeping tasks, and code mode namespaces come from `Extension.namespace`. Code that only uses `PiHarness` and `PiSession` needs no changes for these.
+3. **Deliver signals with `harness.signal()`** rather than `(await harness.pi()).signal()`, which does not schedule the harness's wake first.
+4. **Call `harness.root()` before reaching the root through `harness.pi()`.** Until the root is first used, `sessions.list()` leaves it out and `pi.conversation(ROOT_CONVERSATION_ID)` returns `undefined`, and Pi's own `pi.root()` would create it without the harness's `defaults`. Existing roots are unaffected.
+5. **Handle MCP re-authorization:** catch `MCPAuthorizationRequiredError` from `callTool()`, `readResource()` and `getPrompt()` and send the user to `error.authUrl`. It extends `UnauthorizedError`, so existing `instanceof UnauthorizedError` checks still match. A failed server is no longer retried on each wake, and `addMcpServer()` on one throws its recorded error, so give users a way to try again, such as a Reconnect button that calls `this.reconnectMcpServer(id)`.
+6. **Implement `onFetchError`** if you relied on error details in failed responses, for example to show them only in local development.
+
+### Minor Changes
+
+- [#2832](https://github.com/cloudflare/agents/pull/2832) [`c31b57e`](https://github.com/cloudflare/agents/commit/c31b57e11e19ad532915fcf15dec5f1be916d5b7) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Add `onFetchError(request, error)` to Lifecycle hosts and `Agent`, which chooses the response when a request or WebSocket upgrade fails. See [Failed requests](https://github.com/cloudflare/agents/blob/main/docs/agents/lifecycle.md#failed-requests).
+
+- [#2782](https://github.com/cloudflare/agents/pull/2782) [`d6b4441`](https://github.com/cloudflare/agents/commit/d6b4441fbc2cf6909d61480a9c182181a924a7ff) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP client: requests that need the user to authorize again throw `MCPAuthorizationRequiredError` with a link, and failed servers stay `failed` until the new `reconnectMcpServer(id)`. See [MCP client](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md#failures-and-reconnecting).
+
+- [#2925](https://github.com/cloudflare/agents/pull/2925) [`cf2ad50`](https://github.com/cloudflare/agents/commit/cf2ad501e5faeb98a433fcc196ba58b2d5e2ea97) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Support Pi 1.6 (`~1.6.0`; Pi 1.5 is no longer supported). `harness.signal()` delivers a signal to a parked Pi tool. `PiSession.submit()` and `continue()` take `notify`, so a parked tool can wake when another session's input settles, and `submit()` takes `onAbort: "keep"`, so a queued input stays queued when the session is aborted. `agents/models/pi-ai` counts reasoning and cached tokens that a chat-completions vendor reports at the top level of `usage`, as pi-ai does, and resends a conversation in full when Anthropic can no longer continue its message thread, instead of failing the turn. See [pi-durable 1.6.0's changelog](https://github.com/earendil-works/pi/blob/v1.6.0/packages/durable/CHANGELOG.md#160---2026-11-20) and [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/).
+
+- [#2926](https://github.com/cloudflare/agents/pull/2926) [`6fef21d`](https://github.com/cloudflare/agents/commit/6fef21d889d85b7778f7c9b0f8fe87b0706534b5) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `PiHarness` creates the root session on its first use instead of when Pi opens, and `harness.root({ agent, init })`, `sessions.create({ agent, init })` and `sessions.fork(from, { agent, init })` take Pi's `init`, so a session can start from an existing history. See [Seed a session with an existing history](https://developers.cloudflare.com/agents/harnesses/pi/#seed-a-session-with-an-existing-history).
+
+### Patch Changes
+
+- [#2832](https://github.com/cloudflare/agents/pull/2832) [`c31b57e`](https://github.com/cloudflare/agents/commit/c31b57e11e19ad532915fcf15dec5f1be916d5b7) Thanks [@ben-reitz](https://github.com/ben-reitz)! - When `onError` returns instead of throwing, `Agent` and `AIChatAgent` now pass the original error on, instead of `undefined` (or an unawaited promise when `onError` is async).
+
+- [#2861](https://github.com/cloudflare/agents/pull/2861) [`f0f4ed9`](https://github.com/cloudflare/agents/commit/f0f4ed98f6733b1f09b615efe8de0b626b722691) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix chat recovery and resume races: stop now ends a running recovery, recovery yields to a newer question, and a stale resume ACK keeps the tab waiting for the active stream's replay.
+
+- [#2860](https://github.com/cloudflare/agents/pull/2860) [`7e2e11e`](https://github.com/cloudflare/agents/commit/7e2e11e55825e7298ce3e0690b47414c2fcd71a9) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix chat turn races across tabs: clear stops pending replies, regenerate replaces a reply still streaming, a throwing `onChatMessage` sends an error frame, and repeated tool results no longer re-run the model.
+
+- [#2835](https://github.com/cloudflare/agents/pull/2835) [`5c33d89`](https://github.com/cloudflare/agents/commit/5c33d89791d6a00c6ea64cf7790fa753e3e5cbfd) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Send a burst of messages on a sub-agent connection in one call to the parent, so resuming a sub-agent chat stream shows the partial reply at once instead of replaying it frame by frame ([#2820](https://github.com/cloudflare/agents/issues/2820)).
+
+- [#2914](https://github.com/cloudflare/agents/pull/2914) [`06a2715`](https://github.com/cloudflare/agents/commit/06a271526fd7d4a6dd1ee0ea238fe30402494880) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `claudeCode()` now defaults to `claude-sonnet-5-5`, since `claude-sonnet-4-5` retires on November 30, 2026.
+
+- [#2895](https://github.com/cloudflare/agents/pull/2895) [`47ccc29`](https://github.com/cloudflare/agents/commit/47ccc29e16e04f27881a3bed7f812974a1520b46) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `DurableObjectOAuthClientProvider` is now an `OAuthClientProvider`, and a `Browser` is now a `BrowserSource`, in apps that compile with `exactOptionalPropertyTypes`.
+
+- [#2913](https://github.com/cloudflare/agents/pull/2913) [`3d33563`](https://github.com/cloudflare/agents/commit/3d335639c54d2e91149c5d1960e87e439cd9d8bf) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Export `normalizeCdpSpec` and `RawCdpProtocol` from `agents/browser`, so a custom `BrowserSource` can build its `spec()` from protocol JSON it already has. See [Lower-level helpers](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#lower-level-helpers).
+
+- [#2899](https://github.com/cloudflare/agents/pull/2899) [`1a450e7`](https://github.com/cloudflare/agents/commit/1a450e71325c25ca1ec8b0013d756fe0c733b6f3) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `ai.image()` and pi-ai's `ai.images()` now run the FLUX.2 image models (`@cf/black-forest-labs/flux-2-klein-9b`, `flux-2-klein-4b`, `flux-2-dev`), sending their multipart input and up to four reference images.
+
+- [#2858](https://github.com/cloudflare/agents/pull/2858) [`5071d3c`](https://github.com/cloudflare/agents/commit/5071d3cda939972fb532c93e9b46942b36d8f5d7) Thanks [@mattzcarey](https://github.com/mattzcarey)! - A schedule or queue item that is cancelled or replaced while its callback waits to retry no longer runs again with the old job. This also holds for sub-agent schedules and queue items, and when a second alarm invocation picks up the replacement.
+
+- [#2829](https://github.com/cloudflare/agents/pull/2829) [`88eb62c`](https://github.com/cloudflare/agents/commit/88eb62c9d5a5dd3472d71e0f137c4eaa1bed0920) Thanks [@github-actions](https://github.com/apps/github-actions)! - `Lifecycle.fetch` no longer sends an error's stack to the client when startup or a request handler throws. HTTP requests get a generic `Internal Server Error` body and WebSocket upgrades close with 1011 without an error frame. The full error is still logged. See [#2828](https://github.com/cloudflare/agents/issues/2828).
+
+- [#2827](https://github.com/cloudflare/agents/pull/2827) [`e0f95e5`](https://github.com/cloudflare/agents/commit/e0f95e587078db5b1f53575b8494e3979a519ff3) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Type `LifecycleCapability.onStart()` as returning `MaybePromise<void>` to match the runner, which awaits it. See [Agents](https://developers.cloudflare.com/agents/).
+
+- [#2863](https://github.com/cloudflare/agents/pull/2863) [`46daba4`](https://github.com/cloudflare/agents/commit/46daba47a5f675aae42aa0514ce96437c804f3cd) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix MCP client races found by TLA+ model checking: a pending step-up link survives a token refresh, a refresh no longer overwrites a step-up grant, a removed server's tokens stay deleted, a sign-in survives `closeConnection()`, an old link no longer fails a server added again, overlapping closes and removals leave a server added again alone, `addMcpServer(..., { id })` returns a link that works and renames the server in one transaction, configuring elicitation handlers while a server connects no longer fails it and is advertised, step-up rounds count for the scope set of the link that was completed, and a declined sign-in after a refused refresh is recorded as failed (see [re-authorization during a session](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md#re-authorization-during-a-session)).
+
+- [#2856](https://github.com/cloudflare/agents/pull/2856) [`cff5dd1`](https://github.com/cloudflare/agents/commit/cff5dd1cfdd1f404bff09200f5132087750c1883) Thanks [@mattzcarey](https://github.com/mattzcarey)! - An MCP server removed and added again under the same id while it was still connecting now starts clean. The removed server's connect no longer marks the new one failed ("was removed while connecting"), and its retries no longer connect the new one a second time. With a custom `createAuthProvider`, `removeMcpServer()` no longer deletes the stored row of a server added again while it cleared credentials.
+
+- [#2899](https://github.com/cloudflare/agents/pull/2899) [`1a450e7`](https://github.com/cloudflare/agents/commit/1a450e71325c25ca1ec8b0013d756fe0c733b6f3) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Suggest `@cf/deepseek-ai/deepseek-v4.1-flash-1017` instead of `@cf/zai-org/glm-4.7-flash` in the unknown-model error and doc comments.
+
+- [#2781](https://github.com/cloudflare/agents/pull/2781) [`366d5b5`](https://github.com/cloudflare/agents/commit/366d5b5baf846b4669a2ecd0e61e104aa634432b) Thanks [@github-actions](https://github.com/apps/github-actions)! - Fix Think recovering an interrupted continuation as a duplicate assistant message; recovery now rebuilds the message it continues. Think now requires `agents` >=0.34.0. See [Chat Recovery](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#chat-recovery).
+
+- [#2807](https://github.com/cloudflare/agents/pull/2807) [`1f3bd92`](https://github.com/cloudflare/agents/commit/1f3bd9215239ccd973da87506d4771ac13a20bd2) Thanks [@ben-reitz](https://github.com/ben-reitz)! - The pi `web_search` and `web_fetch` tools give code mode scripts their results as objects.
+
+- [#2899](https://github.com/cloudflare/agents/pull/2899) [`1a450e7`](https://github.com/cloudflare/agents/commit/1a450e71325c25ca1ec8b0013d756fe0c733b6f3) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Move off the Workers AI models retired on November 20, 2026: drop MeloTTS and `whisper-tiny-en` handling, send `@cf/google/embeddinggemma-2` its `{ input }` shape, and suggest `@cf/deepseek-ai/deepseek-v4.1-flash-1017` in examples and messages. See [Planned model deprecations](https://developers.cloudflare.com/changelog/post/2026-11-05-planned-model-deprecations/).
+
+- [#2859](https://github.com/cloudflare/agents/pull/2859) [`f41f395`](https://github.com/cloudflare/agents/commit/f41f3956bfc6cf7c95dde6e28f7992531895e73f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - A Task run cancelled while its attempt is still being claimed no longer starts its handler.
+
+- [#2867](https://github.com/cloudflare/agents/pull/2867) [`0f2727a`](https://github.com/cloudflare/agents/commit/0f2727a2da0c6a6ffb0e54a8207e29120f7ca093) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Stop running client messages on a WebSocket the host has closed. A connection rejected from `onConnect` with `connection.close()` could still run one `@callable` method, state update, or `onMessage` call. The close happens before the client has the upgrade response, so anything the client sent as soon as it connected arrived after the close, and the platform still delivered it. `Connection.close()` now records the close in the socket attachment, so the record survives hibernation, and the `WebSockets` capability drops every later message on both the hibernating and Cap'n Web wires. Messages the client sent before closing the connection itself still run.
+
+## 0.33.0
+
+This release adds support for [Pi 1.5](https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/CHANGELOG.md#150---2026-11-02), which makes `PiHarness` much faster and lighter on memory, and lets you continue a run that ended without an answer.
+
+### Highlights
+
+- **Pi 1.5 support:** `agents/harness/pi`, `agents/models/pi-ai` and the Pi tools now run on Pi 1.5.
+- **Far fewer storage writes while streaming:** Pi stores streamed answers and tool output in batches, at the latest every second, instead of on every update. Over SQLite this cuts storage transactions about 27x for long answers and 5.7x for turns with parallel tools, and CPU by about a quarter. A crash can now lose up to about a second of streamed output.
+- **Faster with many sessions:** Pi's scheduler no longer rechecks every conversation on each commit, so on SQLite one Pi harness with 2,048 sessions went from 88 to 459 agent runs per second. Commits that arrive together now share one storage call, and a normal run makes no storage reads.
+- **Large answers no longer blow up memory:** streaming a 500 KB tool call used to take about 20 s of CPU and a 100 MB heap, and a 140 KB answer followed by a 140 KB tool call held over 100 MB. Pi now appends new text instead of copying it on every update.
+- **Conversation view:** `session.watch()` replaces `session.events()`. It returns the newest transcript entries and the session's live state, such as the answer being streamed, running tools, and why the last run ended without an answer. `session.entries()` pages older entries. See [Work with sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md#work-with-sessions).
+- **Continue a run:** `session.continue()` starts a run on the transcript as it is, without a new message, for example after the model errored or the run hit its turn limit.
+- **Turn limit:** `defaults.maxTurns` caps the tool rounds a run can take in new sessions. A run that reaches it ends without an answer, with reason `turn_limit`.
+- **Crash-looping tasks end instead of parking:** a tool call cut off by Pi's restart limit ends with an error result the model sees, and a model request ends its run without an answer, with reason `restart_limit`. See [How recovery works](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md#how-recovery-works).
+- **Other changes:** `submit()` takes `whenIdle: "reject"`, so an idle session refuses input instead of starting a run. Streamed tool-call arguments on the chat-completions wire that aren't valid JSON now fail the tool call with an error the model can fix. In Pi's code mode, `browserTool` gives scripts its run as an object, with screenshots as image blocks for `image()`. `browserTool` stops when the harness aborts its call, and `BrowserSession` lets code outside `browserTool` run the same `browser` object. `useAgentChat().stop()` now cancels server-started turns streamed without a resume handshake.
+
+### Upgrading
+
+You only need to make changes if you use the Pi harness, `agents/models/pi-ai` or the Pi tools.
+
+1. **Update Pi to `~1.5.0`** (`@earendil-works/pi-durable`, `pi-ai`, `chord`) and install `@earendil-works/pi-schema` alongside them. Once a conversation runs on Pi 1.5, Pi 1.4 cannot read it, so a deployment cannot roll back past this release. Roll forward to fix a bad deploy instead.
+2. **Check [pi-durable's 1.5.0 changelog](https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/CHANGELOG.md#150---2026-11-02)** for its breaking changes, such as the removal of `watchEvents()`, tagged watch calls and ends, and `ConversationView.entries` becoming a window over the transcript.
+3. **Replace `session.events()` with `session.watch()`** and render the view each time it changes. To show a transcript longer than the window, merge each value into Pi's `ConversationTranscript`, which pages older entries with `session.entries()`. The view's entries now include those before a reset or compaction: Pi adds the reset or summary in place instead of cutting the transcript there. An idle `pi.live` now keeps `runFailure` after a failed run, so check `run === undefined` instead of comparing it with `{}`.
+
+   ```diff
+   - const stream = await session.events();
+   - initialize(stream.snapshot);
+   - stream.start(async (events) => events.forEach(apply));
+   + const watch = await session.watch();
+   + render(watch.value);
+   + watch.start(async (call) => {
+   +   if (call.kind === "value") render(call.value);
+   + });
+   ```
+
+4. **Build your Pi tool schemas with `@earendil-works/pi-schema`**, as pi-ai no longer exports TypeBox's `Type`. Unlike `Type.Object`, `obj()` rejects properties it doesn't list; pass `{ open: true }` to allow them. To keep TypeBox instead, import `Type` from `typebox`.
+
+   ```diff
+   - import { Type } from "@earendil-works/pi-ai";
+   - const WordCount = Type.Object({ text: Type.String() });
+   + import { obj, str } from "@earendil-works/pi-schema";
+   + const WordCount = obj({ text: str() });
+   ```
+
+5. **Remove calls to `retry()` and handling of the `parked` status.** To run work again after a run ended without an answer, call `session.continue()` or submit it again.
+6. **Update your `onReport` callback** if you pass one to `Harness.open`. It now takes one report tagged by `kind`, with the error on it. `session_failed` is now `storage_failed`, and a task the restart limit ends is reported as `task_interrupted` instead of `task_parked`.
+
+### Minor Changes
+
+- [#2796](https://github.com/cloudflare/agents/pull/2796) [`edf1b52`](https://github.com/cloudflare/agents/commit/edf1b5274b845571853a73fc1e8edd0ca4b62423) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Support Pi 1.5 (`~1.5.0`; Pi 1.4 is no longer supported): `session.watch()` replaces `session.events()` and returns Pi's conversation view, `session.entries()` pages the transcript, `retry()` and the `parked` pending status are removed as Pi now ends crash-looping tasks, `submit()` takes `whenIdle: "reject"`, and the Pi tools build their schemas with `@earendil-works/pi-schema`, a new optional peer, as pi-ai no longer exports TypeBox's `Type`. See [pi-durable 1.5.0's changelog](https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/CHANGELOG.md#150---2026-11-02).
+
+- [#2797](https://github.com/cloudflare/agents/pull/2797) [`77138fa`](https://github.com/cloudflare/agents/commit/77138fa1a36f2c16f74c584ab3388058d5909182) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Two new controls for the Pi harness, from Pi 1.5:
+
+  - `continue()` starts a run without sending a new message. Use it to try again after a run ended without an answer, for example because the model errored or the run hit its turn limit.
+  - `defaults.maxTurns` limits how many tool rounds a run can take. A run that reaches it ends without an answer, with reason `turn_limit`.
+
+  See [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/).
+
+### Patch Changes
+
+- [#2795](https://github.com/cloudflare/agents/pull/2795) [`3e21ee4`](https://github.com/cloudflare/agents/commit/3e21ee48df129513310b844b05928bf3b5123d00) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Add `Browser.functionDocs()`, `BrowserSession.functions`, report `notices`, opt-in scope locks (`browser.session({ lock: true })`, `session.lock()`) and `conversationScope()` to `agents/browser`, so code outside `browserTool` can run the same `browser` object. See [Browse the Web](https://developers.cloudflare.com/agents/tools/browser/).
+
+- [#2795](https://github.com/cloudflare/agents/pull/2795) [`3e21ee4`](https://github.com/cloudflare/agents/commit/3e21ee48df129513310b844b05928bf3b5123d00) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `browserTool` stops when the harness aborts its call, for pi, the AI SDK and TanStack AI. See [Browse the Web](https://developers.cloudflare.com/agents/tools/browser/).
+
+- [#2798](https://github.com/cloudflare/agents/pull/2798) [`62ccd87`](https://github.com/cloudflare/agents/commit/62ccd8735b655dbe2d8d4f05716b6e6679958c8b) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Pi models on the chat-completions wire (Workers AI, and OpenAI-compatible models through AI Gateway) now parse streamed tool-call arguments with pi-ai's own parser. When a model sends arguments that aren't valid JSON, the tool call now fails with an error the model can see and fix, instead of running with whatever arguments could be salvaged.
+
+  See [Models for pi-ai](https://developers.cloudflare.com/agents/models/pi-ai/).
+
+- [#2801](https://github.com/cloudflare/agents/pull/2801) [`748e693`](https://github.com/cloudflare/agents/commit/748e69393c034ceedfd718f9c14ab8346222335d) Thanks [@ben-reitz](https://github.com/ben-reitz)! - The pi `browserTool` gives code mode scripts the run as an object, with screenshots as image blocks for `image()`. See [Browse the Web](https://developers.cloudflare.com/agents/tools/browser/#in-pis-code-mode).
+
+- [#2805](https://github.com/cloudflare/agents/pull/2805) [`baf26bc`](https://github.com/cloudflare/agents/commit/baf26bc0eb7e06507976592d15fcb1cd8a4ab78e) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `useAgentChat().stop()` now cancels server-started turns streamed without a resume handshake. See [Request cancellation](https://developers.cloudflare.com/agents/agent-class/communication-channels/chat/chat-agents/#request-cancellation).
+
+## 0.32.0
+
+### Minor Changes
+
+- [#2752](https://github.com/cloudflare/agents/pull/2752) [`34cbd30`](https://github.com/cloudflare/agents/commit/34cbd305c6d55d2c38f4063c58ddbe97785fb8c8) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `experimental_registerOpenTelemetry()` to `agents/observability`, which records spans from OpenTelemetry-instrumented libraries as Workers trace spans. Experimental and subject to change.
+
+- [#2771](https://github.com/cloudflare/agents/pull/2771) [`54ae3e8`](https://github.com/cloudflare/agents/commit/54ae3e86987be92ae20bc6a8b06c26ec1884d01c) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Breaking: `agents/skills` now loads Agent Skills from Computer Workspace files (`workspace()`), R2 (`r2()`), or code (`manifest()`), checks `SKILL.md` against the Agent Skills spec, and replaces `SkillRegistry` with `loadSkillCatalog()` and `createSkillTools()` (from `agents/skills/tools/ai-sdk`); `parseSkill()` follows the spec's guide for agents, loading skills that break a rule with warnings; `runner()` moved to `agents/skills/runner`; the `agents:skills` Vite import and `agents/skills/compile` are removed. See [Agent Skills](https://developers.cloudflare.com/agents/skills/).
+
+### Patch Changes
+
+- [#2763](https://github.com/cloudflare/agents/pull/2763) [`df85805`](https://github.com/cloudflare/agents/commit/df85805ed79b4287f35f59efdbf2e947854bc14a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Agents SDK spans (agent lifecycle, `wrapAISDK`, Think) now set span status `error` on failure, where the Workers runtime supports `Span.setStatus()`; attributes are unchanged. See [Observability](https://github.com/cloudflare/agents/blob/main/docs/agents/observability.md#ai-sdk-tracing).
+
+- [#2737](https://github.com/cloudflare/agents/pull/2737) [`08747d9`](https://github.com/cloudflare/agents/commit/08747d9aa7a11f284dbd85e3b024ef1ce1ddaa41) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Mark the package side-effect free (apart from the CLI), so bundlers drop the modules a Worker doesn't use. `import { routeAgentRequest } from "agents"` no longer bundles the MCP client.
+
+- [#2744](https://github.com/cloudflare/agents/pull/2744) [`a2d371e`](https://github.com/cloudflare/agents/commit/a2d371ec333198855f4ac2aa4dadbe2696e73c75) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Update `@modelcontextprotocol/client` and `@modelcontextprotocol/server` to 2.4.0 and `@modelcontextprotocol/sdk` to 1.32.2, and add a `clientMetadataUrl` option to `DurableObjectOAuthClientProvider` for OAuth Client ID Metadata Documents. See [MCP client](https://developers.cloudflare.com/agents/model-context-protocol/apis/client-api/).
+
+- [#2740](https://github.com/cloudflare/agents/pull/2740) [`8cf6da1`](https://github.com/cloudflare/agents/commit/8cf6da190aa4212c83dd11089413f390a9f510ac) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `agents/models/pi-ai` parses streamed chat-completions tool-call arguments incrementally, instead of re-parsing the whole argument text on every delta.
+
+- [#2766](https://github.com/cloudflare/agents/pull/2766) [`b372289`](https://github.com/cloudflare/agents/commit/b372289fdee424366b6bd8a8ae9923afb3ac803f) Thanks [@github-actions](https://github.com/apps/github-actions)! - Allow `@tanstack/ai` 1.x in the optional peer dependency ranges, and type the TanStack AI tools so they compile against both 0.x and 1.x. See [TanStack AI](https://github.com/cloudflare/agents/blob/main/packages/codemode/README.md#tanstack-ai).
+
 ## 0.31.0
 
 This release adds internal hostnames to the browser. Give a Browser Run browser hostnames such as `preview.internal`, and its requests to them go to your agent instead of the internet, so the model can open a dev server, a workspace folder or another Worker in the same browser it uses for the web.
@@ -20,6 +191,7 @@ You only need to make changes if you serve MCP or use `browserTool`.
 If you serve MCP or use `agents/x402` or `agents/experimental/webmcp`:
 
 1. **Add the MCP packages to your `package.json`** at the versions this release expects, since your package manager no longer installs them. Until you do, builds fail with an unresolved import.
+
    - `agents/mcp` (`McpAgent`, `WorkerTransport`, `createLegacyMcpHandler`) and `agents/x402`: `@modelcontextprotocol/sdk@1.32.1` and `@modelcontextprotocol/server@2.3.1`
    - `agents/mcp/server` (`createMcpHandler`): `@modelcontextprotocol/server@2.3.1`
    - `agents/experimental/webmcp`: `@modelcontextprotocol/sdk@1.32.1`

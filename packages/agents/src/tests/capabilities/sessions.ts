@@ -64,7 +64,16 @@ class BilledRows {
  */
 export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly sessions = new Sessions({
-    reservedMetadataKeys: ["channel", "turnMetadata"]
+    reservedMetadataKeys: ["channel", "turnMetadata"],
+    // A flat table of JSON messages, the shape ai-chat stored before
+    // Sessions. A row whose message has no `parts` is skipped.
+    legacyFlatMessages: {
+      table: "legacy_flat_messages",
+      parse: (raw) => {
+        const message = raw as SessionMessage | null;
+        return message && Array.isArray(message.parts) ? message : undefined;
+      }
+    }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.sessions);
   readonly events: RecordedEvent[] = [];
@@ -303,6 +312,11 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
 
   async kvGet<T>(key: string): Promise<T | undefined> {
     return this.ctx.storage.get<T>(key);
+  }
+
+  /** Seed a KV value BEFORE the Lifecycle starts (a released schema version). */
+  async kvPut(key: string, value: unknown): Promise<void> {
+    await this.ctx.storage.put(key, value);
   }
 
   /** Legacy config rows, which Sessions leaves untouched for Think to lift. */

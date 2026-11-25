@@ -95,7 +95,7 @@ export class StressCoder extends DurableObject<StressEnv> {
     return {
       run: sql
         .exec(
-          "SELECT state, attempt, error_name FROM cf_agents_task_runs WHERE run_id = ?",
+          "SELECT status, attempt, error_name FROM cf_agents_task_runs WHERE run_id = ?",
           `codex:${operationId}`
         )
         .toArray(),

@@ -39,7 +39,7 @@ import type {
 } from "agents/sessions";
 import type {
   ContextBlock,
-  ContextBlocks,
+  Context,
   ContextConfig,
   WritableContextProvider
 } from "agents/context";
@@ -61,14 +61,14 @@ export interface CompactAfterOptions {
 
 export class ThinkSession {
   readonly #handle: Session;
-  readonly #context: () => ContextBlocks;
+  readonly #context: () => Context;
   /** Blocks queued by `withContext()`; `null` once startup consumed them. */
   #pendingContext: ContextConfig[] | null = [];
   #promptStore: WritableContextProvider | undefined;
   #compactionErrorHandler: CompactionErrorHandler | null = null;
 
   /** @internal Constructed by Think during `onStart`. */
-  constructor(handle: Session, context: () => ContextBlocks) {
+  constructor(handle: Session, context: () => Context) {
     this.#handle = handle;
     this.#context = context;
   }
@@ -112,8 +112,9 @@ export class ThinkSession {
   /**
    * Persist the frozen system prompt.
    *
-   * @deprecated The frozen prompt is always persisted now, so this is a
-   * no-op. A custom `provider` is still honoured as the prompt store.
+   * @deprecated The session records the prompt each turn was sent with, so
+   * this is not needed. A custom `provider` is still read: a prompt frozen
+   * in it before is what the turns sent before are sent. It is not written.
    */
   withCachedPrompt(provider?: WritableContextProvider): this {
     if (provider) this.#promptStore = provider;
@@ -201,6 +202,16 @@ export class ThinkSession {
   /** @deprecated Read `getHistoryRowStats()` and take its length. */
   async getPathLength(leafId?: string | null): Promise<number> {
     return (await this.#handle.getHistoryRowStats(leafId)).length;
+  }
+
+  /** @internal A page of the stored path from the newest row back (media eviction). */
+  internal_storedPathRows(options: {
+    skip: number;
+    limit: number;
+    measure?: boolean;
+    after?: string;
+  }): Promise<Array<{ id: string; bytes: number }>> {
+    return this.#handle.internal_storedPathRows(options);
   }
 
   getMessage(id: string): Promise<SessionMessage | null> {

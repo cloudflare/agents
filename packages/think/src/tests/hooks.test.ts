@@ -1,3 +1,4 @@
+import { stableHash } from "../action-ledger";
 import { describe, expect, it } from "vitest";
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
@@ -151,15 +152,15 @@ describe("Think — beforeTurn hook", () => {
     const agent = await freshAgent("gateway-cf");
     const gateway = { id: "clutch", metadata: { role: "support", siteId: 7 } };
     const { models, calls } = await agent.resolveModelGatewayForTest(
-      "@cf/meta/llama-3.1-8b-instruct",
+      "@cf/qwen/qwen3.8-27b",
       gateway
     );
 
-    expect(models).toEqual(["@cf/meta/llama-3.1-8b-instruct"]);
+    expect(models).toEqual(["@cf/qwen/qwen3.8-27b"]);
     expect(calls).toEqual([
       {
         kind: "run",
-        model: "@cf/meta/llama-3.1-8b-instruct",
+        model: "@cf/qwen/qwen3.8-27b",
         gateway
       }
     ]);
@@ -185,11 +186,11 @@ describe("Think — beforeTurn hook", () => {
   it("keeps the default gateway when getGateway returns undefined", async () => {
     const agent = await freshAgent("gateway-default");
     const cf = await agent.resolveModelGatewayForTest(
-      "@cf/meta/llama-3.1-8b-instruct",
+      "@cf/qwen/qwen3.8-27b",
       null
     );
     expect(cf.calls).toEqual([
-      { kind: "run", model: "@cf/meta/llama-3.1-8b-instruct", gateway: null }
+      { kind: "run", model: "@cf/qwen/qwen3.8-27b", gateway: null }
     ]);
 
     const catalog = await (
@@ -237,7 +238,7 @@ describe("Think — beforeTurn hook", () => {
   it("explains a missing AI binding for a valid string model id", async () => {
     const agent = await freshAgent("resolve-missing-binding");
     const message = await agent.resolveModelErrorForTest(
-      "@cf/meta/llama-3.1-8b-instruct"
+      "@cf/qwen/qwen3.8-27b"
     );
     expect(message).toContain('Workers AI binding named "AI"');
     expect(message).toContain("getAIBinding()");
@@ -254,12 +255,10 @@ describe("Think — beforeTurn hook", () => {
       const agent = await freshAgent(`resolve-hook-${hook}`);
       const { models, calls } = await agent.runTurnWithStringModelForTest(
         hook,
-        "@cf/meta/llama-3.1-8b-instruct"
+        "@cf/qwen/qwen3.8-27b"
       );
-      expect(models).toContain("@cf/meta/llama-3.1-8b-instruct");
-      expect(calls.map((call) => call.model)).toContain(
-        "@cf/meta/llama-3.1-8b-instruct"
-      );
+      expect(models).toContain("@cf/qwen/qwen3.8-27b");
+      expect(calls.map((call) => call.model)).toContain("@cf/qwen/qwen3.8-27b");
     }
   );
 
@@ -654,6 +653,23 @@ describe("Think — actions compile into guarded tools", () => {
     expect((await agent.getActionProbe()).count).toBe(1);
   });
 
+  it("records an action output past the row limit, capped, and replays it", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-oversize-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-oversize-output");
+    await agent.setActionIdempotencyKey("oversize-key");
+
+    const first = (await agent.executeEchoActionToolForTest()) as string;
+    expect(first.length).toBeLessThan(25_000);
+    expect(first).toContain("[truncated");
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:oversize-key", status: "settled" }
+    ]);
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(first);
+    expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
   it("returns a programming error for action ledger key/input conflicts", async () => {
     const agent = await freshToolAgent(
       `action-ledger-conflict-${crypto.randomUUID()}`
@@ -675,6 +691,63 @@ describe("Think — actions compile into guarded tools", () => {
     });
 
     expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
+  it("answers a conflict, not the running value, for the same key with another input", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-running-conflict-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-slow");
+    await agent.setActionIdempotencyKey("running-key");
+    await agent.setActionDelayForTest(50);
+
+    const [first, second] = await Promise.all([
+      agent.executeEchoActionToolForTest(),
+      agent.executeEchoActionToolForTest("different")
+    ]);
+
+    expect(first).toBe("action echo: hello");
+    expect(second).toMatchObject({ error: { name: "ActionKeyConflict" } });
+    expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
+  it("replays a void action as void, not null", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-void-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-void");
+
+    expect(await agent.executeEchoActionToolForTest()).toBeUndefined();
+    expect(await agent.executeEchoActionToolForTest()).toBeUndefined();
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      {
+        status: "settled",
+        result_json: JSON.stringify({ valuePresent: false })
+      }
+    ]);
+  });
+
+  it("runs a ledgered action with its caller's connection", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-context-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("context-key");
+
+    const { connectionId } =
+      await agent.executeEchoActionOnConnectionForTest("conn-1");
+
+    expect(connectionId).toBe("conn-1");
+  });
+
+  it("hashes action input by value: key order is ignored, dates are told apart", () => {
+    expect(stableHash({ a: 1, b: { c: 2, d: 3 } })).toBe(
+      stableHash({ b: { d: 3, c: 2 }, a: 1 })
+    );
+    expect(stableHash({ at: new Date(1) })).not.toBe(
+      stableHash({ at: new Date(2) })
+    );
   });
 
   it("does not execute when the action ledger has an unknown pending row", async () => {
@@ -879,17 +952,46 @@ describe("Think — actions compile into guarded tools", () => {
     expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
   });
 
+  it("keeps a running action's claim through a sweep, however old", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-sweep-running-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-slow");
+    await agent.setActionIdempotencyKey("running-sweep");
+    await agent.setActionDelayForTest(300);
+    await agent.setActionLedgerRetentionForTest({
+      settledMs: false,
+      pendingMs: 10,
+      maxSweepRows: 10
+    });
+
+    const [output, swept] = await Promise.all([
+      agent.executeEchoActionToolForTest(),
+      new Promise((resolve) => setTimeout(resolve, 100)).then(() =>
+        agent.sweepActionLedgerForTest()
+      )
+    ]);
+
+    expect(swept).toEqual({ settled: 0, pending: 0 });
+    expect(output).toBe("action echo: hello");
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:running-sweep", status: "settled" }
+    ]);
+  });
+
   it("sweeps expired action ledger rows without deleting fresh rows", async () => {
     const agent = await freshToolAgent(
       `action-ledger-sweep-${crypto.randomUUID()}`
     );
     await agent.useEchoActionForTest("ledger-key");
+    // Windows far wider than the test takes, so a fresh row on a slow
+    // runner is not old yet.
     await agent.setActionLedgerRetentionForTest({
-      settledMs: 10,
-      pendingMs: 10,
+      settledMs: 30_000,
+      pendingMs: 30_000,
       maxSweepRows: 10
     });
-    const old = Date.now() - 1_000;
+    const old = Date.now() - 60_000;
     await agent.insertActionLedgerRowForTest({
       key: "action:echo:old-settled",
       status: "settled",
@@ -918,6 +1020,27 @@ describe("Think — actions compile into guarded tools", () => {
         status: "settled"
       }
     ]);
+  });
+
+  it("moves ledger rows an earlier version wrote, so a settled action still replays", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-migrate-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("legacy-key");
+    await agent.insertLegacyActionLedgerRowForTest({
+      key: "action:echo:legacy-key",
+      output: "from before the upgrade"
+    });
+    expect(await agent.migrateLegacyActionLedgerForTest()).toBe(false);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:legacy-key", status: "settled" }
+    ]);
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(
+      "from before the upgrade"
+    );
+    expect((await agent.getActionProbe()).count).toBe(0);
   });
 
   it("emits an approval request with a stable action descriptor", async () => {
@@ -1442,13 +1565,20 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
   });
 
   it("replays an aged tool output through a validating toModelOutput (#2014)", async () => {
-    const agent = await freshToolAgent("validated-output-aged");
+    // A fresh object each run: a retry must not inherit the last attempt's
+    // transcript, which moved the truncation cutoff.
+    const agent = await freshToolAgent(
+      `validated-output-aged-${crypto.randomUUID()}`
+    );
     await agent.setEchoExecuteMode("validated-output");
     const first = await agent.testChat("call echo");
     expect(first.error).toBeUndefined();
     expect(await agent.getEchoExecuteCount()).toBe(1);
 
-    for (let i = 0; i < 4; i++) {
+    // Read-time truncation cuts at multiples of `truncationStep` (8), keeping
+    // 4 to 11 recent messages at full fidelity. Six follow-ups put 15
+    // messages in the last prompt, so the cutoff (8) is past the tool result.
+    for (let i = 0; i < 6; i++) {
       const result = await agent.testChat(`follow-up ${i}`);
       expect(result.error).toBeUndefined();
       expect(result.done).toBe(true);
@@ -2348,5 +2478,100 @@ describe("Think — beforeTurn config overrides", () => {
     const types = websocketChunkTypes(messages);
     expect(types).not.toContain("reasoning-delta");
     expect(types).toContain("text-delta");
+  });
+});
+
+describe("a tool-call id reused across replies", () => {
+  it("applies an approval to the request its approval id names", async () => {
+    const agent = await freshAgent(`reused-approval-${crypto.randomUUID()}`);
+    const request = (approvalId: string, a: number) =>
+      ({
+        type: "tool-calculate",
+        toolCallId: "call_1",
+        state: "approval-requested",
+        input: { a },
+        approval: { id: approvalId }
+      }) as unknown as UIMessage["parts"][number];
+    const text = (t: string) =>
+      [{ type: "text", text: t }] as UIMessage["parts"];
+    await agent.persistTestMessage({
+      id: "u1",
+      role: "user",
+      parts: text("one")
+    });
+    await agent.persistTestMessage({
+      id: "a1",
+      role: "assistant",
+      parts: [request("approval_a", 1)]
+    });
+    await agent.persistTestMessage({
+      id: "u2",
+      role: "user",
+      parts: text("two")
+    });
+    await agent.persistTestMessage({
+      id: "a2",
+      role: "assistant",
+      parts: [request("approval_b", 2)]
+    });
+
+    await agent.applyToolApprovalForTest("call_1", false, "approval_a");
+
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const state = (id: string) =>
+      (
+        stored.find((m) => m.id === id)?.parts[0] as
+          | { state?: string }
+          | undefined
+      )?.state;
+    expect(state("a1")).toBe("output-denied");
+    expect(state("a2")).toBe("approval-requested");
+  });
+
+  it("does not move a repeated id-less decision onto an older request", async () => {
+    const agent = await freshAgent(`reused-idless-${crypto.randomUUID()}`);
+    const request = (approvalId: string) =>
+      ({
+        type: "tool-calculate",
+        toolCallId: "call_1",
+        state: "approval-requested",
+        input: {},
+        approval: { id: approvalId }
+      }) as unknown as UIMessage["parts"][number];
+    const text = (t: string) =>
+      [{ type: "text", text: t }] as UIMessage["parts"];
+    await agent.persistTestMessage({
+      id: "u1",
+      role: "user",
+      parts: text("one")
+    });
+    await agent.persistTestMessage({
+      id: "a1",
+      role: "assistant",
+      parts: [request("approval_a")]
+    });
+    await agent.persistTestMessage({
+      id: "u2",
+      role: "user",
+      parts: text("two")
+    });
+    await agent.persistTestMessage({
+      id: "a2",
+      role: "assistant",
+      parts: [request("approval_b")]
+    });
+
+    await agent.applyToolApprovalForTest("call_1", false);
+    await agent.applyToolApprovalForTest("call_1", false);
+
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const state = (id: string) =>
+      (
+        stored.find((m) => m.id === id)?.parts[0] as
+          | { state?: string }
+          | undefined
+      )?.state;
+    expect(state("a2")).toBe("output-denied");
+    expect(state("a1")).toBe("approval-requested");
   });
 });

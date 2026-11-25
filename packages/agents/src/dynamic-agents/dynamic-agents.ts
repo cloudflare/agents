@@ -1,14 +1,22 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
+  registerUnlistedSockets,
+  takeDeliveryReport
+} from "./unlisted-sockets";
+import {
+  CF_EVENT_LOGS_KEY,
   ensureConnectionWrapped,
+  setConnectionFlag,
+  setConnectionFlagWriter,
+  withoutEventLogFlag,
   getConnectionRawState,
   setConnectionProtocolEnabled
 } from "../websockets/connection-flags";
-import { nanoid } from "nanoid";
-import type {
-  Connection,
-  LifecycleRouteEnvelope,
-  WSMessage
+import {
+  forgetFacetWakes,
+  type Connection,
+  type LifecycleRouteEnvelope,
+  type WSMessage
 } from "../lifecycle/durable-object-lifecycle";
 import {
   LifecycleCapability,
@@ -33,6 +41,11 @@ import {
   type DynamicAgentRpcReplyInvocationContext
 } from "./bridges";
 import type { DynamicAgentHostPort } from "./host";
+import {
+  isStaleRootChannelError,
+  markLiveRoot,
+  RootFacetChannel
+} from "./root-channel";
 import type {
   DynamicAgentBridgeInvocationContext,
   DynamicAgentConnectionBridgeLike,
@@ -41,11 +54,10 @@ import type {
   DynamicAgentPathInvokeEndpoint,
   DynamicAgentWebSocketEndpoint,
   FacetCapableCtx,
-  FacetRunStorageRow,
   RootFacetRpcSurface,
   StoredDynamicAgentConnection
 } from "./types";
-
+import { FACET_FLAG_KEY } from "./facet-flag";
 /**
  * Internal key used to remember the outer `/sub/...` URL for a
  * WebSocket accepted by the parent on behalf of a child facet.
@@ -58,11 +70,48 @@ import type {
 export const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
 export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
 /**
+ * When the root accepted a socket for a sub-agent (ms). A facet compares it
+ * with when it broadcast a frame during its start, before it knew its
+ * sockets, to tell whether the socket got that frame.
+ * Storage-frozen — never rename.
+ */
+export const CF_SUB_AGENT_ACCEPTED_AT_KEY = "_cf_subAgentAcceptedAt";
+
+/** When the root accepted `connection`, if it was routed to a sub-agent. */
+export function connectionAcceptedAt(
+  connection: Connection
+): number | undefined {
+  const raw = getConnectionRawState(connection);
+  const flag = raw?.[CF_SUB_AGENT_ACCEPTED_AT_KEY];
+  if (typeof flag === "number") return flag;
+  const own = (connection as { acceptedAt?: unknown }).acceptedAt;
+  return typeof own === "number" ? own : undefined;
+}
+/**
  * Set on a socket closed because its sub-agent was deleted. Its late
  * message/close events are dropped, so they can't reach a same-name
  * replacement created after the delete. Storage-frozen — never rename.
  */
 export const CF_SUB_AGENT_DELETED_KEY = "_cf_subAgentDeleted";
+
+/** Consecutive sends queued for one sub-agent connection. */
+type PendingConnectionSends = {
+  messages: Array<string | ArrayBuffer | ArrayBufferView>;
+  size: number;
+};
+
+/**
+ * A batch takes no send that would grow it past this size (string length or
+ * byte length), so one root call stays far below the RPC message size limit.
+ * A larger send goes alone, as it did before batching.
+ */
+const MAX_CONNECTION_SEND_BATCH_SIZE = 1_000_000;
+
+function connectionSendSize(
+  message: string | ArrayBuffer | ArrayBufferView
+): number {
+  return typeof message === "string" ? message.length : message.byteLength;
+}
 
 /** Wire-frozen internal header carrying the outer URL on WS upgrades. */
 export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
@@ -94,6 +143,9 @@ export function rejectSubAgentWebSocket(response: Response): Response {
   return new Response(null, { status: 101, webSocket: client });
 }
 
+/** A facet's stored copy of its root's jurisdiction. */
+const ROOT_JURISDICTION_KEY = "cf_agents_root_jurisdiction";
+
 /**
  * The facet-backed dynamic-agent machinery, extracted from the Agent
  * class. One instance per Agent, installed as a Lifecycle capability
@@ -111,8 +163,7 @@ export function rejectSubAgentWebSocket(response: Response): Response {
  * load-bearing startup ordering inside the host's startup span.
  *
  * Nothing here renames any wire- or storage-visible identifier: the
- * `cf_agents_facet_runs` table, `_cf_*` RPC method names, and route
- * key formats are frozen.
+ * `_cf_*` RPC method names and route key formats are frozen.
  *
  * @internal
  */
@@ -121,13 +172,6 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /** The parent-side registry of spawned dynamic agents. */
   readonly registry: DynamicAgentRegistry;
-
-  /**
-   * Root-owned keepAlive tokens held on behalf of descendant facets.
-   * Facets cannot arm a physical alarm, so their keepAlive refs ride
-   * on the root's heartbeat.
-   */
-  #facetKeepAliveTokens = new Set<string>();
 
   /** Per-frame bridge context while a forwarded WS event runs in a facet. */
   #bridgeContext = new AsyncLocalStorage<DynamicAgentBridgeInvocationContext>();
@@ -149,44 +193,51 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /** Per-connection operation queues (send/setState/close ordering). */
   #connectionOperationTails = new Map<string, Promise<void>>();
+  /** State writes of a virtual connection still on their way to the root. */
+  #pendingStateWrites = new Map<string, number>();
+
+  /**
+   * The newest queued send batch per connection, while it can still take
+   * sends: it has not started and nothing was queued behind it.
+   */
+  #openConnectionSendBatches = new Map<string, PendingConnectionSends>();
 
   /** One-way barrier so facet broadcasts wait for older queued operations. */
   #broadcastOperationTail?: Promise<void>;
+  /**
+   * A broadcast that waits for older operations and goes to the root over
+   * a call of its own. A later send waits for it (#2055): it would
+   * otherwise queue behind the same older operation and reach the root
+   * first.
+   */
+  #queuedBroadcastTail?: Promise<void>;
+
+  /**
+   * The channel to the root: at the root, the one it hands its facets; in
+   * a facet, the one its parent handed down at the latest init. Calls
+   * through it do not loop back into the runtime as a root stub does.
+   */
+  #rootChannel?: RootFacetRpcSurface;
+
+  /** In a facet: the jurisdiction its root was addressed in, if any. */
+  #rootJurisdiction?: string;
+
+  /** In a facet: the jurisdiction its root was addressed in, if any. */
+  get rootJurisdiction(): string | undefined {
+    return this.#rootJurisdiction;
+  }
 
   constructor(host: DynamicAgentHostPort) {
     super("dynamic-agents");
+    registerUnlistedSockets(host, () => this.broadcastsToUnlistedSockets);
     this.#host = host;
+    // The newest instance of this object in the isolate; a channel an older
+    // instance handed out stops working.
+    markLiveRoot(host.ctx.id.toString(), host);
     this.registry = new DynamicAgentRegistry({
       sql: host.sql.bind(host),
       execRawSql: (sql) => void host.ctx.storage.sql.exec(sql)
     });
-  }
-
-  runRowsForPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): FacetRunStorageRow[] {
-    const rows = this.#host.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-    `;
-    return rows.filter((row) => {
-      try {
-        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-        return this.#host._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
-      } catch {
-        return false;
-      }
-    });
-  }
-
-  deleteRunRowsForPrefix(ownerPath: ReadonlyArray<AgentPathStep>): void {
-    for (const row of this.runRowsForPrefix(ownerPath)) {
-      this.#host.sql`
-        DELETE FROM cf_agents_facet_runs
-        WHERE owner_path_key = ${row.owner_path_key}
-          AND run_id = ${row.run_id}
-      `;
-    }
   }
 
   lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
@@ -261,7 +312,57 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       : this.#host.lifecycle.route(envelope);
   }
 
+  /**
+   * What this agent hands a child facet as its channel to the root: a root
+   * its own, a facet the one it was handed.
+   */
+  #channelForChildren(): RootFacetRpcSurface | undefined {
+    if (this.#host._isFacet) return this.#rootChannel;
+    this.#rootChannel ??= new RootFacetChannel(
+      this.#host as unknown as RootFacetRpcSurface,
+      this.#host.ctx.id.toString(),
+      (body) => this.#host._runFacetInitInvocation(body)
+    );
+    return this.#rootChannel;
+  }
+
   async rootAlarmOwner(): Promise<RootFacetRpcSurface> {
+    if (!this.#host._isFacet || !this.#rootChannel) return this.rootStub();
+    // Each call takes the channel current when it is made: an init between
+    // two calls of one caller (a nested delete) replaces and disposes the
+    // old one. A channel from a root instance that has since been replaced
+    // refuses the call before running it; the call is made through a stub
+    // instead, and the channel dropped until the next init. Any other
+    // failure is the call's own.
+    type Call = (...args: unknown[]) => Promise<unknown>;
+    const byName = (target: unknown, name: string) =>
+      (target as Record<string, Call>)[name];
+    return new Proxy({} as RootFacetRpcSurface, {
+      get: (_target, prop) => {
+        if (typeof prop !== "string" || !prop.startsWith("_cf_")) {
+          return undefined;
+        }
+        return async (...args: unknown[]) => {
+          const channel = this.#rootChannel;
+          if (!channel) return byName(this.rootStub(), prop)(...args);
+          try {
+            return await byName(channel, prop)(...args);
+          } catch (error) {
+            if (!isStaleRootChannelError(error)) throw error;
+            if (this.#rootChannel === channel) this.#rootChannel = undefined;
+            return byName(this.rootStub(), prop)(...args);
+          }
+        };
+      }
+    });
+  }
+
+  /**
+   * A stub of the root, for a call that may end the calling facet (its own
+   * destroy): measured in the test runtime, a facet deleted while its call
+   * through the channel is open takes the whole process down.
+   */
+  rootStub(): RootFacetRpcSurface {
     const root = this.#host._parentPath[0];
     if (!root) {
       throw new Error("Facet routing requires a root parent.");
@@ -280,9 +381,28 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // Every root endpoint on this surface starts the root's lifecycle itself,
     // so a plain stub is enough. `getAgentByName()` would spend an extra
     // `__unsafe_ensureInitialized` round trip on every broadcast and send.
-    return binding.get(
-      binding.idFromName(root.name)
+    const namespace = this.#inRootJurisdiction(binding);
+    return namespace.get(
+      namespace.idFromName(root.name)
     ) as unknown as RootFacetRpcSurface;
+  }
+
+  /**
+   * The root's namespace in the root's jurisdiction: the same name outside
+   * it is another Durable Object (#2470).
+   */
+  #inRootJurisdiction(binding: DurableObjectNamespace): DurableObjectNamespace {
+    const jurisdiction = this.#rootJurisdiction;
+    return jurisdiction
+      ? binding.jurisdiction(jurisdiction as DurableObjectJurisdiction)
+      : binding;
+  }
+
+  /** What this agent hands a child facet as its root's jurisdiction. */
+  #jurisdictionForChildren(): string | undefined {
+    return this.#host._isFacet
+      ? this.#rootJurisdiction
+      : this.#host.ctx.id.jurisdiction;
   }
 
   rootResolvesToSelf(): boolean {
@@ -295,179 +415,20 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       | undefined;
     if (!binding?.idFromName) return false;
 
-    return binding.idFromName(root.name).equals(this.#host.ctx.id);
+    return this.#inRootJurisdiction(binding)
+      .idFromName(root.name)
+      .equals(this.#host.ctx.id);
   }
 
   /**
-   * Clean root-owned bookkeeping for a sub-tree of facets: bulk-cancel
-   * schedules, queue items, and routed Task wake mirrors under the
-   * owner-path prefix, and delete root-side facet fiber recovery leases for
-   * the same sub-tree.
+   * Clean root-owned bookkeeping for a sub-tree of facets: the root's
+   * facet wakes for it, and rows an earlier release kept for it on the root.
    */
   async cleanupPrefix(ownerPath: ReadonlyArray<AgentPathStep>): Promise<void> {
     const prefix = agentPathKey(ownerPath);
     if (prefix) {
-      await this.#host.scheduler.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-        prefix
-      );
-      await this.#host.tasks.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-        prefix
-      );
-      await this.#host._queue.__DO_NOT_USE_WILL_BREAK__cleanupRoutePrefix(
-        prefix
-      );
+      await forgetFacetWakes(this.#host.lifecycle, prefix);
     }
-    this.deleteRunRowsForPrefix(ownerPath);
-    await this.#host._syncHostJobs();
-  }
-
-  /**
-   * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
-   */
-  async acquireKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string> {
-    const ownerPathKey = agentPathKey(ownerPath);
-    const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
-    this.#facetKeepAliveTokens.add(token);
-    this.#host._keepAliveRefs++;
-    if (this.#host._keepAliveRefs === 1) {
-      await this.#host._syncHostJobs();
-    }
-    return token;
-  }
-
-  /**
-   * Release a root-owned keepAlive ref previously acquired for a facet.
-   * Idempotent so disposer calls can safely race or run twice.
-   */
-  async releaseKeepAlive(token: string): Promise<void> {
-    if (!this.#facetKeepAliveTokens.delete(token)) return;
-    this.#host._keepAliveRefs = Math.max(0, this.#host._keepAliveRefs - 1);
-    await this.#host._syncHostJobs();
-  }
-
-  /**
-   * Register a facet's durable run row in the root-side index so root
-   * alarm housekeeping can dispatch recovery checks into idle facets.
-   */
-  async registerRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    const ownerPathJson = JSON.stringify(ownerPath);
-    const ownerPathKey = agentPathKey(ownerPath);
-    if (!ownerPathKey) {
-      throw new Error("_cf_registerFacetRun requires a non-empty owner path.");
-    }
-    this.#host.sql`
-      INSERT OR REPLACE INTO cf_agents_facet_runs
-        (owner_path, owner_path_key, run_id, created_at)
-      VALUES
-        (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
-    `;
-    await this.#host._syncHostJobs();
-  }
-
-  /**
-   * Root-side scan for durable fibers owned by descendant facets.
-   * `cf_agents_facet_runs` is only an index; actual snapshots and
-   * recovery hooks live in each facet's own `cf_agents_runs` table.
-   */
-  async checkRunFibers(): Promise<void> {
-    // Only the root owns the physical alarm and facet-run index.
-    if (this.#host._parentPath.length > 0) return;
-
-    const rows = this.#host.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-      ORDER BY created_at ASC
-    `;
-    const firstRowByOwner = new Map<string, FacetRunStorageRow>();
-    for (const row of rows) {
-      if (!firstRowByOwner.has(row.owner_path_key)) {
-        firstRowByOwner.set(row.owner_path_key, row);
-      }
-    }
-
-    for (const row of firstRowByOwner.values()) {
-      let ownerPath: AgentPathStep[];
-      try {
-        ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-      } catch (e) {
-        console.warn(
-          `[Agent] Corrupted facet fiber owner path for ${row.owner_path_key}; pruning stale lease.`,
-          e
-        );
-        this.#host.sql`
-          DELETE FROM cf_agents_facet_runs
-          WHERE owner_path_key = ${row.owner_path_key}
-        `;
-        continue;
-      }
-
-      try {
-        // Dispatch through the host so subclass overrides of the
-        // `_cf_checkRunFibersForFacet` RPC entry point keep intercepting.
-        const remaining =
-          await this.#host._cf_checkRunFibersForFacet(ownerPath);
-        if (remaining === 0) {
-          this.#host.sql`
-            DELETE FROM cf_agents_facet_runs
-            WHERE owner_path_key = ${row.owner_path_key}
-          `;
-        }
-      } catch (e) {
-        // Keep the lease so a transient failure (e.g. facet init error)
-        // gets retried on the next root heartbeat.
-        console.error(
-          `[Agent] Facet fiber recovery check failed for ${row.owner_path_key}:`,
-          e
-        );
-      }
-    }
-  }
-
-  /**
-   * Dispatch a runFiber recovery check into the facet identified by
-   * `ownerPath`. Returns the number of remaining local `cf_agents_runs`
-   * rows on the target facet after recovery.
-   */
-  async checkRunFibersAtPath(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<number> {
-    await this.#host.__unsafe_ensureInitialized();
-
-    const selfPath = this.#host.selfPath;
-    if (!this.#host._isSameAgentPathPrefix(selfPath, ownerPath)) {
-      throw new Error(
-        `Facet fiber owner path does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-
-    if (selfPath.length === ownerPath.length) {
-      await this.#host._checkRunFibers();
-      const rows = this.#host.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_agents_runs
-      `;
-      return rows[0]?.count ?? 0;
-    }
-
-    const next = ownerPath[selfPath.length];
-    if (!this.#host.hasSubAgent(next.className, next.name)) {
-      // The facet was deleted or its registry was cleared. The root
-      // should prune the root-side lease; there is no remaining child
-      // storage to recover through the public registry path.
-      return 0;
-    }
-
-    const stub = await this.resolve(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_checkRunFibersForFacet(
-        ownerPath: ReadonlyArray<AgentPathStep>
-      ): Promise<number>;
-    };
-    return handle._cf_checkRunFibersForFacet(ownerPath);
   }
 
   /**
@@ -722,10 +683,18 @@ export class DynamicAgentsInternal extends LifecycleCapability {
             _cf_initAsFacet(
               name: string,
               parentPath: ReadonlyArray<{ className: string; name: string }>,
-              identityName: string
+              identityName: string,
+              rootChannel?: RootFacetRpcSurface,
+              rootJurisdiction?: string
             ): Promise<void>;
           }
-        )._cf_initAsFacet(name, childParentPath, identity.name);
+        )._cf_initAsFacet(
+          name,
+          childParentPath,
+          identity.name,
+          this.#channelForChildren(),
+          this.#jurisdictionForChildren()
+        );
       });
     } catch (error) {
       if (!identity.existing) {
@@ -777,10 +746,18 @@ export class DynamicAgentsInternal extends LifecycleCapability {
             _cf_initAsFacet(
               name: string,
               parentPath: ReadonlyArray<{ className: string; name: string }>,
-              identityName: string
+              identityName: string,
+              rootChannel?: RootFacetRpcSurface,
+              rootJurisdiction?: string
             ): Promise<void>;
           }
-        )._cf_initAsFacet(name, childParentPath, identityName);
+        )._cf_initAsFacet(
+          name,
+          childParentPath,
+          identityName,
+          this.#channelForChildren(),
+          this.#jurisdictionForChildren()
+        );
       });
     } catch (error) {
       // A concurrent delete aborts the facet mid-init; treat that as a drop.
@@ -937,9 +914,19 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     operationName: DynamicAgentConnectionOperationName,
     operation: (bridge: DynamicAgentConnectionBridgeLike) => unknown
   ): void {
+    // Anything queued now runs after the open batch, so later sends must not
+    // join that batch and overtake it.
+    this.#openConnectionSendBatches.delete(connectionId);
     const activeBridge = this.activeBridge(connectionId);
+    const olderOperation = this.#connectionOperationTails.get(connectionId);
+    // Only sends wait for a queued broadcast: a state or flag write waiting
+    // behind one would let the next frame read stale root-owned metadata.
+    const queuedBroadcast =
+      operationName === "send" ? this.#queuedBroadcastTail : undefined;
     const previousConnectionOperation =
-      this.#connectionOperationTails.get(connectionId);
+      olderOperation && queuedBroadcast
+        ? Promise.all([olderOperation, queuedBroadcast]).then(() => {})
+        : (olderOperation ?? queuedBroadcast);
     let pending: Promise<void>;
     if (activeBridge && !previousConnectionOperation) {
       try {
@@ -950,7 +937,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     } else {
       pending = (previousConnectionOperation ?? Promise.resolve()).then(
         async () => {
-          const root = await this.rootAlarmOwner();
+          // A stub, not the channel: socket operations keep their order
+          // with the root's own socket events this way (a call through
+          // the channel overtook a following message's state, in tests).
+          const root = this.rootStub();
           await operation(
             new RootDynamicAgentConnectionBridge(root, connectionId)
           );
@@ -966,12 +956,64 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     });
 
     this.#connectionOperationTails.set(connectionId, completion);
+    if (operationName === "setState" || operationName === "setFlag") {
+      this.#pendingStateWrites.set(
+        connectionId,
+        (this.#pendingStateWrites.get(connectionId) ?? 0) + 1
+      );
+      void completion.then(() => {
+        const left = (this.#pendingStateWrites.get(connectionId) ?? 1) - 1;
+        if (left > 0) this.#pendingStateWrites.set(connectionId, left);
+        else this.#pendingStateWrites.delete(connectionId);
+      });
+    }
     this.#host.ctx.waitUntil(completion);
     void completion.then(() => {
       if (this.#connectionOperationTails.get(connectionId) === completion) {
         this.#connectionOperationTails.delete(connectionId);
       }
     });
+  }
+
+  /**
+   * Route a virtual sub-agent connection send. A send that would wait behind
+   * another operation joins the waiting send batch instead, so a burst (such
+   * as a stream replay) costs one root call, not one per frame (#2820).
+   * Order is unchanged: a batch only ever holds consecutive sends.
+   */
+  routeConnectionSend(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): void {
+    const size = connectionSendSize(message);
+    const open = this.#openConnectionSendBatches.get(connectionId);
+    if (open && open.size + size <= MAX_CONNECTION_SEND_BATCH_SIZE) {
+      open.messages.push(message);
+      open.size += size;
+      return;
+    }
+
+    const batch: PendingConnectionSends = { messages: [message], size };
+    let closed = false;
+    const close = () => {
+      closed = true;
+      if (this.#openConnectionSendBatches.get(connectionId) === batch) {
+        this.#openConnectionSendBatches.delete(connectionId);
+      }
+    };
+    this.routeConnectionOperation(connectionId, "send", (bridge) => {
+      close();
+      const [only] = batch.messages;
+      return batch.messages.length === 1
+        ? bridge.send(only)
+        : bridge.sendMany(batch.messages);
+    });
+    // An idle live frame bridge runs the operation synchronously.
+    if (closed) return;
+    this.#openConnectionSendBatches.set(connectionId, batch);
+    // The operation never runs when resolving the root fails; stop taking
+    // sends then too.
+    void this.#connectionOperationTails.get(connectionId)?.then(close);
   }
 
   /**
@@ -987,13 +1029,13 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[],
     upstreamBridge?: DynamicAgentConnectionBridgeLike
-  ): Promise<void> {
+  ): Promise<number | void> {
     const activeBridge = upstreamBridge ?? this.activeBridge();
     const previousOperations = new Set([
       ...(this.#broadcastOperationTail ? [this.#broadcastOperationTail] : []),
       ...this.#connectionOperationTails.values()
     ]);
-    let pending: Promise<void>;
+    let pending: Promise<number | void>;
     if (activeBridge && previousOperations.size === 0) {
       try {
         pending = Promise.resolve(
@@ -1004,17 +1046,29 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       }
     } else {
       pending = Promise.all(previousOperations).then(async () => {
-        const root = await this.rootAlarmOwner();
-        await root._cf_broadcastToSubAgent(ownerPath, message, without);
+        // A stub, for the same order as the connection operations above.
+        const root = this.rootStub();
+        return root._cf_broadcastToSubAgent(ownerPath, message, without);
       });
     }
-    const completion = pending.catch((error: unknown) => {
+    const delivered = pending.catch((error: unknown) => {
       console.error("[Agent] Sub-agent broadcast operation failed:", {
         operation: "broadcast",
         error
       });
     });
+    const completion = delivered.then(() => {});
 
+    if (!(activeBridge && previousOperations.size === 0)) {
+      // A later send must not join a batch opened before this broadcast.
+      this.#openConnectionSendBatches.clear();
+      this.#queuedBroadcastTail = completion;
+      void completion.then(() => {
+        if (this.#queuedBroadcastTail === completion) {
+          this.#queuedBroadcastTail = undefined;
+        }
+      });
+    }
     this.#broadcastOperationTail = completion;
     this.#host.ctx.waitUntil(completion);
     void completion.then(() => {
@@ -1022,7 +1076,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         this.#broadcastOperationTail = undefined;
       }
     });
-    await completion;
+    return delivered;
   }
 
   #reportConnectionOperationFailure(
@@ -1041,8 +1095,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
+    // Taken before any await: the caller set it for this broadcast.
+    const report = takeDeliveryReport();
     if (this.#broadcastHasNoRecipients(without)) return;
-    await this.routeBroadcast(this.#host.selfPath, message, without);
+    const sentAt = await this.routeBroadcast(
+      this.#host.selfPath,
+      message,
+      without
+    );
+    if (typeof sentAt === "number") report?.(sentAt);
   }
 
   /**
@@ -1052,6 +1113,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    * yet, so it has not been through `onConnect`. Synchronous so a skipped
    * broadcast never reorders later operations.
    */
+  /**
+   * Whether a broadcast now goes to the root's sockets for this facet
+   * unfiltered, including ones this facet does not list yet: a facet that
+   * has not read its sockets from the root (during its start).
+   */
+  get broadcastsToUnlistedSockets(): boolean {
+    return this.#host._isFacet && !this.#virtualConnectionsHydrated;
+  }
+
   #broadcastHasNoRecipients(without: string[] | undefined): boolean {
     if (!this.#virtualConnectionsHydrated) {
       this.#hydrateVirtualConnectionsInBackground();
@@ -1080,12 +1150,14 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void> {
+  ): Promise<number | void> {
     if (this.#host._isFacet) {
-      await this.routeBroadcast(ownerPath, message, without);
-      return;
+      return this.routeBroadcast(ownerPath, message, without);
     }
 
+    // When the root sent it, on its own clock: a socket accepted strictly
+    // before is one of these (`CF_SUB_AGENT_ACCEPTED_AT_KEY`).
+    const sentAt = Date.now();
     for (const connection of this.#host._webSockets.getConnections()) {
       if (without?.includes(connection.id)) continue;
       const targetPath = this.connectionTargetPath(connection);
@@ -1093,6 +1165,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       if (!this.isSameAgentPath(targetPath, ownerPath)) continue;
       connection.send(message);
     }
+    return sentAt;
   }
 
   async connectionMetas(
@@ -1117,6 +1190,17 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     connection.send(message);
   }
 
+  async sendManyToConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    const connection = this.#host._webSockets.getConnection(connectionId);
+    if (!connection || !this.connectionHasChildTarget(connection)) {
+      return;
+    }
+    for (const message of messages) connection.send(message);
+  }
+
   async closeConnection(
     connectionId: string,
     code?: number,
@@ -1138,8 +1222,19 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       return null;
     }
     ensureConnectionWrapped(connection);
-    connection.setState(state);
+    connection.setState(withoutEventLogFlag(state));
     return this.getForwardedState(connection);
+  }
+
+  /**
+   * Root-side: set a sub-agent socket's event-log subscriptions, the one
+   * flag a facet writes on its own (see `createBridgeConnection`).
+   */
+  setConnectionFlag(connectionId: string, key: string, value: unknown): void {
+    if (key !== CF_EVENT_LOGS_KEY) return;
+    const connection = this.#host._webSockets.getConnection(connectionId);
+    if (!connection || !this.connectionHasChildTarget(connection)) return;
+    setConnectionFlag(connection, key, value);
   }
 
   #connectionMetaForPath(
@@ -1168,7 +1263,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       id: connection.id,
       uri: target.uri,
       tags,
-      state: this.getForwardedState(connection)
+      state: this.getForwardedState(connection),
+      acceptedAt: connectionAcceptedAt(connection)
     };
   }
 
@@ -1232,6 +1328,55 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     );
   }
 
+  /**
+   * Whether this Agent forwards `connection`'s messages to a sub-agent,
+   * by the same rule as `forwardWebSocketMessage` (a leading segment that
+   * names this Agent itself is skipped).
+   */
+  connectionRoutesToChild(connection: Connection): boolean {
+    ensureConnectionWrapped(connection);
+    const outerUri = this.#host._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    const uri = typeof outerUri === "string" ? outerUri : connection.uri;
+    if (!uri) return false;
+    // Event-log fan-out and the chat hosts' dispatch ask for every
+    // connection on every frame: parse a URI once per connection object.
+    // The answer is kept with the URI it came from, so a bridged
+    // connection whose URI is refreshed is parsed again.
+    const cached = this.#routesToChild.get(connection);
+    if (cached?.uri === uri) return cached.routes;
+    const routes = this.#childMatch(uri) !== null;
+    this.#routesToChild.set(connection, { uri, routes });
+    return routes;
+  }
+
+  readonly #routesToChild = new WeakMap<
+    Connection,
+    { uri: string; routes: boolean }
+  >();
+
+  /**
+   * The sub-agent a connection URI routes to from here, skipping a leading
+   * segment that names this Agent itself; `null` when it ends here.
+   */
+  #childMatch(uri: string): ReturnType<typeof parseSubAgentPath> {
+    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
+    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
+    const match = parseSubAgentPath(uri, { knownClasses });
+    if (
+      !match ||
+      this.#host._ParentClass.name !== match.childClass ||
+      this.#host.name !== match.childName
+    ) {
+      return match;
+    }
+    const tailUri = new URL(uri);
+    tailUri.pathname = match.remainingPath;
+    return parseSubAgentPath(tailUri.toString(), { knownClasses });
+  }
+
   connectionTargetsChild(connection: Connection): boolean {
     if (!connection.uri) return false;
     const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
@@ -1256,6 +1401,19 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     request: Request,
     options: { gate: boolean }
   ): Promise<boolean> {
+    // The root stamps when it accepted the socket, before it wakes the
+    // sub-agent, whose start may broadcast to it.
+    if (
+      !this.#host._isFacet &&
+      connectionAcceptedAt(connection) === undefined &&
+      this.connectionRoutesToChild(connection)
+    ) {
+      this.#host._unsafe_setConnectionFlag(
+        connection,
+        CF_SUB_AGENT_ACCEPTED_AT_KEY,
+        Date.now()
+      );
+    }
     const routed = await this.#resolveConnection(connection, {
       create: true,
       request,
@@ -1370,22 +1528,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       return { status: "dropped" };
     }
 
-    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
-    let match = parseSubAgentPath(uri, {
-      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-    });
+    const match = this.#childMatch(uri);
     if (!match) return { status: "no-match" };
-    if (
-      this.#host._ParentClass.name === match.childClass &&
-      this.#host.name === match.childName
-    ) {
-      const tailUri = new URL(uri);
-      tailUri.pathname = match.remainingPath;
-      match = parseSubAgentPath(tailUri.toString(), {
-        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-      });
-      if (!match) return { status: "no-match" };
-    }
 
     const { request } = options;
     let forwardReq = request;
@@ -1428,6 +1572,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         uri: childUri.toString(),
         tags,
         state: this.getForwardedState(connection),
+        acceptedAt: connectionAcceptedAt(connection),
         // The outer URL belongs to the root-owned socket. A child that saw
         // it would resolve its own connection from the top of the chain,
         // so a third hop routes back to the second one, recursively.
@@ -1538,7 +1683,12 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   createBridgeConnection(meta: DynamicAgentConnectionMeta): Connection {
     let stored = this.#virtualConnections.get(meta.id);
     if (stored) {
-      stored.meta = meta;
+      // While a state write of this facet is still on its way to the root,
+      // the root's copy in `meta` is older than ours: keep ours, or the
+      // next message would undo the write (an event-log unsubscribe).
+      stored.meta = this.#pendingStateWrites.has(meta.id)
+        ? { ...meta, state: stored.meta.state }
+        : meta;
       if (stored.connection) {
         (
           stored.connection as unknown as {
@@ -1552,6 +1702,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
             tags: string[];
           }
         ).tags = meta.tags;
+        if (meta.acceptedAt !== undefined) {
+          (stored.connection as unknown as { acceptedAt?: number }).acceptedAt =
+            meta.acceptedAt;
+        }
         return stored.connection;
       }
     } else {
@@ -1572,6 +1726,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       id: meta.id,
       uri: meta.uri,
       tags: meta.tags,
+      acceptedAt: meta.acceptedAt,
       get state() {
         return getStored().meta.state;
       },
@@ -1585,9 +1740,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         return state;
       },
       send(message: string | ArrayBuffer | ArrayBufferView) {
-        owner.routeConnectionOperation(meta.id, "send", (bridge) =>
-          bridge.send(message)
-        );
+        owner.routeConnectionSend(meta.id, message);
       },
       close(code?: number, reason?: string) {
         owner.routeConnectionOperation(meta.id, "close", (bridge) =>
@@ -1600,6 +1753,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
     stored.connection = connection;
     ensureConnectionWrapped(connection);
+    // The facet's event-log subscriptions go to the root as that one flag,
+    // so the root applies them, removal included, over any older full-state
+    // write from a facet this socket passes through.
+    setConnectionFlagWriter(connection, CF_EVENT_LOGS_KEY, (value, raw) => {
+      updateStoredState(raw);
+      owner.routeConnectionOperation(meta.id, "setFlag", (bridge) =>
+        bridge.setFlag(CF_EVENT_LOGS_KEY, value)
+      );
+    });
     return connection;
   }
 
@@ -1613,7 +1775,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         id: connection.id,
         uri: connection.uri,
         tags: [...connection.tags],
-        state: this.getRawConnectionState(connection)
+        state: this.getRawConnectionState(connection),
+        acceptedAt: connectionAcceptedAt(connection)
       },
       connection: stored?.connection ?? connection
     });
@@ -1625,20 +1788,27 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    * from the root's WebSocket state.
    */
   async restoreFacetContext(): Promise<void> {
-    const isFacet =
-      await this.#host.ctx.storage.get<boolean>("cf_agents_is_facet");
-    if (isFacet) this.#host._isFacet = true;
+    // One read for all four keys: every agent's start does this, a root's
+    // included.
+    const stored = await this.#host.ctx.storage.get([
+      FACET_FLAG_KEY,
+      "cf_agents_facet_name",
+      ROOT_JURISDICTION_KEY,
+      "cf_agents_parent_path"
+    ]);
+    if (stored.get(FACET_FLAG_KEY)) this.#host._isFacet = true;
 
-    const storedFacetName = await this.#host.ctx.storage.get<string>(
-      "cf_agents_facet_name"
-    );
+    const storedFacetName = stored.get("cf_agents_facet_name");
     if (typeof storedFacetName === "string") {
       this.#host._facetName = storedFacetName;
     }
 
-    const storedParentPath = await this.#host.ctx.storage.get<
-      Array<{ className: string; name: string }>
-    >("cf_agents_parent_path");
+    const storedJurisdiction = stored.get(ROOT_JURISDICTION_KEY);
+    if (typeof storedJurisdiction === "string") {
+      this.#rootJurisdiction = storedJurisdiction;
+    }
+
+    const storedParentPath = stored.get("cf_agents_parent_path");
     if (isValidParentPath(storedParentPath)) {
       this.#host._parentPath = storedParentPath;
     }
@@ -1663,7 +1833,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       return;
     }
 
-    const root = await this.rootAlarmOwner();
+    // A stub: this runs in the facet's start, which a root's own start can
+    // be waiting on; through the channel the call would wait for that start.
+    const root = this.rootStub();
     const metas = await root._cf_subAgentConnectionMetas(this.#host.selfPath);
     for (const meta of metas) {
       // A connection forwarded while the root read was in flight is fresher.
@@ -1828,8 +2000,27 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   async init(
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
-    identityName = name
+    identityName = name,
+    rootChannel?: RootFacetRpcSurface,
+    rootJurisdiction?: string
   ): Promise<void> {
+    if (rootJurisdiction && rootJurisdiction !== this.#rootJurisdiction) {
+      this.#rootJurisdiction = rootJurisdiction;
+      await this.#host.ctx.storage.put(ROOT_JURISDICTION_KEY, rootJurisdiction);
+    }
+    if (rootChannel) {
+      // Kept past this call; the newest one replaces the last.
+      const kept = (
+        rootChannel as RootFacetRpcSurface & { dup?: () => RootFacetRpcSurface }
+      ).dup?.();
+      const previous = this.#rootChannel as
+        | (RootFacetRpcSurface & { [Symbol.dispose]?: () => void })
+        | undefined;
+      this.#rootChannel = kept ?? rootChannel;
+      if (previous && previous !== this.#rootChannel) {
+        previous[Symbol.dispose]?.();
+      }
+    }
     const routedName = this.#host.lifecycle.name;
     if (routedName !== identityName) {
       throw new Error(
@@ -1844,7 +2035,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     this.#host._parentPath = parentPath as AgentPathStep[];
     // Persist the agent-specific facet keys in parallel.
     await Promise.all([
-      this.#host.ctx.storage.put("cf_agents_is_facet", true),
+      this.#host.ctx.storage.put(FACET_FLAG_KEY, true),
       this.#host.ctx.storage.put("cf_agents_facet_name", name),
       this.#host.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
@@ -1854,19 +2045,5 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // virtual sub-agent connections and `broadcast()` routes to the parent
     // bridge, so neither touches the parent's own WebSocket handles (#1679).
     await this.#host.__unsafe_ensureInitialized();
-  }
-
-  /** Remove a completed facet fiber from the root-side index. */
-  async unregisterRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void> {
-    const ownerPathKey = agentPathKey(ownerPath);
-    this.#host.sql`
-      DELETE FROM cf_agents_facet_runs
-      WHERE owner_path_key IS ${ownerPathKey}
-        AND run_id = ${runId}
-    `;
-    await this.#host._syncHostJobs();
   }
 }

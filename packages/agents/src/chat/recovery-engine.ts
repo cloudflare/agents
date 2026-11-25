@@ -9,7 +9,8 @@
  * @internal Not a public API.
  */
 
-import type { FiberRecoveryContext } from "../index";
+import { backoffDelay } from "../retries";
+import { ChatRecoverySupersededError } from "./turn-stop";
 import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
@@ -17,12 +18,43 @@ import type {
 } from "./lifecycle";
 import type { ChatFiberSnapshot } from "./recovery";
 import {
+  interruptedTurnKind,
+  planInterruptedTurn,
+  type RecoveryLeaf
+} from "./interrupted-turn";
+import type { RecoveryAttemptHandle } from "./chat-turns";
+import {
+  handleRecoveryAttemptError,
+  runRecoveredTurn
+} from "./recovery-attempt";
+import {
+  routeStreamInterruption,
+  scheduleRecoveredTurn
+} from "./recovery-route";
+import type {
+  RecoveredTurnSchedule,
+  StreamInterruptionHost,
+  StreamInterruptionOutcome
+} from "./recovery-route";
+import {
+  currentRunAttempt,
+  dispatchChatRecoveryToHandoff
+} from "./recovery-task";
+import type {
+  RecoveredTurnHost,
+  RecoveredTurnResult,
+  RecoveryAttemptData
+} from "./recovery-attempt";
+import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   admitChatRecoveryAttempt,
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
   evaluateChatRecoveryIncident,
-  finishChatRecoveryAttempt
+  finishChatRecoveryAttempt,
+  listActiveChatRecoveryIncidents,
+  readChatRecoveryProgress,
+  sweepStaleChatRecoveryIncidents
 } from "./recovery-incident";
 import type {
   ChatRecoveryAttempt,
@@ -61,7 +93,8 @@ export type ChatRecoveryScheduleCallback =
 export type ChatRecoveryScheduleReason =
   | "initial"
   | "stable_timeout_retry"
-  | "chained_retry";
+  | "chained_retry"
+  | "redefer";
 
 /**
  * A reconstructed orphaned-stream partial. The engine seam is deliberately
@@ -111,6 +144,12 @@ export interface BeginChatRecoveryIncidentResult {
    * when nothing was recorded.
    */
   attempt: ChatRecoveryAttempt | null;
+  /**
+   * A user stopped the turn while it was being routed here: the incident
+   * ends `skipped` with `user_cancelled`, and the caller ends the turn as
+   * stopped. `exhausted` is then `false` and `attempt` `null`.
+   */
+  stopped?: boolean;
 }
 
 /**
@@ -136,19 +175,6 @@ export interface ChatRecoveryAdapter {
    * has no such state and omits it.
    */
   ensureInteractionStateLoaded?(): void;
-  /**
-   * Optional: give the package a chance to handle a NON-chat fiber before chat
-   * recovery inspects it. Returns `true` if the package fully consumed the
-   * fiber, in which case the engine tells the caller to skip chat-recovery
-   * processing for it. `Think` uses this for its messenger/workflow reply fibers
-   * (`think:messenger-reply`); `AIChatAgent` has no non-chat fibers and omits it
-   * (the engine then treats every recovered fiber as a chat-recovery candidate).
-   *
-   * Ordering invariant: the engine dispatches this FIRST, before the
-   * chat-fiber-name gate, so a non-chat fiber is never misclassified as an
-   * orphaned chat turn.
-   */
-  tryHandleNonChatFiberRecovery?(ctx: FiberRecoveryContext): Promise<boolean>;
   /** Monotonic forward-progress marker for the no-progress budget. */
   readProgress(): Promise<number>;
   /**
@@ -166,6 +192,20 @@ export interface ChatRecoveryAdapter {
   listActiveIncidents?(): Promise<ChatRecoveryIncident[]>;
   /** Persist the evaluated incident under `key`. */
   putIncident(key: string, incident: ChatRecoveryIncident): Promise<void>;
+  /**
+   * Recovery picked up the cut-off turn of these requests: the turn is
+   * recovery's now. Durable admission drops their records
+   * (`ChatTurns.turnAccepted`), which a reset between the turn's fiber and
+   * the record's delete can leave. Optional.
+   */
+  turnRecovered?(requestIds: string[]): void;
+  /**
+   * A recovery ended, or a wake found nothing more to do: the requests
+   * queued behind the turn it recovered can run
+   * (`ChatTurns.resumeAdmissions`). Called outside the attempt's scope.
+   * Optional.
+   */
+  recoverySettled?(): void;
   /**
    * Resolve once every write issued so far is durably confirmed (Durable
    * Object `storage.sync()`). {@link ChatRecoveryEngine.beginIncident} waits
@@ -193,8 +233,19 @@ export interface ChatRecoveryAdapter {
     callback: ChatRecoveryScheduleCallback,
     data: Record<string, unknown>,
     reason: ChatRecoveryScheduleReason,
-    delaySeconds: number
+    delaySeconds: number,
+    /**
+     * Keys a retried enqueue of one replacement attempt, so a retry joins the
+     * run an earlier try already created. Only set for `"redefer"`.
+     */
+    dedupeKey?: string
   ): Promise<void>;
+  /**
+   * What the engine needs from the host's turn machinery to run a recovery
+   * attempt and route a live stream interruption. Hosts that only use the
+   * incident bookkeeping omit it.
+   */
+  turns?: ChatRecoveryTurnBindings;
   /**
    * Set or clear the live "recovering…" status (#1620). The engine calls this on
    * the incident transitions: `scheduled` → active (keyed by the recovery-root
@@ -246,10 +297,11 @@ export interface ChatRecoveryAdapter {
    * The in-flight recovery-root request id, consulted as a fallback in the
    * give-up root-id chain when the payload carries no `originalRequestId` /
    * `recoveredRequestId` and no incident record survives. `undefined` when no
-   * recovery chain is active. (`AIChatAgent` and `Think` both back this with
-   * `_activeChatRecoveryRootRequestId`.)
+   * recovery chain is active. Optional: the engine keeps the id itself
+   * ({@link ChatRecoveryEngine.activeRootRequestId}) for hosts that run their
+   * attempts through {@link ChatRecoveryEngine.runRecoveredTurn}.
    */
-  activeChatRecoveryRootRequestId(): string | undefined;
+  activeChatRecoveryRootRequestId?(): string | undefined;
   /**
    * Report a tolerated best-effort bookkeeping failure during give-up: the
    * incident `"read"` (before synthesizing) or the sealing `"seal"` write
@@ -257,6 +309,76 @@ export interface ChatRecoveryAdapter {
    * {@link ChatRecoveryEngine.exhaustRecoveryGiveUp}.
    */
   onGiveUpBookkeepingError(phase: "read" | "seal", error: unknown): void;
+}
+
+/** What a recovery attempt's async scope holds. */
+export type ChatRecoveryAttemptScope = {
+  /** The attempt's incident, when its payload names one. */
+  incidentId?: string;
+  /** The root request id of the attempt's chain. */
+  rootRequestId?: string;
+  /** The schedule this delivery of the attempt is for, when it has one. */
+  delivery?: number;
+  /**
+   * The message ids the interrupted request came from (#2280). The
+   * recovered turn runs under a fresh request id, and the host stamps these
+   * on its frames. A concurrent client request is outside the scope and
+   * never inherits them.
+   */
+  originMessageIds?: string[];
+};
+
+/** The host's turn machinery, as the engine uses it. */
+export interface ChatRecoveryTurnBindings {
+  /** Prefix for the host's log lines, such as `[Think]`. */
+  label: string;
+  /** `ChatTurns.beginRecoveryAttempt`. */
+  beginRecoveryAttempt(
+    rootRequestId: string | undefined
+  ): RecoveryAttemptHandle;
+  /** The host's `waitUntilStable`. Resolves `false` on timeout. */
+  waitUntilStable(timeoutMs: number): Promise<boolean>;
+  /**
+   * Durably record that a request ended with `errorText`, so a client that
+   * was away learns the outcome when it reconnects (#1645).
+   */
+  recordTerminalError(requestId: string, errorText: string): Promise<void>;
+  /**
+   * Tell the tabs that a request recovery took over ended: `skipped` when
+   * the recovered turn found nothing to do, `aborted` when a stop reached the
+   * recovery before its turn started. Optional: without it the tab that
+   * waits on the request learns only that recovery is over.
+   */
+  endRequest?(requestId: string, outcome: "skipped" | "aborted"): void;
+  /** Close agent-tool child runs a recovered turn settled. */
+  reconcileAgentToolChildRuns(): Promise<void>;
+  /** Keep a detached recovered turn inside the current alarm's domain. */
+  trackAlarmWork(turn: Promise<void>): void;
+  /**
+   * An async-context scope (an `AsyncLocalStorage<ChatRecoveryAttemptScope>`)
+   * the engine runs a recovery attempt in. Only code that runs inside it,
+   * the attempt and the turn it starts, belongs to the attempt. A turn some
+   * other request started while the attempt waits does not. The host creates
+   * it, so this module needs no Node import.
+   */
+  attemptScope: {
+    run<T>(attempt: ChatRecoveryAttemptScope, fn: () => T): T;
+    getStore(): ChatRecoveryAttemptScope | undefined;
+    exit<T>(fn: () => T): T;
+  };
+  /** The latest stored message: what a continuation turn continues. */
+  latestMessage(): { id: string; role: string } | undefined;
+  /**
+   * The body of each recovery callback: one attempt. It calls
+   * `onTurnStarted` once the model turn begins.
+   */
+  attempts: Record<
+    ChatRecoveryScheduleCallback,
+    (
+      data: Record<string, unknown> | undefined,
+      onTurnStarted: () => void
+    ) => Promise<void>
+  >;
 }
 
 /** Resolved orphaned-stream identity for a recovered chat turn. */
@@ -275,16 +397,6 @@ export interface ResolvedRecoveryStream {
    * (`AIChatAgent`) — those keep every terminal-stream branch dead, per the
    * "substrate capabilities are optional" decision in the RFC.
    */
-  streamStatus?: ChatStreamStatus;
-}
-
-/** Input to {@link ChatFiberWakeHooks.classifyRecoveredTurn}. */
-export interface ClassifyRecoveredTurnInput {
-  snapshot: ChatFiberSnapshot | null;
-  requestId: string;
-  streamId: string;
-  partial: RecoveryPartial;
-  streamStillActive: boolean;
   streamStatus?: ChatStreamStatus;
 }
 
@@ -309,53 +421,62 @@ export interface PersistOrphanedPartialInput {
   snapshot: ChatFiberSnapshot | null;
 }
 
-/** Input to {@link ChatFiberWakeHooks.dispatchRecoveredTurn}. */
-export interface DispatchRecoveredTurnInput<TClassify> {
-  incident: ChatRecoveryIncident;
-  config: ResolvedChatRecoveryConfig;
-  recoveryKind: ChatRecoveryKind;
-  options: ChatRecoveryOptions;
-  snapshot: ChatFiberSnapshot | null;
+/**
+ * A chat turn whose isolate died before it finished, as its record left it.
+ *
+ * @internal
+ */
+export interface InterruptedChatTurn {
+  /** The turn's request id. */
   requestId: string;
-  recoveryRootRequestId: string;
-  streamId: string;
-  streamStatus?: ChatStreamStatus;
-  /** The package-specific classification detail produced by `classifyRecoveredTurn`. */
-  detail: TClassify;
+  /** The snapshot taken when the turn started, or `null` when none survived. */
+  snapshot: ChatFiberSnapshot | null;
+  /** What the turn last passed to `stash()`, or `null`. */
+  recoveryData: unknown;
+  /** When the turn's run was created. */
+  createdAt: number;
+  /**
+   * Where the recovery attempt goes when the turn's own run runs it, instead
+   * of a recovery Task of its own. Returns `false` when the run cannot keep
+   * it, and the attempt goes to the recovery Task.
+   */
+  attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
 }
 
 /**
- * The wake-dispatch host operations the engine drives when an interrupted CHAT
- * fiber is detected on restart — the divergent organs the frame-collapse map
- * flagged. Kept SEPARATE from {@link ChatRecoveryAdapter} (and passed per call to
- * {@link ChatRecoveryEngine.handleChatFiberRecovery}) so the incident/give-up
- * adapter stays focused, and generic over `TClassify` so the
- * `classifyRecoveredTurn` → `dispatchRecoveredTurn` handoff is type-safe without a
- * class-level generic.
+ * One scheduled recovery attempt: the host callback, its payload, and how
+ * long to wait first.
  *
- * The engine owns the wake LIFECYCLE (gate → parse → unwrap → stream → partial →
- * classify → begin-incident → exhausted-branch → onChatRecovery → persist →
- * complete → dispatch → catch→failed) and the shared persist clause; these hooks
- * own the package-specific I/O and the retry/continue/skip decision.
+ * @internal
  */
-export interface ChatFiberWakeHooks<TClassify> {
-  /** The chat-fiber name prefix (`CHAT_FIBER_NAME + ":"`) gating the wake path. */
-  chatFiberPrefix(): string;
-  /** Decode the fiber snapshot into the recovery snapshot + checkpointed user data. */
-  unwrapRecoverySnapshot(ctx: FiberRecoveryContext): {
-    snapshot: ChatFiberSnapshot | null;
-    recoveryData: unknown;
-  };
+export type ChatRecoveryAttemptInput = {
+  readonly callback: ChatRecoveryScheduleCallback;
+  readonly data: Record<string, unknown>;
+  readonly delaySeconds: number;
+};
+
+/**
+ * The host operations the engine drives when it recovers an interrupted chat
+ * turn. Kept SEPARATE from {@link ChatRecoveryAdapter} (and passed per call to
+ * {@link ChatRecoveryEngine.recoverInterruptedTurn}) so the incident/give-up
+ * adapter stays focused.
+ *
+ * The engine owns the LIFECYCLE (stream → partial → kind → begin-incident →
+ * exhausted-branch → onChatRecovery → persist → complete → plan → schedule or
+ * skip → catch→failed), the shared persist clause and the plan
+ * (`planInterruptedTurn`); these hooks own the package-specific I/O.
+ */
+export interface ChatFiberWakeHooks {
   /**
-   * Classify the recovered turn as a `retry` or `continue` and return any
-   * package-specific detail the dispatch decision needs (e.g. the pre-stream
-   * retry target id). Runs before the incident is opened.
+   * The latest stored message. Read before the incident opens, for the kind
+   * it is opened with, and again after the partial was stored, for the plan.
    */
-  classifyRecoveredTurn(
-    input: ClassifyRecoveredTurnInput
-  ):
-    | { recoveryKind: ChatRecoveryKind; detail: TClassify }
-    | Promise<{ recoveryKind: ChatRecoveryKind; detail: TClassify }>;
+  latestMessage(): RecoveryLeaf | Promise<RecoveryLeaf>;
+  /**
+   * Whether what the turn streamed holds anything that would be stored, by
+   * the host's rules for what a stored reply drops.
+   */
+  partialHoldsContent(partial: RecoveryPartial): boolean;
   /**
    * Build the package's `ChatRecoveryContext` and invoke the user `onChatRecovery`
    * hook, returning its (defaulted) options. The engine wraps this in the
@@ -379,15 +500,28 @@ export interface ChatFiberWakeHooks<TClassify> {
   persistOrphanedStream(streamId: string): Promise<void>;
   /** Mark the (still-active) recovered stream complete and schedule cleanup. */
   completeRecoveredStream(streamId: string): void | Promise<void>;
+  /** The message ids the interrupted request came from, when the host still knows them. */
+  originMessageIds?(requestId: string): string[] | undefined;
+  /** Host fields for the recovery payload, such as `Think`'s submission id. */
+  scheduleData?(input: {
+    recoveryRootRequestId: string;
+  }): Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** The turn's stream ended before the reset: there is nothing to recover. */
+  onStreamEnded?(input: {
+    requestId: string;
+    recoveryRootRequestId: string;
+    streamStatus: "completed" | "error";
+  }): Promise<void>;
   /**
-   * The retry/continue/skip DECISION — the package-owned core. Runs after persist
-   * + complete; owns the leaf/submission computation, the schedule calls (via
-   * {@link ChatRecoveryEngine.scheduleRecovery}), the skip transitions, and any
-   * package-specific terminal/broadcast writes.
+   * Nothing will recover the turn: the app declined to continue it
+   * (`continue_disabled`), or the conversation moved on
+   * (`conversation_changed`). Runs after the incident records the skip.
    */
-  dispatchRecoveredTurn(
-    input: DispatchRecoveredTurnInput<TClassify>
-  ): Promise<void>;
+  onSkipped?(input: {
+    requestId: string;
+    recoveryRootRequestId: string;
+    reason: "continue_disabled" | "conversation_changed";
+  }): Promise<void>;
 }
 
 /**
@@ -404,6 +538,79 @@ export class ChatRecoveryEngine {
   readonly #isolate = crypto.randomUUID();
 
   constructor(private readonly adapter: ChatRecoveryAdapter) {}
+
+  /** Every incident write goes through here, so a terminal one is seen. */
+  async #putIncident(
+    key: string,
+    incident: ChatRecoveryIncident
+  ): Promise<void> {
+    await this.adapter.putIncident(key, incident);
+    if (
+      incident.status !== "detected" &&
+      incident.status !== "scheduled" &&
+      incident.status !== "attempting"
+    ) {
+      this.#settled();
+    }
+  }
+
+  /** The tail of the chain every incident read-modify-write runs on. */
+  #incidentWrites: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Read an incident, compute its next value and write it, with no other
+   * incident write in between. Every read-modify-write of an incident goes
+   * through here, so a cancel that lands while another write is under way
+   * is never written over with the record as it was before the cancel.
+   *
+   * @param change - Synchronous, so nothing can wait on the chain from
+   *   inside it. Returns the next record, `"delete"`, or `undefined` to
+   *   write nothing.
+   * @returns The record before and after. `after` is `undefined` when
+   *   nothing was written.
+   */
+  #update(
+    key: string,
+    change: (
+      incident: ChatRecoveryIncident | null
+    ) => ChatRecoveryIncident | "delete" | undefined
+  ): Promise<{
+    before: ChatRecoveryIncident | null;
+    after: ChatRecoveryIncident | "delete" | undefined;
+  }> {
+    const run = async () => {
+      const before = await this.adapter.getIncident(key);
+      const after = change(before);
+      if (after === "delete") {
+        await this.#deleteIncident(key);
+      } else if (after !== undefined) {
+        await this.#putIncident(key, after);
+      }
+      return { before, after };
+    };
+    return this.#inChain(run);
+  }
+
+  /** Run `write` on the incident chain, after every write queued before. */
+  #inChain<T>(write: () => Promise<T>): Promise<T> {
+    const next = this.#incidentWrites.then(write, write);
+    this.#incidentWrites = next.catch(() => {});
+    return next;
+  }
+
+  async #deleteIncident(key: string): Promise<void> {
+    await this.adapter.deleteIncident(key);
+    this.#settled();
+  }
+
+  /** Tell the host a recovery settled, outside any attempt's scope. */
+  #settled(): void {
+    try {
+      this.outsideAttempt(() => this.adapter.recoverySettled?.());
+    } catch (error) {
+      console.error("[chat] recovery settle hook failed:", error);
+    }
+  }
 
   #newAttempt(): ChatRecoveryAttempt {
     return { isolate: this.#isolate, token: crypto.randomUUID() };
@@ -422,12 +629,12 @@ export class ChatRecoveryEngine {
     const { adapter } = this;
     const key = chatRecoveryIncidentKey(incidentId);
     try {
-      const stored = await adapter.getIncident(key);
-      const next = stored ? finishChatRecoveryAttempt(stored, attempt) : null;
-      if (next) {
-        await adapter.putIncident(key, next);
-        await adapter.syncStorage();
-      }
+      const { after } = await this.#update(key, (stored) =>
+        stored
+          ? (finishChatRecoveryAttempt(stored, attempt) ?? undefined)
+          : undefined
+      );
+      if (after) await adapter.syncStorage();
     } catch {
       // An entry left behind costs at most one extra counted interruption.
     }
@@ -472,14 +679,20 @@ export class ChatRecoveryEngine {
 
     adapter.ensureInteractionStateLoaded?.();
     const attempt = this.#newAttempt();
-    const { incident, exhausted } = admitChatRecoveryAttempt({
-      existing,
-      attempt,
-      config: adapter.resolveConfig(),
-      awaitingClientInteraction:
-        adapter.isAwaitingClientInteraction?.() ?? false
+    let exhausted = false;
+    await this.#update(chatRecoveryIncidentKey(incidentId), (current) => {
+      // Admitted on the record as it is now: a cancel since the read above
+      // is kept.
+      const admitted = admitChatRecoveryAttempt({
+        existing: current ?? existing,
+        attempt,
+        config: adapter.resolveConfig(),
+        awaitingClientInteraction:
+          adapter.isAwaitingClientInteraction?.() ?? false
+      });
+      exhausted = admitted.exhausted;
+      return admitted.incident;
     });
-    await adapter.putIncident(chatRecoveryIncidentKey(incidentId), incident);
     await adapter.syncStorage();
 
     if (exhausted) {
@@ -494,99 +707,102 @@ export class ChatRecoveryEngine {
       await input.run();
     } finally {
       await this.#finishAttempt(incidentId, attempt);
+      this.#settled();
     }
   }
 
   /**
-   * Open or re-evaluate the recovery incident for `input`, persist the result,
-   * and broadcast its lifecycle events. Returns the incident, the resolved
-   * config, and whether the budget is now exhausted.
-   */
-  /**
-   * Dispatch a recovered fiber to the package's non-chat handler (the
-   * messenger/workflow seam) before any chat-recovery processing. Returns `true`
-   * when the package consumed the fiber — the caller must then skip chat
-   * recovery for it. The engine owns the *ordering* (this runs before the
-   * chat-fiber gate); the *behavior* is adapter-owned. No-op (`false`) when the
-   * adapter omits {@link ChatRecoveryAdapter.tryHandleNonChatFiberRecovery}.
-   */
-  async handleNonChatFiber(ctx: FiberRecoveryContext): Promise<boolean> {
-    return (await this.adapter.tryHandleNonChatFiberRecovery?.(ctx)) ?? false;
-  }
-
-  /**
-   * The shared wake-recovery LIFECYCLE for an interrupted chat fiber. Both
-   * packages drove this exact frame; the divergent organs are the
-   * {@link ChatFiberWakeHooks}. In order:
+   * The shared recovery LIFECYCLE for an interrupted chat turn: the replay of
+   * a chat-turn Task run whose isolate died, or a legacy chat fiber row an
+   * older version left. Both packages drove this exact frame; the divergent
+   * organs are the {@link ChatFiberWakeHooks}. In order:
    *
-   * 1. non-chat dispatch ({@link handleNonChatFiber}) FIRST, then the chat-fiber
-   *    name gate — a non-chat fiber is never misread as an orphaned chat turn;
-   * 2. parse the request id, unwrap the snapshot, resolve the orphaned stream +
-   *    reconstruct its partial;
-   * 3. classify the turn (retry/continue + package detail) and open the incident;
-   * 4. if the budget is already exhausted, persist the settled partial (so
+   * 1. resolve the orphaned stream + reconstruct its partial;
+   * 2. read the kind the incident opens with (`interruptedTurnKind`) and open it;
+   * 3. if the budget is already exhausted, persist the settled partial (so
    *    non-idempotent tool results are not discarded — #1631) and terminalize
    *    BEFORE consulting `onChatRecovery`;
-   * 5. otherwise, inside a `failed`-on-throw guard: invoke `onChatRecovery`,
+   * 4. otherwise, inside a `failed`-on-throw guard: invoke `onChatRecovery`,
    *    apply the shared persist gate (base eligibility AND `persist !== false ||
-   *    settled tool results`), complete the live stream, then hand the
-   *    retry/continue/skip DECISION to {@link ChatFiberWakeHooks.dispatchRecoveredTurn}.
+   *    settled tool results`), complete the live stream, then plan what the
+   *    turn does next (`planInterruptedTurn`) and schedule it or skip.
    *
-   * Returns `true` when the fiber was a chat (or non-chat) recovery the engine
-   * handled, `false` when it was not a chat fiber (the caller keeps looking). Any
-   * throw after the incident opens flips it to `failed` so it is never left
-   * leaking in `attempting`.
+   * Any throw after the incident opens flips it to `failed` so it is never
+   * left leaking in `attempting`.
    */
-  async handleChatFiberRecovery<TClassify>(
-    ctx: FiberRecoveryContext,
-    wake: ChatFiberWakeHooks<TClassify>
-  ): Promise<boolean> {
+  async recoverInterruptedTurn(
+    turn: InterruptedChatTurn,
+    wake: ChatFiberWakeHooks
+  ): Promise<void> {
     const { adapter } = this;
-
-    // Ordering invariant: non-chat (messenger/workflow) fibers dispatch BEFORE
-    // the chat-fiber gate.
-    if (await this.handleNonChatFiber(ctx)) return true;
-
-    const chatPrefix = wake.chatFiberPrefix();
-    if (!ctx.name.startsWith(chatPrefix)) return false;
-
-    const requestId = ctx.name.slice(chatPrefix.length);
-    const { snapshot, recoveryData } = wake.unwrapRecoverySnapshot(ctx);
+    const {
+      requestId,
+      snapshot,
+      recoveryData,
+      createdAt,
+      attempt: into
+    } = turn;
+    adapter.turnRecovered?.(
+      snapshot?.recoveryRootRequestId
+        ? [requestId, snapshot.recoveryRootRequestId]
+        : [requestId]
+    );
     const stream = adapter.resolveRecoveryStream(requestId);
     const { streamId, streamStillActive, streamStatus } = stream;
     const partial = streamId
       ? adapter.getPartialStreamText(streamId)
       : { text: "", parts: [], hasSettledToolResults: false };
 
-    const { recoveryKind, detail } = await wake.classifyRecoveredTurn({
-      snapshot,
-      requestId,
-      streamId,
-      partial,
-      streamStillActive,
-      streamStatus
-    });
+    const recoveryKind = interruptedTurnKind(
+      { snapshot, streamStatus },
+      wake.partialHoldsContent(partial),
+      await wake.latestMessage()
+    );
     const recoveryRootRequestId = snapshot?.recoveryRootRequestId ?? requestId;
 
-    // A recovered fiber is a run whose isolate died before it finished. The
+    // An interrupted turn is a run whose isolate died before it finished. The
     // replay is itself an attempt: it counts the death and records itself so
     // that its own death, if it dies too, is counted by the next isolate
     // (#2613).
-    const { incident, config, exhausted, attempt } = await this.beginIncident({
-      requestId,
-      recoveryRootRequestId,
-      latestUserMessageId: snapshot?.latestUserMessageId,
-      recoveryKind,
-      trigger: "interrupted"
-    });
+    const { incident, config, exhausted, attempt, stopped } =
+      await this.beginIncident({
+        requestId,
+        recoveryRootRequestId,
+        latestUserMessageId: snapshot?.latestUserMessageId,
+        recoveryKind,
+        trigger: "interrupted"
+      });
+    if (stopped) {
+      // A stop of this turn's request landed: keep what it stored, close its
+      // stream, and continue nothing.
+      try {
+        if (
+          await this._shouldPersistOrphanedPartial(wake, {
+            streamId,
+            streamStillActive,
+            streamStatus,
+            snapshot,
+            options: undefined,
+            partial
+          })
+        ) {
+          await wake.persistOrphanedStream(streamId);
+        }
+        if (streamStillActive) await wake.completeRecoveredStream(streamId);
+      } finally {
+        // Even when storing what it streamed failed, the tab is told.
+        this.endStopped(incident);
+        this.#settled();
+      }
+      return;
+    }
     try {
-      return await this.#replayRecoveredTurn(wake, {
-        ctx,
+      await this.#replayRecoveredTurn(wake, {
+        createdAt,
         incident,
         config,
         exhausted,
         recoveryKind,
-        detail,
         requestId,
         recoveryRootRequestId,
         snapshot,
@@ -594,23 +810,24 @@ export class ChatRecoveryEngine {
         streamId,
         streamStillActive,
         streamStatus,
-        partial
+        partial,
+        into
       });
     } finally {
       if (attempt) await this.#finishAttempt(incident.incidentId, attempt);
+      this.#settled();
     }
   }
 
-  /** The part of {@link handleChatFiberRecovery} that runs after the incident opened. */
-  async #replayRecoveredTurn<TClassify>(
-    wake: ChatFiberWakeHooks<TClassify>,
+  /** The part of {@link recoverInterruptedTurn} that runs after the incident opened. */
+  async #replayRecoveredTurn(
+    wake: ChatFiberWakeHooks,
     input: {
-      ctx: FiberRecoveryContext;
+      createdAt: number;
       incident: ChatRecoveryIncident;
       config: ResolvedChatRecoveryConfig;
       exhausted: boolean;
       recoveryKind: ChatRecoveryKind;
-      detail: TClassify;
       requestId: string;
       recoveryRootRequestId: string;
       snapshot: ChatFiberSnapshot | null;
@@ -619,16 +836,16 @@ export class ChatRecoveryEngine {
       streamStillActive: boolean;
       streamStatus: ChatStreamStatus | undefined;
       partial: RecoveryPartial;
+      into?: (attempt: ChatRecoveryAttemptInput) => boolean;
     }
-  ): Promise<boolean> {
+  ): Promise<void> {
     const { adapter } = this;
     const {
-      ctx,
+      createdAt,
       incident,
       config,
       exhausted,
       recoveryKind,
-      detail,
       requestId,
       recoveryRootRequestId,
       snapshot,
@@ -636,7 +853,8 @@ export class ChatRecoveryEngine {
       streamId,
       streamStillActive,
       streamStatus,
-      partial
+      partial,
+      into
     } = input;
 
     if (exhausted) {
@@ -663,10 +881,11 @@ export class ChatRecoveryEngine {
         config,
         partial,
         streamId,
-        ctx.createdAt,
+        createdAt,
         snapshot?.originMessageIds
       );
-      return true;
+      this.#settled();
+      return;
     }
 
     // Any throw after the incident opens (user `onChatRecovery`, orphan
@@ -683,7 +902,7 @@ export class ChatRecoveryEngine {
           partial,
           snapshot,
           recoveryData,
-          createdAt: ctx.createdAt
+          createdAt
         })) ?? {};
 
       if (
@@ -703,20 +922,64 @@ export class ChatRecoveryEngine {
         await wake.completeRecoveredStream(streamId);
       }
 
-      await wake.dispatchRecoveredTurn({
-        incident,
-        config,
-        recoveryKind,
+      const plan = planInterruptedTurn(
+        { snapshot, streamStatus },
         options,
-        snapshot,
-        requestId,
+        await wake.latestMessage()
+      );
+      if (plan.action === "skip") {
+        if (streamStatus === "completed" || streamStatus === "error") {
+          await wake.onStreamEnded?.({
+            requestId,
+            recoveryRootRequestId,
+            streamStatus
+          });
+        }
+        await this.updateIncident(incident.incidentId, "skipped", plan.reason);
+        if (plan.reason !== "stream_terminal") {
+          await wake.onSkipped?.({
+            requestId,
+            recoveryRootRequestId,
+            reason: plan.reason
+          });
+        }
+        return;
+      }
+      await this.scheduleRecoveredTurn({
+        incident,
+        into,
+        recoveryKind: plan.action,
         recoveryRootRequestId,
-        streamId,
-        streamStatus,
-        detail
+        retryUserId: plan.action === "retry" ? plan.questionId : null,
+        targetAssistantId:
+          plan.action === "continue" ? plan.replyId : undefined,
+        requestContext: snapshot,
+        originMessageIds:
+          wake.originMessageIds?.(requestId) ?? snapshot?.originMessageIds,
+        extra: {
+          ...(plan.action === "retry" &&
+            plan.regeneratedLeafId !== undefined && {
+              regeneratedLeafId: plan.regeneratedLeafId
+            }),
+          ...(await wake.scheduleData?.({ recoveryRootRequestId }))
+        }
       });
-
-      return true;
+      // A recovery took the cut-off request over: what follows runs under
+      // its own request id. Tell the tabs, and record it, so a tab that
+      // comes back later (even after a hibernation) learns it ended. A
+      // recovery the host declined or gave up on reported its own end.
+      if (streamStillActive) {
+        const after = await this.adapter.getIncident(
+          chatRecoveryIncidentKey(incident.incidentId)
+        );
+        if (
+          after?.status !== "skipped" &&
+          after?.status !== "failed" &&
+          after?.status !== "exhausted"
+        ) {
+          this.#endTakenOver(requestId);
+        }
+      }
     } catch (error) {
       await this.updateIncident(
         incident.incidentId,
@@ -737,8 +1000,8 @@ export class ChatRecoveryEngine {
    * (#1631), and the codec (not the engine) decides whether a partial carries
    * settled tool work, so the engine stays wire-vocabulary-agnostic.
    */
-  private async _shouldPersistOrphanedPartial<TClassify>(
-    wake: ChatFiberWakeHooks<TClassify>,
+  private async _shouldPersistOrphanedPartial(
+    wake: ChatFiberWakeHooks,
     input: PersistOrphanedPartialInput & {
       options: ChatRecoveryOptions | undefined;
       partial: RecoveryPartial;
@@ -791,11 +1054,53 @@ export class ChatRecoveryEngine {
         adapter.onShouldKeepRecoveringError?.(error)
     });
 
-    await adapter.putIncident(key, incident);
+    // Written in the incident chain, and not over a stop: one that landed
+    // while the budget was evaluated, or one of the request this routes.
+    // The stop is then the outcome, not the evaluation, whatever budget is
+    // left.
+    let stopped = false;
+    const { after } = await this.#update(key, (current) => {
+      if (current && isCancelled(current)) {
+        stopped = true;
+        return undefined;
+      }
+      if (this.#wasStopped(incident)) {
+        stopped = true;
+        return {
+          ...incident,
+          status: "skipped",
+          reason: CHAT_RECOVERY_CANCELLED_REASON
+        };
+      }
+      return incident;
+    });
     // Confirm the record before the caller acts on it. The next attempt may
     // run in this invocation, and if it hits a memory-limit reset, writes that
     // were not yet confirmed are discarded with it.
     await adapter.syncStorage();
+    if (stopped) {
+      // No events for a record this did not write. One it wrote as the
+      // stop's outcome says so once.
+      if (after !== undefined && after !== "delete") {
+        adapter.emitRecoveryEvent({
+          type: "chat:recovery:skipped",
+          incidentId: incident.incidentId,
+          requestId: incident.requestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind: incident.recoveryKind,
+          reason: CHAT_RECOVERY_CANCELLED_REASON
+        });
+      }
+      await adapter.setRecovering(false);
+      return {
+        incident: after !== undefined && after !== "delete" ? after : incident,
+        config,
+        exhausted: false,
+        attempt: null,
+        stopped: true
+      };
+    }
     for (const event of events) {
       adapter.emitRecoveryEvent(event);
     }
@@ -829,9 +1134,73 @@ export class ChatRecoveryEngine {
     data: Record<string, unknown>;
     reason?: ChatRecoveryScheduleReason;
     delaySeconds?: number;
-  }): Promise<void> {
+    /** Hand the attempt to the caller's own run instead of the host's Task. */
+    into?: (attempt: ChatRecoveryAttemptInput) => boolean;
+  }): Promise<boolean> {
     const { incident } = input;
-    await this.updateIncident(incident.incidentId, "scheduled");
+    // One write: the status, what the scheduled attempt will do (so a turn
+    // that continues a reply can tell whether this recovery was going to
+    // continue the same one), and a count of schedules (so an attempt can
+    // tell that its own turn scheduled the next one).
+    const key = chatRecoveryIncidentKey(incident.incidentId);
+    // The callback carries the number of its schedule, so a delivery of an
+    // older schedule, or a second delivery of this one after its turn
+    // started, can tell it is not the one to run (`recoveryDelivery`).
+    let delivery: number | undefined;
+    const targetMessageId =
+      input.callback === "_chatRecoveryContinue" &&
+      typeof input.data.targetAssistantId === "string"
+        ? input.data.targetAssistantId
+        : undefined;
+    let stoppedInstead = false;
+    const { before: stored, after } = await this.#update(key, (current) => {
+      if (!current) return undefined;
+      // A stop of the turn landed while it was routed here, before this
+      // write: the stop is the outcome, and nothing is scheduled.
+      if (isCancelled(current) || this.#wasStopped(current)) {
+        stoppedInstead = true;
+        return isCancelled(current)
+          ? undefined
+          : {
+              ...current,
+              status: "skipped",
+              reason: CHAT_RECOVERY_CANCELLED_REASON
+            };
+      }
+      const { deferredError: _deferredError, ...rest } = current;
+      delivery = (current.scheduleCount ?? 0) + 1;
+      return {
+        ...rest,
+        status: "scheduled",
+        scheduleCount: delivery,
+        scheduled: {
+          callback: input.callback,
+          ...(targetMessageId !== undefined && { targetMessageId })
+        }
+      };
+    });
+    if (stoppedInstead) {
+      if (after !== undefined && stored) {
+        this.adapter.emitRecoveryEvent({
+          type: "chat:recovery:skipped",
+          incidentId: incident.incidentId,
+          requestId: stored.requestId,
+          attempt: stored.attempt,
+          maxAttempts: stored.maxAttempts,
+          recoveryKind: stored.recoveryKind,
+          reason: CHAT_RECOVERY_CANCELLED_REASON
+        });
+      }
+      this.endStopped(stored ?? incident);
+      await this.adapter.setRecovering(false);
+      return false;
+    }
+    if (stored) {
+      await this.adapter.setRecovering(
+        true,
+        stored.recoveryRootRequestId ?? stored.requestId
+      );
+    }
     this.adapter.emitRecoveryEvent({
       type: "chat:recovery:scheduled",
       incidentId: incident.incidentId,
@@ -840,11 +1209,122 @@ export class ChatRecoveryEngine {
       maxAttempts: incident.maxAttempts,
       recoveryKind: input.recoveryKind
     });
-    await this.adapter.scheduleRecovery(
-      input.callback,
-      input.data,
-      input.reason ?? "initial",
-      input.delaySeconds ?? 0
+    const data =
+      delivery === undefined ? input.data : { ...input.data, delivery };
+    // The caller's run takes the attempt when it can keep it; otherwise
+    // (an attempt too large to journal) it goes to the host's Task.
+    if (
+      !input.into?.({
+        callback: input.callback,
+        data,
+        delaySeconds: input.delaySeconds ?? 0
+      })
+    ) {
+      await this.adapter.scheduleRecovery(
+        input.callback,
+        data,
+        input.reason ?? "initial",
+        input.delaySeconds ?? 0
+      );
+    }
+    return true;
+  }
+
+  /**
+   * Request ids a user stopped in this isolate, newest last. A stop that
+   * lands while a turn is routed into recovery, before its incident is
+   * `scheduled`, finds nothing to cancel; the schedule reads this instead.
+   * Bounded: an id only matters while its turn is being routed.
+   */
+  readonly #stoppedRequestIds = new Set<string>();
+
+  #noteStoppedRequest(requestId: string): void {
+    this.#stoppedRequestIds.delete(requestId);
+    this.#stoppedRequestIds.add(requestId);
+    if (this.#stoppedRequestIds.size > 64) {
+      const oldest = this.#stoppedRequestIds.values().next().value;
+      if (oldest !== undefined) this.#stoppedRequestIds.delete(oldest);
+    }
+  }
+
+  #wasStopped(incident: ChatRecoveryIncident): boolean {
+    return (
+      this.#stoppedRequestIds.has(incident.requestId) ||
+      (incident.recoveryRootRequestId !== undefined &&
+        this.#stoppedRequestIds.has(incident.recoveryRootRequestId))
+    );
+  }
+
+  /** End a request a recovery took over (see the wake path). */
+  #endTakenOver(requestId: string): void {
+    try {
+      this.adapter.turns?.endRequest?.(requestId, "aborted");
+    } catch (error) {
+      console.error(`[chat] failed to end request ${requestId}`, error);
+    }
+  }
+
+  /**
+   * A stop that landed while the turn was routed into recovery, before
+   * anything was scheduled: the tab's last frame for the ids it stopped
+   * said "recovering", and nothing else will end them. Called once what the
+   * turn streamed is stored, so the end follows the final transcript.
+   */
+  endStopped(incident: ChatRecoveryIncident): void {
+    const ids = new Set([incident.recoveryRootRequestId, incident.requestId]);
+    for (const id of ids) {
+      if (id === undefined || !this.#stoppedRequestIds.has(id)) continue;
+      // A frame that fails to go out must not stop the cleanup around it.
+      try {
+        this.adapter.turns?.endRequest?.(id, "aborted");
+      } catch (error) {
+        console.error(`[chat] failed to end stopped request ${id}`, error);
+      }
+    }
+  }
+
+  /**
+   * Whether a delivered recovery callback is the one to run its turn.
+   *
+   * - `"run"`: it is. Also the answer for a payload with no schedule number
+   *   (one an older version scheduled), and for an incident an older version
+   *   wrote, which has no count.
+   * - `"stale"`: a newer attempt was scheduled since, and that one runs; or
+   *   the incident is gone, so its recovery is over.
+   * - `"cut_off"`: this schedule's turn already started, so this is a second
+   *   delivery after a reset cut the turn off. The interrupted turn's own
+   *   recovery owns it: it stores the partial, counts the attempt and
+   *   schedules the next one.
+   */
+  async recoveryDelivery(
+    incidentId: string | undefined,
+    delivery: unknown
+  ): Promise<"run" | "stale" | "cut_off"> {
+    if (!incidentId || typeof delivery !== "number") return "run";
+    const incident = await this.readIncident(incidentId);
+    // A numbered payload was scheduled by this version, which deletes an
+    // incident only once its recovery completed (or a clear removed it). A
+    // second delivery of it must not continue the finished reply.
+    if (!incident) return "stale";
+    if (incident.scheduleCount === undefined) return "run";
+    if (incident.scheduleCount !== delivery) return "stale";
+    return incident.startedDelivery === delivery ? "cut_off" : "run";
+  }
+
+  /** Record that the turn of the attempt's schedule has started. */
+  private async markDeliveryStarted(
+    attempt: ChatRecoveryAttemptScope | undefined
+  ): Promise<void> {
+    if (!attempt?.incidentId || attempt.delivery === undefined) return;
+    const { delivery } = attempt;
+    await this.#update(
+      chatRecoveryIncidentKey(attempt.incidentId),
+      (incident) =>
+        incident?.status !== "scheduled" ||
+        incident.scheduleCount !== delivery ||
+        incident.startedDelivery === delivery
+          ? undefined
+          : { ...incident, startedDelivery: delivery }
     );
   }
 
@@ -875,25 +1355,36 @@ export class ChatRecoveryEngine {
     const { adapter } = this;
     if (!input.incidentId) return false;
     const key = chatRecoveryIncidentKey(input.incidentId);
-    const incident = await adapter.getIncident(key);
-    if (!incident) return false;
-    const attempt = incident.attempt ?? 0;
-    if (attempt >= (incident.maxAttempts ?? input.fallbackMaxAttempts)) {
-      return false;
-    }
-    await adapter.putIncident(key, {
-      ...incident,
-      attempt: attempt + 1,
-      status: "scheduled",
-      lastAttemptAt: adapter.now(),
-      reason: "stable_timeout_retry"
+    const { after } = await this.#update(key, (incident) => {
+      if (!incident) return undefined;
+      const attempt = incident.attempt ?? 0;
+      if (attempt >= (incident.maxAttempts ?? input.fallbackMaxAttempts)) {
+        return undefined;
+      }
+      return {
+        ...incident,
+        attempt: attempt + 1,
+        status: "scheduled",
+        lastAttemptAt: adapter.now(),
+        reason: "stable_timeout_retry"
+      };
     });
-    await adapter.scheduleRecovery(
-      input.callback,
-      input.data ?? {},
-      "stable_timeout_retry",
-      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
-    );
+    if (!after) return false;
+    const next = {
+      callback: input.callback,
+      data: input.data ?? {},
+      delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+    };
+    // The run of the attempt that timed out runs the next one; otherwise
+    // (no such run, or it cannot keep it) the host's recovery Task does.
+    if (!currentRunAttempt()?.(next)) {
+      await adapter.scheduleRecovery(
+        next.callback,
+        next.data,
+        "stable_timeout_retry",
+        next.delaySeconds
+      );
+    }
     return true;
   }
 
@@ -904,41 +1395,551 @@ export class ChatRecoveryEngine {
    * record is gone.
    */
   async recordTransientRetry(incidentId: string): Promise<number> {
-    const { adapter } = this;
-    const key = chatRecoveryIncidentKey(incidentId);
-    const incident = await adapter.getIncident(key);
-    if (!incident) return 1;
-    const transientRetries = (incident.transientRetries ?? 0) + 1;
-    await adapter.putIncident(key, { ...incident, transientRetries });
+    let transientRetries = 1;
+    await this.#update(chatRecoveryIncidentKey(incidentId), (incident) => {
+      if (!incident) return undefined;
+      transientRetries = (incident.transientRetries ?? 0) + 1;
+      return { ...incident, transientRetries };
+    });
     return transientRetries;
   }
 
   /**
-   * The user cancelled `requestId` while its recovery was scheduled but not
-   * yet running (e.g. during a transient-error backoff). Marks every
-   * `scheduled` incident whose recovery root or current attempt is
-   * `requestId` as `skipped` with {@link CHAT_RECOVERY_CANCELLED_REASON}, so
-   * the queued callback bails when it fires (see {@link isRecoveryCancelled}).
-   * Returns whether any incident was cancelled.
+   * The user stopped `requestId`. Marks every `scheduled` incident that the
+   * id names as `skipped` with {@link CHAT_RECOVERY_CANCELLED_REASON}, and
+   * tells the attempt running for it, if there is one, to stop. A queued
+   * callback then returns when it fires (see {@link isRecoveryCancelled}),
+   * and a running attempt ends at its next stop check.
+   *
+   * An id names an incident when it is the incident's recovery root, the
+   * request id of the turn that was last cut off (what a tab that resumed
+   * that stream tracks), or the request id of the turn its running attempt
+   * started (what a tab sees once the recovered turn streams).
+   *
+   * @returns Whether any incident was cancelled.
    */
   async cancelScheduledRecovery(requestId: string): Promise<boolean> {
+    this.#noteStoppedRequest(requestId);
     const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
     let cancelled = false;
+    let endedHere = false;
+    for (const incident of incidents) {
+      const running = this.#runningAttempts.get(incident.incidentId);
+      const named = (current: ChatRecoveryIncident): boolean =>
+        current.status === "scheduled" &&
+        (current.recoveryRootRequestId === requestId ||
+          current.requestId === requestId ||
+          running?.turnRequestId === requestId);
+      if (!named(incident)) continue;
+      // Checked again where it is written: two stops of one incident (a
+      // tab's cancel and the stop of the turn it names) record one outcome.
+      const applied = await this.updateIncident(
+        incident.incidentId,
+        "skipped",
+        CHAT_RECOVERY_CANCELLED_REASON,
+        named
+      );
+      running?.stopped.abort();
+      if (!applied) continue;
+      cancelled = true;
+      // A running attempt ends its root request when it stops
+      // (`runRecoveredTurn`), and its turn ends its own. Any other id the
+      // stop named (the request a chained attempt's tab last saw cut off,
+      // or any id while the recovery waits out its backoff) gets no
+      // terminal from anything else.
+      const endsItself =
+        running !== undefined &&
+        (requestId === incident.recoveryRootRequestId ||
+          requestId === running.turnRequestId);
+      if (!endsItself) endedHere = true;
+    }
+    if (endedHere) this.adapter.turns?.endRequest?.(requestId, "aborted");
+    return cancelled;
+  }
+
+  /**
+   * Whether the calling code runs inside a recovery attempt. Read from the
+   * attempt's async scope, so a turn another request started while an attempt waits
+   * for the chat to settle sees `undefined`: it is not part of that
+   * attempt's chain. A turn that is interrupted inside an attempt schedules a
+   * chained attempt under this root.
+   */
+  get inAttempt(): boolean {
+    return this.adapter.turns?.attemptScope.getStore() !== undefined;
+  }
+
+  /**
+   * The root request id of the recovery attempt the calling code runs
+   * inside, or `undefined` when it runs inside none. See {@link inAttempt}.
+   */
+  get activeRootRequestId(): string | undefined {
+    return this.adapter.turns?.attemptScope.getStore()?.rootRequestId;
+  }
+
+  /**
+   * The message ids the request a running recovery attempt recovers came
+   * from, or `undefined` outside an attempt. See {@link inAttempt}.
+   */
+  get activeOriginMessageIds(): string[] | undefined {
+    return this.adapter.turns?.attemptScope.getStore()?.originMessageIds;
+  }
+
+  /** The host's turn bindings. Throws for a host that did not supply them. */
+  get turns(): ChatRecoveryTurnBindings {
+    const turns = this.adapter.turns;
+    if (!turns) {
+      throw new Error(
+        "ChatRecoveryEngine: the adapter has no `turns` bindings"
+      );
+    }
+    return turns;
+  }
+
+  /** Whether a client still has a tool call or approval to answer. */
+  isAwaitingClientInteraction(): boolean {
+    return this.adapter.isAwaitingClientInteraction?.() ?? false;
+  }
+
+  /**
+   * Run a recovery callback (`_chatRecoveryContinue` or `_chatRecoveryRetry`)
+   * the Task transport delivered, up to its model handoff, then return. The
+   * turn continues as tracked alarm work, and a detached platform failure
+   * enqueues one replacement attempt.
+   *
+   * The attempt runs inside the host's origin-message-ids scope, so the
+   * frames of the recovered turn carry the ids of the request it recovers.
+   *
+   * @param callback - The callback being run.
+   * @param data - Its payload.
+   */
+  runRecoveryCallback(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown> | undefined
+  ): Promise<void> {
+    const { turns } = this;
+    return dispatchChatRecoveryToHandoff({
+      // Each run is one attempt under the interruption budget: it counts an
+      // earlier attempt that died and records itself before any heavy work.
+      detached: (onTurnStarted) =>
+        this.runRecoveryAttempt({
+          callback,
+          data,
+          run: () => turns.attempts[callback](data, onTurnStarted)
+        }),
+      track: (turn) => turns.trackAlarmWork(turn),
+      redefer: (dedupeKey) =>
+        this.adapter.scheduleRecovery(
+          callback,
+          data ?? {},
+          "redefer",
+          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+          dedupeKey
+        ),
+      onDetachedError: (error) =>
+        console.error(`${turns.label} ${callback} dispatch failed`, error)
+    });
+  }
+
+  /**
+   * Route a live stream interruption (a stall, a transient provider error)
+   * into bounded recovery. See `recovery-route.ts`.
+   */
+  routeStreamInterruption(
+    host: StreamInterruptionHost
+  ): Promise<StreamInterruptionOutcome> {
+    return routeStreamInterruption(this, host);
+  }
+
+  /**
+   * Schedule the recovery attempt for an interrupted turn: a retry of its
+   * question or a continue of its reply. See `recovery-route.ts`.
+   */
+  scheduleRecoveredTurn(input: RecoveredTurnSchedule): Promise<boolean> {
+    return scheduleRecoveredTurn(this, input);
+  }
+
+  /**
+   * Deliver the terminal message for an incident whose budget is spent: the
+   * host's exhaustion writes (`onExhausted`, the terminal frame and record).
+   * {@link exhaustRecoveryGiveUp} is the entry for a give-up that still has
+   * to read and seal the incident.
+   */
+  terminalize(
+    incident: ChatRecoveryIncident,
+    config: ResolvedChatRecoveryConfig,
+    partial: RecoveryPartial,
+    streamId: string,
+    createdAt: number
+  ): Promise<void> {
+    return this.adapter.exhaustChatRecovery(
+      incident,
+      config,
+      partial,
+      streamId,
+      createdAt
+    );
+  }
+
+  /**
+   * Give up on every incident still live, as an out-of-memory exhaustion,
+   * when the alarm circuit breaker trips at its strike budget (#1825). Runs
+   * at the outermost alarm frame, so the terminal message and the sealed
+   * incident can land where the mid-turn writes ran out of memory.
+   */
+  async sealMemoryLimitedRecovery(): Promise<void> {
+    const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
+    for (const incident of incidents) {
+      await this.exhaustRecoveryGiveUp({
+        callback:
+          incident.recoveryKind === "retry"
+            ? "_chatRecoveryRetry"
+            : "_chatRecoveryContinue",
+        data: { incidentId: incident.incidentId },
+        reason: "out_of_memory"
+      });
+    }
+  }
+
+  /**
+   * {@link cancelScheduledRecovery} for the cancel handler: a failed incident
+   * write is logged, so the cancel still stops the turn it aborted.
+   */
+  async tryCancelScheduledRecovery(requestId: string): Promise<void> {
+    try {
+      await this.cancelScheduledRecovery(requestId);
+    } catch (error) {
+      console.error(
+        `${this.adapter.turns?.label ?? "[chat]"} failed to cancel a scheduled chat recovery`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Run the body of one recovery attempt: the checks around a recovered turn,
+   * in the one order both hosts use. See `recovery-attempt.ts`.
+   */
+  runRecoveredTurn<
+    TData extends RecoveryAttemptData,
+    TResult extends RecoveredTurnResult
+  >(host: RecoveredTurnHost<TData, TResult>): Promise<void> {
+    return runRecoveredTurn(this, host);
+  }
+
+  /** Handle an error a recovery attempt threw. See `recovery-attempt.ts`. */
+  handleRecoveryAttemptError(
+    input: Parameters<typeof handleRecoveryAttemptError>[1]
+  ): Promise<void> {
+    return handleRecoveryAttemptError(this, input);
+  }
+
+  /** The host's resolved recovery config. */
+  resolveConfig(): ResolvedChatRecoveryConfig {
+    return this.adapter.resolveConfig();
+  }
+
+  /**
+   * Record that a client stopped a running attempt. The cancel already marked
+   * the incident when it was still scheduled. Record it here otherwise, so
+   * the attempt's own outcome does not overwrite the user's stop.
+   */
+  async recordRecoveryStop(incidentId: string | undefined): Promise<void> {
+    await this.updateIncident(
+      incidentId,
+      "skipped",
+      CHAT_RECOVERY_CANCELLED_REASON,
+      (incident) => !isCancelled(incident)
+    );
+  }
+
+  /**
+   * The recovery attempts running in this isolate, by incident: the signals
+   * that tell each one to end, and the request id of the turn it started.
+   */
+  readonly #runningAttempts = new Map<
+    string,
+    {
+      superseded: AbortController;
+      stopped: AbortController;
+      turnRequestId?: string;
+      /** The schedule whose turn the attempt started. */
+      turnDelivery?: number;
+    }
+  >();
+
+  /**
+   * Register a running recovery attempt. `superseded` aborts when another
+   * turn continues the attempt's reply (see
+   * {@link supersedeScheduledRecovery}), so the attempt stands down even if
+   * it is past its own checks and its turn is waiting in the queue.
+   * `stopped` aborts when a client stops the incident by an id the host's
+   * turn core does not register the attempt under (see
+   * {@link cancelScheduledRecovery}).
+   */
+  beginAttempt(incidentId: string | undefined): {
+    superseded: AbortSignal;
+    stopped: AbortSignal;
+    end(): void;
+  } {
+    const attempt = {
+      superseded: new AbortController(),
+      stopped: new AbortController()
+    };
+    if (incidentId) this.#runningAttempts.set(incidentId, attempt);
+    return {
+      superseded: attempt.superseded.signal,
+      stopped: attempt.stopped.signal,
+      end: () => {
+        if (incidentId && this.#runningAttempts.get(incidentId) === attempt) {
+          this.#runningAttempts.delete(incidentId);
+        }
+      }
+    };
+  }
+
+  /**
+   * Run `fn` outside any recovery attempt's scope (and the origin message
+   * ids it holds). Only the attempt's own turn
+   * is the attempt's. Code that runs in the turn's async chain but is not
+   * the turn must leave the scope: the app's `onChatResponse` hook, which
+   * may start a turn of its own, and the firing of a continuation a tool
+   * result scheduled while the recovered turn ran.
+   */
+  outsideAttempt<T>(fn: () => T): T {
+    const turns = this.adapter.turns;
+    if (!turns) return fn();
+    return turns.attemptScope.exit(fn);
+  }
+
+  /**
+   * Run a recovery attempt inside the host's attempt scope. Everything the
+   * attempt awaits in its own async chain, the turn it starts included,
+   * then reads as the attempt's. Other turns that run while it waits do not.
+   */
+  runInAttemptScope<T>(
+    attempt: ChatRecoveryAttemptScope,
+    run: () => Promise<T>
+  ): Promise<T> {
+    return this.turns.attemptScope.run(attempt, run);
+  }
+
+  /**
+   * Wrap the body of a turn where its durable fiber is set up, and run the
+   * returned function inside the fiber.
+   *
+   * Setting up reads which recovery attempt, if any, the turn belongs to
+   * from the caller's async scope. The fiber may run the body outside that
+   * scope, so the returned function re-enters it: a turn that is interrupted
+   * inside a recovery attempt is then routed as that attempt's (see
+   * `routeStreamInterruption`), and no other turn is.
+   *
+   * `body` receives `takeReply`. A turn that continues the latest reply (a
+   * client's answer to a tool call, the app calling `continueLastTurn`, a
+   * recovery attempt's own turn) calls it before the first stream chunk
+   * that carries content (`takeAtFirstContent`), and not before: a model
+   * call can return a stream that only carries the provider's error. From
+   * then on the reply is this turn's: a
+   * recovery still scheduled to continue the same reply is superseded (see
+   * {@link supersedeScheduledRecovery}). A turn that ends with no content
+   * must not call it, or the reply is left with no turn and no
+   * recovery. Calling it inside the fiber means the turn is durably
+   * registered first, so a restart cannot leave that gap either.
+   *
+   * @param continuation - Whether the turn continues the latest reply.
+   *   `takeReply` does nothing for a turn that starts a new reply.
+   * @param requestId - The turn's request id. When the turn is a recovery
+   *   attempt's own, a stop by this id then reaches the attempt (see
+   *   {@link cancelScheduledRecovery}).
+   */
+  turnBody<T>(
+    continuation: boolean,
+    body: (takeReply: () => Promise<void>) => Promise<T>,
+    requestId?: string
+  ): () => Promise<T> {
+    const scope = this.adapter.turns?.attemptScope;
+    const attempt = scope?.getStore();
+    const running = attempt?.incidentId
+      ? this.#runningAttempts.get(attempt.incidentId)
+      : undefined;
+    if (running && requestId) {
+      running.turnRequestId = requestId;
+      running.turnDelivery = attempt?.delivery;
+    }
+    let taken = false;
+    const takeReply = async (): Promise<void> => {
+      if (!continuation || taken) return;
+      taken = true;
+      await this.supersedeScheduledRecovery(attempt?.incidentId);
+    };
+    // The first write inside the fiber: from here on, a reset wakes the
+    // interrupted turn's recovery, and the callback delivered again must
+    // not run the turn a second time.
+    const run = async (): Promise<T> => {
+      await this.markDeliveryStarted(attempt);
+      return body(takeReply);
+    };
+    return () => (scope && attempt ? scope.run(attempt, run) : run());
+  }
+
+  /**
+   * A turn is continuing the latest reply. Mark each scheduled incident
+   * whose recovery was going to continue that same reply `skipped` with
+   * {@link CHAT_RECOVERY_CONTINUED_REASON}, and tell its attempt, if one is
+   * running here. The attempt, queued or already waiting for the chat to
+   * settle, then ends without asking the model to continue the reply a
+   * second time (see `runRecoveredTurn`).
+   *
+   * Left alone: a scheduled retry (it answers a question, it does not
+   * continue a reply), and a continue of some other message. Each of those
+   * reaches its own leaf check.
+   *
+   * @param exceptIncidentId - The incident of the attempt the superseding
+   *   turn belongs to, which is left alone.
+   * @returns Whether any incident was marked.
+   */
+  async supersedeScheduledRecovery(
+    exceptIncidentId?: string
+  ): Promise<boolean> {
+    const reply = this.adapter.turns?.latestMessage();
+    // A continuation turn continues an assistant reply. With none, there is
+    // nothing a recovery could have been going to continue either.
+    if (reply?.role !== "assistant") return false;
+    const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
+    let superseded = false;
     for (const incident of incidents) {
       if (
-        incident.status === "scheduled" &&
-        (incident.recoveryRootRequestId === requestId ||
-          incident.requestId === requestId)
+        incident.status !== "scheduled" ||
+        incident.incidentId === exceptIncidentId ||
+        !continuesReply(incident, reply.id) ||
+        this.#ownTurnContinuedIt(incident)
       ) {
-        await this.updateIncident(
-          incident.incidentId,
-          "skipped",
-          CHAT_RECOVERY_CANCELLED_REASON
-        );
-        cancelled = true;
+        continue;
       }
+      const applied = await this.updateIncident(
+        incident.incidentId,
+        "skipped",
+        CHAT_RECOVERY_CONTINUED_REASON,
+        (current) =>
+          current.status === "scheduled" &&
+          continuesReply(current, reply.id) &&
+          !this.#ownTurnContinuedIt(current)
+      );
+      if (!applied) continue;
+      this.#runningAttempts
+        .get(incident.incidentId)
+        ?.superseded.abort(new ChatRecoverySupersededError());
+      superseded = true;
     }
-    return cancelled;
+    return superseded;
+  }
+
+  /**
+   * Whether the attempt running for this incident already started the turn
+   * of the incident's current schedule. That turn continued the reply, so a
+   * later turn (a continuation armed during it) does not take the reply
+   * from it. A newer schedule, which a cut-off of that turn leaves, can be
+   * taken.
+   */
+  #ownTurnContinuedIt(incident: ChatRecoveryIncident): boolean {
+    const running = this.#runningAttempts.get(incident.incidentId);
+    return (
+      running?.turnRequestId !== undefined &&
+      running.turnDelivery !== undefined &&
+      running.turnDelivery === incident.scheduleCount
+    );
+  }
+
+  /** Whether a client's answer took over this incident's reply. */
+  async isRecoverySuperseded(incidentId: string | undefined): Promise<boolean> {
+    if (!incidentId) return false;
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return (
+      incident?.status === "skipped" &&
+      incident.reason === CHAT_RECOVERY_CONTINUED_REASON
+    );
+  }
+
+  /** Read an incident, or `null` when there is none. */
+  async readIncident(
+    incidentId: string | undefined
+  ): Promise<ChatRecoveryIncident | null> {
+    if (!incidentId) return null;
+    return this.adapter.getIncident(chatRecoveryIncidentKey(incidentId));
+  }
+
+  /**
+   * An attempt hit a platform transient and will run again once the
+   * platform is healthy. The incident stays `scheduled`, so a stop or a
+   * turn that continues the reply during the deferral still finds it. Only
+   * the error is recorded, for whoever inspects the incident. Best-effort:
+   * in the outage that caused the transient this write can fail too.
+   */
+  async recordDeferral(
+    incidentId: string | undefined,
+    error: string
+  ): Promise<void> {
+    if (!incidentId) return;
+    await this.#update(chatRecoveryIncidentKey(incidentId), (incident) => {
+      if (incident?.status !== "scheduled") return undefined;
+      // The deferred turn ended without a reset, so nothing else will run it
+      // again: the same payload has to.
+      const { startedDelivery: _startedDelivery, ...rest } = incident;
+      return { ...rest, deferredError: error };
+    });
+  }
+
+  /**
+   * Record that the reply this incident continues is being removed because
+   * it holds nothing, and the question it answered. Call it before the
+   * removal.
+   */
+  async markReplyRemoved(
+    incidentId: string | undefined,
+    questionId?: string
+  ): Promise<void> {
+    if (!incidentId) return;
+    await this.#update(chatRecoveryIncidentKey(incidentId), (incident) =>
+      !incident || incident.replyRemoved
+        ? undefined
+        : {
+            ...incident,
+            replyRemoved: true,
+            ...(questionId !== undefined && { replyRemovedFor: questionId })
+          }
+    );
+  }
+
+  /** The question {@link markReplyRemoved} recorded, if it recorded one. */
+  async replyRemovedFor(
+    incidentId: string | undefined
+  ): Promise<string | undefined> {
+    return (await this.readIncident(incidentId))?.replyRemovedFor;
+  }
+
+  /**
+   * Whether an earlier run of this incident's attempt removed the reply it
+   * was to continue. `"unknown"` when there is no incident record to ask:
+   * the caller then goes by the transcript.
+   */
+  async isReplyRemoved(
+    incidentId: string | undefined
+  ): Promise<boolean | "unknown"> {
+    if (!incidentId) return "unknown";
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return incident ? incident.replyRemoved === true : "unknown";
+  }
+
+  /** Whether recovery already gave up on this incident. */
+  async isRecoverySealed(incidentId: string | undefined): Promise<boolean> {
+    if (!incidentId) return false;
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return incident?.status === "exhausted";
   }
 
   /** Whether the user cancelled this incident's scheduled recovery. */
@@ -947,10 +1948,7 @@ export class ChatRecoveryEngine {
     const incident = await this.adapter.getIncident(
       chatRecoveryIncidentKey(incidentId)
     );
-    return (
-      incident?.status === "skipped" &&
-      incident.reason === CHAT_RECOVERY_CANCELLED_REASON
-    );
+    return incident !== null && isCancelled(incident);
   }
 
   /**
@@ -1024,7 +2022,8 @@ export class ChatRecoveryEngine {
     const rootRequestId =
       input.data?.originalRequestId ??
       input.data?.recoveredRequestId ??
-      adapter.activeChatRecoveryRootRequestId() ??
+      this.activeRootRequestId ??
+      adapter.activeChatRecoveryRootRequestId?.() ??
       stored?.recoveryRootRequestId ??
       stored?.requestId ??
       "";
@@ -1062,10 +2061,13 @@ export class ChatRecoveryEngine {
       streamId,
       incident.firstSeenAt
     );
+    this.#settled();
 
     if (incidentKey) {
       try {
-        await adapter.putIncident(incidentKey, incident);
+        // The give-up was delivered: it is the outcome, whatever was written
+        // meanwhile. Written in the incident chain all the same.
+        await this.#inChain(() => this.#putIncident(incidentKey, incident));
       } catch (writeError) {
         adapter.onGiveUpBookkeepingError("seal", writeError);
       }
@@ -1085,27 +2087,27 @@ export class ChatRecoveryEngine {
    * No-op when `incidentId` is undefined or the record is already gone. This is
    * the transition twin of {@link beginIncident}: all I/O is adapter-owned, the
    * engine owns only the state-machine shape.
+   *
+   * @param only - Checked on the record as it is read for the write. A
+   *   record it rejects is left alone, with no event.
+   * @returns Whether the transition was written.
    */
   async updateIncident(
     incidentId: string | undefined,
     status: ChatRecoveryIncident["status"],
-    reason?: string
-  ): Promise<void> {
-    if (!incidentId) return;
+    reason?: string,
+    only?: (incident: ChatRecoveryIncident) => boolean
+  ): Promise<boolean> {
+    if (!incidentId) return false;
     const { adapter } = this;
     const key = chatRecoveryIncidentKey(incidentId);
-    const incident = await adapter.getIncident(key);
-    if (!incident) return;
-
-    if (status === "completed") {
-      await adapter.deleteIncident(key);
-    } else {
-      await adapter.putIncident(key, {
-        ...incident,
-        status,
-        ...(reason ? { reason } : {})
-      });
-    }
+    const { before: incident, after } = await this.#update(key, (current) => {
+      if (!current || (only && !only(current))) return undefined;
+      return status === "completed"
+        ? "delete"
+        : { ...current, status, ...(reason ? { reason } : {}) };
+    });
+    if (!incident || after === undefined) return false;
 
     const eventType =
       status === "completed"
@@ -1139,11 +2141,136 @@ export class ChatRecoveryEngine {
     ) {
       await adapter.setRecovering(false);
     }
+    // A recovery that ends without a turn (skipped, failed) settles nothing
+    // itself. If this agent is an agent-tool child, close the runs it held
+    // open, so a parent that follows one is not left waiting. An attempt
+    // does this as it ends.
+    const turns = adapter.turns;
+    if (
+      (status === "skipped" || status === "failed") &&
+      turns &&
+      !turns.attemptScope.getStore()
+    ) {
+      try {
+        await turns.reconcileAgentToolChildRuns();
+      } catch (error) {
+        console.error(
+          `${turns.label} failed to reconcile agent-tool child runs after recovery ended`,
+          error
+        );
+      }
+    }
+    return true;
   }
+}
+
+/**
+ * The incident storage half of a {@link ChatRecoveryAdapter}, on a Durable
+ * Object's storage. Both chat hosts keep incidents the same way.
+ */
+export function chatRecoveryStorageAdapter(
+  storage: DurableObjectStorage
+): Pick<
+  ChatRecoveryAdapter,
+  | "now"
+  | "sweepStaleIncidents"
+  | "getIncident"
+  | "listActiveIncidents"
+  | "putIncident"
+  | "syncStorage"
+  | "deleteIncident"
+> {
+  return {
+    now: () => Date.now(),
+    sweepStaleIncidents: (now) => sweepStaleChatRecoveryIncidents(storage, now),
+    getIncident: async (key) =>
+      (await storage.get<ChatRecoveryIncident>(key)) ?? null,
+    listActiveIncidents: async () =>
+      (await listActiveChatRecoveryIncidents(storage)).map(
+        ({ incident }) => incident
+      ),
+    putIncident: (key, incident) => storage.put(key, incident),
+    syncStorage: () => storage.sync(),
+    deleteIncident: async (key) => {
+      await storage.delete(key);
+    }
+  };
+}
+
+/**
+ * Build the reader for the durable recovery-progress marker: how much reply
+ * content has landed in the stream log. The log only grows when new content
+ * lands durably, a reconnect replay or a recovery re-persist reads it without
+ * appending (#1637), and compaction rewrites the transcript, not the log
+ * (#1628).
+ *
+ * The counter an older version kept in KV is folded in once per isolate, so
+ * a marker an in-flight incident already recorded is never read lower after
+ * the upgrade.
+ *
+ * @param storage - The Durable Object's storage.
+ * @param stream - The host's stream log, read when the marker is.
+ */
+export function chatRecoveryProgressReader(
+  storage: Pick<DurableObjectStorage, "get">,
+  stream: () => {
+    seedProgress(legacyTotal: number): void;
+    progressMarker(): number;
+  }
+): () => Promise<number> {
+  // Memoized as the promise, not a flag: two concurrent readers both wait
+  // for the seed to land, so neither hands the engine an unseeded marker as
+  // an incident's work baseline. A failed read is not cached, so the next
+  // evaluation retries it.
+  let seed: Promise<void> | null = null;
+  return async () => {
+    seed ??= readChatRecoveryProgress(storage).then(
+      (legacy) => stream().seedProgress(legacy),
+      (error: unknown) => {
+        seed = null;
+        throw error;
+      }
+    );
+    await seed;
+    return stream().progressMarker();
+  };
+}
+
+/**
+ * Whether a scheduled incident's recovery will continue the reply
+ * `replyId`. An incident an older version scheduled does not say what it
+ * targets: its kind decides, and a continue is taken to target the latest
+ * reply, which is what `continueLastTurn` would continue.
+ */
+function continuesReply(
+  incident: ChatRecoveryIncident,
+  replyId: string
+): boolean {
+  const { scheduled } = incident;
+  if (!scheduled) return incident.recoveryKind === "continue";
+  if (scheduled.callback !== "_chatRecoveryContinue") return false;
+  return (
+    scheduled.targetMessageId === undefined ||
+    scheduled.targetMessageId === replyId
+  );
+}
+
+/** Whether the user cancelled this incident's recovery. */
+function isCancelled(incident: ChatRecoveryIncident): boolean {
+  return (
+    incident.status === "skipped" &&
+    incident.reason === CHAT_RECOVERY_CANCELLED_REASON
+  );
 }
 
 /** `incident.reason` for a scheduled recovery the user cancelled. */
 export const CHAT_RECOVERY_CANCELLED_REASON = "user_cancelled";
+
+/**
+ * `incident.reason` for a recovery whose reply a client's answer continued
+ * first.
+ */
+export const CHAT_RECOVERY_CONTINUED_REASON = "continued_by_interaction";
 
 /** Cap on the exponential backoff between transient-error recoveries. */
 export const CHAT_RECOVERY_MAX_BACKOFF_SECONDS = 30;
@@ -1161,10 +2288,11 @@ export function chatRecoveryBackoffSeconds(
   retries: number,
   retryAfterSeconds?: number
 ): number {
-  const backoff = Math.min(
-    2 ** (retries - 1),
-    CHAT_RECOVERY_MAX_BACKOFF_SECONDS
-  );
+  const backoff =
+    backoffDelay(retries, {
+      baseMs: 1000,
+      maxMs: CHAT_RECOVERY_MAX_BACKOFF_SECONDS * 1000
+    }) / 1000;
   if (retryAfterSeconds === undefined) return backoff;
   return Math.min(
     Math.max(backoff, retryAfterSeconds),
@@ -1173,39 +2301,72 @@ export function chatRecoveryBackoffSeconds(
 }
 
 /**
- * The `Retry-After` an error carries, in whole seconds. Reads
- * `responseHeaders` (AI SDK `APICallError`) or `headers` on the error or its
- * `cause` chain; accepts delta-seconds or an HTTP date. `undefined` when absent
- * or unparseable.
+ * How long a provider asked the caller to wait before retrying, in whole
+ * seconds. Reads `responseHeaders` (AI SDK `APICallError`) or `headers` on
+ * the error, then on the errors it wraps: `lastError` and `errors` (AI SDK
+ * `RetryError`, thrown once its own retries are used up; the newest attempt
+ * is read first) and `cause`. `retry-after-ms` (milliseconds) wins over
+ * `retry-after`, which is delta-seconds or an HTTP date. `undefined` when
+ * absent or unparseable.
  */
 export function retryAfterSeconds(
   error: unknown,
   now: number = Date.now()
 ): number | undefined {
-  let current = error;
-  for (let depth = 0; depth < 8 && current != null; depth++) {
-    if (typeof current !== "object") return undefined;
-    const record = current as {
-      responseHeaders?: unknown;
-      headers?: unknown;
-      cause?: unknown;
-    };
-    const value =
-      readRetryAfterHeader(record.responseHeaders) ??
-      readRetryAfterHeader(record.headers);
-    if (value !== undefined) return parseRetryAfter(value, now);
-    current = record.cause;
-  }
-  return undefined;
+  return retryAfterIn(error, now, new Set()).seconds;
 }
 
-function readRetryAfterHeader(headers: unknown): string | undefined {
+/**
+ * `found` separates "this error carries the header, and it does not parse"
+ * (stop there, as the newest answer) from "no header here, keep looking".
+ */
+function retryAfterIn(
+  error: unknown,
+  now: number,
+  seen: Set<object>
+): { found: boolean; seconds?: number } {
+  if (error == null || typeof error !== "object") return { found: false };
+  // An error that wraps itself, directly or further down, is read once.
+  if (seen.has(error)) return { found: false };
+  seen.add(error);
+  const record = error as {
+    responseHeaders?: unknown;
+    headers?: unknown;
+    lastError?: unknown;
+    errors?: unknown;
+    cause?: unknown;
+  };
+  for (const headers of [record.responseHeaders, record.headers]) {
+    const milliseconds = readHeader(headers, "retry-after-ms");
+    if (milliseconds !== undefined && /^\d+(\.\d+)?$/.test(milliseconds)) {
+      return { found: true, seconds: Math.ceil(Number(milliseconds) / 1000) };
+    }
+    const value = readHeader(headers, "retry-after");
+    if (value !== undefined) {
+      return { found: true, seconds: parseRetryAfter(value, now) };
+    }
+  }
+  const wrapped = [
+    record.lastError,
+    ...(Array.isArray(record.errors) ? [...record.errors].reverse() : []),
+    record.cause
+  ];
+  for (const inner of wrapped) {
+    const result = retryAfterIn(inner, now, seen);
+    if (result.found) return result;
+  }
+  return { found: false };
+}
+
+function readHeader(headers: unknown, header: string): string | undefined {
   if (headers == null || typeof headers !== "object") return undefined;
-  if (headers instanceof Headers)
-    return headers.get("retry-after") ?? undefined;
+  if (headers instanceof Headers) {
+    // `Headers` strips the whitespace around a value itself.
+    return headers.get(header) ?? undefined;
+  }
   for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === "retry-after" && typeof value === "string") {
-      return value;
+    if (name.toLowerCase() === header && typeof value === "string") {
+      return value.trim();
     }
   }
   return undefined;

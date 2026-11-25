@@ -1,5 +1,9 @@
 import { Agent, callable } from "../../index.ts";
-import type { StreamingResponse } from "../../index.ts";
+import type {
+  Connection,
+  ConnectionContext,
+  StreamingResponse
+} from "../../index.ts";
 
 // Test Agent for @callable decorator tests
 export class TestCallableAgent extends Agent<
@@ -8,12 +12,48 @@ export class TestCallableAgent extends Agent<
 > {
   initialState = { value: 0 };
 
+  /** How many times `bump()` ran, for the closed-connection tests. */
+  #bumps = 0;
+
+  // `?rejectAfterMs=N` stands in for async auth in onConnect: wait N ms,
+  // then reject the connection with 4001.
+  async onConnect(connection: Connection, ctx: ConnectionContext) {
+    const delay = new URL(ctx.request.url).searchParams.get("rejectAfterMs");
+    if (delay === null) return;
+    await new Promise((resolve) => setTimeout(resolve, Number(delay)));
+    connection.close(4001, "Unauthorized");
+  }
+
+  // A callable with a side effect, for the closed-connection tests.
+  @callable()
+  bump(): number {
+    this.#bumps += 1;
+    this.setState({ value: this.state.value + 1 });
+    return this.#bumps;
+  }
+
+  /** Durable Object RPC: how many times `bump()` ran. */
+  bumpCount(): number {
+    return this.#bumps;
+  }
+
+  /** Durable Object RPC: the synced state value. */
+  stateValue(): number {
+    return this.state.value;
+  }
+
   // Served over BOTH wires: natively on the legacy JSON RPC protocol
   // and, via the decorator-fallback target, on the WebSockets
   // capability's Cap'n Web endpoint.
   @callable()
   multiply(a: number, b: number): number {
     return a * b;
+  }
+
+  // A result of `mib` MiB, for the frame-limit test.
+  @callable()
+  huge(mib: number): string {
+    return "x".repeat(mib * 1024 * 1024);
   }
 
   // For client call-timeout tests over the Cap'n Web endpoint.
@@ -99,6 +139,22 @@ export class TestCallableAgent extends Agent<
       stream.send(i);
     }
     stream.end(count);
+  }
+
+  /** What `hugeStream` saw: whether the over-limit chunk was sent. */
+  hugeStreamResult: { sent: boolean; closed: boolean } | undefined;
+
+  @callable({ streaming: true })
+  hugeStream(stream: StreamingResponse) {
+    stream.send("small");
+    const sent = stream.send("x".repeat(33 * 1024 * 1024));
+    this.hugeStreamResult = { sent, closed: stream.isClosed };
+    stream.end("done");
+  }
+
+  /** Durable Object RPC: what `hugeStream` saw. */
+  getHugeStreamResult() {
+    return this.hugeStreamResult;
   }
 
   // Streaming method - async with delays

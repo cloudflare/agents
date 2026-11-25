@@ -21,10 +21,24 @@ On the ai-chat side, `index.ts` and `react.tsx` already mixed too many concerns 
 packages/agents/src/chat/          ← shared foundation
   index.ts                         barrel exports
   message-builder.ts               applyChunkToParts, getPartialStreamText + types
-  sanitize.ts                      sanitizeMessage, enforceRowSizeLimit
   tool-output-truncation.ts        provider-executed tool payload truncation
   stream-accumulator.ts            StreamAccumulator class
   turn-queue.ts                    TurnQueue class
+  chat-turns.ts                    ChatTurns: the turn core both hosts run on (owns the queue, aborts,
+                                   submit concurrency, continuation, pre-stream set and apply chain)
+  admissions.ts                    ChatAdmissions: a client request's durable record, and its replay
+                                   after a reset
+  server-turn.ts                   runServerTurn: a turn the server starts (saveMessages, continueLastTurn,
+                                   the retry, a recovered turn, an agent-tool run, Think.chat())
+  continuation-turn.ts             the auto-continuation turn, from the fire to the settle
+  turn-failure.ts                  reportTurnFailure: the order of a failure report
+  turn-stop.ts                     isTurnStopped: whether a turn's own signal stopped it
+  turn-fiber.ts                    ChatTurnFibers: a turn body inside the host's recovery fiber
+  before-turn.ts                   what a turn settles in the transcript before the model is called
+  repair-transcript.ts             settle interrupted tool calls, strip trailing reasoning, store a repair
+  request-context.ts               ChatRequestContext: the stored client tools and body
+  agent-tool-runs.ts               AgentToolRuns: an agent-tool child run (life, cancel, tail, reconcile)
+  agent-tool-run-store.ts          the SQL store behind AgentToolRuns
   submit-concurrency.ts            SubmitConcurrencyController
   broadcast-state.ts               broadcastTransition state machine
   continuation-state.ts            ContinuationState
@@ -54,6 +68,9 @@ packages/agents/src/chat/          ← shared foundation
   recovery.ts                      chat-fiber snapshot codec
   recovery-incident.ts             incident budget math + storage helpers
   recovery-engine.ts               ChatRecoveryEngine + adapter / wake-hook seams
+  interrupted-turn.ts              planInterruptedTurn: what a turn found interrupted does next
+  recovery-attempt.ts              runRecoveredTurn: the body of one recovery attempt
+  recovery-route.ts                routeStreamInterruption: a live stall or transient error into recovery
   recovery-task.ts                 reserved chained Task definition for continuations
   turn-task.ts                     createChatTurnTaskDefinition (chat turns as Tasks)
   recovery-codec.ts                ChatRecoveryCodec (AISDKRecoveryCodec)
@@ -72,7 +89,7 @@ packages/think/src/                ← opinionated assistant
   extensions/                      ExtensionManager, HostBridgeLoopback (standalone)
 ```
 
-The directory has a few more small helpers (throttling, chunk sizing, replay batching, transcript repair) that are not listed individually.
+The directory has a few more small helpers (throttling, chunk sizing, replay batching) that are not listed individually.
 
 **Dependency direction**: `ai-chat → agents`, `think → agents`. The shared layer resolves the circular dependency that caused the original fork.
 
@@ -84,11 +101,7 @@ The directory has a few more small helpers (throttling, chunk sizing, replay bat
 
 This is the single most shared piece of code in the chat system. Used by:
 
-- `AIChatAgent._streamSSEReply` — server-side SSE parsing
-- `StreamAccumulator.applyChunk` — the higher-level wrapper (which is how
-  `AIChatAgent._persistOrphanedStream` and Think now rebuild orphaned partials —
-  the orphan path no longer calls `applyChunkToParts` directly)
-- Think's `StreamAccumulator` usage in `_streamResult` (WebSocket and programmatic turns) and `_streamResultToRpcCallback` (`chat()` RPC path)
+- `StreamAccumulator.applyChunk` — the higher-level wrapper, which the reply pump (`pumpReply`) and both hosts' orphan recovery (`_persistOrphanedStream`) build messages with
 
 **Key type: `StreamChunkData`** — deliberately loose (index signature, many optionals) to match the wire format without encoding chunk-type-specific constraints. The `messageMetadata` field is typed as `unknown` (not `Record<string, unknown>`) to match `UIMessageChunk` from the AI SDK.
 
@@ -98,9 +111,7 @@ Row-size enforcement for chat tables that are **not** session storage. Message p
 
 **`sanitizeMessage(message) → UIMessage`** — re-exported from `agents/sessions/sanitize`. Strips OpenAI ephemeral fields (`itemId`, `reasoningEncryptedContent`) from `providerMetadata` and `callProviderMetadata`, then filters truly empty reasoning parts.
 
-**`enforceRowSizeLimit(message, { warn? }) → UIMessage`** — compacts messages exceeding 1.8MB (`ROW_MAX_BYTES`, below SQLite's 2MB row limit). Two-pass: first compact tool outputs over 1KB (annotating `metadata.compactedToolOutputs`), then truncate text parts oldest-first (annotating `metadata.compactedTextParts`). The host passes `warn` to log with its own prefix.
-
-Think calls `enforceRowSizeLimit` only when serializing its submission queue (`cf_think_submissions`). `AIChatAgent` does not call it: its `_sanitizeMessageForPersistence` runs `_truncateProviderExecutedToolPayloads` (large strings in Anthropic-style server-executed tool payloads) and then the protected `sanitizeMessageForPersistence()` hook, and Sessions handles size.
+`enforceRowSizeLimit` stays exported, deprecated, only because released Think (0.21–0.24) and ai-chat (0.10–0.11) import it. Neither host in this repo cuts a message to fit a row: Sessions splits a large message across rows and reads it back whole. `AIChatAgent`'s `_sanitizeMessageForPersistence` runs `_truncateProviderExecutedToolPayloads` (large strings in Anthropic-style server-executed tool payloads) and then the protected `sanitizeMessageForPersistence()` hook.
 
 ### stream-accumulator.ts
 
@@ -120,22 +131,107 @@ class StreamAccumulator {
 
 **`ChunkResult`** carries an optional **`ChunkAction`** — a discriminated union that signals domain-specific concerns without the accumulator knowing about them:
 
-| Action type                 | When                                                                                  | Caller handles                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `start`                     | `start` chunk with optional `messageId` / `messageMetadata`                           | ai-chat: may overwrite `message.id`                                     |
-| `finish`                    | `finish` chunk with optional `finishReason`                                           | ai-chat: normalize `finishReason` to `messageMetadata` before broadcast |
-| `message-metadata`          | `message-metadata` chunk                                                              | Metadata already merged by accumulator                                  |
-| `tool-approval-request`     | `tool-approval-request` chunk                                                         | ai-chat: early persist to SQLite for page-refresh survival              |
-| `cross-message-tool-update` | `tool-output-available` / `tool-output-error` for a `toolCallId` not in current parts | ai-chat: search `this.messages` and update persisted message            |
-| `error`                     | `error` chunk                                                                         | Think: broadcast error frame, `continue`; ai-chat: broadcast error      |
+| Action type                 | When                                                                                  | Caller handles                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `start`                     | `start` chunk with optional `messageId` / `messageMetadata`                           | Metadata already merged by accumulator                             |
+| `finish`                    | `finish` chunk with optional `finishReason`                                           | Metadata already merged by accumulator                             |
+| `message-metadata`          | `message-metadata` chunk                                                              | Metadata already merged by accumulator                             |
+| `tool-approval-request`     | `tool-approval-request` chunk                                                         | Nothing: the reply is stored when it ends                          |
+| `cross-message-tool-update` | `tool-output-available` / `tool-output-error` for a `toolCallId` not in current parts | `pumpReply`: the host updates the stored message                   |
+| `error`                     | `error` chunk                                                                         | `pumpReply`: the host classifies it; a terminal one ends the reply |
 
 **`mergeInto(messages)`** — produces a new message array by finding an existing message (by `messageId`, or walking backward for last assistant in continuation mode), then replacing or appending. This replaced the `flushActiveStreamToMessages` function on the client and the `activeStreamRef` + metadata merge pattern.
 
 **Where the accumulator is used vs. not:**
 
 - **Client** (`agents/chat/react.tsx`, shared by both packages' React exports): Uses `StreamAccumulator` for broadcast/resume streams. The transport-owned path (local tab requests) still goes through `useChat`'s built-in pipeline.
-- **Think server**: Uses `StreamAccumulator` in both `_streamResult` (WebSocket path) and `chat()` (RPC sub-agent path), and to rebuild orphaned partials in `_persistOrphanedStream`.
-- **ai-chat server**: `_persistOrphanedStream` rebuilds orphaned partials through `StreamAccumulator` (the orphan-persist (a) step — see [recovery-engine.ts](#recovery-enginets)). The live streaming path (`_streamSSEReply`) **still** uses `applyChunkToParts` directly: its streaming message (`_streamingMessage`) is shared by reference with `hasPendingInteraction`, `_messagesForClientSync`, and `_findAndUpdateToolPart`, making it impractical to route through the accumulator without a deeper refactoring of the shared mutable state (see "Server-side StreamAccumulator (deferred)").
+- **Both servers**: every live reply is built in the reply pump's accumulator ([reply-pump.ts](#reply-pumpts-reply-sourcets-and-reply-streamts)), and orphaned partials are rebuilt through `StreamAccumulator` in `_persistOrphanedStream`.
+
+### reply-pump.ts, reply-source.ts and reply-stream.ts
+
+**`pumpReply(input, host)`** runs one reply: start its stream, build the message, store and send each chunk, stop on a stop, a stall or an error, route a stall or a transient error to recovery, store the reply, send the terminal frame after the transcript, run the response hook. Both hosts call it for every reply. [chat-turn-core.md](./chat-turn-core.md) has the order of work and the decisions (D118 to D139).
+
+A host passes a `ReplyPumpHost`: `send` (a frame to sockets), `store` (the reply, with the cutover), `route` (recovery), `classify` and `describeError`, `settled` (the response hook), and the chunk steps only one host has. A caller that wants the chunks too (`Think.chat()`) passes a `ReplySink`.
+
+**`LiveReply`** is the reply while it streams and while it is stored. A tool result that arrives then is applied to its accumulator, and `changed()` makes the pump store the reply again. `ended` says the stream closed and the terminal frame waits, which the resume handshake reads (`holdsTerminalFrames`).
+
+**`ReplySource`** is what the pump reads. `uiMessageStreamSource(result)` reads an AI SDK result and keeps the provider error behind an in-band `error` chunk. `responseSource(response, body, requestId)` reads an `onChatMessage` `Response`: SSE lines (a line may span two reads) or plain text as one text part.
+
+**`ReplyStreams`** writes a reply's chunks to `ResumableStream`. It releases the tabs parked on a request when its stream starts and the tabs offered it when it ends, flushes a tool call or result at once and text deltas with the first and every tenth, and lets a host record the request's result in the transaction that settles the stream (`Think`'s submissions).
+
+### chat-turns.ts
+
+**`ChatTurns`** is the turn core `AIChatAgent` and `Think` both construct. It owns the state a host needs to run one turn at a time (`TurnQueue`, `AbortRegistry`, `SubmitConcurrencyController`, `ContinuationState`, `AutoContinuationController`, `PreStreamTurns`, and the tool-result apply chain) and the rules across them. Each rule has one method, and most are thin calls into the files below.
+
+How a turn starts:
+
+- `runClientRequest()` runs one client chat request in the order both hosts follow: decide concurrency, accept (pre-stream mark and abort controller), persist, queue, the superseded and debounce checks, end a request cancelled meanwhile without calling the model, run the turn, settle. The host supplies the steps as a `ClientChatRequest`.
+- `runServerTurn()` runs a turn the server starts. See `server-turn.ts`.
+- `runContinuationTurn()` runs the turn a tool result or approval scheduled. See `continuation-turn.ts`.
+- `decideSubmit()`, `awaitSubmitTurn()` and `settlePreStreamTurn()` cover the overlapping-submit checks.
+
+While a turn runs:
+
+- `turnResetGuard()` tells a running turn whether the chat was cleared since it was admitted, so it neither streams into the cleared chat nor persists there.
+- `applyInteraction()` applies tool results and approvals one at a time. Only one that settled its call schedules a continuation, targeted at that call's message, and not when a stop landed while it was applied.
+- `settleBeforeTurn()` settles what must not reach the model and stores what changed. `continuationWaitsOnClient()` says whether a continuation has anything to continue yet. See `before-turn.ts`.
+- `settleInterruptedReply()` and `settleBeforeRecovery()` settle a cut-off reply before it is stored, and before a recovery continues it.
+- `streamStarted()`, `streamEnded()` and `replyFinalized()` are the points a host reports from its reply pipeline.
+- `reportTurnFailure()` tells clients and the app about a turn that failed before its stream. See `turn-failure.ts`.
+- `isTurnStopped()` (`turn-stop.ts`) is how every outcome decides between `aborted` and an error: the turn's own signal aborted, for anything but a stall. What a stopped turn throws is not an error.
+
+Stop, clear and idle:
+
+- `cancel(id)` stops the request's turn, queued or running, and a recovery attempt registered for it with `beginRecoveryAttempt(rootId)`. `stopAll()` stops every request, and `linkExternal()` links a caller's signal. A stop that stops the running turn drops the continuations that were waiting when it landed. `runtimeAbort()` is for an abort the runtime does itself, such as the stall watchdog, which drops nothing.
+- `reset()` tears all of it down in one synchronous step for a chat clear.
+- `waitForIdle()` and `waitUntilStable()` define idle and stable: no turn, no submit in flight, no tool result being applied, no continuation about to fire.
+
+The host passes a `ChatTurnsHost`: the transcript, whether a reply is streaming, the reply being streamed, the names of the tools a client runs, whether a resumable stream is active, `keepAliveWhile`, an id generator, and `fireContinuation`. What a turn does (the model call, streaming and persisting the reply) is still host code, in one turn body per host for every server-started turn (`AIChatAgent._runServerTurnReply`, `Think._runModelTurn`). [chat-turn-core.md](./chat-turn-core.md) has the differences that were settled on the way and what is still host code.
+
+Both hosts keep their old private field names (`_turnQueue`, `_continuation`, `_abortRegistry` / `_aborts`, and so on) as aliases of the core's parts.
+
+### admissions.ts
+
+**`ChatAdmissions`** keeps an accepted client request across an isolate reset. `runClientRequest` writes a record in `cf_agents_chat_admissions` before the request's messages, and the record is deleted when the turn's fiber is durably accepted, when recovery picks the turn up, or when the request ends. A stop is written on the record, and a clear deletes every record. `resume()` replays the records a reset left, in order and with their concurrency decisions restored, once no recovery is pending. A new request replays them first. `saveMessages` and `continueLastTurn` have no record: they store nothing until their turn starts.
+
+### server-turn.ts
+
+**`runServerTurn`** runs a turn the server starts: `saveMessages`, `continueLastTurn`, the retry, a recovered turn, an agent-tool run, and `Think.chat()`. It captures the queue generation, creates the abort controller and links the caller's signal, queues the turn, and at the front of the queue runs the host's `prepare`, `persist` and `run`, checking for a reset and a stop before each. A turn stopped before its messages are stored stores nothing, and a turn stopped before `run` never calls the model.
+
+`mapServerTurnOutcome` decides the status the caller gets. A reset gives `skipped`, a stop before any reply gives `aborted`, an error stays an error, and what the reply path reported stands. A skipped result carries a `reason`: `cleared`, `nothing-to-continue`, or `awaiting-client` for a `continueLastTurn()` whose reply still waits on a client. `pinnedOr` lets a caller pin the tools and body a turn runs with. A pinned context is this turn's only: it is never written to the stored request context. An `aborted` result says why in `reason`: `stopped`, or `interrupted` for a reply handed to recovery.
+
+### continuation-turn.ts
+
+The auto-continuation turn, from the moment it fires to the moment it settles.
+
+- `runContinuationTurn` creates the abort signal when the continuation fires, queues the turn, claims the continuation when the turn starts, runs the host's turn body, reports a failure before the stream, and settles. A continuation with no connection is the same runner with nothing to claim.
+- `claimContinuation` gives four reasons a continuation does not run: it was fired for another turn, the conversation moved on, the reply already went on to its answer (`transcriptEndsInAnswer`), or the reply still waits on a client. A dropped continuation is reported to the host with the reason (`chat:continuation:dropped`).
+- `settleContinuationTurn` releases only what the turn owns and starts the follow-up a result deferred while it ran.
+- `dropWaitingContinuations` is what a stop of the running turn calls.
+
+The tools and body a continuation runs with are not copied onto it. The host reads the stored request context when the turn starts.
+
+### before-turn.ts and repair-transcript.ts
+
+A provider rejects a request that holds a tool call with no result, and Anthropic rejects an assistant message that ends in a thinking block. These two files keep both out of a request.
+
+- `repairTranscriptBeforeTurn` settles every unanswered call in a message a later message follows, whoever owns it, and an approved call that never ran. A turn that starts a new reply treats the last message the same way. A continuation turn keeps, in the message it continues, a call to a tool the client sent a schema for and an approval request, and reports them as `keptToolCallIds`. A turn that kept any does not call the model.
+- `settleInterruptedReply` settles a reply whose stream was cut off, before it is stored. A call a client is known to own is kept.
+- `stripTrailingReasoning` removes the reasoning an assistant message ends in. It runs inside both of the above.
+- `settleInterruptedPart` (`message-builder.ts`) closes a text or reasoning part an interruption left streaming. Both hosts apply it to the message a continuation extends, so the continuation's parts follow the cut-off ones in order.
+- `replyIsEmpty` says whether a reply holds nothing a client can show and nothing a model request can carry. Such a reply is not stored. The before-turn repair and the settle before a recovery remove a stored one through the sink, and the recovery then retries the question.
+- `removeEmptyReplyToContinue` is what `continueLastTurn()` calls first: a last reply that holds nothing is removed, and the host answers the question again.
+- `chunkMustBeStoredNow` (`recovery-codec.ts`) says which stream chunks go to storage at once: a tool call, before the tool runs, and a settled tool result.
+- `interruptedToolPartAsError` is the default for the hosts' `repairInterruptedToolPart` hook. Its text says what is known about the call.
+- `persistRepairedTranscript` stores what a repair changed and emits `chat:transcript:repaired`, through a `RepairedTranscriptSink` the host supplies.
+
+### request-context.ts
+
+**`ChatRequestContext`** owns the stored client tools and body that later turns run with. A chat request replaces the context whole when its turn starts, and one that sends no client tools clears the stored ones. A tool result replaces the stored tools only when it settled its call and listed some, and not when the context was cleared or replaced while the result was applied. Every change is written through, and a value equal to what is stored is not written again. The host passes a store with `get`, `set` and `delete`.
+
+### agent-tool-runs.ts
+
+**`AgentToolRuns`** owns an agent-tool child run in both hosts, over one SQL store (`agent-tool-run-store.ts`). It starts the run and binds its request id before the turn queues, writes the terminal status once, cancels only the run's own turn, keeps a run whose reply was cut off open until chat recovery finishes its turn, and reconciles a run an earlier isolate started. It also serves what the parent reads: `inspect`, `chunks`, `tail` and progress.
 
 ### protocol.ts
 
@@ -157,29 +253,35 @@ Pure functions for aligning client messages with server state during persistence
 
 `reconcileMessages` and `resolveToolMergeId` are shared — both hosts call them (`Think._handleChatRequest` reconciles incoming messages; `Think._persistIncomingMessage` resolves assistant tool-merge IDs). The module also exports **`reconcileOrphanPartial(existing, incoming)`** — the orphan-persist **(c)** merge primitive (shared; ai-chat is the only consumer today). It is described with the rest of the orphan path in [recovery-engine.ts](#recovery-enginets).
 
-### recovery-engine.ts
+### recovery-engine.ts, recovery-attempt.ts and recovery-route.ts
 
-**`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a Task run for a root agent, or `runFiber` for a routed facet, that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
+`runRecoveredTurn` (`recovery-attempt.ts`) is the body of a recovery attempt in both hosts, and `routeStreamInterruption` (`recovery-route.ts`) routes a live stall or transient error into recovery, reading `Retry-After` from the error. The engine section below describes the orchestration around them.
+
+**`ChatRecoveryEngine`** owns the **shared durable chat-recovery orchestration** — the sequence both `AIChatAgent` and `Think` run when a Durable Object wakes and finds an interrupted chat turn (a chat-turn Task run, on a root agent or a routed facet, that died mid-stream from hibernation, process death, or deploy churn). This state machine was previously duplicated across both packages, and the duplication was already drifting (better fixes landing in one but not the other).
 
 Durable chat recovery is an invariant in both hosts: every chat entry path runs inside a recovery fiber. `ChatRecoveryConfig` accepts `true` or a tuning object, not `false`; previously compiled JavaScript that still supplies `false` is resolved to the default configuration. This guarantees that agent-tool child inspection can use durable recovery state after a restart instead of relying on instance-local abort controllers or stream managers.
 
 **Two host-supplied seams:**
 
 - **`ChatRecoveryAdapter`** — the incident/budget I/O the engine drives (read/write/sweep incidents, read progress, emit lifecycle events, resolve the recovery stream, give-up/exhaust). Stable across a session.
-- **`ChatFiberWakeHooks<TClassify>`** — the per-wake "divergent organs": classify the turn (`retry`/`continue`), unwrap the fiber snapshot, the base persist gate, `persistOrphanedStream`, `completeRecoveredStream`, and the retry/continue/skip dispatch. Passed per `handleChatFiberRecovery` call so the adapter stays focused.
+- **`ChatFiberWakeHooks`** — the per-wake "divergent organs": the latest stored message, whether a partial holds anything the host would store, the base persist gate, `persistOrphanedStream`, `completeRecoveredStream`, and `Think`'s submission steps (`scheduleData`, `onStreamEnded`, `onSkipped`). Passed per `recoverInterruptedTurn` call so the adapter stays focused. The retry/continue/skip decision is `planInterruptedTurn` (`interrupted-turn.ts`), the same for every host.
 
-**The engine owns the lifecycle and its ordering invariants**: non-chat-fiber dispatch first → chat-fiber name gate → parse request id / unwrap snapshot / resolve stream / reconstruct partial → classify → open incident → **if the budget is exhausted**, persist the settled partial _before_ sealing (so non-idempotent tool results aren't discarded, #1631) and terminalize → **else** (inside a `failed`-on-throw guard) invoke `onChatRecovery`, apply the shared persist gate (`persist !== false || hasSettledToolResults`), complete the live stream, then hand the decision to `dispatchRecoveredTurn`. The budget math is the pure `evaluateChatRecoveryIncident`. `experimental/pi-recovery` is a third adapter implementation driving a **non-AI-SDK codec** — the forcing function that keeps the engine host-agnostic.
+**The engine owns the lifecycle and its ordering invariants**: resolve stream / reconstruct partial → kind (`interruptedTurnKind`) → open incident → **if the budget is exhausted**, persist the settled partial _before_ sealing (so non-idempotent tool results aren't discarded, #1631) and terminalize → **else** (inside a `failed`-on-throw guard) invoke `onChatRecovery`, apply the shared persist gate (`persist !== false || hasSettledToolResults`), complete the live stream, then plan the turn (`planInterruptedTurn`) and schedule it or skip. The budget math is the pure `evaluateChatRecoveryIncident`. `experimental/pi-recovery` is a third adapter implementation driving a **non-AI-SDK codec** — the forcing function that keeps the engine host-agnostic.
+
+`recoverInterruptedTurn` takes the turn as its record left it: the request id, the unwrapped snapshot, the stash data and the run's creation time (`InterruptedChatTurn`). A chat-turn Task run replayed with no live closure reaches it through the host's `_recoverChatTurn`, which `ChatTurnTaskHooks.recover` calls. A chat fiber row an older version left reaches the same method through the host's `_handleInternalFiberRecovery` override, which also asks `Think`'s messenger runtime first about its reply fibers. Hosts unwrap the snapshot themselves, so the engine never reads a fiber.
 
 **Orphan-persist seams** (`persistOrphanedStream`'s internals). The engine owns _whether_ to persist; the host owns _how_, in four steps:
 
-| Step                     | Shared?          | What                                                         |
-| ------------------------ | ---------------- | ------------------------------------------------------------ |
-| (a) chunks → parts       | shared           | rebuild via `StreamAccumulator` (idempotent by `toolCallId`) |
-| (b) target-id resolution | host hook        | which message id to write under                              |
-| (c) merge onto existing  | shared primitive | `reconcileOrphanPartial`                                     |
-| (d) upsert by id         | host store       | an `OrphanPersistStore` write backed by Sessions             |
+`ReplyStreams.persistOrphan` runs the whole path for both hosts:
 
-(b) is the one legitimately per-package step: ai-chat reads the stored stream `message_id` (#1691) because a flat `UIMessage[]` can't express parent/child (`AIChatAgent._resolveOrphanTargetId`); Think resolves it structurally from its Session tree. (c) `reconcileOrphanPartial` keeps an existing in-place tool result that lives only in storage — ai-chat's early tool-approval persist — rather than letting a replayed chunk re-advance it; Think has no early persist, so its whole-message replace is already dedup-safe and it doesn't use the helper. (d) is recognizably the same shape on both: ai-chat does `findIndex` → map-replace / append over its flat array; `Think._upsertMessageInHistory` does `session.getMessage` → `updateMessage` / `appendMessage` over a Session tree.
+| Step                    | Where                    | What                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| (a) chunks → parts      | core                     | rebuild via `StreamAccumulator`; a reply that extended a stored message is replayed onto a copy of its parts from when the stream started                                                                                                                                                                                                                                                                   |
+| (b) target id           | core                     | the message id recorded on the stream; an old stream with none takes the host's `legacyMessageId`                                                                                                                                                                                                                                                                                                           |
+| (c) merge onto existing | core, host `mergeLegacy` | the rebuilt reply replaces the stored message but keeps a stored tool part that got as far; a stream that holds only part of the message (no recorded id, a continuation from before the base part count, or a rebuild that does not start with what the stored message holds, as a stream imported from `AIChatAgent` 0.8.4 does) takes the host's `mergeLegacy` (`AIChatAgent`: `reconcileOrphanPartial`) |
+| (d) upsert by id        | host store               | an `OrphanPersistStore` write; `appendMessage` gets the stream's parent id                                                                                                                                                                                                                                                                                                                                  |
+
+In (c) a stored tool part wins over the rebuilt one when it has got at least as far (a result beats an approval, an approval beats a call): a stream has no producer once it is orphaned, so a tool result or an approval that arrived since was written to the stored message, never to the stream. A result the stream itself carries for a call the message held before (a continuation's) is further on, and the rebuilt part stays.
 
 Root-agent continuation attempts run as chained `__cf_internal_chat_recovery`
 Task runs. Initial detection joins by incident identity; stable-state
@@ -188,8 +290,10 @@ Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
 entry point; both hosts run it through the shared
 `dispatchChatRecoveryToHandoff`, which returns at model handoff so a long turn
 never blocks the Lifecycle job loop and registers the turn as tracked alarm
-work (on the root; on a facet `trackAlarmWork` declines, and the detached turn
-stays outside the breaker until Tasks supports routed child wakes). A platform
+work (on the root; on a facet `trackAlarmWork` declines, because the facet runs
+its routed dispatch outside an alarm scope and the root tracks only the routed
+call, which returns at handoff, so the detached turn stays outside the
+breaker). A platform
 failure before handoff propagates through the
 current Task or compatibility schedule; after handoff that execution has
 settled, so the detached continuation enqueues exactly one replacement attempt.
@@ -205,10 +309,10 @@ so the next attempt counts entries left by another isolate in
 counted on the failure path. See
 [rfc-chat-recovery-interrupted-attempts.md](./rfc-chat-recovery-interrupted-attempts.md).
 
-Facets do not yet have routed Task wakes. Dynamic-agent recovery therefore
-keeps the root-owned routed Scheduler transport as a compatibility path until
-Tasks can mirror a child run's wake to its alarm owner. Legacy recovery schedule
-rows use the same callback entry points and drain without migration.
+A facet's turns and recovery attempts run on Tasks too: the run and its step
+journal live on the facet, and Tasks mirrors its wake to the root's alarm.
+Legacy recovery schedule rows and legacy chat fiber rows use the same entry
+points and drain without migration.
 
 Full design + point-in-time decision record: [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 
@@ -220,17 +324,7 @@ Both `ai-chat` and `think` already depend on `agents`. Adding a new package woul
 
 ### Why the accumulator signals actions instead of handling them
 
-The accumulator doesn't know about SQLite, WebSockets, or broadcasting. It signals via `ChunkAction` and the caller decides what to do. This keeps the accumulator testable as a pure data structure and reusable across contexts that handle actions differently (server persists to SQLite on approval, client ignores it; server broadcasts errors on the wire, client logs them).
-
-### Why `_streamSSEReply` was not refactored to use the accumulator
-
-`_streamSSEReply` in ai-chat's server mutates a `message` object that is shared by reference as `this._streamingMessage`. Other methods read this reference to check for pending tool interactions, build client sync payloads, and apply tool results during streaming. Routing through a `StreamAccumulator` would require either:
-
-1. Sharing the same parts array between the accumulator and the message object (breaking the accumulator's encapsulation)
-2. Syncing the accumulator's state back to the message after each chunk (adding complexity, not removing it)
-3. Refactoring all consumers of `_streamingMessage` to read from the accumulator (a much larger change)
-
-None of these reduce complexity. The metadata handling on the server is ~30 lines of straightforward switch/case that matches the accumulator's behavior exactly. The cost of duplication is low; the risk of the refactoring is high.
+The accumulator doesn't know about SQLite, WebSockets, or broadcasting. It signals via `ChunkAction` and the caller decides what to do. This keeps the accumulator testable as a pure data structure and reusable across contexts that handle actions differently (the server stores a result for an earlier message, the client ignores it; the server sends errors on the wire, the client logs them).
 
 ### Why reconciliation is shared
 
@@ -288,29 +382,9 @@ class TurnQueue {
 
 ---
 
-### Server-side StreamAccumulator (deferred)
+### Server-side StreamAccumulator (done)
 
-Making `_streamSSEReply` use the `StreamAccumulator` requires resolving the `_streamingMessage` shared reference problem.
-
-**Consumers of `_streamingMessage`:**
-
-| Method                   | What it reads                                                       | Mutation?                                            |
-| ------------------------ | ------------------------------------------------------------------- | ---------------------------------------------------- |
-| `_messagesForClientSync` | `parts.length`, `id`, full object (spliced into messages array)     | Read only                                            |
-| `hasPendingInteraction`  | Full object → `_messageHasPendingInteraction`                       | Read only                                            |
-| `_findAndUpdateToolPart` | Iterates `parts`, uses `message === _streamingMessage` for identity | **Mutates parts in place** when `isStreamingMessage` |
-| `_streamSSEReply`        | Truthiness, shallow copy for early persist snapshot                 | Read only                                            |
-| `_reply`                 | Sets to the live message object; clears to `null` in `finally`      | Write                                                |
-
-**The core problem:** `_findAndUpdateToolPart` uses **reference identity** (`message === this._streamingMessage`) to decide whether to mutate parts in place vs. spread-copy. If `_streamingMessage` were a `StreamAccumulator`, you'd need to replace this identity check with something else (e.g., a boolean `isStreamingBuffer`, or comparing against the accumulator instance).
-
-**Possible approaches:**
-
-1. **Shared parts array.** Make `StreamAccumulator` accept an external `parts` array in its constructor (by reference, not copy). The accumulator and the `ChatMessage` share the same array. `applyChunk` mutates the shared array. `_streamingMessage` continues to point to the `ChatMessage`. The accumulator is only used for metadata handling. **Downside:** Breaks the accumulator's current encapsulation (constructor copies parts).
-
-2. **Accumulator as `_streamingMessage`.** Replace `_streamingMessage: ChatMessage | null` with `_streamingAccumulator: StreamAccumulator | null`. Refactor all consumers to use `_streamingAccumulator.parts` / `_streamingAccumulator.messageId` / `_streamingAccumulator.toMessage()`. The biggest change is `_findAndUpdateToolPart`'s identity check — replace with `message === _streamingAccumulator?.toMessage()` won't work (toMessage creates new objects). Use a flag instead. **Downside:** Touches 5+ methods.
-
-3. **Leave as-is.** The metadata handling in `_streamSSEReply` is ~30 lines of switch/case that exactly matches the accumulator's behavior. The cost of duplication is low. **This is the current state.**
+`AIChatAgent`'s live loop no longer mutates a shared `_streamingMessage`. Both hosts build every reply in the reply pump's accumulator, and the reply tool results land on is the pump's `LiveReply`. `_findAndUpdateToolPart` writes into the accumulator's parts in place and calls `LiveReply.changed()`.
 
 ---
 
@@ -351,7 +425,7 @@ The machine handles accumulator creation (including continuation context walking
 
 **What still uses independent variables**: `localRequestIdsRef` (path A vs B switch), `resumingToolContinuationRef` (tool continuation re-entrancy guard), `useChatHelpers.status` (AI SDK lifecycle), and the transport's resolver state. These cross-cut the broadcast/transport boundary and aren't part of the accumulator lifecycle.
 
-**Server frame order**: a `done: true` or `error: true` frame ends the client's stream, and a later `cf_agent_chat_messages` snapshot replaces the client's message list. So when a turn persists an assistant message, the server sends that transcript broadcast before the turn's terminal frames. Otherwise a message the user sends right after the turn ends is lost from the UI until the next turn. `AIChatAgent` holds terminal frames (including an in-band SSE `error` frame and the `done` that follows it) in `_broadcastChatMessage` while `_reply` owns the request, releases them in order after the persist, and turns them into errors when persistence fails.
+**Server frame order**: a `done: true` or `error: true` frame ends the client's stream, and a later `cf_agent_chat_messages` snapshot replaces the client's message list. So when a turn persists an assistant message, the server sends that transcript broadcast before the turn's terminal frames. Otherwise a message the user sends right after the turn ends is lost from the UI until the next turn. The reply pump holds the terminal frames (an in-band `error` frame included) until the reply is stored and the transcript sent, for both hosts, and sends an error frame instead when the store fails.
 
 ## History
 
@@ -370,3 +444,5 @@ The machine handles accumulator creation (including continuation context walking
 - Recovery continuations moved onto Tasks as chained `__cf_internal_chat_recovery` runs (#2194).
 - Sessions moved into a Lifecycle capability (`agents/sessions`, #2196). Both hosts persist through it, so row-size truncation left the message path and `enforceRowSizeLimit` now guards only non-session tables.
 - `ResumableStream` rebuilt over the Streams Lifecycle capability (`agents/streams`, #2173).
+- `ChatTurns` (`agents/chat/chat-turns.ts`) took over the turn coordination both hosts duplicated: the fields around `TurnQueue`, clear, cancel, the tool-result continuation decision, and the idle and stable waits. See [rfc-chat-turn-core.md](./rfc-chat-turn-core.md).
+- The rest of the turn loop's coordination moved into `agents/chat`: server-started turns (`server-turn.ts`), the auto-continuation turn (`continuation-turn.ts`), the recovery attempt and the live-interruption route (`recovery-attempt.ts`, `recovery-route.ts`), the turn fiber and the failure report (`turn-fiber.ts`, `turn-failure.ts`), agent-tool child runs (`agent-tool-runs.ts`), the before-turn repair (`before-turn.ts`) and the stored request context (`request-context.ts`). See [chat-turn-core.md](./chat-turn-core.md) for each difference between the hosts and what was chosen.

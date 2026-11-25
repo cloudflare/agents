@@ -3,6 +3,8 @@ import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
+import { MessageType } from "../types";
+import { connectChatWS } from "./test-utils";
 
 function getParent(name = crypto.randomUUID()) {
   return getAgentByName((env as Env).TestChatAgent, name);
@@ -94,5 +96,45 @@ describe("AIChatAgent detached notify / milestones (parity with Think)", () => {
 
     expect(await parent.getChatMessageCallCountForTest()).toBe(1);
     expect(messages.some((message) => message.role === "assistant")).toBe(true);
+  });
+
+  it("abortAllRequests() stops a reaction still waiting behind another turn", async () => {
+    const room = crypto.randomUUID();
+    const parent = await getParent(room);
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    // A turn is running: the reaction queues behind it.
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-running",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              { id: "u1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+            ],
+            delayMs: 400
+          })
+        }
+      })
+    );
+    await expect
+      .poll(() => parent.getChatMessageCallCountForTest(), { timeout: 3000 })
+      .toBe(1);
+    await parent.notifyDetachedMilestoneForTest({
+      runId: "ms-stopped",
+      name: "preview-ready",
+      times: 1,
+      mode: "react"
+    });
+
+    await parent.abortAllRequestsForTest();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await parent.waitForIdleForTest();
+
+    // The reaction's turn existed when the stop came, so it never ran.
+    expect(await parent.getChatMessageCallCountForTest()).toBe(1);
+    ws.close(1000);
   });
 });

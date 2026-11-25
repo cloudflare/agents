@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import { describe, expect, it } from "vitest";
@@ -128,6 +129,156 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(result.cacheCoversPath).toBe(false);
     expect(result.storedState).toBe("output-available");
   });
+
+  it("reconciles a client message older than the window by id, without reading the whole path", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-reconcile")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileOlderThanWindowForTest(): Promise<string[]>;
+    };
+    expect((await agent.getHydrationInfoForTest())?.truncated).toBe(true);
+    // The old message is matched to its stored row, not stored again.
+    expect(await agent.reconcileOlderThanWindowForTest()).toEqual([
+      ...Array.from({ length: 10 }, (_, i) => `seed-${i}`),
+      "new-user"
+    ]);
+  });
+
+  it("matches an older reply the client holds under another id, storing it once", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-copy")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileOptimisticCopyForTest(): Promise<string[]>;
+    };
+    expect((await agent.getHydrationInfoForTest())?.truncated).toBe(true);
+    const ids = await agent.reconcileOptimisticCopyForTest();
+    expect(ids).not.toContain("client-copy");
+    expect(ids).toEqual([
+      ...Array.from({ length: 10 }, (_, i) => `seed-${i}`),
+      "new-user"
+    ]);
+  });
+
+  it("keeps a compacted reply's tool result when the client resends it stale", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-hidden-tool")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileHiddenToolResultForTest(): Promise<string | undefined>;
+    };
+    expect(await agent.reconcileHiddenToolResultForTest()).toBe(
+      "output-available"
+    );
+  });
+
+  it("does not let a stale copy take the id of a reply the client also sent", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-stale-copy")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileStaleCopyForTest(): Promise<string | undefined>;
+    };
+    expect(await agent.reconcileStaleCopyForTest()).toBe("output-available");
+  });
+
+  it("pairs a reused tool call with the oldest unclaimed reply past the window", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-reused-call")
+    )) as unknown as WindowedHydrationStub & {
+      reconcileReusedCallForTest(): Promise<{
+        earlier: unknown;
+        later: unknown;
+      }>;
+    };
+    expect(await agent.reconcileReusedCallForTest()).toEqual({
+      earlier: "early",
+      later: "late"
+    });
+  });
+
+  it("looks a bounded distance past the window for an older reply under another id", async () => {
+    const name = uniqueName("windowed-lookback");
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      name
+    )) as unknown as WindowedHydrationStub & {
+      seedLongPathForTest(count: number): Promise<void>;
+      reconcileCopiesOnLongPathForTest(ids: string[]): Promise<string[]>;
+    };
+    await agent.seedLongPathForTest(20_000);
+    await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(name));
+    // m17000 is 3,000 back and pairs with its row; m100 is past the
+    // lookback (the newest 10,001 messages), so its copy is stored as new.
+    expect(
+      await agent.reconcileCopiesOnLongPathForTest(["m17000", "m100"])
+    ).toEqual(["copy-m100"]);
+  }, 120_000);
+
+  it("does not re-hydrate a window after appends at its tail", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-hydrations")
+    )) as unknown as WindowedHydrationStub & {
+      hydrationsPerRequestForTest(): Promise<{ submit: number; turn: number }>;
+    };
+    expect((await agent.getHydrationInfoForTest())?.truncated).toBe(true);
+    expect(await agent.hydrationsPerRequestForTest()).toEqual({
+      submit: 0,
+      turn: 0
+    });
+  });
+
+  it("re-windows after a batch of short messages outgrows the allowance", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-batch")
+    )) as unknown as WindowedHydrationStub & {
+      hydrationsForBatchForTest(count: number): Promise<number>;
+    };
+    expect((await agent.getHydrationInfoForTest())?.truncated).toBe(true);
+    // 20 short messages are charged 1 KiB each, past an eighth of 64 KiB.
+    expect(await agent.hydrationsForBatchForTest(20)).toBe(1);
+  });
+
+  it("pairs the oldest reply the lookback reaches", async () => {
+    const name = uniqueName("windowed-lookback-edge");
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      name
+    )) as unknown as WindowedHydrationStub & {
+      seedLongPathForTest(count: number): Promise<void>;
+      reconcileCopiesOnLongPathForTest(ids: string[]): Promise<string[]>;
+    };
+    const count = 20_000;
+    await agent.seedLongPathForTest(count);
+    await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(name));
+    // The window holds the newest w messages; the lookback covers the
+    // max(1,000, 10,001 - w) messages below it.
+    const window = (await agent.getCachedMessageIdsForTest()).length;
+    const edge = count - window - Math.max(1_000, 10_001 - window) + 1;
+    expect(edge % 2).toBe(0); // a seeded reply
+    expect(await agent.reconcileCopiesOnLongPathForTest([`m${edge}`])).toEqual(
+      []
+    );
+  }, 120_000);
+
+  it("reconciles on a path too long to read root-first", async () => {
+    const name = uniqueName("windowed-long-path");
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      name
+    )) as unknown as WindowedHydrationStub & {
+      seedLongPathForTest(count: number): Promise<void>;
+      reconcileOnLongPathForTest(): Promise<string | null>;
+    };
+    await agent.seedLongPathForTest(200_005);
+    // Start again on the seeded rows: a windowed cache, a fresh tail.
+    await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(name));
+    expect(await agent.reconcileOnLongPathForTest()).toBe("m200005");
+  }, 120_000);
 
   it("emits chat:hydration:windowed on change, not on every sync", async () => {
     const events: Array<{

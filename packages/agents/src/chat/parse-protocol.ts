@@ -21,6 +21,12 @@ export type ChatProtocolEvent =
     }
   | { type: "clear" }
   | { type: "cancel"; id: string }
+  /**
+   * A stop from a tab that waits for a tool continuation to start. It has
+   * no request id yet, so the server stops the continuation the sending
+   * connection waits on.
+   */
+  | { type: "cancel-continuation" }
   | {
       type: "tool-result";
       toolCallId: string;
@@ -39,9 +45,15 @@ export type ChatProtocolEvent =
       type: "tool-approval";
       toolCallId: string;
       approved: boolean;
+      approvalId?: string;
       autoContinue?: boolean;
     }
-  | { type: "stream-resume-request"; probeId?: string }
+  | {
+      type: "stream-resume-request";
+      probeId?: string;
+      /** The request ids the tab still waits on, newest last. */
+      requestIds?: string[];
+    }
   | { type: "stream-resume-ack"; id: string }
   | { type: "messages"; messages: unknown[] };
 
@@ -87,6 +99,9 @@ export function parseProtocolMessage(raw: string): ChatProtocolEvent | null {
       return { type: "clear" };
 
     case CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL:
+      if (typeof data.id !== "string" && data.continuation === true) {
+        return { type: "cancel-continuation" };
+      }
       return { type: "cancel", id: data.id as string };
 
     case CHAT_MESSAGE_TYPES.TOOL_RESULT:
@@ -112,13 +127,21 @@ export function parseProtocolMessage(raw: string): ChatProtocolEvent | null {
         type: "tool-approval",
         toolCallId: data.toolCallId as string,
         approved: data.approved as boolean,
+        ...(typeof data.approvalId === "string" && {
+          approvalId: data.approvalId
+        }),
         autoContinue: data.autoContinue as boolean | undefined
       };
 
     case CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST:
       return {
         type: "stream-resume-request",
-        ...(typeof data.probeId === "string" ? { probeId: data.probeId } : {})
+        ...(typeof data.probeId === "string" ? { probeId: data.probeId } : {}),
+        ...(Array.isArray(data.requestIds) && {
+          requestIds: data.requestIds
+            .filter((id): id is string => typeof id === "string")
+            .slice(-8)
+        })
       };
 
     case CHAT_MESSAGE_TYPES.STREAM_RESUME_ACK:

@@ -25,6 +25,13 @@ export interface StreamAccumulatorOptions {
   messageId: string;
   /** Whether chunks continue the current assistant message when merged. */
   continuation?: boolean;
+  /**
+   * For a continuation: the server named the message it stores the
+   * continuation in, and `messageId` is that id. The chunks go into that
+   * message, which is added when the list does not hold it. Without it a
+   * continuation goes into the last assistant message.
+   */
+  continuationMessageNamed?: boolean;
   /** Eager seed; omitted continuations seed from the messages passed to `mergeInto`. */
   existingParts?: UIMessage["parts"];
   existingMetadata?: Record<string, unknown>;
@@ -63,12 +70,15 @@ export class StreamAccumulator {
   readonly parts: UIMessage["parts"];
   metadata?: Record<string, unknown>;
   private _isContinuation: boolean;
+  private _continuationMessageNamed: boolean;
   // Continuation chunks wait here until mergeInto can seed from current state.
   private _pendingContinuationChunks: StreamChunkData[] | null;
 
   constructor(options: StreamAccumulatorOptions) {
     this.messageId = options.messageId;
     this._isContinuation = options.continuation ?? false;
+    this._continuationMessageNamed =
+      this._isContinuation && (options.continuationMessageNamed ?? false);
     this.parts = options.existingParts ? [...options.existingParts] : [];
     this.metadata = options.existingMetadata
       ? { ...options.existingMetadata }
@@ -79,6 +89,15 @@ export class StreamAccumulator {
       options.existingMetadata === undefined
         ? []
         : null;
+  }
+
+  /**
+   * `true` for a continuation that has not adopted the message it continues
+   * yet: its parts hold only this stream's chunks until `mergeInto` seeds
+   * them.
+   */
+  get awaitsSeed(): boolean {
+    return this._pendingContinuationChunks !== null;
   }
 
   applyChunk(chunk: StreamChunkData): ChunkResult {
@@ -208,14 +227,22 @@ export class StreamAccumulator {
 
   /**
    * Merge this accumulator's message into an existing message array.
-   * Handles continuation (walk backward for last assistant), replacement
-   * (update existing by messageId), or append (new message). An unseeded
+   * Handles continuation (the message the server named, else walk backward
+   * for last assistant), replacement (update existing by messageId), or
+   * append (new message). An unseeded
    * continuation adopts current parts here before applying its queued chunks.
    */
   mergeInto(messages: UIMessage[]): UIMessage[] {
     let existingIdx = messages.findIndex((m) => m.id === this.messageId);
 
-    if (existingIdx < 0 && this._isContinuation) {
+    // A continuation the server stores in a message of its own is drawn as
+    // one: only a continuation that names no message extends the last
+    // assistant message.
+    if (
+      existingIdx < 0 &&
+      this._isContinuation &&
+      !this._continuationMessageNamed
+    ) {
       for (let i = messages.length - 1; i >= 0; i--) {
         if (messages[i].role === "assistant") {
           existingIdx = i;

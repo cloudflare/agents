@@ -198,6 +198,45 @@ describe("WebSocketChatTransport cancellation policy", () => {
     });
   });
 
+  it("still cancels a server turn whose stream closed into recovery", async () => {
+    const agent = createMockAgent();
+    const activeRequestIds = new Set<string>();
+    const transport = new WebSocketChatTransport<ChatMessage>({
+      agent,
+      activeRequestIds
+    });
+    const stream = await transport.sendMessages({
+      chatId: "chat-1",
+      messages: [userMessage],
+      abortSignal: undefined,
+      trigger: "submit-message"
+    });
+    const [requestId] = activeRequestIds;
+    const reader = stream.getReader();
+    for (const listener of agent.listeners) {
+      listener(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            id: requestId,
+            body: "",
+            done: true,
+            outcome: "recovering"
+          })
+        })
+      );
+    }
+    expect((await reader.read()).done).toBe(true);
+
+    // The user presses Stop while the recovery waits out its backoff.
+    expect(transport.activeServerTurnId).toBe(requestId);
+    expect(transport.cancelActiveServerTurn()).toBe(true);
+    expect(JSON.parse(agent.sent.at(-1) ?? "")).toEqual({
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: requestId
+    });
+  });
+
   it("allows explicit server turn cancellation for observed fallback streams", () => {
     const agent = createMockAgent();
     const transport = new WebSocketChatTransport<ChatMessage>({ agent });

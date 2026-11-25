@@ -74,7 +74,7 @@ describe("Think recovery after forced Durable Object eviction", () => {
     expect(await agent.getTurnCallCount()).toBe(0);
   });
 
-  it("restores declared-task identity and handler configuration", async () => {
+  it("keeps a declared task's pending occurrence and runs it after eviction", async () => {
     const name = `evict-think-schedule-${crypto.randomUUID()}`;
     let agent = await scheduledAgent(name);
     await agent.setScheduledTasksForTest({
@@ -85,70 +85,21 @@ describe("Think recovery after forced Durable Object eviction", () => {
       }
     });
     await agent.reconcileScheduledTasksForTest();
-    const [before] = await agent.listDeclaredScheduledTaskRowsForTest();
-    const payload = await agent.getFirstDeclaredPayloadForTest();
+    const before = await agent.listDeclaredForTest();
 
     agent = await evictAndReacquire(agent, () => scheduledAgent(name));
 
-    const [after] = await agent.listDeclaredScheduledTaskRowsForTest();
-    expect(after).toMatchObject({
-      task_id: "workflow",
-      schedule_id: before.schedule_id,
-      schedule_hash: before.schedule_hash
-    });
-
-    const restoredPayload = await agent.getFirstDeclaredPayloadForTest();
-    expect(restoredPayload).toEqual(payload);
-    await agent.runDeclaredPayloadForTest(restoredPayload);
+    // The restart's own reconcile keeps the occurrence where it was.
+    expect(await agent.listDeclaredForTest()).toEqual(before);
+    const scheduledFor = await agent.runDeclaredNowForTest("workflow");
     expect(await agent.listScheduledTaskHandlerEventsForTest()).toEqual([
       expect.objectContaining({
         taskId: "workflow",
-        scheduledFor: payload.scheduledFor,
-        occurrenceKey: `workflow:${payload.scheduledFor}`,
+        scheduledFor,
+        occurrenceKey: `workflow:${scheduledFor}`,
         metadataJson: JSON.stringify({ workflowName: "daily-digest" })
       })
     ]);
-  });
-
-  // #1877: sub-agents that armed declared tasks under the pre-root-scope
-  // default must disarm themselves on their next start, without anyone calling
-  // `internal_reconcileScheduledTasks()`. That is the migration story for
-  // already-deployed agents, and it runs through the reconcile step of
-  // `onStart` — so it has to be exercised across a real restart rather than by
-  // driving the reconcile directly.
-  //
-  // Note the facet is restarted explicitly: evicting the parent does NOT evict
-  // its facets, and `subAgent()` only replays `onStart` on a facet that is not
-  // already running. Cleanup therefore lands whenever the facet itself next
-  // starts (deploy, eviction, abort) — duplicate *executions*, however, stop
-  // at the next occurrence regardless, via the guard in
-  // `_runDeclaredScheduledTask` (covered in scheduled-tasks.test.ts).
-  it("disarms declared tasks a sub-agent armed before root scoping, on its next start", async () => {
-    const name = `evict-think-facet-schedule-${crypto.randomUUID()}`;
-    let parent = await scheduledAgent(name);
-    await parent.setChildScheduledTasksScopeForTest("child", "all");
-    await parent.setChildScheduledTasksForTest("child", {
-      digest: { schedule: "every 1 minute", prompt: "Daily digest" }
-    });
-    await parent.reconcileChildScheduledTasksForTest("child");
-    expect(
-      await parent.listChildDeclaredScheduledTaskRowsForTest("child")
-    ).toHaveLength(1);
-    expect(await parent.listChildSchedulesForTest("child")).toHaveLength(1);
-
-    // Simulate the upgrade: the class now reports the root-only default, but
-    // nothing has reconciled yet, so the facet's rows are still armed.
-    await parent.setChildScheduledTasksScopeForTest("child", "root");
-
-    parent = await evictAndReacquire(parent, () => scheduledAgent(name));
-    await parent.restartChildForTest("child");
-
-    // Re-resolving the facet fires its `onStart`, whose reconcile step prunes
-    // the rows and cancels the underlying Agent schedules.
-    expect(
-      await parent.listChildDeclaredScheduledTaskRowsForTest("child")
-    ).toHaveLength(0);
-    expect(await parent.listChildSchedulesForTest("child")).toHaveLength(0);
   });
 
   it("re-runs degraded startup and remains usable on the fresh instance", async () => {

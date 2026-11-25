@@ -108,52 +108,35 @@ Allowed transitions:
 
 ## Durable State
 
-Submissions are stored in `cf_think_submissions`:
+A submission is a Tasks run of the framework definition
+`__cf_think_submission` in the lane `submissions` (one at a time, in arrival
+order). Tasks keeps the record: id, idempotency key, status, attempt,
+timestamps, the messages as the run's input (in pieces past one row) and the
+app's metadata. What the turn records about itself (request id, stream id,
+`messagesAppliedAt`, the stamped result status and output, the assistant
+message id, whether the workflow event was queued) lives in the run's metadata
+under `__cf_progress`. A completed submission's output is the run's result. A
+submission chat recovery owns is a parked run (`pending`, wait reason `park`),
+shown as `running`.
 
-```sql
-CREATE TABLE IF NOT EXISTS cf_think_submissions (
-  submission_id TEXT PRIMARY KEY,
-  idempotency_key TEXT UNIQUE,
-  request_id TEXT,
-  stream_id TEXT,
-  status TEXT NOT NULL,
-  messages_json TEXT NOT NULL,
-  metadata_json TEXT,
-  error_message TEXT,
-  created_at INTEGER NOT NULL,
-  messages_applied_at INTEGER,
-  started_at INTEGER,
-  completed_at INTEGER
-)
-```
+The retired `cf_think_submissions` table is read once on start: each row is
+imported as a run (a `running` row counts as interrupted; a completed row's
+output becomes the result) and the table is dropped once empty.
 
-Indexes keep the table usable as both a FIFO queue and an inspection ledger:
-
-```sql
-CREATE INDEX IF NOT EXISTS cf_think_submissions_status_created_idx
-  ON cf_think_submissions (status, created_at, submission_id);
-
-CREATE INDEX IF NOT EXISTS cf_think_submissions_request_status_idx
-  ON cf_think_submissions (request_id, status);
-
-CREATE INDEX IF NOT EXISTS cf_think_submissions_status_completed_idx
-  ON cf_think_submissions (status, completed_at, created_at);
-```
-
-The row is the durable source of truth. In-memory state may accelerate the
+The run is the durable source of truth. In-memory state may accelerate the
 current isolate, but the implementation must be able to reconstruct progress
 from SQLite after hibernation.
 
-`messages_applied_at` is the important internal safety marker. It is set only
+`messagesAppliedAt` is the important internal safety marker. It is set only
 after submitted messages have been appended to Session. Recovery uses it to
 avoid unsafe replay:
 
 - If a `running` submission has no applied messages, it can be moved back to
   `pending`.
 - If any submitted messages are already present in Session but
-  `messages_applied_at` is missing, replay is unsafe and the submission becomes
+  `messagesAppliedAt` is missing, replay is unsafe and the submission becomes
   `error`.
-- If `messages_applied_at` is present, the turn has crossed the boundary where
+- If `messagesAppliedAt` is present, the turn has crossed the boundary where
   chat recovery must either continue it or mark it `error`.
 
 ## Execution Flow

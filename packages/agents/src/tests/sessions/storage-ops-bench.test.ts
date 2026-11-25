@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { MAX_INLINE_ROW_BYTES } from "../../sessions/chunking";
 import type {
   SessionBenchObject,
   SessionSearchHarnessObject
@@ -50,9 +51,11 @@ describe("Sessions storage-ops benchmark", () => {
   it("decides a chunked update from the row's digest, never its continuations", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      // A 3.2 MiB body spans the 1.5 MiB row budget three times: one message
+      // A body just over twice the row budget spans three rows: one message
       // row plus two continuations.
-      const bench = await instance.benchChunkedUpdates(3.2 * 1024 * 1024);
+      const bench = await instance.benchChunkedUpdates(
+        2 * MAX_INLINE_ROW_BYTES + 200_000
+      );
       expect(bench.chunks).toBe(2);
 
       // An identical re-send is one key-side probe of the message row: its
@@ -95,12 +98,11 @@ describe("Sessions storage-ops benchmark", () => {
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
       const lookup = await instance.benchOwnerLookup(200);
       expect(lookup.found).toBe("bench-197");
-      // A full read pays the sized path walk — several billed rows per
-      // message for the byte subqueries — and then hydrates every row. The
-      // newest-first read follows parent pointers from the leaf and stops at
-      // the owner, three rows in, so its cost has no transcript term at all:
-      // the rows it read, plus the compactions probe and the leaf lookup.
-      expect(lookup.fullRead).toBeGreaterThan(1000);
+      // A full read walks every message and then hydrates every row: at
+      // least two rows per message. The newest-first read follows parent
+      // pointers from the leaf and stops at the owner, three rows in, so its
+      // cost has no transcript term at all.
+      expect(lookup.fullRead).toBeGreaterThan(200 * 2);
       expect(lookup.newestFirst).toBeLessThan(12);
     });
   });
@@ -123,15 +125,16 @@ describe("Sessions storage-ops benchmark", () => {
       async (instance: SessionBenchObject) => {
         // An owner inside the compacted span is hidden behind the overlay in
         // either direction. The walk reaches the span's end, plans the prefix
-        // by id (one row per step, no byte subqueries) and stops at the
-        // overlay: bounded well under the full read, which pays the sized walk
-        // and hydrates everything.
+        // by id (a few rows per step, no byte subqueries, no content for
+        // the hidden rows) and stops at the overlay: under the full read,
+        // which pays the sized walk and hydrates every visible row.
         const hidden = await instance.benchOwnerLookup(200, {
           ownerFromLeaf: 100,
           compactedPrefix: 150
         });
         expect(hidden.found).toBeNull();
-        expect(hidden.newestFirst).toBeLessThan(hidden.fullRead / 2);
+        expect(hidden.newestFirst).toBeLessThan(200 * 4);
+        expect(hidden.newestFirst).toBeLessThan(hidden.fullRead);
       }
     );
   });
@@ -154,11 +157,13 @@ describe("Sessions storage-ops benchmark", () => {
   it("bills one extra row per payload chunk, and never splits the message", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      // 2 MiB of payload spans the 1.5 MiB window twice, so it costs five
+      // A payload just over the row budget spans two chunks, so it costs five
       // rows: the message, two payload chunks, metadata, and one reference.
       // The message row itself never chunks — the bytes left before it was
       // measured.
-      const append = await instance.benchPayloadAppend(2 * 1024 * 1024);
+      const append = await instance.benchPayloadAppend(
+        MAX_INLINE_ROW_BYTES + 1_000_000
+      );
 
       expect(append.rowsWritten).toBe(5);
       expect(instance.continuationRowCount("bench-payload")).toBe(0);

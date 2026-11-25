@@ -207,7 +207,7 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     // `_isFacet` was set, assuming facets had no direct client
     // sockets. Sub-agent routing broke that assumption — clients
     // connect directly to facets via `/sub/{class}/{name}`. The
-    // guard made `AIChatAgent._broadcastChatMessage` silently drop
+    // guard made `ChatFrames.broadcast` (AIChatAgent) silently drop
     // every streaming chunk to the client, so real-time chat
     // updates required a page refresh to pick up persisted messages.
     const parent = uniqueName();

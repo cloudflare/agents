@@ -1,4 +1,10 @@
-import type { EntryRecord, InputEntry } from "@earendil-works/pi-durable";
+import type {
+  AgentChange,
+  ConversationInit,
+  EntryRecord,
+  InputEntry,
+  SubmissionNotify
+} from "@earendil-works/pi-durable";
 
 /**
  * `PiHarness`'s own types: how the harness addresses sessions and reports
@@ -20,12 +26,36 @@ export type PiSessionId = string;
  */
 export type PiWhenBusy = "followUp" | "steer" | "reject";
 
+/**
+ * What a submission does when the session is idle.
+ *
+ * - unset (default): starts a run.
+ * - `reject`: not admitted. `submit()` rejects with pi-durable's
+ *   `ConversationIdle` and saves nothing. With `whenBusy: "steer"`, the
+ *   input joins the running work or is refused, in one step that cannot
+ *   race the run's end.
+ */
+export type PiWhenIdle = "reject";
+
+/**
+ * What aborting the session does with a queued input:
+ *
+ * - `withdraw` (default): the input settles `unanswered` with reason
+ *   `aborted`.
+ * - `keep`: the input stays queued; the next input runs it first. For input
+ *   its sender cannot send again, such as another agent's message.
+ *   Withdrawing the operation itself (`abort(operationId)`) still removes it.
+ */
+export type PiOnAbort = "withdraw" | "keep";
+
 export type PiSubmitOptions = {
   /** Default: the root session. */
   readonly session?: PiSessionId;
   /** Idempotency key. Submitting the same id twice returns the same receipt. */
   readonly operationId?: string;
   readonly whenBusy?: PiWhenBusy;
+  readonly whenIdle?: PiWhenIdle;
+  readonly onAbort?: PiOnAbort;
   /**
    * The transcript entry the input is placed as, instead of pi's `pi.user`:
    * for input the user did not type, such as a scheduled prompt, a webhook,
@@ -34,11 +64,49 @@ export type PiSubmitOptions = {
    * start with `pi.`.
    */
   readonly entry?: InputEntry;
+  /**
+   * A pi task to signal when this input settles: pi delivers its
+   * `SubmissionSettled` signal, the settled record, to `taskId` under `key`.
+   * For a tool that parks until another session answers. If the task has
+   * ended or does not exist, the input settles as usual.
+   */
+  readonly notify?: SubmissionNotify;
+};
+
+export type PiContinueOptions = {
+  /** Idempotency key. Continuing with the same id twice returns the same receipt. */
+  readonly operationId?: string;
+  /** A pi task to signal when the run settles. See `PiSubmitOptions.notify`. */
+  readonly notify?: SubmissionNotify;
 };
 
 export type PiSessionOptions = {
   /** Default: the root session. */
   readonly session?: PiSessionId;
+};
+
+/**
+ * How `harness.root()`, `sessions.create()` and `sessions.fork()` create a
+ * session: pi-durable's `ConversationCreateOptions`, without `ownership`.
+ * Both apply in the one commit that creates the session.
+ */
+export type PiSessionCreateOptions = {
+  /**
+   * pi's agent change for the new session. For the root and `create()`, it
+   * is applied over the harness's `defaults`; a fork starts with its
+   * parent's configuration, and this is applied over that. As in pi, a
+   * field that is `undefined` leaves the value underneath in place, and
+   * `null` clears it.
+   */
+  readonly agent?: AgentChange;
+  /**
+   * pi's `ConversationInit`: runs inside the commit that creates the
+   * session, after `agent`, for example to seed its transcript with
+   * `tx.appendEntry()`, one entry per message. Table reads throw
+   * `ReadAfterWrite` there. A throw fails the commit, so the session is not
+   * created.
+   */
+  readonly init?: ConversationInit;
 };
 
 /** Returned once a submission is durable. It says nothing about the model yet. */
@@ -70,12 +138,8 @@ export type PiPromptResponse = PiOperationResult & {
 export type PiPendingOperation = {
   readonly operationId: string;
   readonly session: PiSessionId;
-  /**
-   * `queued` in pi's inbox, or `running` as part of the current run.
-   * `parked`: running, but pi's crash-loop guard (`settings.restartLimit`)
-   * stopped a task of the session; `retry()` runs it again.
-   */
-  readonly status: "queued" | "running" | "parked";
+  /** `queued` in pi's inbox, or `running` as part of the current run. */
+  readonly status: "queued" | "running";
 };
 
 export type PiSessionInfo = {

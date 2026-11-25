@@ -12,6 +12,62 @@ import { State, type StateChangeSource } from "../../state";
  */
 
 describe("State capability", () => {
+  it("rethrows a storage error that is not about size unchanged, flags included", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { capability, lifecycle } = install(new State<string>());
+      await lifecycle.start();
+      capability.set("small");
+
+      // The platform marks transient storage failures with these flags;
+      // retry logic reads them from the thrown error.
+      const transient = Object.assign(new Error("Network connection lost."), {
+        retryable: true,
+        overloaded: false
+      });
+      const exec = storage.sql.exec.bind(storage.sql);
+      const spy = vi
+        .spyOn(storage.sql, "exec")
+        .mockImplementation((query: string, ...bindings: unknown[]) => {
+          if (query.startsWith("INSERT OR REPLACE INTO cf_agents_state")) {
+            throw transient;
+          }
+          return exec(query, ...(bindings as SqlStorageValue[]));
+        });
+      try {
+        let thrown: unknown;
+        try {
+          capability.set("next");
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBe(transient);
+        expect((thrown as { retryable?: boolean }).retryable).toBe(true);
+        expect(capability.get()).toBe("small");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it("names the row limit when a state is too large to store, and keeps the old state", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const { capability, lifecycle } = install(new State<string>());
+      await lifecycle.start();
+      capability.set("small");
+
+      // Over every runtime's row cap (8,388,637 bytes is the largest measured).
+      expect(() => capability.set("x".repeat(9_000_000))).toThrow(
+        /SQLITE_TOOBIG.*8 MiB in production/
+      );
+      expect(capability.get()).toBe("small");
+
+      // A fresh State over the same storage, as after eviction, reads it too.
+      const fresh = install(new State<string>());
+      await fresh.lifecycle.start();
+      expect(fresh.capability.get()).toBe("small");
+    });
+  });
+
   it("reads state before lifecycle startup", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const { capability, lifecycle } = install(new State<number>());
