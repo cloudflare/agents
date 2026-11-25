@@ -163,6 +163,8 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
             { seq: 0, chunk: JSON.stringify(DROPPED_CHUNK), created_at: 0 }
           ];
         }
+        // Only the completed stream's own rows hold its chunks.
+        if (!streamId.startsWith("completed-")) return [];
         return (state.completedChunks ?? []).map((body, seq) => ({
           seq,
           chunk: JSON.stringify(body),
