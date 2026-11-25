@@ -15,12 +15,11 @@
 
 import { LifecycleCapability } from "../lifecycle/capability";
 import { SqlError } from "../sql-error";
-import { SessionsCore } from "./core";
+import { SessionsCore, sessionTables } from "./core";
 import { Session } from "./handle";
 import type { SqlParam } from "./io";
 import type { SessionChangeListener, SessionsOptions } from "./types";
 
-const SESSIONS_SCHEMA_VERSION_KEY = "cf_agents:sessions_schema_version";
 /**
  * 1: legacy `assistant_*` tables lifted. 2: compactions keyed by their end,
  * with `resume_id`.
@@ -40,9 +39,13 @@ const CURRENT_SESSIONS_SCHEMA_VERSION = 2;
 export class Sessions extends LifecycleCapability {
   readonly #core: SessionsCore;
   readonly #handles = new Map<string, Session>();
+  /** The KV key of this instance's schema version. */
+  readonly #schemaKey: string;
 
   constructor(options: SessionsOptions = {}) {
-    super("sessions");
+    super("sessions", options.name);
+    const store = this.store;
+    this.#schemaKey = store.key("sessions_schema_version");
     // Every service is reached lazily, so a handle or a subscription may be
     // taken before `Lifecycle.use()` installs the capability.
     const exec = (query: string, params: SqlParam[]) => {
@@ -52,15 +55,19 @@ export class Sessions extends LifecycleCapability {
         throw new SqlError(query, cause);
       }
     };
-    this.#core = new SessionsCore(options, {
-      // SAFETY: Sessions queries select from its own schema; T describes the
-      // projected columns of the accompanying query text.
-      sql: <T>(query: string, params: SqlParam[]) =>
-        [...exec(query, params)] as T[],
-      sqlWrite: (query, params) => exec(query, params).rowsWritten,
-      transaction: (fn) => this.lifecycle.storage.transactionSync(fn),
-      emit: (type, payload) => this.lifecycle.events.emit(type, payload)
-    });
+    this.#core = new SessionsCore(
+      options,
+      {
+        // SAFETY: Sessions queries select from its own schema; T describes the
+        // projected columns of the accompanying query text.
+        sql: <T>(query: string, params: SqlParam[]) =>
+          [...exec(query, params)] as T[],
+        sqlWrite: (query, params) => exec(query, params).rowsWritten,
+        transaction: (fn) => this.lifecycle.storage.transactionSync(fn),
+        emit: (type, payload) => this.lifecycle.events.emit(type, payload)
+      },
+      sessionTables(store.table)
+    );
   }
 
   // ── Lifecycle capability hooks ───────────────────────────────────────────
@@ -68,9 +75,16 @@ export class Sessions extends LifecycleCapability {
   /** Migrate session storage during Lifecycle startup. */
   async onStart(): Promise<void> {
     const storage = this.lifecycle.storage;
-    const version =
-      (await storage.get<number>(SESSIONS_SCHEMA_VERSION_KEY)) ?? 0;
+    const version = (await storage.get<number>(this.#schemaKey)) ?? 0;
     this.#core.ensureTables();
+    if (this.instanceName !== undefined) {
+      // A named instance never held released rows: nothing to lift or
+      // rebuild. Its tables start at the current version.
+      if (version < CURRENT_SESSIONS_SCHEMA_VERSION) {
+        await storage.put(this.#schemaKey, CURRENT_SESSIONS_SCHEMA_VERSION);
+      }
+      return;
+    }
     if (version < CURRENT_SESSIONS_SCHEMA_VERSION) {
       // Stamp the version only when every legacy source was fully lifted. A
       // partial migration that recorded success would never be retried, and
@@ -81,10 +95,7 @@ export class Sessions extends LifecycleCapability {
       const lifted = version >= 1 || this.#core.migrateLegacy();
       this.#core.rebuildCompactions();
       if (lifted) {
-        await storage.put(
-          SESSIONS_SCHEMA_VERSION_KEY,
-          CURRENT_SESSIONS_SCHEMA_VERSION
-        );
+        await storage.put(this.#schemaKey, CURRENT_SESSIONS_SCHEMA_VERSION);
       }
     }
     // Not gated on the version: overlays an earlier release wrote (before

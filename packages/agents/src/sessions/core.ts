@@ -166,18 +166,20 @@ function pathTooLong(leafId: string | null | undefined): Error {
  * they take once inlined, so a byte budget bounds real memory. `am` is the
  * message row.
  */
-const ROW_BYTES_SQL = `(LENGTH(CAST(am.content AS BLOB)) + CASE WHEN am.content_chunks = 0 THEN 0
+function rowBytesSql(t: SessionTables): string {
+  return `(LENGTH(CAST(am.content AS BLOB)) + CASE WHEN am.content_chunks = 0 THEN 0
     ELSE COALESCE((
       SELECT SUM(LENGTH(CAST(c.content AS BLOB)))
-      FROM cf_agents_session_message_chunks c
+      FROM ${t.chunks} c
       WHERE c.session_id = am.session_id AND c.id = am.id
     ), 0) END
   + COALESCE((
       SELECT SUM((meta.bytes + 2) / 3 * 4)
-      FROM cf_agents_session_attachment_refs r
-      JOIN cf_agents_session_attachment_meta meta ON meta.hash = r.hash
+      FROM ${t.attachmentRefs} r
+      JOIN ${t.attachmentMeta} meta ON meta.hash = r.hash
       WHERE r.session_id = am.session_id AND r.message_id = am.id
     ), 0))`;
+}
 
 /** Bounds for one window of a legacy flat-table lift: rows and summed bytes. */
 const LEGACY_LIFT_WINDOW_ROWS = 25;
@@ -203,10 +205,14 @@ function hasOverlayPrefix(id: string): boolean {
  * Both must be table-qualified: inside the lookup an unqualified `id` or
  * `session_id` binds to the compactions table, not the row being tested.
  */
-function hiddenOverlayRowSql(idColumn: string, sessionExpr: string): string {
+function hiddenOverlayRowSql(
+  t: SessionTables,
+  idColumn: string,
+  sessionExpr: string
+): string {
   const length = COMPACTION_PREFIX.length;
   return `(substr(${idColumn}, 1, ${length}) = '${COMPACTION_PREFIX}'
-    AND EXISTS (SELECT 1 FROM cf_agents_session_compactions oc
+    AND EXISTS (SELECT 1 FROM ${t.compactions} oc
       WHERE oc.session_id = ${sessionExpr}
         AND oc.id = substr(${idColumn}, ${length + 1})))`;
 }
@@ -330,6 +336,52 @@ export function lastSeparator(text: string): number {
 const SEARCH_BACKFILLED_ROWID = -1;
 const SEARCH_MARKER_SESSION = "\u0000search";
 
+/**
+ * The real names of one Sessions instance's tables and index. The default
+ * instance's are today's names; a named instance's carry its suffix
+ * (`LifecycleCapability.store`). Resolved once, then built into statement
+ * text.
+ */
+export interface SessionTables {
+  messages: string;
+  chunks: string;
+  compactions: string;
+  /** The schema-v2 rebuild's temporary table. */
+  compactionsRebuild: string;
+  config: string;
+  annotations: string;
+  fts: string;
+  attachmentMeta: string;
+  attachmentChunks: string;
+  attachmentRefs: string;
+  /** The `(session_id, seq)` tail index (an index, so database-wide). */
+  tailIndex: string;
+}
+
+/** The tables of the instance whose store maps `name` to a table name. */
+export function sessionTables(table: (name: string) => string): SessionTables {
+  return {
+    messages: table("session_messages"),
+    chunks: table("session_message_chunks"),
+    compactions: table("session_compactions"),
+    compactionsRebuild: table("session_compactions_v2"),
+    config: table("session_config"),
+    annotations: table("session_annotations"),
+    fts: table("session_fts"),
+    attachmentMeta: table("session_attachment_meta"),
+    attachmentChunks: table("session_attachment_chunks"),
+    attachmentRefs: table("session_attachment_refs"),
+    // Today's name for the default (not the store's `idx_` form), with the
+    // instance suffix for a named one: an index name is database-wide.
+    tailIndex: table("session_messages_by_seq")
+  };
+}
+
+/** The default instance's tables. */
+export const DEFAULT_SESSION_TABLES = sessionTables(
+  (name) => `cf_agents_${name}`
+);
+
 export class SessionsCore {
   readonly io: SessionsIo;
   readonly #reservedMetadataKeys: readonly string[];
@@ -347,9 +399,17 @@ export class SessionsCore {
   /** True once building the tail index failed in this isolate. */
   #tailIndexFailed = false;
 
-  constructor(options: SessionsOptions, io: SessionsIo) {
+  /** This instance's table and index names. */
+  readonly #t: SessionTables;
+
+  constructor(
+    options: SessionsOptions,
+    io: SessionsIo,
+    tables: SessionTables = DEFAULT_SESSION_TABLES
+  ) {
     this.io = io;
-    this.#attachments = new AttachmentStore(io);
+    this.#t = tables;
+    this.#attachments = new AttachmentStore(io, tables);
     this.#reservedMetadataKeys = options.reservedMetadataKeys ?? [];
     this.#legacyFlatMessages = options.legacyFlatMessages;
   }
@@ -361,7 +421,7 @@ export class SessionsCore {
   ensureTables(): void {
     if (this.#tablesEnsured) return;
     this.io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_messages (
+      `CREATE TABLE IF NOT EXISTS ${this.#t.messages} (
         session_id TEXT NOT NULL,
         id TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -379,7 +439,7 @@ export class SessionsCore {
     );
     this.#addMessageContentHashColumn();
     this.io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_message_chunks (
+      `CREATE TABLE IF NOT EXISTS ${this.#t.chunks} (
         session_id TEXT NOT NULL,
         id TEXT NOT NULL,
         idx INTEGER NOT NULL,
@@ -389,11 +449,11 @@ export class SessionsCore {
       []
     );
     this.io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_compactions (${COMPACTIONS_COLUMNS}) WITHOUT ROWID`,
+      `CREATE TABLE IF NOT EXISTS ${this.#t.compactions} (${COMPACTIONS_COLUMNS}) WITHOUT ROWID`,
       []
     );
     this.io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_config (
+      `CREATE TABLE IF NOT EXISTS ${this.#t.config} (
         session_id TEXT NOT NULL,
         key TEXT NOT NULL,
         value TEXT NOT NULL,
@@ -402,7 +462,7 @@ export class SessionsCore {
       []
     );
     this.io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_annotations (
+      `CREATE TABLE IF NOT EXISTS ${this.#t.annotations} (
         session_id TEXT NOT NULL,
         message_id TEXT NOT NULL,
         kind TEXT NOT NULL,
@@ -412,7 +472,7 @@ export class SessionsCore {
       []
     );
     this.#attachments.ensureTables();
-    this.#fts = this.#tableExists("cf_agents_session_fts");
+    this.#fts = this.#tableExists(`${this.#t.fts}`);
     this.#tablesEnsured = true;
   }
 
@@ -425,11 +485,11 @@ export class SessionsCore {
     const columns = this.io
       .sql<{
         name: string;
-      }>("SELECT name FROM pragma_table_info('cf_agents_session_messages')", [])
+      }>(`SELECT name FROM pragma_table_info('${this.#t.messages}')`, [])
       .map((row) => row.name);
     if (columns.includes("content_hash")) return;
     this.io.sqlWrite(
-      "ALTER TABLE cf_agents_session_messages ADD COLUMN content_hash TEXT",
+      `ALTER TABLE ${this.#t.messages} ADD COLUMN content_hash TEXT`,
       []
     );
   }
@@ -453,7 +513,7 @@ export class SessionsCore {
       if (!this.#ftsBackfilled) {
         const marked =
           this.io.sql<{ one: number }>(
-            "SELECT 1 AS one FROM cf_agents_session_fts WHERE rowid = ?",
+            `SELECT 1 AS one FROM ${this.#t.fts} WHERE rowid = ?`,
             [SEARCH_BACKFILLED_ROWID]
           ).length > 0;
         // An index from an earlier release, or a backfill cut short: some
@@ -464,7 +524,7 @@ export class SessionsCore {
       return;
     }
     this.io.sqlWrite(
-      `CREATE VIRTUAL TABLE cf_agents_session_fts
+      `CREATE VIRTUAL TABLE ${this.#t.fts}
        USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')`,
       []
     );
@@ -485,7 +545,7 @@ export class SessionsCore {
    */
   #backfillSplitMessages(check: boolean): void {
     const split = this.io.sql<{ session_id: string; id: string }>(
-      "SELECT session_id, id FROM cf_agents_session_messages WHERE content_chunks > 0",
+      `SELECT session_id, id FROM ${this.#t.messages} WHERE content_chunks > 0`,
       []
     );
     // Which split messages an older index already holds: one scan of the
@@ -493,7 +553,7 @@ export class SessionsCore {
     const indexed = new Set<string>();
     if (check && split.length > 0) {
       for (const row of this.io.sql<{ session_id: string; id: string }>(
-        `SELECT session_id, id FROM cf_agents_session_fts
+        `SELECT session_id, id FROM ${this.#t.fts}
          WHERE id IN (SELECT value FROM json_each(?))`,
         [JSON.stringify(split.map((row) => row.id))]
       )) {
@@ -507,7 +567,7 @@ export class SessionsCore {
       if (message) this.#indexFts(sessionId, message, false);
     }
     this.io.sqlWrite(
-      `INSERT INTO cf_agents_session_fts (rowid, id, session_id, role, content)
+      `INSERT INTO ${this.#t.fts} (rowid, id, session_id, role, content)
        VALUES (?, '', ?, '', '')`,
       [SEARCH_BACKFILLED_ROWID, SEARCH_MARKER_SESSION]
     );
@@ -516,10 +576,10 @@ export class SessionsCore {
   /** Index rows that predate indexing, in SQL, without loading JSON into JS. */
   #backfillMissingFtsRows(): void {
     this.io.sqlWrite(
-      `INSERT INTO cf_agents_session_fts (id, session_id, role, content)
+      `INSERT INTO ${this.#t.fts} (id, session_id, role, content)
        SELECT m.id, m.session_id, m.role,
          group_concat(json_extract(part.value, '$.text'), ' ')
-       FROM cf_agents_session_messages AS m
+       FROM ${this.#t.messages} AS m
        JOIN json_each(
          CASE WHEN json_valid(m.content) THEN m.content ELSE '{"parts":[]}' END,
          '$.parts'
@@ -527,7 +587,7 @@ export class SessionsCore {
        WHERE json_extract(part.value, '$.type') = 'text'
          AND COALESCE(json_extract(part.value, '$.text'), '') <> ''
          AND NOT EXISTS (
-           SELECT 1 FROM cf_agents_session_fts AS existing
+           SELECT 1 FROM ${this.#t.fts} AS existing
            WHERE existing.id = m.id AND existing.session_id = m.session_id
          )
        GROUP BY m.id, m.session_id, m.role`,
@@ -544,26 +604,26 @@ export class SessionsCore {
   rebuildCompactions(): void {
     const rebuilt =
       this.io.sql<{ one: number }>(
-        `SELECT 1 AS one FROM pragma_table_info('cf_agents_session_compactions')
+        `SELECT 1 AS one FROM pragma_table_info('${this.#t.compactions}')
          WHERE name = 'resume_id'`,
         []
       ).length > 0;
     if (rebuilt) return;
     this.io.transaction(() => {
       this.io.sqlWrite(
-        `CREATE TABLE cf_agents_session_compactions_v2 (${COMPACTIONS_COLUMNS}) WITHOUT ROWID`,
+        `CREATE TABLE ${this.#t.compactionsRebuild} (${COMPACTIONS_COLUMNS}) WITHOUT ROWID`,
         []
       );
       this.io.sqlWrite(
-        `INSERT INTO cf_agents_session_compactions_v2
+        `INSERT INTO ${this.#t.compactionsRebuild}
           (session_id, to_message_id, seq, id, summary, from_message_id, resume_id, created_at)
          SELECT session_id, to_message_id, seq, id, summary, from_message_id, NULL, created_at
-         FROM cf_agents_session_compactions`,
+         FROM ${this.#t.compactions}`,
         []
       );
-      this.io.sqlWrite("DROP TABLE cf_agents_session_compactions", []);
+      this.io.sqlWrite(`DROP TABLE ${this.#t.compactions}`, []);
       this.io.sqlWrite(
-        "ALTER TABLE cf_agents_session_compactions_v2 RENAME TO cf_agents_session_compactions",
+        `ALTER TABLE ${this.#t.compactionsRebuild} RENAME TO ${this.#t.compactions}`,
         []
       );
     });
@@ -591,10 +651,10 @@ export class SessionsCore {
     }>(
       `SELECT c.session_id, c.to_message_id, c.seq, c.from_message_id,
          f.seq AS from_seq, f.parent_id AS from_parent, t.seq AS to_seq
-       FROM cf_agents_session_compactions c
-       LEFT JOIN cf_agents_session_messages f
+       FROM ${this.#t.compactions} c
+       LEFT JOIN ${this.#t.messages} f
          ON f.session_id = c.session_id AND f.id = c.from_message_id
-       LEFT JOIN cf_agents_session_messages t
+       LEFT JOIN ${this.#t.messages} t
          ON t.session_id = c.session_id AND t.id = c.to_message_id
        WHERE c.resume_id IS NULL`,
       []
@@ -629,11 +689,11 @@ export class SessionsCore {
           this.io
             .sql<{ id: string }>(
               `WITH RECURSIVE up(id, parent_id) AS (
-                SELECT id, parent_id FROM cf_agents_session_messages
+                SELECT id, parent_id FROM ${this.#t.messages}
                 WHERE session_id = ?1 AND id = ?2
                 UNION ALL
                 SELECT m.id, m.parent_id FROM up
-                CROSS JOIN cf_agents_session_messages m
+                CROSS JOIN ${this.#t.messages} m
                   ON m.session_id = ?1 AND m.id = up.parent_id
                 WHERE up.id <> ?3 AND m.seq >= ?4
               )
@@ -660,7 +720,7 @@ export class SessionsCore {
     this.io.transaction(() => {
       for (const row of resolved) {
         this.io.sqlWrite(
-          `UPDATE cf_agents_session_compactions SET resume_id = ?
+          `UPDATE ${this.#t.compactions} SET resume_id = ?
            WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
           [row.from_parent ?? "", row.session_id, row.to_message_id, row.seq]
         );
@@ -724,7 +784,7 @@ export class SessionsCore {
 
     if (this.#tableExists("assistant_messages")) {
       this.io.sqlWrite(
-        `INSERT OR IGNORE INTO cf_agents_session_messages
+        `INSERT OR IGNORE INTO ${this.#t.messages}
           (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
          SELECT session_id, id,
            ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at ASC, rowid ASC),
@@ -735,15 +795,11 @@ export class SessionsCore {
         []
       );
       if (this.#fts) this.#backfillMissingFtsRows();
-      dropWhenCopied(
-        "assistant_messages",
-        "cf_agents_session_messages",
-        "content"
-      );
+      dropWhenCopied("assistant_messages", `${this.#t.messages}`, "content");
     }
     if (this.#tableExists("assistant_compactions")) {
       this.io.sqlWrite(
-        `INSERT OR IGNORE INTO cf_agents_session_compactions
+        `INSERT OR IGNORE INTO ${this.#t.compactions}
           (session_id, id, seq, summary, from_message_id, to_message_id, created_at)
          SELECT session_id, id,
            ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at ASC, rowid ASC),
@@ -754,7 +810,7 @@ export class SessionsCore {
       );
       dropWhenCopied(
         "assistant_compactions",
-        "cf_agents_session_compactions",
+        `${this.#t.compactions}`,
         "summary"
       );
     }
@@ -811,7 +867,7 @@ export class SessionsCore {
       this.io
         .sql<{ id: string }>(
           `SELECT legacy.id AS id FROM ${table} AS legacy
-           JOIN cf_agents_session_messages AS lifted
+           JOIN ${this.#t.messages} AS lifted
              ON lifted.session_id = '' AND lifted.id = legacy.id`,
           []
         )
@@ -940,7 +996,7 @@ export class SessionsCore {
   #holdsMessage(sessionId: string, message: SessionMessage): boolean {
     const json = JSON.stringify(extractAttachments(message).message);
     const [row] = this.io.sql<{ content_hash: string | null }>(
-      "SELECT content_hash FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      `SELECT content_hash FROM ${this.#t.messages} WHERE session_id = ? AND id = ?`,
       [sessionId, message.id]
     );
     if (!row) return false;
@@ -990,7 +1046,7 @@ export class SessionsCore {
     const joined = new Map<string, string>();
     if (ids.length === 0) return joined;
     const rows = this.io.sql<{ id: string; content: string }>(
-      `SELECT id, content FROM cf_agents_session_message_chunks
+      `SELECT id, content FROM ${this.#t.chunks}
        WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))
        ORDER BY id ASC, idx ASC`,
       [sessionId, JSON.stringify([...ids])]
@@ -1004,7 +1060,7 @@ export class SessionsCore {
   /** Reassemble one stored row, reading continuations only when it has any. */
   #content(sessionId: string, id: string): string | null {
     const rows = this.io.sql<{ content: string; content_chunks: number }>(
-      "SELECT content, content_chunks FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      `SELECT content, content_chunks FROM ${this.#t.messages} WHERE session_id = ? AND id = ?`,
       [sessionId, id]
     );
     if (rows.length === 0) return null;
@@ -1016,7 +1072,7 @@ export class SessionsCore {
   exists(sessionId: string, id: string): boolean {
     return (
       this.io.sql<{ id: string }>(
-        "SELECT id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+        `SELECT id FROM ${this.#t.messages} WHERE session_id = ? AND id = ?`,
         [sessionId, id]
       ).length > 0
     );
@@ -1027,7 +1083,7 @@ export class SessionsCore {
     const found = new Set<string>();
     for (let i = 0; i < ids.length; i += DELETE_BATCH_IDS) {
       for (const row of this.io.sql<{ id: string }>(
-        `SELECT id FROM cf_agents_session_messages
+        `SELECT id FROM ${this.#t.messages}
          WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
         [sessionId, JSON.stringify(ids.slice(i, i + DELETE_BATCH_IDS))]
       )) {
@@ -1041,7 +1097,7 @@ export class SessionsCore {
       .map((id) => id.slice(COMPACTION_PREFIX.length));
     if (summaries.length > 0) {
       for (const row of this.io.sql<{ id: string }>(
-        `SELECT id FROM cf_agents_session_compactions
+        `SELECT id FROM ${this.#t.compactions}
          WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
         [sessionId, JSON.stringify(summaries)]
       )) {
@@ -1069,7 +1125,7 @@ export class SessionsCore {
     let tail: Tail;
     if (this.#hasTailIndex()) {
       const [row] = this.io.sql<{ id: string; seq: number }>(
-        "SELECT id, seq FROM cf_agents_session_messages WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
+        `SELECT id, seq FROM ${this.#t.messages} WHERE session_id = ? ORDER BY seq DESC LIMIT 1`,
         [sessionId]
       );
       tail = row
@@ -1077,7 +1133,7 @@ export class SessionsCore {
         : { leafId: null, nextSeq: 1, rows: null };
     } else {
       const [row] = this.io.sql<{ id: string; seq: number }>(
-        "SELECT id, seq FROM cf_agents_session_messages WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
+        `SELECT id, seq FROM ${this.#t.messages} WHERE session_id = ? ORDER BY seq DESC LIMIT 1`,
         [sessionId]
       );
       tail = row
@@ -1121,7 +1177,7 @@ export class SessionsCore {
     // The index couldn't be built in this isolate: stop counting.
     if (this.#tailIndexFailed) return null;
     const [{ rows }] = this.io.sql<{ rows: number }>(
-      "SELECT count(*) AS rows FROM cf_agents_session_messages WHERE session_id = ?",
+      `SELECT count(*) AS rows FROM ${this.#t.messages} WHERE session_id = ?`,
       [sessionId]
     );
     if (rows < TAIL_INDEX_ROWS) return rows;
@@ -1134,7 +1190,7 @@ export class SessionsCore {
     if (!this.#tailIndexed) {
       this.#tailIndexed =
         this.io.sql<{ one: number }>(
-          "SELECT 1 AS one FROM sqlite_master WHERE type = 'index' AND name = 'cf_agents_session_messages_by_seq'",
+          `SELECT 1 AS one FROM sqlite_master WHERE type = 'index' AND name = '${this.#t.tailIndex}'`,
           []
         ).length > 0;
     }
@@ -1153,8 +1209,8 @@ export class SessionsCore {
     if (this.#tailIndexFailed) return false;
     try {
       this.io.sqlWrite(
-        `CREATE INDEX IF NOT EXISTS cf_agents_session_messages_by_seq
-         ON cf_agents_session_messages (session_id, seq)`,
+        `CREATE INDEX IF NOT EXISTS ${this.#t.tailIndex}
+         ON ${this.#t.messages} (session_id, seq)`,
         []
       );
     } catch (error) {
@@ -1215,7 +1271,7 @@ export class SessionsCore {
       this.#hiddenOverlayIds(sessionId, [leafId]).has(leafId)
     ) {
       const [row] = this.io.sql<{ parent_id: string | null }>(
-        "SELECT parent_id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+        `SELECT parent_id FROM ${this.#t.messages} WHERE session_id = ? AND id = ?`,
         [sessionId, leafId]
       );
       leafId = row?.parent_id ?? null;
@@ -1239,7 +1295,7 @@ export class SessionsCore {
       content: string;
       content_chunks: number;
     }>(
-      `SELECT id, seq, content, content_chunks FROM cf_agents_session_messages
+      `SELECT id, seq, content, content_chunks FROM ${this.#t.messages}
        WHERE session_id = ? AND parent_id = ? ORDER BY seq ASC`,
       [sessionId, parentId]
     );
@@ -1296,13 +1352,11 @@ export class SessionsCore {
     maxSteps: number,
     measure: boolean
   ): VisibleStep[] {
-    const overlayJoin = (
-      row: string
-    ) => `LEFT JOIN cf_agents_session_compactions o
+    const overlayJoin = (row: string) => `LEFT JOIN ${this.#t.compactions} o
         ON o.session_id = ?1 AND o.to_message_id = ${row}.id
           AND o.resume_id IS NOT NULL
           AND NOT EXISTS (
-            SELECT 1 FROM cf_agents_session_compactions n
+            SELECT 1 FROM ${this.#t.compactions} n
             WHERE n.session_id = o.session_id
               AND n.to_message_id = o.to_message_id
               AND n.resume_id IS NOT NULL AND n.seq > o.seq)`;
@@ -1314,19 +1368,19 @@ export class SessionsCore {
     const measured = measure
       ? `, CASE WHEN walk.overlay_seq IS NOT NULL THEN (
             SELECT LENGTH(CAST(c.summary AS BLOB))
-            FROM cf_agents_session_compactions c
+            FROM ${this.#t.compactions} c
             WHERE c.session_id = ?1
               AND c.to_message_id = walk.id AND c.seq = walk.overlay_seq)
           ELSE walk.length + CASE WHEN walk.chunks = 0 THEN 0
             ELSE COALESCE((
               SELECT SUM(LENGTH(CAST(k.content AS BLOB)))
-              FROM cf_agents_session_message_chunks k
+              FROM ${this.#t.chunks} k
               WHERE k.session_id = ?1 AND k.id = walk.id
             ), 0) END
           + COALESCE((
               SELECT SUM((meta.bytes + 2) / 3 * 4)
-              FROM cf_agents_session_attachment_refs r
-              JOIN cf_agents_session_attachment_meta meta ON meta.hash = r.hash
+              FROM ${this.#t.attachmentRefs} r
+              JOIN ${this.#t.attachmentMeta} meta ON meta.hash = r.hash
               WHERE r.session_id = ?1 AND r.message_id = walk.id
             ), 0) END AS bytes`
       : "";
@@ -1339,13 +1393,13 @@ export class SessionsCore {
     const steps = this.io.sql<VisibleStep>(
       `WITH RECURSIVE walk(id, role, token_estimate, overlay_seq, overlay_id, next, length, chunks, step) AS (
         SELECT m.id, m.role, m.token_estimate, o.seq, o.id, ${next}, ${row("m")}, 0
-        FROM cf_agents_session_messages m
+        FROM ${this.#t.messages} m
         ${overlayJoin("m")}
         WHERE m.session_id = ?1 AND m.id = ?2
         UNION ALL
         SELECT m.id, m.role, m.token_estimate, o.seq, o.id, ${next}, ${row("m")}, walk.step + 1
         FROM walk
-        CROSS JOIN cf_agents_session_messages m
+        CROSS JOIN ${this.#t.messages} m
           ON m.session_id = ?1 AND m.id = walk.next
         ${overlayJoin("m")}
         WHERE walk.step + 1 < ?3
@@ -1419,7 +1473,7 @@ export class SessionsCore {
   ): StoredCompaction {
     const [row] = this.io.sql<CompactionRow>(
       `SELECT id, summary, from_message_id, to_message_id, created_at
-       FROM cf_agents_session_compactions
+       FROM ${this.#t.compactions}
        WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
       [sessionId, step.id, step.overlaySeq]
     );
@@ -1437,17 +1491,17 @@ export class SessionsCore {
     if (!leaf) return [];
     const walked = this.io.sql<SessionRowStat>(
       `WITH RECURSIVE path(id, parent_id, depth) AS (
-        SELECT id, parent_id, 0 FROM cf_agents_session_messages
+        SELECT id, parent_id, 0 FROM ${this.#t.messages}
         WHERE session_id = ? AND id = ?
         UNION ALL
         SELECT m.id, m.parent_id, p.depth + 1 FROM path p
-        CROSS JOIN cf_agents_session_messages m
+        CROSS JOIN ${this.#t.messages} m
           ON m.session_id = ? AND m.id = p.parent_id
         WHERE p.depth < ${MAX_ROOT_FIRST_STEPS}
       )
-      SELECT path.id AS id, am.role AS role, ${ROW_BYTES_SQL} AS bytes,
+      SELECT path.id AS id, am.role AS role, ${rowBytesSql(this.#t)} AS bytes,
         am.token_estimate AS tokenEstimate
-      FROM path CROSS JOIN cf_agents_session_messages am
+      FROM path CROSS JOIN ${this.#t.messages} am
         ON am.session_id = ? AND am.id = path.id
       ORDER BY path.depth DESC`,
       [sessionId, leaf, sessionId, sessionId]
@@ -1482,7 +1536,7 @@ export class SessionsCore {
       options.after === undefined
         ? this.latestLeafId(sessionId)
         : (this.io.sql<{ parent_id: string | null }>(
-            "SELECT parent_id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+            `SELECT parent_id FROM ${this.#t.messages} WHERE session_id = ? AND id = ?`,
             [sessionId, options.after]
           )[0]?.parent_id ?? null);
     if (!leaf || options.limit <= 0) return [];
@@ -1497,11 +1551,11 @@ export class SessionsCore {
       const walked = this.io
         .sql<{ id: string }>(
           `WITH RECURSIVE path(id, parent_id, depth) AS (
-            SELECT id, parent_id, 0 FROM cf_agents_session_messages
+            SELECT id, parent_id, 0 FROM ${this.#t.messages}
             WHERE session_id = ? AND id = ?
             UNION ALL
             SELECT m.id, m.parent_id, p.depth + 1 FROM path p
-            CROSS JOIN cf_agents_session_messages m
+            CROSS JOIN ${this.#t.messages} m
               ON m.session_id = ? AND m.id = p.parent_id
             WHERE p.depth + 1 < ?
           )
@@ -1524,8 +1578,8 @@ export class SessionsCore {
     const bytes = new Map(
       this.io
         .sql<{ id: string; bytes: number }>(
-          `SELECT am.id AS id, ${ROW_BYTES_SQL} AS bytes
-           FROM cf_agents_session_messages am
+          `SELECT am.id AS id, ${rowBytesSql(this.#t)} AS bytes
+           FROM ${this.#t.messages} am
            WHERE am.session_id = ? AND am.id IN (SELECT value FROM json_each(?))`,
           [sessionId, JSON.stringify(page)]
         )
@@ -1576,7 +1630,7 @@ export class SessionsCore {
       content: string;
       content_chunks: number;
     }>(
-      `SELECT id, content, content_chunks FROM cf_agents_session_messages
+      `SELECT id, content, content_chunks FROM ${this.#t.messages}
        WHERE session_id = ? AND id IN (${rows.map(() => "?").join(", ")})`,
       [sessionId, ...rows.map((row) => row.id)]
     );
@@ -1691,8 +1745,8 @@ export class SessionsCore {
       }>(
         `SELECT m.parent_id, CASE WHEN o.seq IS NULL THEN m.content END AS content,
            m.content_chunks, o.seq AS overlay_seq, o.resume_id
-         FROM cf_agents_session_messages m
-         LEFT JOIN cf_agents_session_compactions o
+         FROM ${this.#t.messages} m
+         LEFT JOIN ${this.#t.compactions} o
            ON o.session_id = m.session_id AND o.to_message_id = m.id
              AND o.resume_id IS NOT NULL
          WHERE m.session_id = ? AND m.id = ?
@@ -1932,7 +1986,7 @@ export class SessionsCore {
   ): void {
     for (let idx = 1; idx < slices.length; idx++) {
       this.io.sqlWrite(
-        `INSERT OR REPLACE INTO cf_agents_session_message_chunks
+        `INSERT OR REPLACE INTO ${this.#t.chunks}
           (session_id, id, idx, content) VALUES (?, ?, ?, ?)`,
         [sessionId, id, idx, slices[idx]]
       );
@@ -1986,7 +2040,7 @@ export class SessionsCore {
         this.#attachments.put(attachment.payload, attachment.hash);
       }
       this.io.sqlWrite(
-        `INSERT INTO cf_agents_session_messages
+        `INSERT INTO ${this.#t.messages}
           (session_id, id, seq, parent_id, role, content, content_chunks, token_estimate, created_at, content_hash)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
@@ -2047,7 +2101,7 @@ export class SessionsCore {
       token_estimate: number;
       content_hash: string | null;
     }>(
-      "SELECT content_chunks, token_estimate, content_hash FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      `SELECT content_chunks, token_estimate, content_hash FROM ${this.#t.messages} WHERE session_id = ? AND id = ?`,
       [sessionId, message.id]
     );
     if (oldRows.length === 0) return "missing";
@@ -2067,7 +2121,7 @@ export class SessionsCore {
       // Byte-identical: stamp the digest so this row stops paying the
       // read-back. Still `unchanged`: no continuation, FTS, or event.
       this.io.sqlWrite(
-        "UPDATE cf_agents_session_messages SET content_hash = ? WHERE session_id = ? AND id = ?",
+        `UPDATE ${this.#t.messages} SET content_hash = ? WHERE session_id = ? AND id = ?`,
         [digest, sessionId, message.id]
       );
       return "unchanged";
@@ -2079,7 +2133,7 @@ export class SessionsCore {
         this.#attachments.put(attachment.payload, attachment.hash);
       }
       this.io.sqlWrite(
-        `UPDATE cf_agents_session_messages
+        `UPDATE ${this.#t.messages}
          SET role = ?, content = ?, content_chunks = ?, token_estimate = ?, content_hash = ?
          WHERE session_id = ? AND id = ?`,
         [
@@ -2096,7 +2150,7 @@ export class SessionsCore {
       // in the same transaction as the row that stopped referencing them.
       if (old.content_chunks > slices.length - 1) {
         this.io.sqlWrite(
-          `DELETE FROM cf_agents_session_message_chunks
+          `DELETE FROM ${this.#t.chunks}
            WHERE session_id = ? AND id = ? AND idx > ?`,
           [sessionId, message.id, slices.length - 1]
         );
@@ -2161,7 +2215,7 @@ export class SessionsCore {
     }>(
       `WITH RECURSIVE
        children(child_id, ancestor_id) AS MATERIALIZED (
-         SELECT id, parent_id FROM cf_agents_session_messages
+         SELECT id, parent_id FROM ${this.#t.messages}
          WHERE session_id = ?2
            AND parent_id IN (SELECT value FROM json_each(?1))
            AND id NOT IN (SELECT value FROM json_each(?1))
@@ -2171,7 +2225,7 @@ export class SessionsCore {
          UNION ALL
          SELECT rewire.child_id, parent.parent_id
          FROM rewire
-         JOIN cf_agents_session_messages AS parent
+         JOIN ${this.#t.messages} AS parent
            ON parent.session_id = ?2 AND parent.id = rewire.ancestor_id
          WHERE rewire.ancestor_id IN (SELECT value FROM json_each(?1))
        )
@@ -2189,30 +2243,30 @@ export class SessionsCore {
     }
     for (const [ancestor, children] of byAncestor) {
       this.io.sqlWrite(
-        `UPDATE cf_agents_session_messages SET parent_id = ?
+        `UPDATE ${this.#t.messages} SET parent_id = ?
          WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
         [ancestor, sessionId, JSON.stringify(children)]
       );
     }
     this.io.sqlWrite(
-      `DELETE FROM cf_agents_session_messages
+      `DELETE FROM ${this.#t.messages}
        WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
       [sessionId, ids]
     );
     this.io.sqlWrite(
-      `DELETE FROM cf_agents_session_message_chunks
+      `DELETE FROM ${this.#t.chunks}
        WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
       [sessionId, ids]
     );
     this.#attachments.releaseMessages(sessionId, batch);
     this.io.sqlWrite(
-      `DELETE FROM cf_agents_session_annotations
+      `DELETE FROM ${this.#t.annotations}
        WHERE session_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
       [sessionId, ids]
     );
     if (this.#fts) {
       this.io.sqlWrite(
-        `DELETE FROM cf_agents_session_fts
+        `DELETE FROM ${this.#t.fts}
          WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
         [sessionId, ids]
       );
@@ -2240,7 +2294,7 @@ export class SessionsCore {
       resume_id: string;
     }>(
       `SELECT seq, id, to_message_id, resume_id
-       FROM cf_agents_session_compactions
+       FROM ${this.#t.compactions}
        WHERE session_id = ? AND resume_id IS NOT NULL
          AND (to_message_id IN (SELECT value FROM json_each(?))
            OR resume_id IN (SELECT value FROM json_each(?)))`,
@@ -2264,7 +2318,7 @@ export class SessionsCore {
              SELECT value, value FROM json_each(?)
              UNION ALL
              SELECT up.start, m.parent_id FROM up
-             CROSS JOIN cf_agents_session_messages m
+             CROSS JOIN ${this.#t.messages} m
                ON m.session_id = ? AND m.id = up.cur
              WHERE up.cur IN (SELECT id FROM deleted)
            )
@@ -2283,20 +2337,20 @@ export class SessionsCore {
       const to = moved(overlay.to_message_id);
       if (to === null || to === resume) {
         this.io.sqlWrite(
-          `DELETE FROM cf_agents_session_compactions
+          `DELETE FROM ${this.#t.compactions}
            WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
           [sessionId, overlay.to_message_id, overlay.seq]
         );
         removed.push(`${COMPACTION_PREFIX}${overlay.id}`);
         this.io.sqlWrite(
-          `DELETE FROM cf_agents_session_annotations
+          `DELETE FROM ${this.#t.annotations}
            WHERE session_id = ? AND message_id = ?`,
           [sessionId, `${COMPACTION_PREFIX}${overlay.id}`]
         );
         continue;
       }
       this.io.sqlWrite(
-        `UPDATE cf_agents_session_compactions SET to_message_id = ?, resume_id = ?
+        `UPDATE ${this.#t.compactions} SET to_message_id = ?, resume_id = ?
          WHERE session_id = ? AND to_message_id = ? AND seq = ?`,
         [to, resume, sessionId, overlay.to_message_id, overlay.seq]
       );
@@ -2304,7 +2358,7 @@ export class SessionsCore {
     if (removed.length === 0) return [];
     return this.io
       .sql<{ id: string }>(
-        `SELECT id FROM cf_agents_session_messages
+        `SELECT id FROM ${this.#t.messages}
          WHERE session_id = ? AND id IN (SELECT value FROM json_each(?))`,
         [sessionId, JSON.stringify(removed)]
       )
@@ -2313,26 +2367,24 @@ export class SessionsCore {
 
   clearMessages(sessionId: string): void {
     this.io.transaction(() => {
+      this.io.sqlWrite(`DELETE FROM ${this.#t.messages} WHERE session_id = ?`, [
+        sessionId
+      ]);
+      this.io.sqlWrite(`DELETE FROM ${this.#t.chunks} WHERE session_id = ?`, [
+        sessionId
+      ]);
       this.io.sqlWrite(
-        "DELETE FROM cf_agents_session_messages WHERE session_id = ?",
+        `DELETE FROM ${this.#t.compactions} WHERE session_id = ?`,
         [sessionId]
       );
       this.io.sqlWrite(
-        "DELETE FROM cf_agents_session_message_chunks WHERE session_id = ?",
-        [sessionId]
-      );
-      this.io.sqlWrite(
-        "DELETE FROM cf_agents_session_compactions WHERE session_id = ?",
-        [sessionId]
-      );
-      this.io.sqlWrite(
-        "DELETE FROM cf_agents_session_annotations WHERE session_id = ?",
+        `DELETE FROM ${this.#t.annotations} WHERE session_id = ?`,
         [sessionId]
       );
       // Keys under `transcript:` belong to the transcript; any other key
       // (an event-log epoch, say) outlives a clear.
       this.io.sqlWrite(
-        `DELETE FROM cf_agents_session_config
+        `DELETE FROM ${this.#t.config}
          WHERE session_id = ? AND key >= '${TRANSCRIPT_CONFIG_PREFIX}'
            AND key < '${TRANSCRIPT_CONFIG_PREFIX_END}'`,
         [sessionId]
@@ -2343,10 +2395,9 @@ export class SessionsCore {
       this.setConfig(sessionId, CLEARED_AT_CONFIG_KEY, String(Date.now()));
       this.#attachments.releaseSession(sessionId);
       if (this.#fts) {
-        this.io.sqlWrite(
-          "DELETE FROM cf_agents_session_fts WHERE session_id = ?",
-          [sessionId]
-        );
+        this.io.sqlWrite(`DELETE FROM ${this.#t.fts} WHERE session_id = ?`, [
+          sessionId
+        ]);
       }
     });
     this.#tails.set(sessionId, {
@@ -2384,7 +2435,7 @@ export class SessionsCore {
     let resume: string;
     const extended = extendsId
       ? this.io.sql<{ from_message_id: string; resume_id: string | null }>(
-          `SELECT from_message_id, resume_id FROM cf_agents_session_compactions
+          `SELECT from_message_id, resume_id FROM ${this.#t.compactions}
            WHERE session_id = ? AND id = ?`,
           [sessionId, extendsId]
         )[0]
@@ -2400,11 +2451,11 @@ export class SessionsCore {
     this.io.transaction(() => {
       const seq =
         this.io.sql<{ seq: number }>(
-          "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM cf_agents_session_compactions WHERE session_id = ?",
+          `SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM ${this.#t.compactions} WHERE session_id = ?`,
           [sessionId]
         )[0]?.seq ?? 1;
       this.io.sqlWrite(
-        `INSERT INTO cf_agents_session_compactions
+        `INSERT INTO ${this.#t.compactions}
           (session_id, to_message_id, seq, id, summary, from_message_id, resume_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [sessionId, toMessageId, seq, id, summary, from, resume, now]
@@ -2437,7 +2488,7 @@ export class SessionsCore {
       seq: number;
       parent_id: string | null;
     }>(
-      `SELECT id, seq, parent_id FROM cf_agents_session_messages
+      `SELECT id, seq, parent_id FROM ${this.#t.messages}
        WHERE session_id = ? AND id IN (?, ?)`,
       [sessionId, from, to]
     );
@@ -2461,7 +2512,7 @@ export class SessionsCore {
   /** Throw unless an extended overlay's continuation lies below `to`. */
   #assertOverlayEnd(sessionId: string, resume: string, to: string): void {
     const [end] = this.io.sql<{ seq: number }>(
-      "SELECT seq FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      `SELECT seq FROM ${this.#t.messages} WHERE session_id = ? AND id = ?`,
       [sessionId, to]
     );
     if (!end) {
@@ -2471,7 +2522,7 @@ export class SessionsCore {
     }
     if (resume === "") return;
     const [below] = this.io.sql<{ id: string; seq: number }>(
-      "SELECT id, seq FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      `SELECT id, seq FROM ${this.#t.messages} WHERE session_id = ? AND id = ?`,
       [sessionId, resume]
     );
     if (!below || resume === to || !this.#isAncestor(sessionId, below, to)) {
@@ -2490,11 +2541,11 @@ export class SessionsCore {
     return (
       this.io.sql<{ hit: number }>(
         `WITH RECURSIVE up(id, parent_id, seq) AS (
-          SELECT id, parent_id, seq FROM cf_agents_session_messages
+          SELECT id, parent_id, seq FROM ${this.#t.messages}
           WHERE session_id = ? AND id = ?
           UNION ALL
           SELECT m.id, m.parent_id, m.seq FROM up
-          CROSS JOIN cf_agents_session_messages m
+          CROSS JOIN ${this.#t.messages} m
             ON m.session_id = ? AND m.id = up.parent_id
           WHERE up.id <> ? AND m.seq >= ?
         )
@@ -2516,7 +2567,7 @@ export class SessionsCore {
   #hasAnnotations(sessionId: string): boolean {
     return (
       this.io.sql<{ one: number }>(
-        "SELECT 1 AS one FROM cf_agents_session_annotations WHERE session_id = ? LIMIT 1",
+        `SELECT 1 AS one FROM ${this.#t.annotations} WHERE session_id = ? LIMIT 1`,
         [sessionId]
       ).length > 0
     );
@@ -2543,7 +2594,7 @@ export class SessionsCore {
       `WITH RECURSIVE
       stop(seq) AS (
         SELECT COALESCE(
-          (SELECT seq FROM cf_agents_session_messages
+          (SELECT seq FROM ${this.#t.messages}
            WHERE session_id = ?1 AND id = ?3),
           -1)
       ),
@@ -2553,13 +2604,13 @@ export class SessionsCore {
       -- as reads do, instead of passing every row it hid. Along an ancestor
       -- chain seq falls, so the walk stops at or below the continuation.
       span(id, parent_id, depth) AS (
-        SELECT id, parent_id, 0 FROM cf_agents_session_messages
+        SELECT id, parent_id, 0 FROM ${this.#t.messages}
         WHERE session_id = ?1 AND id = ?2
         UNION ALL
         SELECT next.id, next.parent_id, s.depth + 1 FROM span s
-        CROSS JOIN cf_agents_session_messages next
+        CROSS JOIN ${this.#t.messages} next
           ON next.session_id = ?1 AND next.id = COALESCE(
-            (SELECT c.resume_id FROM cf_agents_session_compactions c
+            (SELECT c.resume_id FROM ${this.#t.compactions} c
              WHERE c.session_id = ?1 AND c.to_message_id = s.id
                AND c.resume_id IS NOT NULL
              ORDER BY c.seq DESC LIMIT 1),
@@ -2568,7 +2619,7 @@ export class SessionsCore {
       ),
       found AS (
         SELECT a.kind, a.value, span.depth, 0 AS on_overlay
-        FROM span CROSS JOIN cf_agents_session_annotations a
+        FROM span CROSS JOIN ${this.#t.annotations} a
           ON a.session_id = ?1 AND a.message_id = span.id
         UNION ALL
         -- The overlay the walk applies at a row carries the newest
@@ -2576,14 +2627,14 @@ export class SessionsCore {
         -- It sits where it ends and outranks the row it hid there.
         SELECT a.kind, a.value, span.depth, 1 AS on_overlay
         FROM span
-        CROSS JOIN cf_agents_session_compactions c
+        CROSS JOIN ${this.#t.compactions} c
           ON c.session_id = ?1 AND c.to_message_id = span.id
             AND c.resume_id IS NOT NULL
             AND NOT EXISTS (
-              SELECT 1 FROM cf_agents_session_compactions n
+              SELECT 1 FROM ${this.#t.compactions} n
               WHERE n.session_id = ?1 AND n.to_message_id = c.to_message_id
                 AND n.resume_id IS NOT NULL AND n.seq > c.seq)
-        CROSS JOIN cf_agents_session_annotations a
+        CROSS JOIN ${this.#t.annotations} a
           ON a.session_id = ?1 AND a.message_id = '${COMPACTION_PREFIX}' || c.id
       ),
       ranked AS (
@@ -2607,7 +2658,7 @@ export class SessionsCore {
     const found = new Map<string, string>();
     if (messageIds.length === 0) return found;
     const rows = this.io.sql<{ message_id: string; value: string }>(
-      `SELECT message_id, value FROM cf_agents_session_annotations
+      `SELECT message_id, value FROM ${this.#t.annotations}
        WHERE session_id = ? AND kind = ?
          AND message_id IN (SELECT value FROM json_each(?))`,
       [sessionId, kind, JSON.stringify(messageIds)]
@@ -2623,7 +2674,7 @@ export class SessionsCore {
     value: string
   ): void {
     this.io.sqlWrite(
-      `INSERT INTO cf_agents_session_annotations
+      `INSERT INTO ${this.#t.annotations}
          (session_id, message_id, kind, value)
        VALUES (?, ?, ?, ?)
        ON CONFLICT (session_id, message_id, kind)
@@ -2670,7 +2721,7 @@ export class SessionsCore {
   config(sessionId: string, key: string): string | null {
     return (
       this.io.sql<{ value: string }>(
-        "SELECT value FROM cf_agents_session_config WHERE session_id = ? AND key = ?",
+        `SELECT value FROM ${this.#t.config} WHERE session_id = ? AND key = ?`,
         [sessionId, key]
       )[0]?.value ?? null
     );
@@ -2679,13 +2730,13 @@ export class SessionsCore {
   setConfig(sessionId: string, key: string, value: string | null): void {
     if (value === null) {
       this.io.sqlWrite(
-        "DELETE FROM cf_agents_session_config WHERE session_id = ? AND key = ?",
+        `DELETE FROM ${this.#t.config} WHERE session_id = ? AND key = ?`,
         [sessionId, key]
       );
       return;
     }
     this.io.sqlWrite(
-      `INSERT INTO cf_agents_session_config (session_id, key, value)
+      `INSERT INTO ${this.#t.config} (session_id, key, value)
        VALUES (?, ?, ?)
        ON CONFLICT (session_id, key) DO UPDATE SET value = excluded.value`,
       [sessionId, key, value]
@@ -2696,7 +2747,7 @@ export class SessionsCore {
     return this.io
       .sql<CompactionRow>(
         `SELECT id, summary, from_message_id, to_message_id, created_at
-         FROM cf_agents_session_compactions
+         FROM ${this.#t.compactions}
          WHERE session_id = ? ORDER BY seq ASC`,
         [sessionId]
       )
@@ -2712,11 +2763,11 @@ export class SessionsCore {
     const sanitized = `"${query.replace(/"/g, '""')}"`;
     return this.io
       .sql<{ id: string; role: string; content: string }>(
-        `SELECT f.id, f.role, f.content FROM cf_agents_session_fts f
-         INNER JOIN cf_agents_session_messages m
+        `SELECT f.id, f.role, f.content FROM ${this.#t.fts} f
+         INNER JOIN ${this.#t.messages} m
            ON m.session_id = f.session_id AND m.id = f.id
-         WHERE cf_agents_session_fts MATCH ? AND f.session_id = ?
-           AND NOT ${hiddenOverlayRowSql("f.id", "f.session_id")}
+         WHERE ${this.#t.fts} MATCH ? AND f.session_id = ?
+           AND NOT ${hiddenOverlayRowSql(this.#t, "f.id", "f.session_id")}
          ORDER BY rank LIMIT ?`,
         [sanitized, sessionId, limit]
       )
@@ -2733,7 +2784,7 @@ export class SessionsCore {
     const text = searchableText(message);
     if (replace) {
       const existing = this.io.sql<{ content: string; role: string }>(
-        "SELECT content, role FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
+        `SELECT content, role FROM ${this.#t.fts} WHERE id = ? AND session_id = ?`,
         [message.id, sessionId]
       );
       if (existing.length > 0) {
@@ -2741,14 +2792,14 @@ export class SessionsCore {
           return;
         }
         this.io.sqlWrite(
-          "DELETE FROM cf_agents_session_fts WHERE id = ? AND session_id = ?",
+          `DELETE FROM ${this.#t.fts} WHERE id = ? AND session_id = ?`,
           [message.id, sessionId]
         );
       }
     }
     if (text) {
       this.io.sqlWrite(
-        "INSERT INTO cf_agents_session_fts (id, session_id, role, content) VALUES (?, ?, ?, ?)",
+        `INSERT INTO ${this.#t.fts} (id, session_id, role, content) VALUES (?, ?, ?, ?)`,
         [message.id, sessionId, message.role, text]
       );
     }
@@ -2780,7 +2831,7 @@ export class SessionsCore {
         this.#attachments.put(attachment.payload, attachment.hash);
       }
       inserted = this.io.sqlWrite(
-        `INSERT OR IGNORE INTO cf_agents_session_messages
+        `INSERT OR IGNORE INTO ${this.#t.messages}
           (session_id, id, seq, parent_id, role, content, content_chunks, token_estimate, created_at, content_hash)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [

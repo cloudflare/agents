@@ -159,6 +159,15 @@ export interface HistoryBatchReadOptions extends HistoryReadOptions {
 /** Policy for a Sessions capability. */
 export interface SessionsOptions {
   /**
+   * A second (or third) Sessions in the same Durable Object: its own tables,
+   * transcripts, compactions, search and attachments, apart from the default
+   * instance and from every other name. `[a-z][a-z0-9-]{0,31}`. Omit it for
+   * the default instance, whose tables are the ones every release used.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  name?: string;
+  /**
    * Message-metadata keys reserved for server-side writers. Stripped from
    * writes marked `source: "client"`. Default: none.
    */
