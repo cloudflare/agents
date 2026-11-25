@@ -204,6 +204,13 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   /** One-way barrier so facet broadcasts wait for older queued operations. */
   #broadcastOperationTail?: Promise<void>;
+  /**
+   * A broadcast that waits for older operations and goes to the root over
+   * a call of its own. A later send waits for it (#2055): it would
+   * otherwise queue behind the same older operation and reach the root
+   * first.
+   */
+  #queuedBroadcastTail?: Promise<void>;
 
   /**
    * The channel to the root: at the root, the one it hands its facets; in
@@ -911,8 +918,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // join that batch and overtake it.
     this.#openConnectionSendBatches.delete(connectionId);
     const activeBridge = this.activeBridge(connectionId);
+    const olderOperation = this.#connectionOperationTails.get(connectionId);
+    // Only sends wait for a queued broadcast: a state or flag write waiting
+    // behind one would let the next frame read stale root-owned metadata.
+    const queuedBroadcast =
+      operationName === "send" ? this.#queuedBroadcastTail : undefined;
     const previousConnectionOperation =
-      this.#connectionOperationTails.get(connectionId);
+      olderOperation && queuedBroadcast
+        ? Promise.all([olderOperation, queuedBroadcast]).then(() => {})
+        : (olderOperation ?? queuedBroadcast);
     let pending: Promise<void>;
     if (activeBridge && !previousConnectionOperation) {
       try {
@@ -1045,6 +1059,14 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     });
     const completion = delivered.then(() => {});
 
+    if (!(activeBridge && previousOperations.size === 0)) {
+      this.#queuedBroadcastTail = completion;
+      void completion.then(() => {
+        if (this.#queuedBroadcastTail === completion) {
+          this.#queuedBroadcastTail = undefined;
+        }
+      });
+    }
     this.#broadcastOperationTail = completion;
     this.#host.ctx.waitUntil(completion);
     void completion.then(() => {
