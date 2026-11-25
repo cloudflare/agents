@@ -14,4 +14,4 @@ Tags are an indexed, non-unique lookup key; stream ids are unique within an inst
 
 ## Memory
 
-Per stream touched in the isolate: its write buffer (bounded by the batch limits), its newest block's position, and, for a trimmed stream, its stored totals. Each leaves on settle or delete.
+Per stream touched in the isolate: its write buffer (bounded by the batch limits) and its newest block's position, which leave on settle or delete; and, for a stream trimmed with retention (an event log, which stays open), its stored totals, which leave on delete.
