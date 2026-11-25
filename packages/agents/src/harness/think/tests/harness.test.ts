@@ -758,6 +758,22 @@ describe("ThinkHarness durability", () => {
     );
   });
 
+  it("reads a transcript cold through an id that carries no name", async () => {
+    // The object learned its name when first addressed by it; later it is
+    // addressed by id alone, and its Lifecycle loads the stored name at
+    // startup. Binding the harness's Sessions must not read the name first.
+    const named = fresh();
+    await named.prompt("hello");
+    await evictDurableObject(named);
+    const byId = env.THINK_HARNESS_TEST.get(
+      env.THINK_HARNESS_TEST.idFromString(named.id.toString())
+    );
+    expect(await byId.messages()).toEqual([
+      "user: hello",
+      "assistant: echo: hello"
+    ]);
+  });
+
   it("carries more sessions than one batch forward, with their client tools", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
@@ -770,6 +786,12 @@ describe("ThinkHarness durability", () => {
     expect(sessions).toHaveLength(121);
     expect(sessions.slice(0, 2).map((s) => s.id)).toEqual(["s-000", "s-001"]);
     expect(await stub.clientToolsValue("s-119")).toBe('[{"name":"tool_119"}]');
+    // Each kept apart in the one record: Sessions' version under its own
+    // id, the harness's carry-forward under the harness's.
+    expect(await stub.schemaVersions()).toMatchObject({
+      sessions: 2,
+      "think-harness": 1
+    });
     expect(await stub.harnessTables()).toEqual([]);
   });
 

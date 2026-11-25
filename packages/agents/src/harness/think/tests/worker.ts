@@ -1041,6 +1041,13 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  /** The one schema record: each capability id's version. */
+  schemaVersions(): Record<string, number> | undefined {
+    return this.ctx.storage.kv.get<Record<string, number>>(
+      "cf_agents:schema_versions"
+    );
+  }
+
   /** A released version's store with `count` sessions, each with a tool. */
   seedStoreSessions(count: number): void {
     const store = openHarnessStore(this.ctx.storage, {

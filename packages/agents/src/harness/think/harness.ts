@@ -2261,10 +2261,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (this.#bound) return;
     // The harness's services, but Sessions' own schema handle: its version
     // is Sessions' (`sessions`), not the harness's carry-forward step.
-    bindLifecycleCapability(this.#sessions, {
-      ...this.lifecycle,
-      schema: capabilitySchema(this.lifecycle, this.#sessions.capabilityId)
-    });
+    // A Proxy, not a spread: a spread calls every getter now, and `name`
+    // throws on an object addressed without a name until startup has loaded
+    // the stored one. Everything but `schema` is read when used.
+    const services = this.lifecycle;
+    const schema = capabilitySchema(services, this.#sessions.capabilityId);
+    bindLifecycleCapability(
+      this.#sessions,
+      // An empty target: the services are frozen, and a Proxy of a frozen
+      // object must return its own `schema`.
+      new Proxy({} as typeof services, {
+        get: (_target, key) =>
+          key === "schema" ? schema : Reflect.get(services, key)
+      })
+    );
     this.#bound = true;
     // Writes made on a session's Sessions handle (from `configureSession`)
     // go around the harness; pass them on as events, so listeners and chat
