@@ -4,7 +4,8 @@
  *
  * Uses the Vitest plugin with a real WorkerLoader binding.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { asSchema } from "ai";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { ExtensionManager, sanitizeName } from "../extensions/manager";
 import type { ExtensionManifest } from "../extensions/types";
@@ -192,6 +193,73 @@ describe("ExtensionManager", () => {
       const tools = manager.getTools();
       expect(Object.keys(tools)).toContain("math_add");
       expect(Object.keys(tools)).toContain("math_multiply");
+    });
+
+    it("offers the model the same tool definitions as before the extension core", async () => {
+      await manager.load(makeManifest({ name: "math" }), MULTI_TOOL_SOURCE);
+      const descriptor = (name: string, op: string) => ({
+        description: `[math] ${op} two numbers`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            a: { type: "number", description: "First number" },
+            b: { type: "number", description: "Second number" }
+          },
+          required: ["a", "b"]
+        },
+        name
+      });
+      // What the released manager built: `tool({ description, inputSchema:
+      // jsonSchema(schema), execute })`, as the AI SDK sends it.
+      const sent = await Promise.all(
+        Object.entries(manager.getTools()).map(async ([name, tool]) => ({
+          description: tool.description,
+          inputSchema: await asSchema(tool.inputSchema).jsonSchema,
+          name
+        }))
+      );
+      expect(JSON.stringify(sent)).toBe(
+        JSON.stringify([
+          descriptor("math_add", "Add"),
+          descriptor("math_multiply", "Multiply")
+        ])
+      );
+      // A tool that does not stream returns its result, not an iterable.
+      const result = manager
+        .getTools()
+        .math_add.execute?.(
+          { a: 2, b: 3 },
+          { toolCallId: "c", messages: [], context: undefined }
+        );
+      expect(result).toBeInstanceOf(Promise);
+      expect(await result).toBe(5);
+    });
+
+    it("warns once per manager that a context block's type is ignored", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await manager.load(
+        makeManifest({
+          name: "typed",
+          context: [{ label: "notes", type: "writable" }]
+        }),
+        GREET_EXTENSION_SOURCE
+      );
+      await manager.load(
+        makeManifest({
+          name: "typed-again",
+          context: [{ label: "notes", type: "readonly" }]
+        }),
+        GREET_EXTENSION_SOURCE
+      );
+      const typeWarnings = warn.mock.calls.filter((call) =>
+        String(call[0]).includes("`type` is ignored")
+      );
+      warn.mockRestore();
+      expect(typeWarnings).toHaveLength(1);
+      expect(manager.list().map((ext) => ext.contextLabels)).toEqual([
+        ["typed_notes"],
+        ["typed_again_notes"]
+      ]);
     });
 
     it("should merge tools from multiple extensions", async () => {

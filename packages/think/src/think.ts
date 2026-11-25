@@ -650,7 +650,8 @@ import {
   ThinkExtensionHooks,
   createThinkExtensionManager,
   loadThinkExtensions
-} from "./extensions/pipeline";
+} from "./extensions/wiring";
+import { coreOf } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import { DEFAULT_MESSENGER_CONCURRENCY } from "./messengers";
 import type {
@@ -3665,7 +3666,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       agentClassName: this.constructor.name,
       agentId: this.ctx.id.toString(),
       exports: (this.ctx as unknown as { exports?: Record<string, unknown> })
-        .exports
+        .exports,
+      hookTimeoutMs: () => this.hookTimeout
     });
     await loadThinkExtensions(
       this.extensionManager,
@@ -4251,10 +4253,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   hookTimeout = 5000;
 
   /** Runs the extension hooks of each turn. */
-  readonly #extensionHooks = new ThinkExtensionHooks({
-    manager: () => this.extensionManager,
-    timeoutMs: () => this.hookTimeout
-  });
+  readonly #extensionHooks = new ThinkExtensionHooks(
+    () => this.extensionManager && coreOf(this.extensionManager)
+  );
 
   /**
    * Hand out an RPC stub to this agent's Workspace. `getWorkspace(stub)`

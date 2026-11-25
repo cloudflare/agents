@@ -110,12 +110,17 @@ export class ExtensionManager<M extends HookMap = ExtensionHooks> {
       context,
       loaded
         .filter(({ hooks }) => hooks.has(name))
-        .map(
-          ({ handle }) =>
-            (current: M[H][0]) =>
-              handle.hook(name, current)
+        .map(({ name: extension, handle }) =>
+          Object.assign((current: M[H][0]) => handle.hook(name, current), {
+            extension
+          })
         )
     );
+  }
+
+  /** Whether any loaded extension subscribes to hook `name`. */
+  async subscribed(name: keyof M & string): Promise<boolean> {
+    return (await this.#all()).some(({ hooks }) => hooks.has(name));
   }
 }
 

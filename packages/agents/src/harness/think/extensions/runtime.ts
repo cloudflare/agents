@@ -18,6 +18,7 @@ import type {
   ExtensionHookName,
   ExtensionHooks,
   ExtensionTool,
+  HookHandler,
   PromptDraft,
   PromptEntry,
   ThinkExtension,
@@ -133,7 +134,7 @@ class ExtensionRuntime implements ExtensionHandle {
   readonly #promptTransforms: Transform<PromptDraft>[] = [];
   readonly #hooks = new Map<
     ExtensionHookName,
-    ((context: unknown) => Promise<unknown>)[]
+    HookHandler<unknown, unknown>[]
   >();
   /**
    * The tools this extension set in its latest build for each session,
@@ -185,7 +186,11 @@ class ExtensionRuntime implements ExtensionHandle {
           // SAFETY: the list for `hook` holds only handlers of `hook`, and
           // each is called with a context of `hook`.
           const run = handler as (context: unknown) => unknown;
-          runners.push(async (context) => run(context));
+          runners.push(
+            Object.assign(async (context: unknown) => run(context), {
+              extension: this.#name
+            })
+          );
           this.#hooks.set(hook, runners);
         }
       });
@@ -373,7 +378,7 @@ class ExtensionRuntime implements ExtensionHandle {
   ): Promise<ExtensionHooks[H][1]> {
     const rule = harnessHookRules[name];
     // SAFETY: the handlers of hook `name` take and return its types.
-    const handlers = (this.#hooks.get(name) ?? []) as Parameters<
+    const handlers = (this.#hooks.get(name) ?? []) as unknown as Parameters<
       typeof rule
     >[1];
     return rule(context, handlers);

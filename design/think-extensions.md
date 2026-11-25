@@ -30,7 +30,7 @@ A transform is `(draft, build) => void | Promise<void>`, where `build` is `{ ses
 - the input schema as JSON Schema, the same object the AI SDK would send. It is converted once per tool object;
 - the name of the extension that set it (its owner), and flags for which functions the owner keeps: `execute`, input validation, `toModelOutput`, `needsApproval`.
 
-The harness turns each entry back into an AI SDK tool whose functions call the owner's handle. `execute` runs through an async generator that yields what the tool yields, when it yields it, so a streaming tool's preliminary outputs arrive as they did. A call whose signal is already aborted does not start, and a cancel reaches the call of that session only (call ids are unique only within one model reply). Validation runs the tool's own schema, so zod defaults and transforms apply as before. The AI SDK's `onInputStart`, `onInputDelta` and `onInputAvailable` callbacks are not called, and the runtime warns once per tool that has one.
+The harness turns each entry back into an AI SDK tool whose functions call the owner's handle. A tool whose `execute` is an async generator runs through an async generator that yields what the tool yields, when it yields it, so its preliminary outputs arrive as they did. Any other tool returns its one output, because the AI SDK streams whatever returns an async iterable. An output is captured when the tool yields it. A call whose signal is already aborted does not start, and a cancel reaches the call of that session only (call ids are unique only within one model reply). Validation runs the tool's own schema, so zod defaults and transforms apply as before. The AI SDK's `onInputStart`, `onInputDelta` and `onInputAvailable` callbacks are not called, and the runtime warns once per tool that has one.
 
 **The handle** is all the harness holds of an extension: `describe`, `build`, `execute`, `cancel`, `validate`, `modelOutput`, `needsApproval`, `hook`. Every argument and result is structured-clone data. The exception is `execute`'s `onOutput`, which is a function, and Workers RPC passes a function as a stub. The rule for anything added to it: if it cannot be the same in the harness's isolate and across Workers RPC, it is not in the API. The conformance test in `tests/extensions.test.ts` runs one extension directly and through a handle that clones every argument and result, and expects the same entries, outcomes and hook decisions.
 
@@ -46,6 +46,21 @@ The harness turns each entry back into an AI SDK tool whose functions call the o
 A handler that throws ends the dispatch with its error, which keeps each ThinkHarness option's contract (a throwing `beforeToolCall` ends the operation `unanswered`). The options' hooks are called as methods of the `hooks` object, as before.
 
 **ThinkHarness's own parts** are the first two extensions it loads, in process: `context` (the session context's `set_context` and `search_context`), then `options` (the `tools` and `system` options and the hooks above). Client tools are merged after the build, as before: they have no server function. `model`, `onChunk`, `toolApproval` and `beforeTurn` stay options the harness calls itself, because they hand over live objects: a model, every streamed chunk, a configuration that may hold a model.
+
+## Extensions Think loads from source
+
+`Think`'s released extensions (a manifest plus source that evaluates to `{ tools, hooks }`, run in a dynamic Worker through `extensionLoader`) are handles of the same core. Each loaded Worker is a `ReleasedWorkerHandle` (`packages/think/src/extensions/manager.ts`): its tools are fixed at load, offered as `<extension>_<tool>` and described as `[<extension>] <description>`, and run over the Worker's `execute` RPC. The public `ExtensionManager` keeps its methods. `getTools()` is the core's `toolsOf` over the loaded handles' entries, so there is one way to turn entries into tools.
+
+Their hooks are the released ones, a second hook map on the same manager until `Think` runs on ThinkHarness:
+
+| Hook                                                         | Sent                  | How they combine                                                                                                                                                                      |
+| ------------------------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `beforeTurn`                                                 | the turn snapshot     | a fold: each extension's serializable `TurnConfig` fields (last write wins; `headers` and `providerOptions` merged) go to the next, which sees the changed `system` and `activeTools` |
+| `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChunk` | that event's snapshot | observe                                                                                                                                                                               |
+
+Each call has the agent's `hookTimeout`. An extension that fails or passes it is logged and skipped. A snapshot is made only when some extension subscribes to the event. A tool of an unloaded extension answers with an error that says it is no longer available.
+
+A context block's `type` in the manifest is ignored with a warning, once per manager. An extension writes its blocks with `host.setContext()`, which its `context.write` permission governs.
 
 ## Guarantees
 

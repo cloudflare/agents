@@ -561,4 +561,4 @@ getExtensions() {
 }
 ```
 
-The context block is registered as `notes_scratchpad` (namespaced by extension name).
+The context block is registered as `notes_scratchpad` (namespaced by extension name). The extension writes it with `host.setContext()`, which needs the `context.write` permission. A block's `type` is ignored, with a warning.

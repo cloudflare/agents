@@ -119,8 +119,13 @@ export type HookMap = Readonly<Record<string, readonly [unknown, unknown]>>;
 export type HookRules<M extends HookMap> = {
   readonly [H in keyof M]: (
     context: M[H][0],
-    handlers: readonly ((context: M[H][0]) => Promise<M[H][1]>)[]
+    handlers: readonly HookHandler<M[H][0], M[H][1]>[]
   ) => Promise<M[H][1]>;
+};
+
+/** One extension's handlers of a hook, named after the extension. @internal */
+export type HookHandler<C, R> = ((context: C) => Promise<R>) & {
+  readonly extension: string;
 };
 
 /**
