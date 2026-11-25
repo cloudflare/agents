@@ -103,15 +103,14 @@ export interface StreamsSyncInternal {
   ): void;
   /** Replace a stream row's metadata, whatever its state. */
   setMetadata(streamId: string, metadata: Record<string, StreamJson>): void;
-  /** The read-fenced append: one chunk at the log tail, reader wakeup. */
-  append(streamId: string, chunk: StreamJson): number;
   /**
    * A buffered append of a chunk given as its JSON text and its UTF-8
    * size: the caller serialized and measured it once and checked its own
    * size limit (at most `ROW_VALUE_BYTES`, so it fits a row). It gets its seq now and waits in memory with the
-   * stream's earlier buffered chunks; all of them are written as one new
-   * block (one INSERT) once `maxChunks` or `maxBytes` is reached, on
-   * `flush()`, before a direct `append`, or when the stream settles (dropped
+   * stream's earlier buffered chunks; all of them are written in one row
+   * write (a new block, or the newest one with `fillBlocks`) once
+   * `maxChunks` or `maxBytes` is reached, on `flush()`, before a writer's
+   * `append` to the same stream, or when the stream settles (dropped
    * by a cutover that discards). A crash loses what is buffered: at most
    * `maxChunks - 1` chunks.
    */
@@ -591,7 +590,6 @@ export class Streams extends LifecycleCapability {
           WHERE stream_id = ${streamId}
         `;
       },
-      append: (streamId, chunk) => this.#append(streamId, chunk),
       appendJson: (streamId, json, bytes, batch) =>
         this.#appendBuffered(streamId, json, bytes, batch),
       flush: (streamId) => {
