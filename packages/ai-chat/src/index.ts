@@ -108,6 +108,7 @@ import {
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
+  storedAsFacet,
   type ChatRecoveryTaskReason,
   type StreamInterruptionOutcome
 } from "agents/chat";
@@ -960,7 +961,8 @@ export class AIChatAgent<
           () => {
             this._resumableStream = new ResumableStream(
               this.streams,
-              this.sql.bind(this)
+              this.sql.bind(this),
+              () => storedAsFacet(this.ctx.storage.kv)
             );
           }
         );

@@ -84,6 +84,7 @@ export {
   createChatStreams,
   type SqlTaggedTemplate
 } from "./resumable-stream";
+export { storedAsFacet } from "../dynamic-agents/facet-flag";
 export {
   createChatTurnTaskDefinition,
   currentTurnCheckpoint,

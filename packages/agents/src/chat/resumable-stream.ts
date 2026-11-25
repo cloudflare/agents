@@ -25,8 +25,9 @@
 import { nanoid } from "nanoid";
 import type { Connection } from "agents";
 import { Streams, type StreamsSyncInternal } from "../streams/streams";
-import type { StreamJson, StreamRow, StreamState } from "../streams/types";
+import type { StreamJson, StreamRow } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
+import { importLegacyChatStreams } from "./legacy-chat-streams";
 import {
   REPLAY_CHUNK_BYTES,
   REPLAY_ITEM_BYTES,
@@ -86,7 +87,7 @@ export function createChatStreams(): Streams {
  * a stream some other producer opened on the same Durable Object. The turn's
  * request id lives in the stream's indexed `tag`.
  */
-type ChatStreamMetadata = {
+export type ChatStreamMetadata = {
   cfChat: 1;
   /**
    * The assistant message id this stream is producing, captured when the
@@ -248,7 +249,12 @@ export class ResumableStream {
 
   private readonly ops: StreamsSyncInternal;
 
-  constructor(streams: Streams, sql: SqlTaggedTemplate) {
+  constructor(
+    streams: Streams,
+    sql: SqlTaggedTemplate,
+    /** Whether this is a facet, which empties the legacy chat tables. */
+    isFacet: () => boolean = () => false
+  ) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
     this._sql = sql;
@@ -268,7 +274,7 @@ export class ResumableStream {
         this._rememberDeleted(row, chat);
       })
     );
-    this._migrateLegacyTables(sql);
+    importLegacyChatStreams(sql, this.ops, isFacet);
     // Restore any active stream from a previous session
     this.restore();
   }
@@ -402,110 +408,6 @@ export class ResumableStream {
   private _deleteRetiring(rows: readonly StreamRow[]): void {
     if (rows.length === 0) return;
     this.ops.deleteMany(rows.map((row) => row.stream_id));
-  }
-
-  /**
-   * One-time migration of the pre-capability `cf_ai_chat_stream_*` tables
-   * into the Streams tables, preserving in-flight resumability across the
-   * upgrade (an active stream keeps its id, chunks, and last-activity), then
-   * dropping the legacy tables. Tolerates the pre-#1691/#1733 metadata
-   * schema (no `message_id` / `is_continuation` columns). The host `sql`
-   * handle touches only these chat-owned legacy tables.
-   */
-  private _migrateLegacyTables(sql: SqlTaggedTemplate): void {
-    const legacyTables = sql<{ name: string }>`
-      SELECT name FROM sqlite_master WHERE type = 'table'
-      AND name IN ('cf_ai_chat_stream_metadata', 'cf_ai_chat_stream_chunks')
-    `.map((row) => row.name);
-    if (legacyTables.length === 0) return;
-
-    if (legacyTables.includes("cf_ai_chat_stream_metadata")) {
-      const columns = sql<{ name: string }>`
-        SELECT name FROM pragma_table_info('cf_ai_chat_stream_metadata')
-      `.map((row) => row.name);
-      const hasMessageId = columns.includes("message_id");
-      const hasContinuation = columns.includes("is_continuation");
-      const hasChunks = legacyTables.includes("cf_ai_chat_stream_chunks");
-
-      const rows = sql<{
-        id: string;
-        request_id: string;
-        status: string;
-        created_at: number;
-        completed_at: number | null;
-        message_id?: string | null;
-        is_continuation?: number | null;
-      }>`SELECT * FROM cf_ai_chat_stream_metadata`;
-      for (const row of rows) {
-        const streamId = String(row.id);
-        if (this.ops.getStream(streamId)) continue;
-
-        const metadata: ChatStreamMetadata = { cfChat: 1 };
-        if (hasMessageId && row.message_id != null) {
-          metadata.messageId = String(row.message_id);
-        }
-        if (hasContinuation && row.is_continuation === 1) {
-          metadata.isContinuation = 1;
-        }
-
-        const chunkRows = hasChunks
-          ? sql<{ body: string; created_at: number }>`
-              SELECT body, created_at FROM cf_ai_chat_stream_chunks
-              WHERE stream_id = ${streamId} ORDER BY chunk_index ASC
-            `
-          : [];
-
-        const status = String(row.status);
-        const state: StreamState =
-          status === "error"
-            ? "errored"
-            : status === "completed"
-              ? "completed"
-              : "streaming";
-        const createdAt = Number(row.created_at);
-        const closedAt =
-          row.completed_at != null ? Number(row.completed_at) : null;
-        // Preserve last-activity semantics: the legacy sweep keyed off the
-        // newest chunk write, falling back to the stream's start time.
-        const lastChunkAt = chunkRows.reduce(
-          (max, chunk) => Math.max(max, Number(chunk.created_at)),
-          createdAt
-        );
-
-        // The row is imported complete: final chunk count and last-activity
-        // timestamp up front, because importChunk is a bare log INSERT that
-        // never touches the stream row. A terminal row must carry its exact
-        // cursor at rest (nothing stamps it later), and a live row's
-        // updated_at seeds the sweep's coarse cutoff until real appends
-        // resume.
-        this.ops.importStream({
-          streamId,
-          state,
-          tag: String(row.request_id),
-          metadata,
-          chunkCount: chunkRows.length,
-          createdAt,
-          updatedAt: closedAt ?? lastChunkAt,
-          closedAt
-        });
-        for (const chunk of chunkRows) {
-          const body = String(chunk.body);
-          // A legacy row body is either a packed JSON array of chunk bodies
-          // (imported verbatim as that array) or a single opaque body string.
-          let value: StreamJson = body;
-          try {
-            const parsed = JSON.parse(body) as StreamJson;
-            if (Array.isArray(parsed)) value = parsed;
-          } catch {
-            // Opaque body string.
-          }
-          this.ops.importChunk(streamId, value, Number(chunk.created_at));
-        }
-      }
-    }
-
-    sql`DROP TABLE IF EXISTS cf_ai_chat_stream_chunks`;
-    sql`DROP TABLE IF EXISTS cf_ai_chat_stream_metadata`;
   }
 
   // ── State accessors ────────────────────────────────────────────────

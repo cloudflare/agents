@@ -259,6 +259,7 @@ import {
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
+  storedAsFacet,
   type StreamInterruptionOutcome,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
@@ -1750,7 +1751,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         async () => {
           this._resumableStream = new ResumableStream(
             this.streams,
-            this.sql.bind(this)
+            this.sql.bind(this),
+            () => storedAsFacet(this.ctx.storage.kv)
           );
           this._requestContext.restore();
           this._setupProtocolHandlers();
