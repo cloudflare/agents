@@ -66,17 +66,24 @@ describe("applyChunks", () => {
     expect(asked.parts[0]).toMatchObject({ state: "input-available" });
   });
 
-  it("does not add a replayed tool call twice", () => {
-    const start = {
-      type: "tool-input-start" as const,
-      toolCallId: "c1",
-      toolName: "search"
-    };
+  it("does not add or reopen a replayed tool call", () => {
+    const call = { toolCallId: "c1", toolName: "search" };
     const message = applyChunks({ id: "m1", role: "assistant", parts: [] }, [
-      start,
-      start
+      { type: "tool-input-start", ...call },
+      { type: "tool-input-available", ...call, input: { q: "x" } },
+      { type: "tool-output-available", toolCallId: "c1", output: "found" },
+      // A provider replaying the earlier call in a continuation.
+      { type: "tool-input-start", ...call }
     ]);
-    expect(message.parts).toHaveLength(1);
+    expect(message.parts).toEqual([
+      {
+        type: "tool",
+        ...call,
+        state: "output-available",
+        input: { q: "x" },
+        output: "found"
+      }
+    ]);
   });
 
   it("clears preliminary when a final output arrives without it", () => {

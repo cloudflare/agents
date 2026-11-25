@@ -116,6 +116,65 @@ const rawToolInputText = new WeakMap<MessagePart, string>();
  */
 const provisionalInput = new WeakSet<MessagePart>();
 
+/**
+ * Text and reasoning parts still open, by `${type}:${chunk id}`, for each
+ * parts array. Deltas and ends go to the part their id opened, as the AI SDK
+ * routes them, so parts that overlap do not mix. A part opened before this
+ * array saw its start (a resumed stream) falls back to the last part of the
+ * type.
+ */
+const openTextParts = new WeakMap<MessagePart[], Map<string, MessagePart>>();
+
+function openTextPart(
+  parts: MessagePart[],
+  type: "text" | "reasoning",
+  id: unknown
+): MessagePart | undefined {
+  const byId =
+    typeof id === "string"
+      ? openTextParts.get(parts)?.get(`${type}:${id}`)
+      : undefined;
+  return byId ?? findLastPartByType(parts, type);
+}
+
+function startTextPart(
+  parts: MessagePart[],
+  type: "text" | "reasoning",
+  chunk: StreamChunkData
+): void {
+  const part = {
+    type,
+    text: "",
+    state: "streaming",
+    ...(chunk.providerMetadata != null
+      ? { providerMetadata: chunk.providerMetadata }
+      : {})
+  } as MessagePart;
+  parts.push(part);
+  if (typeof chunk.id !== "string") return;
+  let open = openTextParts.get(parts);
+  if (!open) {
+    open = new Map();
+    openTextParts.set(parts, open);
+  }
+  open.set(`${type}:${chunk.id}`, part);
+}
+
+function endTextPart(
+  parts: MessagePart[],
+  type: "text" | "reasoning",
+  chunk: StreamChunkData
+): void {
+  const part = openTextPart(parts, type, chunk.id);
+  if (typeof chunk.id === "string") {
+    openTextParts.get(parts)?.delete(`${type}:${chunk.id}`);
+  }
+  if (part && "state" in part) {
+    (part as { state: string }).state = "done";
+    mergeProviderMetadata(part, chunk.providerMetadata);
+  }
+}
+
 const APPROVAL_STATES = new Set(["approval-requested", "approval-responded"]);
 
 /**
@@ -257,19 +316,12 @@ export function applyChunkToParts(
     // chunk, then merged from deltas and the end (Anthropic signs a thinking
     // block on reasoning-end; OpenAI names a text item on text-start).
     case "text-start": {
-      parts.push({
-        type: "text",
-        text: "",
-        state: "streaming",
-        ...(chunk.providerMetadata != null
-          ? { providerMetadata: chunk.providerMetadata }
-          : {})
-      } as MessagePart);
+      startTextPart(parts, "text", chunk);
       return true;
     }
 
     case "text-delta": {
-      const lastTextPart = findLastPartByType(parts, "text");
+      const lastTextPart = openTextPart(parts, "text", chunk.id);
       if (lastTextPart && lastTextPart.type === "text") {
         (lastTextPart as { text: string }).text += chunk.delta ?? "";
         mergeProviderMetadata(lastTextPart, chunk.providerMetadata);
@@ -288,28 +340,17 @@ export function applyChunkToParts(
     }
 
     case "text-end": {
-      const lastTextPart = findLastPartByType(parts, "text");
-      if (lastTextPart && "state" in lastTextPart) {
-        (lastTextPart as { state: string }).state = "done";
-        mergeProviderMetadata(lastTextPart, chunk.providerMetadata);
-      }
+      endTextPart(parts, "text", chunk);
       return true;
     }
 
     case "reasoning-start": {
-      parts.push({
-        type: "reasoning",
-        text: "",
-        state: "streaming",
-        ...(chunk.providerMetadata != null
-          ? { providerMetadata: chunk.providerMetadata }
-          : {})
-      } as MessagePart);
+      startTextPart(parts, "reasoning", chunk);
       return true;
     }
 
     case "reasoning-delta": {
-      const lastReasoningPart = findLastPartByType(parts, "reasoning");
+      const lastReasoningPart = openTextPart(parts, "reasoning", chunk.id);
       if (lastReasoningPart && lastReasoningPart.type === "reasoning") {
         (lastReasoningPart as { text: string }).text += chunk.delta ?? "";
         mergeProviderMetadata(lastReasoningPart, chunk.providerMetadata);
@@ -328,11 +369,7 @@ export function applyChunkToParts(
     }
 
     case "reasoning-end": {
-      const lastReasoningPart = findLastPartByType(parts, "reasoning");
-      if (lastReasoningPart && "state" in lastReasoningPart) {
-        (lastReasoningPart as { state: string }).state = "done";
-        mergeProviderMetadata(lastReasoningPart, chunk.providerMetadata);
-      }
+      endTextPart(parts, "reasoning", chunk);
       return true;
     }
 
@@ -340,7 +377,13 @@ export function applyChunkToParts(
       parts.push({
         type: "file",
         mediaType: chunk.mediaType,
-        url: chunk.url
+        url: chunk.url,
+        ...(typeof chunk.filename === "string"
+          ? { filename: chunk.filename }
+          : {}),
+        ...(chunk.providerMetadata != null
+          ? { providerMetadata: chunk.providerMetadata }
+          : {})
       } as MessagePart);
       return true;
     }
