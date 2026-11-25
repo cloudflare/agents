@@ -68,6 +68,10 @@ A manifest's `network` hosts are enforced by `HostBridgeLoopback`, the binding t
 
 A context block's `type` in the manifest is ignored with a warning, once per manager. An extension writes its blocks with `host.setContext()`, which its `context.write` permission governs.
 
+## The harness-backed Think shell
+
+The shell (`think/src/harness/think.ts`) takes Think's extension members as Think does: `extensionLoader`, `getExtensions()` and `extensionManager`. At start, with a loader, it creates the same released `ExtensionManager`, loads `getExtensions()` and restores what was loaded at run time (its `ext:<name>` rows, as on Think). It also registers each extension's context blocks. The manager's tools join ThinkHarness as one shipped extension, `sandboxed`, after the subclass's own tools. Its released hooks run from the shell's hook options: `beforeTurn` after the subclass's, then the three observers and `onChunk`. `_cfHostBridge` serves `HostBridgeLoopback` over the same host API as Think.
+
 ## Guarantees
 
 The core stores nothing: it adds no row, key or job. One thing is durable, and it predates the core. `Think`'s public `ExtensionManager`, when given `storage`, keeps each extension loaded at run time as `ext:<name>` (manifest and source) in the object's storage, deletes it on `unload`, and `restore()` loads them again after a restart. Moving these records into the manager as a capability comes with run-time loading on ThinkHarness.
