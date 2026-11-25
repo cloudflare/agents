@@ -9486,7 +9486,12 @@ export class ThinkProgrammaticTestAgent extends Think {
     const turn = this.chat(text, new TestCollectingCallback());
     const deadline = Date.now() + 5000;
     while (!gate.entered) {
-      if (Date.now() > deadline) throw new Error("active turn never started");
+      if (Date.now() > deadline) {
+        // Disarm, so a turn that arrives late does not park for good.
+        if (this._turnGate === gate) this._turnGate = null;
+        gate.open();
+        throw new Error("active turn never started");
+      }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     return {
@@ -10074,11 +10079,11 @@ export class ThinkProgrammaticTestAgent extends Think {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
+    // Never hand back a state the caller did not wait for.
     const submission = await this.inspectSubmission(submissionId);
-    if (!submission) {
-      throw new Error(`Submission ${submissionId} was not found`);
-    }
-    return submission;
+    throw new Error(
+      `Submission ${submissionId} is ${submission?.status ?? "missing"}; the awaited state never came`
+    );
   }
 
   async cancelQueuedRunningSubmissionBeforeSlotForTest(options?: {
@@ -10117,6 +10122,8 @@ export class ThinkProgrammaticTestAgent extends Think {
         }
       );
 
+      // The cancel must land on a submission that is running and waiting
+      // for its slot; the wait throws if it never gets there.
       await this._waitForSubmissionForTest(
         submissionId,
         (submission) => submission.status === "running"
