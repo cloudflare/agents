@@ -6,7 +6,8 @@ import { MessageType } from "../types";
 import {
   connectChatWS,
   isUseChatResponseMessage,
-  waitForChatClearBroadcast
+  waitForChatClearBroadcast,
+  waitUntilHandled
 } from "./test-utils";
 
 function connectSlowStream(room: string) {
@@ -82,24 +83,6 @@ const firstUserMessage: ChatMessage = {
   role: "user",
   parts: [{ type: "text", text: "Hello" }]
 };
-
-/**
- * Wait until the agent has handled `count` socket messages of `type`: the
- * socket and the RPCs that follow are separate channels.
- */
-async function waitUntilHandled(
-  agent: { handledMessageCountForTest(type: string): Promise<number> },
-  type: string,
-  count: number
-) {
-  const deadline = Date.now() + 5000;
-  while ((await agent.handledMessageCountForTest(type)) < count) {
-    if (Date.now() > deadline) {
-      throw new Error(`${type} was not handled ${count} time(s)`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
 
 describe("AIChatAgent chat turn serialization", () => {
   it("queues a second websocket request behind the active turn", async () => {

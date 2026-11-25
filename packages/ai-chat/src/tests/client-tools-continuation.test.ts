@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, it, expect, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitUntilHandled } from "./test-utils";
 import { getAgentByName } from "agents";
 
 function collectMessages(ws: WebSocket): Array<Record<string, unknown>> {
@@ -30,24 +30,6 @@ async function waitForMessage(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   return undefined;
-}
-
-/**
- * Wait until the agent has handled `count` socket messages of `type`: the
- * socket and the RPCs that follow are separate channels.
- */
-async function waitUntilHandled(
-  agent: { handledMessageCountForTest(type: string): Promise<number> },
-  type: string,
-  count: number
-) {
-  const deadline = Date.now() + 5000;
-  while ((await agent.handledMessageCountForTest(type)) < count) {
-    if (Date.now() > deadline) {
-      throw new Error(`${type} was not handled ${count} time(s)`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
 }
 
 describe("Client tools continuation", () => {

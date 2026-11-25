@@ -3,7 +3,7 @@ import type { UIMessage as ChatMessage } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitUntilHandled } from "./test-utils";
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -32,24 +32,6 @@ const firstUserMessage: ChatMessage = {
   role: "user",
   parts: [{ type: "text", text: "Hello" }]
 };
-
-/**
- * Wait until the agent has handled `count` socket messages of `type`: the
- * socket and the RPCs that follow are separate channels.
- */
-async function waitUntilHandled(
-  agent: { handledMessageCountForTest(type: string): Promise<number> },
-  type: string,
-  count: number
-) {
-  const deadline = Date.now() + 5000;
-  while ((await agent.handledMessageCountForTest(type)) < count) {
-    if (Date.now() > deadline) {
-      throw new Error(`${type} was not handled ${count} time(s)`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
 
 describe("AIChatAgent pending interaction helpers", () => {
   it("detects pending tool interactions on the latest assistant message", async () => {
