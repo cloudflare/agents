@@ -296,17 +296,22 @@ describe("Tasks lane arrival policies", () => {
         async () => (await instance.tasks.get("a"))?.status === "completed"
       );
       // c replaces b; settling b moves the lane on to c, which its caller's
-      // local starts here.
-      await instance.tasks.run("__cf_reported" as never, undefined as never, {
-        runId: "c",
-        lane: "l",
-        policy: "latest",
-        local: "C"
-      });
+      // local would start here. Hold c's `pending` report: c must not start
+      // while that callback runs.
+      const held = gate();
+      instance.pendingReportGate = held.promise;
+      const accepted = instance.tasks.run(
+        "__cf_reported" as never,
+        undefined as never,
+        { runId: "c", lane: "l", policy: "latest", local: "C" }
+      );
+      await until(() => instance.pendingReportsHeld.includes("c"));
+      expect(instance.reportedStarts).not.toContain("c");
+      instance.pendingReportGate = null;
+      held.open();
+      await accepted;
       await until(() => instance.reports.includes("c:completed"));
-      const own = instance.reports.filter((entry) => entry.startsWith("c:"));
-      expect(own.indexOf("c:pending")).toBeLessThan(own.indexOf("c:running"));
-      expect(own[0]).toBe("c:pending");
+      expect(instance.reportedStarts).toContain("c");
     });
   });
 
