@@ -1277,16 +1277,19 @@ describe("PiHarness's root session", () => {
     await abortAllDurableObjects();
     stub = fresh(name);
     // pi reopens and resumes with nothing to do, so no wake is left once
-    // the wake its startup pushed has run.
+    // the wake its startup pushed has run. Run its alarm rather than wait for
+    // the runtime to fire it.
     expect(await stub.instance()).not.toBe(before);
     expect(await stub.rootExists()).toBe(false);
     let jobs = await stub.wakeJobs();
-    for (let i = 0; i < 100 && jobs.length > 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let i = 0; i < 5 && jobs.length > 0; i++) {
+      await runArmedAlarm(stub);
       jobs = await stub.wakeJobs();
     }
     expect(jobs).toEqual([]);
-    expect(await stub.alarmTime()).toBeNull();
+    // The alarm that ran the wake clears its fallback alarm after the job
+    // rows are gone.
+    expect(await alarmCleared(stub)).toBe(true);
 
     expect(await stub.seedRoot()).toMatchObject({ created: true });
     expect((await stub.prompt("hello")).messages).toEqual([

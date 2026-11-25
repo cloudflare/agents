@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@earendil-works/pi-agent-core>@earendil-works/pi-ai': ~1.6.0
+  '@earendil-works/pi-agent-core>@earendil-works/pi-ai': ~1.6.1
 
 patchedDependencies:
   '@chonkiejs/chunk@0.9.3': 3a49e38f3640c0c74dbbc562d6bb7f765d90a90a94692ffb78d1d490b6b6f196
@@ -1994,20 +1994,20 @@ importers:
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.6.7)
       '@earendil-works/chord':
-        specifier: ~1.6.0
-        version: 1.6.0(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)
+        specifier: ~1.6.1
+        version: 1.6.1(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)
       '@earendil-works/pi-ai':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-durable':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.8)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.8)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-schema':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       '@earendil-works/pi-telemetry':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       agents:
         specifier: '*'
         version: link:../../../packages/agents
@@ -2278,20 +2278,20 @@ importers:
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.6.7)
       '@earendil-works/chord':
-        specifier: ~1.6.0
-        version: 1.6.0(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)
+        specifier: ~1.6.1
+        version: 1.6.1(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)
       '@earendil-works/pi-ai':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-durable':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.8)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.8)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-schema':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       '@earendil-works/pi-telemetry':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -2568,14 +2568,14 @@ importers:
         specifier: ^4.0.0
         version: 4.0.2
       '@earendil-works/pi-agent-core':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-ai':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-schema':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       agents:
         specifier: '*'
         version: link:../../../packages/agents
@@ -2746,20 +2746,20 @@ importers:
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.6.7)
       '@earendil-works/chord':
-        specifier: ~1.6.0
-        version: 1.6.0(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)
+        specifier: ~1.6.1
+        version: 1.6.1(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)
       '@earendil-works/pi-ai':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-durable':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.8)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.8)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-schema':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       '@earendil-works/pi-telemetry':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -4607,11 +4607,11 @@ importers:
   experimental/pi-recovery:
     dependencies:
       '@earendil-works/pi-agent-core':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-ai':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -4832,23 +4832,23 @@ importers:
         specifier: workspace:*
         version: link:../codemode
       '@earendil-works/chord':
-        specifier: ~1.6.0
-        version: 1.6.0(esbuild@0.28.1)(react@19.2.7)(ws@8.21.3)
+        specifier: ~1.6.1
+        version: 1.6.1(esbuild@0.28.1)(react@19.2.7)(ws@8.21.3)
       '@earendil-works/pi-ai':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-codemode':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       '@earendil-works/pi-durable':
-        specifier: ~1.6.0
-        version: 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.1)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.7)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+        specifier: ~1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.1)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.7)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       '@earendil-works/pi-schema':
-        specifier: ~1.6.0
-        version: 1.6.0
+        specifier: ~1.6.1
+        version: 1.6.1
       '@earendil-works/pi-tui':
-        specifier: 1.6.0
-        version: 1.6.0
+        specifier: 1.6.1
+        version: 1.6.1
       '@modelcontextprotocol/client':
         specifier: 2.4.0
         version: 2.4.0
@@ -5651,6 +5651,10 @@ packages:
     resolution: {integrity: sha512-L+Z85anONJd8MaiuraO4wRxATCdEejBZ3K3eymzWI5JPXa9sOS9CkIm72PBKqXKX+Z9p9NGMX5AIMXm0LEflgw==}
     engines: {node: '>=20.0.0'}
 
+  '@aws-sdk/credential-provider-node@3.972.82':
+    resolution: {integrity: sha512-znDkEOGXB8W3kG1LJUKP3foBZY/9qLM0eil/DxWXSp37XsdsRLQHE/d/OaCGGVgKpA6znR38h/+INk8do1FjiA==}
+    engines: {node: '>=20.0.0'}
+
   '@aws-sdk/credential-provider-node@3.972.84':
     resolution: {integrity: sha512-oHt854odINVwzwsh+c5x69j0ajm4DbqqqVJ+O1ECsCIZeMDAbzFpXItaqP7UZstJj/ATdTk/KFSH0LaNAgV+kA==}
     engines: {node: '>=20.0.0'}
@@ -6408,8 +6412,8 @@ packages:
     peerDependencies:
       react: '>=16.8.0'
 
-  '@earendil-works/chord@1.6.0':
-    resolution: {integrity: sha512-8dQXEKUR6qQPc4zNEblmv6hEfr2JAAU+nUprt+mhtdfRRZzl1At5ZhnJqTqesElAdR7RpAyaRIAilyteNHzyWA==}
+  '@earendil-works/chord@1.6.1':
+    resolution: {integrity: sha512-uoMFLrKMAOnfHhGdOuJgKyYsfn160djhs+sYJbW5zQ0qgVbkFQXaUEs8YdFcaTpYsASoL5AvIGvRVC2TUD7gXw==}
     engines: {node: '>=22.19.0'}
     peerDependencies:
       esbuild: ^0.28.2
@@ -6423,33 +6427,33 @@ packages:
       ws:
         optional: true
 
-  '@earendil-works/pi-agent-core@1.6.0':
-    resolution: {integrity: sha512-IU/x+2XtE4KIdIkEndZssdLPbIUR38Btj+Q7vjIIXIK7GSamLtDH5jOw/dzBWAvWFAgZ2dslF5sPc6GcGOnS+w==}
+  '@earendil-works/pi-agent-core@1.6.1':
+    resolution: {integrity: sha512-1pkZKTaO1sSY0xVw/W45ULLQRg0rOOt6oJdeTG06upAeIq1UGHA0o+MR9UN6efPi7yW48uVinlFId7fwQilxvg==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-ai@1.6.0':
-    resolution: {integrity: sha512-9hL+eygFDEiFp//cydeUfmFsKmEqpmvsNPb10Y1W8+m5K9O+sx1hMStfu6nukrBD5sl6mP4RykCYBBNEgsVLfw==}
+  '@earendil-works/pi-ai@1.6.1':
+    resolution: {integrity: sha512-EyorgVyA2s4MxNl7YOapzOpdxrc8HUgxHEIOo8QRMK35P7PCOsSiWzMLf6ixKl3/obkg7I3wGJWHq+FdbUz43g==}
     engines: {node: '>=22.19.0'}
     hasBin: true
 
-  '@earendil-works/pi-codemode@1.6.0':
-    resolution: {integrity: sha512-GAgAy7iJCVbeiuqq2dTIuNj3aXTMUeTF8Nu8LZs72e8ueGGDU5L3/D8VxzTHALIpQ1/q8u1tfmB3iYS2Nopchw==}
+  '@earendil-works/pi-codemode@1.6.1':
+    resolution: {integrity: sha512-xogcFe38Ek/9cabCz6sP52FjUKtuNDwLmqeM1aQiwOF5rg7jZ//FRpnMeYyhvRyod2UYhhf/ojfg6rRdXi0peQ==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-durable@1.6.0':
-    resolution: {integrity: sha512-nyPjInj/7ZjLEUCDMS7oNGRj1ynftOCVqXilWRBhIuT/xoRHrPy5yFNle/64hvs3F1rukMZ7Ar/4reA7auvUWQ==}
+  '@earendil-works/pi-durable@1.6.1':
+    resolution: {integrity: sha512-hhKQg7FDsp25+pvIodqYZEEYTqKA/lBvHYJqHwwqb/zIc0hHq45HK6hQ7BnMHIyjsI7ev9P8qLCQlwxiFblm8A==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-schema@1.6.0':
-    resolution: {integrity: sha512-jD0VRCUcFzWQ5zN82pOuoHNN42/3pu4E5krtpiKknvPq4g2m+fuO38lj+xnZhuVpYcd2G0qlmr8lE6ZMzkad7Q==}
+  '@earendil-works/pi-schema@1.6.1':
+    resolution: {integrity: sha512-Q/6W4IiDdIQUochCuvXFpglTByNTFTuMYvMqXjcRiOnxOl/3mQYLAZpZTpBSRWiS4WgeV7NyH/8dQp6ipYZeNg==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-telemetry@1.6.0':
-    resolution: {integrity: sha512-MNL0TvtpgoSfX7mBLSVgzxTW6yvT8VLEpHvbWnZsIp92FtqVvx+4q9DxWZdX8KvcQqBs0GseAgVnLdVFinjN9Q==}
+  '@earendil-works/pi-telemetry@1.6.1':
+    resolution: {integrity: sha512-3gyjVQlVrPwEq7ZCea8++prMwUkuNXM3v/mzTJ9knJAhqrYLxSVAjYzA1iC3KLq8ismmSQIcnFp++qTwQwNToA==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-tui@1.6.0':
-    resolution: {integrity: sha512-nVtWZ4rYr3KHDla3skGAWG5XoITEUJCoEx1AsWv1yKxV7+v86ulD2hxVn/P+COI6jsoeQmj3orqHbCHZwAUsUg==}
+  '@earendil-works/pi-tui@1.6.1':
+    resolution: {integrity: sha512-6WQPbhuoQKCIiu5Jp4S/cFdeqdm4SbAXlgCytsY/4ycR1sqHY4nB8xPTfGUucn61hVnN7hkOzI1CWNmE8UDQ3A==}
     engines: {node: '>=22.19.0'}
 
   '@effect/opentelemetry@4.0.0-rc.112':
@@ -6977,9 +6981,9 @@ packages:
       '@modelcontextprotocol/sdk':
         optional: true
 
-  '@google/genai@2.32.0':
-    resolution: {integrity: sha512-60c79uXpR0a47bmGqDxbXEBuQUalNmwo5mx5kqb91jIW4FoqpsLSt86DeVhRhtH5+s/16Wqxt3sXzFQn2U1OHQ==}
-    engines: {node: '>=20.0.0'}
+  '@google/genai@3.6.1':
+    resolution: {integrity: sha512-DQIkZkl+VoZc+RUSaJ41vRuywjQDpP0t/oUf5/ddQhNW6JsPjVULW2EgHmuJ1mrr6ACtrmUdPlqtNXF1yfKySg==}
+    engines: {node: '>=22.0.0'}
     peerDependencies:
       '@modelcontextprotocol/sdk': ^1.25.2
     peerDependenciesMeta:
@@ -13330,6 +13334,10 @@ packages:
     resolution: {integrity: sha512-RJJPTTpvFfHcWLkIa2JFWK4XvtSzS0yEWDmunqHXli1h3JlkbcQZXDZdcWxv+JK3Xsl5/UFDPZ0iGm7DAengYw==}
     engines: {node: '>=12.0.0'}
 
+  protobufjs@7.6.6:
+    resolution: {integrity: sha512-dYDWdjSl5RNb7SgPxGQcRU+GtvP7s2fpkrY0r432PcOIaZ0/rBcxEZnQN67iJhFuQiVw754JDoPruPCNdGsbjg==}
+    engines: {node: '>=12.0.0'}
+
   proxy-addr@2.0.7:
     resolution: {integrity: sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==}
     engines: {node: '>= 0.10'}
@@ -15553,6 +15561,20 @@ snapshots:
       '@smithy/types': 4.19.0
       tslib: 2.8.1
 
+  '@aws-sdk/credential-provider-node@3.972.82':
+    dependencies:
+      '@aws-sdk/credential-provider-env': 3.972.72
+      '@aws-sdk/credential-provider-http': 3.972.74
+      '@aws-sdk/credential-provider-ini': 3.973.17
+      '@aws-sdk/credential-provider-process': 3.972.72
+      '@aws-sdk/credential-provider-sso': 3.973.16
+      '@aws-sdk/credential-provider-web-identity': 3.972.78
+      '@aws-sdk/types': 3.974.6
+      '@smithy/core': 3.35.0
+      '@smithy/credential-provider-imds': 4.5.2
+      '@smithy/types': 4.19.0
+      tslib: 2.8.1
+
   '@aws-sdk/credential-provider-node@3.972.84':
     dependencies:
       '@aws-sdk/credential-provider-env': 3.972.72
@@ -16767,30 +16789,29 @@ snapshots:
       react: 19.2.7
       tslib: 2.8.1
 
-  '@earendil-works/chord@1.6.0(esbuild@0.28.1)(react@19.2.7)(ws@8.21.3)':
+  '@earendil-works/chord@1.6.1(esbuild@0.28.1)(react@19.2.7)(ws@8.21.3)':
     dependencies:
-      '@earendil-works/pi-schema': 1.6.0
-      '@earendil-works/pi-telemetry': 1.6.0
+      '@earendil-works/pi-schema': 1.6.1
+      '@earendil-works/pi-telemetry': 1.6.1
     optionalDependencies:
       esbuild: 0.28.1
       react: 19.2.7
       ws: 8.21.3
 
-  '@earendil-works/chord@1.6.0(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)':
+  '@earendil-works/chord@1.6.1(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)':
     dependencies:
-      '@earendil-works/pi-schema': 1.6.0
-      '@earendil-works/pi-telemetry': 1.6.0
+      '@earendil-works/pi-schema': 1.6.1
+      '@earendil-works/pi-telemetry': 1.6.1
     optionalDependencies:
       esbuild: 0.28.2
       react: 19.2.8
       ws: 8.21.3
 
-  '@earendil-works/pi-agent-core@1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)':
+  '@earendil-works/pi-agent-core@1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)':
     dependencies:
-      '@earendil-works/pi-ai': 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
-      '@earendil-works/pi-schema': 1.6.0
+      '@earendil-works/pi-ai': 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+      '@earendil-works/pi-schema': 1.6.1
     transitivePeerDependencies:
-      - '@aws-sdk/credential-provider-node'
       - '@modelcontextprotocol/sdk'
       - '@smithy/hash-node'
       - '@smithy/signature-v4'
@@ -16803,20 +16824,20 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-ai@1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)':
+  '@earendil-works/pi-ai@1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)':
     dependencies:
       '@anthropic-ai/sdk': 0.129.0(zod@4.6.7)
       '@aws-sdk/client-bedrock-runtime': 3.1127.0
-      '@earendil-works/pi-schema': 1.6.0
-      '@earendil-works/pi-telemetry': 1.6.0
-      '@google/genai': 2.32.0(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(supports-color@10.2.2)
+      '@aws-sdk/credential-provider-node': 3.972.82
+      '@earendil-works/pi-schema': 1.6.1
+      '@earendil-works/pi-telemetry': 1.6.1
+      '@google/genai': 3.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(supports-color@10.2.2)
       '@smithy/node-http-handler': 4.12.1
       http-proxy-agent: 9.1.0(supports-color@10.2.2)
       https-proxy-agent: 9.1.0(supports-color@10.2.2)
-      openai: 7.59.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+      openai: 7.59.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
       partial-json: 0.1.7
     transitivePeerDependencies:
-      - '@aws-sdk/credential-provider-node'
       - '@modelcontextprotocol/sdk'
       - '@smithy/hash-node'
       - '@smithy/signature-v4'
@@ -16829,21 +16850,20 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-codemode@1.6.0':
+  '@earendil-works/pi-codemode@1.6.1':
     dependencies:
       quickjs-wasi: 3.6.2
 
-  '@earendil-works/pi-durable@1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.1)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.7)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)':
+  '@earendil-works/pi-durable@1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.1)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.7)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)':
     dependencies:
-      '@earendil-works/chord': 1.6.0(esbuild@0.28.1)(react@19.2.7)(ws@8.21.3)
-      '@earendil-works/pi-ai': 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
-      '@earendil-works/pi-codemode': 1.6.0
-      '@earendil-works/pi-schema': 1.6.0
-      '@earendil-works/pi-telemetry': 1.6.0
+      '@earendil-works/chord': 1.6.1(esbuild@0.28.1)(react@19.2.7)(ws@8.21.3)
+      '@earendil-works/pi-ai': 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+      '@earendil-works/pi-codemode': 1.6.1
+      '@earendil-works/pi-schema': 1.6.1
+      '@earendil-works/pi-telemetry': 1.6.1
       '@silvia-odwyer/photon': 0.3.3
       diff: 8.0.4
     transitivePeerDependencies:
-      - '@aws-sdk/credential-provider-node'
       - '@modelcontextprotocol/sdk'
       - '@smithy/hash-node'
       - '@smithy/signature-v4'
@@ -16858,17 +16878,16 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-durable@1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.8)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)':
+  '@earendil-works/pi-durable@1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(google-auth-library@10.7.0(supports-color@10.2.2))(react@19.2.8)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)':
     dependencies:
-      '@earendil-works/chord': 1.6.0(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)
-      '@earendil-works/pi-ai': 1.6.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
-      '@earendil-works/pi-codemode': 1.6.0
-      '@earendil-works/pi-schema': 1.6.0
-      '@earendil-works/pi-telemetry': 1.6.0
+      '@earendil-works/chord': 1.6.1(esbuild@0.28.2)(react@19.2.8)(ws@8.21.3)
+      '@earendil-works/pi-ai': 1.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
+      '@earendil-works/pi-codemode': 1.6.1
+      '@earendil-works/pi-schema': 1.6.1
+      '@earendil-works/pi-telemetry': 1.6.1
       '@silvia-odwyer/photon': 0.3.3
       diff: 8.0.4
     transitivePeerDependencies:
-      - '@aws-sdk/credential-provider-node'
       - '@modelcontextprotocol/sdk'
       - '@smithy/hash-node'
       - '@smithy/signature-v4'
@@ -16883,11 +16902,11 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-schema@1.6.0': {}
+  '@earendil-works/pi-schema@1.6.1': {}
 
-  '@earendil-works/pi-telemetry@1.6.0': {}
+  '@earendil-works/pi-telemetry@1.6.1': {}
 
-  '@earendil-works/pi-tui@1.6.0':
+  '@earendil-works/pi-tui@1.6.1':
     dependencies:
       get-east-asian-width: 1.6.0
       marked: 18.0.11
@@ -17312,11 +17331,11 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@google/genai@2.32.0(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(supports-color@10.2.2)':
+  '@google/genai@3.6.1(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(supports-color@10.2.2)':
     dependencies:
       google-auth-library: 10.7.0(supports-color@10.2.2)
       p-retry: 4.6.2
-      protobufjs: 7.6.4
+      protobufjs: 7.6.6
       ws: 8.21.3
     optionalDependencies:
       '@modelcontextprotocol/sdk': 1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7)
@@ -24993,9 +25012,9 @@ snapshots:
       ws: 8.21.3
       zod: 4.6.7
 
-  openai@7.59.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(undici@8.12.3)(ws@8.21.3)(zod@4.6.7):
+  openai@7.59.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.4)(google-auth-library@10.7.0(supports-color@10.2.2))(undici@8.12.3)(ws@8.21.3)(zod@4.6.7):
     optionalDependencies:
-      '@aws-sdk/credential-provider-node': 3.972.84
+      '@aws-sdk/credential-provider-node': 3.972.82
       '@smithy/signature-v4': 5.7.4
       google-auth-library: 10.7.0(supports-color@10.2.2)
       undici: 8.12.3
@@ -25361,6 +25380,21 @@ snapshots:
   property-information@7.2.0: {}
 
   protobufjs@7.6.4:
+    dependencies:
+      '@protobufjs/aspromise': 1.1.2
+      '@protobufjs/base64': 1.1.2
+      '@protobufjs/codegen': 2.0.5
+      '@protobufjs/eventemitter': 1.1.1
+      '@protobufjs/fetch': 1.1.1
+      '@protobufjs/float': 1.0.2
+      '@protobufjs/path': 1.1.2
+      '@protobufjs/pool': 1.1.0
+      '@protobufjs/utf8': 1.1.1
+      '@types/node': 26.4.0
+      long: 5.3.2
+    optional: true
+
+  protobufjs@7.6.6:
     dependencies:
       '@protobufjs/aspromise': 1.1.2
       '@protobufjs/base64': 1.1.2

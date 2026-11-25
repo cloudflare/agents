@@ -420,6 +420,9 @@ function catalogIdOf(model: Model<Api>): string | undefined {
  * unknown catalog model) become a `CloudflareAIError`, so fallback and retry
  * behave as they do on the Workers AI run path; a vendor's own error response
  * on the provider-native path is left for the wire's parser to read.
+ *
+ * `onResponse` sees every response, failures included, before any of them
+ * throws: pi-ai's `onResponse` reports error responses too.
  */
 export async function sendGateway(
   request: WireRequest,
@@ -427,7 +430,7 @@ export async function sendGateway(
   body: Record<string, unknown>,
   vendorHeaders: Record<string, string>,
   format: RunRequestFormat,
-  onResponse?: (response: Response) => void
+  onResponse?: (response: Response) => void | Promise<void>
 ): Promise<Response> {
   const { model, options, resolved } = request;
   const catalogId = catalogIdOf(model);
@@ -443,7 +446,7 @@ export async function sendGateway(
       model: catalogId,
       signal: options.signal
     });
-    onResponse?.(response);
+    await reportResponse(response, onResponse);
     if (!response.ok) {
       throw await errorFromResponse(response, {
         model: catalogId,
@@ -465,12 +468,30 @@ export async function sendGateway(
   });
   // The correlation ids are on the raw response, and a gateway envelope is
   // about to throw, so the caller sees them either way.
-  onResponse?.(response);
+  await reportResponse(response, onResponse);
   return await liftGatewayError(response, {
     model: wireModelId(model),
     requestBodyValues: body,
     url: transport.url
   });
+}
+
+/**
+ * Hands `response` to `onResponse`. If the callback throws, the wire never
+ * gets the response, so its body is cancelled here before the error goes on.
+ */
+async function reportResponse(
+  response: Response,
+  onResponse: ((response: Response) => void | Promise<void>) | undefined
+): Promise<void> {
+  try {
+    await onResponse?.(response);
+  } catch (error) {
+    if (response.body !== null && !response.body.locked) {
+      await response.body.cancel().catch(() => {});
+    }
+    throw error;
+  }
 }
 
 /**

@@ -35,7 +35,8 @@ import {
   startMessage,
   withIdleDeadline,
   ignoredWorkersAIKnobs,
-  recordWarnings
+  recordWarnings,
+  responseInfo
 } from "./shared";
 import type { WireRequest } from "../settings";
 
@@ -139,6 +140,10 @@ export function streamAnthropic(
       requestBodyValues: body,
       url: transport.url
     };
+    // pi-ai reports each response the SDK sees, error responses included. A
+    // gateway failure throws here instead, so the SDK never sees it: that one
+    // is reported below.
+    let raw: Response | undefined;
     try {
       const response = await sendGateway(
         request,
@@ -146,8 +151,9 @@ export function streamAnthropic(
         body,
         anthropicVendorHeaders(betas ? betas.split(",") : []),
         "messages",
-        (raw) => {
-          correlation = correlationDetails(request, raw, transport);
+        (received) => {
+          raw = received;
+          correlation = correlationDetails(request, received, transport);
         }
       );
       if (!response.ok) {
@@ -163,6 +169,9 @@ export function streamAnthropic(
       );
     } catch (error) {
       transportError = error;
+      if (raw !== undefined) {
+        await options.onResponse?.(responseInfo(raw), model);
+      }
       throw error;
     }
   };

@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.34.1
+
+### Patch Changes
+
+- [#3171](https://github.com/cloudflare/agents/pull/3171) [`9448cd8`](https://github.com/cloudflare/agents/commit/9448cd82e974a16015a66dac8f820a42474c4672) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Support Pi 1.6.1 (`~1.6.1`). Pi tools now park with `{ kind: "sleep", signals, until }` instead of `{ sleep: { ... } }`, and a signal's state is `{ kind: "value", value }` or `{ kind: "expired" }`; a tool that still returns the old shape compiles but ends with an empty result, so update parking tools when you upgrade. `agents/models/pi-ai` now matches pi-ai 1.6.1: a chat-completions stream that ends with `finish_reason: "error"` fails with an error the Pi harness retries under its retry settings, `rawStopReason` records the provider's reason (with OpenRouter's `native_finish_reason`), an OpenRouter `stop` with no output and a failing native reason is a retryable error, and `onResponse` sees every response, failures included. The `agents/models` SSE decoder reads large streamed events in linear time. See [pi-durable 1.6.1's changelog](https://github.com/earendil-works/pi/blob/v1.6.1/packages/durable/CHANGELOG.md#161---2026-11-25) and [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/#tools-that-wait).
+
 ## 0.34.0
 
 This release adds support for [Pi 1.6](https://github.com/earendil-works/pi/blob/v1.6.0/packages/durable/CHANGELOG.md#160---2026-11-20), which lets a Pi tool wait for a person, a deadline or another session without keeping the agent awake, and lets a Pi session start from an existing history. MCP clients now say when a user needs to authorize again, and failed requests no longer send error details to the client.
