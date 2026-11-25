@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { seedTaskRun, type TaskHarnessObject } from "../capabilities/tasks";
 
 function gate(): { promise: Promise<void>; open: () => void } {
@@ -138,6 +138,46 @@ describe("Tasks lanes", () => {
             .length === 0
       );
       expect(dropped).toBe(1);
+    });
+  });
+
+  it("moves the lane on when a dropped local throws", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      const first = gate();
+      instance.lanedGates.set("a", first.promise);
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const lane = { lane: "l" } as const;
+      await instance.tasks.run(
+        "laned",
+        { label: "a" },
+        { ...lane, local: "A" }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        {
+          ...lane,
+          runId: "b",
+          local: {
+            dropped: () => {
+              throw new Error("dropped threw");
+            }
+          }
+        }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "c" },
+        { ...lane, local: "C" }
+      );
+      await until(() => instance.lanedStarted.length === 1);
+      await instance.tasks.cancel("b");
+      first.open();
+      await until(() => instance.lanedStarted.length === 2);
+      expect(instance.lanedStarted).toEqual(["a", "c"]);
+      error.mockRestore();
     });
   });
 

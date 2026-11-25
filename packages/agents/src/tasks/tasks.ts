@@ -2045,21 +2045,30 @@ export class Tasks<
   }
 
   /**
-   * Whether a run may start now: a run outside a lane always may; a lane
-   * run only when it is its lane's head and the lane is not held.
-   */
-  /**
    * Forget a run's `local` that no attempt took (the run ended first), and
-   * tell it: a `local` with a `dropped` function is called.
+   * tell it: a `local` with a `dropped` function is called. What it throws
+   * is logged: the settle that called it still reports and moves the lane on.
    */
   #dropLocal(runId: string): void {
     const local = this.#locals.get(runId);
     if (local === undefined) return;
     this.#locals.delete(runId);
     const dropped = (local as { dropped?: unknown }).dropped;
-    if (typeof dropped === "function") dropped.call(local);
+    if (typeof dropped !== "function") return;
+    try {
+      dropped.call(local);
+    } catch (error) {
+      console.error(
+        `[tasks] run "${runId}": its local's dropped() threw:`,
+        error
+      );
+    }
   }
 
+  /**
+   * Whether a run may start now: a run outside a lane always may; a lane
+   * run only when it is its lane's head and the lane is not held.
+   */
   #laneAllows(row: TaskRunRow | undefined): boolean {
     if (row?.lane == null) return true;
     if (this.#heldLanes.has(row.lane)) return false;
@@ -2107,7 +2116,14 @@ export class Tasks<
     if (!this.#locals.has(head.run_id)) {
       await this.#syncWake(head.run_id);
     } else {
-      void this.#executeRun(head.run_id).catch(() => {});
+      // An attempt that did not claim it, or threw first, leaves its wake to
+      // the queue, as a head with no `local` gets.
+      const runId = head.run_id;
+      const claimed = () => (this.#store.getRun(runId)?.attempt ?? 1) > 0;
+      void this.#executeRun(runId)
+        .catch(() => {})
+        .then(() => (claimed() ? undefined : this.#syncWake(runId)))
+        .catch(() => {});
     }
   }
 
