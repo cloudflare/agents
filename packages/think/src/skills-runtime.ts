@@ -83,6 +83,11 @@ export class ThinkSkills {
     }
   }
 
+  /** Whether a catalog loaded: skills are on. */
+  get loaded(): boolean {
+    return this.#catalog !== null;
+  }
+
   /** The catalog's prompt block text. */
   prompt(): string {
     return this.#catalog?.prompt() ?? "No skills are available.";

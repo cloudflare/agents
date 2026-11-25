@@ -25,6 +25,11 @@ describe("Think skills", () => {
     await a.writeSkill("map-reading", "How to read a map.");
     const first = await a.turn("hello");
     expect(first.system).toContain("- map-reading: How to read a map.");
+    // The agent keeps Think's default getSystemPrompt(): with the catalog
+    // block there, the default text stays out.
+    expect(first.system).not.toContain(
+      JSON.stringify(await a.defaultSystemPrompt()).slice(1, -1)
+    );
 
     await a.writeSkill("knots", "How to tie knots.");
     const second = await a.turn("again");

@@ -43,6 +43,8 @@ import { Workspace } from "@cloudflare/computer";
 import { workspaceExtension } from "./extensions/workspace";
 import { fetchExtension } from "./extensions/fetch";
 import { skillsExtension } from "./extensions/skills";
+import { ThinkSkills } from "../skills-runtime";
+import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
@@ -75,6 +77,9 @@ import type {
   TurnContext,
   TurnInputMessages
 } from "../think";
+
+const { snapshot: snapshotDeclaredMembers, isOverridden: isMethodOverridden } =
+  declaredOverrides(() => Think.prototype);
 
 function toInput(
   input: Exclude<TurnInputMessages, (current: UIMessage[]) => unknown>
@@ -162,9 +167,12 @@ export class Think<
   #messages: UIMessage[] = [];
   #context: Context | undefined;
   #handle: Session | undefined;
+  /** Skills from `getSkills()`, loaded in onStart as Think loads them. */
+  readonly #skills = new ThinkSkills();
   #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
 
   constructor(ctx: AgentContext, env: Env) {
+    snapshotDeclaredMembers(new.target.prototype);
     super(ctx, env);
     const self = this;
     this.harness = new ThinkHarness({
@@ -204,9 +212,8 @@ export class Think<
         {
           name: "skills",
           after: true,
-          extension: skillsExtension(
-            () => this.getSkills(),
-            () => this.getSkillScriptRunner()
+          extension: skillsExtension(this.#skills, () =>
+            this.getSkillScriptRunner()
           )
         },
         {
@@ -229,11 +236,12 @@ export class Think<
         id === this.harness.session().id ? this.#context : undefined,
       model: async () => this.resolveModel(await this.getModel()),
       // As in Think: an overridden getSystemPrompt() stays above the
-      // context blocks; the default is only the fallback for no blocks.
+      // context blocks; the default is only the fallback for no blocks,
+      // the skill catalog's included.
       system: () =>
-        this.getSystemPrompt !== Think.prototype.getSystemPrompt ||
-        !this.#context ||
-        this.#context.getBlocks().length === 0
+        isMethodOverridden(this, "getSystemPrompt") ||
+        ((!this.#context || this.#context.getBlocks().length === 0) &&
+          !this.#skills.loaded)
           ? this.getSystemPrompt()
           : undefined,
       tools: () => this.getTools(),
@@ -314,6 +322,7 @@ export class Think<
         sql: this
       });
       await this.#context.load();
+      await this.#skills.start(() => this.getSkills());
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
         if (event.type === "reset") this.#messages = [];

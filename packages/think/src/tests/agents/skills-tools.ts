@@ -73,6 +73,11 @@ export class ThinkSkillsToolsTestAgent extends Think {
     return [skills.workspace(this.workspace)];
   }
 
+  /** Think's default getSystemPrompt(), which this agent keeps. */
+  async defaultSystemPrompt(): Promise<string> {
+    return this.getSystemPrompt();
+  }
+
   async writeSkill(name: string, description: string): Promise<void> {
     await this.workspace.fs.mkdir(`/workspace/.agents/skills/${name}`, {
       recursive: true
