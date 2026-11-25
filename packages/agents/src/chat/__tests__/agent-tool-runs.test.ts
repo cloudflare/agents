@@ -1,3 +1,5 @@
+import { allChunks } from "../../agent-tool-chunks";
+import { REPLAY_PAGE_BYTES } from "../../internal/platform-limits";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it, expect } from "vitest";
 import {
@@ -126,6 +128,8 @@ function setup() {
   const broadcasts: Array<{ requestId: string; body: string }> = [];
   const incidents = new Map<string, Incident>();
   const stored = new Map<string, string[]>();
+  /** How many stored chunks reads have pulled. */
+  const pulled = { count: 0 };
   const streamOf = new Map<string, string>();
   let reply = false;
   let activeRequestId: string | null = null;
@@ -148,12 +152,13 @@ function setup() {
       const id = streamOf.get(requestId);
       return id ? { id } : null;
     },
-    getStreamChunks: (streamId) => {
+    *storedChunks(streamId) {
       if (typeof streamId !== "string") throw new Error("no stream id");
-      return (stored.get(streamId) ?? []).map((body, chunk_index) => ({
-        body,
-        chunk_index
-      }));
+      const bodies = stored.get(streamId) ?? [];
+      for (let chunk_index = 0; chunk_index < bodies.length; chunk_index++) {
+        pulled.count++;
+        yield { body: bodies[chunk_index], chunk_index };
+      }
     },
     get activeRequestId() {
       return activeStream;
@@ -250,6 +255,7 @@ function setup() {
       activeStream = requestId;
     },
     /** Give `requestId` a stream holding `bodies`. */
+    pulled,
     storeChunks: (requestId: string, bodies: string[]) => {
       const streamId = `stream-${requestId}`;
       streamOf.set(requestId, streamId);
@@ -819,6 +825,38 @@ describe("AgentToolRuns", () => {
     ]);
   });
 
+  it("answers stored chunks in pages of at most REPLAY_PAGE_BYTES, and allChunks reads them all", async () => {
+    const { runs, storeChunks, pulled } = setup();
+    const turn = heldTurn();
+    await runs.start("run-1", START, turn.run);
+    runs.bindTurn("run-1", "req-1");
+    // Twelve 1.8 MB bodies: 21.6 MB, over one RPC reply's 32 MiB budget
+    // half, so one call answers only the first ones.
+    const bodies = Array.from({ length: 12 }, (_, i) =>
+      String.fromCharCode(97 + i).repeat(1_800_000)
+    );
+    storeChunks("req-1", bodies);
+    const first = runs.chunks("run-1");
+    expect(first.length).toBeGreaterThan(0);
+    expect(first.length).toBeLessThan(12);
+    expect(
+      first.reduce((sum, chunk) => sum + chunk.body.length, 0)
+    ).toBeLessThanOrEqual(REPLAY_PAGE_BYTES);
+    // The page stops reading once it is full: it pulls one chunk past it.
+    expect(pulled.count).toBe(first.length + 1);
+    const all: number[] = [];
+    await allChunks(
+      (afterSequence) =>
+        runs.chunks(
+          "run-1",
+          afterSequence === undefined ? undefined : { afterSequence }
+        ),
+      undefined,
+      (chunk) => all.push(chunk.sequence)
+    );
+    expect(all).toEqual(Array.from({ length: 12 }, (_, i) => i));
+  });
+
   describe("tail", () => {
     const decoder = new TextDecoder();
     async function readAll(stream: ReadableStream<Uint8Array>) {
@@ -869,12 +907,16 @@ describe("AgentToolRuns", () => {
       storeChunks("req-1", ["a"]);
       runs.liveSequences.set("run-1", 1);
 
+      let storedDuringRead = false;
       const reading = readAll(
         runs.tail("run-1", undefined, {
           chunks: async (runId, options) => {
-            // Stored and broadcast while the backlog is being read.
-            storeChunks("req-1", ["a", "b"]);
-            runs.intercept(frame("req-1", "b"));
+            // Stored and broadcast while the backlog's first page is read.
+            if (!storedDuringRead) {
+              storedDuringRead = true;
+              storeChunks("req-1", ["a", "b"]);
+              runs.intercept(frame("req-1", "b"));
+            }
             return runs.chunks(runId, options);
           }
         })

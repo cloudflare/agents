@@ -99,9 +99,9 @@ Deleting a message splices its children to its parent. Removing a message in the
 
 ### Row budget
 
-Sessions stores messages. One SQLite row holds up to 1.9 MB of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
+Sessions stores messages. One SQLite row holds up to 7.9 MB of serialized JSON, which is more than the overwhelming majority of messages need: they occupy exactly one row, and cost exactly one billed row write.
 
-A message that does not fit is split across continuation rows and reassembled on read. Nothing is truncated, nothing is summarized, and no message is too large to store — a 5 MB message is one message row plus three continuation rows, and reads back byte for byte. There is no error to catch and nothing to configure.
+A message that does not fit is split across continuation rows and reassembled on read. Nothing is truncated, nothing is summarized, and no message is too large to store — a 20 MB message is one message row plus two continuation rows, and reads back byte for byte. There is no error to catch and nothing to configure.
 
 Slices are cut on UTF-8 **byte** boundaries, never in the middle of a surrogate pair, so a message full of emoji or CJK text round-trips exactly like an ASCII one.
 
@@ -161,7 +161,7 @@ recent.totalContentBytes;
 
 The read walks back from the newest message and stops before the message that would pass the budget; the newest message is always returned. `truncated` is `true` when older messages were left out. `totalContentBytes` is the size of everything a full read would return; when `truncated`, it can be just the stored size of the part the read measured. Pass `{ leafId }` to read another branch.
 
-The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 1.9 MB its first slice occupies. That is what makes the budget a bound on isolate memory.
+The budget counts what hydration actually costs. Each row is charged its full stored size — the message row plus every continuation row it was split across — so a 12 MB message is charged 12 MB, not the 7.9 MB its first slice occupies. That is what makes the budget a bound on isolate memory.
 
 `getHistory()` materializes the selected path and exists for consumers that require an array:
 
@@ -281,7 +281,7 @@ The common path pays nothing for it. A window of messages with no continuations 
 
 ### What it costs
 
-Splitting is not a way to shrink the database. Continuation rows live in the same Durable Object as the message they belong to, inside the same 10 GB. Billing counts rows written, not bytes, so a 500 KB message costs the same one billed row as a tiny one, and a 2 MB message costs two.
+Splitting is not a way to shrink the database. Continuation rows live in the same Durable Object as the message they belong to, inside the same 10 GB. Billing counts rows written, not bytes, so a 500 KB message costs the same one billed row as a tiny one, and a 10 MB message costs two.
 
 `SessionRowStat.bytes` and the `totalContentBytes` returned by `getRecentHistory()` report the whole message — row plus continuations — so a byte budget passed to `getRecentHistory()` bounds the memory a hydration will actually take.
 
@@ -318,7 +318,7 @@ That budget is a hard ceiling with no message-count floor beneath it. `getRecent
 const results = await session.search("deployment failed");
 ```
 
-The index is built by the first `search()` call on an object, with a one-time SQL-only backfill of the messages already stored, and maintained on every write from then on. An object that never searches never pays for an index: maintaining one costs an extra billed row on every append, so it exists only where something actually reads it.
+The index holds the first 1.9 MB of each message's text. A search returns its hits in rank order up to `limit`, and stops early once their text passes 16 MiB, so a reply always fits in memory and in one RPC reply. The index is built by the first `search()` call on an object, with a one-time backfill of the messages already stored (in SQL, except a message whose text passes 1.9 MB or that is split across rows, which is read one at a time), and maintained on every write from then on. An object that never searches never pays for an index: maintaining one costs an extra billed row on every append, so it exists only where something actually reads it.
 
 Search indexes text parts only. File contents, reasoning, and tool payloads are not indexed automatically.
 

@@ -1428,14 +1428,9 @@ tool name and input as well as the call ID. The older
 `resolveToolMergeId()` helper is deprecated because its conversation-wide
 lookup can match the wrong turn when call IDs repeat.
 
-### Row Size Protection
+### Large messages
 
-SQLite rows have a maximum size of 2 MB. When a message approaches this limit (for example, a tool returning a very large output), `AIChatAgent` automatically compacts the message:
-
-1. **Tool output compaction** — Large tool outputs are replaced with an LLM-friendly summary that instructs the model to suggest re-running the tool
-2. **Text truncation** — If the message is still too large after tool compaction, text parts are truncated with a note
-
-Compacted messages include `metadata.compactedToolOutputs` so clients can detect and display this gracefully.
+`AIChatAgent` stores messages through [Sessions](./sessions.md#row-budget). A message larger than one SQLite row (7.9 MB of serialized JSON) is split across rows and read back byte for byte, so a large tool output is kept whole. A single streamed chunk over 1.8 MB still reaches connected clients live but is left out of stream replay, so a client that reconnects mid-stream gets the finished message instead of that chunk.
 
 ### `sanitizeMessageForPersistence`
 

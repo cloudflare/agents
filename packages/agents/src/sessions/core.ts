@@ -14,6 +14,10 @@
 import { createHash } from "node:crypto";
 import { extractAttachments, resolveAttachments } from "./attachment-ingest";
 import { AttachmentStore } from "./attachment-store";
+import {
+  REPLAY_ITEM_BYTES,
+  REPLAY_PAGE_BYTES
+} from "../internal/platform-limits";
 import { splitContent } from "./chunking";
 import { COMPACTION_PREFIX } from "./compaction-helpers";
 import type { SessionsIo } from "./io";
@@ -283,9 +287,10 @@ function contentDigest(json: string): string {
 }
 
 /**
- * The text a message contributes to the search index. The index holds it in
- * one row, so only the first row budget is searchable; the rest would not
- * fit (`SQLITE_TOOBIG`). A cut inside a word is moved back to before the
+ * The text a message contributes to the search index: its first
+ * `REPLAY_ITEM_BYTES` (1.9 MB). A search returns up to 20 hits with their
+ * indexed text, which must fit in memory and in one reply, so the index does
+ * not follow the row size. A cut inside a word is moved back to before the
  * last separator, so no fragment is indexed as if it were a word. A word is
  * what the index's `unicode61` tokenizer keeps together: letters, digits,
  * combining marks and private-use characters, read by code point.
@@ -295,7 +300,7 @@ function searchableText(message: SessionMessage): string {
     .filter((part) => part.type === "text")
     .map((part) => part.text ?? "")
     .join(" ");
-  const first = splitContent(text)[0] ?? "";
+  const first = splitContent(text, REPLAY_ITEM_BYTES)[0] ?? "";
   const next = text.codePointAt(first.length);
   if (next === undefined || !SEARCH_WORD.test(String.fromCodePoint(next))) {
     return first;
@@ -539,7 +544,7 @@ export class SessionsCore {
           ).length > 0;
         // An index from an earlier release, or a backfill cut short: some
         // split messages may already be indexed (appends since), so check.
-        if (!marked) this.#backfillSplitMessages(true);
+        if (!marked) this.#backfillInJs();
         this.#ftsBackfilled = true;
       }
       return;
@@ -551,28 +556,33 @@ export class SessionsCore {
     );
     this.#fts = true;
     this.#backfillMissingFtsRows();
-    this.#backfillSplitMessages(false);
+    this.#backfillInJs();
     this.#ftsBackfilled = true;
   }
 
   /**
-   * Index the messages stored across continuation rows. Their first slice
-   * is not valid JSON on its own, so the SQL backfill skips them; each is
-   * indexed from its reassembled JSON (attachments are not loaded: the
-   * index holds text), one message in memory at a time. On a new index
-   * none of them is there yet; on an older one, `check` skips those already
-   * indexed. The marker row goes in last, so a backfill cut short is
-   * finished by a later search.
+   * Index the messages the SQL backfill leaves out: those stored across
+   * continuation rows (their first slice is not valid JSON on its own) and
+   * those whose text passes `REPLAY_ITEM_BYTES` (only a row that long can
+   * hold one), which `searchableText` cuts. Each is indexed from its JSON
+   * (attachments are not loaded: the index holds text), one message in
+   * memory at a time, unless the index already holds it. With `mark`, the
+   * marker row goes in last, so a backfill cut short is finished by a later
+   * search.
    */
-  #backfillSplitMessages(check: boolean): void {
+  #backfillInJs(mark = true): void {
+    // `octet_length` reads a text's size without loading it (measured:
+    // 2 ms against 247 ms for `length(CAST(... AS BLOB))` over 300 reads of
+    // 7 MB rows), so this scan does not load message bodies.
     const split = this.io.sql<{ session_id: string; id: string }>(
-      `SELECT session_id, id FROM ${this.#t.messages} WHERE content_chunks > 0`,
-      []
+      `SELECT session_id, id FROM ${this.#t.messages}
+       WHERE content_chunks > 0 OR octet_length(content) > ?`,
+      [REPLAY_ITEM_BYTES]
     );
-    // Which split messages an older index already holds: one scan of the
-    // index for all of them (its id columns are not indexed).
+    // Which of them the index already holds: one scan of the index for all
+    // of them (its id columns are not indexed).
     const indexed = new Set<string>();
-    if (check && split.length > 0) {
+    if (split.length > 0) {
       for (const row of this.io.sql<{ session_id: string; id: string }>(
         `SELECT session_id, id FROM ${this.#t.fts}
          WHERE id IN (SELECT value FROM json_each(?))`,
@@ -587,6 +597,7 @@ export class SessionsCore {
       const message = json === null ? null : this.#parse(json);
       if (message) this.#indexFts(sessionId, message, false);
     }
+    if (!mark) return;
     this.io.sqlWrite(
       `INSERT INTO ${this.#t.fts} (rowid, id, session_id, role, content)
        VALUES (?, '', ?, '', '')`,
@@ -594,7 +605,11 @@ export class SessionsCore {
     );
   }
 
-  /** Index rows that predate indexing, in SQL, without loading JSON into JS. */
+  /**
+   * Index rows that predate indexing, in SQL, without loading JSON into
+   * JS, when a message's text fits the index's `REPLAY_ITEM_BYTES`. A longer
+   * text is left to {@link backfillInJs}, which cuts it as live indexing does.
+   */
   #backfillMissingFtsRows(): void {
     this.io.sqlWrite(
       `INSERT INTO ${this.#t.fts} (id, session_id, role, content)
@@ -611,8 +626,9 @@ export class SessionsCore {
            SELECT 1 FROM ${this.#t.fts} AS existing
            WHERE existing.id = m.id AND existing.session_id = m.session_id
          )
-       GROUP BY m.id, m.session_id, m.role`,
-      []
+       GROUP BY m.id, m.session_id, m.role
+       HAVING length(CAST(group_concat(json_extract(part.value, '$.text'), ' ') AS BLOB)) <= ?`,
+      [REPLAY_ITEM_BYTES]
     );
   }
 
@@ -815,7 +831,10 @@ export class SessionsCore {
          FROM assistant_messages`,
         []
       );
-      if (this.#fts) this.#backfillMissingFtsRows();
+      if (this.#fts) {
+        this.#backfillMissingFtsRows();
+        this.#backfillInJs(false);
+      }
       dropWhenCopied("assistant_messages", `${this.#t.messages}`, "content");
     }
     if (this.#tableExists("assistant_compactions")) {
@@ -2782,15 +2801,32 @@ export class SessionsCore {
     // Quote the query as a literal phrase, escaping embedded double quotes,
     // so user input cannot inject FTS5 syntax.
     const sanitized = `"${query.replace(/"/g, '""')}"`;
+    // Hits come back in rank order until their text passes
+    // REPLAY_PAGE_BYTES (the first hit always does): a search reply must fit
+    // in memory and in one RPC reply or WebSocket message.
+    // The count limit applies first, so the byte total reads no more
+    // bodies than `limit`.
     return this.io
       .sql<{ id: string; role: string; content: string }>(
-        `SELECT f.id, f.role, f.content FROM ${this.#t.fts} f
-         INNER JOIN ${this.#t.messages} m
-           ON m.session_id = f.session_id AND m.id = f.id
-         WHERE ${this.#t.fts} MATCH ? AND f.session_id = ?
-           AND NOT ${hiddenOverlayRowSql(this.#t, "f.id", "f.session_id")}
-         ORDER BY rank LIMIT ?`,
-        [sanitized, sessionId, limit]
+        `SELECT id, role, content FROM (
+           SELECT id, role, content,
+             ROW_NUMBER() OVER (ORDER BY r) AS n,
+             SUM(length(CAST(content AS BLOB))) OVER (
+               ORDER BY r ROWS UNBOUNDED PRECEDING
+             ) AS total
+           FROM (
+             SELECT f.id, f.role, f.content, f.rank AS r
+             FROM ${this.#t.fts} f
+             INNER JOIN ${this.#t.messages} m
+               ON m.session_id = f.session_id AND m.id = f.id
+             WHERE ${this.#t.fts} MATCH ? AND f.session_id = ?
+               AND NOT ${hiddenOverlayRowSql(this.#t, "f.id", "f.session_id")}
+             ORDER BY f.rank LIMIT ?
+           )
+         )
+         WHERE n = 1 OR total <= ?
+         ORDER BY n`,
+        [sanitized, sessionId, limit, REPLAY_PAGE_BYTES]
       )
       .map((row) => ({ id: row.id, role: row.role, content: row.content }));
   }

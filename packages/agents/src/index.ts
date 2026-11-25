@@ -224,6 +224,7 @@ export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
 } from "./agent-tool-types";
+import { allChunks } from "./agent-tool-chunks";
 import {
   AGENT_TOOL_MILESTONE_PART,
   AGENT_TOOL_PROGRESS_PART,
@@ -3766,7 +3767,7 @@ export class Agent<
           );
           sequence = cursor.next;
         } else {
-          const chunks = await adapter.getAgentToolChunks(runId);
+          const chunks = await this._readAgentToolChunks(adapter, runId);
           sequence = this._broadcastAgentToolChunks(
             options.parentToolCallId,
             runId,
@@ -5662,7 +5663,7 @@ export class Agent<
         // clients that already saw the stored chunks don't dedupe new ones away.
         let storedCount = 0;
         try {
-          const existing = await adapter.getAgentToolChunks(row.run_id);
+          const existing = await this._readAgentToolChunks(adapter, row.run_id);
           const last = existing[existing.length - 1];
           if (last) afterSequence = last.sequence;
           storedCount = existing.length;
@@ -6149,9 +6150,31 @@ export class Agent<
     timeoutMs?: number
   ): Promise<AgentToolStoredChunk[] | undefined> {
     return this._settleWithinRecoveryTimeout(
-      adapter.getAgentToolChunks(runId),
+      this._readAgentToolChunks(adapter, runId),
       timeoutMs
     );
+  }
+
+  /**
+   * Every stored chunk of a child's run. `getAgentToolChunks` answers one
+   * page per call (at most `REPLAY_PAGE_BYTES`, as an RPC reply must stay
+   * under 32 MiB), so this reads page after page.
+   */
+  private async _readAgentToolChunks(
+    adapter: AgentToolChildAdapter,
+    runId: string
+  ): Promise<AgentToolStoredChunk[]> {
+    const chunks: AgentToolStoredChunk[] = [];
+    await allChunks(
+      (afterSequence) =>
+        adapter.getAgentToolChunks(
+          runId,
+          afterSequence === undefined ? undefined : { afterSequence }
+        ),
+      undefined,
+      (chunk) => chunks.push(chunk)
+    );
+    return chunks;
   }
 
   /** Resolve to `undefined` when `promise` rejects or outlasts `timeoutMs`. */

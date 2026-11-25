@@ -7,7 +7,8 @@ This guide shows how to add agents to an existing Cloudflare Workers project. If
 ## Prerequisites
 
 - An existing Cloudflare Workers project with `wrangler.jsonc`
-- Node.js 18+
+- Node.js 22+ (wrangler 4.145.0 requires it)
+- For local development and tests: `wrangler` 4.145.0 or later and, if you test with Vitest, `@cloudflare/vitest-plugin` 1.9.1 or later. Agents store up to 8 MB in one SQLite row, as production allows. Older local runtimes, including every `@cloudflare/vitest-pool-workers` release, store about 2.2 MB per row and fail larger writes with `SQLITE_TOOBIG`.
 
 ---
 

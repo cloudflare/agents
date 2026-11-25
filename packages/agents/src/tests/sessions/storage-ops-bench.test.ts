@@ -157,11 +157,13 @@ describe("Sessions storage-ops benchmark", () => {
   it("bills one extra row per payload chunk, and never splits the message", async () => {
     const stub = env.SessionBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionBenchObject) => {
-      // 2 MiB of payload spans the 1.5 MiB window twice, so it costs five
+      // A payload just over the row budget spans two chunks, so it costs five
       // rows: the message, two payload chunks, metadata, and one reference.
       // The message row itself never chunks — the bytes left before it was
       // measured.
-      const append = await instance.benchPayloadAppend(2 * 1024 * 1024);
+      const append = await instance.benchPayloadAppend(
+        MAX_INLINE_ROW_BYTES + 1_000_000
+      );
 
       expect(append.rowsWritten).toBe(5);
       expect(instance.continuationRowCount("bench-payload")).toBe(0);

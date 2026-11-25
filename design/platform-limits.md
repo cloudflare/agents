@@ -1,6 +1,6 @@
 # Platform limits
 
-`packages/agents/src/internal/platform-limits.ts` holds the SQLite row budget and the budgets derived from it. Streams, event logs, chat message compaction and chunk storage, held-message pieces, and the chat and harness stream segments take their row ceiling from it. Sessions chunking, the harness store and Tasks still restate the 2 MB figure and are moving to it one area at a time. The module is internal. It is not exported to apps and has no docs page.
+`packages/agents/src/internal/platform-limits.ts` holds the SQLite row budget and the budgets derived from it. Streams, event logs, chat message compaction and chunk storage, held-message pieces, Sessions chunks and attachments, and the chat and harness stream segments take their row ceiling from it. Tasks sets its run-row caps (inline input 500,000 units, framework metadata 1.9 MB) together, because one run row holds several of them. The harness store splits at its own 256 K units. The module is internal. It is not exported to apps and has no docs page.
 
 ## How it works
 
@@ -27,9 +27,11 @@ Past the row cap SQLite throws `string or blob too big: SQLITE_TOOBIG`. Inside `
 
 A runtime cannot read a row larger than its own cap. A 5 MB value written by workerd 1.20261012 and read by 1.20260722 from the same storage fails with TOOBIG, even for `SELECT length(v)`.
 
+**Row size is not item size.** The floor sets how much fits in one row. What the SDK keeps to replay later (a stream chunk, an event, a chat chunk body, the indexed text of a search hit) is capped by `REPLAY_ITEM_BYTES`, 1.9 MB, which did not move with the floor. Replays, search results and `getAgentToolChunks` send many items at once, and each WebSocket message or RPC reply holds 32 MiB at most (production drops a larger outbound message without an error). So those readers also page by bytes: at most `REPLAY_PAGE_BYTES` (16 MiB) per frame, reply or search result, as well as by count.
+
 ## Key decisions
 
-**The budget is the lowest cap, not production's.** `wrangler dev` and the vitest pool run the workerd the developer installed, and older releases cap rows at 2.2 MB. Data written above that cap would be unreadable after a wrangler downgrade with persisted local state, or in a test pool on an older release. So `SQLITE_ROW_BYTES` is 2,000,000 today. That is below every runtime measured, even though production allows 8 MiB.
+**The budget is the lowest cap of the runtimes the SDK supports.** `wrangler dev` and the Vitest pool run the workerd the developer installed. A row above a runtime's cap cannot be read by that runtime. `SQLITE_ROW_BYTES` is 8,000,000: production, wrangler 4.145.0 and later, and `@cloudflare/vitest-plugin` 1.9.1 and later all hold 8,388,637 bytes, which leaves 388,637 bytes for a row's other columns. Until 24 Nov 2026 it was 2,000,000, because the Vitest pool then (`@cloudflare/vitest-pool-workers`) held 2.2 MB. Local runtimes older than workerd 1.20260930 are not supported. On them, a large write fails with `SQLITE_TOOBIG`, and `SqlError` says to upgrade.
 
 **Raising it is one edit, once every runtime the SDK runs on holds 8 MiB.** The condition: the Vitest pool and the `wrangler` this repo installs both ship workerd 1.20260930 or later. Both do now. Wrangler ^4.145.0 ships 1.20260930.2. The pool is `@cloudflare/vitest-plugin` 1.9.1, which ships 1.20261123.1, measured at 8,388,637 bytes. It replaced the deprecated `@cloudflare/vitest-pool-workers`, whose last release (0.23.0) ships 1.20260815.1, measured at 2,199,995 bytes. A floor above the pool's cap would make our tests, and every app's tests, fail with `SQLITE_TOOBIG` on rows production accepts.
 
@@ -47,4 +49,4 @@ A runtime cannot read a row larger than its own cap. A 5 MB value written by wor
 
 ## Tradeoffs
 
-A value between 2 MB and 8 MiB takes several rows where production could store it in one. Raising the floor would not remove the splitting code. Values over 8 MiB, such as files and long transcripts, still need the admissions, Sessions and Tasks splitters and the chat message compaction.
+The splitters stay. Values over 8 MB, such as files and long transcripts, still need them. One row read can now bring up to 8 MB into memory, against 2 MB before, out of an isolate's 128 MB. Readers that page by row (Sessions history in 4 MiB batches, Streams replay one block at a time) hold one such row at a time. Local runtimes older than workerd 1.20260930 cannot read rows this code writes.

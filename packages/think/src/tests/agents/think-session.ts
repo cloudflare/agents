@@ -66,7 +66,8 @@ import {
   recentChatTerminal,
   toolApprovalUpdate,
   toolResultUpdate,
-  type ChatProtocolHost
+  type ChatProtocolHost,
+  REPLAY_CHUNK_BYTES
 } from "agents/chat";
 import type {
   ChatTurns,
@@ -1573,7 +1574,7 @@ export class ThinkTestAgent extends Think {
     };
     const delta = (value: string) =>
       JSON.stringify({ type: "text-delta", id: "t", delta: value });
-    const oversized = delta("x".repeat(1_900_000));
+    const oversized = delta("x".repeat(REPLAY_CHUNK_BYTES + 100_000));
 
     send(delta("a"));
     send(delta("b"));

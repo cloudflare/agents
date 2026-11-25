@@ -424,6 +424,12 @@ export type AgentToolChildAdapter<Input = unknown, Output = unknown> = {
       reconcile?: boolean;
     }
   ): Promise<AgentToolRunInspection<Output> | null>;
+  /**
+   * The run's stored chunks after `afterSequence`, in order, one page per
+   * call: at most 16 MiB of chunk bodies (always at least one chunk), so the
+   * reply fits in one RPC call. To read them all, call again with the last
+   * sequence returned until a call returns none.
+   */
   getAgentToolChunks(
     runId: string,
     options?: { afterSequence?: number }

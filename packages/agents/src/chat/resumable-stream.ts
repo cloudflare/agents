@@ -28,7 +28,10 @@ import { Streams, type StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow, StreamState } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
 import { storedChunkBytes } from "./chunk-size";
-import { ROW_MAX_BYTES, ROW_VALUE_BYTES } from "../internal/platform-limits";
+import {
+  REPLAY_CHUNK_BYTES,
+  REPLAY_ITEM_BYTES
+} from "../internal/platform-limits";
 import type { ChatTurnOutcome } from "./wire-types";
 
 /** Number of chunks to pack into a single stored segment before flushing */
@@ -37,7 +40,7 @@ const CHUNK_BUFFER_SIZE = 10;
 const CHUNK_BUFFER_MAX_SIZE = 100;
 /**
  * Max accumulated raw chunk bytes packed into one segment before forcing a
- * flush, well under `ROW_VALUE_BYTES`: packing serializes bodies into a JSON
+ * flush, well under `REPLAY_ITEM_BYTES`: packing serializes bodies into a JSON
  * array, which re-escapes their contents (quotes/backslashes), so we keep the
  * raw total well under the limit to leave generous headroom for escaping
  * overhead. A chunk larger than this is flushed as its own (unwrapped)
@@ -73,7 +76,7 @@ const MAX_REMEMBERED_DELETED_TERMINALS = 32;
  * per-chunk ceiling that chat's packed segments require.
  */
 export function createChatStreams(): Streams {
-  return new Streams({ maxChunkBytes: ROW_VALUE_BYTES });
+  return new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
 }
 
 /**
@@ -830,7 +833,7 @@ export class ResumableStream {
     // on the stored (JSON-escaped) encoding. The chunk is still broadcast to
     // live clients; only replay storage is skipped.
     const bodyBytes = storedChunkBytes(body);
-    if (bodyBytes > ROW_MAX_BYTES) {
+    if (bodyBytes > REPLAY_CHUNK_BYTES) {
       console.warn(
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
           `to prevent SQLite row limit crash. Live clients still receive it.`
@@ -1248,10 +1251,20 @@ export class ResumableStream {
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    return [...this._storedBodies(streamId)].map((body, chunk_index) => ({
-      body,
-      chunk_index
-    }));
+    return [...this.storedChunks(streamId)];
+  }
+
+  /**
+   * The same chunks as {@link getStreamChunks}, read one page of segments at
+   * a time, so a reader that stops early decodes no more than it took.
+   */
+  *storedChunks(
+    streamId: string
+  ): Generator<{ body: string; chunk_index: number }> {
+    let chunk_index = 0;
+    for (const body of this._storedBodies(streamId)) {
+      yield { body, chunk_index: chunk_index++ };
+    }
   }
 
   /** @internal For testing only */
