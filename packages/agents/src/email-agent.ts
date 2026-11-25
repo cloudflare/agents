@@ -10,6 +10,7 @@ import { EmailMessage } from "cloudflare:email";
 import { RpcTarget } from "cloudflare:workers";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
 import { signAgentHeaders, type EmailResolver } from "./email";
+import { replySubject } from "./email-headers";
 import type { Agent } from "./index";
 import type { AgentEmail } from "./internal_context";
 import { camelCaseToKebabCase } from "./utils";
@@ -154,7 +155,9 @@ export async function replyToAgentEmail(
   msg.setSender({ addr: email.to, name: options.fromName });
   msg.setRecipient(email.from);
   msg.setSubject(
-    options.subject || `Re: ${email.headers.get("subject")}` || "No subject"
+    options.subject ||
+      replySubject(email.headers.get("subject") ?? undefined) ||
+      "No subject"
   );
   msg.addMessage({
     contentType: options.contentType || "text/plain",
@@ -181,8 +184,9 @@ export async function replyToAgentEmail(
   }
   await email.reply({ from: email.to, raw: msg.asRaw(), to: email.from });
 
-  const rawSubject = email.headers.get("subject");
-  return options.subject ?? (rawSubject ? `Re: ${rawSubject}` : undefined);
+  return (
+    options.subject ?? replySubject(email.headers.get("subject") ?? undefined)
+  );
 }
 
 // Cache the agent namespace map for email routing
