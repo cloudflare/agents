@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { Agent } from "../../../index";
 import { tool, type UIMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
@@ -9,14 +10,14 @@ import type {
 } from "../../../experimental/channels/harness";
 import { Context } from "../../../context";
 import { Lifecycle } from "../../../lifecycle";
-import { openHarnessStore } from "../../store/store";
+import { openHarnessStore, type JsonValue } from "../../store/store";
 import { Streams } from "../../../streams/streams";
+import { Tasks } from "../../../tasks/tasks";
 import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
 import {
   classifyContextOverflow,
-  setWakeTimingForTests,
   SteerNotSupportedError,
   ThinkHarness
 } from "../harness";
@@ -151,7 +152,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** Sessions handles, as configureSession hands them over. */
   readonly #handles = new Map<string, Session>();
 
+  /** The object's default Tasks, given to the harness as Think gives its own. */
+  readonly tasks = new Tasks();
   readonly harness = new ThinkHarness({
+    tasks: this.tasks,
     system: "You are a test.",
     model: new MockLanguageModelV4({
       doStream: async ({ prompt }) => {
@@ -280,18 +284,22 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     webSockets: this.webSockets
   });
   readonly lifecycle = Lifecycle.install(this)
+    .use(this.tasks)
     .use(this.harness)
     .use(this.webSockets)
     .use(this.chat);
 
-  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-    super(ctx, env);
-    setWakeTimingForTests(this.harness, { heartbeatMs: 1_000 });
-  }
-
   #reply(prompt: PromptMessage[]): ReadableStream<StreamPart> {
     const last = prompt.filter((m) => m.role !== "system").at(-1);
     let parts: StreamPart[];
+    const first = prompt.find((m) => m.role === "user");
+    if (
+      last?.role === "tool" &&
+      contentText(first?.content) === "gate then slow"
+    ) {
+      // The model call after the tool's step streams, then holds.
+      return this.#slow(12);
+    }
     if (last?.role === "tool") {
       parts = textReply(`tool said: ${toolResultText(last.content)}`);
     } else if (last?.role === "assistant") {
@@ -321,6 +329,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           { name: "multiply", input: { value: 2 } },
           { name: "multiply", input: { value: 3 } }
         ]);
+      } else if (text === "gate then slow") {
+        parts = callReply([{ name: "gate" }]);
       } else if (text === "gate" || text === "gate-safe") {
         parts = callReply([{ name: text === "gate" ? "gate" : "gate_safe" }]);
       } else if (text === "approve") {
@@ -717,76 +727,69 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Move the harness's records out of the shared store into the tables an
-   * earlier version kept, as if that version had written them. The
-   * transcript and streams are untouched: their format did not change.
+   * Move the open operations out of Tasks into the shared store, as the
+   * released version kept them: progress in `meta`, the tool calls it
+   * started in its session's state. The transcript and streams are
+   * untouched: their format did not change.
    */
-  downgradeRecords(): void {
+  downgradeToStore(): void {
     const sql = this.ctx.storage.sql;
     const store = openHarnessStore(this.ctx.storage, {
       prefix: SHARED_STORE_PREFIX
     });
-    createLegacyTables(sql);
-    for (const session of store.sessions()) {
-      // SAFETY: the harness writes its session state as this shape.
-      const state = session.state as unknown as LegacySessionState;
-      sql.exec(
-        `INSERT INTO cf_think_harness_sessions (id, parent, client_tools, created_at)
-         VALUES (?, ?, ?, ?)`,
-        session.id,
-        session.parent ?? null,
-        JSON.stringify(state.clientTools),
-        session.createdAt
-      );
-      for (const [toolCallId, call] of Object.entries(state.toolCalls)) {
-        sql.exec(
-          `INSERT INTO cf_think_harness_tool_calls
-             (session_id, tool_call_id, operation_id, attempts)
-           VALUES (?, ?, ?, ?)`,
-          session.id,
-          toolCallId,
-          call.operationId,
-          call.attempts
-        );
-      }
-    }
-    for (const op of store.operations()) {
-      // SAFETY: the harness writes its operation meta as this shape.
-      const meta = op.meta as unknown as LegacyOperationMeta;
-      const result =
-        op.result !== null && typeof op.result === "object"
-          ? // SAFETY: a done operation's result is `{ text }`.
-            (op.result as { text?: string })
-          : {};
-      sql.exec(
-        `INSERT INTO cf_think_harness_operations
-           (session_id, operation_id, seq, input, status, source, parent_id,
-            message_id, stream_id, pending_model, steps, interruptions,
-            overflow_retries, reason, text, abandon_reason, created_at,
-            updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        op.session,
-        op.id,
-        op.seq,
-        JSON.stringify(op.input),
-        op.status,
-        meta.source,
-        meta.parentId,
-        meta.messageId,
-        meta.streamId,
-        meta.pendingModel ? 1 : 0,
-        meta.steps,
-        meta.interruptions,
-        meta.overflowRetries,
-        op.reason ?? null,
-        result.text ?? null,
-        meta.abandonReason,
-        op.createdAt,
-        op.createdAt
-      );
-    }
-    for (const table of ["sessions", "operations", "log"]) {
-      sql.exec(`DROP TABLE ${SHARED_STORE_PREFIX}${table}`);
+    const runs = sql
+      .exec<{
+        run_id: string;
+        input: string;
+        status: string;
+        checkpoint: string | null;
+      }>(
+        `SELECT run_id, input, status, checkpoint FROM cf_agents_task_runs
+         WHERE definition = '__cf_think_harness_operation'
+           AND status IN ('pending', 'running')
+         ORDER BY seq`
+      )
+      .toArray();
+    for (const run of runs) {
+      // SAFETY: the harness names its runs [session, operation id] and
+      // stores { input, source } with a `turn` checkpoint.
+      const [session, id] = JSON.parse(run.run_id) as [string, string];
+      const { input, source } = JSON.parse(run.input) as {
+        input: JsonValue;
+        source: string;
+      };
+      const turn = (
+        run.checkpoint
+          ? (JSON.parse(run.checkpoint) as { turn?: Record<string, JsonValue> })
+          : {}
+      ).turn;
+      store.createSession({ id: session });
+      store.enqueue({
+        session,
+        id,
+        input,
+        meta: { source, ...turn, abandonReason: null }
+      });
+      if (run.status === "running") store.start(session, id);
+      const started = sql
+        .exec<{ step_name: string }>(
+          `SELECT step_name FROM cf_agents_task_steps
+           WHERE run_id = ? AND state = 'running'`,
+          run.run_id
+        )
+        .toArray()
+        .map((step) => step.step_name.split(":").slice(2).join(":"));
+      store.setSessionState(session, {
+        clientTools: [],
+        toolCalls: Object.fromEntries(
+          started.map((toolCallId) => [
+            toolCallId,
+            { operationId: id, attempts: 1 }
+          ])
+        )
+      });
+      sql.exec("DELETE FROM cf_agents_task_steps WHERE run_id = ?", run.run_id);
+      sql.exec("DELETE FROM cf_agents_task_runs WHERE run_id = ?", run.run_id);
     }
   }
 
@@ -801,23 +804,34 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       .map((row) => row.name);
   }
 
-  /** An operation as the shared harness store holds it. */
-  storedOperation(session: string, operationId: string) {
-    const op = openHarnessStore(this.ctx.storage, {
+  /** How many operations the shared harness store holds. */
+  storedOperations(): number {
+    return openHarnessStore(this.ctx.storage, {
       prefix: SHARED_STORE_PREFIX
-    }).operation(session, operationId);
-    if (!op) return undefined;
-    // Flattened for RPC: a JSON value's type is too deep to serialize.
-    const result: { readonly status: string; readonly result: string } = {
-      status: op.status,
-      result: JSON.stringify(op.result)
-    };
-    return result;
+    }).operations().length;
   }
 
-  /** What the alarm memory-limit breaker does when it seals. */
-  sealMemoryLimit(): void {
-    this.harness.onMemoryLimit({ sealed: true });
+  /**
+   * What the alarm memory-limit breaker does when it seals while an
+   * operation's run is the job it was driving.
+   */
+  async sealMemoryLimit(operationId: string): Promise<void> {
+    const runId = JSON.stringify(["", operationId]);
+    await this.tasks.onMemoryLimit({
+      sealed: true,
+      executing: {
+        id: `task:${runId}`,
+        capability: this.tasks.capabilityId,
+        fn: "wake",
+        time: Date.now(),
+        payload: { runId },
+        retry: { maxAttempts: 1 },
+        singleflight: false,
+        exclusive: false,
+        recoveryLoop: false,
+        createdAt: Math.floor(Date.now() / 1000)
+      }
+    });
   }
 
   answerAsClient(
@@ -1030,6 +1044,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
  */
 export class ThinkWithStreamsObject extends DurableObject<Cloudflare.Env> {
   readonly streams = new Streams();
+  /** The host's own Tasks, beside the one the harness composes. */
+  readonly tasks = new Tasks();
   readonly harness = new ThinkHarness({
     model: new MockLanguageModelV4({
       doStream: async () => ({
@@ -1044,7 +1060,31 @@ export class ThinkWithStreamsObject extends DurableObject<Cloudflare.Env> {
   });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.streams)
+    .use(this.tasks)
     .use(this.harness);
+
+  /** Runs in each Tasks table, by table. */
+  taskRuns(): Record<string, number> {
+    const sql = this.ctx.storage.sql;
+    const tables = sql
+      .exec<{ name: string }>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name LIKE 'cf_agents_task_runs%'`
+      )
+      .toArray()
+      .map((row) => row.name);
+    return Object.fromEntries(
+      tables.map((table) => [
+        table,
+        sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n
+      ])
+    );
+  }
+
+  /** What the host's own Tasks lists. */
+  async ownRuns(): Promise<number> {
+    return (await this.tasks.list()).length;
+  }
 
   /** Seed a v1 stream whose rows are the last in the legacy table. */
   async seedLegacy(): Promise<void> {
@@ -1086,28 +1126,115 @@ export class ThinkWithStreamsObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
+/**
+ * A sub-agent (a facet of `ThinkHarnessFacetRoot`) with a harness of its
+ * own, on the Tasks the harness composes, beside the Agent's default one.
+ */
+export class ThinkHarnessFacetChild extends Agent<Cloudflare.Env> {
+  readonly harness = new ThinkHarness({
+    model: new MockLanguageModelV4({
+      doStream: async ({ prompt }) => {
+        // SAFETY: the mock's prompt is the provider's message list.
+        const last = (prompt as unknown as PromptMessage[]).at(-1);
+        const parts =
+          last?.role === "tool"
+            ? textReply(`tool said: ${toolResultText(last.content)}`)
+            : callReply([{ name: "gate" }]);
+        return {
+          stream: new ReadableStream<StreamPart>({
+            start(controller) {
+              for (const part of parts) controller.enqueue(part);
+              controller.close();
+            }
+          })
+        };
+      }
+    }),
+    tools: () => ({
+      gate: tool({
+        description: "Wait until released",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const kv = this.ctx.storage.kv;
+          const runs = (kv.get<number>(GATE_RUNS_KEY) ?? 0) + 1;
+          kv.put(GATE_RUNS_KEY, runs);
+          while (!kv.get(RELEASE_KEY)) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          return `released after ${runs} runs`;
+        }
+      })
+    })
+  });
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.harness);
+  }
+
+  async submitText(text: string): Promise<string> {
+    return (await this.harness.submit(text)).operationId;
+  }
+
+  waitFor(operationId: string): Promise<ThinkOperationResult> {
+    return this.harness.session().wait(operationId);
+  }
+
+  async gateStarted(): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      if ((this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("The gate tool never started");
+  }
+
+  release(): void {
+    this.ctx.storage.kv.put(RELEASE_KEY, true);
+  }
+
+  gateRuns(): number {
+    return this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0;
+  }
+
+  /** Runs of the Agent's own Tasks. */
+  async agentRuns(): Promise<number> {
+    return (await this.tasks.list()).length;
+  }
+}
+
+/** A root agent whose sub-agent runs a harness. */
+export class ThinkHarnessFacetRoot extends Agent<Cloudflare.Env> {
+  #child() {
+    return this.subAgent(ThinkHarnessFacetChild, "child");
+  }
+
+  async childSubmit(text: string): Promise<string> {
+    return (await this.#child()).submitText(text);
+  }
+
+  async childWait(operationId: string) {
+    return (await this.#child()).waitFor(operationId);
+  }
+
+  async childGateStarted(): Promise<void> {
+    await (await this.#child()).gateStarted();
+  }
+
+  async childRelease(): Promise<void> {
+    await (await this.#child()).release();
+  }
+
+  async childGateRuns(): Promise<number> {
+    return (await this.#child()).gateRuns();
+  }
+
+  async childAgentRuns(): Promise<number> {
+    return (await this.#child()).agentRuns();
+  }
+}
+
 /** The table prefix ThinkHarness keeps its records under in the shared store. */
 const SHARED_STORE_PREFIX = "cf_think_harness_store_";
-
-type LegacySessionState = {
-  readonly clientTools: unknown[];
-  readonly toolCalls: Record<
-    string,
-    { readonly operationId: string; readonly attempts: number }
-  >;
-};
-
-type LegacyOperationMeta = {
-  readonly source: string;
-  readonly parentId: string | null;
-  readonly messageId: string | null;
-  readonly streamId: string | null;
-  readonly pendingModel: boolean;
-  readonly steps: number;
-  readonly interruptions: number;
-  readonly overflowRetries: number;
-  readonly abandonReason: string | null;
-};
 
 /** ThinkHarness's own tables, as the version before the shared store made them. */
 function createLegacyTables(sql: SqlStorage): void {

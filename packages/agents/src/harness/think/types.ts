@@ -25,6 +25,7 @@ import type {
 } from "../../experimental/channels/harness";
 import type { Session } from "../../sessions/handle";
 import type { Context } from "../../context/context";
+import type { Tasks } from "../../tasks/tasks";
 
 /**
  * A session id. The root session is `""`, the Sessions capability's default
@@ -194,7 +195,8 @@ export type ThinkRecoveryOptions = {
   readonly maxAttempts?: number;
   /**
    * Delay before the second recovery attempt, doubled for each after it,
-   * up to a minute. The first is immediate. Default 1000.
+   * up to a minute, and spread over its upper half so recoveries do not
+   * line up. The first is immediate. Default 1000.
    */
   readonly backoffMs?: number;
   /**
@@ -431,4 +433,10 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
     id: ThinkSessionId
   ) => Context | undefined;
   readonly hooks?: ThinkHarnessHooks;
+  /**
+   * @internal The Tasks capability the operations run on, installed by the
+   * host before the harness. Default: the harness's own, which it installs
+   * with itself. For a host whose rows are already in its default Tasks.
+   */
+  readonly tasks?: Tasks;
 };

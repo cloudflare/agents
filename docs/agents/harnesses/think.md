@@ -8,7 +8,7 @@ description: Run Think's agent loop in a Durable Object with the experimental Th
 
 - Each session's transcript is kept as AI SDK `UIMessage`s, in the same tables the `Sessions` capability uses.
 - The output of a model call is kept while it streams, in the same tables the `Streams` capability uses.
-- One Lifecycle job per session wakes the object after an eviction.
+- Each operation is a run of a [Tasks](../tasks.md) instance the harness installs with itself, apart from any `Tasks` your object has. A session's operations run one at a time, in the order they were submitted, and a run's wake brings the object back after an eviction.
 
 It is experimental. The API may change in any release.
 
@@ -141,10 +141,11 @@ Input submitted with `source: "client"` is untrusted:
 Every step of a turn reads only durable state, so a restarted object continues where the last write left off.
 
 - **During a model call.** Chunks are written to a stream as they arrive. When the call ends, the harness persists the message and deletes the stream in one SQLite transaction. After an eviction, the harness rebuilds the partial message from the stream, keeps it, and calls the model again to continue the same message. Tool calls whose input never finished streaming are dropped.
-- **During a tool call.** The harness records each call before it runs. After an eviction, a call with a record and no result was cut short. A tool that carries `recovery: "rerun"` runs again. Any other tool (`"report"`, the default) has the call recorded as failed with an "interrupted" error and the model decides what to do. Use `rerun` only for tools that are safe to repeat.
-- **Budget.** `recovery.maxAttempts` (default 10) counts interruptions without progress. A finished model call or tool call resets the count. Past the budget the operation settles `unanswered` with reason `interrupted`. Retries after the first back off from `recovery.backoffMs` (default 1000), doubling up to a minute.
+- **During a tool call.** Each server tool call is a step of its operation's run, recorded before the tool runs; the step writes the tool's result to the transcript. After an eviction, a call whose step started and has no result was cut short. A tool that carries `recovery: "rerun"` runs again. Any other tool (`"report"`, the default) has the call recorded as failed with an "interrupted" error and the model decides what to do. Use `rerun` only for tools that are safe to repeat.
+- **Budget.** `recovery.maxAttempts` (default 10) counts interruptions without progress. A finished model call or tool call resets the count. Past the budget the operation settles `unanswered` with reason `interrupted`. Retries after the first back off from `recovery.backoffMs` (default 1000), doubling up to a minute, each spread over the upper half of its delay.
 - **Stalls.** A model stream that sends nothing for `recovery.stallTimeoutMs` (default 120000) is treated as interrupted.
-- **Memory limits.** The wake jobs are flagged for the Lifecycle's alarm memory-limit breaker, so a turn that keeps running out of memory is backed off. When the breaker seals, the running operation is settled `unanswered` with reason `out_of_memory` on the next start, keeping any partial answer, rather than run again. A restart keeps a wake already set for later, so backoff survives a deploy.
+- **Memory limits.** A turn run from the alarm counts against the Lifecycle's alarm memory-limit breaker, so a turn that keeps running out of memory is backed off. When the breaker seals, the running operation is settled `unanswered` with reason `out_of_memory`, keeping any partial answer, rather than run again.
+- **Abort.** `abort()` settles the operation `unanswered` with reason `aborted` (`withdrawn` for one that had not started) and keeps its partial answer. The next queued operation starts after that answer is in the transcript.
 
 ## Hooks
 

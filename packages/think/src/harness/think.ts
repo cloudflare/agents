@@ -140,6 +140,8 @@ export class Think<
     super(ctx, env);
     const self = this;
     this.harness = new ThinkHarness({
+      // The Agent's own Tasks, which Think's runs already use.
+      tasks: this.tasks,
       // Think's reserved keys, so client writes are stripped the same way.
       reservedMetadataKeys: ["channel", "turnMetadata"],
       // Think's own API writes and configures the Sessions handle directly.

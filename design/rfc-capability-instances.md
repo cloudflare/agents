@@ -67,7 +67,7 @@ A composing capability constructs the instances it composes, named after itself,
 
 A composer can be given an instance instead of building one. Then the host installs it. That is for a host whose released rows are already in the default tables and whose own API reads them, which keeps them where they are.
 
-This RFC does not move anything a harness stores today. `ThinkHarness` keeps its operations in its own records and schedules its own wakes; putting those on a composed Tasks is separate work with its own migration of open operations. Until then the harness composes only what it already uses (Streams and Sessions), and being given or building those instances does not change where its operations live.
+`ThinkHarness` composes its own Tasks (`tasks/@think-harness`, tables `cf_agents_task_runs__c_think_2dharness` and the rest): each operation is a run on the session's lane, and the open operations a released version kept in the harness store are carried forward into runs at start. A host can give it a Tasks instead (internal `tasks` option), which the host installs; the harness-backed Think does, with the Agent's default. Streams and Sessions are still the default instances' tables until Streams takes a name and the transcripts move.
 
 ### What is shared
 

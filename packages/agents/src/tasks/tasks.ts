@@ -2049,6 +2049,8 @@ export class Tasks<
    */
   peekList(options: {
     definition: string;
+    /** Only runs of this lane. */
+    lane?: string;
     status?: readonly TaskStatus[];
     /** Pending runs match only when parked (true) or only when not (false). */
     parked?: boolean;
@@ -2066,6 +2068,10 @@ export class Tasks<
     const params: (string | number)[] = [options.definition];
     const withResults = options.results !== false;
     let query = `SELECT ${withResults ? "*" : RUN_LIST_COLUMNS} FROM ${this.#tables.runs} WHERE definition = ?`;
+    if (options.lane !== undefined) {
+      query += " AND lane = ?";
+      params.push(options.lane);
+    }
     if (options.input !== undefined) {
       query += " AND input = ?";
       params.push(serializeTaskValue(options.input, "input filter") ?? "");

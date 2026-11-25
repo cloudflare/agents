@@ -6,6 +6,7 @@ import {
   runInDurableObject
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { getAgentByName } from "../../../index";
 import type { ThinkHarnessTestObject } from "./worker";
 
 function fresh(
@@ -183,7 +184,7 @@ describe("ThinkHarness turns", () => {
     expect(text(await stub.prompt("after"))).toBe("echo: after");
   });
 
-  it("parks the wake job once the session is idle, leaving no alarm", async () => {
+  it("leaves no alarm once the session is idle", async () => {
     const stub = fresh();
     await stub.prompt("hello");
     expect(await waitForNoAlarm(stub)).toBeNull();
@@ -422,7 +423,7 @@ describe("ThinkHarness durability", () => {
     let stub = fresh(name);
     const receipt = await stub.submit("gate-safe");
     await stub.gateStarted(1);
-    await stub.sealMemoryLimit();
+    await stub.sealMemoryLimit(receipt.operationId);
     stub = await crash(name);
     await runDurableObjectAlarm(stub);
     expect(await stub.wait(receipt.operationId)).toMatchObject({
@@ -447,7 +448,7 @@ describe("ThinkHarness durability", () => {
     stub = fresh(name);
     const receipt = await stub.submit("gate-safe");
     await stub.gateStarted(1);
-    await stub.sealMemoryLimit();
+    await stub.sealMemoryLimit(receipt.operationId);
     stub = await crash(name);
     await runDurableObjectAlarm(stub);
     expect(await stub.wait(receipt.operationId)).toMatchObject({
@@ -456,7 +457,7 @@ describe("ThinkHarness durability", () => {
     });
   });
 
-  it("moves an earlier version's records into the shared store on first start", async () => {
+  it("carries an earlier version's open operations forward as runs and drops settled ones", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
     // Before the harness first starts, write its records as they once were.
@@ -466,34 +467,25 @@ describe("ThinkHarness durability", () => {
     await evictDurableObject(stub);
     stub = fresh(name);
 
-    // The queued operation is woken and answered.
+    // The queued operation is a run now, woken and answered.
     await runDurableObjectAlarm(stub);
     expect(await stub.wait("op-queued")).toMatchObject({
       status: "done",
       text: "echo: after the upgrade"
     });
-    // The settled one keeps its answer and its id.
-    expect(await stub.wait("op-done")).toEqual({
-      operationId: "op-done",
-      session: "",
-      status: "done",
-      text: "old answer",
-      messageId: "answer-old"
+    // The settled one is dropped: its answer is in the transcript.
+    expect(await stub.wait("op-done")).toMatchObject({
+      status: "unanswered",
+      reason: "not_found"
     });
-    expect(
-      (await stub.submit("again", { operationId: "op-done" })).accepted
-    ).toBe(false);
     expect(await stub.listSessions()).toEqual([
       { id: "", busy: false },
       // Oldest first, as they were created, not by id.
       { id: "zeta", parent: "", busy: false },
       { id: "alpha", busy: false }
     ]);
-    // The records now live in the shared store, and the old tables are gone.
-    expect(await stub.storedOperation("", "op-done")).toMatchObject({
-      status: "done",
-      result: JSON.stringify({ text: "old answer" })
-    });
+    // The store keeps the sessions and no operation; the old tables are gone.
+    expect(await stub.storedOperations()).toBe(0);
     expect(await stub.harnessTables()).toEqual([
       "cf_think_harness_store_log",
       "cf_think_harness_store_operations",
@@ -501,17 +493,17 @@ describe("ThinkHarness durability", () => {
     ]);
   });
 
-  it("recovers a tool call an earlier version's records left in flight", async () => {
+  it("recovers a tool call a released version's records left in flight", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
     const receipt = await stub.submit("gate");
     await stub.gateStarted(1);
 
-    // Evicted mid-call, then restarted on a version that reads the old
-    // tables: rewrite the records that way before the harness starts again.
+    // Evicted mid-call, then restarted on the released version, which kept
+    // operations in the harness store: rewrite the records that way.
     stub = await crash(name);
     await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
-      instance.downgradeRecords()
+      instance.downgradeToStore()
     );
     await evictDurableObject(stub);
     stub = fresh(name);
@@ -527,6 +519,7 @@ describe("ThinkHarness durability", () => {
     );
     expect(await stub.gateRuns()).toBe(1);
     expect(await stub.messages()).toHaveLength(2);
+    expect(await stub.storedOperations()).toBe(0);
   });
 
   it("keeps work a rolled-back version queued under an id the store already holds", async () => {
@@ -616,6 +609,40 @@ describe("ThinkHarness durability", () => {
     await stub.release();
   });
 
+  it("does not run a finished tool again after a reset in the model call that follows it", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("gate then slow");
+    await stub.gateStarted(1);
+    await stub.release();
+    // The tool's result is in the transcript and the next call streams.
+    await stub.streamed();
+
+    stub = await crash(name);
+    await runDurableObjectAlarm(stub);
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("done");
+    expect(await stub.gateRuns()).toBe(1);
+    const messages = await stub.messages();
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatch(
+      /^assistant: \[gate output-available\] x+ continued$/
+    );
+  });
+
+  it("answers the next queued operation after the aborted one's partial message", async () => {
+    const stub = fresh();
+    const slow = await stub.submit("slow");
+    const next = await stub.submit("next");
+    await stub.streamed();
+    await stub.abort(slow.operationId);
+    expect(text(await stub.wait(next.operationId))).toBe("echo: next");
+    const messages = await stub.messages();
+    expect(messages).toHaveLength(4);
+    expect(messages[1]).toMatch(/^assistant: x+$/);
+    expect(messages.slice(2)).toEqual(["user: next", "assistant: echo: next"]);
+  });
+
   it("compacts and retries once on a context overflow", async () => {
     const stub = fresh();
     await stub.prompt("one");
@@ -624,6 +651,38 @@ describe("ThinkHarness durability", () => {
     expect(await stub.lastPromptText()).toBe(
       "system:You are a test.|assistant:[compacted]|user:overflow"
     );
+  });
+});
+
+describe("ThinkHarness's own Tasks", () => {
+  it("keeps its runs in its own instance, apart from the host's Tasks", async () => {
+    const stub = env.THINK_WITH_STREAMS.getByName(crypto.randomUUID());
+    expect(await stub.prompt("hello")).toBe("done");
+    expect(await stub.taskRuns()).toEqual({
+      cf_agents_task_runs: 0,
+      cf_agents_task_runs__c_think_2dharness: 1
+    });
+    expect(await stub.ownRuns()).toBe(0);
+  });
+
+  it("recovers an operation in a sub-agent, woken through the root", async () => {
+    const name = crypto.randomUUID();
+    let root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    const operationId = await root.childSubmit("gate");
+    await root.childGateStarted();
+
+    await abortAllDurableObjects();
+    root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    const result = root.childWait(operationId);
+    await runDurableObjectAlarm(root);
+    const settled = await result;
+    expect(settled.status).toBe("done");
+    expect(text(settled)).toMatch(
+      /^tool said: error: The tool call was interrupted/
+    );
+    expect(await root.childGateRuns()).toBe(1);
+    // The Agent's own Tasks holds none of the harness's runs.
+    expect(await root.childAgentRuns()).toBe(0);
   });
 });
 
