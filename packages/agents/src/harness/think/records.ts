@@ -1,18 +1,14 @@
 /**
- * ThinkHarness's own durable records: which sessions exist, the queue of
- * operations in each, and the tool calls the harness has started. Messages
- * are not here; they live in the Sessions capability, and in-flight model
- * output lives in the Streams capability.
+ * ThinkHarness's records in the shared, harness-agnostic store
+ * (`agents/harness/store`), under the `cf_think_harness_store_` prefix:
+ * which sessions exist and the client tools each declared. Operations are
+ * Tasks runs; messages live in the Sessions capability and in-flight model
+ * output in the Streams capability.
  *
- * The records are kept in the shared, harness-agnostic store
- * (`agents/harness/store`), under the `cf_think_harness_store_` prefix. This
- * module is the translation between the harness's records and the store's
- * opaque JSON: an operation's progress is its `meta`, a done operation's
- * text is its `result`, and a session's declared client tools and started
- * tool calls are its `state`.
- *
- * Every write is synchronous, so a write can join the transaction a Streams
- * cutover or a Sessions write commits in.
+ * The store once held the operations and the tool calls they started too.
+ * {@link OperationRecords.leftOperations} reads what a released version left
+ * open there, so the harness can carry it forward into runs, and
+ * {@link OperationRecords.dropOperations} then forgets every operation.
  */
 import type { UIMessage } from "ai";
 import type { ClientToolSchema } from "../../chat/client-tools";
@@ -47,46 +43,28 @@ export type OperationInput =
   /** Continue the latest assistant message. */
   | { readonly kind: "continue" };
 
-/** Where an operation is in its life. */
-export type OperationStatus = "queued" | "running" | "done" | "unanswered";
-
-/** One operation, parsed. */
-export type OperationRecord = {
+/**
+ * An open operation a released version left in the store, with its progress
+ * and the tool calls it started and did not finish.
+ */
+export type StoredOpenOperation = {
   readonly session: string;
   readonly operationId: string;
-  readonly seq: number;
   readonly input: OperationInput;
-  readonly status: OperationStatus;
+  readonly status: "queued" | "running";
   readonly source: "client" | "server";
-  /** The message a new assistant message is a child of. */
-  readonly parentId: string | undefined;
-  /** This operation's assistant message, once it has one. */
-  readonly messageId: string | undefined;
-  /** The stream of the model call in progress, if one is. */
-  readonly streamId: string | undefined;
-  /** Whether the model has to be called before the turn can end. */
+  readonly parentId: string | null;
+  readonly messageId: string | null;
+  readonly streamId: string | null;
   readonly pendingModel: boolean;
-  /** Model calls made so far. */
   readonly steps: number;
-  /** Interruptions since the turn last made progress. */
   readonly interruptions: number;
-  /** Context-overflow retries spent. */
   readonly overflowRetries: number;
-  /** Why an `unanswered` operation ended. */
-  readonly reason: string | undefined;
-  /** A `done` operation's answer. */
-  readonly text: string | undefined;
-  /** Set when the operation must be settled unanswered rather than run on. */
-  readonly abandonReason: string | undefined;
+  /** Set when the memory-limit breaker sealed it. */
+  readonly abandonReason: string | null;
+  /** Tool calls it started, by id. */
+  readonly startedToolCalls: string[];
   readonly createdAt: number;
-};
-
-/** A tool call the harness started, so an eviction mid-call is noticed. */
-export type ToolCallRecord = {
-  readonly session: string;
-  readonly toolCallId: string;
-  readonly operationId: string;
-  readonly attempts: number;
 };
 
 /** A session the harness knows of. */
@@ -96,26 +74,6 @@ export type SessionRecord = {
   readonly createdAt: number;
 };
 
-/**
- * A change to an operation's progress. A field left out is unchanged;
- * `null` clears it.
- */
-export type OperationProgress = {
-  readonly parentId?: string | null;
-  readonly messageId?: string | null;
-  readonly streamId?: string | null;
-  readonly pendingModel?: boolean;
-  readonly steps?: number;
-  readonly interruptions?: number;
-  readonly overflowRetries?: number;
-  readonly abandonReason?: string | null;
-};
-
-/** How an operation ended. */
-export type OperationSettlement =
-  | { readonly status: "done"; readonly text: string }
-  | { readonly status: "unanswered"; readonly reason: string };
-
 /** The shared store's table prefix for ThinkHarness's records. */
 const STORE_PREFIX = "cf_think_harness_store_";
 
@@ -124,9 +82,7 @@ const LEGACY_SESSIONS = "cf_think_harness_sessions";
 const LEGACY_OPERATIONS = "cf_think_harness_operations";
 const LEGACY_TOOL_CALLS = "cf_think_harness_tool_calls";
 
-const OPEN = ["queued", "running"] as const;
-
-/** An operation's progress, as kept in the store's `meta`. */
+/** An operation's progress, as a released version kept it in `meta`. */
 type OperationMeta = {
   readonly source: "client" | "server";
   readonly parentId: string | null;
@@ -139,7 +95,7 @@ type OperationMeta = {
   readonly abandonReason: string | null;
 };
 
-/** A started tool call, as kept in its session's state. */
+/** A started tool call, as a released version kept it in session state. */
 type StartedToolCall = {
   readonly operationId: string;
   readonly attempts: number;
@@ -148,6 +104,7 @@ type StartedToolCall = {
 /** A session's harness-owned state, as kept in the store. */
 type SessionState = {
   readonly clientTools: readonly ClientToolSchema[];
+  /** Only in state a released version wrote; dropped with the operations. */
   readonly toolCalls: Readonly<Record<string, StartedToolCall>>;
 };
 
@@ -182,61 +139,14 @@ function parseMeta(value: JsonValue): OperationMeta {
   };
 }
 
-function newMeta(source: "client" | "server"): OperationMeta {
-  return {
-    source,
-    parentId: null,
-    messageId: null,
-    streamId: null,
-    pendingModel: false,
-    steps: 0,
-    interruptions: 0,
-    overflowRetries: 0,
-    abandonReason: null
-  };
-}
-
 function metaJson(meta: OperationMeta): JsonValue {
   return { ...meta };
 }
 
-function withProgress(
-  meta: OperationMeta,
-  change: OperationProgress
-): OperationMeta {
-  return {
-    source: meta.source,
-    parentId: change.parentId === undefined ? meta.parentId : change.parentId,
-    messageId:
-      change.messageId === undefined ? meta.messageId : change.messageId,
-    streamId: change.streamId === undefined ? meta.streamId : change.streamId,
-    pendingModel: change.pendingModel ?? meta.pendingModel,
-    steps: change.steps ?? meta.steps,
-    interruptions: change.interruptions ?? meta.interruptions,
-    overflowRetries: change.overflowRetries ?? meta.overflowRetries,
-    abandonReason:
-      change.abandonReason === undefined
-        ? meta.abandonReason
-        : change.abandonReason
-  };
-}
-
-function inputJson(input: OperationInput): JsonValue {
-  // SAFETY: an OperationInput is plain JSON: UI messages and tool answers
-  // as clients send them, which the harness always stored as JSON.
-  return input as unknown as JsonValue;
-}
-
 function parseInput(value: JsonValue): OperationInput {
-  // SAFETY: inputs are stored only by `insert` (from an OperationInput) or
-  // imported from the legacy table, which `insert` also wrote.
+  // SAFETY: inputs were stored by a released version from an
+  // OperationInput, or imported from the legacy table it also wrote.
   return value as unknown as OperationInput;
-}
-
-function parseText(result: JsonValue): string | undefined {
-  return isRecord(result) && typeof result.text === "string"
-    ? result.text
-    : undefined;
 }
 
 function parseSessionState(value: JsonValue | undefined): SessionState {
@@ -268,42 +178,35 @@ function parseSessionState(value: JsonValue | undefined): SessionState {
   };
 }
 
+/** A session's state as this version writes it: tool calls are steps now. */
 function sessionStateJson(state: SessionState): JsonValue {
-  return {
-    // SAFETY: a ClientToolSchema is plain JSON: a name, a description and
-    // a JSON Schema.
-    clientTools: state.clientTools as unknown as JsonValue,
-    toolCalls: { ...state.toolCalls }
-  };
+  // SAFETY: a ClientToolSchema is plain JSON: a name, a description and a
+  // JSON Schema.
+  return { clientTools: state.clientTools as unknown as JsonValue };
 }
 
-function parseOperation(stored: StoredOperation): OperationRecord {
+function parseOpenOperation(
+  stored: StoredOperation,
+  state: SessionState
+): StoredOpenOperation {
   const meta = parseMeta(stored.meta);
   return {
     session: stored.session,
     operationId: stored.id,
-    seq: stored.seq,
     input: parseInput(stored.input),
-    status: stored.status,
-    source: meta.source,
-    parentId: meta.parentId ?? undefined,
-    messageId: meta.messageId ?? undefined,
-    streamId: meta.streamId ?? undefined,
-    pendingModel: meta.pendingModel,
-    steps: meta.steps,
-    interruptions: meta.interruptions,
-    overflowRetries: meta.overflowRetries,
-    reason: stored.reason,
-    text: stored.status === "done" ? parseText(stored.result) : undefined,
-    abandonReason: meta.abandonReason ?? undefined,
+    status: stored.status === "running" ? "running" : "queued",
+    ...meta,
+    startedToolCalls: Object.entries(state.toolCalls)
+      .filter(([, call]) => call.operationId === stored.id)
+      .map(([toolCallId]) => toolCallId),
     createdAt: stored.createdAt
   };
 }
 
 /**
- * The harness's records, over the shared harness store: sessions, the
- * operation queue, and started tool calls. Opening it moves records an
- * earlier version left in its own tables into the store.
+ * The harness's records over the shared harness store: sessions and their
+ * client tools. Opening it moves records an earlier version left in its
+ * own tables into the store.
  */
 export class OperationRecords {
   readonly #store: HarnessStore;
@@ -367,134 +270,52 @@ export class OperationRecords {
     });
   }
 
-  // ── Operations ───────────────────────────────────────────────────────────
+  // ── Operations a released version left ───────────────────────────────────
 
-  /** Insert a queued operation. Returns false when the id already exists. */
-  insert(
-    session: string,
-    operationId: string,
-    input: OperationInput,
-    source: "client" | "server"
-  ): boolean {
-    return this.#store.enqueue({
-      session,
-      id: operationId,
-      input: inputJson(input),
-      meta: metaJson(newMeta(source))
-    }).accepted;
-  }
-
-  /** One operation. */
-  get(session: string, operationId: string): OperationRecord | undefined {
-    const stored = this.#store.operation(session, operationId);
-    return stored ? parseOperation(stored) : undefined;
-  }
-
-  /** Unsettled operations, oldest first; every session when none is given. */
-  open(session?: string): OperationRecord[] {
+  /**
+   * The oldest open operations a released version left, at most `limit`,
+   * in submission order. Only those rows are read: settled ones can be
+   * many, and hold whole messages.
+   */
+  leftOperations(limit: number): StoredOpenOperation[] {
+    const states = new Map<string, SessionState>();
     return this.#store
-      .operations({
-        ...(session !== undefined && { session }),
-        status: OPEN
-      })
-      .map(parseOperation);
+      .operations({ status: ["queued", "running"], limit })
+      .map((operation) => {
+        let state = states.get(operation.session);
+        if (!state) {
+          state = this.#state(operation.session);
+          states.set(operation.session, state);
+        }
+        return parseOpenOperation(operation, state);
+      });
   }
 
-  /** Change an operation's progress. */
-  update(
-    session: string,
-    operationId: string,
-    change: OperationProgress
-  ): void {
+  /**
+   * Forget open operations once they are runs (`carried`), and the tool
+   * calls they started.
+   */
+  dropOperations(carried: readonly StoredOpenOperation[]): void {
     this.#store.transaction(() => {
-      const stored = this.#store.operation(session, operationId);
-      if (!stored) return;
-      this.#store.setOperationMeta(
-        session,
-        operationId,
-        metaJson(withProgress(parseMeta(stored.meta), change))
-      );
+      for (const operation of carried) {
+        this.#store.deleteOperation(operation.session, operation.operationId);
+        if (operation.startedToolCalls.length > 0) {
+          this.#updateState(operation.session, (state) => ({
+            ...state,
+            toolCalls: {}
+          }));
+        }
+      }
     });
   }
 
   /**
-   * Move a queued operation to running, with its progress so far.
-   * Returns false when it was not queued.
+   * Forget every settled operation, in SQL, without reading one. A tool
+   * call a released version recorded for one stays in its session's state,
+   * where nothing reads it, until the session's state is next written.
    */
-  start(
-    session: string,
-    operationId: string,
-    change: OperationProgress
-  ): boolean {
-    return this.#store.transaction(() => {
-      if (!this.#store.start(session, operationId)) return false;
-      this.update(session, operationId, change);
-      return true;
-    });
-  }
-
-  /**
-   * Settle an open operation, with a last change to its progress. Returns
-   * false when it had already settled.
-   */
-  settle(
-    session: string,
-    operationId: string,
-    outcome: OperationSettlement,
-    change: OperationProgress = {}
-  ): boolean {
-    return this.#store.transaction(() => {
-      const settled = this.#store.settle(
-        session,
-        operationId,
-        outcome.status === "done"
-          ? { status: "done", result: { text: outcome.text } }
-          : outcome
-      );
-      if (settled) this.update(session, operationId, change);
-      return settled;
-    });
-  }
-
-  /** Forget every settled operation in a session, for a reset. */
-  deleteSettled(session: string): void {
-    this.#store.transaction(() => {
-      this.#store.deleteSettled(session);
-      this.#updateState(session, (state) => ({ ...state, toolCalls: {} }));
-    });
-  }
-
-  // ── Tool calls ───────────────────────────────────────────────────────────
-
-  /** The record of a started tool call, if it was started. */
-  toolCall(session: string, toolCallId: string): ToolCallRecord | undefined {
-    const { toolCalls } = this.#state(session);
-    // An id such as `constructor` must not read an inherited property.
-    if (!Object.hasOwn(toolCalls, toolCallId)) return undefined;
-    const call = toolCalls[toolCallId];
-    return call && { session, toolCallId, ...call };
-  }
-
-  /** Record that a tool call is starting. Returns the attempt number. */
-  startToolCall(
-    session: string,
-    toolCallId: string,
-    operationId: string
-  ): number {
-    const attempts = (this.toolCall(session, toolCallId)?.attempts ?? 0) + 1;
-    this.#updateState(session, (state) => ({
-      ...state,
-      toolCalls: { ...state.toolCalls, [toolCallId]: { operationId, attempts } }
-    }));
-    return attempts;
-  }
-
-  /** Forget a tool call once its result is in the transcript. */
-  finishToolCall(session: string, toolCallId: string): void {
-    this.#updateState(session, (state) => {
-      const { [toolCallId]: _finished, ...toolCalls } = state.toolCalls;
-      return { ...state, toolCalls };
-    });
+  dropSettled(): void {
+    this.#store.deleteSettled();
   }
 }
 
@@ -615,7 +436,11 @@ function importLegacyTables(
     for (const [id, state] of states) {
       // A session the legacy sessions table lacked is created here.
       store.createSession({ id });
-      store.setSessionState(id, sessionStateJson(state));
+      // With the tool calls it started, which carry-forward reads.
+      store.setSessionState(id, {
+        ...(sessionStateJson(state) as { [key: string]: JsonValue }),
+        toolCalls: { ...state.toolCalls }
+      });
     }
 
     if (present.has(LEGACY_OPERATIONS)) {

@@ -182,6 +182,12 @@ describe("HarnessStore", () => {
         "queued"
       ]);
       expect(store.operation("other", "done")?.status).toBe("done");
+      expect(
+        store.operations({ status: ["queued", "running"], limit: 1 })
+      ).toHaveLength(1);
+      // Every session's, with no session given.
+      expect(store.deleteSettled()).toBe(1);
+      expect(store.operation("other", "done")).toBeUndefined();
       // The id is free again.
       expect(
         store.enqueue({ session: "s", id: "done", input: 1 }).accepted

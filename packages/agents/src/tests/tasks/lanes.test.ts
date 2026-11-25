@@ -63,6 +63,44 @@ describe("Tasks lanes", () => {
     );
   });
 
+  it("lists one lane's runs, open and settled", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      const first = gate();
+      instance.lanedGates.set("a", first.promise);
+      for (const [runId, lane] of [
+        ["a", "l"],
+        ["b", "l"],
+        ["c", "other"]
+      ] as const) {
+        await instance.tasks.run("laned", { label: runId }, { runId, lane });
+      }
+      await until(
+        async () => (await instance.tasks.get("c"))?.status === "completed"
+      );
+      const listed = (
+        lane: string,
+        status?: ("pending" | "running" | "completed")[]
+      ) =>
+        instance.tasks
+          .peekList({
+            definition: "laned",
+            lane,
+            order: "oldest",
+            ...(status && { status })
+          })
+          .map((record) => record.runId);
+      expect(listed("l")).toEqual(["a", "b"]);
+      expect(listed("other")).toEqual(["c"]);
+      expect(listed("l", ["pending"])).toEqual(["b"]);
+      first.open();
+      await until(
+        async () => (await instance.tasks.get("b"))?.status === "completed"
+      );
+      expect(listed("l", ["completed"])).toEqual(["a", "b"]);
+    });
+  });
+
   it("starts nothing in a held lane until it is released", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

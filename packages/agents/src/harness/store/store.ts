@@ -429,6 +429,8 @@ export class HarnessStore {
     filter: {
       readonly session?: string;
       readonly status?: readonly OperationStatus[];
+      /** At most this many, the oldest. Default: all. */
+      readonly limit?: number;
     } = {}
   ): OperationRecord[] {
     const where: string[] = [];
@@ -446,8 +448,10 @@ export class HarnessStore {
       .exec<OperationRow>(
         `SELECT * FROM ${this.#operations}
          ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
-         ORDER BY seq`,
-        ...params
+         ORDER BY seq
+         ${filter.limit === undefined ? "" : "LIMIT ?"}`,
+        ...params,
+        ...(filter.limit === undefined ? [] : [filter.limit])
       )
       .toArray()
       .map((row) => this.#operationOf(row));
@@ -520,18 +524,23 @@ export class HarnessStore {
 
   /**
    * Forget a session's settled operations, as when the session starts
-   * over. Open operations are kept. A forgotten operation's id may be
-   * enqueued again.
+   * over, or every session's. Open operations are kept. A forgotten
+   * operation's id may be enqueued again. Reads none of their data.
    *
-   * @param session - The session id.
+   * @param session - The session id. Default: every session.
    * @returns How many operations were deleted.
    */
-  deleteSettled(session: string): number {
-    return this.#storage.sql.exec(
-      `DELETE FROM ${this.#operations}
-       WHERE session = ? AND status IN ('done', 'unanswered')`,
-      session
-    ).rowsWritten;
+  deleteSettled(session?: string): number {
+    return session === undefined
+      ? this.#storage.sql.exec(
+          `DELETE FROM ${this.#operations}
+           WHERE status IN ('done', 'unanswered')`
+        ).rowsWritten
+      : this.#storage.sql.exec(
+          `DELETE FROM ${this.#operations}
+           WHERE session = ? AND status IN ('done', 'unanswered')`,
+          session
+        ).rowsWritten;
   }
 
   /**

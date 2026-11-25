@@ -13,58 +13,71 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**204 of the 1006 tests that construct Think pass (20%).** Across the whole suite, 402 of 1204.
+**133 of the 1246 tests that construct Think pass (10%).** Across the whole suite, 421 of 1534.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
 | `action-pause-recovery.test.ts`        | 0 / 3    | 0%   |
 | `actions-attach-reply.test.ts`         | 0 / 12   | 0%   |
-| `actions-durable-pause.test.ts`        | 2 / 40   | 5%   |
+| `actions-durable-pause.test.ts`        | 2 / 56   | 3%   |
 | `agent-tool-reattach-recovery.test.ts` | 0 / 2    | 0%   |
 | `agent-tool-rebind-noop.test.ts`       | 0 / 6    | 0%   |
-| `agent-tools.test.ts`                  | 12 / 47  | 25%  |
-| `assistant-agent-loop.test.ts`         | 8 / 26   | 30%  |
+| `agent-tools.test.ts`                  | 12 / 64  | 18%  |
+| `assistant-agent-loop.test.ts`         | 9 / 33   | 27%  |
 | `assistant-agent.test.ts`              | 5 / 5    | 100% |
-| `assistant-message-metadata.test.ts`   | 1 / 9    | 11%  |
+| `assistant-message-metadata.test.ts`   | 0 / 9    | 0%   |
 | `attachment-consumption.test.ts`       | 0 / 4    | 0%   |
 | `browser-tools.test.ts`                | 6 / 6    | 100% |
 | `channel-policy.test.ts`               | 2 / 3    | 66%  |
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 31 / 100 | 31%  |
-| `cold-rpc-initialization.test.ts`      | 3 / 4    | 75%  |
+| `client-tools.test.ts`                 | 0 / 136  | 0%   |
+| `cold-rpc-initialization.test.ts`      | 0 / 4    | 0%   |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
+| `context-upgrade.test.ts`              | 4 / 11   | 36%  |
 | `deliver-notice.test.ts`               | 0 / 7    | 0%   |
+| `durable-admission.test.ts`            | 1 / 7    | 14%  |
+| `empty-reply.test.ts`                  | 0 / 10   | 0%   |
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
-| `execute-hitl.test.ts`                 | 0 / 12   | 0%   |
+| `execute-hitl.test.ts`                 | 0 / 16   | 0%   |
 | `execute-tool.test.ts`                 | 1 / 6    | 16%  |
-| `extension-manager.test.ts`            | 34 / 34  | 100% |
+| `extension-manager.test.ts`            | 38 / 38  | 100% |
 | `fetch-tools.test.ts`                  | 48 / 51  | 94%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
-| `hooks.test.ts`                        | 37 / 140 | 26%  |
-| `hydration-budget.test.ts`             | 1 / 9    | 11%  |
+| `hooks.test.ts`                        | 36 / 149 | 24%  |
+| `hydration-budget.test.ts`             | 1 / 19   | 5%   |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
 | `mcp-tool-materialization.test.ts`     | 0 / 2    | 0%   |
-| `media-eviction.test.ts`               | 3 / 16   | 18%  |
-| `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
+| `media-eviction.test.ts`               | 3 / 22   | 13%  |
+| `message-reconciliation.test.ts`       | 0 / 11   | 0%   |
 | `messengers.test.ts`                   | 79 / 103 | 76%  |
-| `nested-agent-tools.test.ts`           | 0 / 3    | 0%   |
-| `onconnect-broadcast.test.ts`          | 1 / 13   | 7%   |
+| `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
+| `onconnect-broadcast.test.ts`          | 1 / 14   | 7%   |
 | `onstart-degraded.test.ts`             | 1 / 5    | 20%  |
 | `origin-message-ids.test.ts`           | 0 / 8    | 0%   |
+| `periphery-action-tools.test.ts`       | 9 / 9    | 100% |
+| `periphery-channels.test.ts`           | 12 / 12  | 100% |
+| `periphery-extensions.test.ts`         | 12 / 12  | 100% |
+| `periphery-inference.test.ts`          | 19 / 19  | 100% |
+| `periphery-modules.test.ts`            | 9 / 18   | 50%  |
+| `periphery-transcript.test.ts`         | 12 / 12  | 100% |
+| `periphery-turn-policy.test.ts`        | 13 / 13  | 100% |
 | `prompt-cache.test.ts`                 | 4 / 10   | 40%  |
+| `queued-order.test.ts`                 | 0 / 5    | 0%   |
+| `rpc-chat-turns.test.ts`               | 0 / 5    | 0%   |
 | `run-turn-recovery.test.ts`            | 1 / 10   | 10%  |
-| `run-turn.test.ts`                     | 13 / 34  | 38%  |
-| `scheduled-tasks.test.ts`              | 1 / 18   | 5%   |
+| `run-turn.test.ts`                     | 0 / 35   | 0%   |
+| `scheduled-tasks.test.ts`              | 0 / 9    | 0%   |
+| `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
-| `streaming-message-id.test.ts`         | 1 / 1    | 100% |
-| `submissions.test.ts`                  | 8 / 92   | 8%   |
+| `streaming-message-id.test.ts`         | 0 / 1    | 0%   |
+| `submissions.test.ts`                  | 0 / 116  | 0%   |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
-| `terminal-frame-order.test.ts`         | 0 / 3    | 0%   |
-| `think-eviction.test.ts`               | 1 / 4    | 25%  |
-| `think-session.test.ts`                | 67 / 280 | 23%  |
+| `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
+| `think-eviction.test.ts`               | 1 / 3    | 33%  |
+| `think-session.test.ts`                | 52 / 305 | 17%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
 | `workspace-tools.test.ts`              | 1 / 8    | 12%  |
