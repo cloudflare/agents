@@ -188,6 +188,7 @@ describe("Tasks lanes", () => {
       const error = vi.spyOn(console, "error").mockImplementation(() => {});
       // Held, so the head keeps its local until it is cancelled.
       instance.tasks.holdLane("l");
+      let dropped = 0;
       const lane = { lane: "l" } as const;
       await instance.tasks.run(
         "laned",
@@ -197,6 +198,7 @@ describe("Tasks lanes", () => {
           runId: "b",
           local: {
             dropped: () => {
+              dropped++;
               throw new Error("dropped threw");
             }
           }
@@ -207,7 +209,10 @@ describe("Tasks lanes", () => {
         { label: "c" },
         { ...lane, local: "C" }
       );
+      // The cancel settles the head and returns although dropped() threw.
       await instance.tasks.cancel("b");
+      expect(dropped).toBe(1);
+      expect((await instance.tasks.get("b"))?.status).toBe("aborted");
       await instance.tasks.releaseLane("l");
       await until(() => instance.lanedStarted.length === 1);
       expect(instance.lanedStarted).toEqual(["c"]);
