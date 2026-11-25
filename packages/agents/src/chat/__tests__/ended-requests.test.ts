@@ -15,6 +15,8 @@ describe("EndedRequests", () => {
     expect(ended.has({ id: "tab", acceptedAt: 9_000 }, "req-1")).toBe(true);
     // A same-id socket accepted after the broadcast: it did not.
     expect(ended.has({ id: "tab", acceptedAt: 11_000 }, "req-1")).toBe(false);
+    // Accepted in the broadcast's millisecond: maybe after it, so not told.
+    expect(ended.has({ id: "tab", acceptedAt: 10_000 }, "req-1")).toBe(false);
     // A socket the broadcast left out.
     expect(ended.has({ id: "resuming-tab", acceptedAt: 9_000 }, "req-1")).toBe(
       false

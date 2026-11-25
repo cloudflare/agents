@@ -95,7 +95,7 @@ export class EndedRequests {
 
   /**
    * Whether `connection` was sent the end of `requestId`: noted for it, or
-   * broadcast after the root accepted it (a sub-agent's socket, whose
+   * broadcast after (strictly) the root accepted it (a sub-agent's socket, whose
    * `acceptedAt` the root stamps) and not left out.
    */
   has(connection: object, requestId: string): boolean {
@@ -108,7 +108,10 @@ export class EndedRequests {
     return (
       broadcast !== undefined &&
       typeof acceptedAt === "number" &&
-      acceptedAt <= broadcast.at &&
+      // Strictly before: `Date.now()` advances only at I/O, so an accept
+      // in the broadcast's millisecond may have come after it. A miss here
+      // costs a duplicate end; a wrong hit would cost the tab its end.
+      acceptedAt < broadcast.at &&
       !(typeof id === "string" && broadcast.without.has(id))
     );
   }
