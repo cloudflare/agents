@@ -1,8 +1,8 @@
 {
   "total": 1541,
   "passed": 520,
-  "needThink": 1250,
-  "needThinkPassed": 229,
+  "needThink": 1256,
+  "needThinkPassed": 235,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -113,8 +113,8 @@
       "passed": 41
     },
     "fetch-tools.test.ts": {
-      "total": 52,
-      "passed": 51
+      "total": 51,
+      "passed": 50
     },
     "fiber.test.ts": {
       "total": 7,
@@ -257,8 +257,8 @@
       "passed": 3
     },
     "workspace-tools.test.ts": {
-      "total": 9,
-      "passed": 7
+      "total": 10,
+      "passed": 8
     },
     "ws-web-channel.test.ts": {
       "total": 10,
@@ -403,7 +403,6 @@
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > never reuses a host extension id without a scope",
     "extension-manager.test.ts > ExtensionManager worker id stability > reuses the same worker id across managers for identical extensions",
     "fetch-tools.test.ts > Think — fetchTools integration > does not register fetch tools by default",
-    "fetch-tools.test.ts > Think — fetchTools integration > sends the workspace and fetch tools as they are given directly, in that order, byte for byte",
     "fetch-tools.test.ts > createFetchTools — config > generates one fetch_<name> tool per binding with a sanitized name",
     "fetch-tools.test.ts > createFetchTools — config > registers fetch_url only when a public allowlist is set",
     "fetch-tools.test.ts > createFetchTools — config > throws when neither allowlist nor bindings are configured",
@@ -784,6 +783,7 @@
     "workspace-tools.test.ts > Think workspace tools > reads files through node:fs, not codemode:tools",
     "workspace-tools.test.ts > Think workspace tools > runs code on the Workspace's backend through exec",
     "workspace-tools.test.ts > Think workspace tools > sends the workspace tools to the model as they are given directly, byte for byte",
+    "workspace-tools.test.ts > Think workspace tools > writes a file when the model calls the write tool, and keeps the call",
     "workspace-tools.test.ts > Think workspace tools > writes and reads files through the tools",
     "ws-web-channel.test.ts > Think — WebSocket chat runs on the web channel (#2255) > still runs server-driven turns without a channel by default"
   ]

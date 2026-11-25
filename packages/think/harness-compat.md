@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**229 of the 1250 tests that construct Think pass (18%).** Across the whole suite, 520 of 1541.
+**235 of the 1256 tests that construct Think pass (18%).** Across the whole suite, 520 of 1541.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -44,7 +44,7 @@ supported by the harness-backed Think yet".
 | `execute-hitl.test.ts`                 | 0 / 16   | 0%   |
 | `execute-tool.test.ts`                 | 6 / 6    | 100% |
 | `extension-manager.test.ts`            | 41 / 41  | 100% |
-| `fetch-tools.test.ts`                  | 51 / 52  | 98%  |
+| `fetch-tools.test.ts`                  | 50 / 51  | 98%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
 | `hooks.test.ts`                        | 38 / 149 | 25%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
@@ -80,5 +80,5 @@ supported by the harness-backed Think yet".
 | `think-session.test.ts`                | 59 / 305 | 19%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
-| `workspace-tools.test.ts`              | 7 / 9    | 77%  |
+| `workspace-tools.test.ts`              | 8 / 10   | 80%  |
 | `ws-web-channel.test.ts`               | 1 / 10   | 10%  |
