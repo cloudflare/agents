@@ -343,7 +343,7 @@ describe("the continuation turn", () => {
       admissions: {
         storage: kept.storage,
         recoveryPending: async () => false,
-        released: () => [],
+        released: () => ({ records: [], drop: () => {} }),
         replayRequest: () => null
       }
     });
@@ -389,7 +389,7 @@ describe("the continuation turn", () => {
     const admissions = () => ({
       storage: kept.storage,
       recoveryPending: async () => false,
-      released: () => [],
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     turns = new ChatTurns<TestConnection>(host, {

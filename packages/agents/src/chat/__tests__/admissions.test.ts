@@ -122,7 +122,7 @@ function isolate(
     admissions: {
       storage: memoryStorage(world.keys).storage,
       recoveryPending: async () => false,
-      released: () => [],
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: (record) => {
         replayed.push(record);
         return request(record.requestId);
@@ -397,7 +397,7 @@ describe("durable admission", () => {
       admissions: {
         storage: memoryStorage().storage,
         recoveryPending: async () => false,
-        released: () => [],
+        released: () => ({ records: [], drop: () => {} }),
         replayRequest: () => null
       }
     });
@@ -636,7 +636,8 @@ describe("takeReleasedChatAdmissions", () => {
     piece.run("r2", 0, both.slice(0, 20));
     piece.run("r2", 1, both.slice(20));
 
-    const records = takeReleasedChatAdmissions(sql(db));
+    const released = takeReleasedChatAdmissions(sql(db));
+    const { records } = released;
     expect(records.map((r) => r.requestId)).toEqual(["r1", "r2"]);
     expect(records[0]).toMatchObject({
       messages: [{ id: "u1", role: "user" }],
@@ -650,13 +651,15 @@ describe("takeReleasedChatAdmissions", () => {
       stopped: true,
       afterUserId: "u1"
     });
-    // Taken once: the tables are gone.
-    expect(takeReleasedChatAdmissions(sql(db))).toEqual([]);
+    // The tables stay until the records are carried over, then go.
+    expect(takeReleasedChatAdmissions(sql(db)).records).toHaveLength(2);
+    released.drop();
+    expect(takeReleasedChatAdmissions(sql(db)).records).toEqual([]);
   });
 
   it("reads nothing on an object with no table", () => {
     expect(
-      takeReleasedChatAdmissions(sql(new DatabaseSync(":memory:")))
+      takeReleasedChatAdmissions(sql(new DatabaseSync(":memory:"))).records
     ).toEqual([]);
   });
 });

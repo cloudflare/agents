@@ -122,13 +122,15 @@ export interface ChatAdmissionRecord {
 export const CHAT_ADMISSIONS_TABLE = "cf_agents_chat_admissions";
 
 /**
- * Take the admission records an earlier release left, in admission order,
- * and drop their tables: the records now live on the chat lane's runs. An
- * object with no table pays one read of no rows.
+ * Read the admission records an earlier release left, in admission order.
+ * `drop()` deletes their tables, once their replacements are written: the
+ * records now live on the chat lane's runs. An object with no table pays
+ * one read of no rows.
  */
-export function takeReleasedChatAdmissions(
-  sql: () => AgentToolSql
-): ChatAdmissionRecord[] {
+export function takeReleasedChatAdmissions(sql: () => AgentToolSql): {
+  records: ChatAdmissionRecord[];
+  drop(): void;
+} {
   const table = CHAT_ADMISSIONS_TABLE;
   const pieces = `${table}_messages`;
   const run = (query: string, ...bindings: unknown[]) =>
@@ -139,7 +141,7 @@ export function takeReleasedChatAdmissions(
     run(`select 1 from ${table} limit 0`);
   } catch (error) {
     if (!String(error).includes("no such table")) throw error;
-    return [];
+    return { records: [], drop: () => {} };
   }
   const columns = new Set(
     run(`select name from pragma_table_info('${table}')`).map((row) =>
@@ -149,7 +151,8 @@ export function takeReleasedChatAdmissions(
   const has = (name: string) => columns.has(name);
   const records = run(
     `select request_id, seq, message_ids, decision, payload, stopped,
-            created_at, messages,
+            created_at,
+            ${has("messages") ? "messages" : "null as messages"},
             ${has("message_pieces") ? "message_pieces" : "0 as message_pieces"},
             ${has("after_user_id") ? "after_user_id" : "null as after_user_id"}
      from ${table} order by seq`
@@ -193,9 +196,13 @@ export function takeReleasedChatAdmissions(
       createdAt: Number(row.created_at)
     };
   });
-  run(`drop table if exists ${pieces}`);
-  run(`drop table ${table}`);
-  return records;
+  return {
+    records,
+    drop: () => {
+      run(`drop table if exists ${pieces}`);
+      run(`drop table if exists ${table}`);
+    }
+  };
 }
 
 function heldMessages(value: unknown): HeldChatMessage[] {
@@ -330,6 +337,11 @@ export function interruptedTurnRequestIds(
 
 /** What a client request's run holds until its turn starts. JSON. */
 export interface ChatAdmissionInput {
+  /**
+   * Admission order: increasing across the requests of one object (runs
+   * accepted in the same millisecond list in no set order).
+   */
+  order?: number;
   messages: HeldChatMessage[];
   afterUserId: string | null;
   decision: StoredSubmitDecision;
@@ -405,6 +417,11 @@ export class ChatAdmissions {
       return;
     }
     this.#seeded = true;
+    const found: Array<{
+      requestId: string;
+      runId: string;
+      admission: ChatAdmissionInput;
+    }> = [];
     for (const run of runs) {
       const requestId = run.metadata?.requestId;
       if (typeof requestId !== "string" || this.#held.has(requestId)) continue;
@@ -412,10 +429,11 @@ export class ChatAdmissions {
         run.runId
       )?.admission;
       if (!admission) continue;
-      this.#held.set(requestId, {
-        runId: run.runId,
-        messages: admission.messages
-      });
+      found.push({ requestId, runId: run.runId, admission });
+    }
+    found.sort((a, b) => (a.admission.order ?? 0) - (b.admission.order ?? 0));
+    for (const { requestId, runId, admission } of found) {
+      this.#held.set(requestId, { runId, messages: admission.messages });
       this.#seededDecisions.push({ requestId, decision: admission.decision });
     }
   }
@@ -435,12 +453,17 @@ export class ChatAdmissions {
     }
   }
 
-  /** Keep a continuation's record until its turn starts. */
+  /**
+   * Keep a continuation's record until its turn starts. `carried`: one an
+   * earlier release kept, which {@link continuations} hands back to
+   * schedule.
+   */
   async admitContinuation(
     requestId: string,
-    targetMessageIds: string[]
+    targetMessageIds: string[],
+    carried = false
   ): Promise<void> {
-    this.#continuations.add(requestId);
+    if (!carried) this.#continuations.add(requestId);
     await this.host
       .storage()
       .put(CHAT_CONTINUATION_KEY_PREFIX + requestId, { targetMessageIds });

@@ -179,6 +179,11 @@ const ATTEMPT = "attempt";
 const SNAPSHOT = "snapshot";
 /** The field of a lane turn's kept envelope that says when its model call began. */
 const BEGAN_AT = "__cfBeganAt";
+/**
+ * The field of a lane turn's kept envelope that says its model call ran as
+ * a run of its own.
+ */
+const ELSEWHERE = "__cfElsewhere";
 
 /**
  * The storage key a turn accepted before checkpoints kept its snapshot
@@ -257,6 +262,17 @@ export function createChatTurnTaskDefinition(
           const kept = step.checkpoint.get(SNAPSHOT);
           // A lane turn whose model call never began: nothing to recover.
           if (lane && kept === undefined) return null;
+          // A lane turn whose model call ran as a run of its own: that run
+          // recovers it.
+          if (
+            lane &&
+            kept &&
+            typeof kept === "object" &&
+            !Array.isArray(kept) &&
+            kept[ELSEWHERE] === true
+          ) {
+            return null;
+          }
           // A lane turn kept its envelope without the app's data; a turn
           // from before its input carried the snapshot kept it whole.
           const laneKept =
@@ -409,7 +425,16 @@ async function runLaneTurn(
           step.checkpoint.set(SNAPSHOT, kept);
         } catch {
           // Too large for the run's row: the model call runs as a run of
-          // its own, whose input keeps it in parts.
+          // its own, whose input keeps it in parts, and which recovers it.
+          // This run says so, so a replay of it runs nothing.
+          try {
+            step.checkpoint.set(SNAPSHOT, {
+              [BEGAN_AT]: Date.now(),
+              [ELSEWHERE]: true
+            });
+          } catch (error) {
+            console.warn("[chat] turn snapshot not kept:", error);
+          }
           return undefined;
         }
         begun = true;

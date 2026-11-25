@@ -209,7 +209,7 @@ export interface ChatTurnsAdmissionOptions {
    * Take the records an earlier release left (`takeReleasedChatAdmissions`).
    * Called once, on the first {@link ChatTurns.resumeAdmissions}.
    */
-  released(): ChatAdmissionRecord[];
+  released(): { records: ChatAdmissionRecord[]; drop(): void };
   /**
    * The request a record describes, to run again after a reset. It has no
    * connection: its frames go to every connection. Return `null` when it
@@ -421,7 +421,7 @@ export class ChatTurns<
     | ((record: ChatAdmissionRecord) => ClientChatRequest<unknown> | null)
     | null;
   /** The records an earlier release left, until they are carried over. */
-  #released: (() => ChatAdmissionRecord[]) | null;
+  #released: ChatTurnsAdmissionOptions["released"] | null;
   /** Whether a chat turn waits for recovery, for continuations' records. */
   readonly #recoveryPending: (() => Promise<boolean>) | null;
 
@@ -595,8 +595,6 @@ export class ChatTurns<
     this.preStream.begin(requestId);
     const releasePendingEnqueue = this.submits.beginEnqueue();
     const onQueued = () => releasePendingEnqueue();
-    // A replay runs inside the run that holds its record.
-    if (replay) this.queue.reserveInline(requestId);
     let reservation: TurnReservation | undefined;
     let stage: "persist" | "turn" = "persist";
     // The messages the request holds until its turn starts.
@@ -610,6 +608,7 @@ export class ChatTurns<
       // there, so the replay stores them once and nothing else can.
       if (admissions && !replay && request.admission) {
         const admission: ChatAdmissionInput = {
+          order: admissionOrder(),
           messages: held,
           afterUserId: this.#latestUserId(),
           decision: {
@@ -742,9 +741,22 @@ export class ChatTurns<
     const request = this.#replayRequest?.({ ...record, stopped });
     if (!request) return;
     this.admissions?.hold(record.requestId, runId, record.messages);
-    await this.#runClientRequest(request, {
-      record: { ...record, stopped }
+    // The request runs inside this run, which holds the lane until its turn
+    // ends; what the host does after the turn (its response hooks, which may
+    // queue a turn of their own) runs after the lane moved on.
+    let laneDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+      laneDone = resolve;
     });
+    this.queue.reserveInline(record.requestId, laneDone);
+    void this.#runClientRequest(request, {
+      record: { ...record, stopped }
+    })
+      .catch((error: unknown) =>
+        console.error("[chat] a replayed request failed:", error)
+      )
+      .finally(laneDone);
+    await done;
   }
 
   /**
@@ -764,13 +776,15 @@ export class ChatTurns<
         if (!record.stopped) {
           await admissions.admitContinuation(
             record.requestId,
-            continuation.targetMessageIds
+            continuation.targetMessageIds,
+            true
           );
         }
         continue;
       }
       const nonce = crypto.randomUUID();
       const admission: ChatAdmissionInput = {
+        order: record.seq,
         messages: record.messages,
         afterUserId: record.afterUserId,
         decision: record.decision,
@@ -807,7 +821,11 @@ export class ChatTurns<
     if (this.#released) {
       const released = this.#released();
       this.#released = null;
-      if (released.length > 0) await this.#carryReleasedAdmissions(released);
+      if (released.records.length > 0) {
+        await this.#carryReleasedAdmissions(released.records);
+      }
+      // Only once their replacements are written.
+      released.drop();
     }
     const kept = await admissions.continuations();
     if (kept.length === 0) return;
@@ -1809,6 +1827,13 @@ function connectionOf<TConnection extends ContinuationConnection>(
     // A spec may throw when the result is not to continue.
     return null;
   }
+}
+
+let lastAdmissionOrder = 0;
+/** An admission order: increasing in this isolate, and after earlier ones. */
+function admissionOrder(): number {
+  lastAdmissionOrder = Math.max(lastAdmissionOrder + 1, Date.now() * 1000);
+  return lastAdmissionOrder;
 }
 
 /** The trigger of a continuation's admission record (P1). */

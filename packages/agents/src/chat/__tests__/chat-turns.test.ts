@@ -162,7 +162,7 @@ describe("ChatTurns", () => {
     const admissions = () => ({
       storage: kept.storage,
       recoveryPending: async () => false,
-      released: () => [],
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
@@ -209,7 +209,7 @@ describe("ChatTurns", () => {
     const admissions = () => ({
       storage: kept.storage,
       recoveryPending: async () => false,
-      released: () => [],
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
@@ -240,7 +240,7 @@ describe("ChatTurns", () => {
     const admissions = () => ({
       storage: kept.storage,
       recoveryPending: async () => false,
-      released: () => [],
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];

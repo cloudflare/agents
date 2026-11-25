@@ -161,25 +161,33 @@ export class TurnLane {
 
   /** Forget a {@link reserveInline} its request did not use. */
   releaseInline(requestId: string): void {
-    this.#reserved.delete(requestId);
+    this.#reserved.get(requestId)?.release();
   }
 
   /**
    * Run the turn `requestId` where it is now, inside the run that replays
    * it: its next `enqueue` runs at once.
    */
-  reserveInline(requestId: string): void {
+  reserveInline(requestId: string, onDone?: () => void): void {
     this.#reserved.set(requestId, {
       accepted: Promise.resolve(""),
-      release: () => this.#reserved.delete(requestId),
+      release: () => {
+        this.#reserved.delete(requestId);
+        onDone?.();
+      },
       enqueue: async <T>(fn: () => Promise<T>) => {
+        const generation = this.#generation;
+        // Counted as queued work while it runs, as a turn on the lane is.
+        this.#counts.set(generation, (this.#counts.get(generation) ?? 0) + 1);
         this.#activeRequestId = requestId;
-        this.#activeGeneration = this.#generation;
+        this.#activeGeneration = generation;
         try {
           return { status: "completed" as const, value: await fn() };
         } finally {
           this.#activeRequestId = null;
           this.#activeGeneration = null;
+          this.#decrement(generation);
+          onDone?.();
         }
       }
     });
