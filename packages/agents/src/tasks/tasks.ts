@@ -1552,10 +1552,6 @@ export class Tasks<
     outcome: TaskSettlement | TaskValue,
     options: { checkpoint?: Record<string, TaskJson> } = {}
   ): Promise<boolean> {
-    if (outcome instanceof TaskSettlement && outcome.kind === "retry") {
-      // Only a handler waits to retry; settle() ends a run.
-      throw new Error("settle() does not take TaskSettlement.retry()");
-    }
     await this.lifecycle.ready();
     if (this.#liveAttempt(runId)) return false;
     const row = this.#store.getRun(runId);
@@ -1575,6 +1571,17 @@ export class Tasks<
     if (claimed === 0) return false;
     for (const [key, value] of Object.entries(options.checkpoint ?? {})) {
       this.#store.setCheckpoint(runId, generation, key, value);
+    }
+    if (outcome instanceof TaskSettlement && outcome.kind === "retry") {
+      // Written before the first await, so a racing settle finds the run
+      // pending again and takes nothing.
+      await this.#suspend(
+        row,
+        generation,
+        "retry",
+        outcome.wakeAt ?? Date.now()
+      );
+      return true;
     }
     if (outcome instanceof TaskSettlement) {
       await this.#settleReturned(row, generation, outcome);

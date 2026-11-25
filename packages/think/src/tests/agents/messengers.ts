@@ -2,6 +2,8 @@ import type { LanguageModel, UIMessage } from "ai";
 import type { Adapter, Chat, ChatInstance } from "chat";
 import { Message, parseMarkdown } from "chat";
 import { Think } from "../../think";
+import { releaseDelivery, sendDelivery } from "agents/internal";
+import { recoveredReplyId } from "../../messengers/recovered-reply";
 import {
   chatSdkMessenger,
   MESSENGER_REPLY_FIBER_NAME,
@@ -126,11 +128,9 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       type === "chat:recovery:completed" &&
       typeof payload?.incidentId === "string"
     ) {
-      this._stagedAtCompletion = this.ctx.storage
-        .get<{ outcome?: string }>(
-          `cf_think_messenger_recovery:${payload.incidentId}`
-        )
-        .then((delivery) => delivery?.outcome ?? null);
+      this._stagedAtCompletion = Promise.resolve(
+        this._recoveredReplyState(payload.incidentId)
+      );
     }
     if (
       type === "chat:recovery:completed" &&
@@ -357,10 +357,60 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
   private _failPostForTest: string | null = null;
 
   /**
-   * Deliver a settled recovered reply whose record says `posted` posts
-   * already went out, through the live path (`replay: false`) or the start
-   * replay. `failPost` rejects that post once. Returns the retry it
-   * scheduled, if any, and whether the record is still pending.
+   * Where the incident's recovered reply stands: its released outcome,
+   * `"held"` while it waits for one, `"delivered"` once it is gone.
+   */
+  private _recoveredReplyState(incidentId: string): string {
+    const id = recoveredReplyId(incidentId);
+    const record = this.tasks.peek(id);
+    if (!record) return "delivered";
+    return (
+      this.tasks.checkpointOf<string>(id, "outcome") ??
+      (record.waitReason === "park" ? "held" : "pending")
+    );
+  }
+
+  /** Wait until the incident's recovered reply is delivered (or 10 s). */
+  private async _untilRecoveredReplyDelivered(
+    incidentId: string
+  ): Promise<boolean> {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (this.tasks.peek(recoveredReplyId(incidentId)) === undefined) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  }
+
+  /** A settled reply as the released version kept it. */
+  private async _seedLegacyRecoveredReply(
+    incidentId: string,
+    reply: Record<string, unknown>
+  ): Promise<void> {
+    await this.ctx.storage.put(`cf_think_messenger_recovery:${incidentId}`, {
+      messengerId: "fake",
+      threadId: "fake:dm-split",
+      partialText: "",
+      ...reply
+    });
+  }
+
+  private _replayRecoveredReplies(): Promise<void> {
+    return (
+      this as unknown as {
+        _replayMessengerRecoveryDeliveries(): Promise<void>;
+      }
+    )._replayMessengerRecoveryDeliveries();
+  }
+
+  /**
+   * Deliver a settled recovered reply: one the released version kept with
+   * `posted` posts already out, moved on start (`replay: true`), or one
+   * held and released by recovery (`replay: false`). `failPost` rejects
+   * that post once. Returns whether the delivery then waits to retry, and
+   * its cursor.
    */
   async deliverSettledRecoveryForTest(options: {
     text: string;
@@ -368,95 +418,81 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     failPost?: string;
     replay?: boolean;
   }): Promise<{
-    retry: { key: string; attempts: number } | undefined;
-    pending: { posted?: number } | undefined;
+    incidentId: string;
+    retrying: boolean;
+    posted: number | undefined;
+    delivered: boolean;
   }> {
     const incidentId = `${crypto.randomUUID()}:user-1`;
-    const key = `cf_think_messenger_recovery:${incidentId}`;
-    await this.ctx.storage.put(key, {
-      messengerId: "fake",
-      threadId: "fake:dm-split",
-      partialText: "",
-      outcome: "completed",
-      text: options.text,
-      ...(options.posted !== undefined && { posted: options.posted })
-    });
+    const id = recoveredReplyId(incidentId);
     this._failPostForTest = options.failPost ?? null;
-    const internal = this as unknown as {
-      _settleMessengerRecovery(
-        incidentId: string,
-        outcome: "completed" | "interrupted"
-      ): void;
-      _replayMessengerRecoveryDeliveries(): Promise<void>;
-    };
-    const retryFor = () =>
-      this.getSchedules()
-        .filter(
-          (schedule) =>
-            schedule.callback === "_cfRetryMessengerRecoveryDelivery"
-        )
-        .map(
-          (schedule) =>
-            schedule.payload as unknown as { key: string; attempts: number }
-        )
-        .find((payload) => payload.key === key);
     if (options.replay) {
-      await internal._replayMessengerRecoveryDeliveries();
+      await this._seedLegacyRecoveredReply(incidentId, {
+        outcome: "completed",
+        text: options.text,
+        ...(options.posted !== undefined && { posted: options.posted })
+      });
+      await this._replayRecoveredReplies();
     } else {
-      internal._settleMessengerRecovery(incidentId, "completed");
-      const deadline = Date.now() + 5_000;
-      while (
-        Date.now() < deadline &&
-        !retryFor() &&
-        (await this.ctx.storage.get(key)) !== undefined
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await sendDelivery(this.tasks, "think-messenger-recovery", id, {
+        messengerId: "fake",
+        threadId: "fake:dm-split",
+        partialText: ""
+      });
+      await releaseDelivery(this.tasks, id, {
+        outcome: "completed",
+        text: options.text
+      });
+    }
+    // Until it is delivered, or an attempt that posted failed and waits.
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline &&
+      this.tasks.peek(id) !== undefined &&
+      (this.tasks.peek(id)?.waitReason !== "retry" ||
+        this.tasks.checkpointOf(id, "posted") === undefined)
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return {
-      retry: retryFor(),
-      pending: await this.ctx.storage.get<{ posted?: number }>(key)
+      incidentId,
+      retrying: this.tasks.peek(id)?.waitReason === "retry",
+      posted: this.tasks.checkpointOf<number>(id, "posted"),
+      delivered: this.tasks.peek(id) === undefined
     };
   }
 
   private _slowPostsForTest = false;
 
   /**
-   * Deliver one settled recovered reply from the start replay and a
-   * scheduled retry at once, with every post slow enough to overlap.
+   * Release one held recovered reply twice at once, and run the start
+   * replay beside it, with every post slow enough to overlap.
    */
   async deliverRecoveryConcurrentlyForTest(text: string): Promise<boolean> {
-    const key = `cf_think_messenger_recovery:${crypto.randomUUID()}:user-1`;
-    await this.ctx.storage.put(key, {
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    const id = recoveredReplyId(incidentId);
+    await sendDelivery(this.tasks, "think-messenger-recovery", id, {
       messengerId: "fake",
       threadId: "fake:dm-split",
-      partialText: "",
-      outcome: "completed",
-      text
+      partialText: ""
     });
     this._slowPostsForTest = true;
     try {
+      const outcome = { outcome: "completed", text };
       await Promise.all([
-        (
-          this as unknown as {
-            _replayMessengerRecoveryDeliveries(): Promise<void>;
-          }
-        )._replayMessengerRecoveryDeliveries(),
-        this._cfRetryMessengerRecoveryDelivery({ key, attempts: 1 })
+        releaseDelivery(this.tasks, id, outcome),
+        releaseDelivery(this.tasks, id, outcome),
+        this._replayRecoveredReplies()
       ]);
+      return await this._untilRecoveredReplyDelivered(incidentId);
     } finally {
       this._slowPostsForTest = false;
     }
-    return (await this.ctx.storage.get(key)) === undefined;
   }
 
-  /** Run a scheduled recovered-reply retry now. */
-  async runMessengerRecoveryRetryForTest(payload: {
-    key: string;
-    attempts: number;
-  }): Promise<boolean> {
-    await this._cfRetryMessengerRecoveryDelivery(payload);
-    return (await this.ctx.storage.get(payload.key)) === undefined;
+  /** Wait for a recovered reply that waits to retry to be delivered. */
+  async awaitRecoveredReplyForTest(incidentId: string): Promise<boolean> {
+    return this._untilRecoveredReplyDelivered(incidentId);
   }
 
   async getRecorded(kind: "prompt" | "post" | "edit"): Promise<string[]> {
@@ -469,12 +505,15 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
 
   private _stagedAtCompletion: Promise<string | null> | undefined;
 
-  /** The messenger reply outcome stored when recovery emitted `completed`. */
+  /** Where the reply stood when recovery emitted `completed`. */
   async getStagedOutcomeAtCompletionForTest(): Promise<string | null> {
     return (await this._stagedAtCompletion) ?? null;
   }
 
-  /** A pending reply whose incident settled while nothing was delivering it. */
+  /**
+   * A reply the released version kept unsettled, moved on start: delivered
+   * as `interrupted` when its incident is gone, held while it recovers.
+   */
   async replayOrphanedMessengerDeliveryForTest(options?: {
     activeIncident?: boolean;
   }): Promise<boolean> {
@@ -485,18 +524,48 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         { incidentId, status: "scheduled" }
       );
     }
-    const key = `cf_think_messenger_recovery:${incidentId}`;
-    await this.ctx.storage.put(key, {
-      messengerId: "fake",
-      threadId: "fake:dm-orphan",
-      partialText: ""
+    await this._seedLegacyRecoveredReply(incidentId, {
+      threadId: "fake:dm-orphan"
     });
+    await this._replayRecoveredReplies();
+    if (options?.activeIncident) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return this.tasks.peek(recoveredReplyId(incidentId)) === undefined;
+    }
+    return this._untilRecoveredReplyDelivered(incidentId);
+  }
+
+  /**
+   * A reply the released version kept unsettled while its incident still
+   * recovers, moved on start, then released by recovery before any alarm
+   * ran: it must be held at once so the release finds it.
+   */
+  async releaseMigratedRecoveringReplyForTest(text: string): Promise<{
+    heldAfterStart: boolean;
+    delivered: boolean;
+  }> {
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    await this.ctx.storage.put(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`,
+      { incidentId, status: "scheduled" }
+    );
+    await this._seedLegacyRecoveredReply(incidentId, {});
+    await this._replayRecoveredReplies();
+    const heldAfterStart =
+      this.tasks.peek(recoveredReplyId(incidentId))?.waitReason === "park";
     await (
       this as unknown as {
-        _replayMessengerRecoveryDeliveries(): Promise<void>;
+        _releaseMessengerRecovery(
+          incidentId: string,
+          outcome: "completed" | "interrupted",
+          text?: string
+        ): Promise<void>;
       }
-    )._replayMessengerRecoveryDeliveries();
-    return (await this.ctx.storage.get(key)) === undefined;
+    )._releaseMessengerRecovery(incidentId, "completed", text);
+    return {
+      heldAfterStart,
+      delivered: await this._untilRecoveredReplyDelivered(incidentId)
+    };
   }
 
   async getAdapterCalls(): Promise<Array<{ kind: string; content: string }>> {

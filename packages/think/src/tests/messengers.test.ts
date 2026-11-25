@@ -1346,7 +1346,7 @@ describe("think messengers core", () => {
       expect(posted).toEqual(["Got", "it"]);
     });
 
-    it("stores the reply outcome before recovery reports completion", async () => {
+    it("releases the reply with its outcome before recovery reports completion", async () => {
       const name = `recover-self-${crypto.randomUUID()}`;
       await sendAndSettle(name, "it");
       const agent = await getAgentByName(
@@ -1354,8 +1354,8 @@ describe("think messengers core", () => {
         name
       );
 
-      expect(await agent.getStagedOutcomeAtCompletionForTest()).toBe(
-        "completed"
+      expect(["completed", "delivered"]).toContain(
+        await agent.getStagedOutcomeAtCompletionForTest()
       );
     });
 
@@ -1371,6 +1371,20 @@ describe("think messengers core", () => {
         })
       ).toBe(false);
       expect(await agent.getAdapterCalls()).toEqual([]);
+    });
+
+    it("holds a migrated reply whose incident still recovers, so recovery's release delivers it", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `orphan-release-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agent.releaseMigratedRecoveringReplyForTest("recovered answer")
+      ).toEqual({ heldAfterStart: true, delivered: true });
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["recovered answer"]);
     });
 
     it("apologizes on start for a pending reply whose incident is gone", async () => {
@@ -1418,7 +1432,7 @@ describe("think messengers core", () => {
         replay: true
       });
 
-      expect(result.pending).toBeUndefined();
+      expect(result.delivered).toBe(true);
       expect(
         (await agent.getAdapterCalls()).map((call) => call.content)
       ).toEqual(["two", "three"]);
@@ -1434,11 +1448,9 @@ describe("think messengers core", () => {
         failPost: "two"
       });
 
-      expect(result.retry?.attempts).toBe(1);
-      expect(result.pending?.posted).toBe(2);
-      expect(result.retry).toBeDefined();
-      if (!result.retry) return;
-      expect(await agent.runMessengerRecoveryRetryForTest(result.retry)).toBe(
+      expect(result.retrying).toBe(true);
+      expect(result.posted).toBe(2);
+      expect(await agent.awaitRecoveredReplyForTest(result.incidentId)).toBe(
         true
       );
       expect(

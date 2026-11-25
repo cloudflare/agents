@@ -83,21 +83,38 @@ describe("Tasks retry settlement", () => {
     });
   });
 
-  it("is not taken by settle(), which ends a run", async () => {
+  it("runs a parked run again, with its checkpoint, when settled with a retry", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       await instance.lifecycle.start();
-      instance.tasks.register(retrying, async () =>
-        TaskSettlement.park("outcome")
-      );
+      const seen: unknown[] = [];
+      instance.tasks.register(retrying, async (_input, step) => {
+        const outcome = step.checkpoint.get("outcome");
+        seen.push(outcome);
+        return outcome === undefined ? TaskSettlement.park("outcome") : outcome;
+      });
       await instance.tasks.run(retrying, undefined as never, {
-        runId: "s",
+        runId: "p",
         start: "now"
       });
-      await expect(
-        instance.tasks.settle("s", TaskSettlement.retry(Date.now()))
-      ).rejects.toThrow("settle() does not take TaskSettlement.retry()");
-      expect(instance.tasks.peek("s")).toMatchObject({ waitReason: "park" });
+      expect(instance.tasks.peek("p")).toMatchObject({
+        status: "pending",
+        waitReason: "park"
+      });
+
+      const settle = () =>
+        instance.tasks.settle("p", TaskSettlement.retry(Date.now()), {
+          checkpoint: { outcome: "posted" }
+        });
+      const [first, second] = await Promise.all([settle(), settle()]);
+      expect([first, second].sort()).toEqual([false, true]);
+      await instance.tasks.runDue(retrying);
+
+      expect(seen).toEqual([undefined, "posted"]);
+      expect(await instance.tasks.get("p")).toMatchObject({
+        status: "completed",
+        result: "posted"
+      });
     });
   });
 });
