@@ -228,6 +228,15 @@ describe("extensions: the build", () => {
         inputSchema: z.object({}),
         outputSchema: z.object({ n: z.bigint() }),
         execute: async () => ({ n: 1n })
+      }),
+      // A schema whose JSON Schema comes later and fails.
+      later: tool({
+        description: "Has a schema that rejects",
+        inputSchema: z.object({}),
+        outputSchema: jsonSchema<{ ok: boolean }>(() =>
+          Promise.reject(new Error("no JSON Schema"))
+        ),
+        execute: async () => ({ ok: true })
       })
     };
     const manager = new ExtensionManager(harnessHookRules);
@@ -237,9 +246,10 @@ describe("extensions: the build", () => {
     );
     const built = await manager.build("");
     warn.mockRestore();
-    expect(Object.keys(built.tools)).toEqual(["dated", "big"]);
+    expect(Object.keys(built.tools)).toEqual(["dated", "big", "later"]);
     expect(built.tools.dated?.outputSchema).toBeUndefined();
     expect(built.tools.big?.outputSchema).toBeUndefined();
+    expect(built.tools.later?.outputSchema).toBeUndefined();
     expect((await send(built.tools, undefined)).request).toBe(
       (await send(tools, undefined)).request
     );
