@@ -131,4 +131,23 @@ describe("the schema versions record", () => {
       ]);
     });
   });
+
+  it("reads a legacy key for an id that names an Object property", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      storage.kv.put("cf_agents:constructor_schema_version", 1);
+      storage.sql.exec("CREATE TABLE versioned_rows (id TEXT)");
+      const capability = new Versioned(
+        "constructor",
+        "cf_agents:constructor_schema_version"
+      );
+      const { lifecycle } = install(capability);
+      await lifecycle.start();
+      expect(capability.ran).toEqual([2]);
+      expect(storage.kv.get(SCHEMA_VERSIONS_KEY)).toEqual({ constructor: 2 });
+    });
+  });
+
+  it("refuses the Lifecycle's own id as a capability kind", () => {
+    expect(() => new Versioned("lifecycle")).toThrow(/reserved/);
+  });
 });

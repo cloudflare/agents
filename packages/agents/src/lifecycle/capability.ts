@@ -138,6 +138,9 @@ const installedServices = new WeakMap<object, LifecycleServices>();
 /** A name an app gives an instance: `[a-z][a-z0-9-]{0,31}`. */
 const INSTANCE_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 
+/** The job queue's schema version is recorded under this id. */
+const RESERVED_KIND = "lifecycle";
+
 /**
  * The shape of a name a composer derives ({@link LifecycleCapability.composedName}):
  * `@` and the composer's id, which can hold any printable ASCII its kind
@@ -184,6 +187,12 @@ export abstract class LifecycleCapability<Props extends object = object> {
   protected constructor(kind: string, instanceName?: string) {
     if (kind.trim() === "") {
       throw new Error("Lifecycle capability IDs must be non-empty");
+    }
+    if (kind === RESERVED_KIND) {
+      throw new Error(
+        `"${RESERVED_KIND}" is reserved for the Lifecycle's own schema ` +
+          "version: choose another capability kind."
+      );
     }
     if (
       instanceName !== undefined &&

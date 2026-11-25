@@ -471,9 +471,10 @@ export class Lifecycle<
     // The queue's columns are recorded under the Lifecycle's own id.
     this.#jobQueue = new JobQueue(
       this.#ctx.storage,
-      this.#schemaVersions.forCapability("lifecycle", () => {
-        if (this.#status !== "starting") this.#schemaVersions.flush();
-      })
+      this.#schemaVersions.forCapability(
+        "lifecycle",
+        () => this.#status === "starting"
+      )
     );
     facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
     instanceListers.set(this, (stored) => this.#instances(stored));
@@ -749,9 +750,10 @@ export class Lifecycle<
           })
       }),
       // Written once at the end of startup; at once after a later migrate.
-      schema: this.#schemaVersions.forCapability(capabilityId, () => {
-        if (this.#status !== "starting") this.#schemaVersions.flush();
-      }),
+      schema: this.#schemaVersions.forCapability(
+        capabilityId,
+        () => this.#status === "starting"
+      ),
       routes: Object.freeze({
         get source() {
           return lifecycleRouteTransports.get(lifecycle)?.source;

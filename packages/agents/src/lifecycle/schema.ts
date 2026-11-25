@@ -83,9 +83,23 @@ export class SchemaVersions {
   }
 
   #record(): Record<string, number> {
-    this.#versions ??=
-      this.#storage.kv.get<Record<string, number>>(SCHEMA_VERSIONS_KEY) ?? {};
+    // No prototype: an id such as `constructor` is only ever its own entry.
+    this.#versions ??= Object.assign(
+      Object.create(null) as Record<string, number>,
+      this.#storage.kv.get<Record<string, number>>(SCHEMA_VERSIONS_KEY)
+    );
     return this.#versions;
+  }
+
+  /**
+   * Read the record again at the next use. Outside startup a write may sit
+   * in a transaction that rolls back, so a migration there trusts only
+   * what storage holds.
+   */
+  #reread(): void {
+    this.#versions = undefined;
+    this.#folded.length = 0;
+    this.#dirty = false;
   }
 
   #current(id: string, legacyKey: string | undefined): number {
@@ -122,8 +136,18 @@ export class SchemaVersions {
     return true;
   }
 
-  /** The handle for capability `id`; `afterChange` runs after a step. */
-  forCapability(id: string, afterChange: () => void): LifecycleSchema {
+  /**
+   * The handle for capability `id`. During startup the record is read once
+   * and written by the Lifecycle at the end; otherwise each migration reads
+   * it from storage and writes it at once.
+   */
+  forCapability(id: string, inStartup: () => boolean): LifecycleSchema {
+    const afterChange = () => {
+      if (!inStartup()) this.flush();
+    };
+    const begin = () => {
+      if (!inStartup()) this.#reread();
+    };
     const missing = <Step>(schema: LifecycleSchemaSteps<Step>): Step[] => {
       const current = this.#current(id, schema.legacyKey);
       const steps: Step[] = [];
@@ -135,6 +159,7 @@ export class SchemaVersions {
     };
     return Object.freeze({
       migrateSync: (schema) => {
+        begin();
         const current = this.#current(id, schema.legacyKey);
         if (current >= schema.version) {
           afterChange();
@@ -148,6 +173,7 @@ export class SchemaVersions {
         afterChange();
       },
       migrate: async (schema) => {
+        begin();
         const current = this.#current(id, schema.legacyKey);
         if (current >= schema.version) {
           afterChange();
