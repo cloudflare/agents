@@ -146,9 +146,7 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
     indexes: both.indexes.filter((name) => !alone.indexes.includes(name)),
     keys: both.keys
       .map(keyName)
-      .filter((key) => !alone.keys.map(keyName).includes(key)),
-    // Job ids can be random: compared within the run.
-    jobs: both.jobs.filter((job) => !before.jobs.includes(job))
+      .filter((key) => !alone.keys.map(keyName).includes(key))
   };
   // Values within the run: what the probe's smoke wrote or changed.
   const changedRows = both.rows.filter((row) => !before.rows.includes(row));
@@ -157,7 +155,6 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
     ...addedNames.tables.filter((name) => !isProbeName(name)),
     ...addedNames.indexes.filter((name) => !isProbeName(name)),
     ...addedNames.keys.filter((key) => !key.startsWith(`cf_agents:${id}:`)),
-    ...addedNames.jobs.filter((job) => !job.startsWith(`${id} ${id}:`)),
     ...changedRows.filter((row) => !isProbeName(rowTable(row))),
     ...changedKeys.filter(
       (entry) => !keyName(entry).startsWith(`cf_agents:${id}:`)
@@ -172,10 +169,29 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
       `the default instance's ${field}, next to the probe`
     ).toEqual(alone[field]);
   }
+  // Jobs, whenever queued (at start too): the probe's are under its owner
+  // id and prefix, and every other owner has as many jobs as with the
+  // default alone. Counts, since job ids can be random.
+  const owner = (job: string) => job.slice(0, job.indexOf(" "));
+  const jobId = (job: string) => job.slice(job.indexOf(" ") + 1);
   expect(
-    both.jobs.filter((job) => !addedNames.jobs.includes(job)),
-    "the default instance's jobs, next to the probe"
-  ).toEqual(before.jobs);
+    both.jobs.filter(
+      (job) => owner(job) === id && !jobId(job).startsWith(`${id}:`)
+    ),
+    "the probe instance's jobs without its prefix"
+  ).toEqual([]);
+  const perOwner = (jobs: string[]) => {
+    const counts: Record<string, number> = {};
+    for (const job of jobs) {
+      if (owner(job) === id) continue;
+      counts[owner(job)] = (counts[owner(job)] ?? 0) + 1;
+    }
+    return counts;
+  };
+  expect(
+    perOwner(both.jobs),
+    "jobs per owner other than the probe, next to the probe"
+  ).toEqual(perOwner(alone.jobs));
   // The Lifecycle's own (the job queue, its bookkeeping keys) belongs to
   // no instance.
   const lifecycleOwn = (field: "tables" | "indexes" | "keys", name: string) =>
