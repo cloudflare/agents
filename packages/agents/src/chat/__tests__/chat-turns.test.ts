@@ -235,6 +235,45 @@ describe("ChatTurns", () => {
     expect(after.continuation.pending).toBeNull();
   });
 
+  it("schedules a continuation an earlier release kept", async () => {
+    const kept = memoryStorage();
+    host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
+    const restarted = new FakeHost();
+    restarted.transcript = host.transcript;
+    const after = new ChatTurns(restarted, {
+      defaultDebounceMs: 750,
+      lane: memoryLane(),
+      admissions: {
+        storage: kept.storage,
+        recoveryPending: async () => false,
+        released: () => ({
+          records: [
+            {
+              requestId: "cont-old",
+              seq: 1,
+              messageIds: [],
+              messages: [],
+              afterUserId: null,
+              decision: {
+                strategy: null,
+                overlapping: false,
+                debounceUntilMs: null
+              },
+              payload: { trigger: "continuation", targetMessageIds: ["a1"] },
+              stopped: false,
+              createdAt: 1
+            }
+          ],
+          drop: () => {}
+        }),
+        replayRequest: () => null
+      }
+    });
+    await after.resumeAdmissions();
+    expect(restarted.fired).toBe(1);
+    expect(after.continuation.pending?.requestId).toBe("cont-old");
+  });
+
   it("drops a kept continuation whose answered message is no longer the latest", async () => {
     const kept = memoryStorage();
     const admissions = () => ({
