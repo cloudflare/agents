@@ -447,6 +447,25 @@ describe("ThinkHarness durability", () => {
     });
   }
 
+  it("replays a stream in the default tables to a client that joins before recovery runs", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("slow");
+    await stub.streamed();
+    stub = await crash(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.moveStreamsToDefault({ forgetSchema: false })
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    // Before the alarm recovers the call: what a reconnecting tab is sent.
+    expect(await stub.inFlightChunks()).toBeGreaterThan(0);
+    expect(await stub.defaultStreamIds()).toEqual(["host-1"]);
+    await runDurableObjectAlarm(stub);
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+  });
+
   it("keeps the partial of an aborted call whose report is owed and whose stream is in the default tables", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);

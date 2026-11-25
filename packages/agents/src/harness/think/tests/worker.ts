@@ -1001,6 +1001,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return (await session.wait(operationId)).status;
   }
 
+  /** How many chunks a client joining now is sent for the running call. */
+  async inFlightChunks(): Promise<number> {
+    return (await this.harness.session().inFlight())?.chunks.length ?? 0;
+  }
+
   /** Ids of the streams in the default Streams tables. */
   defaultStreamIds(): string[] {
     const sql = this.ctx.storage.sql;
