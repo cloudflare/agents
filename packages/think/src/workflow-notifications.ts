@@ -58,7 +58,7 @@ export function workflowNotificationSink(
         `Workflow notification for submission ${JSON.stringify(
           notification.event.payload?.submissionId
         )} (${notification.workflowName}/${notification.workflowId}, ${notification.event.type}) ` +
-          `could not be delivered after ${attempts} attempts over 12h; giving up: ` +
+          `could not be delivered after ${attempts} attempts; giving up: ` +
           (cause instanceof Error ? cause.message : String(cause))
       )
   };
