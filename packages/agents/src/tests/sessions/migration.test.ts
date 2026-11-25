@@ -122,7 +122,11 @@ describe("Sessions legacy migration", () => {
         { id: "m3", seq: 3, type: "message", parent_id: "m1" }
       ]);
       expect(
-        await instance.kvGet<number>("cf_agents:sessions_schema_version")
+        (
+          await instance.kvGet<Record<string, number>>(
+            "cf_agents:schema_versions"
+          )
+        )?.sessions
       ).toBe(2);
 
       // Every lifted source is dropped once its rows are verified present.
@@ -228,6 +232,44 @@ describe("Sessions legacy migration", () => {
       expect(
         instance.eventsOfType("session:migration:incomplete")[0]?.payload
       ).toMatchObject({ table: "assistant_messages", source: 3, copied: 2 });
+      // The version stays unstamped, so the lift runs again.
+      expect(
+        (
+          await instance.kvGet<Record<string, number>>(
+            "cf_agents:schema_versions"
+          )
+        )?.sessions
+      ).toBeUndefined();
+    });
+
+    // A later start retries the lift, and keeps the source again.
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      await instance.sessions.session().getHistory();
+      expect(instance.tableNames()).toContain("assistant_messages");
+      expect(
+        instance.eventsOfType("session:migration:incomplete")[0]?.payload
+      ).toMatchObject({ table: "assistant_messages", source: 3, copied: 2 });
+      expect(
+        (
+          await instance.kvGet<Record<string, number>>(
+            "cf_agents:schema_versions"
+          )
+        )?.sessions
+      ).toBeUndefined();
+    });
+  });
+
+  it("leaves an app's own table whose name differs from a legacy one only in case", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // SQLite resolves table names regardless of case; the lift must not.
+      instance.seedLegacy([
+        "CREATE TABLE Assistant_Sessions (x TEXT)",
+        "INSERT INTO Assistant_Sessions VALUES ('mine')"
+      ]);
+      await instance.sessions.session().getHistory();
+      expect(instance.tableNames()).toContain("Assistant_Sessions");
     });
   });
 

@@ -334,9 +334,18 @@ describe("Sessions carries released overlays forward", () => {
       expect(instance.eventsOfType("session:overlays:unresolved")).toEqual([
         { type: "session:overlays:unresolved", payload: { count: 2 } }
       ]);
+      // On the one schema record; the key Sessions kept it under is folded
+      // in and gone.
+      expect(
+        (
+          await instance.kvGet<Record<string, number>>(
+            "cf_agents:schema_versions"
+          )
+        )?.sessions
+      ).toBe(2);
       expect(
         await instance.kvGet<number>("cf_agents:sessions_schema_version")
-      ).toBe(2);
+      ).toBeUndefined();
     });
   }, 120_000);
 

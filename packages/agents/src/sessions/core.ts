@@ -508,22 +508,48 @@ export class SessionsCore {
    * row back once.
    */
   #addMessageContentHashColumn(): void {
-    const columns = this.io
-      .sql<{
-        name: string;
-      }>(`SELECT name FROM pragma_table_info('${this.#t.messages}')`, [])
-      .map((row) => row.name);
-    if (columns.includes("content_hash")) return;
+    if (
+      this.#probe(`SELECT [content_hash] FROM [${this.#t.messages}] LIMIT 0`)
+    ) {
+      return;
+    }
     this.io.sqlWrite(
       `ALTER TABLE ${this.#t.messages} ADD COLUMN content_hash TEXT`,
       []
     );
   }
 
+  /**
+   * Whether `query` runs: a `LIMIT 0` read of a missing table, column or
+   * index throws, of an existing one reads no row. No `sqlite_master` or
+   * `pragma_table_info` read (STANDARDISE row 7; `hasTable` in
+   * lifecycle/schema.ts, through Sessions' own `io`).
+   */
+  #probe(query: string): boolean {
+    try {
+      this.io.sql(query, []);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   #tableExists(name: string): boolean {
+    return this.#probe(`SELECT 1 FROM [${name}] LIMIT 0`);
+  }
+
+  /**
+   * Whether a legacy source table exists under exactly this name. SQLite
+   * resolves names regardless of case, so the probe alone would take an
+   * app's own `Assistant_Sessions` for `assistant_sessions`, and the lift
+   * would drop it. The exact-name read runs only when the probe finds a
+   * table: once the sources are gone, a start reads no `sqlite_master`.
+   */
+  #legacyTableExists(name: string): boolean {
     return (
+      this.#tableExists(name) &&
       this.io.sql<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
         [name]
       ).length > 0
     );
@@ -639,12 +665,9 @@ export class SessionsCore {
    * interrupted after the rebuild repeats nothing.
    */
   rebuildCompactions(): void {
-    const rebuilt =
-      this.io.sql<{ one: number }>(
-        `SELECT 1 AS one FROM pragma_table_info('${this.#t.compactions}')
-         WHERE name = 'resume_id'`,
-        []
-      ).length > 0;
+    const rebuilt = this.#probe(
+      `SELECT [resume_id] FROM [${this.#t.compactions}] LIMIT 0`
+    );
     if (rebuilt) return;
     this.io.transaction(() => {
       this.io.sqlWrite(
@@ -785,7 +808,9 @@ export class SessionsCore {
     this.#pathTokens.clear();
     let complete = true;
     const drop = (name: string): void => {
-      if (this.#tableExists(name)) this.io.sqlWrite(`DROP TABLE ${name}`, []);
+      if (this.#legacyTableExists(name)) {
+        this.io.sqlWrite(`DROP TABLE ${name}`, []);
+      }
     };
     /**
      * Drop a lifted source only once every one of its rows has a copy holding
@@ -819,7 +844,7 @@ export class SessionsCore {
       });
     };
 
-    if (this.#tableExists("assistant_messages")) {
+    if (this.#legacyTableExists("assistant_messages")) {
       this.io.sqlWrite(
         `INSERT OR IGNORE INTO ${this.#t.messages}
           (session_id, id, seq, parent_id, role, content, token_estimate, created_at)
@@ -837,7 +862,7 @@ export class SessionsCore {
       }
       dropWhenCopied("assistant_messages", `${this.#t.messages}`, "content");
     }
-    if (this.#tableExists("assistant_compactions")) {
+    if (this.#legacyTableExists("assistant_compactions")) {
       this.io.sqlWrite(
         `INSERT OR IGNORE INTO ${this.#t.compactions}
           (session_id, id, seq, summary, from_message_id, to_message_id, created_at)
@@ -877,7 +902,7 @@ export class SessionsCore {
    */
   liftLegacyFlatMessages(): boolean {
     const source = this.#legacyFlatMessages;
-    if (!source || !this.#tableExists(source.table)) return true;
+    if (!source || !this.#legacyTableExists(source.table)) return true;
     const { table } = source;
     const order = this.io
       .sql<{
@@ -1228,11 +1253,10 @@ export class SessionsCore {
   /** Whether the tail index exists; a positive answer is remembered. */
   #hasTailIndex(): boolean {
     if (!this.#tailIndexed) {
-      this.#tailIndexed =
-        this.io.sql<{ one: number }>(
-          `SELECT 1 AS one FROM sqlite_master WHERE type = 'index' AND name = '${this.#t.tailIndex}'`,
-          []
-        ).length > 0;
+      // `INDEXED BY` a missing index throws.
+      this.#tailIndexed = this.#probe(
+        `SELECT 1 FROM [${this.#t.messages}] INDEXED BY [${this.#t.tailIndex}] LIMIT 0`
+      );
     }
     return this.#tailIndexed;
   }

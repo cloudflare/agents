@@ -14,6 +14,7 @@ import {
   HOST_SCHEMA_ID,
   LIFECYCLE_SCHEMA_ID,
   type LifecycleSchema,
+  registerSchemaHandles,
   SchemaVersions
 } from "./schema";
 import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
@@ -783,6 +784,9 @@ export class Lifecycle<
     // A capability reaches the facet wake through its services object.
     facetWakeArmers.set(services, (address, time) =>
       this.#holdFacetWake(address, time, 0)
+    );
+    registerSchemaHandles(services, (id) =>
+      this.#schemaVersions.forCapability(id, () => this.#status === "starting")
     );
     return services;
   }
