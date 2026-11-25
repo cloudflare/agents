@@ -571,12 +571,40 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual([]);
     expect(turns.continuation.pending?.requestId).toBe("cont-1");
     expect(connection.sent).toEqual([]);
+    // Still work in progress: the chat is not reported stable meanwhile.
+    expect(turns.hasPendingDecision()).toBe(true);
 
     await vi.advanceTimersByTimeAsync(250);
     await drain();
     expect(host.ran).toEqual(["cont-1"]);
     expect(host.errors).toEqual([]);
     expect(turns.continuation.pending).toBeNull();
+  });
+
+  it("a continuation replaced while it waits to fire again is not fired in its place", async () => {
+    const turn = host.turn();
+    let failures = 1;
+    host.turn = () => ({
+      ...turn,
+      enqueue: async (requestId, body, onQueued) => {
+        if (failures-- > 0) throw new Error("probe parent reset");
+        return turn.enqueue(requestId, body, onQueued);
+      }
+    });
+    await result("a1");
+    await fire();
+    await drain();
+    expect(turns.continuation.pending?.requestId).toBe("cont-1");
+    // A clear drops it while it waits, and a new answer arrives.
+    turns.continuation.clearPending();
+    host.transcript = [user("u2"), toolReply("a2", "output-available")];
+    await result("a2");
+    // The new one fires on its own schedule, once; the old one's retry,
+    // when its wait ends, fires nothing.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await drain();
+    expect(host.ran).toEqual(["cont-2"]);
+    expect(turns.aborts.has("cont-1")).toBe(false);
   });
 
   it("a newer pending continuation with no deferred result is left as it is", async () => {

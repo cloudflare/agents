@@ -383,7 +383,9 @@ export async function runContinuationTurn<
       turn.onError(error, { errorPrefix, reported: outcome.reported });
     }
   } finally {
-    parts.firing.delete(firing);
+    // A continuation waiting to fire again still counts as firing, so the
+    // chat is not reported stable meanwhile.
+    if (!retry) parts.firing.delete(firing);
     parts.unscheduled.delete(requestId);
     if (!retry) {
       // The abort signal goes however the turn ended. The release is for a
@@ -399,6 +401,13 @@ export async function runContinuationTurn<
     await new Promise((resolve) =>
       setTimeout(resolve, CONTINUATION_ENQUEUE_RETRY_MS * 2 ** attempt)
     );
+    parts.firing.delete(firing);
+    // Replaced meanwhile (a clear, a stop): that one fires on its own.
+    if (parts.continuation.pending?.requestId !== requestId) {
+      parts.aborts.remove(requestId);
+      queued();
+      return;
+    }
     return runContinuationTurn(parts, turn, undefined, attempt + 1);
   }
 
