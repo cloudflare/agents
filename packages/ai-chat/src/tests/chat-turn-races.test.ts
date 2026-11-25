@@ -794,7 +794,7 @@ describe("chat turn races", () => {
     const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const { ws: tab2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const agent = await getAgentByName(env.TestChatAgent, room);
-    await agent.storeNoteLaterFromPersistForTest(400);
+    await agent.storeNoteLaterFromPersistForTest();
     await agent.holdPersistForTest("user");
 
     sendChatRequest(tab1, "req-1", [user1]);
@@ -804,7 +804,8 @@ describe("chat turn races", () => {
     await sendHandled(agent, tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
     expect(await agent.isPersistHeldForTest()).toBe(true);
     await agent.releasePersistForTest();
-    // The note is stored on a timer after the persist: wait for it.
+    // The work the persist started stores its note now.
+    await agent.storeLaterNoteForTest();
     await waitUntil(async () =>
       ((await agent.getPersistedMessages()) as ChatMessage[]).some(
         (m) => m.id === "note-later"
