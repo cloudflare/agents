@@ -59,6 +59,21 @@ async function sendHandled(
   );
 }
 
+/** Wait until the agent is idle and has no continuation armed or deferred. */
+async function settled(agent: {
+  waitForIdleForTest(): Promise<unknown>;
+  getContinuationStateForTest(): Promise<{
+    hasPending: boolean;
+    hasDeferred: boolean;
+  }>;
+}) {
+  await waitUntil(async () => {
+    await agent.waitForIdleForTest();
+    const state = await agent.getContinuationStateForTest();
+    return !state.hasPending && !state.hasDeferred;
+  });
+}
+
 function sendChatRequest(
   ws: WebSocket,
   id: string,
@@ -1010,8 +1025,8 @@ describe("chat turn races", () => {
     await waitUntil(
       async () => (await agent.getChatMessageCallCountForTest()) === 2
     );
-    await delay(400);
-    await agent.waitForIdleForTest();
+    // No armed continuation and idle: nothing more can start.
+    await settled(agent);
     expect(await agent.getChatMessageCallCountForTest()).toBe(2);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
@@ -1258,8 +1273,8 @@ describe("chat turn races", () => {
     await waitUntil(
       async () => (await agent.getChatMessageCallCountForTest()) === 2
     );
-    await delay(900);
-    await agent.waitForIdleForTest();
+    // No armed continuation and idle: nothing more can start.
+    await settled(agent);
     expect(await agent.getChatMessageCallCountForTest()).toBe(2);
     expect(
       seen.filter((m) => isUseChatResponseMessage(m) && m.error === true)
@@ -1340,8 +1355,8 @@ describe("chat turn races", () => {
     });
     send(ws, { type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id: "req-1" });
     await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
-    await delay(300);
-    await agent.waitForIdleForTest();
+    // No armed continuation and idle: nothing more can start.
+    await settled(agent);
 
     // Stop means stop: the model is not called again.
     expect(await agent.getChatMessageCallCountForTest()).toBe(1);
@@ -1446,12 +1461,12 @@ describe("chat turn races", () => {
       async () =>
         (await agent.getContinuationStateForTest()).hasDeferred === true
     );
-    send(ws, {
+    await sendHandled(agent, ws, {
       type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
       id: continuationId
     });
-    await delay(900);
-    await agent.waitForIdleForTest();
+    // No armed continuation and idle: nothing more can start.
+    await settled(agent);
 
     // Stop means stop: the second result does not start the model again.
     expect(await agent.getChatMessageCallCountForTest()).toBe(1);
