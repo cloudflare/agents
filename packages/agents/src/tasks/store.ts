@@ -160,6 +160,22 @@ export class TaskStore {
     `[0];
   }
 
+  /**
+   * Where a new run of `lane` goes, in one read: whether the lane has an
+   * open run it waits behind, and its sequence number.
+   */
+  lanePlace(lane: string): { open: boolean; seq: number } {
+    const row = this.sql<{ seq: number | null; open: number }>`
+      SELECT
+        (SELECT MAX(seq) FROM ${this.tables.runs} WHERE lane = ${lane}) AS seq,
+        EXISTS (
+          SELECT 1 FROM ${this.tables.runs}
+          WHERE lane = ${lane} AND status IN ('pending', 'running')
+        ) AS open
+    `[0];
+    return { open: row?.open === 1, seq: (row?.seq ?? 0) + 1 };
+  }
+
   /** The sequence number the next run of `lane` gets. */
   nextLaneSeq(lane: string): number {
     return (

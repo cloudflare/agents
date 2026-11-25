@@ -32,7 +32,7 @@ import type {
   SaveMessagesResult,
   SkippedTurnReason
 } from "./lifecycle";
-import type { TurnQueue } from "./turn-queue";
+import type { TurnLane } from "./turn-lane";
 import { isTurnStopped } from "./turn-stop";
 
 export type ServerTurnStatus = SaveMessagesResult["status"];
@@ -117,7 +117,7 @@ export interface ServerChatTurn<TInput = undefined> {
 
 /** The parts of the turn core a server-started turn runs on. */
 export interface ServerTurnParts {
-  queue: TurnQueue;
+  queue: TurnLane;
   aborts: AbortRegistry;
   /**
    * Link the caller's signal to the turn. `ChatTurns` passes its own

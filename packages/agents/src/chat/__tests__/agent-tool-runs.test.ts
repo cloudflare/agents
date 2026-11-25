@@ -644,10 +644,10 @@ describe("AgentToolRuns", () => {
     store.seed("run-1");
     store.bindRequest("run-1", "req-1");
     store.raw(
-      `create table cf_agents_task_runs (run_id text, definition text, input text, status text, metadata text)`
+      `create table cf_agents_task_runs (run_id text, definition text, input text, status text, metadata text, lane text, checkpoint text)`
     );
     store.raw(
-      `insert into cf_agents_task_runs values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running', null)`
+      `insert into cf_agents_task_runs (run_id, definition, input, status, metadata) values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running', null)`
     );
 
     await runs.reconcileStale("run-1");
@@ -659,10 +659,10 @@ describe("AgentToolRuns", () => {
     skipped.store.seed("run-1");
     skipped.store.bindRequest("run-1", "req-1");
     skipped.store.raw(
-      `create table cf_agents_task_runs (run_id text, definition text, input text, status text, metadata text)`
+      `create table cf_agents_task_runs (run_id text, definition text, input text, status text, metadata text, lane text, checkpoint text)`
     );
     skipped.store.raw(
-      `insert into cf_agents_task_runs values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running', null)`
+      `insert into cf_agents_task_runs (run_id, definition, input, status, metadata) values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running', null)`
     );
     skipped.setIncident("i-1", {
       status: "skipped",

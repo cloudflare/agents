@@ -25,6 +25,13 @@ interface ChatRecoveryTestStub {
     metadata?: { messageId?: string; continuation?: boolean }
   ): Promise<void>;
   insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+  insertInterruptedLaneTurn(
+    requestId: string,
+    began: boolean,
+    stash?: unknown
+  ): Promise<void>;
+  getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
+  openChatTurnRunsForTest(): Promise<number>;
   insertLegacyChatFiberForTest(
     requestId: string,
     snapshot?: unknown
@@ -1940,6 +1947,49 @@ describe("onChatRecovery", () => {
     expect(fiberCtx.streamId).toBe("stream-fiber");
     expect(fiberCtx.partialText).toBe("Fiber recovery text");
     expect(fiberCtx.recoveryData).toEqual({ someUserData: true });
+  });
+
+  it("recovers a lane turn whose model call began, with its stash data", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({ continue: false });
+    await agentStub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "Hello" }] }
+    ] as ChatMessage[]);
+    await agentStub.insertInterruptedStream(
+      "stream-lane",
+      "req-lane",
+      makeChunks(["Lane recovery text"], "assistant-lane")
+    );
+    await agentStub.insertInterruptedLaneTurn("req-lane", true, {
+      someUserData: true
+    });
+
+    await agentStub.triggerFiberRecovery();
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      streamId: string;
+      partialText: string;
+      recoveryData: unknown;
+    }>;
+    const context = contexts[contexts.length - 1];
+    expect(context?.streamId).toBe("stream-lane");
+    expect(context?.partialText).toBe("Lane recovery text");
+    expect(context?.recoveryData).toEqual({ someUserData: true });
+  });
+
+  it("does not recover a lane turn whose model call never began", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({ continue: false });
+    await agentStub.insertInterruptedLaneTurn("req-queued", false);
+
+    await agentStub.triggerFiberRecovery();
+
+    expect(await agentStub.getRecoveryContexts()).toEqual([]);
+    expect(await agentStub.getActiveFibers()).toEqual([]);
+    // Its run ended, so the lane is free.
+    expect(await agentStub.openChatTurnRunsForTest()).toBe(0);
   });
 
   it("should retry a pre-stream interrupted user turn by default", async () => {

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { seedTaskRun, type TaskHarnessObject } from "../capabilities/tasks";
 
 function gate(): { promise: Promise<void>; open: () => void } {
@@ -98,6 +98,126 @@ describe("Tasks lanes", () => {
         async () => (await instance.tasks.get("b"))?.status === "completed"
       );
       expect(listed("l", ["completed"])).toEqual(["a", "b"]);
+    });
+  });
+
+  it("hands a queued run its caller's local when it starts here, and tells a local no attempt took", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      const first = gate();
+      instance.lanedGates.set("a", first.promise);
+      let dropped = 0;
+      const lane = { lane: "l" } as const;
+      await instance.tasks.run(
+        "laned",
+        { label: "a" },
+        { ...lane, local: "A" }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        { ...lane, local: "B" }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "c" },
+        { ...lane, runId: "c", local: { dropped: () => dropped++ } }
+      );
+      await until(() => instance.lanedStarted.length === 1);
+      // c ends before an attempt took its local: it is told, once.
+      await instance.tasks.cancel("c");
+      expect(dropped).toBe(1);
+      first.open();
+      await until(() => instance.lanedStarted.length === 2);
+      // b started here as a settled, with the local its caller passed.
+      expect(instance.lanedLocals).toEqual(["A", "B"]);
+      await until(
+        async () =>
+          (await instance.tasks.list({ status: ["pending", "running"] }))
+            .length === 0
+      );
+      expect(dropped).toBe(1);
+    });
+  });
+
+  it("moves the lane on when a dropped local throws", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      const first = gate();
+      instance.lanedGates.set("a", first.promise);
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const lane = { lane: "l" } as const;
+      await instance.tasks.run(
+        "laned",
+        { label: "a" },
+        { ...lane, local: "A" }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        {
+          ...lane,
+          runId: "b",
+          local: {
+            dropped: () => {
+              throw new Error("dropped threw");
+            }
+          }
+        }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "c" },
+        { ...lane, local: "C" }
+      );
+      await until(() => instance.lanedStarted.length === 1);
+      await instance.tasks.cancel("b");
+      first.open();
+      await until(() => instance.lanedStarted.length === 2);
+      expect(instance.lanedStarted).toEqual(["a", "c"]);
+      error.mockRestore();
+    });
+  });
+
+  it("moves the lane on when the cancelled head's dropped local throws", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      // Held, so the head keeps its local until it is cancelled.
+      instance.tasks.holdLane("l");
+      let dropped = 0;
+      const lane = { lane: "l" } as const;
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        {
+          ...lane,
+          runId: "b",
+          local: {
+            dropped: () => {
+              dropped++;
+              throw new Error("dropped threw");
+            }
+          }
+        }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "c" },
+        { ...lane, local: "C" }
+      );
+      // The cancel settles the head and returns although dropped() threw.
+      await instance.tasks.cancel("b");
+      expect(dropped).toBe(1);
+      expect((await instance.tasks.get("b"))?.status).toBe("aborted");
+      await instance.tasks.releaseLane("l");
+      await until(() => instance.lanedStarted.length === 1);
+      expect(instance.lanedStarted).toEqual(["c"]);
+      expect(instance.lanedLocals).toEqual(["C"]);
+      error.mockRestore();
     });
   });
 

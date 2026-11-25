@@ -103,7 +103,9 @@ import {
   type TurnFailure,
   type TurnFailureHost
 } from "./turn-failure";
-import { TurnQueue } from "./turn-queue";
+import { TurnLane } from "./turn-lane";
+import { CHAT_TURN_LANE, type ChatTurnTaskInput } from "./turn-task";
+import type { Tasks } from "../tasks";
 import { ChatStreamStalledError } from "./stall-watchdog";
 import { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
 
@@ -179,6 +181,11 @@ export interface ChatTurnsHost {
 export interface ChatTurnsOptions {
   /** Wait for trailing-edge debounced overlapping submits, in milliseconds. */
   defaultDebounceMs: number;
+  /**
+   * Where each queued turn is a run: the host's Tasks, and its chat-turn
+   * definition.
+   */
+  lane: { tasks(): Pick<Tasks, "run">; definition: string };
   /**
    * Durable admission of client requests (`admissions.ts`). Without it a
    * request waiting in the queue is lost when the isolate resets.
@@ -316,7 +323,7 @@ export class ChatTurns<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
   /** Serializes turns; its generation is the chat's reset epoch. */
-  readonly queue = new TurnQueue();
+  readonly queue: TurnLane;
   /** One abort controller per request id. */
   readonly aborts = new AbortRegistry();
   /** Overlapping-submit policy (`messageConcurrency`). */
@@ -406,6 +413,23 @@ export class ChatTurns<
     private readonly host: ChatTurnsHost,
     options: ChatTurnsOptions
   ) {
+    const { lane } = options;
+    this.queue = new TurnLane((requestId, entry) => {
+      const nonce = crypto.randomUUID();
+      const input: ChatTurnTaskInput = {
+        requestId,
+        continuation: false,
+        nonce,
+        lane: true
+      };
+      return lane.tasks().run(lane.definition, input, {
+        runId: `chat_${nonce}`,
+        retain: false,
+        metadata: { requestId },
+        lane: CHAT_TURN_LANE,
+        local: entry
+      });
+    });
     const admissions = options.admissions;
     this.admissions = admissions
       ? new ChatAdmissions({

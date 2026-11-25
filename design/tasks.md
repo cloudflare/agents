@@ -68,7 +68,7 @@ A terminal report must outlive a reset before it returns. A run with a wake job 
 
 ## Memory
 
-Per isolate: one abort controller and one promise per running attempt (`#active`, removed when the attempt ends); one `local` per run whose caller still waits for its first attempt (`#locals`); one entry per live `wait()` (`#waiters`, removed on resolve, timeout or abort); the runs whose terminal report is being delivered (`#reporting`); the held lanes (`#heldLanes`, a handful of names). Nothing is cached per run beyond that; lists page.
+Per isolate: one abort controller and one promise per running attempt (`#active`, removed when the attempt ends); one `local` per run whose caller still waits for its first attempt (`#locals`), held for a queued lane run until its attempt here starts or it ends (bounded by the lane's open runs; a reset drops them, and a `local` with `dropped()` is told when its run ends first); one entry per live `wait()` (`#waiters`, removed on resolve, timeout or abort); the runs whose terminal report is being delivered (`#reporting`); the held lanes (`#heldLanes`, a handful of names). Nothing is cached per run beyond that; lists page.
 
 ## The chat turn
 

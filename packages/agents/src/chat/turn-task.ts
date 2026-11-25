@@ -37,15 +37,54 @@ export type ChatTurnClosureEntry = {
 };
 
 /**
+ * A turn queued on the chat lane (`turn-lane.ts`): the `local` of its run,
+ * accepted when it was queued. Its model call runs in the same run.
+ */
+export type ChatLaneEntry = {
+  readonly lane: true;
+  /**
+   * Run the queued turn in the async context it was queued in, with
+   * `inside` (this run's context) entered within it.
+   */
+  run(inside: <T>(fn: () => Promise<T>) => Promise<T>): Promise<void>;
+  /** The run ended without running it (Tasks calls it). A no-op once it ran. */
+  dropped(): void;
+};
+
+/**
+ * Run a lane turn's model call in its own run: keep `envelope` as its
+ * recovery snapshot, then run `body` under the fiber stash context. Returns
+ * `undefined` (the caller runs the model call as a run of its own) for a
+ * second model call of the run, or one under another request id.
+ */
+export type ChatRunBegin = <T>(
+  turn: {
+    requestId: string;
+    envelope: TaskJson | undefined;
+    onStash(data: unknown): void;
+  },
+  body: () => Promise<T>
+) => Promise<T> | undefined;
+
+const laneRun = new AsyncLocalStorage<ChatRunBegin | undefined>();
+
+/** The running lane turn's run, for its model call, or `undefined`. */
+export function currentChatRun(): ChatRunBegin | undefined {
+  return laneRun.getStore();
+}
+
+/**
  * The chat-turn run's input: the request, and what recovery needs to run it
  * again (`envelope`: the turn's snapshot in the stash envelope, with no app
- * data; absent when it cannot be kept as JSON).
+ * data; absent when it cannot be kept as JSON). A lane turn (`lane`) keeps
+ * its envelope in the checkpoint when its model call begins.
  */
 export type ChatTurnTaskInput = {
   requestId: string;
   continuation: boolean;
   nonce: string;
   envelope?: TaskJson;
+  lane?: true;
 };
 
 /** The host internals one chat-turn definition runs against. */
@@ -82,6 +121,9 @@ export type ChatTurnTaskHooks = {
   readonly attempts: ChatRecoveryTaskHooks;
 };
 
+/** The Tasks lane the chat turns of an agent run on, one at a time. */
+export const CHAT_TURN_LANE = "chat";
+
 /** Where a live turn's interruption hands its recovery attempt. */
 const turnAttempt = new AsyncLocalStorage<
   (attempt: ChatRecoveryAttemptInput) => boolean
@@ -108,10 +150,13 @@ const STASH = "stash";
  */
 const ATTEMPT = "attempt";
 /**
- * The checkpoint entry a turn accepted before its input carried the
- * snapshot kept its whole envelope under. Read by its recovery only.
+ * The checkpoint entry holding a lane turn's envelope, written when its
+ * model call begins (`null` when it could not be kept). A turn accepted
+ * before its input carried the snapshot kept its whole envelope here too.
  */
-const LEGACY_ENVELOPE = "snapshot";
+const SNAPSHOT = "snapshot";
+/** The field of a lane turn's kept envelope that says when its model call began. */
+const BEGAN_AT = "__cfBeganAt";
 
 /**
  * The storage key a turn accepted before checkpoints kept its snapshot
@@ -129,14 +174,30 @@ export function createChatTurnTaskDefinition(
   hooks: ChatTurnTaskHooks
 ): (input: unknown, step: TaskStep) => Promise<void> {
   return async (input, step) => {
-    const { requestId, nonce, envelope } = input as ChatTurnTaskInput;
+    const { requestId, nonce, envelope, lane } = input as ChatTurnTaskInput;
+    const local = step.local as
+      | ChatTurnClosureEntry
+      | ChatLaneEntry
+      | undefined;
+    if (local && "lane" in local) {
+      try {
+        return await runLaneTurn(
+          hooks,
+          step,
+          input as ChatTurnTaskInput,
+          local
+        );
+      } finally {
+        local.dropped();
+      }
+    }
     // A replay's recovery attempt, journaled as the step's result so a
     // reset during its backoff or dispatch runs the same attempt again.
     const attempt = await step.do(
       "model-turn",
       { retries: { limit: 1 }, timeout: "1 day" },
       async ({ signal }) => {
-        const entry = step.local as ChatTurnClosureEntry | undefined;
+        const entry = local;
         if (!entry) {
           // The live turn planned its recovery before the isolate died: run
           // that attempt. Its stream already ended as recovering, so the
@@ -148,8 +209,26 @@ export function createChatTurnTaskDefinition(
           // evidence, drive user-visible recovery.
           const legacyKey = legacySnapshotKey(nonce);
           const stash = step.checkpoint.get(STASH);
+          const kept = step.checkpoint.get(SNAPSHOT);
+          // A lane turn whose model call never began: nothing to recover.
+          if (lane && kept === undefined) return null;
+          // A lane turn kept its envelope without the app's data; a turn
+          // from before its input carried the snapshot kept it whole.
+          const laneKept =
+            lane && kept && typeof kept === "object" && !Array.isArray(kept)
+              ? kept
+              : undefined;
+          const { [BEGAN_AT]: beganAt, ...laneEnvelope } = laneKept ?? {};
           const persisted =
-            step.checkpoint.get(LEGACY_ENVELOPE) ??
+            (laneKept
+              ? {
+                  // A snapshot that could not be kept is null, so the
+                  // app's data is not read as one.
+                  [hooks.snapshotKey]: null,
+                  ...laneEnvelope,
+                  user: stash ?? null
+                }
+              : (kept ?? undefined)) ??
             (envelope &&
             typeof envelope === "object" &&
             !Array.isArray(envelope)
@@ -165,9 +244,10 @@ export function createChatTurnTaskDefinition(
           await hooks.recover({
             requestId,
             persisted,
-            createdAt: step.createdAt,
+            createdAt: typeof beganAt === "number" ? beganAt : step.createdAt,
             attempt: (next) => {
-              if (!journalableAttempt(next)) return false;
+              // A lane turn's attempt would hold the lane: the Task takes it.
+              if (lane || !journalableAttempt(next)) return false;
               scheduled = next;
               return true;
             }
@@ -202,18 +282,7 @@ export function createChatTurnTaskDefinition(
                     signal,
                     stash: (data) => {
                       entry.onStash(data);
-                      // Stash data is a hint for recovery; stream cursors are
-                      // the evidence. Data that cannot be kept is skipped,
-                      // and never fails the turn.
-                      try {
-                        // SAFETY: stash data is JSON, as fiber stash data
-                        // always was; the write throws on anything else.
-                        // `stash(undefined)` clears the data, as the envelope
-                        // with no `user` field did.
-                        step.checkpoint.set(STASH, (data ?? null) as TaskJson);
-                      } catch (error) {
-                        console.warn("[chat] turn stash data not kept:", error);
-                      }
+                      keepStash(step, data);
                     }
                   },
                   fn
@@ -243,4 +312,91 @@ export function createChatTurnTaskDefinition(
       });
     }
   };
+}
+
+/**
+ * A lane turn's attempt in the isolate that queued it: run the turn, and its
+ * model call in the run's `model-turn` step. An interruption's recovery
+ * attempt goes to the recovery Task: one in this run would hold the lane,
+ * and the turns queued behind it, through its backoff.
+ */
+async function runLaneTurn(
+  hooks: ChatTurnTaskHooks,
+  step: TaskStep,
+  input: ChatTurnTaskInput,
+  entry: ChatLaneEntry
+): Promise<void> {
+  await step.do(
+    "model-turn",
+    { retries: { limit: 1 }, timeout: "1 day" },
+    async ({ signal }) => {
+      let begun = false;
+      // What the model call threw fails the run, as a run of its own did.
+      let failed: { error: unknown } | undefined;
+      const begin: ChatRunBegin = (turn, body) => {
+        if (begun || turn.requestId !== input.requestId) return undefined;
+        // Kept with when the model call began: recovery ages the turn from
+        // then, not from when it was queued.
+        const kept: TaskJson =
+          turn.envelope && typeof turn.envelope === "object"
+            ? { ...turn.envelope, [BEGAN_AT]: Date.now() }
+            : { [BEGAN_AT]: Date.now() };
+        try {
+          step.checkpoint.set(SNAPSHOT, kept);
+        } catch {
+          // Too large for the run's row: the model call runs as a run of
+          // its own, whose input keeps it in parts.
+          return undefined;
+        }
+        begun = true;
+        // A turn its model call starts runs as a run of its own.
+        return laneRun.run(undefined, () =>
+          hooks.withStash(
+            {
+              id: input.nonce,
+              signal,
+              stash: (data) => {
+                turn.onStash(data);
+                keepStash(step, data);
+              }
+            },
+            async () => {
+              try {
+                return await body();
+              } catch (error) {
+                failed = { error };
+                throw error;
+              }
+            }
+          )
+        );
+      };
+      await hooks.keepAliveWhile(() =>
+        entry.run((fn) =>
+          turnAttempt.run(
+            () => false,
+            () => laneRun.run(begin, fn)
+          )
+        )
+      );
+      if (failed) throw failed.error;
+      return null;
+    }
+  );
+}
+
+/**
+ * Keep the app's `stash()` data in the run's checkpoint. Stash data is a
+ * hint for recovery; stream cursors are the evidence. Data that cannot be
+ * kept is skipped, and never fails the turn.
+ */
+function keepStash(step: TaskStep, data: unknown): void {
+  try {
+    // SAFETY: stash data is JSON, as fiber stash data always was; the write
+    // throws on anything else. `stash(undefined)` clears the data, as the
+    // envelope with no `user` field did.
+    step.checkpoint.set(STASH, (data ?? null) as TaskJson);
+  } catch (error) {
+    console.warn("[chat] turn stash data not kept:", error);
+  }
 }

@@ -419,7 +419,8 @@ export async function chatRecoveryNames(input: {
 
 /**
  * Request ids of chat-turn runs that have not settled: Task runs of the
- * turn definition, and legacy fibers (facets). A table that does not exist
+ * turn definition (a turn queued on the chat lane once its model call
+ * began), and legacy fibers (facets). A table that does not exist
  * yet holds none.
  */
 export function interruptedTurnRequestIds(
@@ -431,7 +432,8 @@ export function interruptedTurnRequestIds(
     for (const row of sql
       .exec(
         `select input, metadata from cf_agents_task_runs
-         where definition = ? and status in ('pending', 'running')`,
+         where definition = ? and status in ('pending', 'running')
+           and (lane is null or json_type(checkpoint, '$.snapshot') is not null)`,
         turnName
       )
       .toArray()) {

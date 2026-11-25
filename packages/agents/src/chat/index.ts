@@ -31,7 +31,9 @@ export {
   type ChunkResult
 } from "./stream-accumulator";
 
-export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
+export { TurnLane, type TurnResult, type EnqueueOptions } from "./turn-lane";
+// Released `@cloudflare/ai-chat` 0.12 and `@cloudflare/think` 0.24 import it.
+export { TurnQueue } from "./turn-queue";
 
 export { originMessageIds, withOriginMessageIds } from "./origin-message-ids";
 

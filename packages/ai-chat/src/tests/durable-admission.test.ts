@@ -352,3 +352,20 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(textOf(messages[1])).toBe(QUICK_REPLY);
   }, 40_000);
 });
+
+describe("a turn started from onStart", () => {
+  it("runs while onStart waits for it", async () => {
+    const stub = await getAgentByName(
+      env.OnStartTurnAgent,
+      crypto.randomUUID()
+    );
+    // The first call starts the agent: onStart waits for its own turn.
+    const roles = await Promise.race([
+      stub.rolesForTest(),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve("startup held"), 5000)
+      )
+    ]);
+    expect(roles).toEqual(["user", "assistant"]);
+  });
+});

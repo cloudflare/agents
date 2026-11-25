@@ -73,7 +73,7 @@ import type {
   ClientToolSchema,
   ResumableStream,
   ToolPartUpdate,
-  TurnQueue
+  TurnLane
 } from "agents/chat";
 import type { Schedule } from "agents";
 import {
@@ -13318,7 +13318,7 @@ export class ThinkRecoveryTestAgent extends Think {
     // SAFETY: this inert fixture reaches Think's private startup/bookkeeping
     // seams without exposing production test hooks. These are their signatures.
     const internals = this as unknown as {
-      _turnQueue: TurnQueue;
+      _turnQueue: TurnLane;
       _chatRecoveryEngine(): unknown;
     };
     // The recovery engine writes the incident's outcome.
@@ -13528,6 +13528,11 @@ export class ThinkRecoveryTestAgent extends Think {
       const queueBlocker = foreignResult
         ? enqueue(blockerId, () => releaseQueueBlocker.promise)
         : undefined;
+      // The blocker's run starts once Tasks has accepted it.
+      for (let i = 0; foreignResult && i < 200; i++) {
+        if (queue.activeRequestId === blockerId) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
       if (foreignResult) {
         queue.enqueue = (requestId, fn, options) => {
           const result = enqueue(requestId, fn, options);

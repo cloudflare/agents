@@ -1,6 +1,10 @@
 /**
  * TurnQueue — serial async queue with generation-based invalidation.
  *
+ * Kept for released `@cloudflare/ai-chat` (0.12) and `@cloudflare/think`
+ * (0.24), which import it from `agents/chat`; this release's hosts queue
+ * their turns on the chat lane (`turn-lane.ts`).
+ *
  * Serializes async work via a promise chain, tracks which request is
  * currently active, and lets callers invalidate all queued work by
  * advancing a generation counter.
