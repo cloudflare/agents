@@ -1019,14 +1019,11 @@ export class AIChatAgent<
       // The HTTP transcript has the stored messages only; this list names
       // the queued ones, which a tab keeps apart and draws last.
       if (this._turns.queuedMessageIds().size > 0) {
-        sendIfOpen(
-          connection,
-          JSON.stringify({
-            type: MessageType.CF_AGENT_CHAT_MESSAGES,
-            connect: true,
-            ...this._turns.connectView(this.messages)
-          })
-        );
+        this._frames.send(connection, {
+          type: MessageType.CF_AGENT_CHAT_MESSAGES,
+          connect: true,
+          ...this._turns.connectView(this.messages)
+        });
       }
 
       // Notify client about active streams that can be resumed
