@@ -35,6 +35,7 @@ const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
 const ENVIRONMENT_KEY = "test:environment";
 const REMIND_SECTION_KEY = "test:remind-section";
+const REMIND_LABEL_KEY = "test:remind-label";
 const CATALOGUE_KEY = "test:catalogue";
 const HANG_KEY = "test:hang-provider";
 /** The session that has context blocks. */
@@ -224,11 +225,15 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           ctx.prompt.transform((prompt) => {
             const text = this.ctx.storage.kv.get<string>(REMIND_SECTION_KEY);
             if (text !== undefined) {
-              prompt.set("catalog_section", {
-                text,
-                description: "What is in the catalog",
-                whenChanged: "remind"
-              });
+              prompt.set(
+                this.ctx.storage.kv.get<string>(REMIND_LABEL_KEY) ??
+                  "catalog_section",
+                {
+                  text,
+                  description: "What is in the catalog",
+                  whenChanged: "remind"
+                }
+              );
             }
           })
       }
@@ -1187,6 +1192,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   setCatalogue(value: string): void {
     this.ctx.storage.kv.put(CATALOGUE_KEY, value);
+  }
+
+  setRemindSectionLabel(label: string): void {
+    this.ctx.storage.kv.put(REMIND_LABEL_KEY, label);
+  }
+
+  clearRemindSection(): void {
+    this.ctx.storage.kv.delete(REMIND_SECTION_KEY);
   }
 
   setRemindSection(value: string): void {

@@ -43,6 +43,11 @@ export type ExtensionBuild = {
   readonly system: string | undefined;
   /** The sections that are remind blocks, labelled by their keys. */
   readonly remind: readonly RemindSection[];
+  /**
+   * Every section's text, remind blocks included, in order: the system
+   * text for a session that has no context to hold the remind blocks.
+   */
+  readonly allSections: string | undefined;
 };
 
 /** A remind section, as a context block takes it. @internal */
@@ -137,9 +142,13 @@ export class ExtensionManager<M extends HookMap = ExtensionHooks> {
 /** The system text of the plain sections, and the remind sections. */
 function promptOf(
   prompt: Drafts["prompt"]
-): Pick<ExtensionBuild, "system" | "remind"> {
+): Pick<ExtensionBuild, "system" | "remind" | "allSections"> {
   const plain = prompt.filter(([, section]) => !section.whenChanged);
   return {
+    allSections:
+      prompt.length === 0
+        ? undefined
+        : prompt.map(([, section]) => section.text).join("\n\n"),
     system:
       plain.length === 0
         ? undefined
