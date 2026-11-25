@@ -347,4 +347,20 @@ describe("deliverToSurfaces", () => {
     );
     expect(emails[0].text).toMatch(/^The answer was interrupted/);
   });
+
+  it("streams the response to a Chat SDK thread through its adapter", async () => {
+    const stub = fresh();
+    await answer(stub, [], async () => ({
+      version: 1,
+      channelKey: "chat",
+      address: { threadId: "fakechat:42" },
+      label: "fakechat · fakechat:42",
+      key: "fakechat:42"
+    }));
+    const posts = await until(
+      () => stub.getChatPosts(),
+      (p) => p.length === 1
+    );
+    expect(posts).toEqual([{ threadId: "fakechat:42", text: "Hello" }]);
+  });
 });

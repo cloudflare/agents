@@ -18,6 +18,8 @@ import {
 } from "../../experimental/channels";
 import { WebChannel } from "../../experimental/channels/web";
 import { email } from "../../experimental/channels/email";
+import { chatSdkChannel } from "../../experimental/channels/chat-sdk";
+import type { Adapter } from "chat";
 import { Lifecycle } from "../../lifecycle";
 import { Streams } from "../../streams";
 import { Tasks } from "../../tasks";
@@ -333,6 +335,27 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
         },
         { tasks: this.tasks }
       ),
+      // A Chat SDK adapter as a Channel, streaming through the adapter.
+      chat: deliverToSurfaces(
+        chatSdkChannel({
+          name: "fakechat",
+          path: "/webhooks/fakechat",
+          adapter: {
+            name: "fakechat",
+            initialize: async () => {},
+            stream: async (threadId: string, text: AsyncIterable<unknown>) => {
+              let streamed = "";
+              for await (const part of text) streamed += String(part);
+              this.ctx.storage.kv.put("chat", [
+                ...this.getChatPosts(),
+                { threadId, text: streamed }
+              ]);
+              return { id: "chat-1", threadId, raw: {} };
+            }
+          } as unknown as Adapter
+        }),
+        { tasks: this.tasks }
+      ),
       email: deliverToSurfaces(
         email({
           from: "agent@example.com",
@@ -389,6 +412,11 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
   /** What the thrower Channel delivered, after its first send threw. */
   getThrown(): string[] {
     return this.ctx.storage.kv.get<string[]>("thrower") ?? [];
+  }
+
+  /** What the Chat SDK adapter streamed, by thread. */
+  getChatPosts(): Array<{ threadId: string; text: string }> {
+    return this.ctx.storage.kv.get("chat") ?? [];
   }
 
   /** What the email Channel sent. */

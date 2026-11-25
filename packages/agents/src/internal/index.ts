@@ -104,3 +104,8 @@ export {
   deliverToSurfaces,
   type DeliverToSurfacesOptions
 } from "../experimental/channels/deliveries";
+export {
+  chatSdkChannel,
+  type ChatSdkAddress,
+  type ChatSdkChannelOptions
+} from "../experimental/channels/chat-sdk";
