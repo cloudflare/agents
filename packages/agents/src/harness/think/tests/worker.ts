@@ -815,6 +815,15 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       .map((row) => row.name);
   }
 
+  /** The root session's state as the shared harness store holds it. */
+  storedSessionState(): string {
+    return JSON.stringify(
+      openHarnessStore(this.ctx.storage, {
+        prefix: SHARED_STORE_PREFIX
+      }).session("")?.state
+    );
+  }
+
   /** How many operations the shared harness store holds. */
   storedOperations(): number {
     return openHarnessStore(this.ctx.storage, {
@@ -921,6 +930,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       prefix: SHARED_STORE_PREFIX
     });
     store.createSession({ id: "" });
+    // The released version kept the tool calls it started in session state.
+    store.setSessionState("", {
+      clientTools: [],
+      toolCalls: { "call-old": { operationId: "op-old", attempts: 1 } }
+    });
     store.enqueue({ session: "", id: "op-old", input: {}, meta: {} });
     store.settle("", "op-old", { status: "done", result: { text: "old" } });
     this.ctx.storage.sql.exec(

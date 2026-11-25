@@ -21,3 +21,7 @@ Durable: run rows, checkpoints, tool steps (Tasks), transcripts (Sessions), in-f
 - A settled run keeps its checkpoint (about 150 bytes) until `reset()` deletes the session's settled runs; the terminal report of a cancelled run needs it after the run settled.
 - A seal can settle a run while the next queued run in its lane starts: no lane hold there, unlike `abort()`.
 - A cold start reads the store for open operations and deletes settled ones: two statements, no rows, once the store is empty.
+
+## History
+
+- [rfc-capability-instances.md](./rfc-capability-instances.md): why a composer builds its own named instances and when a host gives it one instead (the harness-backed Think, whose rows are in the Agent's default Tasks).

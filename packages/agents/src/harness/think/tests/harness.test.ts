@@ -571,6 +571,10 @@ describe("ThinkHarness durability", () => {
     stub = fresh(name);
     expect(text(await stub.prompt("hello"))).toBe("echo: hello");
     expect(await stub.storedOperations()).toBe(0);
+    // Nor the tool calls it had recorded for them.
+    expect(JSON.parse(await stub.storedSessionState())).toEqual({
+      clientTools: []
+    });
   });
 
   it("keeps work a rolled-back version queued under an id the store already holds", async () => {

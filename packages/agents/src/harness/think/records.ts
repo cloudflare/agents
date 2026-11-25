@@ -314,9 +314,23 @@ export class OperationRecords {
     });
   }
 
-  /** Forget every settled operation, in SQL, without reading one. */
+  /**
+   * Forget every settled operation, in SQL, without reading one. The first
+   * time there were some, also forget the tool calls a released version
+   * recorded for them in session state.
+   */
   dropSettled(): void {
-    this.#store.deleteSettled();
+    this.#store.transaction(() => {
+      if (this.#store.deleteSettled() === 0) return;
+      for (const session of this.#store.sessions()) {
+        if (Object.keys(parseSessionState(session.state).toolCalls).length) {
+          this.#updateState(session.id, (state) => ({
+            ...state,
+            toolCalls: {}
+          }));
+        }
+      }
+    });
   }
 }
 
