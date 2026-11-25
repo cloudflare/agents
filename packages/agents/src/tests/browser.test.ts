@@ -754,7 +754,9 @@ describe("Browser.connect", () => {
     const key = namedBrowserSessionKey("work");
     const before = store.sessions.get(key)!;
 
-    cdp.send("Page.navigate", { url: "about:blank" }, { timeoutMs: 50 }).catch(() => {});
+    cdp
+      .send("Page.navigate", { url: "about:blank" }, { timeoutMs: 50 })
+      .catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(store.sessions.get(key)).toEqual(before);
   });
@@ -781,7 +783,9 @@ describe("Browser.connect", () => {
     // Past the derived interval (keepAliveMs / 2 = 100ms) but well inside
     // the 60s default: this send must refresh the record.
     await new Promise((resolve) => setTimeout(resolve, 120));
-    cdp.send("Page.navigate", { url: "about:blank" }, { timeoutMs: 50 }).catch(() => {});
+    cdp
+      .send("Page.navigate", { url: "about:blank" }, { timeoutMs: 50 })
+      .catch(() => {});
     await waitUntil(
       () => store.sessions.get(key)!.updatedAt !== stale.updatedAt
     );
@@ -800,7 +804,9 @@ describe("Browser.connect", () => {
     const key = namedBrowserSessionKey("work");
     expect(store.sessions.has(key)).toBe(false);
 
-    cdp.send("Page.navigate", { url: "about:blank" }, { timeoutMs: 50 }).catch(() => {});
+    cdp
+      .send("Page.navigate", { url: "about:blank" }, { timeoutMs: 50 })
+      .catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(store.sessions.has(key)).toBe(false);
   });
