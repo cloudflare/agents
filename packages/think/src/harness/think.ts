@@ -39,6 +39,9 @@ import {
   reconcileScheduledTasks,
   type ThinkScheduledTasks
 } from "../scheduled-tasks";
+import { Workspace } from "@cloudflare/computer";
+import { workspaceExtension } from "./extensions/workspace";
+import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
@@ -135,6 +138,12 @@ export class Think<
   /** The conversation, configured by {@link configureSession}. */
   session!: ThinkSession;
 
+  /**
+   * The agent's Workspace, as in Think: a subclass may assign its own; by
+   * default one on this Durable Object's storage, made at start.
+   */
+  workspace!: ThinkWorkspace;
+
   #messages: UIMessage[] = [];
   #context: Context | undefined;
   #handle: Session | undefined;
@@ -146,6 +155,13 @@ export class Think<
     this.harness = new ThinkHarness({
       // The Agent's own Tasks, which Think's runs already use.
       tasks: this.tasks,
+      // In Think's tool order: the workspace's tools come first.
+      extensions: [
+        {
+          name: "workspace",
+          extension: workspaceExtension(() => this.workspace)
+        }
+      ],
       // Think's reserved keys, so client writes are stripped the same way.
       reservedMetadataKeys: ["channel", "turnMetadata"],
       // Think's own API writes and configures the Sessions handle directly.
@@ -227,6 +243,9 @@ export class Think<
 
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
+      if (!this.workspace) {
+        this.workspace = new Workspace({ storage: this.ctx.storage });
+      }
       const handle = await this.#rootHandle();
       this.session = await this.configureSession(
         new ThinkSession(handle, () => this.context)
@@ -722,7 +741,8 @@ export class Think<
   // ── Harness wiring ────────────────────────────────────────────────
 
   async #beforeTurn(turn: ThinkTurnContext): Promise<ThinkTurnConfig | void> {
-    const tools = await this.getTools();
+    // Every tool on offer, as Think's `beforeTurn` sees them.
+    const tools = turn.toolSet;
     const model = this.resolveModel(await this.getModel());
     this.#running = {
       requestId: turn.operationId,

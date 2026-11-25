@@ -26,6 +26,15 @@ import type {
 import type { Session } from "../../sessions/handle";
 import type { Context } from "../../context/context";
 import type { Tasks } from "../../tasks/tasks";
+import type { ThinkExtension } from "./extensions/types";
+
+/**
+ * @internal An extension a host installs with the harness, by name.
+ */
+export type ThinkShippedExtension = {
+  readonly name: string;
+  readonly extension: ThinkExtension;
+};
 
 /**
  * A session id. The root session is `""`, the Sessions capability's default
@@ -227,6 +236,11 @@ export type ThinkTurnContext = ThinkHookContext & {
   readonly system: string | undefined;
   /** Names of the tools on offer. */
   readonly tools: readonly string[];
+  /**
+   * @internal The tools on offer as built, for a host that hands them to
+   * a hook of its own (the harness-backed Think's `beforeTurn`).
+   */
+  readonly toolSet: ToolSet;
 };
 
 /**
@@ -439,4 +453,10 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
    * with itself. For a host whose rows are already in its default Tasks.
    */
   readonly tasks?: Tasks;
+  /**
+   * @internal Shipped extensions the host installs, in order, ahead of the
+   * harness's own (the context's tools, then these options): a tool of the
+   * same name in `tools` replaces one of theirs in place.
+   */
+  readonly extensions?: readonly ThinkShippedExtension[];
 };

@@ -549,6 +549,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   constructor(options: ThinkHarnessOptions<TOOLS>) {
     super("think-harness");
     this.#options = options;
+    for (const { name, extension } of options.extensions ?? []) {
+      this.#extensions.load(name, loadInProcess(name, extension));
+    }
     this.#extensions.load(
       "context",
       loadInProcess(
@@ -1437,7 +1440,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         continuation: existing !== undefined,
         messages: request,
         system,
-        tools: Object.keys(tools)
+        tools: Object.keys(tools),
+        // A copy: a hook that edits it does not change what is offered.
+        toolSet: { ...tools }
       })) ?? {};
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
@@ -2258,16 +2263,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       // this value existed the harness store read it the same way.
       Array.isArray(parsed) ? (parsed as ClientToolSchema[]) : []
     );
-    // A client cannot replace a server tool: the server's definition, its
-    // execute and its approval policy win on a name clash.
-    for (const name of Object.keys(client)) {
+    // Client tools go last, as in Think. A client cannot replace a server
+    // tool: the server's definition, its execute and its approval policy
+    // win on a name clash.
+    const merged: ToolSet = { ...tools };
+    for (const [name, tool] of Object.entries(client)) {
       if (Object.hasOwn(tools, name)) {
         console.warn(
           `ThinkHarness ignored a client tool named "${name}": a server tool has that name`
         );
+        continue;
       }
+      merged[name] = tool;
     }
-    return { tools: { ...client, ...tools }, system };
+    return { tools: merged, system };
   }
 
   /**

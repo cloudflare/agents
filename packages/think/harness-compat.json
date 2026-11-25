@@ -1,8 +1,8 @@
 {
-  "total": 1535,
-  "passed": 505,
-  "needThink": 1247,
-  "needThinkPassed": 217,
+  "total": 1541,
+  "passed": 520,
+  "needThink": 1256,
+  "needThinkPassed": 235,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -50,7 +50,7 @@
     },
     "channel-policy.test.ts": {
       "total": 3,
-      "passed": 2
+      "passed": 1
     },
     "channel-recovery.test.ts": {
       "total": 5,
@@ -66,7 +66,7 @@
     },
     "client-tools.test.ts": {
       "total": 136,
-      "passed": 35
+      "passed": 34
     },
     "cold-rpc-initialization.test.ts": {
       "total": 4,
@@ -106,15 +106,15 @@
     },
     "execute-tool.test.ts": {
       "total": 6,
-      "passed": 1
+      "passed": 6
     },
     "extension-manager.test.ts": {
-      "total": 38,
-      "passed": 38
+      "total": 41,
+      "passed": 41
     },
     "fetch-tools.test.ts": {
       "total": 51,
-      "passed": 48
+      "passed": 50
     },
     "fiber.test.ts": {
       "total": 7,
@@ -145,7 +145,7 @@
       "passed": 4
     },
     "messengers.test.ts": {
-      "total": 103,
+      "total": 104,
       "passed": 79
     },
     "nested-agent-tools.test.ts": {
@@ -257,8 +257,8 @@
       "passed": 3
     },
     "workspace-tools.test.ts": {
-      "total": 8,
-      "passed": 1
+      "total": 10,
+      "passed": 8
     },
     "ws-web-channel.test.ts": {
       "total": 10,
@@ -302,7 +302,6 @@
     "browser-tools.test.ts > createBrowserTools > requires a browser binding or cdpUrl",
     "browser-tools.test.ts > createBrowserTools > returns browser_execute plus the default Quick Action tools when a binding is present",
     "channel-policy.test.ts > per-channel policy (Phase 4b) > does not apply channel policy for turns on other channels",
-    "channel-policy.test.ts > per-channel policy (Phase 4b) > narrows the tool set via the channel policy (removes, not just adds)",
     "channel-threading.test.ts > channel threading (Phase 4a) > has no channel context when none is supplied",
     "channels.test.ts > resolveChannels > absorbs getMessengers() entries as messenger channels and feeds the runtime",
     "channels.test.ts > resolveChannels > allows overriding the web channel's policy with a kind: web entry",
@@ -346,7 +345,6 @@
     "client-tools.test.ts > Think — tool results with nothing to continue > a second tab's result for an answered call does not continue again",
     "client-tools.test.ts > resume coordination during pending continuation > correlates idle STREAM_RESUME_NONE after a continuation completes",
     "client-tools.test.ts > resume coordination during pending continuation > does not send STREAM_RESUME_NONE for an immediate resume request after tool output",
-    "client-tools.test.ts > resume coordination during pending continuation > holds STREAM_RESUME_REQUEST while continuation is pending",
     "cold-rpc-initialization.test.ts > native RPC initialization > hydrates persisted Think history when native RPC is first after eviction",
     "cold-rpc-initialization.test.ts > native RPC initialization > initializes Think before the first inherited RPC method executes",
     "cold-rpc-initialization.test.ts > native RPC initialization > initializes Think before the first subclass RPC method executes",
@@ -357,11 +355,18 @@
     "context-upgrade.test.ts > Think context upgrade > rebuilds the prompt from the blocks at the turn after a compaction",
     "context-upgrade.test.ts > Think context upgrade > stores the prompt only on the session, never in a _system_prompt row",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a clear before the replay drops it",
+    "execute-tool.test.ts > execute tool on the codemode runtime > maps needsApproval AI SDK tools to requiresApproval — the call pauses durably",
     "execute-tool.test.ts > execute tool on the codemode runtime > one-liner: createExecuteTool(agent) runs without state.* and records on this.codemode",
+    "execute-tool.test.ts > execute tool on the codemode runtime > runs sandbox code against the workspace tools",
+    "execute-tool.test.ts > execute tool on the codemode runtime > runs sandbox code against tools.* (ToolSetConnector)",
+    "execute-tool.test.ts > execute tool on the codemode runtime > shares one durable history across explicit and one-liner runtimes (same name)",
+    "execute-tool.test.ts > execute tool on the codemode runtime > surfaces sandbox errors as error outcomes with an executionId",
+    "extension-manager.test.ts > ExtensionManager > getTools > offers the model the same tool definitions as before the extension core",
     "extension-manager.test.ts > ExtensionManager > getTools > should merge tools from multiple extensions",
     "extension-manager.test.ts > ExtensionManager > getTools > should prefix tool names with extension name",
     "extension-manager.test.ts > ExtensionManager > getTools > should return AI SDK tools from loaded extensions",
     "extension-manager.test.ts > ExtensionManager > getTools > should return empty object when no extensions loaded",
+    "extension-manager.test.ts > ExtensionManager > getTools > warns once per manager that a context block's type is ignored",
     "extension-manager.test.ts > ExtensionManager > lifecycle after unload > should allow reloading after unload",
     "extension-manager.test.ts > ExtensionManager > lifecycle after unload > should not include tools from unloaded extensions",
     "extension-manager.test.ts > ExtensionManager > lifecycle after unload > should throw when executing a tool from an unloaded extension",
@@ -392,6 +397,7 @@
     "extension-manager.test.ts > ExtensionManager > tool execution > should propagate tool execution errors",
     "extension-manager.test.ts > ExtensionManager > unload > should return false for unknown extension",
     "extension-manager.test.ts > ExtensionManager > unload > should unload an extension",
+    "extension-manager.test.ts > ExtensionManager hook timeout > runs a manager the agent was given under the agent's timeout",
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > changes the id when the context labels change",
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > gives different agents different ids for the same host extension",
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > never reuses a host extension id without a scope",
@@ -413,6 +419,8 @@
     "fetch-tools.test.ts > fetch — redirects > follows same-origin redirects through the binding",
     "fetch-tools.test.ts > fetch — size limits > returns too_large for JSON that exceeds the byte cap",
     "fetch-tools.test.ts > fetch — size limits > truncates oversized text and flags truncated",
+    "fetch-tools.test.ts > fetch — workspace spill > writes binary bodies when spill is enabled in auto",
+    "fetch-tools.test.ts > fetch — workspace spill > writes text bodies to the workspace in workspace mode",
     "fetch-tools.test.ts > fetch_<binding> — responses > parses JSON bodies",
     "fetch-tools.test.ts > fetch_<binding> — responses > rejects binary content in auto mode without spill",
     "fetch-tools.test.ts > fetch_<binding> — responses > rejects paths outside the binding allowlist",
@@ -769,7 +777,14 @@
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes submitMessages and waitForEvent results after copying serializable data",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes the submitMessages result before cancelling a timed-out prompt",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > keeps the waitForEvent result alive while validating nested output",
+    "workspace-tools.test.ts > Think workspace tools > adds exec when the Workspace has a backend",
     "workspace-tools.test.ts > Think workspace tools > lets a same-name tool from getTools() replace a built-in",
+    "workspace-tools.test.ts > Think workspace tools > lets code run with exec import the agent's tools from codemode:tools",
+    "workspace-tools.test.ts > Think workspace tools > reads files through node:fs, not codemode:tools",
+    "workspace-tools.test.ts > Think workspace tools > runs code on the Workspace's backend through exec",
+    "workspace-tools.test.ts > Think workspace tools > sends the workspace tools to the model as they are given directly, byte for byte",
+    "workspace-tools.test.ts > Think workspace tools > writes a file when the model calls the write tool, and keeps the call",
+    "workspace-tools.test.ts > Think workspace tools > writes and reads files through the tools",
     "ws-web-channel.test.ts > Think — WebSocket chat runs on the web channel (#2255) > still runs server-driven turns without a channel by default"
   ]
 }

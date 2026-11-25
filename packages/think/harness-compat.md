@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**217 of the 1247 tests that construct Think pass (17%).** Across the whole suite, 505 of 1535.
+**235 of the 1256 tests that construct Think pass (18%).** Across the whole suite, 520 of 1541.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -28,11 +28,11 @@ supported by the harness-backed Think yet".
 | `assistant-message-metadata.test.ts`   | 1 / 9    | 11%  |
 | `attachment-consumption.test.ts`       | 0 / 4    | 0%   |
 | `browser-tools.test.ts`                | 6 / 6    | 100% |
-| `channel-policy.test.ts`               | 2 / 3    | 66%  |
+| `channel-policy.test.ts`               | 1 / 3    | 33%  |
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 35 / 136 | 25%  |
+| `client-tools.test.ts`                 | 34 / 136 | 25%  |
 | `cold-rpc-initialization.test.ts`      | 3 / 4    | 75%  |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
@@ -42,9 +42,9 @@ supported by the harness-backed Think yet".
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
 | `execute-hitl.test.ts`                 | 0 / 16   | 0%   |
-| `execute-tool.test.ts`                 | 1 / 6    | 16%  |
-| `extension-manager.test.ts`            | 38 / 38  | 100% |
-| `fetch-tools.test.ts`                  | 48 / 51  | 94%  |
+| `execute-tool.test.ts`                 | 6 / 6    | 100% |
+| `extension-manager.test.ts`            | 41 / 41  | 100% |
+| `fetch-tools.test.ts`                  | 50 / 51  | 98%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
 | `hooks.test.ts`                        | 38 / 149 | 25%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
@@ -52,7 +52,7 @@ supported by the harness-backed Think yet".
 | `mcp-tool-materialization.test.ts`     | 0 / 2    | 0%   |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
 | `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
-| `messengers.test.ts`                   | 79 / 103 | 76%  |
+| `messengers.test.ts`                   | 79 / 104 | 75%  |
 | `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
 | `onconnect-broadcast.test.ts`          | 1 / 14   | 7%   |
 | `onstart-degraded.test.ts`             | 1 / 5    | 20%  |
@@ -80,5 +80,5 @@ supported by the harness-backed Think yet".
 | `think-session.test.ts`                | 59 / 305 | 19%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
-| `workspace-tools.test.ts`              | 1 / 8    | 12%  |
+| `workspace-tools.test.ts`              | 8 / 10   | 80%  |
 | `ws-web-channel.test.ts`               | 1 / 10   | 10%  |
