@@ -67,6 +67,23 @@ the right moment and no lock to trip over. Handlers are ordinary arrows that
 capture `this`. Version the name (`"build-report@v2"`) instead of changing an
 in-flight definition's step layout.
 
+### More than one Tasks
+
+Give a second Tasks a `name` to keep its runs apart from the first:
+
+```ts
+readonly tasks = new Tasks({ definitions: { /* … */ } });
+readonly imports = new Tasks({ name: "imports", definitions: { /* … */ } });
+readonly lifecycle = Lifecycle.install(this).use(this.tasks).use(this.imports);
+```
+
+Each has its own runs, run ids, lanes, idempotency keys and wakes; `get`,
+`list`, `wait`, `cancel`, `clear` and `delete` see only their own. A name is
+a lowercase letter followed by up to 31 lowercase letters, digits or hyphens,
+and two instances with the same name in one object throw at install. The
+unnamed Tasks keeps the tables it always had. The `name` option is
+experimental.
+
 ## On an Agent
 
 `Agent` installs the capability automatically as `this.tasks` (experimental).
