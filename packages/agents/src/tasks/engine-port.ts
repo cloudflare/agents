@@ -34,6 +34,12 @@ export type TaskStepEngineDeps = {
   claimRefreshAfterMs: number;
   defaults: ResolvedStepPolicy;
   emit: (type: string, payload: Record<string, unknown>) => void;
+  /**
+   * Put before a step's idempotency key: empty for the default instance,
+   * the instance's id and `:` for a named one, so the same run id and step
+   * name in two instances never send an external service the same key.
+   */
+  stepKeyPrefix: string;
 };
 
 /** @internal Build the engine port for one claimed attempt. */
@@ -186,7 +192,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     },
     attemptSignal: deps.signal,
     emit: deps.emit,
-    stepIdempotencyKey: (name) => `${runId}:${name}`,
+    stepIdempotencyKey: (name) => `${deps.stepKeyPrefix}${runId}:${name}`,
     defaults: deps.defaults
   };
 }

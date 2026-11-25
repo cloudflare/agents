@@ -1603,6 +1603,8 @@ export class Tasks<
       claimedAtMs,
       claimRefreshAfterMs: CLAIM_SLACK_MS / 2,
       defaults: this.#stepDefaults,
+      stepKeyPrefix:
+        this.instanceName === undefined ? "" : `${this.capabilityId}:`,
       emit: (type, payload) =>
         this.#emit(type as TaskEventType, { runId, definition, ...payload })
     });

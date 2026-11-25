@@ -78,7 +78,8 @@ readonly lifecycle = Lifecycle.install(this).use(this.tasks).use(this.imports);
 ```
 
 Each has its own runs, run ids, lanes, idempotency keys and wakes; `get`,
-`list`, `wait`, `cancel`, `clear` and `delete` see only their own. A name is
+`list`, `wait`, `cancel`, `clear` and `delete` see only their own, and a named instance's step idempotency keys start
+with its id (`tasks/imports:`), so they never match the unnamed one's. A name is
 a lowercase letter followed by up to 31 lowercase letters, digits or hyphens,
 and two instances with the same name in one object throw at install. The
 unnamed Tasks keeps the tables it always had. The `name` option is

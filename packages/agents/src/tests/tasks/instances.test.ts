@@ -4,13 +4,18 @@ import type { TaskStep } from "../../tasks";
 import { withCapabilityHarness } from "../shared/capability-harness";
 import { describeInstanceConformance } from "../shared/instance-conformance";
 
+/** Each instance's step idempotency keys, by tag. */
+const stepKeys: string[] = [];
+
 /** A Tasks whose one definition tags its output with the instance's tag. */
 function tasks(tag: string, name?: string) {
   return new Tasks({
     name,
     definitions: {
-      echo: async (input: { x: string }, step: TaskStep) =>
-        step.do("tag", async () => `${tag}:${input.x}`)
+      echo: async (input: { x: string }, step: TaskStep) => {
+        stepKeys.push(`${tag} ${step.idempotencyKey("tag")}`);
+        return step.do("tag", async () => `${tag}:${input.x}`);
+      }
     }
   });
 }
@@ -81,6 +86,7 @@ describe("Tasks instances", () => {
         idempotencyKey: "k",
         retain: true
       };
+      stepKeys.length = 0;
       await plain.run("echo", { x: "a" }, options);
       await probe.run("echo", { x: "b" }, options);
       const [a, b] = await Promise.all([
@@ -96,20 +102,33 @@ describe("Tasks instances", () => {
         result: "probe:b"
       });
 
-      // A queued run in each; clearing one lane, cancelling or deleting in
-      // one instance leaves the other's alone.
-      await plain.run("echo", { x: "c" }, { runId: "q", start: "alarm" });
-      await probe.run("echo", { x: "d" }, { runId: "q", start: "alarm" });
-      expect(await plain.cancel("q")).toBe(true);
-      expect((await probe.get("q"))?.status).toBe("pending");
+      // The same run id and step name never give two instances the same
+      // step key; the default's is as it was.
+      expect([...new Set(stepKeys)].sort()).toEqual([
+        "default invoice-1:tag",
+        "probe tasks/probe:invoice-1:tag"
+      ]);
+
+      // A queued run in each in the same lane, and one more each to cancel:
+      // clearing the lane or cancelling in one instance leaves the other's.
+      const queued = { lane: "chat:x", start: "alarm" } as const;
+      await plain.run("echo", { x: "c" }, { runId: "q", ...queued });
+      await probe.run("echo", { x: "d" }, { runId: "q", ...queued });
+      await plain.run("echo", { x: "e" }, { runId: "c", start: "alarm" });
+      await probe.run("echo", { x: "f" }, { runId: "c", start: "alarm" });
+      expect(await plain.cancel("c")).toBe(true);
+      expect((await probe.get("c"))?.status).toBe("pending");
       await plain.clear("chat:x");
+      expect((await plain.get("q"))?.status).toBe("skipped");
+      expect((await probe.get("q"))?.status).toBe("pending");
       expect((await probe.list()).map((run) => run.runId).sort()).toEqual([
+        "c",
         "invoice-1",
         "q"
       ]);
       await plain.delete({});
       expect(await plain.list()).toEqual([]);
-      expect(await probe.list()).toHaveLength(2);
+      expect(await probe.list()).toHaveLength(3);
     });
   });
 
@@ -157,7 +176,9 @@ describe("Tasks instances", () => {
       const after = install(tasks("default"));
       after.lifecycle.use(back);
       await after.lifecycle.start();
-      await back.runDue("echo");
+      // Its wake is still queued and reaches it through the alarm.
+      await after.lifecycle.alarm();
+      await back.wait("kept", { timeoutMs: 5_000 });
       expect(await back.get("kept")).toMatchObject({
         status: "completed",
         result: "probe:1"
