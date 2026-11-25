@@ -277,4 +277,41 @@ describe("Streams instances", () => {
       ).toEqual([]);
     });
   });
+
+  it("starts with no sqlite_master read, and probes for v1 chunks only on an object that had a schema", async () => {
+    const queries = async (
+      storage: DurableObjectStorage,
+      fn: () => Promise<void>
+    ): Promise<string[]> => {
+      const sql = storage.sql;
+      const exec = sql.exec.bind(sql);
+      const seen: string[] = [];
+      sql.exec = ((query: string, ...params: SqlStorageValue[]) => {
+        seen.push(query);
+        return exec(query, ...params);
+      }) as typeof sql.exec;
+      try {
+        await fn();
+      } finally {
+        sql.exec = exec;
+      }
+      return seen;
+    };
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { lifecycle } = install(new Streams());
+      const fresh = await queries(storage, () => lifecycle.start());
+      expect(
+        fresh.filter((q) => /sqlite_master|stream_chunks/.test(q))
+      ).toEqual([]);
+    });
+    await withCapabilityHarness(async ({ install, storage }) => {
+      await storage.put("cf_agents:streams_schema_version", 2);
+      const { lifecycle } = install(new Streams());
+      const started = await queries(storage, () => lifecycle.start());
+      expect(started.filter((q) => /sqlite_master/.test(q))).toEqual([]);
+      expect(started.filter((q) => /stream_chunks/.test(q))).toEqual([
+        "SELECT 1 FROM [cf_agents_stream_chunks] LIMIT 0"
+      ]);
+    });
+  });
 });

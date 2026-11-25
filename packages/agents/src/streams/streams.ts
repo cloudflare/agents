@@ -14,6 +14,7 @@
  */
 
 import { LifecycleCapability } from "../lifecycle/capability";
+import { hasTable } from "../lifecycle/schema";
 import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import { SqlError } from "../sql-error";
 import { SqlName } from "../sql-name";
@@ -322,6 +323,9 @@ export class Streams extends LifecycleCapability {
 
   /** Migrate stream storage during Lifecycle startup. */
   async onStart(): Promise<void> {
+    // Streams keeps its own version key, not the Lifecycle's one record:
+    // ThinkHarness binds a Streams to its own services, and a record entry
+    // would land under the harness's id and take its schema version.
     const storage = this.lifecycle.storage;
     const version = (await storage.get<number>(this.#schemaVersionKey)) ?? 0;
     if (version < CURRENT_STREAM_SCHEMA_VERSION) {
@@ -1500,12 +1504,7 @@ export class Streams extends LifecycleCapability {
   }
 
   #hasLegacyChunkTable(): boolean {
-    return (
-      this.#sql<{ name: string }>`
-        SELECT name FROM sqlite_master
-        WHERE type = 'table' AND name = 'cf_agents_stream_chunks'
-      `.length > 0
-    );
+    return hasTable(this.lifecycle.storage.sql, "cf_agents_stream_chunks");
   }
 
   #dropLegacyChunkTableIfEmpty(): void {

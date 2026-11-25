@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { CutoverHarnessObject } from "../capabilities/streams";
 import type { StreamChunk } from "../../streams";
@@ -98,6 +98,29 @@ describe("v1 chunk rows fold into blocks lazily", () => {
       writer.close();
       const chunks = await collect(instance.streams.read("live"));
       expect(chunks.map((c) => c.chunk)).toEqual(["a", "b", "c", "d"]);
+    });
+  });
+
+  it("still folds v1 chunks after a restart that left them untouched", async () => {
+    const name = crypto.randomUUID();
+    let stub = env.CutoverHarnessObject.getByName(name);
+    await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {
+      const ctx = (instance as unknown as { ctx: DurableObjectState }).ctx;
+      await ctx.storage.put("cf_agents:streams_schema_version", 1);
+      seedV1(instance, { done: { state: "completed", chunks: ["a", "b"] } });
+      // The first start records schema 2 and folds nothing.
+      await instance.lifecycle.start();
+      expect(await ctx.storage.get("cf_agents:streams_schema_version")).toBe(2);
+    });
+    await evictDurableObject(stub);
+    stub = env.CutoverHarnessObject.getByName(name);
+    await runInDurableObject(stub, async (instance: CutoverHarnessObject) => {
+      await instance.lifecycle.start();
+      const done = await collect(instance.streams.read("done"));
+      expect(done.map((c) => c.chunk)).toEqual(["a", "b"]);
+      expect(
+        count(instance, "SELECT COUNT(*) AS n FROM cf_agents_stream_blocks")
+      ).toBe(1);
     });
   });
 
