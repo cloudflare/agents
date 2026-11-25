@@ -257,6 +257,37 @@ describe("extensions: the build", () => {
     expect(ran).toEqual(["late"]);
   });
 
+  it("keeps a tool callable on the build it came from after a later build drops it", async () => {
+    let offered = true;
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "toggle",
+      loadInProcess("toggle", (ctx) =>
+        ctx.tools.transform((tools) => {
+          if (!offered) return;
+          tools.set(
+            "x",
+            tool({
+              description: "x",
+              inputSchema: z.object({}),
+              execute: async () => "ran"
+            })
+          );
+        })
+      )
+    );
+    const pinned = (await manager.build("")).tools;
+    // Another build, as a watch makes, no longer has the tool.
+    offered = false;
+    expect(Object.keys((await manager.build("")).tools)).toEqual([]);
+    expect(
+      await pinned.x?.execute?.(
+        {},
+        { toolCallId: "c", messages: [], context: undefined }
+      )
+    ).toBe("ran");
+  });
+
   it("refuses a transform registered after the extension returned", async () => {
     let late: (() => void) | undefined;
     const handle = await loadInProcess("late", (ctx) => {

@@ -1173,12 +1173,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   ): Promise<OperationOutcome> {
     const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
     let turn = first;
+    // One build per attempt: every model call and tool call of it sees the
+    // same tools and prompt. A change to them applies from the next turn.
+    const built = await this.#build(first.session);
+    const tools = built.tools;
+    live.tools = tools;
     for (;;) {
       if (run.signal.aborted) throw run.signal.reason;
       const message = await this.#message(turn);
-      const built = await this.#build(turn.session);
-      const tools = built.tools;
-      live.tools = tools;
       const action = nextAction(
         {
           streamId: turn.streamId ?? undefined,
@@ -1186,7 +1188,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           steps: turn.steps
         },
         message,
-        (name) => isServerTool(tools, name),
+        // A call to a tool this build does not have is the harness's to
+        // answer: a client would never run it.
+        (name) => isServerTool(tools, name) || !Object.hasOwn(tools, name),
         maxSteps
       );
       let next: Turn | OperationOutcome;
@@ -1323,7 +1327,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           nextAction(
             { streamId: undefined, pendingModel: true, steps: 0 },
             answered,
-            (name) => isServerTool(tools, name),
+            // As in the step loop: a call to a tool this build does not
+            // have is the harness's to answer.
+            (name) => isServerTool(tools, name) || !Object.hasOwn(tools, name),
             Number.POSITIVE_INFINITY
           )._tag !== "await-input";
         await this.#commit(run, session, undefined, (put) => {
@@ -1772,8 +1778,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const approvals: string[] = [];
     for (const call of calls) {
       const toolName = toolNameOf(call);
-      const tool = tools[toolName];
-      if (!tool) continue;
+      const tool = Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
+      if (!tool) {
+        toRun.push(call);
+        continue;
+      }
       if (call.state === "input-available") {
         const needsApproval =
           (await this.#options.toolApproval?.({
@@ -1821,7 +1830,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     await Promise.all(
       toRun.map((call) => {
         const toolName = toolNameOf(call);
-        const tool = tools[toolName];
+        const tool = Object.hasOwn(tools, toolName)
+          ? tools[toolName]
+          : undefined;
         const { toolCallId } = call;
         // A provider may reuse a tool-call id in a later model step.
         return run.do(
@@ -1832,8 +1843,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             // recorded before the call became a step.
             const attempt =
               stepAttempt + (start.started?.includes(toolCallId) ? 1 : 0);
+            // Removed since the model was offered it, or never offered.
+            const unavailable: ToolOutcome = {
+              ok: false,
+              errorText: `Tool "${toolName}" is no longer available.`
+            };
             let outcome: ToolOutcome | undefined;
-            if (
+            if (!tool) {
+              outcome = unavailable;
+            } else if (
               attempt > 1 &&
               (toolRecovery(tool) === "report" || attempt - 1 >= maxAttempts)
             ) {
@@ -1842,7 +1860,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               outcome = { ok: false, errorText: INTERRUPTED_TOOL_ERROR };
             }
             let input: unknown = call.input;
-            if (!outcome) {
+            if (!outcome && tool) {
               const decision = await this.#extensions.hook("beforeToolCall", {
                 session,
                 operationId,
@@ -1882,7 +1900,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             }
             // Aborted while it ran: the run's report settles the call.
             if (signal.aborted) return;
-            const settled = outcome;
+            const settled = outcome ?? unavailable;
             await this.#extensions.hook("afterToolCall", {
               session,
               operationId,

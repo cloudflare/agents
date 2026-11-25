@@ -24,6 +24,8 @@ A transform is `(draft, build) => void | Promise<void>`, where `build` is `{ ses
 
 **A build** starts from empty drafts and passes them through every loaded extension in load order. Each extension sees what the ones before it made. The result depends only on what is loaded and in what order, so building again is always safe. ThinkHarness builds where it resolves a session's tools: once per model call, and when a watch starts or a tool answer arrives.
 
+**One build per attempt.** A run builds once, when an attempt starts, and every model call and tool call of that attempt uses that build. A change to the extensions or the options' tools applies from the next turn (or the next attempt after a reset). A call to a tool the attempt's build lacks, because it was removed while the call was cut off, is answered with the tool error `Tool "<name>" is no longer available.` A call the model makes to a tool it was never offered is answered by the AI SDK as an invalid call.
+
 **Data crosses, functions stay.** `tools.set(name, tool)` takes an AI SDK tool. The runtime beside the extension keeps the tool object and gives the harness a data entry:
 
 - the tool's data fields as written (description, `type`, `id`, `args`, `providerOptions`, `strict`, `inputExamples`, `recovery`...). A description given as a function is resolved at build, as the AI SDK resolves it when the call has no tool context;
