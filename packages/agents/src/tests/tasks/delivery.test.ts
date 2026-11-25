@@ -95,10 +95,12 @@ describe("deliveries", () => {
           await gate;
         }
       });
-      await sendDelivery(tasksOf(instance), "slow", "k", "first");
+      const first = sendDelivery(tasksOf(instance), "slow", "k", "first");
+      await until(() => payloads.length === 1);
       await sendDelivery(tasksOf(instance), "slow", "k", "second");
       release();
-      await until(() => instance.tasks.peek("k") === undefined);
+      await first;
+      expect(instance.tasks.peek("k")).toBeUndefined();
       expect(payloads).toEqual(["first"]);
     });
   });

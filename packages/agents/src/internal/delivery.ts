@@ -125,9 +125,9 @@ export function registerDeliverySink<Payload>(
 
 /**
  * Send `payload` to `sink` as delivery `id`. A delivery with that id that
- * is still open is joined, not repeated: one delivery per key. The first
- * attempt starts in this invocation; nothing is kept once it is
- * acknowledged.
+ * is still open is joined, not repeated: one delivery per key. Resolves
+ * once the first attempt has ended (acknowledged, or waiting to retry);
+ * nothing is kept once the delivery is acknowledged.
  *
  * `resume` carries a delivery an earlier version already tried: its give-up
  * window counts from `sentAt`, its backoff from `attempts`, and it waits
@@ -143,9 +143,12 @@ export async function sendDelivery<Payload>(
   resume?: { sentAt: number; attempts: number }
 ): Promise<void> {
   if (!resume) {
+    // The first attempt runs here and now: its claim arms the run's only
+    // wake, so the accept writes none.
     await tasks.run(deliveryDefinition(sink), payload, {
       runId: id,
-      retain: false
+      retain: false,
+      start: "now"
     });
     return;
   }

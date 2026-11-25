@@ -283,10 +283,17 @@ describe("legacy workflow notification migration", () => {
           ('n1', 's1', 'WF', 'wf-1', 'completed', '{"ok":true}', 1, NULL),
           ('n2', 's2', 'WF', 'wf-2', 'completed', '{"ok":true}', 2, 5)`
       );
-      const sent: Array<{ id: string; notification: unknown }> = [];
-      await migrateWorkflowNotificationTable(sql, async (id, notification) => {
-        sent.push({ id, notification });
-      });
+      const sent: Array<{
+        id: string;
+        notification: unknown;
+        resume: unknown;
+      }> = [];
+      await migrateWorkflowNotificationTable(
+        sql,
+        async (id, notification, resume) => {
+          sent.push({ id, notification, resume });
+        }
+      );
       expect(sent).toEqual([
         {
           id: "workflow-notification:s1:completed",
@@ -294,7 +301,8 @@ describe("legacy workflow notification migration", () => {
             workflowName: "WF",
             workflowId: "wf-1",
             event: { type: "completed", payload: { ok: true } }
-          }
+          },
+          resume: { sentAt: 1, attempts: 0 }
         }
       ]);
       expect(tableExists(sql, "cf_think_workflow_notifications")).toBe(false);

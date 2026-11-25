@@ -101,7 +101,7 @@ export function legacyWorkflowNotification(
 
 /**
  * Send the undelivered rows of the retired `cf_think_workflow_notifications`
- * table as deliveries and drop the table. A missing table means a fresh
+ * table as deliveries (run from the alarm) and drop the table. A missing table means a fresh
  * object or a finished migration. One bad row does not hold back the rest.
  *
  * TEMPORARY: one-shot upgrade path. Remove in the next minor.
@@ -110,7 +110,11 @@ export function legacyWorkflowNotification(
  */
 export async function migrateWorkflowNotificationTable(
   sql: SqlStorage,
-  send: (id: string, notification: WorkflowNotification) => Promise<unknown>
+  send: (
+    id: string,
+    notification: WorkflowNotification,
+    resume: { sentAt: number; attempts: number }
+  ) => Promise<unknown>
 ): Promise<void> {
   if (!tableExists(sql, "cf_think_workflow_notifications")) return;
   const rows = sql
@@ -120,8 +124,10 @@ export async function migrateWorkflowNotificationTable(
       workflow_id: string;
       event_type: string;
       payload_json: string;
+      created_at: number;
     }>(
-      `SELECT submission_id, workflow_name, workflow_id, event_type, payload_json
+      `SELECT submission_id, workflow_name, workflow_id, event_type, payload_json,
+              created_at
        FROM cf_think_workflow_notifications
        WHERE delivered_at IS NULL
        ORDER BY created_at ASC, notification_id ASC`
@@ -135,11 +141,17 @@ export async function migrateWorkflowNotificationTable(
       continue;
     }
     try {
-      await send(workflowNotificationId(row.submission_id, row.event_type), {
-        workflowName: row.workflow_name,
-        workflowId: row.workflow_id,
-        event: { type: row.event_type, payload }
-      });
+      // From the alarm, with its window counted from when it was written:
+      // a start does not wait on the workflow.
+      await send(
+        workflowNotificationId(row.submission_id, row.event_type),
+        {
+          workflowName: row.workflow_name,
+          workflowId: row.workflow_id,
+          event: { type: row.event_type, payload }
+        },
+        { sentAt: row.created_at, attempts: 0 }
+      );
     } catch (error) {
       console.error(
         `[Think] could not migrate the workflow notification for submission ${row.submission_id}`,

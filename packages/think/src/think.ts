@@ -1814,12 +1814,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               await this._sweepApprovals();
               await migrateWorkflowNotificationTable(
                 this.ctx.storage.sql,
-                (id, notification) =>
+                (id, notification, resume) =>
                   sendDelivery(
                     this.tasks,
                     WORKFLOW_NOTIFICATION_SINK,
                     id,
-                    notification
+                    notification,
+                    resume
                   )
               );
               await this._replayPendingResponseHooks();
