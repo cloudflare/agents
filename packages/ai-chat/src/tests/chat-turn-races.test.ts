@@ -973,19 +973,19 @@ describe("chat turn races", () => {
       ] as ChatMessage["parts"]
     };
     await agent.persistMessages([user1, reply]);
-    await agent.setTestBody({ delayMs: 300, failFirstContinuation: true });
+    await agent.setTestBody({ failFirstContinuation: true });
+    await agent.holdNextModelCallForTest();
 
     // The first result starts a continuation, which waits on the model.
     send(ws, toolResult("call-1"));
-    await waitUntil(
-      async () => (await agent.getChatMessageCallCountForTest()) === 1
-    );
+    await waitUntil(async () => await agent.isModelCallHeldForTest());
     // A second result lands meanwhile. Then the model call fails.
     send(ws, toolResult("call-2"));
     await waitUntil(
       async () =>
         (await agent.getContinuationStateForTest()).hasDeferred === true
     );
+    await agent.releaseModelCallForTest();
 
     // The second result gets its own continuation.
     await waitUntil(
@@ -1507,6 +1507,8 @@ describe("chat turn races", () => {
     const seen = record(tabA);
     const seenB = record(tabB);
     const agent = await getAgentByName(env.SlowStreamAgent, room);
+    // Tab A's reply stops after its first chunk until released.
+    await agent.holdStreamForTest("req-1");
 
     // Tab A's reply streams; tab B regenerates it, so B waits in the queue.
     sendChatRequest(tabA, "req-1", [user1], {
@@ -1537,6 +1539,7 @@ describe("chat turn races", () => {
     );
     // A question is stored while the regenerate waits, so it is skipped.
     await agent.persistMessages([user1, user2]);
+    await agent.releaseStreamForTest("req-1");
     await waitUntil(() => responses(seenB, "req-2").some((m) => m.done), 6000);
     await agent.waitForIdleForTest();
 

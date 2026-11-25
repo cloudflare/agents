@@ -14,7 +14,7 @@ import {
   AGENT_TOOL_PROGRESS_PART,
   getAgentByName
 } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Env } from "./worker";
 import { connectChatWS } from "./test-utils";
 
@@ -618,15 +618,18 @@ describe("AIChatAgent as an agent-tool child", () => {
     // The failure that arrives after root detached must still be seen:
     // this is exactly the gap a routed dispatch that discards its
     // still-pending call (instead of tracking it) would miss entirely.
-    await new Promise((resolve) => setTimeout(resolve, 4_000));
-    const freshParent = await getParent(parentName);
-
-    expect(
-      await freshParent.facetRecoveryIncidentStatusForTest(
-        executing.childName,
-        executing.incidentId
-      )
-    ).toBe("exhausted");
+    await vi.waitFor(
+      async () => {
+        const freshParent = await getParent(parentName);
+        expect(
+          await freshParent.facetRecoveryIncidentStatusForTest(
+            executing.childName,
+            executing.incidentId
+          )
+        ).toBe("exhausted");
+      },
+      { timeout: 12_000, interval: 200 }
+    );
   }, 20_000);
 
   it("keeps a routed run's claim mirrored on root after root detaches at the dispatch budget", async () => {
@@ -651,15 +654,19 @@ describe("AIChatAgent as an agent-tool child", () => {
       await parent.childHasTaskWakeForTest(executing.childName, runId)
     ).toBe(true);
 
-    // Let the delayed failure land and seal inside this test.
-    await new Promise((resolve) => setTimeout(resolve, 4_000));
-    const freshParent = await getParent(parentName);
-    expect(
-      await freshParent.facetRecoveryIncidentStatusForTest(
-        executing.childName,
-        executing.incidentId
-      )
-    ).toBe("exhausted");
+    // The delayed failure lands and seals inside this test.
+    await vi.waitFor(
+      async () => {
+        const freshParent = await getParent(parentName);
+        expect(
+          await freshParent.facetRecoveryIncidentStatusForTest(
+            executing.childName,
+            executing.incidentId
+          )
+        ).toBe("exhausted");
+      },
+      { timeout: 12_000, interval: 200 }
+    );
   }, 20_000);
 
   it("runs a facet's chat turn as a Task run on the facet, not a legacy fiber", async () => {

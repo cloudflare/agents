@@ -55,6 +55,31 @@ import {
  * `callback`, oldest first: a recovery Task run, or a replayed chat-turn run
  * whose `model-turn` step journaled the attempt it runs itself.
  */
+/**
+ * A point a fixture waits at until the test releases it, so a test can
+ * hold a model call or a stream open while it does what it is about.
+ */
+class TestGate {
+  reached = false;
+  readonly #released: Promise<void>;
+  #release!: () => void;
+
+  constructor() {
+    this.#released = new Promise<void>((resolve) => {
+      this.#release = resolve;
+    });
+  }
+
+  pass(): Promise<void> {
+    this.reached = true;
+    return this.#released;
+  }
+
+  release(): void {
+    this.#release();
+  }
+}
+
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
   return sql
     .exec<{ run_id: string }>(
@@ -516,6 +541,22 @@ export class TestChatAgent extends AIChatAgent<Env> {
     }
   }
 
+  /** Holds the next model call (inside onChatMessage) until released. */
+  private _modelGate: TestGate | null = null;
+
+  holdNextModelCallForTest(): void {
+    this._modelGate = new TestGate();
+  }
+
+  isModelCallHeldForTest(): boolean {
+    return this._modelGate?.reached ?? false;
+  }
+
+  releaseModelCallForTest(): void {
+    this._modelGate?.release();
+    this._modelGate = null;
+  }
+
   /** Put a turn that does nothing at the front of the queue until released. */
   holdTurnQueueForTest(): void {
     const held = new Promise<void>((resolve) => {
@@ -655,6 +696,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
     if (delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
+
+    const modelGate = this._modelGate;
+    if (modelGate && !modelGate.reached) await modelGate.pass();
 
     // Every continuation fails before it produces a response.
     if (
@@ -1928,6 +1972,32 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
  * - `chunkDelayMs`: delay between chunks in ms (default: 50)
  */
 export class SlowStreamAgent extends AIChatAgent<Env> {
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    // Record each socket message once the agent has handled it, so a test
+    // can wait for the server to have seen one it sent.
+    const handle = this.onMessage;
+    this.onMessage = async (connection: Connection, message: WSMessage) => {
+      await handle(connection, message);
+      if (typeof message === "string") {
+        try {
+          const { type } = JSON.parse(message) as { type?: unknown };
+          if (typeof type === "string") this._handledMessageTypes.push(type);
+        } catch {
+          // Not JSON: nothing to record.
+        }
+      }
+    };
+  }
+
+  private _handledMessageTypes: string[] = [];
+
+  /** How many socket messages of `type` the agent has handled. */
+  handledMessageCountForTest(type: string): number {
+    return this._handledMessageTypes.filter((handled) => handled === type)
+      .length;
+  }
+
   /** Reset this agent's isolate, as an eviction or a deploy does. */
   async resetIsolateForTest(): Promise<void> {
     this.ctx.abort("test: forced reset");
@@ -2012,6 +2082,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     options?: OnChatMessageOptions
   ) {
     this._transcriptsSeen.push(this.messages.map((message) => message.id));
+    const streamGate = this._takeStreamGate(options?.requestId);
     if (options?.requestId) {
       this._startedRequestIds.push(options.requestId);
       this._requestStartTimes.set(options.requestId, Date.now());
@@ -2139,6 +2210,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
           } else {
             controller.enqueue(encoder.encode(`chunk-${i} `));
           }
+          if (i === 0 && streamGate) await streamGate.pass();
         }
         if (format === "sse") {
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -2151,6 +2223,39 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return new Response(stream, {
       headers: { "Content-Type": contentType }
     });
+  }
+
+  /**
+   * Streams held after their first chunk until released: by request id,
+   * or "next" for whichever stream starts next (a continuation's id is not
+   * known ahead).
+   */
+  private _streamGates = new Map<string, TestGate>();
+
+  private _takeStreamGate(requestId: string | undefined): TestGate | undefined {
+    const byId = requestId ? this._streamGates.get(requestId) : undefined;
+    if (byId) return byId;
+    const next = this._streamGates.get("next");
+    if (!next || next.reached) return undefined;
+    // Keep it under the request's id too, for release and checks by id.
+    if (requestId) this._streamGates.set(requestId, next);
+    return next;
+  }
+
+  holdStreamForTest(requestId = "next"): void {
+    this._streamGates.set(requestId, new TestGate());
+  }
+
+  isStreamHeldForTest(requestId = "next"): boolean {
+    return this._streamGates.get(requestId)?.reached ?? false;
+  }
+
+  releaseStreamForTest(requestId = "next"): void {
+    const gate = this._streamGates.get(requestId);
+    gate?.release();
+    for (const [key, value] of this._streamGates) {
+      if (value === gate) this._streamGates.delete(key);
+    }
   }
 
   private _stopWithReasonStarted: (() => void) | undefined;
