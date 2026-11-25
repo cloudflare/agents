@@ -1126,10 +1126,7 @@ export class Tasks<
     const noWakeYet =
       lane === null
         ? startMode === "attached"
-        : queued ||
-          (startMode === "warm" &&
-            options.local !== undefined &&
-            this.lifecycle.status() !== "starting");
+        : queued || (startMode === "warm" && options.local !== undefined);
     if (!noWakeYet) {
       try {
         await this.#syncWake(runId);
@@ -1144,10 +1141,13 @@ export class Tasks<
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
     if (startMode === "warm") {
-      if (this.lifecycle.status() === "starting") {
-        // A lane run keeps its `local` for the attempt its wake starts here
-        // once the host has started.
-        if (lane === null) this.#locals.delete(runId);
+      // A lane run its caller holds the `local` of starts now, during
+      // startup too: a host's `onStart` may wait for it.
+      if (
+        this.lifecycle.status() === "starting" &&
+        (lane === null || options.local === undefined)
+      ) {
+        this.#locals.delete(runId);
       } else {
         void this.#executeRun(runId)
           .catch(() => {})
@@ -2104,10 +2104,7 @@ export class Tasks<
     // starts here, as the head before it did, not a wake later: its claim
     // mirrors its deadline, and until then the row's is the wake a restart
     // reconciles.
-    if (
-      !this.#locals.has(head.run_id) ||
-      this.lifecycle.status() === "starting"
-    ) {
+    if (!this.#locals.has(head.run_id)) {
       await this.#syncWake(head.run_id);
     } else {
       void this.#executeRun(head.run_id).catch(() => {});

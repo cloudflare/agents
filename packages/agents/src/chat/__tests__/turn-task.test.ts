@@ -3,7 +3,9 @@ import type { TaskJson, TaskStep } from "../../tasks";
 import { unwrapChatFiberSnapshot } from "../recovery";
 import {
   createChatTurnTaskDefinition,
+  currentChatRun,
   currentTurnAttempt,
+  type ChatLaneEntry,
   type ChatTurnClosureEntry
 } from "../turn-task";
 
@@ -55,6 +57,54 @@ const hooks = {
 };
 
 describe("createChatTurnTaskDefinition", () => {
+  it("runs a lane turn's model call as a run of its own when its snapshot is too large for the row", async () => {
+    let began: unknown = "not asked";
+    const entry: ChatLaneEntry = {
+      lane: true,
+      run: (inside) =>
+        inside(async () => {
+          began = currentChatRun()?.(
+            { requestId: "r1", envelope: { big: true }, onStash: () => {} },
+            async () => "reply"
+          );
+        }),
+      dropped: () => {}
+    };
+    const { step, checkpoint } = fakeStep(entry);
+    step.checkpoint.set = () => {
+      throw new Error("SQLITE_TOOBIG");
+    };
+    await createChatTurnTaskDefinition(hooks)(
+      { requestId: "r1", continuation: false, nonce: "n1", lane: true },
+      step
+    );
+    // Declined: the caller starts the model call's own run.
+    expect(began).toBeUndefined();
+    expect(checkpoint.size).toBe(0);
+  });
+
+  it("ages a recovered lane turn from when its model call began, not from when it was queued", async () => {
+    const recover = vi.fn(async () => {});
+    const { step, checkpoint } = fakeStep(undefined);
+    checkpoint.set(
+      "snapshot",
+      JSON.stringify({ __snapshot: null, user: null, __cfBeganAt: 500 })
+    );
+    checkpoint.set("stash", JSON.stringify({ step: 1 }));
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      storage: { delete: async () => false } as unknown as DurableObjectStorage,
+      recover
+    })({ requestId: "r1", continuation: false, nonce: "n1", lane: true }, step);
+    expect(recover).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: "r1",
+        createdAt: 500,
+        persisted: { __snapshot: null, user: { step: 1 } }
+      })
+    );
+  });
+
   it("runs a live turn whose stash data cannot be kept as JSON, and settles its caller", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const resolve = vi.fn();

@@ -367,6 +367,7 @@ export type Env = {
   RecoveryThrowingAgent: DurableObjectNamespace<RecoveryThrowingAgent>;
   RecoverySlowStreamAgent: DurableObjectNamespace<RecoverySlowStreamAgent>;
   AsyncStartAdmissionAgent: DurableObjectNamespace<AsyncStartAdmissionAgent>;
+  OnStartTurnAgent: DurableObjectNamespace<OnStartTurnAgent>;
   AIChatAgentToolParent: DurableObjectNamespace<AIChatAgentToolParent>;
   AIChatAgentToolChild: DurableObjectNamespace<AIChatAgentToolChild>;
   StuckAgentToolChild: DurableObjectNamespace<StuckAgentToolChild>;
@@ -5687,6 +5688,20 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
 
   async waitForIdleForTest(): Promise<void> {
     await this["_turns"].waitForIdle();
+  }
+}
+
+/** An app whose `onStart` waits for a turn of its own. */
+export class OnStartTurnAgent extends TestChatAgent {
+  override async onStart(): Promise<void> {
+    if (this.messages.length > 0) return;
+    await this.saveMessages([
+      { id: "on-start", role: "user", parts: [{ type: "text", text: "hi" }] }
+    ]);
+  }
+
+  rolesForTest(): string[] {
+    return this.messages.map((message) => message.role);
   }
 }
 

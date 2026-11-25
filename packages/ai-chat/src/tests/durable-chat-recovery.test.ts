@@ -31,6 +31,7 @@ interface ChatRecoveryTestStub {
     stash?: unknown
   ): Promise<void>;
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
+  openChatTurnRunsForTest(): Promise<number>;
   insertLegacyChatFiberForTest(
     requestId: string,
     snapshot?: unknown
@@ -1987,6 +1988,8 @@ describe("onChatRecovery", () => {
 
     expect(await agentStub.getRecoveryContexts()).toEqual([]);
     expect(await agentStub.getActiveFibers()).toEqual([]);
+    // Its run ended, so the lane is free.
+    expect(await agentStub.openChatTurnRunsForTest()).toBe(0);
   });
 
   it("should retry a pre-stream interrupted user turn by default", async () => {

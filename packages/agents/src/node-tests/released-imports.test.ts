@@ -18,6 +18,8 @@ describe("agents/chat names released packages import", () => {
       parts: [{ type: "text", text: "hi" }]
     };
     expect(chat.enforceRowSizeLimit(small)).toBe(small);
+    // think 0.24 and ai-chat 0.12 construct one.
+    expect(typeof chat.TurnQueue).toBe("function");
     const big: UIMessage = {
       id: "b",
       role: "user",

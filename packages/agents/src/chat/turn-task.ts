@@ -155,6 +155,8 @@ const ATTEMPT = "attempt";
  * before its input carried the snapshot kept its whole envelope here too.
  */
 const SNAPSHOT = "snapshot";
+/** The field of a lane turn's kept envelope that says when its model call began. */
+const BEGAN_AT = "__cfBeganAt";
 
 /**
  * The storage key a turn accepted before checkpoints kept its snapshot
@@ -212,9 +214,14 @@ export function createChatTurnTaskDefinition(
           if (lane && kept === undefined) return null;
           // A lane turn kept its envelope without the app's data; a turn
           // from before its input carried the snapshot kept it whole.
+          const laneKept =
+            lane && kept && typeof kept === "object" && !Array.isArray(kept)
+              ? kept
+              : undefined;
+          const { [BEGAN_AT]: beganAt, ...laneEnvelope } = laneKept ?? {};
           const persisted =
-            (lane && kept && typeof kept === "object" && !Array.isArray(kept)
-              ? { ...kept, user: stash ?? null }
+            (laneKept
+              ? { ...laneEnvelope, user: stash ?? null }
               : (kept ?? undefined)) ??
             (envelope &&
             typeof envelope === "object" &&
@@ -231,7 +238,7 @@ export function createChatTurnTaskDefinition(
           await hooks.recover({
             requestId,
             persisted,
-            createdAt: step.createdAt,
+            createdAt: typeof beganAt === "number" ? beganAt : step.createdAt,
             attempt: (next) => {
               // A lane turn's attempt would hold the lane: the Task takes it.
               if (lane || !journalableAttempt(next)) return false;
@@ -322,13 +329,20 @@ async function runLaneTurn(
       let failed: { error: unknown } | undefined;
       const begin: ChatRunBegin = (turn, body) => {
         if (begun || turn.requestId !== input.requestId) return undefined;
-        begun = true;
+        // Kept with when the model call began: recovery ages the turn from
+        // then, not from when it was queued.
+        const kept: TaskJson =
+          turn.envelope && typeof turn.envelope === "object"
+            ? { ...turn.envelope, [BEGAN_AT]: Date.now() }
+            : { [BEGAN_AT]: Date.now() };
         try {
-          step.checkpoint.set(SNAPSHOT, turn.envelope ?? null);
-        } catch (error) {
-          console.warn("[chat] turn snapshot not kept:", error);
-          step.checkpoint.set(SNAPSHOT, null);
+          step.checkpoint.set(SNAPSHOT, kept);
+        } catch {
+          // Too large for the run's row: the model call runs as a run of
+          // its own, whose input keeps it in parts.
+          return undefined;
         }
+        begun = true;
         // A turn its model call starts runs as a run of its own.
         return laneRun.run(undefined, () =>
           hooks.withStash(

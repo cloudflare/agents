@@ -109,6 +109,10 @@
         "name": "AsyncStartAdmissionAgent"
       },
       {
+        "class_name": "OnStartTurnAgent",
+        "name": "OnStartTurnAgent"
+      },
+      {
         "class_name": "AIChatAgentToolParent",
         "name": "AIChatAgentToolParent"
       },
@@ -221,6 +225,10 @@
     {
       "new_sqlite_classes": ["OverridingPersistMergeAgent"],
       "tag": "v17"
+    },
+    {
+      "new_sqlite_classes": ["OnStartTurnAgent"],
+      "tag": "v18"
     }
   ]
 }
