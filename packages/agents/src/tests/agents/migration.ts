@@ -1,3 +1,5 @@
+import { forgetSchemaVersion } from "../../lifecycle/durable-object-lifecycle";
+import { storeAsReleased } from "../shared/schema-versions";
 import { Agent } from "../../index.ts";
 
 const SCHEDULE_SCHEMA_VERSION_KEY = "cf_agents:schedules_schema_version";
@@ -34,7 +36,8 @@ export class TestMigrationAgent extends Agent {
       INSERT INTO cf_agents_schedules (id, callback, payload, type, time, delayInSeconds)
       VALUES ('test-old-row', 'testCallback', '"hello"', 'delayed', 4102444800, 5)
     `);
-    await this.ctx.storage.delete(SCHEDULE_SCHEMA_VERSION_KEY);
+    storeAsReleased(this.ctx.storage, "scheduler", SCHEDULE_SCHEMA_VERSION_KEY);
+    forgetSchemaVersion(this.lifecycle, "scheduler");
   }
 
   /**
@@ -89,7 +92,8 @@ export class TestMigrationAgent extends Agent {
       INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
       VALUES ('row-keepalive', '_cf_keepAliveHeartbeat', 'null', 'scheduled', 4102444805)
     `);
-    await this.ctx.storage.delete(SCHEDULE_SCHEMA_VERSION_KEY);
+    storeAsReleased(this.ctx.storage, "scheduler", SCHEDULE_SCHEMA_VERSION_KEY);
+    forgetSchemaVersion(this.lifecycle, "scheduler");
   }
 
   /** Enter Scheduler's real async API, which starts Lifecycle and migrates. */

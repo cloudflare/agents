@@ -20,6 +20,13 @@ export type MCPServerRow = {
 };
 
 /** Create the durable MCP server catalog table when it does not exist. */
+/**
+ * MCP's schema version key from before the one record. Either migration
+ * that runs first (the catalog at start, or the status columns on a cold
+ * registration) folds it in.
+ */
+export const MCP_SCHEMA_VERSION_KEY = "cf_agents:mcp_schema_version";
+
 export function ensureMcpServerTable(storage: DurableObjectStorage): void {
   storage.sql.exec(`
     CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (

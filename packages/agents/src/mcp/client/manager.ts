@@ -39,7 +39,8 @@ import { ServerStatus } from "./status";
 import {
   encodeMcpServerOptions,
   ensureMcpServerTable,
-  type MCPServerRow
+  type MCPServerRow,
+  MCP_SCHEMA_VERSION_KEY
 } from "./storage";
 import type {
   MCPClientElicitationHandlers,
@@ -52,7 +53,6 @@ import type {
   RegisterServerOptions
 } from "./types";
 
-const MCP_SCHEMA_VERSION_KEY = "cf_agents:mcp_schema_version";
 const CURRENT_MCP_SCHEMA_VERSION = 1;
 
 /**
@@ -115,7 +115,10 @@ export class MCPClientManager extends LifecycleCapability {
         return manager.mcpConnections;
       },
       get store() {
-        manager.#store ??= new McpServerStore(manager.lifecycle.storage);
+        manager.#store ??= new McpServerStore(
+          manager.lifecycle.storage,
+          manager.lifecycle.schema
+        );
         return manager.#store;
       },
       get storage() {
@@ -159,15 +162,11 @@ export class MCPClientManager extends LifecycleCapability {
 
   /** Restore persisted HTTP and RPC connections before the host handles work. */
   async onStart(): Promise<void> {
-    const schemaVersion =
-      (await this.lifecycle.storage.get<number>(MCP_SCHEMA_VERSION_KEY)) ?? 0;
-    if (schemaVersion < CURRENT_MCP_SCHEMA_VERSION) {
-      ensureMcpServerTable(this.lifecycle.storage);
-      await this.lifecycle.storage.put(
-        MCP_SCHEMA_VERSION_KEY,
-        CURRENT_MCP_SCHEMA_VERSION
-      );
-    }
+    this.lifecycle.schema.migrateSync({
+      version: CURRENT_MCP_SCHEMA_VERSION,
+      legacyKey: MCP_SCHEMA_VERSION_KEY,
+      steps: { 1: () => ensureMcpServerTable(this.lifecycle.storage) }
+    });
     await this.restoreConnectionsFromStorage(this._name);
     this.servers.restoreRpc();
     this.ctx.stateChanged();

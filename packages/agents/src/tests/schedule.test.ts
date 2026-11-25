@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { storeAsReleased } from "./shared/schema-versions";
 import {
   evictDurableObject,
   runDurableObjectAlarm,
@@ -1319,7 +1320,11 @@ describe("schedule operations", () => {
           nowSec + 3600,
           nowSec + 3600
         );
-        await ctx.storage.delete("cf_agents:schedules_schema_version");
+        storeAsReleased(
+          ctx.storage,
+          "scheduler",
+          "cf_agents:schedules_schema_version"
+        );
       });
       await evictDurableObject(stub);
 
