@@ -8,7 +8,7 @@
  */
 import { asSchema, type JSONSchema7 } from "ai";
 import type { ThinkSessionId } from "../types";
-import { dispatchHook, type HookRunner } from "./hooks";
+import { harnessHookRules } from "./hooks";
 import type {
   BuildContext,
   Draft,
@@ -18,6 +18,7 @@ import type {
   ExtensionHookName,
   ExtensionHooks,
   ExtensionTool,
+  HookHandler,
   PromptDraft,
   PromptEntry,
   ThinkExtension,
@@ -87,6 +88,13 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isAsyncGeneratorFunction(value: unknown): boolean {
+  return (
+    typeof value === "function" &&
+    value.constructor?.name === "AsyncGeneratorFunction"
+  );
+}
+
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   return (
     typeof value === "object" &&
@@ -124,7 +132,10 @@ class ExtensionRuntime implements ExtensionHandle {
   readonly #name: string;
   readonly #toolTransforms: Transform<ToolDraft>[] = [];
   readonly #promptTransforms: Transform<PromptDraft>[] = [];
-  readonly #hooks = new Map<ExtensionHookName, HookRunner[]>();
+  readonly #hooks = new Map<
+    ExtensionHookName,
+    HookHandler<unknown, unknown>[]
+  >();
   /**
    * The tools this extension set in its latest build for each session,
    * replaced by the next. One entry per session built in this isolate.
@@ -172,8 +183,14 @@ class ExtensionRuntime implements ExtensionHandle {
         ) => {
           registering(`a ${hook} hook`);
           const runners = this.#hooks.get(hook) ?? [];
-          // SAFETY: the runner list for `hook` holds only handlers of `hook`.
-          runners.push(handler as HookRunner);
+          // SAFETY: the list for `hook` holds only handlers of `hook`, and
+          // each is called with a context of `hook`.
+          const run = handler as (context: unknown) => unknown;
+          runners.push(
+            Object.assign(async (context: unknown) => run(context), {
+              extension: this.#name
+            })
+          );
           this.#hooks.set(hook, runners);
         }
       });
@@ -253,6 +270,7 @@ class ExtensionRuntime implements ExtensionHandle {
         execute: typeof tool.execute === "function",
         validate: schema.validate !== undefined,
         modelOutput: typeof tool.toModelOutput === "function",
+        streams: isAsyncGeneratorFunction(tool.execute),
         ...(needsApproval === true && { approval: "always" as const }),
         ...(typeof needsApproval === "function" && {
           approval: "call" as const
@@ -358,6 +376,11 @@ class ExtensionRuntime implements ExtensionHandle {
     name: H,
     context: ExtensionHooks[H][0]
   ): Promise<ExtensionHooks[H][1]> {
-    return dispatchHook(name, context, this.#hooks.get(name) ?? []);
+    const rule = harnessHookRules[name];
+    // SAFETY: the handlers of hook `name` take and return its types.
+    const handlers = (this.#hooks.get(name) ?? []) as unknown as Parameters<
+      typeof rule
+    >[1];
+    return rule(context, handlers);
   }
 }

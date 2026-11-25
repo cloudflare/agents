@@ -31,10 +31,12 @@ export interface ExtensionManifest {
     label: string;
     /** Human-readable description shown in the system prompt header. */
     description?: string;
-    /** Block type determines which tools are generated.
-     * Note: not yet enforced — all blocks use SQLite-backed storage
-     * until bridge providers are implemented (Phase 4). */
-    type: "readonly" | "writable" | "searchable";
+    /**
+     * @deprecated Ignored, with a warning when set. An extension writes its
+     * blocks with `host.setContext()`, which its `context.write` permission
+     * governs.
+     */
+    type?: "readonly" | "writable" | "searchable";
     /** Maximum token budget for this block. */
     maxTokens?: number;
   }>;

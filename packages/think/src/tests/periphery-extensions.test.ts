@@ -3,22 +3,52 @@ import type { Context } from "agents/context";
 import { manifest } from "agents/skills";
 import { describe, expect, it, vi } from "vitest";
 import { callThinkHostApi, createThinkHostApi } from "../extensions/host-api";
-import type { ExtensionManager } from "../extensions/manager";
-import { ThinkExtensionHooks } from "../extensions/pipeline";
+import { ExtensionManager as ExtensionCore } from "agents/internal";
+import { ReleasedWorkerHandle, releasedHookRules } from "../extensions/manager";
+import { ThinkExtensionHooks } from "../extensions/wiring";
 import { SKILLS_CONTEXT_LABEL, ThinkSkills } from "../skills-runtime";
 import type { TurnContext } from "../turn-types";
 import type { ThinkWorkspace } from "../workspace-files";
 
 type Hook = (name: string, snapshot: unknown) => Promise<string>;
 
-function fakeManager(subscribers: Record<string, Array<[string, Hook]>>) {
-  return {
-    getHookSubscribers: (hookName: string) =>
-      (subscribers[hookName] ?? []).map(([name, hook]) => ({
-        name,
-        entrypoint: { hook }
-      }))
-  } as unknown as ExtensionManager;
+/**
+ * An extension core over fake released Workers: each subscriber answers
+ * its hooks with `hook`, as a Worker's `hook` RPC does.
+ */
+function fakeCore(
+  subscribers: Record<string, Array<[string, Hook]>>,
+  timeoutMs: number
+) {
+  const core = new ExtensionCore(releasedHookRules(() => timeoutMs));
+  const hooksOf = new Map<string, { hooks: string[]; hook: Hook }>();
+  for (const [hookName, list] of Object.entries(subscribers)) {
+    for (const [name, hook] of list) {
+      const entry = hooksOf.get(name) ?? { hooks: [], hook };
+      entry.hooks.push(hookName);
+      hooksOf.set(name, entry);
+    }
+  }
+  for (const [name, { hooks, hook }] of hooksOf) {
+    const entrypoint = {
+      describe: async () => "[]",
+      manifest: async () => JSON.stringify({ hooks }),
+      execute: async () => "{}",
+      hook
+    };
+    core.load(
+      name,
+      Promise.resolve(
+        new ReleasedWorkerHandle(
+          { name, version: "1.0.0" },
+          entrypoint,
+          [],
+          hooks
+        )
+      )
+    );
+  }
+  return core;
 }
 
 const turnContext = {
@@ -31,47 +61,44 @@ const turnContext = {
 
 describe("ThinkExtensionHooks.beforeTurn", () => {
   it("returns the subclass config when no extension subscribes", async () => {
-    const hooks = new ThinkExtensionHooks({
-      manager: () => fakeManager({}),
-      timeoutMs: () => 50
-    });
+    const hooks = new ThinkExtensionHooks(() => fakeCore({}, 50));
     const config = { maxSteps: 3 };
     expect(await hooks.beforeTurn(turnContext, config)).toBe(config);
   });
 
   it("pipes the config through extensions in order", async () => {
     const seen: unknown[] = [];
-    const hooks = new ThinkExtensionHooks({
-      manager: () =>
-        fakeManager({
-          beforeTurn: [
-            [
-              "first",
-              async (_name, snapshot) => {
-                seen.push(snapshot);
-                return JSON.stringify({
-                  result: {
-                    system: "from first",
-                    temperature: 0.2,
-                    headers: { a: "1" },
-                    model: "ignored"
-                  }
-                });
-              }
-            ],
-            [
-              "second",
-              async (_name, snapshot) => {
-                seen.push(snapshot);
-                return JSON.stringify({
-                  result: { activeTools: ["x"], headers: { b: "2" } }
-                });
-              }
-            ]
+    const core = fakeCore(
+      {
+        beforeTurn: [
+          [
+            "first",
+            async (_name, snapshot) => {
+              seen.push(snapshot);
+              return JSON.stringify({
+                result: {
+                  system: "from first",
+                  temperature: 0.2,
+                  headers: { a: "1" },
+                  model: "ignored"
+                }
+              });
+            }
+          ],
+          [
+            "second",
+            async (_name, snapshot) => {
+              seen.push(snapshot);
+              return JSON.stringify({
+                result: { activeTools: ["x"], headers: { b: "2" } }
+              });
+            }
           ]
-        }),
-      timeoutMs: () => 50
-    });
+        ]
+      },
+      50
+    );
+    const hooks = new ThinkExtensionHooks(() => core);
     const config = await hooks.beforeTurn(turnContext, {
       maxSteps: 4,
       headers: { base: "0" }
@@ -88,23 +115,23 @@ describe("ThinkExtensionHooks.beforeTurn", () => {
 
   it("skips an extension that fails or times out", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const hooks = new ThinkExtensionHooks({
-      manager: () =>
-        fakeManager({
-          beforeTurn: [
-            ["slow", () => new Promise<string>(() => {})],
-            [
-              "broken",
-              async () => {
-                throw new Error("boom");
-              }
-            ],
-            ["errors", async () => JSON.stringify({ error: "bad" })],
-            ["good", async () => JSON.stringify({ result: { seed: 7 } })]
-          ]
-        }),
-      timeoutMs: () => 10
-    });
+    const core = fakeCore(
+      {
+        beforeTurn: [
+          ["slow", () => new Promise<string>(() => {})],
+          [
+            "broken",
+            async () => {
+              throw new Error("boom");
+            }
+          ],
+          ["errors", async () => JSON.stringify({ error: "bad" })],
+          ["good", async () => JSON.stringify({ result: { seed: 7 } })]
+        ]
+      },
+      10
+    );
+    const hooks = new ThinkExtensionHooks(() => core);
     expect(await hooks.beforeTurn(turnContext, {})).toEqual({ seed: 7 });
     expect(warn).toHaveBeenCalledTimes(3);
     warn.mockRestore();
@@ -115,28 +142,28 @@ describe("ThinkExtensionHooks observations", () => {
   it("sends a snapshot to each subscriber and ignores failures", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const calls: string[] = [];
-    const hooks = new ThinkExtensionHooks({
-      manager: () =>
-        fakeManager({
-          onChunk: [
-            [
-              "a",
-              async (name) => {
-                calls.push(`a:${name}`);
-                throw new Error("ignored");
-              }
-            ],
-            [
-              "b",
-              async (name) => {
-                calls.push(`b:${name}`);
-                return "";
-              }
-            ]
+    const core = fakeCore(
+      {
+        onChunk: [
+          [
+            "a",
+            async (name) => {
+              calls.push(`a:${name}`);
+              throw new Error("ignored");
+            }
+          ],
+          [
+            "b",
+            async (name) => {
+              calls.push(`b:${name}`);
+              return "";
+            }
           ]
-        }),
-      timeoutMs: () => 50
-    });
+        ]
+      },
+      50
+    );
+    const hooks = new ThinkExtensionHooks(() => core);
     await hooks.chunk({ chunk: { type: "text-delta" } } as never);
     await hooks.stepFinish({} as never);
     expect(calls).toEqual(["a:onChunk", "b:onChunk"]);
@@ -144,10 +171,7 @@ describe("ThinkExtensionHooks observations", () => {
   });
 
   it("does nothing without an extension manager", async () => {
-    const hooks = new ThinkExtensionHooks({
-      manager: () => undefined,
-      timeoutMs: () => 50
-    });
+    const hooks = new ThinkExtensionHooks(() => undefined);
     const config = {};
     expect(await hooks.beforeTurn(turnContext, config)).toBe(config);
     await hooks.chunk({ chunk: { type: "text-delta" } } as never);

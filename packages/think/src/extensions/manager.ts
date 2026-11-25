@@ -9,15 +9,21 @@
  * 3. Discovers tools via describe() RPC call
  * 4. Exposes them as AI SDK tools via getTools()
  *
- * Extension source format — a JS object expression defining tools:
+ * Each loaded Worker is an extension handle of the extension core
+ * (`agents/internal`), which builds the tools and runs the hooks.
+ *
+ * Extension source format — a JS object expression with `tools` and
+ * `hooks`:
  *
  * ```js
  * ({
- *   greet: {
- *     description: "Greet someone",
- *     parameters: { name: { type: "string" } },
- *     required: ["name"],
- *     execute: async (args, host) => `Hello, ${args.name}!`
+ *   tools: {
+ *     greet: {
+ *       description: "Greet someone",
+ *       parameters: { name: { type: "string" } },
+ *       required: ["name"],
+ *       execute: async (args, host) => `Hello, ${args.name}!`
+ *     }
  *   }
  * })
  * ```
@@ -27,8 +33,19 @@
  * (gated by permissions). See HostBridgeLoopback.
  */
 
-import { tool, jsonSchema } from "ai";
 import type { ToolSet } from "ai";
+import {
+  ExtensionManager as ExtensionCore,
+  toolsOf,
+  type Drafts,
+  type ExtensionHandle,
+  type HookHandler,
+  type HookRules,
+  type ToolEntry,
+  type ToolOutcome
+} from "agents/internal";
+import type { TurnConfig } from "../turn-types";
+import { parseHookResult, type createTurnContextSnapshot } from "./hook-proxy";
 import type {
   ExtensionManifest,
   ExtensionPermissions,
@@ -51,7 +68,8 @@ export function sanitizeName(name: string): string {
     .replace(/^_|_$/g, "");
 }
 
-interface ExtensionEntrypoint {
+/** @internal The RPC methods of a released extension's Worker. */
+export interface ExtensionEntrypoint {
   describe(): Promise<string>;
   manifest(): Promise<string>;
   execute(toolName: string, argsJson: string): Promise<string>;
@@ -63,6 +81,7 @@ interface LoadedExtension {
   tools: ExtensionToolDescriptor[];
   hooks: string[];
   entrypoint: ExtensionEntrypoint;
+  handle: ReleasedWorkerHandle;
 }
 
 /** Shape persisted to DO storage for each extension. */
@@ -120,6 +139,288 @@ async function hashWorkerConfig(input: unknown): Promise<string> {
   ).join("");
 }
 
+type TurnSnapshot = ReturnType<typeof createTurnContextSnapshot>;
+
+/**
+ * The released hooks, with the snapshot each extension is sent. Only the
+ * snapshot crosses to the extension; `beforeTurn`'s `config` is the fold's
+ * starting point and stays here.
+ *
+ * @internal
+ */
+export type ReleasedHooks = {
+  beforeTurn: [{ snapshot: TurnSnapshot; config: TurnConfig }, TurnConfig];
+  beforeToolCall: [unknown, void];
+  afterToolCall: [unknown, void];
+  onStepFinish: [unknown, void];
+  onChunk: [unknown, void];
+};
+
+/** @internal */
+export type ReleasedHookName = keyof ReleasedHooks;
+
+const RELEASED_HOOKS: readonly ReleasedHookName[] = [
+  "beforeTurn",
+  "beforeToolCall",
+  "afterToolCall",
+  "onStepFinish",
+  "onChunk"
+];
+
+/**
+ * `TurnConfig` fields an extension's `beforeTurn` may set, last write wins.
+ * `model` and `tools` are not among them: a sandboxed extension cannot send a
+ * `LanguageModel` or an AI SDK tool over RPC. It uses `activeTools` instead.
+ */
+const EXTENSION_SCALAR_CONFIG_KEYS = [
+  "system",
+  "messages",
+  "activeTools",
+  "toolChoice",
+  "maxSteps",
+  "sendReasoning",
+  "maxOutputTokens",
+  "temperature",
+  "topP",
+  "topK",
+  "presencePenalty",
+  "frequencyPenalty",
+  "stopSequences",
+  "seed",
+  "maxRetries",
+  "timeout"
+] as const satisfies ReadonlyArray<keyof TurnConfig>;
+
+async function guarded<C, R>(
+  hook: ReleasedHookName,
+  handler: HookHandler<C, R>,
+  context: C,
+  timeoutMs: number
+): Promise<R | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      handler(context),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Hook timeout: ${handler.extension}`)),
+          timeoutMs
+        );
+      })
+    ]);
+  } catch (error) {
+    console.warn(
+      `[Think] Extension "${handler.extension}" ${hook} failed:`,
+      error instanceof Error ? error.message : error
+    );
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * How the released hooks combine, with `timeoutMs` per call.
+ *
+ * @internal
+ */
+export function releasedHookRules(
+  timeoutMs: () => number
+): HookRules<ReleasedHooks> {
+  const observeEach =
+    (hook: ReleasedHookName) =>
+    async (
+      context: unknown,
+      handlers: readonly HookHandler<unknown, void>[]
+    ): Promise<void> => {
+      for (const handler of handlers) {
+        await guarded(hook, handler, context, timeoutMs());
+      }
+    };
+  return {
+    async beforeTurn({ snapshot: first, config }, handlers) {
+      if (handlers.length === 0) return config;
+      let snapshot = first;
+      const accumulated: TurnConfig = { ...config };
+      for (const handler of handlers) {
+        const changes = await guarded(
+          "beforeTurn",
+          handler,
+          { snapshot, config: accumulated },
+          timeoutMs()
+        );
+        if (!changes) continue;
+        const writable = accumulated as Record<string, unknown>;
+        for (const key of EXTENSION_SCALAR_CONFIG_KEYS) {
+          const value = changes[key];
+          if (value !== undefined) writable[key] = value;
+        }
+        if (changes.headers !== undefined) {
+          accumulated.headers = {
+            ...(accumulated.headers ?? {}),
+            ...changes.headers
+          };
+        }
+        if (changes.providerOptions !== undefined) {
+          accumulated.providerOptions = {
+            ...(accumulated.providerOptions ?? {}),
+            ...changes.providerOptions
+          };
+        }
+        // The next extension sees this one's changes.
+        if (accumulated.system !== undefined) {
+          snapshot = { ...snapshot, system: accumulated.system };
+        }
+        if (accumulated.activeTools !== undefined) {
+          snapshot = { ...snapshot, toolNames: accumulated.activeTools };
+        }
+      }
+      return accumulated;
+    },
+    beforeToolCall: observeEach("beforeToolCall"),
+    afterToolCall: observeEach("afterToolCall"),
+    onStepFinish: observeEach("onStepFinish"),
+    onChunk: observeEach("onChunk")
+  };
+}
+
+/**
+ * A released extension's Worker, as an extension handle. Its tools are
+ * fixed when it loads: each is offered as `<extension>_<tool>`, described
+ * as `[<extension>] <description>`.
+ *
+ * @internal
+ */
+export class ReleasedWorkerHandle implements ExtensionHandle<ReleasedHooks> {
+  readonly entries: readonly (readonly [string, ToolEntry])[];
+  readonly #manifest: ExtensionManifest;
+  readonly #entrypoint: ExtensionEntrypoint;
+  readonly #hooks: readonly ReleasedHookName[];
+  /** The tool each offered name runs. */
+  readonly #toolNames = new Map<string, string>();
+  #unloaded = false;
+
+  constructor(
+    manifest: ExtensionManifest,
+    entrypoint: ExtensionEntrypoint,
+    tools: readonly ExtensionToolDescriptor[],
+    hooks: readonly string[]
+  ) {
+    this.#manifest = manifest;
+    this.#entrypoint = entrypoint;
+    this.#hooks = RELEASED_HOOKS.filter((hook) => hooks.includes(hook));
+    const prefix = sanitizeName(manifest.name);
+    this.entries = tools.map((descriptor) => {
+      const name = `${prefix}_${descriptor.name}`;
+      this.#toolNames.set(name, descriptor.name);
+      const entry: ToolEntry = {
+        owner: manifest.name,
+        definition: {
+          description: `[${manifest.name}] ${descriptor.description}`
+        },
+        // SAFETY: a descriptor's input schema is a JSON Schema object.
+        inputSchema: descriptor.inputSchema as ToolEntry["inputSchema"],
+        execute: true,
+        validate: false,
+        modelOutput: false,
+        streams: false
+      };
+      return [name, entry] as const;
+    });
+  }
+
+  /** Its tools answer as unloaded from now on. */
+  unload(): void {
+    this.#unloaded = true;
+  }
+
+  async describe() {
+    return { hooks: this.#hooks };
+  }
+
+  async build(drafts: Drafts): Promise<Drafts> {
+    const tools = new Map(drafts.tools);
+    for (const [name, entry] of this.entries) tools.set(name, entry);
+    return { tools: [...tools], prompt: drafts.prompt };
+  }
+
+  async execute(name: string, input: unknown): Promise<ToolOutcome> {
+    if (this.#unloaded) {
+      return {
+        ok: false,
+        errorText: `Extension "${this.#manifest.name}" has been unloaded. Tool "${name}" is no longer available.`
+      };
+    }
+    const resultJson = await this.#entrypoint.execute(
+      this.#toolNames.get(name) ?? name,
+      JSON.stringify(input)
+    );
+    const parsed = JSON.parse(resultJson) as {
+      result?: unknown;
+      error?: string;
+    };
+    return parsed.error
+      ? { ok: false, errorText: parsed.error }
+      : { ok: true, output: parsed.result };
+  }
+
+  /** The released protocol has no way to stop a call. */
+  cancel(): void {}
+
+  async validate(): Promise<never> {
+    throw new Error("A released extension's tools take JSON Schema input");
+  }
+
+  async modelOutput(): Promise<never> {
+    throw new Error("A released extension's tools have no toModelOutput");
+  }
+
+  async needsApproval(): Promise<boolean> {
+    return false;
+  }
+
+  async hook<H extends ReleasedHookName>(
+    name: H,
+    context: ReleasedHooks[H][0]
+  ): Promise<ReleasedHooks[H][1]> {
+    const payload =
+      name === "beforeTurn"
+        ? (context as ReleasedHooks["beforeTurn"][0]).snapshot
+        : context;
+    const parsed = parseHookResult(await this.#entrypoint.hook(name, payload));
+    if ("error" in parsed) throw new Error(parsed.error);
+    // SAFETY: only `beforeTurn` returns something; the observers' results
+    // are ignored.
+    return (
+      "config" in parsed && name === "beforeTurn" ? parsed.config : undefined
+    ) as ReleasedHooks[H][1];
+  }
+}
+
+/** Each manager's extension core, and the hook timeout it runs under. */
+const cores = new WeakMap<
+  ExtensionManager,
+  { core: ExtensionCore<ReleasedHooks>; timeoutMs: () => number }
+>();
+
+/**
+ * The extension core behind `manager`, which runs its extensions' hooks
+ * with the agent's `timeoutMs` per call. A manager the agent was given
+ * runs under the agent's timeout too.
+ *
+ * @internal
+ */
+export function coreOf(
+  manager: ExtensionManager,
+  timeoutMs: () => number
+): ExtensionCore<ReleasedHooks> | undefined {
+  const entry = cores.get(manager);
+  if (entry) entry.timeoutMs = timeoutMs;
+  return entry?.core;
+}
+
+const DEFAULT_HOOK_TIMEOUT_MS = 5000;
+
 export class ExtensionManager {
   #loader: WorkerLoader;
   #storage: DurableObjectStorage | null;
@@ -131,7 +432,9 @@ export class ExtensionManager {
     | null;
   #workerIdScope: string;
   #extensions = new Map<string, LoadedExtension>();
+  readonly #core: ExtensionCore<ReleasedHooks>;
   #restored = false;
+  #warnedContextType = false;
   #onUnload:
     | ((name: string, contextLabels: string[]) => void | Promise<void>)
     | null = null;
@@ -141,17 +444,17 @@ export class ExtensionManager {
     this.#storage = options.storage ?? null;
     this.#createHostBinding = options.createHostBinding ?? null;
     this.#workerIdScope = options.workerIdScope ?? crypto.randomUUID();
+    const entry: {
+      core: ExtensionCore<ReleasedHooks>;
+      timeoutMs: () => number;
+    } = {
+      core: new ExtensionCore(releasedHookRules(() => entry.timeoutMs())),
+      timeoutMs: () => DEFAULT_HOOK_TIMEOUT_MS
+    };
+    this.#core = entry.core;
+    cores.set(this, entry);
   }
 
-  /**
-   * Load an extension from source code.
-   *
-   * The source is a JS object expression defining tools. Each tool has
-   * `description`, `parameters` (JSON Schema properties), optional
-   * `required` array, and an `execute` async function.
-   *
-   * @returns Summary of the loaded extension including discovered tools.
-   */
   /**
    * Restore extensions from DO storage after hibernation.
    *
@@ -172,6 +475,15 @@ export class ExtensionManager {
     }
   }
 
+  /**
+   * Load an extension from source code.
+   *
+   * The source is a JS object expression with `tools` and `hooks`. Each
+   * tool has `description`, `parameters` (JSON Schema properties), optional
+   * `required` array, and an `execute` async function.
+   *
+   * @returns Summary of the loaded extension including discovered tools.
+   */
   async load(
     manifest: ExtensionManifest,
     source: string
@@ -199,6 +511,15 @@ export class ExtensionManager {
     manifest: ExtensionManifest,
     source: string
   ): Promise<ExtensionInfo> {
+    if (
+      !this.#warnedContextType &&
+      manifest.context?.some((block) => block.type !== undefined)
+    ) {
+      this.#warnedContextType = true;
+      console.warn(
+        `[Think] Extension "${manifest.name}": a context block's \`type\` is ignored. An extension writes its blocks with host.setContext(), which its context.write permission governs.`
+      );
+    }
     const workerModule = wrapExtensionSource(source);
     const permissions = manifest.permissions ?? {};
 
@@ -265,11 +586,14 @@ export class ExtensionManager {
       // Legacy extensions may not have manifest() — treat as no hooks
     }
 
+    const handle = new ReleasedWorkerHandle(manifest, entrypoint, tools, hooks);
+    this.#core.load(manifest.name, Promise.resolve(handle));
     this.#extensions.set(manifest.name, {
       manifest,
       tools,
       hooks,
-      entrypoint
+      entrypoint,
+      handle
     });
 
     return toExtensionInfo(manifest, tools);
@@ -286,6 +610,8 @@ export class ExtensionManager {
     if (!ext) return false;
 
     const removed = this.#extensions.delete(name);
+    this.#core.unload(name);
+    ext.handle.unload();
     if (removed && this.#storage) {
       await this.#storage.delete(`${STORAGE_PREFIX}${name}`);
     }
@@ -368,41 +694,14 @@ export class ExtensionManager {
    * collisions: e.g. extension "github" with tool "create_pr" → "github_create_pr".
    */
   getTools(): ToolSet {
-    const tools: ToolSet = {};
-
-    for (const ext of this.#extensions.values()) {
-      const prefix = sanitizeName(ext.manifest.name);
-
-      for (const descriptor of ext.tools) {
-        const toolName = `${prefix}_${descriptor.name}`;
-
-        tools[toolName] = tool({
-          description: `[${ext.manifest.name}] ${descriptor.description}`,
-          inputSchema: jsonSchema(
-            descriptor.inputSchema as Record<string, unknown>
-          ),
-          execute: async (args: Record<string, unknown>) => {
-            if (!this.#extensions.has(ext.manifest.name)) {
-              throw new Error(
-                `Extension "${ext.manifest.name}" has been unloaded. Tool "${toolName}" is no longer available.`
-              );
-            }
-            const resultJson = await ext.entrypoint.execute(
-              descriptor.name,
-              JSON.stringify(args)
-            );
-            const parsed = JSON.parse(resultJson) as {
-              result?: unknown;
-              error?: string;
-            };
-            if (parsed.error) throw new Error(parsed.error);
-            return parsed.result;
-          }
-        });
-      }
-    }
-
-    return tools;
+    const loaded = [...this.#extensions.values()];
+    // Each released extension offers the tools it described at load, so
+    // the build is the extensions' entries in load order.
+    return toolsOf<ReleasedHooks>(
+      loaded.flatMap(({ handle }) => handle.entries),
+      new Map(loaded.map(({ manifest, handle }) => [manifest.name, handle])),
+      ""
+    );
   }
 }
 

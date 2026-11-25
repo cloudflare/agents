@@ -71,6 +71,7 @@ import {
   type ThinkSessionEvent,
   type ThinkSessionListener
 } from "./events";
+import { harnessHookRules } from "./extensions/hooks";
 import { ExtensionManager } from "./extensions/manager";
 import { contextExtension, optionsExtension, resolve } from "./extensions/own";
 import { loadInProcess } from "./extensions/runtime";
@@ -509,7 +510,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * What builds each session's tools and prompt, and receives the hooks:
    * the session context's tools, then the options.
    */
-  readonly #extensions = new ExtensionManager();
+  readonly #extensions = new ExtensionManager(harnessHookRules);
   /**
    * The operations: one run each, on the harness's own Tasks unless the
    * host gave it one (`options.tasks`).
