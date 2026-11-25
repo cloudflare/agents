@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-Internal refactor, no API change: `ThinkHarness` can be given shipped extensions to load ahead of its own, for the harness-backed Think's workspace tools.
+Experimental `ThinkHarness` offers a session's client tools after its own, as `Think` does, and a `beforeTurn` hook that edits the tools it is shown no longer changes what the model is offered.
