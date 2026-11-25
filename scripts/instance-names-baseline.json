@@ -7,7 +7,6 @@
   "packages/agents/src/context/sqlite-provider.ts": 3,
   "packages/agents/src/dynamic-agents/dynamic-agents.ts": 10,
   "packages/agents/src/dynamic-agents/registry.ts": 9,
-  "packages/agents/src/e2e-tests/worker.ts": 14,
   "packages/agents/src/fiber-runs.ts": 11,
   "packages/agents/src/fiber-types.ts": 2,
   "packages/agents/src/harness/store/store.ts": 3,
@@ -41,10 +40,8 @@
   "packages/agents/src/tasks/types.ts": 3,
   "packages/agents/src/voice/index.ts": 1,
   "packages/agents/src/workflow-tracking/workflows.ts": 19,
-  "packages/ai-chat/src/e2e-tests/worker.ts": 7,
   "packages/codemode/src/runtime.ts": 1,
   "packages/shell/src/filesystem.ts": 1,
   "packages/think/src/config-store.ts": 1,
-  "packages/think/src/e2e-tests/worker.ts": 29,
   "packages/think/src/think.ts": 3
 }

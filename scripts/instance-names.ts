@@ -25,7 +25,7 @@ const LITERAL =
   /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\[\s\S])*`/g;
 
 const files = execSync(
-  "git ls-files 'packages/*/src/*.ts' | grep -v '/tests\\?/' | grep -v '\\.test\\.ts$'",
+  "git ls-files 'packages/*/src/*.ts' | grep -v '/\\(e2e-\\|react-\\)\\?tests\\?/' | grep -v '\\.test\\.ts$'",
   { encoding: "utf8" }
 )
   .split("\n")
