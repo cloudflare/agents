@@ -577,6 +577,7 @@ export class AIChatAgent<
   private readonly _frames = new ChatFrames({
     broadcast: (message, without) => this.broadcast(message, without),
     connections: () => this.getConnections(),
+    reachesUnlisted: () => this._cf_broadcastReachesUnlistedSockets(),
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>

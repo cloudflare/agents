@@ -51,6 +51,12 @@ export interface ChatFramesOptions {
    * a deployment).
    */
   connections(): Iterable<{ readonly id: string }>;
+  /**
+   * Whether a broadcast now also reaches sockets {@link connections} does
+   * not list (a sub-agent during its start, whose broadcast the root sends
+   * to every socket it accepted for it).
+   */
+  reachesUnlisted?(): boolean;
   /** Where recent terminal frames are recorded. */
   kv: RecentTerminalsKv;
   /** Connections that were told a stream resumes and have not acked yet. */
@@ -195,7 +201,9 @@ export class ChatFrames {
         if (this.ended.has(connection, ends)) without.push(connection.id);
         else this.ended.note(connection, ends);
       }
-      this.ended.broadcast(ends, without);
+      // Only a broadcast that goes out to sockets nobody here lists: a
+      // facet that knows its sockets skips one with no listed recipient.
+      if (this.options.reachesUnlisted?.()) this.ended.broadcast(ends, without);
     }
     this.options.broadcast(JSON.stringify(ready), without);
     this.#record(ready);

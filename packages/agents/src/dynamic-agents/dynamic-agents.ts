@@ -1076,6 +1076,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    * yet, so it has not been through `onConnect`. Synchronous so a skipped
    * broadcast never reorders later operations.
    */
+  /**
+   * Whether a broadcast now goes to the root's sockets for this facet
+   * unfiltered, including ones this facet does not list yet: a facet that
+   * has not read its sockets from the root (during its start).
+   */
+  get broadcastsToUnlistedSockets(): boolean {
+    return this.#host._isFacet && !this.#virtualConnectionsHydrated;
+  }
+
   #broadcastHasNoRecipients(without: string[] | undefined): boolean {
     if (!this.#virtualConnectionsHydrated) {
       this.#hydrateVirtualConnectionsInBackground();
@@ -1356,7 +1365,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // sub-agent, whose start may broadcast to it.
     if (
       !this.#host._isFacet &&
-      connectionAcceptedAt(connection) === undefined
+      connectionAcceptedAt(connection) === undefined &&
+      this.requestTargetsChild(request)
     ) {
       this.#host._unsafe_setConnectionFlag(
         connection,

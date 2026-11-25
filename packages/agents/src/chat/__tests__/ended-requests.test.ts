@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EndedRequests } from "../chat-frames";
+import { ChatFrames, EndedRequests } from "../chat-frames";
+import { CHAT_MESSAGE_TYPES } from "../protocol";
 
 describe("EndedRequests", () => {
   afterEach(() => vi.useRealTimers());
@@ -33,5 +34,36 @@ describe("EndedRequests", () => {
     ended.note(socket, "req-1");
     expect(ended.has(socket, "req-1")).toBe(true);
     expect(ended.has({ id: "tab" }, "req-1")).toBe(false);
+  });
+
+  it("records a broadcast as reaching unlisted sockets only when the host says it does", () => {
+    for (const reachesUnlisted of [true, false]) {
+      const kv = new Map<string, unknown>();
+      const frames = new ChatFrames({
+        broadcast: () => {},
+        connections: () => [],
+        reachesUnlisted: () => reachesUnlisted,
+        kv: {
+          get: (key: string) => kv.get(key),
+          put: (key: string, value: unknown) => void kv.set(key, value),
+          delete: (key: string) => kv.delete(key)
+        },
+        resuming: new Set<string>(),
+        storedOriginIds: () => undefined,
+        recoveryOriginIds: () => undefined,
+        clientView: (messages: unknown) => ({ messages })
+      } as unknown as ConstructorParameters<typeof ChatFrames>[0]);
+      frames.broadcast({
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        id: "req-1",
+        body: "",
+        done: true
+      } as Parameters<ChatFrames["broadcast"]>[0]);
+      // A facet that lists its sockets and skipped a broadcast with no
+      // listed recipient told an unlisted socket nothing.
+      expect(frames.ended.has({ id: "tab", acceptedAt: 0 }, "req-1")).toBe(
+        reachesUnlisted
+      );
+    }
   });
 });
