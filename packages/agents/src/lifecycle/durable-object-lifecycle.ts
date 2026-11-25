@@ -10,7 +10,7 @@ import {
 } from "./capability-runner";
 import { backoffDelay } from "../retries";
 import { abortWithoutAlarmRetry } from "./abort";
-import { SchemaVersions } from "./schema";
+import { LIFECYCLE_SCHEMA_ID, SchemaVersions } from "./schema";
 import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
@@ -468,11 +468,11 @@ export class Lifecycle<
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
     this.#schemaVersions = new SchemaVersions(this.#ctx.storage);
-    // The queue's columns are recorded under the Lifecycle's own id.
+    // The queue's columns are recorded under the Lifecycle's own entry.
     this.#jobQueue = new JobQueue(
       this.#ctx.storage,
       this.#schemaVersions.forCapability(
-        "lifecycle",
+        LIFECYCLE_SCHEMA_ID,
         () => this.#status === "starting"
       )
     );

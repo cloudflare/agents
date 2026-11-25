@@ -113,7 +113,7 @@ describe("the schema versions record", () => {
 
   it("reads only the one record at a start with nothing to migrate", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
-      storage.kv.put(SCHEMA_VERSIONS_KEY, { queue: 1, lifecycle: 1 });
+      storage.kv.put(SCHEMA_VERSIONS_KEY, { queue: 1, "": 1 });
       const read: string[] = [];
       const get = storage.kv.get.bind(storage.kv);
       storage.kv.get = ((key: string) => {
@@ -147,7 +147,54 @@ describe("the schema versions record", () => {
     });
   });
 
-  it("refuses the Lifecycle's own id as a capability kind", () => {
-    expect(() => new Versioned("lifecycle")).toThrow(/reserved/);
+  it("keeps a capability of kind lifecycle apart from the job queue's version", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const capability = new Versioned("lifecycle");
+      const { lifecycle } = install(capability);
+      await lifecycle.start();
+      await lifecycle.jobs.push({ fn: "noop", time: Date.now() + 60_000 });
+
+      expect(capability.ran).toEqual([1, 2]);
+      // The job queue's columns sit under the Lifecycle's blank entry.
+      expect(storage.kv.get(SCHEMA_VERSIONS_KEY)).toEqual({
+        lifecycle: 2,
+        "": 1
+      });
+    });
+  });
+
+  it("deletes a folded key when a later migration creates the job table on the way", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      storage.kv.put("cf_agents:late_schema_version", 0);
+      const late = new LateMigration();
+      const { lifecycle } = install(late);
+      await lifecycle.start();
+      await late.migrateNow();
+
+      expect(storage.kv.get("cf_agents:late_schema_version")).toBe(undefined);
+      expect(storage.kv.get(SCHEMA_VERSIONS_KEY)).toMatchObject({ late: 1 });
+    });
   });
 });
+
+/** Migrates after startup; its step pushes the first job. */
+class LateMigration extends LifecycleCapability {
+  constructor() {
+    super("late");
+  }
+
+  migrateNow(): Promise<void> {
+    return this.lifecycle.schema.migrate({
+      version: 1,
+      legacyKey: "cf_agents:late_schema_version",
+      steps: {
+        1: async () => {
+          await this.lifecycle.jobs.push({
+            fn: "noop",
+            time: Date.now() + 60_000
+          });
+        }
+      }
+    });
+  }
+}

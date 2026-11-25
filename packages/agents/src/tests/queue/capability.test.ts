@@ -328,7 +328,7 @@ describe("Queue capability", () => {
         expect(
           state.storage.kv.get<Record<string, number>>(
             "cf_agents:schema_versions"
-          )?.lifecycle
+          )?.[""]
         ).toBe(1);
         instance.release();
       }

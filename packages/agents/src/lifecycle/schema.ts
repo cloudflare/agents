@@ -12,6 +12,12 @@
 export const SCHEMA_VERSIONS_KEY = "cf_agents:schema_versions";
 
 /**
+ * @internal The Lifecycle's own entry (the job queue's columns). Empty, so
+ * no capability id (never blank) can take it.
+ */
+export const LIFECYCLE_SCHEMA_ID = "";
+
+/**
  * @internal A capability's schema: its current version and the step that
  * brings each version up from the one before. Steps must be idempotent: a
  * reset before the record is written runs them again.
@@ -75,8 +81,12 @@ export class SchemaVersions {
   readonly #storage: DurableObjectStorage;
   #versions: Record<string, number> | undefined;
   #dirty = false;
-  /** Legacy keys folded in, deleted with the next write. */
-  readonly #folded: string[] = [];
+  /**
+   * Legacy keys folded in, by capability id, deleted with the next write.
+   * Kept across a re-read: another migration may re-read while this one
+   * awaits a step.
+   */
+  readonly #folded = new Map<string, string>();
 
   constructor(storage: DurableObjectStorage) {
     this.#storage = storage;
@@ -98,7 +108,6 @@ export class SchemaVersions {
    */
   #reread(): void {
     this.#versions = undefined;
-    this.#folded.length = 0;
     this.#dirty = false;
   }
 
@@ -111,7 +120,7 @@ export class SchemaVersions {
     if (legacy === undefined) return 0;
     record[id] = legacy;
     this.#dirty = true;
-    this.#folded.push(legacyKey);
+    this.#folded.set(id, legacyKey);
     return legacy;
   }
 
@@ -131,7 +140,12 @@ export class SchemaVersions {
   flush(): boolean {
     if (!this.#dirty) return false;
     this.#storage.kv.put(SCHEMA_VERSIONS_KEY, this.#record());
-    for (const key of this.#folded.splice(0)) this.#storage.kv.delete(key);
+    for (const [id, key] of this.#folded) {
+      // Only once the folded version is in the record being written.
+      if (this.#record()[id] === undefined) continue;
+      this.#storage.kv.delete(key);
+      this.#folded.delete(id);
+    }
     this.#dirty = false;
     return true;
   }
