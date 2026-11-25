@@ -181,6 +181,41 @@ describe("Tasks lanes", () => {
     });
   });
 
+  it("moves the lane on when the cancelled head's dropped local throws", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      // Held, so the head keeps its local until it is cancelled.
+      instance.tasks.holdLane("l");
+      const lane = { lane: "l" } as const;
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        {
+          ...lane,
+          runId: "b",
+          local: {
+            dropped: () => {
+              throw new Error("dropped threw");
+            }
+          }
+        }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "c" },
+        { ...lane, local: "C" }
+      );
+      await instance.tasks.cancel("b");
+      await instance.tasks.releaseLane("l");
+      await until(() => instance.lanedStarted.length === 1);
+      expect(instance.lanedStarted).toEqual(["c"]);
+      expect(instance.lanedLocals).toEqual(["C"]);
+      error.mockRestore();
+    });
+  });
+
   it("starts nothing in a held lane until it is released", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
