@@ -985,6 +985,35 @@ describe("ThinkHarness context", () => {
     );
   });
 
+  it("puts an extension's remind section in the recorded prompt and delivers its change once", async () => {
+    const stub = fresh();
+    await stub.setRemindSection("Hammers.");
+    await stub.prompt("hello", session);
+    await stub.setRemindSection("Hammers and saws.");
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+
+    const [first, second, third] = await stub.promptTexts();
+    const system = (prompt: string) => prompt.split("|")[0];
+    expect(system(first)).toContain("Hammers.");
+    // The recorded prompt is not rewritten by the change.
+    expect(system(second)).toBe(system(first));
+    expect(system(third)).toBe(system(first));
+    // The change goes out once, after the user message that noticed it.
+    expect(second).toMatch(/\|user:again[^|]*Hammers and saws\./);
+    expect(third.startsWith(second)).toBe(true);
+    expect(third.endsWith("|user:thanks")).toBe(true);
+  });
+
+  it("sends an extension's remind section as system text when the session has no context", async () => {
+    const stub = fresh();
+    await stub.setRemindSection("Hammers.");
+    await stub.prompt("hello");
+    expect(await stub.lastPromptText()).toBe(
+      "system:You are a test.\n\nHammers.|user:hello"
+    );
+  });
+
   it("delivers a changed remind block once and keeps every request a prefix of the next", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);

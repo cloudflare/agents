@@ -34,6 +34,7 @@ const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
 const ENVIRONMENT_KEY = "test:environment";
+const REMIND_SECTION_KEY = "test:remind-section";
 const CATALOGUE_KEY = "test:catalogue";
 const HANG_KEY = "test:hang-provider";
 /** The session that has context blocks. */
@@ -215,6 +216,23 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         })
       })
     }),
+    // A shipped extension's remind section, set only once a test asks.
+    extensions: [
+      {
+        name: "catalog",
+        extension: (ctx) =>
+          ctx.prompt.transform((prompt) => {
+            const text = this.ctx.storage.kv.get<string>(REMIND_SECTION_KEY);
+            if (text !== undefined) {
+              prompt.set("catalog_section", {
+                text,
+                description: "What is in the catalog",
+                whenChanged: "remind"
+              });
+            }
+          })
+      }
+    ],
     recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
@@ -1169,6 +1187,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   setCatalogue(value: string): void {
     this.ctx.storage.kv.put(CATALOGUE_KEY, value);
+  }
+
+  setRemindSection(value: string): void {
+    this.ctx.storage.kv.put(REMIND_SECTION_KEY, value);
   }
 
   setEnvironment(value: string): void {

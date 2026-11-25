@@ -45,6 +45,8 @@ The harness turns each entry back into an AI SDK tool whose functions call the o
 
 A handler that throws ends the dispatch with its error, which keeps each ThinkHarness option's contract (a throwing `beforeToolCall` ends the operation `unanswered`). The options' hooks are called as methods of the `hooks` object, as before.
 
+**Remind sections.** A prompt entry may say `whenChanged: "remind"` (with an optional `description` and `maxTokens`). In a session with a context, ThinkHarness adds such an entry as a remind block of that context the first time its label is built, and the block reads the latest build's text. It is in the prompt the context records, and a change to it goes out once, as a reminder after the user message of the turn that noticed it, without rewriting the recorded prompt. In a session without a context there is nowhere to record it, so it is system text like the other sections. Memory: the latest text per section per session built in this isolate, the same bound as the per-session context map.
+
 **ThinkHarness's own parts** are the first two extensions it loads, in process: `context` (the session context's `set_context` and `search_context`), then `options` (the `tools` and `system` options and the hooks above). Client tools are merged after the build, as before: they have no server function. `model`, `onChunk`, `toolApproval` and `beforeTurn` stay options the harness calls itself, because they hand over live objects: a model, every streamed chunk, a configuration that may hold a model.
 
 ## Extensions Think loads from source

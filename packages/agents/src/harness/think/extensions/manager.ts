@@ -36,8 +36,21 @@ export type ExtensionBuild = {
    * owner through its handle.
    */
   readonly tools: ToolSet;
-  /** The prompt sections' text, in order, or nothing if there are none. */
+  /**
+   * The text of the sections that are not remind blocks, in order, or
+   * nothing if there are none.
+   */
   readonly system: string | undefined;
+  /** The sections that are remind blocks, labelled by their keys. */
+  readonly remind: readonly RemindSection[];
+};
+
+/** A remind section, as a context block takes it. @internal */
+export type RemindSection = {
+  readonly label: string;
+  readonly text: string;
+  readonly description?: string;
+  readonly maxTokens?: number;
 };
 
 const NO_DRAFTS: Drafts = { tools: [], prompt: [] };
@@ -93,10 +106,7 @@ export class ExtensionManager<M extends HookMap = ExtensionHooks> {
         new Map(loaded.map(({ name, handle }) => [name, handle])),
         session
       ),
-      system:
-        drafts.prompt.length === 0
-          ? undefined
-          : drafts.prompt.map(([, section]) => section.text).join("\n\n")
+      ...promptOf(drafts.prompt)
     };
   }
 
@@ -122,6 +132,27 @@ export class ExtensionManager<M extends HookMap = ExtensionHooks> {
   async subscribed(name: keyof M & string): Promise<boolean> {
     return (await this.#all()).some(({ hooks }) => hooks.has(name));
   }
+}
+
+/** The system text of the plain sections, and the remind sections. */
+function promptOf(
+  prompt: Drafts["prompt"]
+): Pick<ExtensionBuild, "system" | "remind"> {
+  const plain = prompt.filter(([, section]) => !section.whenChanged);
+  return {
+    system:
+      plain.length === 0
+        ? undefined
+        : plain.map(([, section]) => section.text).join("\n\n"),
+    remind: prompt
+      .filter(([, section]) => section.whenChanged === "remind")
+      .map(([label, { text, description, maxTokens }]) => ({
+        label,
+        text,
+        ...(description !== undefined && { description }),
+        ...(maxTokens !== undefined && { maxTokens })
+      }))
+  };
 }
 
 /**

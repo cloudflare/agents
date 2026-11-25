@@ -62,11 +62,23 @@ export type ToolEntry = {
   readonly approval?: "always" | "call";
 };
 
-/** A prompt section, by key. @internal */
-export type PromptEntry = {
-  readonly owner: string;
+/**
+ * A prompt section, by key. One with `whenChanged: "remind"` is a block of
+ * the session's context instead of system text: it is in the prompt the
+ * context records, and a change to it reaches the model once, as a
+ * reminder, without rewriting that prompt.
+ *
+ * @internal
+ */
+export type PromptSection = {
   readonly text: string;
+  readonly whenChanged?: "remind";
+  readonly description?: string;
+  readonly maxTokens?: number;
 };
+
+/** A prompt section as the harness holds it. @internal */
+export type PromptEntry = PromptSection & { readonly owner: string };
 
 /** Tools and prompt as a build passes them along. Ordered. @internal */
 export type Drafts = {
@@ -94,7 +106,7 @@ export interface Draft<Value, Entry> {
 /** @internal */
 export type ToolDraft = Draft<ExtensionTool, ToolEntry>;
 /** @internal */
-export type PromptDraft = Draft<{ readonly text: string }, PromptEntry>;
+export type PromptDraft = Draft<PromptSection, PromptEntry>;
 
 /** @internal */
 export type Transform<D> = (

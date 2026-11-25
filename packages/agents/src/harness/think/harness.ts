@@ -72,7 +72,11 @@ import {
   type ThinkSessionListener
 } from "./events";
 import { harnessHookRules } from "./extensions/hooks";
-import { ExtensionManager } from "./extensions/manager";
+import {
+  ExtensionManager,
+  type ExtensionBuild,
+  type RemindSection
+} from "./extensions/manager";
 import { contextExtension, optionsExtension, resolve } from "./extensions/own";
 import { loadInProcess } from "./extensions/in-process";
 import { ReleasedRecords, type OperationInput } from "./records";
@@ -506,6 +510,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly #configured = new Set<ThinkSessionId>();
   /** Each session's context, from the `context` option, built on first use. */
   readonly #contexts = new Map<ThinkSessionId, Context | undefined>();
+  /**
+   * The latest text of each extension remind section, per session, which
+   * its context block reads. One entry per session built in this isolate,
+   * as `#contexts`.
+   */
+  readonly #remindTexts = new Map<ThinkSessionId, Map<string, string>>();
   /**
    * What builds each session's tools and prompt, and receives the hooks:
    * the session context's tools, then the options.
@@ -1185,14 +1195,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           next = await this.#recoverModel(run, turn, message);
           break;
         case "call-model":
-          next = await this.#callModel(
-            run,
-            turn,
-            message,
-            tools,
-            built.system,
-            live
-          );
+          next = await this.#callModel(run, turn, message, tools, built, live);
           break;
         case "run-tools":
           if (!message) return outcomeOf({}, message);
@@ -1394,7 +1397,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     start: Turn,
     existing: UIMessage | undefined,
     tools: ToolSet,
-    optionsSystem: string | undefined,
+    prompt: Pick<ExtensionBuild, "system" | "remind">,
     live: LiveRun
   ): Promise<Turn | OperationOutcome> {
     const { session, operationId } = start;
@@ -1419,7 +1422,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const context = this.#context(session);
     let contextSystem = "";
     let request = history;
+    let optionsSystem = prompt.system;
     if (context) {
+      await this.#remindBlocks(session, context, prompt.remind);
       const prepared = await context.prepare({
         messages: history,
         // A call after an interruption is sent as the first attempt was.
@@ -1429,6 +1434,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       request = withReminder(
         asUIMessages(await context.project(history)),
         prepared.reminder
+      );
+    }
+    if (!context && prompt.remind.length > 0) {
+      // Without a context a remind section has nowhere to be recorded, so
+      // it is system text like the others.
+      optionsSystem = joinSystem(
+        optionsSystem,
+        prompt.remind.map((section) => section.text).join("\n\n")
       );
     }
     const system = joinSystem(optionsSystem, contextSystem);
@@ -2249,11 +2262,45 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return message ? asUIMessage(message) : undefined;
   }
 
+  /**
+   * The extensions' remind sections as remind blocks of the session's
+   * context: added the first time a label is built, and reading the
+   * latest build's text, so a change reaches the model once as a reminder.
+   */
+  async #remindBlocks(
+    session: ThinkSessionId,
+    context: Context,
+    sections: readonly RemindSection[]
+  ): Promise<void> {
+    if (sections.length === 0) return;
+    let texts = this.#remindTexts.get(session);
+    if (!texts) {
+      texts = new Map();
+      this.#remindTexts.set(session, texts);
+    }
+    for (const { label, text, description, maxTokens } of sections) {
+      const added = texts.has(label);
+      texts.set(label, text);
+      if (added) continue;
+      await context.addBlock({
+        label,
+        ...(description !== undefined && { description }),
+        ...(maxTokens !== undefined && { maxTokens }),
+        whenChanged: "remind",
+        provider: {
+          get: async () => this.#remindTexts.get(session)?.get(label) ?? null
+        }
+      });
+    }
+  }
+
   /** A session's tools, its client's included, and its options' prompt. */
-  async #build(
-    session: ThinkSessionId
-  ): Promise<{ tools: ToolSet; system: string | undefined }> {
-    const { tools, system } = await this.#extensions.build(session);
+  async #build(session: ThinkSessionId): Promise<{
+    tools: ToolSet;
+    system: string | undefined;
+    remind: readonly RemindSection[];
+  }> {
+    const { tools, system, remind } = await this.#extensions.build(session);
     const declared =
       await this.#handle(session).internal_config(CLIENT_TOOLS_KEY);
     // A client's declaration that is not a list declares nothing.
@@ -2276,7 +2323,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       merged[name] = tool;
     }
-    return { tools: merged, system };
+    return { tools: merged, system, remind };
   }
 
   /**
