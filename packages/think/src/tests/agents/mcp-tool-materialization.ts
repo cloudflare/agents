@@ -109,6 +109,8 @@ class BulkMcpConnector extends McpConnector<Cloudflare.Env> {
 export class ThinkMcpToolMaterializationAgent extends Think {
   private _getAIToolsCalls = 0;
   private _waitForConnectionsCalls = 0;
+  /** Waits that have finished, not only begun. */
+  private _waitsFinished = 0;
   private _mcpToolCountBeforeTurn = 0;
   private _connector?: BulkMcpConnector;
 
@@ -127,7 +129,7 @@ export class ThinkMcpToolMaterializationAgent extends Think {
   }
 
   override getTools() {
-    this.#getToolsAfterWait.push(this._waitForConnectionsCalls > 0);
+    this.#getToolsAfterWait.push(this._waitsFinished > 0);
     return {};
   }
 
@@ -139,6 +141,7 @@ export class ThinkMcpToolMaterializationAgent extends Think {
   async getToolsFollowsWait(): Promise<boolean[]> {
     await this._ensureBulkConnection();
     this._waitForConnectionsCalls = 0;
+    this._waitsFinished = 0;
     this.#getToolsAfterWait = [];
     await this.runTurn({ mode: "wait", input: "hello" });
     return this.#getToolsAfterWait;
@@ -246,7 +249,11 @@ export class ThinkMcpToolMaterializationAgent extends Think {
     );
     this.mcp.waitForConnections = async (options) => {
       this._waitForConnectionsCalls++;
-      return originalWaitForConnections(options);
+      // Discovery that is not finished yet: the wait settles a few ticks
+      // later, so a getTools() run while it is in flight sees no finish.
+      await originalWaitForConnections(options);
+      for (let tick = 0; tick < 5; tick++) await Promise.resolve();
+      this._waitsFinished++;
     };
 
     this._connector = new BulkMcpConnector(this.ctx, this.env, connection);
