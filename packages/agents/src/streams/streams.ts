@@ -323,21 +323,16 @@ export class Streams extends LifecycleCapability {
 
   /** Migrate stream storage during Lifecycle startup. */
   onStart(): void {
-    // Step 1 runs only for an object with no streams schema yet: it never
-    // had schema v1's chunk table, so there is nothing to look for.
-    let fresh = false;
     this.lifecycle.schema.migrateSync({
       version: CURRENT_STREAM_SCHEMA_VERSION,
       legacyKey: this.#schemaVersionKey,
-      steps: {
-        1: () => {
-          fresh = true;
-        },
-        2: () => this.#ensureTables()
-      }
+      steps: { 2: () => this.#ensureTables() }
     });
     // Schema v1's chunk table only ever belonged to the default instance.
-    if (!fresh && this.instanceName === undefined) {
+    // Probed on every start (a `LIMIT 0` read of no rows), not inferred
+    // from the record: a Streams bound by another capability (ThinkHarness)
+    // shares these tables but records its version under that capability.
+    if (this.instanceName === undefined) {
       this.#legacyChunkTable = this.#hasLegacyChunkTable();
     }
   }
