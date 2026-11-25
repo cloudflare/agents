@@ -249,7 +249,12 @@ export class ResumableStream {
 
   private readonly ops: StreamsSyncInternal;
 
-  constructor(streams: Streams, sql: SqlTaggedTemplate) {
+  constructor(
+    streams: Streams,
+    sql: SqlTaggedTemplate,
+    /** A facet empties the legacy chat tables instead of dropping them. */
+    facet = false
+  ) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
     this._sql = sql;
@@ -269,7 +274,7 @@ export class ResumableStream {
         this._rememberDeleted(row, chat);
       })
     );
-    importLegacyChatStreams(sql, this.ops);
+    importLegacyChatStreams(sql, this.ops, facet);
     // Restore any active stream from a previous session
     this.restore();
   }

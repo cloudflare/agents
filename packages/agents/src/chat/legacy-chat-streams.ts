@@ -21,10 +21,16 @@ function exists(read: () => unknown): boolean {
  * handle touches only these chat-owned legacy tables. The tables are probed
  * with a `LIMIT 0` read, not `sqlite_master` (RUNTIME-FACTS: a missing
  * table throws, an existing one reads no row).
+ *
+ * A facet empties the tables instead of dropping them: a facet that drops
+ * old indexed tables at its first start after an upgrade can reset its
+ * tree's storage on a deployment (RUNTIME-FACTS, measured for the fiber
+ * tables). An emptied table is skipped at the next start.
  */
 export function importLegacyChatStreams(
   sql: SqlTaggedTemplate,
-  ops: StreamsSyncInternal
+  ops: StreamsSyncInternal,
+  facet = false
 ): void {
   const hasMetadata = exists(
     () => sql`SELECT 1 FROM cf_ai_chat_stream_metadata LIMIT 0`
@@ -33,6 +39,15 @@ export function importLegacyChatStreams(
     () => sql`SELECT 1 FROM cf_ai_chat_stream_chunks LIMIT 0`
   );
   if (!hasMetadata && !hasChunks) return;
+  if (
+    facet &&
+    (!hasMetadata ||
+      sql`SELECT 1 FROM cf_ai_chat_stream_metadata LIMIT 1`.length === 0) &&
+    (!hasChunks ||
+      sql`SELECT 1 FROM cf_ai_chat_stream_chunks LIMIT 1`.length === 0)
+  ) {
+    return;
+  }
 
   if (hasMetadata) {
     const columns = sql<{ name: string }>`
@@ -118,6 +133,13 @@ export function importLegacyChatStreams(
     }
   }
 
-  sql`DROP TABLE IF EXISTS cf_ai_chat_stream_chunks`;
-  sql`DROP TABLE IF EXISTS cf_ai_chat_stream_metadata`;
+  // Only the tables found: a table the probe did not find is left alone.
+  if (hasChunks) {
+    if (facet) sql`DELETE FROM cf_ai_chat_stream_chunks`;
+    else sql`DROP TABLE cf_ai_chat_stream_chunks`;
+  }
+  if (hasMetadata) {
+    if (facet) sql`DELETE FROM cf_ai_chat_stream_metadata`;
+    else sql`DROP TABLE cf_ai_chat_stream_metadata`;
+  }
 }

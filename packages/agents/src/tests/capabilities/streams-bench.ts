@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { ResumableStream, createChatStreams } from "../../chat";
+import { importLegacyChatStreams } from "../../chat/legacy-chat-streams";
 
 /**
  * Storage-ops benchmark harness for the chat-on-Streams replatform: measures
@@ -443,6 +444,71 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return {
       legacyRowsRead: Number(legacyCursor.rowsRead),
       newRowsRead
+    };
+  }
+
+  /**
+   * Seed the pre-capability chat stream tables with one live stream, run
+   * the legacy import as a root or a facet would, and report what is left.
+   */
+  async probeLegacyImport(facet: boolean): Promise<{
+    chunks: number;
+    tables: string[];
+  }> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE cf_ai_chat_stream_metadata (id TEXT PRIMARY KEY, request_id TEXT, status TEXT, created_at INTEGER, completed_at INTEGER)"
+    );
+    sql.exec(
+      "CREATE TABLE cf_ai_chat_stream_chunks (id TEXT PRIMARY KEY, stream_id TEXT, body TEXT, chunk_index INTEGER, created_at INTEGER)"
+    );
+    sql.exec(
+      "CREATE INDEX idx_legacy_chunks ON cf_ai_chat_stream_chunks(stream_id, chunk_index)"
+    );
+    const now = Date.now();
+    sql.exec(
+      "INSERT INTO cf_ai_chat_stream_metadata VALUES ('legacy-stream', 'legacy-req', 'streaming', ?, NULL)",
+      now
+    );
+    sql.exec(
+      "INSERT INTO cf_ai_chat_stream_chunks VALUES ('c1', 'legacy-stream', '{\"type\":\"text\"}', 0, ?)",
+      now
+    );
+    const tagged = <T = Record<string, unknown>>(
+      strings: TemplateStringsArray,
+      ...values: (string | number | boolean | null)[]
+    ): T[] =>
+      [
+        ...sql.exec(
+          strings.reduce(
+            (q, part, i) => q + part + (i < values.length ? "?" : ""),
+            ""
+          ),
+          ...values
+        )
+      ] as T[];
+    importLegacyChatStreams(
+      tagged,
+      this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
+      facet
+    );
+    // A second start finds nothing left to import.
+    importLegacyChatStreams(
+      tagged,
+      this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
+      facet
+    );
+    const tables = sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_ai_chat_stream_%'"
+      )
+      .toArray()
+      .map((row) => row.name)
+      .sort();
+    return {
+      chunks: [...this.#adapter().storedChunks("legacy-stream")].length,
+      tables
     };
   }
 }
