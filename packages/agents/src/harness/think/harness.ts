@@ -14,6 +14,7 @@ import {
   bindLifecycleCapability,
   LifecycleCapability
 } from "../../lifecycle/capability";
+import { capabilitySchema } from "../../lifecycle/schema";
 import { REPLAY_ITEM_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
@@ -2258,7 +2259,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   #bindOwned(): void {
     if (this.#bound) return;
-    bindLifecycleCapability(this.#sessions, this.lifecycle);
+    // The harness's services, but Sessions' own schema handle: its version
+    // is Sessions' (`sessions`), not the harness's carry-forward step.
+    bindLifecycleCapability(this.#sessions, {
+      ...this.lifecycle,
+      schema: capabilitySchema(this.lifecycle, this.#sessions.capabilityId)
+    });
     this.#bound = true;
     // Writes made on a session's Sessions handle (from `configureSession`)
     // go around the harness; pass them on as events, so listeners and chat

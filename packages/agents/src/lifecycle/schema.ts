@@ -216,3 +216,30 @@ export class SchemaVersions {
     });
   }
 }
+
+const schemaHandles = new WeakMap<object, (id: string) => LifecycleSchema>();
+
+/** @internal The Lifecycle registers how to make any id's schema handle. */
+export function registerSchemaHandles(
+  services: object,
+  forId: (id: string) => LifecycleSchema
+): void {
+  schemaHandles.set(services, forId);
+}
+
+/**
+ * @internal The schema handle of capability `id`, in the Lifecycle that
+ * made `services`. For a capability that binds another it owns with its
+ * own services (`bindLifecycleCapability`): the owned one keeps its schema
+ * version under its own id, not its owner's.
+ */
+export function capabilitySchema(
+  services: object,
+  id: string
+): LifecycleSchema {
+  const forId = schemaHandles.get(services);
+  if (!forId) {
+    throw new Error("capabilitySchema: services not made by a Lifecycle");
+  }
+  return forId(id);
+}
