@@ -11,6 +11,7 @@ import {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset
 } from "../retries";
+import { isNonRetryableError } from "../tasks/errors";
 import { TaskSettlement } from "../tasks/settlement";
 import type { Tasks } from "../tasks/tasks";
 import type { TaskCheckpoint, TaskJson, TaskStep } from "../tasks/types";
@@ -30,7 +31,9 @@ export interface DeliveryAttempt {
 
 /**
  * Where deliveries of one kind go. Returning acknowledges the delivery;
- * throwing fails this attempt, and it is tried again with backoff.
+ * throwing fails this attempt, and it is tried again with backoff. Throwing
+ * a `NonRetryableError` gives the delivery up at once (a receiver that
+ * refused it, or a send that may have arrived in part).
  * Returning `"hold"` keeps the delivery, with no deadline, until
  * {@link releaseDelivery} gives it what it waits for.
  *
@@ -301,7 +304,7 @@ async function attemptDelivery<Payload>(
     step.checkpoint.set(ENDED, step.attempt);
     step.checkpoint.set(LOST, 0);
     const now = Date.now();
-    if (outOfTime(now)) return giveUp(error);
+    if (outOfTime(now) || isNonRetryableError(error)) return giveUp(error);
     const retry = retryLater(now);
     console.error(
       `[agents] delivery ${step.id} failed (attempt ${step.attempt}); retrying in ${Math.round(((retry.wakeAt ?? now) - now) / 1000)}s`,

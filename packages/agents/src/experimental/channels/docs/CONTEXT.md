@@ -91,6 +91,10 @@ One model call plus the tool calls it produced, as in the AI SDK. Used sparingly
 The current view of a conversation: the harness session's transcript plus every turn that is queued, running or awaiting input.
 _Avoid_: Hydration payload, state sync
 
+**Surface delivery**:
+One response on its way to one gateway surface (an email thread, later a Slack thread), as a durable delivery run in the agent object (`deliverToSurfaces`). Retried while the Channel says its failure is retryable; given up, and never posted twice, when it refused it or only part may have arrived.
+_Avoid_: Reply, send
+
 **Response**:
 One streamed, replayable run of agent output within a turn. It either ends, closed by its producer, or is interrupted, because its producer is gone. How the turn went is never a property of the response.
 _Avoid_: Delivery stream, reply, operation
