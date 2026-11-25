@@ -49,20 +49,6 @@ export interface ResumeHandshakeHost {
   /** The host's use-chat-response message-type constant (wire string). */
   readonly responseMessageType: string;
   readonly resumableStream: ResumableStream;
-  /**
-   * Replay the request's latest completed chat stream, ending in its
-   * `done` frame. Defaults to `replayCompletedChunks` over the stream
-   * adapter's Streams: released hosts (ai-chat 0.12, Think 0.24) pass no
-   * replays.
-   * @returns False when there is none, or the connection closed.
-   */
-  replayCompleted?(connection: Connection, requestId: string): boolean;
-  /**
-   * Replay the request's latest errored chat stream, with no terminal frame
-   * Defaults to `replayErroredChunks`, as above.
-   * @returns False only when the connection closed mid-replay.
-   */
-  replayErrored?(connection: Connection, requestId: string): boolean;
   readonly continuation: ContinuationState<Connection>;
   /**
    * Accepted-but-not-yet-streamed turns (#1784). Optional: experimental
@@ -448,13 +434,7 @@ export class ResumeHandshake {
       // the app kept it, and must not come back if it did not. Only its
       // recorded end is sent.
     } else if (
-      this.host.replayCompleted
-        ? this.host.replayCompleted(connection, requestId)
-        : replayCompletedChunks(
-            resumableStream.streamOps,
-            connection,
-            requestId
-          )
+      replayCompletedChunks(resumableStream.streamOps, connection, requestId)
     ) {
       // A stream that closed into recovery ends on "recovering", which is
       // not an end for the tab. A stop since then recorded the request's
@@ -575,14 +555,13 @@ export class ResumeHandshake {
     // content chunks, then the terminal error (#1575). If the connection drops
     // mid-replay, skip the terminal frame; the record is retained, so the next
     // reconnect retries the whole sequence.
-    const replayed = this.host.replayErrored
-      ? this.host.replayErrored(connection, pending.requestId)
-      : replayErroredChunks(
-          resumableStream.streamOps,
-          connection,
-          pending.requestId
-        );
-    if (!replayed) {
+    if (
+      !replayErroredChunks(
+        resumableStream.streamOps,
+        connection,
+        pending.requestId
+      )
+    ) {
       return true;
     }
     const messageIds =

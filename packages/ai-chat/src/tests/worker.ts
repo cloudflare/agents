@@ -46,8 +46,7 @@ import {
   type ReplyStreams,
   type ToolPartUpdate,
   REPLAY_CHUNK_BYTES,
-  CHAT_RECOVERY_PROGRESS_KEY,
-  replayErroredChunks
+  CHAT_RECOVERY_PROGRESS_KEY
 } from "agents/chat";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
@@ -2756,34 +2755,6 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
   getChatResponseResults(): ChatResponseResult[] {
     return [...this._chatResponseResults];
-  }
-
-  /**
-   * #1575: drive `replayErroredChunks` against a
-   * controllable connection so the return-value contract is testable in
-   * isolation: `failAfter` sends succeed, then the connection simulates a
-   * post-close send (the only error `sendIfOpen` swallows). Returns the
-   * method's boolean and how many frames actually went out.
-   */
-  replayErroredChunksByRequestIdForTest(
-    requestId: string,
-    failAfter: number
-  ): { returned: boolean; sent: number } {
-    let sent = 0;
-    const fakeConnection = {
-      send(_message: string) {
-        if (sent >= failAfter) {
-          throw new TypeError("WebSocket send() after close");
-        }
-        sent++;
-      }
-    };
-    const returned = replayErroredChunks(
-      this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
-      fakeConnection as unknown as Parameters<typeof replayErroredChunks>[1],
-      requestId
-    );
-    return { returned, sent };
   }
 
   async persistToolCallMessage(
