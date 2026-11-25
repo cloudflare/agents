@@ -45,6 +45,8 @@ export type StreamChunkData = {
   /** Optional framework-specific metadata for the approval request. */
   approvalDescriptor?: unknown;
   providerMetadata?: Record<string, unknown>;
+  /** Metadata declared by the tool, carried on tool-input-* chunks */
+  toolMetadata?: unknown;
   /** Whether the tool was executed by the provider (e.g. Gemini code execution) */
   providerExecuted?: boolean;
   /** Payload for data-* parts (developer-defined typed JSON) */
@@ -55,6 +57,8 @@ export type StreamChunkData = {
   messageId?: string;
   /** Per-message metadata attached by start/finish/message-metadata chunks */
   messageMetadata?: unknown;
+  /** Content of a `steering-message` chunk: the parts of the user message */
+  parts?: unknown;
   [key: string]: unknown;
 };
 
@@ -178,6 +182,9 @@ export function applyLateToolInput(
   if (chunk.providerMetadata != null) {
     p.callProviderMetadata = chunk.providerMetadata;
   }
+  if (chunk.toolMetadata != null) {
+    p.toolMetadata = chunk.toolMetadata;
+  }
   if (chunk.title != null) {
     p.title = chunk.title;
   }
@@ -234,6 +241,7 @@ export function lateToolInputForwardChunks(
  * - tool-input-start / tool-input-delta / tool-input-available / tool-input-error
  * - tool-output-available / tool-output-error
  * - step-start (aliased from start-step)
+ * - steering-message (a user message added to the run with AI SDK steering)
  * - data-* (developer-defined typed JSON blobs)
  *
  * @param parts - The mutable parts array to update
@@ -245,11 +253,17 @@ export function applyChunkToParts(
   chunk: StreamChunkData
 ): boolean {
   switch (chunk.type) {
+    // Provider metadata is kept as the AI SDK keeps it: from the start
+    // chunk, then merged from deltas and the end (Anthropic signs a thinking
+    // block on reasoning-end; OpenAI names a text item on text-start).
     case "text-start": {
       parts.push({
         type: "text",
         text: "",
-        state: "streaming"
+        state: "streaming",
+        ...(chunk.providerMetadata != null
+          ? { providerMetadata: chunk.providerMetadata }
+          : {})
       } as MessagePart);
       return true;
     }
@@ -258,12 +272,16 @@ export function applyChunkToParts(
       const lastTextPart = findLastPartByType(parts, "text");
       if (lastTextPart && lastTextPart.type === "text") {
         (lastTextPart as { text: string }).text += chunk.delta ?? "";
+        mergeProviderMetadata(lastTextPart, chunk.providerMetadata);
       } else {
         // No text-start received — create a new text part (stream resumption fallback)
         parts.push({
           type: "text",
           text: chunk.delta ?? "",
-          state: "streaming"
+          state: "streaming",
+          ...(chunk.providerMetadata != null
+            ? { providerMetadata: chunk.providerMetadata }
+            : {})
         } as MessagePart);
       }
       return true;
@@ -273,6 +291,7 @@ export function applyChunkToParts(
       const lastTextPart = findLastPartByType(parts, "text");
       if (lastTextPart && "state" in lastTextPart) {
         (lastTextPart as { state: string }).state = "done";
+        mergeProviderMetadata(lastTextPart, chunk.providerMetadata);
       }
       return true;
     }
@@ -281,7 +300,10 @@ export function applyChunkToParts(
       parts.push({
         type: "reasoning",
         text: "",
-        state: "streaming"
+        state: "streaming",
+        ...(chunk.providerMetadata != null
+          ? { providerMetadata: chunk.providerMetadata }
+          : {})
       } as MessagePart);
       return true;
     }
@@ -375,6 +397,9 @@ export function applyChunkToParts(
         ...(chunk.providerMetadata != null
           ? { callProviderMetadata: chunk.providerMetadata }
           : {}),
+        ...(chunk.toolMetadata != null
+          ? { toolMetadata: chunk.toolMetadata }
+          : {}),
         ...(chunk.title != null ? { title: chunk.title } : {})
       } as MessagePart);
       return true;
@@ -426,6 +451,9 @@ export function applyChunkToParts(
           if (chunk.providerMetadata != null) {
             p.callProviderMetadata = chunk.providerMetadata;
           }
+          if (chunk.toolMetadata != null) {
+            p.toolMetadata = chunk.toolMetadata;
+          }
           if (chunk.title != null) {
             p.title = chunk.title;
           }
@@ -447,6 +475,9 @@ export function applyChunkToParts(
           : {}),
         ...(chunk.providerMetadata != null
           ? { callProviderMetadata: chunk.providerMetadata }
+          : {}),
+        ...(chunk.toolMetadata != null
+          ? { toolMetadata: chunk.toolMetadata }
           : {}),
         ...(chunk.title != null ? { title: chunk.title } : {})
       } as MessagePart);
@@ -477,6 +508,9 @@ export function applyChunkToParts(
         if (chunk.providerMetadata != null) {
           p.callProviderMetadata = chunk.providerMetadata;
         }
+        if (chunk.toolMetadata != null) {
+          p.toolMetadata = chunk.toolMetadata;
+        }
       } else {
         parts.push({
           type: `tool-${chunk.toolName}`,
@@ -490,6 +524,9 @@ export function applyChunkToParts(
             : {}),
           ...(chunk.providerMetadata != null
             ? { callProviderMetadata: chunk.providerMetadata }
+            : {}),
+          ...(chunk.toolMetadata != null
+            ? { toolMetadata: chunk.toolMetadata }
             : {})
         } as MessagePart);
       }
@@ -564,9 +601,10 @@ export function applyChunkToParts(
         const p = toolPart as Record<string, unknown>;
         p.state = "output-available";
         p.output = chunk.output;
-        if (chunk.preliminary !== undefined) {
-          p.preliminary = chunk.preliminary;
-        }
+        // As the AI SDK records it: a final output carries no `preliminary`
+        // and clears an earlier one (#2635).
+        if (chunk.preliminary === undefined) delete p.preliminary;
+        else p.preliminary = chunk.preliminary;
       }
       return true;
     }
@@ -585,6 +623,26 @@ export function applyChunkToParts(
     case "step-start":
     case "start-step": {
       parts.push({ type: "step-start" } as MessagePart);
+      return true;
+    }
+
+    // AI SDK steering (`experimental_steering`) adds a user message to a
+    // running generation and emits it as a chunk between steps. It has to be
+    // persisted, or the message disappears from the transcript on reload and
+    // resume. The id is the steering message id, unique per message, so a
+    // replayed chunk never adds it twice.
+    case "steering-message": {
+      if (
+        chunk.id != null &&
+        findDataPartByTypeAndId(parts, chunk.type, chunk.id)
+      ) {
+        return true;
+      }
+      parts.push({
+        type: "steering-message",
+        id: chunk.id,
+        parts: chunk.parts
+      } as unknown as MessagePart);
       return true;
     }
 
