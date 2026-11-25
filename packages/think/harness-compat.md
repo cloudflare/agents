@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**237 of the 1261 tests that construct Think pass (18%).** Across the whole suite, 529 of 1553.
+**241 of the 1261 tests that construct Think pass (19%).** Across the whole suite, 533 of 1553.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -74,7 +74,7 @@ supported by the harness-backed Think yet".
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1    | 100% |
-| `submissions.test.ts`                  | 9 / 116  | 7%   |
+| `submissions.test.ts`                  | 13 / 116 | 11%  |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
 | `think-eviction.test.ts`               | 2 / 3    | 66%  |
