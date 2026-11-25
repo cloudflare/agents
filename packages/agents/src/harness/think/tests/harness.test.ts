@@ -228,6 +228,25 @@ describe("ThinkHarness hooks", () => {
 });
 
 describe("ThinkHarness approvals and client tools", () => {
+  it("builds once for an answer that continues the turn", async () => {
+    const stub = fresh();
+    await stub.prompt("approve");
+    const [call] = await stub.lastToolCalls();
+    await stub.takeToolBuilds();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "done",
+      text: "tool said: did the dangerous thing"
+    });
+    // The answer's build serves the tool run and the model call after it.
+    expect(await stub.takeToolBuilds()).toBe(1);
+  });
+
   it("keeps an approved call to a tool the build no longer has waiting, as Think does", async () => {
     const stub = fresh();
     await stub.prompt("approve");

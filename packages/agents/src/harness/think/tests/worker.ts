@@ -151,6 +151,8 @@ function storageSql(storage: DurableObjectStorage) {
 export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** Every model call's prompt, in order, for this isolate. */
   readonly prompts: PromptMessage[][] = [];
+  /** Times the `tools` option was resolved, in this isolate. */
+  #toolBuilds = 0;
   /** The tool names each model call was offered, in order. */
   readonly offered: string[][] = [];
   #releaseSlow: () => void = () => {};
@@ -177,54 +179,57 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         return { stream: this.#reply(messages) };
       }
     }),
-    tools: () => ({
-      multiply: tool({
-        description: "Multiply by three",
-        inputSchema: z.object({ value: z.number() }),
-        execute: async ({ value }) => value * 3
-      }),
-      gate: tool({
-        description: "Wait until released",
-        inputSchema: z.object({}),
-        execute: () => this.#gate()
-      }),
-      // Gone from the tools once a test removes it.
-      ...(!this.ctx.storage.kv.get<boolean>(NO_GATE_SAFE_KEY) && {
-        gate_safe: {
-          ...tool({
-            description: "Wait until released; safe to rerun",
-            inputSchema: z.object({}),
-            execute: () => this.#gate()
-          }),
-          recovery: "rerun" as const
-        }
-      }),
-      // Gone from the tools once a test removes it.
-      ...(!this.ctx.storage.kv.get<boolean>(NO_DANGEROUS_KEY) && {
-        dangerous: tool({
-          description: "Needs approval",
+    tools: () => {
+      this.#toolBuilds++;
+      return {
+        multiply: tool({
+          description: "Multiply by three",
+          inputSchema: z.object({ value: z.number() }),
+          execute: async ({ value }) => value * 3
+        }),
+        gate: tool({
+          description: "Wait until released",
           inputSchema: z.object({}),
-          needsApproval: true,
-          execute: async () => {
-            const runs =
-              (this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0) + 1;
-            this.ctx.storage.kv.put(DANGEROUS_RUNS_KEY, runs);
-            return "did the dangerous thing";
+          execute: () => this.#gate()
+        }),
+        // Gone from the tools once a test removes it.
+        ...(!this.ctx.storage.kv.get<boolean>(NO_GATE_SAFE_KEY) && {
+          gate_safe: {
+            ...tool({
+              description: "Wait until released; safe to rerun",
+              inputSchema: z.object({}),
+              execute: () => this.#gate()
+            }),
+            recovery: "rerun" as const
           }
+        }),
+        // Gone from the tools once a test removes it.
+        ...(!this.ctx.storage.kv.get<boolean>(NO_DANGEROUS_KEY) && {
+          dangerous: tool({
+            description: "Needs approval",
+            inputSchema: z.object({}),
+            needsApproval: true,
+            execute: async () => {
+              const runs =
+                (this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0) + 1;
+              this.ctx.storage.kv.put(DANGEROUS_RUNS_KEY, runs);
+              return "did the dangerous thing";
+            }
+          })
+        }),
+        ask: tool({
+          description: "Runs on the client",
+          inputSchema: z.object({ question: z.string() })
+        }),
+        // A client tool the app adds only once `addLateTool()` is called.
+        ...(this.ctx.storage.kv.get<boolean>(LATE_TOOL_KEY) && {
+          late: tool({
+            description: "Runs on the client, added later",
+            inputSchema: z.object({})
+          })
         })
-      }),
-      ask: tool({
-        description: "Runs on the client",
-        inputSchema: z.object({ question: z.string() })
-      }),
-      // A client tool the app adds only once `addLateTool()` is called.
-      ...(this.ctx.storage.kv.get<boolean>(LATE_TOOL_KEY) && {
-        late: tool({
-          description: "Runs on the client, added later",
-          inputSchema: z.object({})
-        })
-      })
-    }),
+      };
+    },
     // A shipped extension's remind section, set only once a test asks.
     extensions: [
       {
@@ -1228,6 +1233,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   setRemindSection(value: string): void {
     this.ctx.storage.kv.put(REMIND_SECTION_KEY, value);
+  }
+
+  takeToolBuilds(): number {
+    const builds = this.#toolBuilds;
+    this.#toolBuilds = 0;
+    return builds;
   }
 
   removeDangerous(): void {

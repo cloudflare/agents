@@ -176,6 +176,14 @@ const INTERRUPTED_TOOL_ERROR =
   "The tool call was interrupted before it finished, because the agent restarted. It may or may not have taken effect.";
 
 /** The operation a session is running in this isolate. */
+/** A session's tools, its client's included, and its options' prompt. */
+type SessionBuild = {
+  readonly tools: ToolSet;
+  readonly system: string | undefined;
+  readonly remind: readonly RemindSection[];
+  readonly allSections: string | undefined;
+};
+
 type LiveRun = {
   readonly operationId: string;
   /** Chunks of the model call in progress. */
@@ -184,6 +192,11 @@ type LiveRun = {
   continues: boolean;
   /** The tools this run resolved, which decide which calls are a client's. */
   tools?: ToolSet;
+  /**
+   * The build an answer placed in this attempt made, which the attempt's
+   * model loop uses rather than building again.
+   */
+  built?: SessionBuild;
   /**
    * The run was cancelled and its terminal report finished it from
    * `partial`: the attempt, still unwinding, writes nothing more.
@@ -1179,7 +1192,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     let turn = first;
     // One build per attempt: every model call and tool call of it sees the
     // same tools and prompt. A change to them applies from the next turn.
-    const built = await this.#build(first.session);
+    const built = live.built ?? (await this.#build(first.session));
     const tools = built.tools;
     live.tools = tools;
     for (;;) {
@@ -1284,11 +1297,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       case "answer": {
         const history = asUIMessages(await handle.getHistory());
-        const { tools } = await this.#build(session);
+        const built = await this.#build(session);
+        const { tools } = built;
         // The answered message is published before the model loop runs, if
-        // it runs at all: watches read its client tools from these.
+        // it runs at all: watches read its client tools from these. The
+        // loop uses this build too.
+        // Only this operation's own run: one cancelled while it built must
+        // not hand its build to the next turn.
         const live = this.#live.get(session);
-        if (live) live.tools = tools;
+        if (live?.operationId === operationId) {
+          live.tools = tools;
+          live.built = built;
+        }
         const answer = input.answer;
         if (answer.type === "tool-result" && source === "client") {
           // A client answers only its own tools. A server tool's result
@@ -2328,12 +2348,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /** A session's tools, its client's included, and its options' prompt. */
-  async #build(session: ThinkSessionId): Promise<{
-    tools: ToolSet;
-    system: string | undefined;
-    remind: readonly RemindSection[];
-    allSections: string | undefined;
-  }> {
+  async #build(session: ThinkSessionId): Promise<SessionBuild> {
     const { tools, system, remind, allSections } =
       await this.#extensions.build(session);
     const declared =
