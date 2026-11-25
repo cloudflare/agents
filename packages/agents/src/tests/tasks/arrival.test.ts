@@ -197,7 +197,8 @@ describe("Tasks lane arrival policies", () => {
       // Its wake comes due while a still runs: it goes on waiting its turn.
       await until(async () => {
         await instance.tasks.runDue("laned");
-        return (await instance.tasks.get("b"))?.waitReason === "overlap";
+        const b = await instance.tasks.get("b");
+        return b?.status === "pending" && b.waitReason === "overlap";
       });
       expect((await instance.tasks.get("b"))?.status).toBe("pending");
       a.open();
