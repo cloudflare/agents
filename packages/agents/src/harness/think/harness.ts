@@ -2221,6 +2221,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * resolves after it returned.
    */
   async #onStatus(record: TaskRecord): Promise<void> {
+    await this.#reportStatus(record);
+    if (record.definition !== SUBMISSION_DEFINITION) return;
+    try {
+      await this.#options.onSubmissionStatus?.(this.#inspection(record));
+    } catch (error) {
+      console.error("ThinkHarness onSubmissionStatus failed", error);
+    }
+  }
+
+  /** An operation's status report: its event, and a settled one's end. */
+  async #reportStatus(record: TaskRecord): Promise<void> {
     const [session, operationId] = operationOf(record.runId);
     if (isQueued(record)) {
       this.#events.emit(session, {

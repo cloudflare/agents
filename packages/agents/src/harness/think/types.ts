@@ -489,4 +489,12 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
    * an earlier one's in place.
    */
   readonly extensions?: readonly ThinkShippedExtension[];
+  /**
+   * @internal Told each time a submission (internal `submission` option)
+   * is accepted, starts an attempt, or settles, as Tasks reports it: at
+   * least once for the end, and before `wait()` resolves. A throw is logged.
+   */
+  readonly onSubmissionStatus?: (
+    status: ThinkOperationInspection
+  ) => void | Promise<void>;
 };

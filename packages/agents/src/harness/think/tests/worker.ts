@@ -39,6 +39,7 @@ const ACTIVE_TOOLS_KEY = "test:active-tools";
 const LATE_EXAMPLES_KEY = "test:late-examples";
 const ENVIRONMENT_KEY = "test:environment";
 const REMIND_SECTION_KEY = "test:remind-section";
+const SUBMISSION_STATUS_KEY = "test:submission-statuses";
 const REMIND_LABEL_KEY = "test:remind-label";
 const NO_GATE_SAFE_KEY = "test:no-gate-safe";
 const NO_DANGEROUS_KEY = "test:no-dangerous";
@@ -259,6 +260,13 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           })
       }
     ],
+    // Each submission status report, in order, as `<id>:<status>`.
+    onSubmissionStatus: (status) => {
+      const seen =
+        this.ctx.storage.kv.get<string[]>(SUBMISSION_STATUS_KEY) ?? [];
+      seen.push(`${status.operationId}:${status.status}`);
+      this.ctx.storage.kv.put(SUBMISSION_STATUS_KEY, seen);
+    },
     recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
@@ -1236,6 +1244,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       options
     );
     return { types, end };
+  }
+
+  /** Every submission status report so far, as `<id>:<status>`. */
+  submissionStatuses(): string[] {
+    return this.ctx.storage.kv.get<string[]>(SUBMISSION_STATUS_KEY) ?? [];
   }
 
   /** The root session's submissions, newest first: their ids and statuses. */

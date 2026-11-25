@@ -357,6 +357,7 @@ export class Think<
       get maxSteps() {
         return self.#turnMaxSteps ?? self.maxSteps;
       },
+      onSubmissionStatus: (status) => this.#submissionStatus(status),
       hooks: {
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
@@ -1040,6 +1041,51 @@ export class Think<
       after = { operationId: last.operationId, createdAt: last.createdAt };
     }
     return deleted;
+  }
+
+  /** Called when a submission's status changes, as on Think. */
+  protected onSubmissionStatus(
+    _submission: ThinkSubmissionInspection
+  ): void | Promise<void> {}
+
+  /**
+   * The harness's report of a submission's status: Think's events, then
+   * the app's hook, before a wait on the submission resolves.
+   */
+  async #submissionStatus(status: ThinkOperationInspection): Promise<void> {
+    const inspection = submissionInspection(status);
+    const { submissionId, requestId } = inspection;
+    if (status.status === "queued") {
+      this._emit("submission:create", {
+        submissionId,
+        requestId,
+        idempotencyKey: inspection.idempotencyKey
+      });
+    }
+    this._emit("submission:status", {
+      submissionId,
+      requestId,
+      status: inspection.status
+    });
+    if (inspection.status === "error" && inspection.error) {
+      this._emit("submission:error", {
+        submissionId,
+        requestId,
+        error: inspection.error
+      });
+      console.error("[Think] Submission failed", {
+        submissionId,
+        requestId,
+        idempotencyKey: inspection.idempotencyKey,
+        metadata: inspection.metadata,
+        error: inspection.error
+      });
+    }
+    try {
+      await this.onSubmissionStatus(inspection);
+    } catch (error) {
+      console.error("[Think] onSubmissionStatus failed", error);
+    }
   }
 
   async waitForSubmission(
