@@ -13,3 +13,4 @@ Stored chat messages and tool calls.
 - A repeated tool result is a no-op, and an approval given before a tool's final input keeps that input (#2981).
 - `AIChatAgent` retention (`maxPersistedMessages`) no longer reads the whole transcript on every persist.
 - A chat message list frame over the WebSocket message limit is no longer sent, which production drops without a word; it is logged instead.
+- The client tools and body of the last chat request are kept with the conversation's Sessions storage and carried over once from where earlier releases kept them; one over the row budget is kept in memory only, with a warning, instead of failing the write.

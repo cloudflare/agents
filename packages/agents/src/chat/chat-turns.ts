@@ -96,9 +96,12 @@ import {
   type SubmitConcurrencyDecision
 } from "./submit-concurrency";
 import {
+  clientResolvableToolNames,
   hasIncompleteToolBatch,
   hasPendingToolInteraction
 } from "./tool-state";
+import type { ClientToolSchema } from "./client-tools";
+import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import {
   reportTurnFailure,
   type TurnFailure,
@@ -107,6 +110,59 @@ import {
 import { TurnLane, type TurnReservation } from "./turn-lane";
 import { CHAT_TURN_LANE, type ChatTurnTaskInput } from "./turn-task";
 import type { Tasks } from "../tasks";
+
+const utf8 = new TextEncoder();
+
+/**
+ * The session value the last request context is kept in. Under
+ * `transcript:`, so a chat clear drops it.
+ *
+ * @internal
+ */
+export const CHAT_REQUEST_CONTEXT_KEY = "transcript:chat:request";
+
+/**
+ * The stored form of a request context kept by an earlier release as two
+ * JSON strings (`lastClientTools`, `lastBody`), or `null` when neither
+ * holds anything. A malformed half is dropped.
+ *
+ * @internal
+ */
+/**
+ * `json` when it fits one row (`ROW_VALUE_BYTES`), else `null` with a
+ * warning: a request context that large is kept in memory only.
+ *
+ * @internal
+ */
+export function storableRequestContext(json: string | null): string | null {
+  if (json === null || json.length * 3 <= ROW_VALUE_BYTES) return json;
+  if (utf8.encode(json).byteLength <= ROW_VALUE_BYTES) return json;
+  console.warn(
+    `[agents/chat] The last request's client tools and body (${json.length} characters) are over the ${ROW_VALUE_BYTES}-byte row budget, so they are kept in memory only: after a restart, a server-started turn runs without them.`
+  );
+  return null;
+}
+
+export function requestContextFromLegacy(
+  lastClientTools: string | undefined,
+  lastBody: string | undefined
+): string | null {
+  const parse = (json: string | undefined): unknown => {
+    try {
+      return json ? JSON.parse(json) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const clientTools = parse(lastClientTools);
+  const body = parse(lastBody);
+  const value: { clientTools?: unknown; body?: unknown } = {};
+  if (Array.isArray(clientTools) && clientTools.length > 0) {
+    value.clientTools = clientTools;
+  }
+  if (body && typeof body === "object") value.body = body;
+  return Object.keys(value).length > 0 ? JSON.stringify(value) : null;
+}
 import { ChatStreamStalledError } from "./stall-watchdog";
 import { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
 
@@ -129,10 +185,11 @@ export interface ChatTurnsHost {
   /** The reply being streamed now, before it is stored, or `null`. */
   streamingReply(): ChatTurnMessage | null;
   /**
-   * Names of the tools a client is known to run: the schemas the client sent
-   * with the request whose turn last started.
+   * Store the last request context: `{ clientTools, body }` as JSON, or
+   * `null` once it is empty. The hosts keep it as the session's
+   * `transcript:chat:request` value, so a clear drops it.
    */
-  clientToolNames(): Set<string>;
+  saveRequestContext(json: string | null): void;
   /**
    * Every tool a client may answer, when the host can tell: the client's
    * own tools and the ones the server declares without an `execute`. A host
@@ -428,6 +485,120 @@ export class ChatTurns<
   /** Whether a chat turn waits for recovery, for continuations' records. */
   readonly #recoveryPending: (() => Promise<boolean>) | null;
 
+  /**
+   * The client tools and body of the last client request. A server-started
+   * turn (`saveMessages`, a schedule) and a tool-answer continuation run
+   * with them. Kept in memory because hooks read them synchronously, and
+   * stored through {@link ChatTurnsHost.saveRequestContext}.
+   */
+  lastClientTools: ClientToolSchema[] | undefined;
+  /** See {@link lastClientTools}. */
+  lastBody: Record<string, unknown> | undefined;
+  /** Bumped by every set and clear, so a tool result applied meanwhile does not replace newer tools. */
+  #requestGeneration = 0;
+
+  /**
+   * Load the stored request context (`json` from the session value), at
+   * start. Malformed JSON is treated as none.
+   */
+  restoreRequestContext(json: string | null): void {
+    let value: { clientTools?: unknown; body?: unknown } = {};
+    try {
+      value = json ? (JSON.parse(json) as typeof value) : {};
+    } catch {
+      // A malformed value is no context.
+    }
+    this.lastClientTools = Array.isArray(value.clientTools)
+      ? (value.clientTools as ClientToolSchema[])
+      : undefined;
+    this.lastBody =
+      value.body && typeof value.body === "object"
+        ? (value.body as Record<string, unknown>)
+        : undefined;
+  }
+
+  /**
+   * Take a client request's tools and body as the last request context. No
+   * tools clears the stored tools; an empty body clears the body.
+   */
+  setRequestContext(request: {
+    clientTools?: ClientToolSchema[] | null;
+    body?: Record<string, unknown> | null;
+  }): {
+    clientTools: ClientToolSchema[] | undefined;
+    body: Record<string, unknown> | undefined;
+  } {
+    const { clientTools, body } = request;
+    this.#requestGeneration++;
+    this.lastClientTools =
+      Array.isArray(clientTools) && clientTools.length > 0
+        ? clientTools
+        : undefined;
+    this.lastBody = body && Object.keys(body).length > 0 ? body : undefined;
+    this.storeRequestContext();
+    return { clientTools: this.lastClientTools, body: this.lastBody };
+  }
+
+  /** Forget the last request context (a chat clear). */
+  clearRequestContext(): void {
+    this.#requestGeneration++;
+    this.lastClientTools = undefined;
+    this.lastBody = undefined;
+    this.storeRequestContext();
+  }
+
+  /**
+   * Wrap a tool result's apply so that, when it changed a message, the
+   * tools it carried replace the stored ones, unless a request set or
+   * cleared the context while it ran.
+   */
+  applyingToolResult(
+    clientTools: unknown,
+    apply: () => Promise<ToolInteractionOutcome>
+  ): () => Promise<ToolInteractionOutcome> {
+    const generation = this.#requestGeneration;
+    return async () => {
+      const outcome = await apply();
+      if (
+        outcome.status === "changed" &&
+        this.#requestGeneration === generation &&
+        Array.isArray(clientTools) &&
+        clientTools.length > 0
+      ) {
+        this.lastClientTools = clientTools as ClientToolSchema[];
+        this.storeRequestContext();
+      }
+      return outcome;
+    };
+  }
+
+  /** Names of the tools the client of the last request runs. */
+  clientToolNames(): Set<string> {
+    return clientResolvableToolNames(this.lastClientTools);
+  }
+
+  /**
+   * Store the current request context. One past `ROW_VALUE_BYTES` is kept in
+   * memory only, with a warning, and the stored one is deleted: after a
+   * restart, server-started turns run without a context rather than with an
+   * older one. Every call writes: a Sessions clear deletes the stored value
+   * without telling this object, so "unchanged" cannot be trusted.
+   */
+  storeRequestContext(): void {
+    this.host.saveRequestContext(
+      storableRequestContext(
+        this.lastClientTools || this.lastBody
+          ? JSON.stringify({
+              ...(this.lastClientTools && {
+                clientTools: this.lastClientTools
+              }),
+              ...(this.lastBody && { body: this.lastBody })
+            })
+          : null
+      )
+    );
+  }
+
   constructor(
     private readonly host: ChatTurnsHost,
     options: ChatTurnsOptions
@@ -485,7 +656,7 @@ export class ChatTurns<
       autoContinuation: this.autoContinuation,
       aborts: this.aborts,
       messages: () => host.messages(),
-      clientToolNames: () => host.clientToolNames(),
+      clientToolNames: () => this.clientToolNames(),
       streamed: new Map(),
       firing: new Set(),
       unscheduled: new Set(),
@@ -1371,7 +1542,7 @@ export class ChatTurns<
   continuationWaitsOnClient(
     messages: ReadonlyArray<ChatTurnMessage> = this.host.messages()
   ): boolean {
-    return continuationWaitsOnClient(messages, this.host.clientToolNames());
+    return continuationWaitsOnClient(messages, this.clientToolNames());
   }
 
   /**
@@ -1395,7 +1566,7 @@ export class ChatTurns<
   ): Promise<BeforeTurnRepairResult> {
     const result = repairTranscriptBeforeTurn(messages, {
       ...options,
-      clientToolNames: this.host.clientToolNames()
+      clientToolNames: this.clientToolNames()
     });
     // Without the replies that hold nothing: the repair removed them.
     return {
@@ -1438,7 +1609,7 @@ export class ChatTurns<
      * the stored ones (a turn that runs with pinned tools: a recovered
      * turn, an agent-tool run). Defaults to the host's.
      */
-    clientToolNames: ReadonlySet<string> = this.host.clientToolNames()
+    clientToolNames: ReadonlySet<string> = this.clientToolNames()
   ): TMessage {
     return settleInterruptedReply(message, { repairPart, clientToolNames });
   }
@@ -1462,7 +1633,7 @@ export class ChatTurns<
       settled = await settleReplyBeforeRecovery(
         messages(),
         continueReplyId,
-        { repairPart, clientToolNames: this.host.clientToolNames() },
+        { repairPart, clientToolNames: this.clientToolNames() },
         sink,
         removal
       );
@@ -1768,7 +1939,7 @@ export class ChatTurns<
     return hasPendingToolInteraction({
       messages: this.host.messages(),
       streaming: this.host.streamingReply(),
-      clientToolNames: this.host.clientToolNames(),
+      clientToolNames: this.clientToolNames(),
       clientAnswerableToolNames: this.host.clientAnswerableToolNames?.()
     });
   }

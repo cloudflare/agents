@@ -13,7 +13,6 @@ import {
   releaseChatConnection,
   type ChatProtocolHost
 } from "../protocol-dispatch";
-import type { ChatRequestContext } from "../request-context";
 import type { ResumeHandshake } from "../resume-handshake";
 
 type Call = [string, ...unknown[]];
@@ -46,6 +45,11 @@ function recordingHost(endedFrame: string | null = null) {
       await enqueue(async () => true);
       return true;
     },
+    applyingToolResult:
+      (clientTools: unknown, apply: () => Promise<unknown>) => async () => {
+        calls.push(["turns.applyingToolResult", clientTools]);
+        return apply();
+      },
     continuation: {
       releaseConnection: (id: string) => {
         calls.push(["continuation.releaseConnection", id]);
@@ -56,13 +60,6 @@ function recordingHost(endedFrame: string | null = null) {
         calls.push(["preStream.release", id]);
       }
     }
-  };
-  const requestContext = {
-    applyingToolResult:
-      (clientTools: unknown, apply: () => Promise<unknown>) => async () => {
-        calls.push(["requestContext.applyingToolResult", clientTools]);
-        return apply();
-      }
   };
   const handshake = {
     handleResumeRequest: async (
@@ -94,7 +91,6 @@ function recordingHost(endedFrame: string | null = null) {
   const host: ChatProtocolHost<Connection> = {
     // SAFETY: the dispatch reaches only the members the fakes implement.
     turns: turns as unknown as ChatTurns<Connection>,
-    requestContext: requestContext as unknown as ChatRequestContext,
     resumeHandshake: () => handshake as unknown as ResumeHandshake,
     emit: (type, payload) => calls.push(["emit", type, payload]),
     chatRequest: async (connection, request) => {
@@ -459,7 +455,7 @@ describe("dispatchChatProtocol", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(calls).toEqual([
       ["emit", "tool:result", { toolCallId: "t1", toolName: "pick" }],
-      ["requestContext.applyingToolResult", [{ name: "pick" }]],
+      ["turns.applyingToolResult", [{ name: "pick" }]],
       ["applyToolResult", "t1"],
       [
         "turns.applyInteraction",

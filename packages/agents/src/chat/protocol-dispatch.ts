@@ -25,7 +25,6 @@ import type { ClientToolSchema } from "./client-tools";
 import type { ChatFrames } from "./chat-frames";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
-import type { ChatRequestContext } from "./request-context";
 import type { ResumeHandshake } from "./resume-handshake";
 
 /**
@@ -73,7 +72,6 @@ export type ToolApprovalEvent = Extract<
  */
 export interface ChatProtocolHost<TConnection extends Connection> {
   readonly turns: ChatTurns<TConnection>;
-  readonly requestContext: ChatRequestContext;
   resumeHandshake(): ResumeHandshake;
   /** The observability events every host emits for these messages. */
   emit(
@@ -248,7 +246,7 @@ export async function dispatchChatProtocol<TConnection extends Connection>(
       // with the latest schemas. A duplicate or a result for a call that
       // is gone changes nothing.
       void host.turns.applyInteraction(
-        host.requestContext.applyingToolResult(event.clientTools, () =>
+        host.turns.applyingToolResult(event.clientTools, () =>
           host.applyToolResult(event)
         ),
         event.autoContinue === true,

@@ -243,6 +243,9 @@ export {
  */
 export {
   ChatTurns,
+  CHAT_REQUEST_CONTEXT_KEY,
+  requestContextFromLegacy,
+  storableRequestContext,
   type ChatTurnsHost,
   type ChatTurnsOptions,
   type ChatTurnsAdmissionOptions,
@@ -383,19 +386,6 @@ export {
   type BeforeTurnRepairOptions,
   type BeforeTurnRepairResult
 } from "./before-turn";
-
-/**
- * @internal The one owner of a chat's stored request context (client tools
- * and body). Sibling-package support, not a public API. See
- * `request-context.ts`.
- */
-export {
-  ChatRequestContext,
-  clientRequestContext,
-  type ClientRequestContext,
-  type RequestContextKey,
-  type RequestContextStore
-} from "./request-context";
 
 export type { OrphanPersistStore } from "./orphan-store";
 

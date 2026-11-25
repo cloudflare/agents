@@ -234,8 +234,10 @@ import {
   toolResultUpdate,
   toolApprovalUpdate,
   pausedExecutionUpdate,
-  ChatRequestContext,
+  CHAT_REQUEST_CONTEXT_KEY,
   frameText,
+  requestContextFromLegacy,
+  storableRequestContext,
   dispatchChatProtocol,
   rejectionMessage,
   releaseChatConnection,
@@ -1756,7 +1758,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             this.sql.bind(this),
             () => storedAsFacet(this.ctx.storage.kv)
           );
-          this._requestContext.restore();
+          this._restoreRequestContext();
           this._setupProtocolHandlers();
           await this._initializeChannels();
         }
@@ -1906,7 +1908,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     part: UIMessage["parts"][number]
   ): UIMessage["parts"][number] {
     return interruptedToolPartAsError(part, {
-      clientToolNames: this._requestContext.clientToolNames()
+      clientToolNames: this._turns.clientToolNames()
     });
   }
 
@@ -2167,7 +2169,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       isReplyStreaming: () => this._turns.liveReply !== null,
       streamingReply: () =>
         this._turns.liveReply?.accumulator.toMessage() ?? null,
-      clientToolNames: () => this._requestContext.clientToolNames(),
+      saveRequestContext: (json) => {
+        const session = this.sessions.session(
+          (this.session as ThinkSession | undefined)?.sessionId
+        );
+        session
+          .internal_setConfig(CHAT_REQUEST_CONTEXT_KEY, json)
+          .catch((error: unknown) => {
+            console.error(
+              "[Think] Failed to store the request context:",
+              error
+            );
+          });
+      },
       clientAnswerableToolNames: () => this._clientAnswerableToolNames(),
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => crypto.randomUUID(),
@@ -2328,29 +2342,53 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   });
   /** Lazily-built shared resume-handshake driver (Tier-2). */
   private _resumeHandshakeInstance: ResumeHandshake | null = null;
+  /** The carry-forward of an earlier release's keys, while it runs (tests await it). */
+  private _requestContextCarried: Promise<void> | undefined;
+  /** Whether the last request context was read since this isolate started. */
+  private _requestContextLoaded = false;
+
   /**
-   * The stored request context (the shared `ChatRequestContext`): the client
-   * tools and body of the most recent chat request, which continuations and
-   * recoveries run with. It owns when they change and writes them to
-   * `think_config`, skipping a value equal to what is stored.
+   * Read the last request context (the session's `transcript:chat:request`
+   * value) once per isolate. Runs before onStart on boot recovery, so it
+   * reads synchronously, from the default session until onStart configured
+   * one. A Think from an earlier release kept it in `think_config`
+   * (`lastClientTools`, `lastBody`): carried over once, then deleted.
    */
-  private readonly _requestContext = new ChatRequestContext({
-    get: (key) => this._cfConfig.get(key),
-    set: (key, json) => this._cfConfig.set(key, json),
-    delete: (key) => this._cfConfig.delete(key)
-  });
-  private get _lastClientTools(): ClientToolSchema[] | undefined {
-    return this._requestContext.clientTools;
+  private _restoreRequestContext(): void {
+    if (this._requestContextLoaded) return;
+    this._requestContextLoaded = true;
+    const session = this.sessions.session(
+      (this.session as ThinkSession | undefined)?.sessionId
+    );
+    const stored = session.internal_configNow(CHAT_REQUEST_CONTEXT_KEY);
+    if (stored !== null) {
+      this._turns.restoreRequestContext(stored);
+      return;
+    }
+    const lastClientTools = this._cfConfig.get("lastClientTools");
+    const lastBody = this._cfConfig.get("lastBody");
+    if (lastClientTools === undefined && lastBody === undefined) return;
+    const json = requestContextFromLegacy(lastClientTools, lastBody);
+    this._turns.restoreRequestContext(json);
+    // One over the row budget stays in memory only; the old keys go either
+    // way, so a later clear cannot bring them back.
+    this._requestContextCarried = session
+      .internal_setConfig(
+        CHAT_REQUEST_CONTEXT_KEY,
+        storableRequestContext(json)
+      )
+      .catch((error: unknown) => {
+        console.error(
+          "[Think] Failed to carry the request context forward:",
+          error
+        );
+      })
+      .finally(() => {
+        this._cfConfig.delete("lastClientTools");
+        this._cfConfig.delete("lastBody");
+      });
   }
-  private set _lastClientTools(clientTools: ClientToolSchema[] | undefined) {
-    this._requestContext.clientTools = clientTools;
-  }
-  private get _lastBody(): Record<string, unknown> | undefined {
-    return this._requestContext.body;
-  }
-  private set _lastBody(body: Record<string, unknown> | undefined) {
-    this._requestContext.body = body;
-  }
+
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
   /** The stream every reply writes (`pumpReply`). */
@@ -3043,8 +3081,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._activeChatRecoveryRootRequestId ?? requestId,
         continuation,
         messages: this.messages,
-        lastBody: context ? context.body : this._lastBody,
-        lastClientTools: context ? context.clientTools : this._lastClientTools,
+        lastBody: context ? context.body : this._turns.lastBody,
+        lastClientTools: context
+          ? context.clientTools
+          : this._turns.lastClientTools,
         originMessageIds: this._frames.originIds(requestId)
       }),
       ...(branchParentId !== undefined && { branchParentId })
@@ -4498,7 +4538,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // `_lastClientTools`. The executor is a live RPC ref that dies with the
     // isolate, so unlike the WebSocket path there is no SPA that could ever
     // replay a `tool-result` after an eviction. Persisting the names would put
-    // them in `_requestContext.clientToolNames()`, causing recovery to misclassify a
+    // them in `_turns.clientToolNames()`, causing recovery to misclassify a
     // dangling `input-available` orphan as a pending human interaction and park
     // forever. Keeping them per-turn lets such an orphan recover like a server
     // tool: `continueLastTurn`'s transcript repair errors it and the model
@@ -6522,9 +6562,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           ...turn.model,
           clientTools: pinnedOr(
             turn.pinned?.clientTools,
-            () => this._lastClientTools
+            () => this._turns.lastClientTools
           ),
-          body: pinnedOr(turn.pinned?.body, () => this._lastBody)
+          body: pinnedOr(turn.pinned?.body, () => this._turns.lastBody)
         });
         output = ran?.output;
         return ran;
@@ -7047,7 +7087,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private get _chatProtocol(): ChatProtocolHost<Connection> {
     this._chatProtocolInstance ??= {
       turns: this._turns,
-      requestContext: this._requestContext,
       resumeHandshake: () => this._resumeHandshake(),
       emit: (type, payload) => this._emit(type, payload),
       chatRequest: (connection, request) =>
@@ -7345,7 +7384,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               "cloudflare.agents.turn.trigger": "ws-chat"
             },
             () =>
-              this._requestContext.set({
+              this._turns.setRequestContext({
                 clientTools: rawClientTools,
                 body: customBody
               })
@@ -7519,7 +7558,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
     this._resumableStream.clearAll();
     this._pendingResumeConnections.clear();
-    this._requestContext.clear();
+    this._turns.clearRequestContext();
     await this._clearHistory();
     this.broadcast(
       JSON.stringify({ type: MSG_CHAT_CLEAR }),
@@ -7986,7 +8025,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         ? undefined
         : this._chatTurnFibers.requestContext(requestId);
     const pinned =
-      live !== undefined && live.lastClientTools !== this._lastClientTools
+      live !== undefined && live.lastClientTools !== this._turns.lastClientTools
         ? clientResolvableToolNames(live.lastClientTools ?? undefined)
         : undefined;
     return this._turns.settleInterruptedReply(
@@ -9346,7 +9385,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _clientAnswerableToolNames(): Set<string> {
     // The client tools from the last request, which the SPA answers by
     // replaying a `tool-result` after a restart.
-    const names = this._requestContext.clientToolNames();
+    const names = this._turns.clientToolNames();
     for (const name of this._unexecutedToolNames()) names.add(name);
     return names;
   }
@@ -9497,7 +9536,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }
       },
       // Hibernation ordering guard. The budget decision consults
-      // `hasPendingInteraction()` -> `_requestContext.clientToolNames()` ->
+      // `hasPendingInteraction()` -> `_turns.clientToolNames()` ->
       // `_lastClientTools` to keep a HITL turn (parked on a client-tool
       // `input-available` orphan) budget-free. On a fresh wake the base Agent
       // runs the boot-recovery path (`_handleInternalFiberRecovery`) BEFORE
@@ -9510,9 +9549,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       // tools are already loaded. The engine invokes this BEFORE it reads
       // `isAwaitingClientInteraction()`.
       ensureInteractionStateLoaded: () => {
-        if (this._lastClientTools === undefined) {
-          this._requestContext.restore("lastClientTools");
-        }
+        this._restoreRequestContext();
       },
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
@@ -9690,8 +9727,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const turnContext = this._chatTurnFibers.requestContext(
       input.requestId
     ) ?? {
-      lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastBody: this._turns.lastBody,
+      lastClientTools: this._turns.lastClientTools
     };
     // If a durable submission is running for this turn, the recovery must
     // complete it, or the submission hangs.
@@ -9905,9 +9942,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           partialParts: input.partial.parts as MessagePart[],
           recoveryData: input.recoveryData,
           messages: [...this.messages],
-          lastBody: input.snapshot?.lastBody ?? this._lastBody,
+          lastBody: input.snapshot?.lastBody ?? this._turns.lastBody,
           lastClientTools:
-            input.snapshot?.lastClientTools ?? this._lastClientTools,
+            input.snapshot?.lastClientTools ?? this._turns.lastClientTools,
           createdAt: input.createdAt
         }),
       shouldPersistOrphanedPartial: (input) =>
@@ -10701,8 +10738,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._runModelTurn(requestId, signal, {
           continuation: true,
           connection,
-          clientTools: this._lastClientTools,
-          body: this._lastBody
+          clientTools: this._turns.lastClientTools,
+          body: this._turns.lastBody
         }),
       failure: this._turnFailureHost(),
       onError: (error, { errorPrefix, reported }) => {

@@ -35,7 +35,7 @@ import {
  * The data a host supplies to schedule (or re-target) a pending/deferred
  * auto-continuation. The tools and body the continuation turn runs with are
  * not part of it: the turn reads the stored request context when it starts
- * (`ChatRequestContext`), so there is one copy of them.
+ * (`ChatTurns.lastClientTools`), so there is one copy of them.
  */
 export interface ContinuationSpec<
   TConnection extends ContinuationConnection = ContinuationConnection
