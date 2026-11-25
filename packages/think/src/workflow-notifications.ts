@@ -42,18 +42,18 @@ export function workflowNotificationId(
  * The sink. The delivery defaults (2 s doubling, ten-minute cap, giving up
  * twelve hours after the notification was sent) ride out an outage of the
  * workflow binding without waking the object forever for a workflow that
- * is gone. The give-up error reaches the agent's `onError`.
+ * is gone. `onGiveUp` gets the give-up error (Think passes it to `onError`).
  *
  * @internal
  */
 export function workflowNotificationSink(
-  send: (notification: WorkflowNotification) => Promise<void>
+  send: (notification: WorkflowNotification) => Promise<void>,
+  onGiveUp: (error: Error) => void | Promise<void>
 ): DeliverySink<WorkflowNotification> {
   return {
     deliver: (notification) => send(notification),
+    onGiveUp,
     giveUpError: (notification, _id, attempts, cause) =>
-      // Deliberately no `cause`: Tasks keeps a run whose error's cause chain
-      // is a platform-class failure, which would keep it past the cutoff.
       new Error(
         `Workflow notification for submission ${JSON.stringify(
           notification.event.payload?.submissionId
@@ -101,8 +101,10 @@ export function legacyWorkflowNotification(
 
 /**
  * Send the undelivered rows of the retired `cf_think_workflow_notifications`
- * table as deliveries (run from the alarm) and drop the table. A missing table means a fresh
- * object or a finished migration. One bad row does not hold back the rest.
+ * table as deliveries (run from the alarm), deleting each row once its
+ * delivery is stored, and drop the table when none is left. A row whose
+ * send fails stays for the next start; the rest go on. A missing table
+ * means a fresh object or a finished migration.
  *
  * TEMPORARY: one-shot upgrade path. Remove in the next minor.
  *
@@ -119,6 +121,7 @@ export async function migrateWorkflowNotificationTable(
   if (!tableExists(sql, "cf_think_workflow_notifications")) return;
   const rows = sql
     .exec<{
+      notification_id: string;
       submission_id: string;
       workflow_name: string;
       workflow_id: string;
@@ -126,7 +129,7 @@ export async function migrateWorkflowNotificationTable(
       payload_json: string;
       created_at: number;
     }>(
-      `SELECT submission_id, workflow_name, workflow_id, event_type, payload_json,
+      `SELECT notification_id, submission_id, workflow_name, workflow_id, event_type, payload_json,
               created_at
        FROM cf_think_workflow_notifications
        WHERE delivered_at IS NULL
@@ -138,6 +141,11 @@ export async function migrateWorkflowNotificationTable(
     try {
       payload = JSON.parse(row.payload_json) as WorkflowEventPayload;
     } catch {
+      // Nothing to deliver: it can go.
+      sql.exec(
+        "DELETE FROM cf_think_workflow_notifications WHERE notification_id = ?",
+        row.notification_id
+      );
       continue;
     }
     try {
@@ -152,12 +160,23 @@ export async function migrateWorkflowNotificationTable(
         },
         { sentAt: row.created_at, attempts: 0 }
       );
+      sql.exec(
+        "DELETE FROM cf_think_workflow_notifications WHERE notification_id = ?",
+        row.notification_id
+      );
     } catch (error) {
+      // Kept for the next start; the rest go on.
       console.error(
         `[Think] could not migrate the workflow notification for submission ${row.submission_id}`,
         error
       );
     }
   }
+  const [left] = sql
+    .exec(
+      "SELECT 1 FROM cf_think_workflow_notifications WHERE delivered_at IS NULL LIMIT 1"
+    )
+    .toArray();
+  if (left) return;
   sql.exec("DROP TABLE cf_think_workflow_notifications");
 }

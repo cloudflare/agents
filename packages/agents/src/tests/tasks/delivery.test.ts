@@ -129,14 +129,19 @@ describe("deliveries", () => {
     });
   });
 
-  it("gives up once the next attempt would start past the window, and reports it", async () => {
+  it("gives up on the first failure past the window, and reports it once", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       await instance.lifecycle.start();
+      const gaveUp: string[] = [];
       registerDeliverySink<null>(tasksOf(instance), "gone", {
         retry: { baseDelayMs: 100, giveUpAfterMs: 250 },
         deliver: () => {
-          throw new Error("unreachable");
+          // Text Tasks would read as a platform failure if it were thrown.
+          throw new Error("Network connection lost.");
+        },
+        onGiveUp: (error) => {
+          gaveUp.push(error.message);
         }
       });
       await tasksOf(instance).run(deliveryDefinition("gone"), null, {
@@ -145,10 +150,10 @@ describe("deliveries", () => {
       await until(() => instance.tasks.peek("g")?.status === "error");
       const record = instance.tasks.peek("g");
       expect(record?.error?.message).toMatch(
-        /^Delivery g gave up after \d+ attempts: unreachable$/
+        /^Delivery g gave up after \d+ attempts: Network connection lost\.$/
       );
       expect(record!.attempt).toBeGreaterThan(1);
-      expect(instance.runErrors.some((e) => e.includes("gave up"))).toBe(true);
+      expect(gaveUp).toEqual([record!.error!.message]);
     });
   });
 
@@ -192,9 +197,13 @@ describe("deliveries", () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       await instance.lifecycle.start();
+      const gaveUp: string[] = [];
       registerDeliverySink<null>(tasksOf(instance), "old", {
         deliver: () => {
           throw new Error("still down");
+        },
+        onGiveUp: (error) => {
+          gaveUp.push(error.message);
         }
       });
       await sendDelivery(tasksOf(instance), "old", "o", null, {
@@ -204,9 +213,9 @@ describe("deliveries", () => {
       await tasksOf(instance).runDue(deliveryDefinition("old"));
       // Given up on its first attempt here (attempt 5); nothing is kept.
       expect(instance.tasks.peek("o")).toBeUndefined();
-      expect(instance.runErrors).toContainEqual(
-        expect.stringContaining("Delivery o gave up after 5 attempts")
-      );
+      expect(gaveUp).toEqual([
+        "Delivery o gave up after 5 attempts: still down"
+      ]);
     });
   });
 });

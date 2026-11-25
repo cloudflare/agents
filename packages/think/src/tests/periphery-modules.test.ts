@@ -308,4 +308,50 @@ describe("legacy workflow notification migration", () => {
       expect(tableExists(sql, "cf_think_workflow_notifications")).toBe(false);
     });
   });
+
+  it("keeps a row whose send failed, and drops the table once a later start sends it", async () => {
+    const stub = await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      `periphery-legacy-workflow-fail-${crypto.randomUUID()}`
+    );
+    await stub.getMessages();
+    await runInDurableObject(stub, async (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec(`CREATE TABLE cf_think_workflow_notifications (
+        notification_id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      )`);
+      sql.exec(
+        `INSERT INTO cf_think_workflow_notifications VALUES
+          ('n1', 's1', 'WF', 'wf-1', 'completed', '{"ok":true}', 1, NULL),
+          ('n2', 's2', 'WF', 'wf-2', 'completed', '{"ok":true}', 2, NULL)`
+      );
+      const sent: string[] = [];
+      await migrateWorkflowNotificationTable(sql, async (id) => {
+        if (id.includes(":s1:")) throw new Error("storage full");
+        sent.push(id);
+      });
+      expect(sent).toEqual(["workflow-notification:s2:completed"]);
+      expect(
+        sql
+          .exec("SELECT notification_id FROM cf_think_workflow_notifications")
+          .toArray()
+      ).toEqual([{ notification_id: "n1" }]);
+
+      await migrateWorkflowNotificationTable(sql, async (id) => {
+        sent.push(id);
+      });
+      expect(sent).toEqual([
+        "workflow-notification:s2:completed",
+        "workflow-notification:s1:completed"
+      ]);
+      expect(tableExists(sql, "cf_think_workflow_notifications")).toBe(false);
+    });
+  });
 });

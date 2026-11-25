@@ -25,7 +25,7 @@ await sendDelivery(tasks, "think-workflow-notification", id, payload);
 
 ## Retry and give-up
 
-A failed attempt returns `TaskSettlement.retry(next)`: the run waits `pending` (wait reason `retry`) with its wake job at `next`, and holds nothing in memory. `next` is `backoffDelay(attempt, { baseMs, maxMs })`, the one backoff function (equal jitter). Defaults: 2 s doubling, 10 minutes at most. When `next` would be later than `giveUpAfterMs` (12 hours) after the run was accepted, the attempt throws the give-up error instead: the run ends `error` (deleted, as `retain: false`) and Tasks reports the error to the host's `onError`.
+A failed attempt returns `TaskSettlement.retry(next)`: the run waits `pending` (wait reason `retry`) with its wake job at `next`, and holds nothing in memory. `next` is `backoffDelay(attempt, { baseMs, maxMs })`, the one backoff function (equal jitter). Defaults: 2 s doubling, 10 minutes at most. An attempt that fails `giveUpAfterMs` (12 hours) or more after the run was accepted gives up instead: the sink's `onGiveUp` gets the give-up error (Think passes it to `onError`) and the handler returns `TaskSettlement.failed(error)`, so the run ends `error` (deleted, as `retain: false`). Returned, not thrown: Tasks reads some thrown messages, such as a lost connection, as a platform failure and would keep the run open.
 
 An attempt still running after `attemptTimeoutMs` (60 s) fails like a throw: its signal aborts and its later checkpoint writes throw. The sink is not stopped; a late return changes nothing (the next attempt delivers again: at least once).
 

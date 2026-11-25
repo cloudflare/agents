@@ -72,8 +72,8 @@ export interface DeliverySink<Payload> {
   retry?: DeliveryRetryPolicy;
   /**
    * The error a delivery gives up with; `cause` is the last failure. The
-   * run ends `error` with it and Tasks reports it to the host's `onError`.
-   * Default: "Delivery <id> gave up after <n> attempts: <cause>".
+   * run ends `error` with it. Default: "Delivery <id> gave up after <n>
+   * attempts: <cause>".
    */
   giveUpError?(
     payload: Payload,
@@ -81,6 +81,11 @@ export interface DeliverySink<Payload> {
     attempts: number,
     cause: unknown
   ): Error;
+  /**
+   * Called once when a delivery gives up, before its run ends `error`. A
+   * throw is logged and changes nothing.
+   */
+  onGiveUp?(error: Error, payload: Payload): void | Promise<void>;
 }
 
 const DEFAULT_RETRY: Required<DeliveryRetryPolicy> = {
@@ -212,22 +217,30 @@ async function attemptDelivery<Payload>(
     }
     if (step.signal.aborted) throw error;
     const now = Date.now();
+    if (now - step.createdAt >= policy.giveUpAfterMs) {
+      const giveUp =
+        sink.giveUpError?.(payload, step.id, step.attempt, error) ??
+        new Error(
+          `Delivery ${step.id} gave up after ${step.attempt} attempts: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      console.error(`[agents] ${giveUp.message}`);
+      try {
+        await sink.onGiveUp?.(giveUp, payload);
+      } catch (hookError) {
+        console.error(`[agents] delivery ${step.id} onGiveUp threw`, hookError);
+      }
+      // Returned, not thrown: Tasks reads some thrown messages (a lost
+      // connection) as a platform failure and would keep the run open.
+      return TaskSettlement.failed(giveUp);
+    }
     const next =
       now +
       backoffDelay(step.attempt, {
         baseMs: policy.baseDelayMs,
         maxMs: policy.maxDelayMs
       });
-    if (next - step.createdAt > policy.giveUpAfterMs) {
-      throw (
-        sink.giveUpError?.(payload, step.id, step.attempt, error) ??
-        new Error(
-          `Delivery ${step.id} gave up after ${step.attempt} attempts: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        )
-      );
-    }
     console.error(
       `[agents] delivery ${step.id} failed (attempt ${step.attempt}); retrying in ${Math.round((next - now) / 1000)}s`,
       error

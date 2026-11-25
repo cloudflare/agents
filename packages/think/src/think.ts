@@ -5356,12 +5356,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     registerDeliverySink(
       this.tasks,
       WORKFLOW_NOTIFICATION_SINK,
-      workflowNotificationSink((notification) =>
-        this.sendWorkflowEvent(
-          notification.workflowName as string & {},
-          notification.workflowId,
-          notification.event
-        )
+      workflowNotificationSink(
+        (notification) =>
+          this.sendWorkflowEvent(
+            notification.workflowName as string & {},
+            notification.workflowId,
+            notification.event
+          ),
+        (error) => this.onError(error)
       )
     );
     this.tasks.register(
