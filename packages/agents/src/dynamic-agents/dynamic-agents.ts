@@ -1060,6 +1060,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     const completion = delivered.then(() => {});
 
     if (!(activeBridge && previousOperations.size === 0)) {
+      // A later send must not join a batch opened before this broadcast.
+      this.#openConnectionSendBatches.clear();
       this.#queuedBroadcastTail = completion;
       void completion.then(() => {
         if (this.#queuedBroadcastTail === completion) {
