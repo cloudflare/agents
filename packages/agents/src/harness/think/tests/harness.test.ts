@@ -843,11 +843,11 @@ describe("ThinkHarness context", () => {
     await stub.setEnvironment("Tuesday");
     await stub.prompt("again", session);
     await stub.prompt("more", session);
-    // Loading the blocks takes a while: the eviction lands during it.
-    await stub.slowProvider(500);
+    // Loading the blocks hangs: the eviction lands during it.
+    await stub.hangProvider(true);
     expect(await stub.compactOnHandle(session)).toBe(true);
     stub = await crash(name);
-    await stub.slowProvider(0);
+    await stub.hangProvider(false);
     await stub.prompt("after", session);
     const last = (await stub.promptTexts()).at(-1) ?? "";
     const system = last.split("|")[0];
