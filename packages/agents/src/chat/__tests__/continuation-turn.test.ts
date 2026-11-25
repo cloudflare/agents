@@ -7,6 +7,7 @@ import {
   afterEach,
   onTestFinished
 } from "vitest";
+import { memoryLane } from "./memory-lane";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { createChatAdmissionStore } from "../admissions";
 import { AutoContinuationController } from "../auto-continuation-controller";
@@ -227,7 +228,10 @@ describe("the continuation turn", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     host = new FakeHost();
-    turns = new ChatTurns<TestConnection>(host, { defaultDebounceMs: 750 });
+    turns = new ChatTurns<TestConnection>(host, {
+      defaultDebounceMs: 750,
+      lane: memoryLane()
+    });
     host.turns = turns;
     connection = makeConnection("c1");
     host.transcript = [user("u1"), toolReply("a1", "output-available")];
@@ -342,6 +346,7 @@ describe("the continuation turn", () => {
     }));
     turns = new ChatTurns<TestConnection>(host, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: {
         store,
         recoveryPending: async () => false,
@@ -397,6 +402,7 @@ describe("the continuation turn", () => {
     });
     turns = new ChatTurns<TestConnection>(host, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     host.turns = turns;
@@ -409,6 +415,7 @@ describe("the continuation turn", () => {
     restarted.transcript = host.transcript;
     const after = new ChatTurns<TestConnection>(restarted, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     restarted.turns = after;
@@ -470,7 +477,8 @@ describe("the continuation turn", () => {
     const quiet = new FakeHost();
     Object.assign(quiet, { continuationDropped: undefined });
     const quietTurns = new ChatTurns<TestConnection>(quiet, {
-      defaultDebounceMs: 750
+      defaultDebounceMs: 750,
+      lane: memoryLane()
     });
     quiet.turns = quietTurns;
     quiet.transcript = [user("u1"), toolReply("a1", "output-available")];
@@ -1397,7 +1405,10 @@ describe("what a continuation turn runs", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     host = new FakeHost();
-    turns = new ChatTurns<TestConnection>(host, { defaultDebounceMs: 750 });
+    turns = new ChatTurns<TestConnection>(host, {
+      defaultDebounceMs: 750,
+      lane: memoryLane()
+    });
     host.turns = turns;
     connection = makeConnection("c1");
     host.transcript = [user("u1"), toolReply("a1", "output-available")];
@@ -1796,7 +1807,8 @@ describe("what a continuation turn runs", () => {
       const quiet = new FakeHost();
       Object.assign(quiet, { continuationDropped: undefined });
       const quietTurns = new ChatTurns<TestConnection>(quiet, {
-        defaultDebounceMs: 750
+        defaultDebounceMs: 750,
+        lane: memoryLane()
       });
       quiet.turns = quietTurns;
       let finishApply!: () => void;

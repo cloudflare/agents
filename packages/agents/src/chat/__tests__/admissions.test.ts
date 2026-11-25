@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { memoryLane } from "./memory-lane";
 import { describe, expect, it } from "vitest";
 import { splitPieces } from "../../internal/platform-limits";
 import {
@@ -126,6 +127,7 @@ function isolate(
 
   const turns: ChatTurns = new ChatTurns(host, {
     defaultDebounceMs: 0,
+    lane: memoryLane(),
     admissions: {
       store,
       recoveryPending: async () => options.recoveryPending?.() ?? false,
@@ -465,6 +467,7 @@ describe("durable admission", () => {
   it("a request whose record cannot be written ends with an error", async () => {
     const turns = new ChatTurns(new Host(), {
       defaultDebounceMs: 0,
+      lane: memoryLane(),
       admissions: {
         store: {
           ...createChatAdmissionStore(() => ({
@@ -585,22 +588,16 @@ describe("chatRecoveryNames", () => {
   ) {
     const db = new DatabaseSync(":memory:");
     db.exec(
-      "create table cf_agents_task_runs (definition text, status text, input text, metadata text)"
+      "create table cf_agents_task_runs (definition text, status text, input text, metadata text, lane text, checkpoint text)"
     );
-    db.prepare("insert into cf_agents_task_runs values (?, ?, ?, ?)").run(
-      "turn",
-      "running",
-      JSON.stringify({ requestId: "r1" }),
-      null
-    );
+    db.prepare(
+      "insert into cf_agents_task_runs (definition, status, input, metadata) values (?, ?, ?, ?)"
+    ).run("turn", "running", JSON.stringify({ requestId: "r1" }), null);
     if (options.partedRun) {
       // A run whose large input is kept in parts: only its metadata names it.
-      db.prepare("insert into cf_agents_task_runs values (?, ?, ?, ?)").run(
-        "turn",
-        "pending",
-        null,
-        JSON.stringify({ requestId: "r-big" })
-      );
+      db.prepare(
+        "insert into cf_agents_task_runs (definition, status, input, metadata) values (?, ?, ?, ?)"
+      ).run("turn", "pending", null, JSON.stringify({ requestId: "r-big" }));
     }
     const sql = {
       exec: (query: string, ...bindings: unknown[]) => {

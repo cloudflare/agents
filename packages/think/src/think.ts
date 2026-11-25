@@ -2188,6 +2188,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     },
     {
       defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS,
+      // Each queued turn is a run on the chat-turn definition's lane.
+      lane: {
+        tasks: () => this.tasks,
+        definition: (this.constructor as typeof Think).CHAT_FIBER_NAME
+      },
       // A request waiting in the queue survives an isolate reset.
       admissions: {
         store: createChatAdmissionStore(() => this.ctx.storage.sql),

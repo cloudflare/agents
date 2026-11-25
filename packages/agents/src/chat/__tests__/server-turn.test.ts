@@ -10,7 +10,8 @@ import {
   type ServerTurnParts
 } from "../server-turn";
 import { ChatStreamStalledError } from "../stall-watchdog";
-import { TurnQueue } from "../turn-queue";
+import { TurnLane } from "../turn-lane";
+import { memoryLaneRun } from "./memory-lane";
 
 /** Let queued microtasks and the queue's own awaits run. */
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -20,7 +21,10 @@ describe("runServerTurn", () => {
   let log: string[];
 
   beforeEach(() => {
-    parts = { queue: new TurnQueue(), aborts: new AbortRegistry() };
+    parts = {
+      queue: new TurnLane(memoryLaneRun()),
+      aborts: new AbortRegistry()
+    };
     log = [];
   });
 

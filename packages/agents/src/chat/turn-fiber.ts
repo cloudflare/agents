@@ -34,7 +34,11 @@ import { isTurnStopped } from "./turn-stop";
 import { isDurableObjectMemoryLimitReset } from "../retries";
 import type { TaskJson } from "../tasks";
 import { MAX_PARTED_INPUT_BYTES } from "../tasks/serialization";
-import type { ChatTurnClosureEntry, ChatTurnTaskInput } from "./turn-task";
+import {
+  currentChatRun,
+  type ChatTurnClosureEntry,
+  type ChatTurnTaskInput
+} from "./turn-task";
 
 /** What {@link ChatTurnFibers} needs from the agent that hosts it. */
 export interface ChatTurnFiberHost {
@@ -197,6 +201,19 @@ export class ChatTurnFibers {
     body: () => Promise<T>
   ): Promise<T> {
     const { requestId, continuation, snapshot } = turn;
+    // The snapshot is a hint for recovery; stream cursors are the evidence.
+    // One that cannot be kept as JSON (a request body with a `bigint`) is
+    // left out, and never fails the turn.
+    const envelope = asJson(
+      wrapChatFiberSnapshot(this.host.snapshotKey, snapshot, null)
+    );
+    // A turn queued on the chat lane runs its model call in its own run.
+    const inLane = currentChatRun()?.({ requestId, envelope, onStash }, () => {
+      this.host.turnAccepted?.(requestId);
+      turn.onAccepted?.(requestId);
+      return body();
+    });
+    if (inLane) return inLane;
     const nonce = this.host.generateId();
     let resolveOutcome!: (value: unknown) => void;
     let rejectOutcome!: (error: unknown) => void;
@@ -212,12 +229,6 @@ export class ChatTurnFibers {
     // request, a caller's result capture), whichever attempt claims it: the
     // caller's, or the alarm's when that claims the run first.
     const inCaller = AsyncLocalStorage.snapshot();
-    // The snapshot is a hint for recovery; stream cursors are the evidence.
-    // One that cannot be kept as JSON (a request body with a `bigint`) is
-    // left out, and never fails the turn.
-    const envelope = asJson(
-      wrapChatFiberSnapshot(this.host.snapshotKey, snapshot, null)
-    );
     await this.host.runTask(
       {
         requestId,

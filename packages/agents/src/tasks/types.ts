@@ -282,7 +282,10 @@ export interface TaskRunOptions {
   /**
    * @internal Handed as `step.local` to an attempt this isolate starts while
    * the caller still waits for the first one (`start` omitted or `"now"`),
-   * whether the caller or the alarm claimed it; never stored.
+   * whether the caller or the alarm claimed it; never stored. A lane run
+   * queued behind another keeps it until its attempt here starts. If the
+   * run ends before an attempt took it, a `dropped` function on it is
+   * called.
    */
   local?: unknown;
 }

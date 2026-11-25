@@ -101,6 +101,46 @@ describe("Tasks lanes", () => {
     });
   });
 
+  it("hands a queued run its caller's local when it starts here, and tells a local no attempt took", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      const first = gate();
+      instance.lanedGates.set("a", first.promise);
+      let dropped = 0;
+      const lane = { lane: "l" } as const;
+      await instance.tasks.run(
+        "laned",
+        { label: "a" },
+        { ...lane, local: "A" }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        { ...lane, local: "B" }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "c" },
+        { ...lane, runId: "c", local: { dropped: () => dropped++ } }
+      );
+      await until(() => instance.lanedStarted.length === 1);
+      // c ends before an attempt took its local: it is told, once.
+      await instance.tasks.cancel("c");
+      expect(dropped).toBe(1);
+      first.open();
+      await until(() => instance.lanedStarted.length === 2);
+      // b started here as a settled, with the local its caller passed.
+      expect(instance.lanedLocals).toEqual(["A", "B"]);
+      await until(
+        async () =>
+          (await instance.tasks.list({ status: ["pending", "running"] }))
+            .length === 0
+      );
+      expect(dropped).toBe(1);
+    });
+  });
+
   it("starts nothing in a held lane until it is released", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

@@ -5344,6 +5344,39 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    * Leave an interrupted turn: a chat turn (`CHAT_FIBER_NAME:<requestId>`)
    * as a chat-turn Task run, anything else as a fiber row.
    */
+  /**
+   * A chat turn's lane run an isolate left: `began` when its model call had
+   * begun (its envelope and `stash` in the checkpoint), or still queued.
+   */
+  async insertInterruptedLaneTurn(
+    requestId: string,
+    began: boolean,
+    stash?: unknown
+  ): Promise<void> {
+    const nonce = crypto.randomUUID();
+    const runId = `chat_${nonce}`;
+    await this.tasks.get(runId);
+    const checkpoint = began
+      ? JSON.stringify({
+          snapshot: { __cfAIChatFiberSnapshot: null, user: null },
+          ...(stash !== undefined && { stash })
+        })
+      : null;
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, metadata, idempotency_key, retain,
+         attempt, next_at, cancel_requested, created_at, updated_at, lane, seq,
+         checkpoint)
+      VALUES
+        (${runId}, ${AIChatAgent.CHAT_FIBER_NAME},
+         ${JSON.stringify({ requestId, continuation: false, nonce, lane: true })},
+         'pending', ${JSON.stringify({ requestId })},
+         NULL, 0, ${began ? 1 : 0}, ${now}, 0, ${now}, ${now}, 'chat', 1,
+         ${checkpoint})
+    `;
+  }
+
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown,
@@ -5603,6 +5636,11 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
       thrown = error instanceof Error ? error.message : String(error);
     } finally {
       this._shouldThrow = false;
+    }
+    // The caller hears of the failure from its turn; the turn's run fails
+    // just after, and onError hears of it then.
+    for (let i = 0; i < 200 && this._onErrorSeen.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const internals = this as unknown as {
       _chatTurnFibers: { liveTurns: Map<string, unknown> };

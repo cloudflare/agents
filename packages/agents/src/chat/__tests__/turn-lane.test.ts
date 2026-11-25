@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { TurnQueue } from "../turn-queue";
+import { TurnLane } from "../turn-lane";
+import { memoryLaneRun } from "./memory-lane";
 
 function deferred() {
   let resolve!: () => void;
@@ -9,11 +10,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-describe("TurnQueue", () => {
+describe("TurnLane", () => {
   // ── Serialization ────────────────────────────────────────────────
 
   it("serializes enqueued work so the second waits for the first", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const order: number[] = [];
     const gate = deferred();
 
@@ -40,7 +41,7 @@ describe("TurnQueue", () => {
   // ── Return value ─────────────────────────────────────────────────
 
   it("returns the fn's value in a completed result", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const result = await queue.enqueue("r1", async () => 42);
     expect(result).toEqual({ status: "completed", value: 42 });
   });
@@ -48,7 +49,7 @@ describe("TurnQueue", () => {
   // ── Generation skip ──────────────────────────────────────────────
 
   it("auto-skips stale turns without calling fn", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const gate = deferred();
     let secondCalled = false;
 
@@ -73,7 +74,7 @@ describe("TurnQueue", () => {
   // ── waitForIdle ──────────────────────────────────────────────────
 
   it("resolves when the queue is fully drained", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const gate = deferred();
     let done = false;
 
@@ -94,7 +95,7 @@ describe("TurnQueue", () => {
   });
 
   it("handles new enqueues during execution", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const order: string[] = [];
 
     await queue.enqueue("r1", async () => {
@@ -113,7 +114,7 @@ describe("TurnQueue", () => {
   // ── queuedCount ──────────────────────────────────────────────────
 
   it("tracks per-generation counts accurately", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const gate = deferred();
 
     expect(queue.queuedCount()).toBe(0);
@@ -134,7 +135,7 @@ describe("TurnQueue", () => {
   // ── activeRequestId ──────────────────────────────────────────────
 
   it("tracks active request during execution", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
 
     expect(queue.activeRequestId).toBeNull();
     expect(queue.isActive).toBe(false);
@@ -156,7 +157,7 @@ describe("TurnQueue", () => {
   // ── Error propagation ────────────────────────────────────────────
 
   it("propagates fn errors but keeps the queue running", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
 
     const first = queue
       .enqueue("r1", async () => {
@@ -174,7 +175,7 @@ describe("TurnQueue", () => {
   // ── Multiple resets ──────────────────────────────────────────────
 
   it("advances generation on each reset", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     expect(queue.generation).toBe(0);
 
     queue.reset();
@@ -185,7 +186,7 @@ describe("TurnQueue", () => {
   });
 
   it("skips turns from multiple stale generations", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const gate = deferred();
     const called: string[] = [];
 
@@ -222,7 +223,7 @@ describe("TurnQueue", () => {
   // ── Concurrent enqueues ──────────────────────────────────────────
 
   it("serializes N items in FIFO order", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const order: number[] = [];
 
     const promises = Array.from({ length: 5 }, (_, i) =>
@@ -242,7 +243,7 @@ describe("TurnQueue", () => {
   // ── Explicit generation option ───────────────────────────────────
 
   it("respects explicit generation option for stale detection", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const gen0 = queue.generation;
 
     queue.reset();
@@ -261,7 +262,7 @@ describe("TurnQueue", () => {
   });
 
   it("runs fn when explicit generation matches current", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     queue.reset();
     const gen1 = queue.generation;
 
@@ -275,7 +276,7 @@ describe("TurnQueue", () => {
   // ── queuedCount with stale generations ───────────────────────────
 
   it("decrements count for stale turns that get skipped", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const gate = deferred();
 
     queue.enqueue("r1", async () => {
@@ -296,7 +297,7 @@ describe("TurnQueue", () => {
   // ── reset during active execution ────────────────────────────────
 
   it("completes the active fn after reset but skips queued turns", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     const gate = deferred();
     const events: string[] = [];
 
@@ -327,7 +328,7 @@ describe("TurnQueue", () => {
   });
 
   it("reports the generation the active turn was admitted under", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     expect(queue.activeGeneration).toBeNull();
 
     const seen: Array<[number | null, number]> = [];
@@ -347,12 +348,12 @@ describe("TurnQueue", () => {
   // ── waitForIdle on an idle queue ─────────────────────────────────
 
   it("resolves immediately when the queue is already idle", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     await queue.waitForIdle();
   });
 
   it("resolves immediately after all work has drained", async () => {
-    const queue = new TurnQueue();
+    const queue = new TurnLane(memoryLaneRun());
     await queue.enqueue("r1", async () => {});
     await queue.waitForIdle();
   });

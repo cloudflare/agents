@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { memoryLane } from "./memory-lane";
 import { ChatRecoverySupersededError } from "../turn-stop";
 import { createChatAdmissionStore } from "../admissions";
 import { ChatStreamStalledError } from "../stall-watchdog";
@@ -87,7 +88,7 @@ describe("ChatTurns", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     host = new FakeHost();
-    turns = new ChatTurns(host, { defaultDebounceMs: 750 });
+    turns = new ChatTurns(host, { defaultDebounceMs: 750, lane: memoryLane() });
   });
 
   afterEach(() => {
@@ -174,6 +175,7 @@ describe("ChatTurns", () => {
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
     const before = new ChatTurns(host, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     await before.applyInteraction(
@@ -188,6 +190,7 @@ describe("ChatTurns", () => {
     restarted.transcript = host.transcript;
     const after = new ChatTurns(restarted, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     await after.resumeAdmissions();
@@ -201,6 +204,7 @@ describe("ChatTurns", () => {
     after.turnAccepted(requestId!);
     const again = new ChatTurns(restarted, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     await again.resumeAdmissions();
@@ -223,6 +227,7 @@ describe("ChatTurns", () => {
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
     const before = new ChatTurns(host, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     await before.applyInteraction(
@@ -235,6 +240,7 @@ describe("ChatTurns", () => {
     restarted.transcript = host.transcript;
     const after = new ChatTurns(restarted, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     await after.resumeAdmissions();
@@ -257,6 +263,7 @@ describe("ChatTurns", () => {
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
     const before = new ChatTurns(host, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     await before.applyInteraction(
@@ -269,6 +276,7 @@ describe("ChatTurns", () => {
     restarted.transcript = [...host.transcript, user("u2")];
     const after = new ChatTurns(restarted, {
       defaultDebounceMs: 750,
+      lane: memoryLane(),
       admissions: admissions()
     });
     await after.resumeAdmissions();

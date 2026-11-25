@@ -1095,7 +1095,8 @@ export class Tasks<
     const placed = this.#store.placeInput(runId, inputJson);
     // A run queued behind its lane's open run waits with no deadline (and
     // no wake job) until that run settles.
-    const queued = lane !== null && this.#store.laneHead(lane) !== undefined;
+    const place = lane === null ? null : this.#store.lanePlace(lane);
+    const queued = place?.open ?? false;
     this.#store.sql`
       INSERT INTO ${this.#tables.runs}
         (run_id, definition, input, status, metadata, idempotency_key, retain,
@@ -1105,7 +1106,7 @@ export class Tasks<
         (${runId}, ${definition}, ${placed.input}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
          0, ${queued ? null : now}, 0, ${now}, ${now}, ${lane},
-         ${lane === null ? null : this.#store.nextLaneSeq(lane)},
+         ${place?.seq ?? null},
          ${placed.parts})
     `;
     // Before the wake is published: an attempt this isolate starts from it
@@ -1117,10 +1118,19 @@ export class Tasks<
     // published after it (a reset in between leaves the row's deadline,
     // which the next start mirrors).
     await this.#report(runId);
-    // A run started now outside a lane gets its first wake from the claim
-    // that follows at once; until then its row's deadline is the wake a
-    // restart reconciles.
-    if (startMode !== "attached" || lane !== null) {
+    // A run started now outside a lane, or a lane's free head that this
+    // isolate starts at once for a caller holding its `local`, gets its first
+    // wake from the claim that follows; until then its row's deadline is the
+    // wake a restart reconciles.
+    // A new run queued in a lane has no deadline, so no wake to cancel.
+    const noWakeYet =
+      lane === null
+        ? startMode === "attached"
+        : queued ||
+          (startMode === "warm" &&
+            options.local !== undefined &&
+            this.lifecycle.status() !== "starting");
+    if (!noWakeYet) {
       try {
         await this.#syncWake(runId);
       } catch (error) {
@@ -1134,11 +1144,18 @@ export class Tasks<
     // Warm path: begin the first attempt immediately when the host is past
     // startup. The durable deadline above is authoritative either way.
     if (startMode === "warm") {
-      if (this.lifecycle.status() === "starting") this.#locals.delete(runId);
-      else {
+      if (this.lifecycle.status() === "starting") {
+        // A lane run keeps its `local` for the attempt its wake starts here
+        // once the host has started.
+        if (lane === null) this.#locals.delete(runId);
+      } else {
         void this.#executeRun(runId)
           .catch(() => {})
-          .finally(() => this.#locals.delete(runId));
+          // A lane run queued behind another keeps its `local` until its
+          // first attempt here takes it, or it ends without one.
+          .finally(() => {
+            if (lane === null) this.#locals.delete(runId);
+          });
       }
     }
 
@@ -1251,6 +1268,8 @@ export class Tasks<
       definition: row.definition,
       attempt
     });
+    // The attempt takes the caller's `local`: it is handed over once.
+    if (local !== undefined) this.#locals.delete(runId);
     const promise = this.#runAttempt(
       row,
       handler,
@@ -1776,6 +1795,7 @@ export class Tasks<
     runId: string,
     row: TaskRunRow | undefined
   ): Promise<void> {
+    this.#dropLocal(runId);
     const onStatus =
       row && this.#registeredOptions.get(row.definition)?.onStatus;
     let guarded = false;
@@ -1796,7 +1816,7 @@ export class Tasks<
     if (row?.lane != null && row.seq != null) {
       const head = this.#store.laneHead(row.lane);
       if (head?.seq != null && head.seq > row.seq) {
-        await this.#wakeLane(row.lane);
+        await this.#wakeLane(row.lane, head);
       }
     }
     const reported =
@@ -2028,6 +2048,18 @@ export class Tasks<
    * Whether a run may start now: a run outside a lane always may; a lane
    * run only when it is its lane's head and the lane is not held.
    */
+  /**
+   * Forget a run's `local` that no attempt took (the run ended first), and
+   * tell it: a `local` with a `dropped` function is called.
+   */
+  #dropLocal(runId: string): void {
+    const local = this.#locals.get(runId);
+    if (local === undefined) return;
+    this.#locals.delete(runId);
+    const dropped = (local as { dropped?: unknown }).dropped;
+    if (typeof dropped === "function") dropped.call(local);
+  }
+
   #laneAllows(row: TaskRunRow | undefined): boolean {
     if (row?.lane == null) return true;
     if (this.#heldLanes.has(row.lane)) return false;
@@ -2051,9 +2083,11 @@ export class Tasks<
   }
 
   /** Give a lane's head a deadline of now if it waits without one. */
-  async #wakeLane(lane: string): Promise<void> {
+  async #wakeLane(
+    lane: string,
+    head = this.#store.laneHead(lane)
+  ): Promise<void> {
     if (this.#heldLanes.has(lane)) return;
-    const head = this.#store.laneHead(lane);
     if (!head) return;
     if (
       head.status === "pending" &&
@@ -2066,7 +2100,18 @@ export class Tasks<
         WHERE run_id = ${head.run_id} AND status = 'pending'
       `;
     }
-    await this.#syncWake(head.run_id);
+    // A run accepted in this isolate whose caller still holds its `local`
+    // starts here, as the head before it did, not a wake later: its claim
+    // mirrors its deadline, and until then the row's is the wake a restart
+    // reconciles.
+    if (
+      !this.#locals.has(head.run_id) ||
+      this.lifecycle.status() === "starting"
+    ) {
+      await this.#syncWake(head.run_id);
+    } else {
+      void this.#executeRun(head.run_id).catch(() => {});
+    }
   }
 
   /**
