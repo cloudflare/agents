@@ -1,14 +1,11 @@
 /**
- * ThinkHarness's records in the shared, harness-agnostic store
- * (`agents/harness/store`), under the `cf_think_harness_store_` prefix:
- * which sessions exist and the client tools each declared. Operations are
- * Tasks runs; messages live in the Sessions capability and in-flight model
- * output in the Streams capability.
- *
- * The store once held the operations and the tool calls they started too.
- * {@link OperationRecords.leftOperations} reads what a released version left
- * open there, so the harness can carry it forward into runs, and
- * {@link OperationRecords.dropOperations} then forgets every operation.
+ * What an operation asks the harness to do, and what released versions of
+ * ThinkHarness kept of their own: the shared harness store
+ * (`agents/harness/store`, prefix `cf_think_harness_store_`) with sessions,
+ * their client tools and operations, and before it the 0.27 tables. The
+ * harness now keeps sessions and client tools in Sessions and operations in
+ * Tasks; {@link ReleasedRecords} is what it reads once, at start, to carry
+ * those records forward.
  */
 import type { UIMessage } from "ai";
 import type { ClientToolSchema } from "../../chat/client-tools";
@@ -19,6 +16,7 @@ import {
   type JsonValue,
   type OperationRecord as StoredOperation
 } from "../store/store";
+import { hasTable } from "../../lifecycle/schema";
 
 /** What an operation asks the harness to do, as stored. */
 export type OperationInput =
@@ -67,11 +65,12 @@ export type StoredOpenOperation = {
   readonly createdAt: number;
 };
 
-/** A session the harness knows of. */
-export type SessionRecord = {
+/** A session a released version knew of. */
+export type ReleasedSession = {
   readonly id: string;
   readonly parent: string | undefined;
   readonly createdAt: number;
+  readonly clientTools: readonly ClientToolSchema[];
 };
 
 /** The shared store's table prefix for ThinkHarness's records. */
@@ -178,11 +177,13 @@ function parseSessionState(value: JsonValue | undefined): SessionState {
   };
 }
 
-/** A session's state as this version writes it: tool calls are steps now. */
 function sessionStateJson(state: SessionState): JsonValue {
-  // SAFETY: a ClientToolSchema is plain JSON: a name, a description and a
-  // JSON Schema.
-  return { clientTools: state.clientTools as unknown as JsonValue };
+  return {
+    // SAFETY: a ClientToolSchema is plain JSON: a name, a description and
+    // a JSON Schema.
+    clientTools: state.clientTools as unknown as JsonValue,
+    toolCalls: { ...state.toolCalls }
+  };
 }
 
 function parseOpenOperation(
@@ -203,79 +204,79 @@ function parseOpenOperation(
   };
 }
 
+/** The store's tables, by their suffix after the prefix. */
+const STORE_TABLES = ["sessions", "operations", "log"] as const;
+
 /**
- * The harness's records over the shared harness store: sessions and their
- * client tools. Opening it moves records an earlier version left in its
- * own tables into the store.
+ * What a released version kept in the shared harness store, or before that
+ * in the 0.27 tables: sessions with their client tools, and operations.
+ * Opened only at start and only when those tables are there; the harness
+ * moves what it holds into Sessions and Tasks, then drops the tables.
  */
-export class OperationRecords {
+export class ReleasedRecords {
+  readonly #storage: DurableObjectStorage;
   readonly #store: HarnessStore;
+  readonly #facet: boolean;
 
   /**
-   * Open the records, creating the store's tables and importing any legacy
-   * tables. Cheap after the first time: keep one per isolate.
-   *
-   * @param storage - The Durable Object's storage.
+   * The records, or `undefined` when no table of a released version is
+   * there. Run once per object, as a schema step.
    */
-  constructor(storage: DurableObjectStorage) {
+  static open(
+    storage: DurableObjectStorage,
+    facet: boolean
+  ): ReleasedRecords | undefined {
+    const present = new Set(
+      [
+        ...STORE_TABLES.map((table) => `${STORE_PREFIX}${table}`),
+        LEGACY_SESSIONS,
+        LEGACY_OPERATIONS,
+        LEGACY_TOOL_CALLS
+      ].filter((name) => hasTable(storage.sql, name))
+    );
+    return present.size === 0
+      ? undefined
+      : new ReleasedRecords(storage, present, facet);
+  }
+
+  private constructor(
+    storage: DurableObjectStorage,
+    present: Set<string>,
+    facet: boolean
+  ) {
+    this.#storage = storage;
+    this.#facet = facet;
     this.#store = openHarnessStore(storage, { prefix: STORE_PREFIX });
-    importLegacyTables(storage, this.#store);
+    importLegacyTables(storage, this.#store, present, this.#discard);
   }
 
-  // ── Sessions ─────────────────────────────────────────────────────────────
+  /**
+   * A table this is done with. A facet empties it rather than dropping it:
+   * a facet dropping indexed tables on its first start after an upgrade
+   * has reset its whole tree's storage (measured; only the root drops).
+   */
+  readonly #discard = (table: string): void => {
+    this.#storage.sql.exec(
+      this.#facet ? `DELETE FROM ${table}` : `DROP TABLE IF EXISTS ${table}`
+    );
+  };
 
-  /** Record a session, unless it exists. */
-  ensureSession(id: string, parent?: string): void {
-    this.#store.createSession({
-      id,
-      ...(parent !== undefined && { parent }),
-      state: sessionStateJson(EMPTY_STATE)
-    });
-  }
-
-  /** Every session, oldest first. */
-  sessions(): SessionRecord[] {
-    return this.#store.sessions().map((session) => ({
+  /**
+   * Sessions, oldest first, with the client tools each declared: `limit`
+   * of them from `offset`.
+   */
+  sessions(offset: number, limit: number): ReleasedSession[] {
+    return this.#store.sessions({ offset, limit }).map((session) => ({
       id: session.id,
       parent: session.parent,
-      createdAt: session.createdAt
+      createdAt: session.createdAt,
+      clientTools: parseSessionState(session.state).clientTools
     }));
   }
 
-  /** The client tools a session's client last declared. */
-  clientTools(session: string): ClientToolSchema[] {
-    return [...this.#state(session).clientTools];
-  }
-
-  /** Replace the client tools a session's client declared. */
-  setClientTools(session: string, tools: readonly ClientToolSchema[]): void {
-    this.#updateState(session, (state) => ({ ...state, clientTools: tools }));
-  }
-
-  #state(session: string): SessionState {
-    return parseSessionState(this.#store.session(session)?.state);
-  }
-
-  #updateState(
-    session: string,
-    change: (state: SessionState) => SessionState
-  ): void {
-    this.#store.transaction(() => {
-      const stored = this.#store.session(session);
-      if (!stored) return;
-      this.#store.setSessionState(
-        session,
-        sessionStateJson(change(parseSessionState(stored.state)))
-      );
-    });
-  }
-
-  // ── Operations a released version left ───────────────────────────────────
-
   /**
-   * The oldest open operations a released version left, at most `limit`,
-   * in submission order. Only those rows are read: settled ones can be
-   * many, and hold whole messages.
+   * The oldest open operations, at most `limit`, in submission order. Only
+   * those rows are read: settled ones can be many, and hold whole messages.
    */
   leftOperations(limit: number): StoredOpenOperation[] {
     const states = new Map<string, SessionState>();
@@ -284,38 +285,30 @@ export class OperationRecords {
       .map((operation) => {
         let state = states.get(operation.session);
         if (!state) {
-          state = this.#state(operation.session);
+          state = parseSessionState(
+            this.#store.session(operation.session)?.state
+          );
           states.set(operation.session, state);
         }
         return parseOpenOperation(operation, state);
       });
   }
 
-  /**
-   * Forget open operations once they are runs (`carried`), and the tool
-   * calls they started.
-   */
+  /** Forget open operations once they are runs. */
   dropOperations(carried: readonly StoredOpenOperation[]): void {
     this.#store.transaction(() => {
       for (const operation of carried) {
         this.#store.deleteOperation(operation.session, operation.operationId);
-        if (operation.startedToolCalls.length > 0) {
-          this.#updateState(operation.session, (state) => ({
-            ...state,
-            toolCalls: {}
-          }));
-        }
       }
     });
   }
 
-  /**
-   * Forget every settled operation, in SQL, without reading one. A tool
-   * call a released version recorded for one stays in its session's state,
-   * where nothing reads it, until the session's state is next written.
-   */
-  dropSettled(): void {
-    this.#store.deleteSettled();
+  /** Discard the store's tables, settled operations and all, unread. */
+  drop(): void {
+    this.#storage.transactionSync(() => {
+      for (const table of STORE_TABLES)
+        this.#discard(`${STORE_PREFIX}${table}`);
+    });
   }
 }
 
@@ -369,21 +362,18 @@ function parseJsonColumn(text: string): JsonValue {
  */
 function importLegacyTables(
   storage: DurableObjectStorage,
-  store: HarnessStore
+  store: HarnessStore,
+  present: ReadonlySet<string>,
+  discard: (table: string) => void
 ): void {
   const sql = storage.sql;
-  const present = new Set(
-    sql
-      .exec<{ name: string }>(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?, ?)`,
-        LEGACY_SESSIONS,
-        LEGACY_OPERATIONS,
-        LEGACY_TOOL_CALLS
-      )
-      .toArray()
-      .map((row) => row.name)
-  );
-  if (present.size === 0) return;
+  if (
+    !present.has(LEGACY_SESSIONS) &&
+    !present.has(LEGACY_OPERATIONS) &&
+    !present.has(LEGACY_TOOL_CALLS)
+  ) {
+    return;
+  }
 
   storage.transactionSync(() => {
     const states = new Map<string, SessionState>();
@@ -436,11 +426,7 @@ function importLegacyTables(
     for (const [id, state] of states) {
       // A session the legacy sessions table lacked is created here.
       store.createSession({ id });
-      // With the tool calls it started, which carry-forward reads.
-      store.setSessionState(id, {
-        ...(sessionStateJson(state) as { [key: string]: JsonValue }),
-        toolCalls: { ...state.toolCalls }
-      });
+      store.setSessionState(id, sessionStateJson(state));
     }
 
     if (present.has(LEGACY_OPERATIONS)) {
@@ -457,7 +443,7 @@ function importLegacyTables(
       LEGACY_OPERATIONS,
       LEGACY_TOOL_CALLS
     ]) {
-      sql.exec(`DROP TABLE IF EXISTS ${table}`);
+      if (present.has(table)) discard(table);
     }
   });
 }

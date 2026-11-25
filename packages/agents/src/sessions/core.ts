@@ -2767,6 +2767,16 @@ export class SessionsCore {
     );
   }
 
+  /** Every session holding config `key`, with its value. */
+  configs(key: string): { sessionId: string; value: string }[] {
+    return this.io
+      .sql<{ session_id: string; value: string }>(
+        `SELECT session_id, value FROM ${this.#t.config} WHERE key = ?`,
+        [key]
+      )
+      .map((row) => ({ sessionId: row.session_id, value: row.value }));
+  }
+
   setConfig(sessionId: string, key: string, value: string | null): void {
     if (value === null) {
       this.io.sqlWrite(

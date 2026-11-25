@@ -1,6 +1,6 @@
 # ThinkHarness
 
-`ThinkHarness` (`agents/harness/think`, experimental) runs Think's agent loop as a Lifecycle capability. It owns no table and schedules no job of its own: its rows are in the capabilities it uses. It is a capability because it composes them into the one unit a host installs.
+`ThinkHarness` (`agents/harness/think`, experimental) runs Think's agent loop as a Lifecycle capability. It owns no table and schedules no job of its own: its rows are in the capabilities it uses (Tasks, Sessions, Streams). It is a capability because it composes them into the one unit a host installs.
 
 ## How it works
 
@@ -9,8 +9,8 @@
 - **A server tool call is a step.** `run.do("tool:<step>:<toolCallId>")` runs the tool and writes its result to the transcript before the step completes. A reset mid call leaves the step `running`, so the next attempt sees step attempt 2 and the tool's `recovery` decides: reported as interrupted (default) or run again (`"rerun"`, within `recovery.maxAttempts`). A finished call is never run again.
 - **A model call** streams into Streams; the cutover persists the message and discards the stream in one transaction. After a reset the next attempt finds `streamId` in the checkpoint, keeps the partial and continues the same message. A second interruption in a row sleeps the run (`backoffDelay`, equal jitter), which keeps the lane.
 - **Ends outside the handler.** A cancel or a memory-limit seal ends the run without its handler. The terminal report (`onStatus`, at least once, before `wait()` resolves) finishes it from the kept checkpoint (`keepCheckpoint`) and the stream, or from the live attempt's chunks: partial kept, open tool calls failed, stream discarded. A cancelled attempt that is still unwinding writes nothing more: `#commit` refuses it in the same synchronous block as the write. `abort()` holds the session's lane across the cancels, so the next operation starts after the partial answer is in the transcript.
-- **Carried forward.** At start, the open operations a released version left in the harness store (`cf_think_harness_store_operations`, filled from the 0.27 tables by the existing import) become runs, 50 at a time, in submission order: a running one as interrupted with its progress and started tool calls, a sealed one to be finished as abandoned. Settled ones are deleted in SQL without being read.
-- **What stays in the harness store:** sessions and the client tools each declared, until they move to Sessions.
+- **Sessions and client tools are session values.** A session the harness knows of has the Sessions config value `think-harness:session` (`{ parent?, createdAt }`); the client tools its client last declared are `think-harness:client-tools`. Neither is a `transcript:` key, so `reset()` keeps both. `sessions.list()` reads every session holding `think-harness:session` (`Sessions.internal_configs`), oldest first.
+- **Carried forward.** At start one read of the schema finds whether a released version's tables are left: the shared harness store (`cf_think_harness_store_*`) or the 0.27 tables before it (imported into the store first, as before). If so, its open operations become runs, 50 at a time, in submission order: a running one as interrupted with its progress and started tool calls, a sealed one to be finished as abandoned. Its sessions and client tools become session values. Then the store's tables are discarded, settled operations with them, unread: dropped at the root, emptied in a sub-agent (a facet dropping indexed tables on its first start after an upgrade has reset its tree's storage on a deployment), where the empty tables stay and are never read again.
 
 ## Durable and in memory
 
@@ -20,7 +20,7 @@ Durable: run rows, checkpoints, tool steps (Tasks), transcripts (Sessions), in-f
 
 - A settled run keeps its checkpoint (about 150 bytes) until `reset()` deletes the session's settled runs; the terminal report of a cancelled run needs it after the run settled.
 - A seal can settle a run while the next queued run in its lane starts: no lane hold there, unlike `abort()`.
-- A cold start reads the store for open operations and deletes settled ones: two statements, no rows, once the store is empty.
+- A cold start reads the schema once for a released version's tables (none after the first start) and the root session's value.
 
 ## History
 

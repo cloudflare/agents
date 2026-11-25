@@ -1,8 +1,8 @@
 {
   "total": 1534,
-  "passed": 421,
+  "passed": 461,
   "needThink": 1246,
-  "needThinkPassed": 133,
+  "needThinkPassed": 173,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -38,7 +38,7 @@
     },
     "assistant-message-metadata.test.ts": {
       "total": 9,
-      "passed": 0
+      "passed": 1
     },
     "attachment-consumption.test.ts": {
       "total": 4,
@@ -66,7 +66,7 @@
     },
     "client-tools.test.ts": {
       "total": 136,
-      "passed": 0
+      "passed": 34
     },
     "cold-rpc-initialization.test.ts": {
       "total": 4,
@@ -142,7 +142,7 @@
     },
     "message-reconciliation.test.ts": {
       "total": 11,
-      "passed": 0
+      "passed": 4
     },
     "messengers.test.ts": {
       "total": 103,
@@ -226,7 +226,7 @@
     },
     "streaming-message-id.test.ts": {
       "total": 1,
-      "passed": 0
+      "passed": 1
     },
     "submissions.test.ts": {
       "total": 116,
@@ -294,6 +294,7 @@
     "assistant-agent.test.ts > Think — message persistence > messages survive across agent instances",
     "assistant-agent.test.ts > Think — streaming flow > persists assistant message after streaming",
     "assistant-agent.test.ts > Think — streaming flow > sends a chat request and receives streamed response",
+    "assistant-message-metadata.test.ts > Think — server-authored assistant-message metadata > stamps no metadata keys when no writer is configured (opt-in)",
     "browser-tools.test.ts > createBrowserTools > accepts cdpUrl instead of browser binding (Quick Actions skipped without a binding)",
     "browser-tools.test.ts > createBrowserTools > accepts optional timeout and session mode",
     "browser-tools.test.ts > createBrowserTools > exposes the runtime handle and connector via createBrowserRuntime",
@@ -311,6 +312,40 @@
     "channels.test.ts > resolveChannels > throws on a duplicate id across configureChannels() and getMessengers()",
     "channels.test.ts > resolveChannels > throws when configureChannels() replaces web with a non-web kind",
     "channels.test.ts > resolveChannels > throws when getMessengers() declares a messenger named web",
+    "client-tools.test.ts > Think — a client copy of a reply that is behind > does not shorten the stored reply",
+    "client-tools.test.ts > Think — auto-continuation > autoContinue: true triggers continuation",
+    "client-tools.test.ts > Think — auto-continuation > continues after approving a tool that shares its message with a settled tool (#2185)",
+    "client-tools.test.ts > Think — auto-continuation > does not continue a standalone errored tool (autoContinue:false, no opted-in sibling) (#1650)",
+    "client-tools.test.ts > Think — auto-continuation > does not execute a rejected server approval tool and retains denial",
+    "client-tools.test.ts > Think — auto-continuation > persists an approved server tool execution error as terminal output",
+    "client-tools.test.ts > Think — auto-continuation > sends a failed continuation's error frame before onChatResponse returns (#2381)",
+    "client-tools.test.ts > Think — auto-continuation > treats a pending approved tool as complete — no spurious transcript-repair backstop (#1627)",
+    "client-tools.test.ts > Think — auto-continuation > without autoContinue, no continuation",
+    "client-tools.test.ts > Think — custom body via WebSocket > body fields persist and are available after turn",
+    "client-tools.test.ts > Think — custom body via WebSocket > body is cleared when request has no custom fields",
+    "client-tools.test.ts > Think — messageConcurrency > only applies to submit-message, not regenerate-message",
+    "client-tools.test.ts > Think — messageConcurrency > post-clear submits are not treated as overlapping",
+    "client-tools.test.ts > Think — messageConcurrency > queue: processes all overlapping submits in order",
+    "client-tools.test.ts > Think — onChatResponse via WebSocket > fires onChatResponse after WebSocket chat request",
+    "client-tools.test.ts > Think — regeneration > multiple regenerations create multiple branches",
+    "client-tools.test.ts > Think — regeneration > regenerate-message creates a sibling branch, not a replacement",
+    "client-tools.test.ts > Think — regeneration > regenerating an earlier response leaves later stored answers untouched (#2028)",
+    "client-tools.test.ts > Think — regeneration > regeneration fires onChatResponse",
+    "client-tools.test.ts > Think — regeneration > regeneration preserves conversation history before the branch point",
+    "client-tools.test.ts > Think — tool approval > does NOT update tool in output-available state",
+    "client-tools.test.ts > Think — tool approval > non-existent toolCallId is a no-op",
+    "client-tools.test.ts > Think — tool approval > preserves approval data",
+    "client-tools.test.ts > Think — tool broadcast and persistence > other tabs receive continuation stream chunks",
+    "client-tools.test.ts > Think — tool broadcast and persistence > tool state survives across agent instances",
+    "client-tools.test.ts > Think — tool result application > applies to tool in approval-responded state",
+    "client-tools.test.ts > Think — tool result application > does NOT update tool in output-available state",
+    "client-tools.test.ts > Think — tool result application > does NOT update tool in output-denied state",
+    "client-tools.test.ts > Think — tool result application > sets output-error state with errorText",
+    "client-tools.test.ts > Think — tool result application > updates tool part to output-available",
+    "client-tools.test.ts > Think — tool results with nothing to continue > a result for an older reply does not continue the newer reply",
+    "client-tools.test.ts > Think — tool results with nothing to continue > a second tab's result for an answered call does not continue again",
+    "client-tools.test.ts > resume coordination during pending continuation > correlates idle STREAM_RESUME_NONE after a continuation completes",
+    "client-tools.test.ts > resume coordination during pending continuation > does not send STREAM_RESUME_NONE for an immediate resume request after tool output",
     "connection-state.test.ts > preserves onConnect state for the first Think root client message",
     "connection-state.test.ts > preserves onConnect state for the first Think sub-agent client message",
     "context-upgrade.test.ts > Think context upgrade > does not send a change twice when the turn that recorded it failed",
@@ -453,6 +488,10 @@
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > ignores text, markers, remote urls and small payloads",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees a payload nested inside a tool output",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees an inline file payload at or above the threshold",
+    "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > collapses an optimistic copy of a provider-executed tool with a large input",
+    "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > does not re-repair an already-errored tool call or clobber its errorText",
+    "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > merges server tool outputs into a stale client snapshot when IDs match",
+    "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > preserves a denied tool approval (output-denied) instead of flipping it to errored",
     "messengers.test.ts > telegram messenger provider > classifies Telegram no-op edit errors",
     "messengers.test.ts > telegram messenger provider > requires explicit webhook verification posture",
     "messengers.test.ts > telegram messenger provider > splits long Telegram follow-up text without dropping content",
@@ -626,6 +665,7 @@
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > rewrites the prefix once per compaction",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > sends a changed remind block once, where it was delivered, until a refresh promotes it (#2089)",
     "run-turn-recovery.test.ts > recovery × runTurn > wraps a runTurn turn in a recovery fiber and cleans it up",
+    "streaming-message-id.test.ts > Think — streaming assistant message-id alignment > stamps the persisted assistant id onto a new turn's start chunk",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > allows unverified adapter webhooks only when Think verifies them",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > forwards nativeStreaming to the adapter",
     "think-eviction.test.ts > Think recovery after forced Durable Object eviction > rebuilds the in-memory transcript cache without running a turn",

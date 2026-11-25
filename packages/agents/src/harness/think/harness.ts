@@ -30,7 +30,10 @@ import type {
   TaskStatus,
   TaskStep
 } from "../../tasks/types";
-import { createToolsFromClientSchemas } from "../../chat/client-tools";
+import {
+  createToolsFromClientSchemas,
+  type ClientToolSchema
+} from "../../chat/client-tools";
 import type { StreamChunkData } from "../../chat/message-builder";
 import {
   ChatStreamStalledError,
@@ -67,7 +70,7 @@ import {
   type ThinkSessionEvent,
   type ThinkSessionListener
 } from "./events";
-import { OperationRecords, type OperationInput } from "./records";
+import { ReleasedRecords, type OperationInput } from "./records";
 import {
   executeTool,
   isServerTool,
@@ -128,6 +131,14 @@ export const ROOT_SESSION: ThinkSessionId = "";
 
 /** The Tasks definition every operation is a run of. */
 const OPERATION_DEFINITION = "__cf_think_harness_operation";
+/**
+ * The session value (Sessions config) that records a session the harness
+ * knows of: `{ parent?, createdAt }`. Not a `transcript:` key, so a reset
+ * keeps it.
+ */
+const SESSION_KEY = "think-harness:session";
+/** The session value holding the client tools its client last declared. */
+const CLIENT_TOOLS_KEY = "think-harness:client-tools";
 /** Open operations carried forward from the harness store at a time. */
 const CARRY_BATCH = 50;
 /** The checkpoint key a placed operation's progress is kept under. */
@@ -534,7 +545,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly #ownMessages = new Map<ThinkSessionId, Map<string, number>>();
   /** Clears of the harness's own in progress, per session. */
   readonly #ownClears = new Map<ThinkSessionId, number>();
-  #records: OperationRecords | undefined;
 
   /**
    * @param options - The model, tools and hooks.
@@ -567,16 +577,52 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   /**
-   * Start the transcripts and streams, and carry forward the open
-   * operations a released version kept in the harness store.
+   * Start the transcripts and streams, and carry forward what a released
+   * version kept in the harness store.
    */
   override async onStart(): Promise<void> {
     this.#bindOwned();
     await this.#sessions.onStart();
     await this.#streams.onStart();
-    const store = this.#tables();
-    store.ensureSession(ROOT_SESSION);
-    await this.#carryForward(store);
+    await this.lifecycle.schema.migrate({
+      version: 1,
+      steps: { 1: () => this.#carryReleased() }
+    });
+    await this.#ensureSession(ROOT_SESSION);
+  }
+
+  /**
+   * Move what a released version kept in the harness store into Tasks and
+   * Sessions, then drop the store's tables. Idempotent, as a schema step
+   * must be: a reset part way runs it again.
+   */
+  async #carryReleased(): Promise<void> {
+    const released = ReleasedRecords.open(
+      this.lifecycle.storage,
+      this.lifecycle.routes.source !== undefined
+    );
+    if (!released) return;
+    await this.#carryForward(released);
+    for (let offset = 0; ; offset += CARRY_BATCH) {
+      const sessions = released.sessions(offset, CARRY_BATCH);
+      for (const session of sessions) {
+        // The Sessions handle, not `#handle`: carrying a session forward is
+        // not the host's first use of it, so `configureSession` waits.
+        const handle = this.#sessions.session(session.id);
+        await handle.internal_setConfig(
+          SESSION_KEY,
+          sessionValue(session.parent, session.createdAt)
+        );
+        if (session.clientTools.length > 0) {
+          await handle.internal_setConfig(
+            CLIENT_TOOLS_KEY,
+            JSON.stringify(session.clientTools)
+          );
+        }
+      }
+      if (sessions.length < CARRY_BATCH) break;
+    }
+    released.drop();
   }
 
   /**
@@ -585,7 +631,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * one is interrupted and runs again from its progress. Settled ones are
    * dropped: their answers are in the transcript.
    */
-  async #carryForward(store: OperationRecords): Promise<void> {
+  async #carryForward(store: ReleasedRecords): Promise<void> {
     // In batches, each forgotten once its runs are written, so a long
     // queue is never held in memory whole.
     for (;;) {
@@ -632,7 +678,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       store.dropOperations(left);
     }
-    store.dropSettled();
+  }
+
+  /** Record a session, unless the harness knows it already. */
+  async #ensureSession(id: ThinkSessionId, parent?: ThinkSessionId) {
+    const handle = this.#handle(id);
+    if ((await handle.internal_config(SESSION_KEY)) !== null) return;
+    await handle.internal_setConfig(
+      SESSION_KEY,
+      sessionValue(parent, Date.now())
+    );
   }
 
   // ── The harness interface ────────────────────────────────────────────────
@@ -689,13 +744,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (whenBusy === "steer") throw new SteerNotSupportedError(session);
     await this.lifecycle.ready();
     const operationId = options.operationId ?? crypto.randomUUID();
-    const store = this.#tables();
-    this.lifecycle.storage.transactionSync(() => {
-      store.ensureSession(session);
-      if (options.clientTools !== undefined) {
-        store.setClientTools(session, options.clientTools);
-      }
-    });
+    await this.#ensureSession(session);
+    if (options.clientTools !== undefined) {
+      await this.#handle(session).internal_setConfig(
+        CLIENT_TOOLS_KEY,
+        JSON.stringify(options.clientTools)
+      );
+    }
     const stored: OperationRunInput = {
       input,
       source: options.source ?? "server"
@@ -956,7 +1011,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   async createSession(parent?: ThinkSessionId): Promise<ThinkSession> {
     await this.lifecycle.ready();
     const id = crypto.randomUUID();
-    this.#tables().ensureSession(id, parent);
+    await this.#ensureSession(id, parent);
     return this.session(id);
   }
 
@@ -995,12 +1050,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const busy = new Set(
       this.#open().map((record) => operationOf(record.runId)[0])
     );
-    return this.#tables()
-      .sessions()
-      .map((record) => ({
-        id: record.id,
-        ...(record.parent !== undefined && { parent: record.parent }),
-        busy: busy.has(record.id)
+    return (await this.#sessions.internal_configs(SESSION_KEY))
+      .map(({ sessionId, value }) => ({
+        id: sessionId,
+        // SAFETY: written only by sessionValue.
+        ...(JSON.parse(value) as { parent?: string; createdAt: number })
+      }))
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))
+      .map(({ id, parent }) => ({
+        id,
+        ...(parent !== undefined && { parent }),
+        busy: busy.has(id)
       }));
   }
 
@@ -1995,11 +2055,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   // ── Storage ──────────────────────────────────────────────────────────────
 
-  #tables(): OperationRecords {
-    this.#records ??= new OperationRecords(this.lifecycle.storage);
-    return this.#records;
-  }
-
   /**
    * Every open operation, oldest first, in one session's lane or in all.
    * Open operations are what callers submitted and have not settled, so
@@ -2175,8 +2230,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       ...((await this.#context(session)?.tools()) ?? {}),
       ...((await resolve(this.#options.tools, session)) ?? {})
     };
+    const declared =
+      await this.#handle(session).internal_config(CLIENT_TOOLS_KEY);
+    // A client's declaration that is not a list declares nothing.
+    const parsed: unknown = declared === null ? [] : JSON.parse(declared);
     const client = createToolsFromClientSchemas(
-      this.#tables().clientTools(session)
+      // SAFETY: the list a client declared, as `enqueue` stored it; before
+      // this value existed the harness store read it the same way.
+      Array.isArray(parsed) ? (parsed as ClientToolSchema[]) : []
     );
     // A client cannot replace a server tool: the server's definition, its
     // execute and its approval policy win on a name clash.
@@ -2361,6 +2422,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function streamTag(session: ThinkSessionId, operationId: string): string {
   return `think:${JSON.stringify([session, operationId])}`;
+}
+
+/** A session's `SESSION_KEY` value. */
+function sessionValue(
+  parent: ThinkSessionId | undefined,
+  createdAt: number
+): string {
+  return JSON.stringify({ ...(parent !== undefined && { parent }), createdAt });
 }
 
 /** How a turn ended, from its `ended` mark and its message. */
