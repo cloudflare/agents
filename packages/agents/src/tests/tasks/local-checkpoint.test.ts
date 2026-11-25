@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { forgetSchemaVersion } from "../../lifecycle/durable-object-lifecycle";
 import { describe, expect, it } from "vitest";
 import { seedTaskRun, type TaskHarnessObject } from "../capabilities/tasks";
 
@@ -15,6 +16,10 @@ const checkpointRows = (storage: DurableObjectStorage, runId: string) =>
       value:
         typeof row.value === "string" ? row.value : JSON.stringify(row.value)
     }));
+
+/** Tasks' entry in the one schema versions record. */
+const tasksSchemaVersion = (storage: DurableObjectStorage) =>
+  storage.kv.get<Record<string, number>>("cf_agents:schema_versions")?.tasks;
 
 describe("Tasks local and checkpoint", () => {
   it("hands `local` to the first attempt in the caller's isolate", async () => {
@@ -232,6 +237,8 @@ describe("Tasks schema 2", () => {
             old === "waiting" ? null : 2
           );
         }
+        // A version from before the one schema record, and no entry in it.
+        forgetSchemaVersion(instance.lifecycle, "tasks");
         await state.storage.put("cf_agents:tasks_schema_version", 1);
 
         await instance.lifecycle.start();
@@ -257,9 +264,10 @@ describe("Tasks schema 2", () => {
         expect(
           (await instance.tasks.getByIdempotencyKey("key-done"))?.runId
         ).toBe("done");
-        expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
-          4
-        );
+        expect(tasksSchemaVersion(state.storage)).toBe(4);
+        expect(
+          await state.storage.get("cf_agents:tasks_schema_version")
+        ).toBeUndefined();
         await instance.tasks.cancel("sleeping");
       }
     );
@@ -327,6 +335,8 @@ describe("Tasks schema 4", () => {
             JSON.stringify(value)
           );
         }
+        // A version from before the one schema record, and no entry in it.
+        forgetSchemaVersion(instance.lifecycle, "tasks");
         await state.storage.put("cf_agents:tasks_schema_version", 3);
 
         await instance.tasks.onStart();
@@ -347,9 +357,10 @@ describe("Tasks schema 4", () => {
           note: { attempt: 1 },
           'odd."key': [1, 2]
         });
-        expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
-          4
-        );
+        expect(tasksSchemaVersion(state.storage)).toBe(4);
+        expect(
+          await state.storage.get("cf_agents:tasks_schema_version")
+        ).toBeUndefined();
       }
     );
   });
@@ -380,6 +391,8 @@ describe("Tasks schema 4, started again", () => {
         state.storage.sql.exec(
           "INSERT INTO cf_agents_task_checkpoint VALUES ('again', 'note', '1')"
         );
+        // A version from before the one schema record, and no entry in it.
+        forgetSchemaVersion(instance.lifecycle, "tasks");
         await state.storage.put("cf_agents:tasks_schema_version", 3);
 
         await instance.tasks.onStart();
@@ -390,9 +403,10 @@ describe("Tasks schema 4, started again", () => {
           )
           .toArray();
         expect(JSON.parse(row.checkpoint)).toEqual({ note: 1 });
-        expect(await state.storage.get("cf_agents:tasks_schema_version")).toBe(
-          4
-        );
+        expect(tasksSchemaVersion(state.storage)).toBe(4);
+        expect(
+          await state.storage.get("cf_agents:tasks_schema_version")
+        ).toBeUndefined();
       }
     );
   });

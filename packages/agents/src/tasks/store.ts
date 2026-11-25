@@ -268,7 +268,7 @@ export class TaskStore {
    * run's `checkpoint` column, then drop the table.
    */
   moveCheckpointTable(): void {
-    this.#storage.transactionSync(() => {
+    {
       this.#storage.sql.exec(`
         UPDATE ${this.tables.runs} SET checkpoint = (
           SELECT json_group_object(key, json(value))
@@ -277,11 +277,11 @@ export class TaskStore {
         )
         WHERE run_id IN (SELECT run_id FROM cf_agents_task_checkpoint)`);
       this.#storage.sql.exec(`DROP TABLE cf_agents_task_checkpoint`);
-    });
+    }
   }
 
   /**
-   * Rebuild `cf_agents_task_runs` in the current shape, in one transaction,
+   * Rebuild `cf_agents_task_runs` in the current shape (inside the migration's transaction),
    * keeping every run. From schema 1 the `state` column becomes `status`,
    * with `waiting` folded into `pending` (its `wait_reason` says why),
    * `failed` renamed `error` and `cancelled` renamed `aborted`. From 1 or 2
@@ -307,7 +307,7 @@ export class TaskStore {
     const notified = columns.has("notified") ? "notified" : "NULL";
     const parts = columns.has("input_parts") ? "input_parts" : "NULL";
     const checkpoint = columns.has("checkpoint") ? "checkpoint" : "NULL";
-    this.#storage.transactionSync(() => {
+    {
       const exec = (query: string) => {
         try {
           this.#storage.sql.exec(query);
@@ -337,7 +337,7 @@ export class TaskStore {
       exec(
         `ALTER TABLE ${this.tables.runs}_next RENAME TO ${this.tables.runs}`
       );
-    });
+    }
   }
 
   ensureTables(): void {

@@ -66,7 +66,10 @@ describe("Tasks instances", () => {
         "cf_agents_task_runs_lane",
         "cf_agents_task_steps"
       ]);
-      expect(storage.kv.get("cf_agents:tasks_schema_version")).toBe(4);
+      expect(
+        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
+          ?.tasks
+      ).toBe(4);
     });
   });
 

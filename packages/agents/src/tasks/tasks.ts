@@ -25,6 +25,7 @@ import { isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
 import { SqlName } from "../sql-name";
 import { RUN_LIST_COLUMNS, TaskStore } from "./store";
+import { hasColumn, hasTable } from "../lifecycle/schema";
 import type { TaskTables } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
@@ -503,15 +504,34 @@ export class Tasks<
 
   /** Migrate storage and reconcile run deadlines during Lifecycle startup. */
   async onStart(): Promise<void> {
-    const storage = this.lifecycle.storage;
-    const version = (await storage.get<number>(this.#schemaVersionKey)) ?? 0;
-    if (version < CURRENT_FIBER_SCHEMA_VERSION) {
-      if (version === 1 || version === 2) this.#store.rebuildRuns();
-      if (version === 3) this.#store.addCheckpointColumn();
-      if (version === 2 || version === 3) this.#store.moveCheckpointTable();
-      this.#store.ensureTables();
-      await storage.put(this.#schemaVersionKey, CURRENT_FIBER_SCHEMA_VERSION);
-    }
+    // Each step looks at what is there, so a step a reset repeats, or one
+    // a newer table makes moot, does nothing.
+    const sql = this.lifecycle.storage.sql;
+    const runs = this.#tables.runs.name;
+    const hasRuns = () => hasTable(sql, runs);
+    this.lifecycle.schema.migrateSync({
+      version: CURRENT_FIBER_SCHEMA_VERSION,
+      legacyKey: this.#schemaVersionKey,
+      steps: {
+        // 1 → 2 renamed the statuses, 2 → 3 added lanes: one rebuild.
+        3: () => {
+          if (
+            hasRuns() &&
+            (hasColumn(sql, runs, "state") || !hasColumn(sql, runs, "lane"))
+          ) {
+            this.#store.rebuildRuns();
+          }
+        },
+        // 3 → 4: the checkpoint moves into the run row.
+        4: () => {
+          if (hasRuns()) this.#store.addCheckpointColumn();
+          if (hasTable(sql, this.store.table("task_checkpoint"))) {
+            this.#store.moveCheckpointTable();
+          }
+          this.#store.ensureTables();
+        }
+      }
+    });
     this.#reconcile();
     await this.#syncAllWakes();
     await this.#handOverSoon();
