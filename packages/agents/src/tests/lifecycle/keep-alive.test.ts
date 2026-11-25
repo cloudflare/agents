@@ -135,6 +135,18 @@ describe("KeepAlive capability", () => {
     });
   });
 
+  it("does not count a hold asked for before the capability is installed", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const keepAlive = new KeepAlive();
+      await expect(keepAlive.acquire()).rejects.toThrow();
+      expect(keepAlive.holds).toBe(0);
+      install(keepAlive);
+      const release = await keepAlive.acquire();
+      expect(heartbeat(storage)).not.toBeNull();
+      release();
+    });
+  });
+
   it("does not collide with a host job named heartbeat", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const { capability: keepAlive, lifecycle } = install(new KeepAlive());

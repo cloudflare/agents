@@ -90,14 +90,14 @@ export class KeepAlive extends LifecycleCapability {
    */
   async #open(): Promise<void> {
     this.#holds += 1;
-    if (this.#holds === 1) {
-      this.#armed = this.lifecycle.jobs.push({
-        id: HEARTBEAT_JOB_ID,
-        fn: "heartbeat",
-        time: Date.now() + this.#intervalMs
-      });
-    }
     try {
+      if (this.#holds === 1) {
+        this.#armed = this.lifecycle.jobs.push({
+          id: HEARTBEAT_JOB_ID,
+          fn: "heartbeat",
+          time: Date.now() + this.#intervalMs
+        });
+      }
       await this.#armed;
     } catch (error) {
       this.#holds -= 1;
