@@ -145,3 +145,40 @@ export function importLegacyChatStreams(
     else sql`DROP TABLE cf_ai_chat_stream_metadata`;
   }
 }
+
+/** @internal The Streams counter of retired chat segments and credits. */
+export const CHAT_RETIRED_COUNTER = "chat_retired";
+/** @internal The Streams counter holding the seeded pre-derivation total. */
+export const CHAT_LEGACY_COUNTER = "chat_legacy";
+
+/**
+ * One-time move of the recovery progress marker's durable part from the
+ * host-made `cf_agents_chat_progress` table into the Streams capability's
+ * counters, then the table goes (emptied in a facet, as above). Probed with
+ * a `LIMIT 0` read, so a start with no table reads nothing.
+ */
+export function importLegacyChatProgress(
+  sql: SqlTaggedTemplate,
+  ops: StreamsSyncInternal,
+  isFacet: () => boolean
+): void {
+  if (!exists(() => sql`SELECT 1 FROM cf_agents_chat_progress LIMIT 0`)) {
+    return;
+  }
+  const [row] = sql<{ retired: number; legacy: number }>`
+    SELECT retired, legacy FROM cf_agents_chat_progress WHERE key = 'chat'
+  `;
+  if (!row) {
+    if (!isFacet()) sql`DROP TABLE cf_agents_chat_progress`;
+    return;
+  }
+  if (row.retired > 0) ops.addToCounter(CHAT_RETIRED_COUNTER, row.retired);
+  if (row.legacy > 0) {
+    ops.setCounter(
+      CHAT_LEGACY_COUNTER,
+      Math.max(row.legacy, ops.counter(CHAT_LEGACY_COUNTER))
+    );
+  }
+  if (isFacet()) sql`DELETE FROM cf_agents_chat_progress`;
+  else sql`DROP TABLE cf_agents_chat_progress`;
+}

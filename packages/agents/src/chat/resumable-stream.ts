@@ -27,7 +27,12 @@ import type { Connection } from "agents";
 import { Streams, type StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
-import { importLegacyChatStreams } from "./legacy-chat-streams";
+import {
+  CHAT_LEGACY_COUNTER,
+  CHAT_RETIRED_COUNTER,
+  importLegacyChatProgress,
+  importLegacyChatStreams
+} from "./legacy-chat-streams";
 import {
   REPLAY_CHUNK_BYTES,
   REPLAY_ITEM_BYTES,
@@ -257,8 +262,7 @@ export class ResumableStream {
   ) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
-    this._sql = sql;
-    this._ensureProgressTable();
+    importLegacyChatProgress(sql, this.ops, isFacet);
     // Every path that removes a chat row's log — this adapter's cutover,
     // reclaim and clear, and the capability's public `delete()` — folds the
     // row's segments into the retired total first. Registered before the
@@ -292,40 +296,24 @@ export class ResumableStream {
   // never moves when rows go away. Nothing is written per chunk; one row is
   // written per stream retired.
 
-  private readonly _sql: SqlTaggedTemplate;
-
   /**
-   * One row: `retired` accumulates the segments of deleted streams and
-   * explicit credits; `legacy` holds the pre-derivation KV counter, folded
-   * in once. They are separate columns so a seed can never swallow
-   * segments retired before it landed, and a repeated seed is idempotent.
+   * Two counters kept with the Streams capability: `retired` accumulates
+   * the segments of deleted streams and explicit credits; `legacy` holds
+   * the pre-derivation KV counter, folded in once. They are separate so a
+   * seed can never swallow segments retired before it landed, and a
+   * repeated seed is idempotent.
    */
-  private _ensureProgressTable(): void {
-    this._sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_chat_progress (
-        key TEXT PRIMARY KEY,
-        retired INTEGER NOT NULL,
-        legacy INTEGER NOT NULL DEFAULT 0
-      ) WITHOUT ROWID
-    `;
-  }
-
   private _retiredSegments(): number {
-    const rows = this._sql<{ retired: number; legacy: number }>`
-      SELECT retired, legacy FROM cf_agents_chat_progress WHERE key = 'chat'
-    `;
-    const row = rows[0];
-    return row ? row.retired + row.legacy : 0;
+    return (
+      this.ops.counter(CHAT_RETIRED_COUNTER) +
+      this.ops.counter(CHAT_LEGACY_COUNTER)
+    );
   }
 
   /** Add `segments` to the retired total. One row write; a no-op for zero. */
   private _retire(segments: number): void {
     if (segments <= 0) return;
-    this._sql`
-      INSERT INTO cf_agents_chat_progress (key, retired, legacy)
-      VALUES ('chat', ${segments}, 0)
-      ON CONFLICT(key) DO UPDATE SET retired = retired + excluded.retired
-    `;
+    this.ops.addToCounter(CHAT_RETIRED_COUNTER, segments);
   }
 
   /**
@@ -392,12 +380,12 @@ export class ResumableStream {
    */
   seedProgress(legacyTotal: number): void {
     if (legacyTotal <= 0) return;
-    this._sql`
-      INSERT INTO cf_agents_chat_progress (key, retired, legacy)
-      VALUES ('chat', 0, ${legacyTotal})
-      ON CONFLICT(key) DO UPDATE
-        SET legacy = MAX(legacy, excluded.legacy - retired)
-    `;
+    const legacy = this.ops.counter(CHAT_LEGACY_COUNTER);
+    const raised = Math.max(
+      legacy,
+      legacyTotal - this.ops.counter(CHAT_RETIRED_COUNTER)
+    );
+    if (raised !== legacy) this.ops.setCounter(CHAT_LEGACY_COUNTER, raised);
   }
 
   /**
