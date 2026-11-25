@@ -85,25 +85,23 @@ export class State<T = unknown> extends LifecycleCapability {
   // ── Lifecycle capability hooks ─────────────────────────────────────────────
 
   /** Initialize state storage during Lifecycle startup. */
-  async onStart(): Promise<void> {
-    const version =
-      (await this.lifecycle.storage.get<number>(STATE_SCHEMA_VERSION_KEY)) ?? 0;
-    if (version >= CURRENT_STATE_SCHEMA_VERSION) {
-      this.#tableEnsured = true;
-      return;
-    }
-
-    // v1: own the table and clear the legacy wasChanged row left behind by
-    // pre-optimization SDKs (state itself lives in STATE_ROW_ID).
-    this.#ensureTable();
-    this.lifecycle.storage.sql.exec(
-      "DELETE FROM cf_agents_state WHERE id = ?",
-      LEGACY_WAS_CHANGED_ROW_ID
-    );
-    await this.lifecycle.storage.put(
-      STATE_SCHEMA_VERSION_KEY,
-      CURRENT_STATE_SCHEMA_VERSION
-    );
+  onStart(): void {
+    this.lifecycle.schema.migrateSync({
+      version: CURRENT_STATE_SCHEMA_VERSION,
+      legacyKey: STATE_SCHEMA_VERSION_KEY,
+      steps: {
+        // v1: own the table and clear the legacy wasChanged row left behind
+        // by pre-optimization SDKs (state itself lives in STATE_ROW_ID).
+        1: () => {
+          this.#ensureTable();
+          this.lifecycle.storage.sql.exec(
+            "DELETE FROM cf_agents_state WHERE id = ?",
+            LEGACY_WAS_CHANGED_ROW_ID
+          );
+        }
+      }
+    });
+    this.#tableEnsured = true;
   }
 
   #ensureTable(): void {

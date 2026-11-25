@@ -8,6 +8,7 @@
  * which its root wakes.
  */
 
+import { hasTable } from "../lifecycle/schema";
 import {
   LifecycleCapability,
   type LifecycleRouteContext
@@ -146,12 +147,11 @@ export class Queue<
 
   /** Migrate legacy `cf_agents_queues` rows into the Lifecycle job queue. */
   async onStart(): Promise<void> {
-    const storage = this.lifecycle.storage;
-    const version = (await storage.get<number>(QUEUE_SCHEMA_VERSION_KEY)) ?? 0;
-    if (version >= CURRENT_QUEUE_SCHEMA_VERSION) return;
-
-    await this.#migrateLegacyQueueTable(storage);
-    await storage.put(QUEUE_SCHEMA_VERSION_KEY, CURRENT_QUEUE_SCHEMA_VERSION);
+    await this.lifecycle.schema.migrate({
+      version: CURRENT_QUEUE_SCHEMA_VERSION,
+      legacyKey: QUEUE_SCHEMA_VERSION_KEY,
+      steps: { 1: () => this.#migrateLegacyQueueTable(this.lifecycle.storage) }
+    });
   }
 
   /**
@@ -164,12 +164,7 @@ export class Queue<
    * version bump that gates it), once every deployed object has migrated.
    */
   async #migrateLegacyQueueTable(storage: DurableObjectStorage): Promise<void> {
-    const tables = storage.sql
-      .exec(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='cf_agents_queues'"
-      )
-      .toArray();
-    if (tables.length === 0) return;
+    if (!hasTable(storage.sql, "cf_agents_queues")) return;
 
     const rows = storage.sql
       .exec("SELECT * FROM cf_agents_queues ORDER BY created_at ASC, rowid ASC")

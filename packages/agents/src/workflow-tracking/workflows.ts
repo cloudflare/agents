@@ -634,10 +634,12 @@ export class Workflows extends LifecycleCapability {
   #ensureTable(): void {
     if (this.#tableReady) return;
     const storage = this.lifecycle.storage;
-    if (
-      (storage.kv.get<number>(SCHEMA_VERSION_KEY) ?? 0) < CURRENT_SCHEMA_VERSION
-    ) {
-      storage.sql.exec(`
+    this.lifecycle.schema.migrateSync({
+      version: CURRENT_SCHEMA_VERSION,
+      legacyKey: SCHEMA_VERSION_KEY,
+      steps: {
+        1: () => {
+          storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS cf_agents_workflows (
           id TEXT PRIMARY KEY NOT NULL,
           workflow_id TEXT NOT NULL UNIQUE,
@@ -655,14 +657,15 @@ export class Workflows extends LifecycleCapability {
           completed_at INTEGER
         )
       `);
-      storage.sql.exec(
-        "CREATE INDEX IF NOT EXISTS idx_workflows_status ON cf_agents_workflows(status)"
-      );
-      storage.sql.exec(
-        "CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)"
-      );
-      storage.kv.put(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
-    }
+          storage.sql.exec(
+            "CREATE INDEX IF NOT EXISTS idx_workflows_status ON cf_agents_workflows(status)"
+          );
+          storage.sql.exec(
+            "CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)"
+          );
+        }
+      }
+    });
     this.#tableReady = true;
   }
 

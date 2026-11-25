@@ -324,6 +324,12 @@ describe("Queue capability", () => {
         expect((await instance.queue.list()).map((item) => item.id)).toEqual([
           kept.id
         ]);
+        // The rolled-back write of the job queue's version is made again.
+        expect(
+          state.storage.kv.get<Record<string, number>>(
+            "cf_agents:schema_versions"
+          )?.[""]
+        ).toBe(1);
         instance.release();
       }
     );

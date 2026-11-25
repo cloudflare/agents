@@ -61,7 +61,10 @@ function snapshot(storage: DurableObjectStorage): Snapshot {
     virtual,
     indexes: names("index"),
     // Keys and rows with their values, so an overwrite in place shows.
+    // The schema versions record is one for every capability (the
+    // Lifecycle's), so it is not any instance's key.
     keys: [...storage.kv.list()]
+      .filter(([key]) => key !== "cf_agents:schema_versions")
       .map(([key, value]) => `${key} ${JSON.stringify(value)}`)
       .sort(),
     jobs,

@@ -10,6 +10,7 @@ import {
 } from "./capability-runner";
 import { backoffDelay } from "../retries";
 import { abortWithoutAlarmRetry } from "./abort";
+import { LIFECYCLE_SCHEMA_ID, SchemaVersions } from "./schema";
 import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
@@ -270,6 +271,16 @@ export function armFacetWake(
  * @internal At the root: drop the wake jobs of a facet path and every path
  * below it, when that sub-tree is deleted.
  */
+const schemaForgetters = new WeakMap<object, (id: string) => void>();
+
+/**
+ * @internal Drop capability `id`'s schema version in `lifecycle`, so its
+ * migration steps run again (tests that re-run a migration).
+ */
+export function forgetSchemaVersion(lifecycle: object, id: string): void {
+  schemaForgetters.get(lifecycle)?.(id);
+}
+
 /** What a Lifecycle holds, by capability id. */
 export type LifecycleInstances = {
   /** Installed capability ids, in install order. */
@@ -456,9 +467,18 @@ export class Lifecycle<
     this.#host = host as unknown as LifecycleHost<Env, Props>;
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
-    this.#jobQueue = new JobQueue(this.#ctx.storage);
+    this.#schemaVersions = new SchemaVersions(this.#ctx.storage);
+    // The queue's columns are recorded under the Lifecycle's own entry.
+    this.#jobQueue = new JobQueue(
+      this.#ctx.storage,
+      this.#schemaVersions.forCapability(
+        LIFECYCLE_SCHEMA_ID,
+        () => this.#status === "starting"
+      )
+    );
     facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
     instanceListers.set(this, (stored) => this.#instances(stored));
+    schemaForgetters.set(this, (id) => this.#schemaVersions.forget(id));
     facetWakeArmers.set(this, (address, time) =>
       this.#holdFacetWake(address, time, 0)
     );
@@ -729,6 +749,11 @@ export class Lifecycle<
             payload: named ? withInstance(payload, instanceName) : payload
           })
       }),
+      // Written once at the end of startup; at once after a later migrate.
+      schema: this.#schemaVersions.forCapability(
+        capabilityId,
+        () => this.#status === "starting"
+      ),
       routes: Object.freeze({
         get source() {
           return lifecycleRouteTransports.get(lifecycle)?.source;
@@ -1273,6 +1298,7 @@ export class Lifecycle<
           await runInLifecycleHostContext({ host: this.#host }, () =>
             this.#host.onStart?.(this.#props)
           );
+          this.#schemaVersions.flush();
           this.#status = "started";
         } catch (cause) {
           this.#status = "zero";
@@ -1586,6 +1612,9 @@ export class Lifecycle<
       payload: { capability: owner }
     });
   }
+
+  /** Every capability's schema version, in one record. */
+  readonly #schemaVersions: SchemaVersions;
 
   /** Alarm invocations running on this instance. */
   #alarmsRunning = 0;

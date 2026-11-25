@@ -9,6 +9,7 @@
  * state. Payloads are opaque to the queue.
  */
 
+import { hasColumn, hasTable, type LifecycleSchema } from "./schema";
 import { nanoid } from "nanoid";
 import type { RetryOptions } from "../retries";
 import { SqlError } from "../sql-error";
@@ -213,9 +214,17 @@ export class JobQueue {
    */
   readonly #inFlight = new Map<string, RevisionEntry>();
 
-  constructor(storage: DurableObjectStorage) {
+  /**
+   * `schema` is the Lifecycle's handle on the versions record, under which
+   * the queue's own columns are recorded; without one (a bare queue in a
+   * test), the columns are checked at every first use.
+   */
+  constructor(storage: DurableObjectStorage, schema?: LifecycleSchema) {
     this.#storage = storage;
+    this.#schema = schema;
   }
+
+  readonly #schema: LifecycleSchema | undefined;
 
   #sql<T = JobStorageRow>(
     query: string,
@@ -260,22 +269,24 @@ export class JobQueue {
         held_since INTEGER,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       ) WITHOUT ROWID`);
-    // Tables created before attempts were counted get the column; their
-    // pending jobs start at zero.
-    const columns = [
-      ...this.#storage.sql.exec<{ name: string }>(
-        "SELECT name FROM pragma_table_info('cf_agents_jobs')"
-      )
-    ];
-    if (!columns.some((column) => column.name === "attempts")) {
-      this.#storage.sql.exec(
-        "ALTER TABLE cf_agents_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
-      );
-    }
-    if (!columns.some((column) => column.name === "held_since")) {
-      this.#storage.sql.exec(
-        "ALTER TABLE cf_agents_jobs ADD COLUMN held_since INTEGER"
-      );
+    // Tables created before attempts were counted get the columns; their
+    // pending jobs start at zero. Recorded once, so a start with the
+    // columns in place reads nothing more.
+    const addColumns = () => {
+      const sql = this.#storage.sql;
+      if (!hasColumn(sql, "cf_agents_jobs", "attempts")) {
+        sql.exec(
+          "ALTER TABLE cf_agents_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+        );
+      }
+      if (!hasColumn(sql, "cf_agents_jobs", "held_since")) {
+        sql.exec("ALTER TABLE cf_agents_jobs ADD COLUMN held_since INTEGER");
+      }
+    };
+    if (this.#schema) {
+      this.#schema.migrateSync({ version: 1, steps: { 1: addColumns } });
+    } else {
+      addColumns();
     }
     this.#tableEnsured = true;
   }
@@ -285,13 +296,8 @@ export class JobQueue {
    * an object that never pushed a job gets no schema write from asking.
    */
   hasJobs(): boolean {
-    if (!this.#tableEnsured) {
-      const table = [
-        ...this.#storage.sql.exec(
-          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_jobs'"
-        )
-      ];
-      if (table.length === 0) return false;
+    if (!this.#tableEnsured && !hasTable(this.#storage.sql, "cf_agents_jobs")) {
+      return false;
     }
     return this.#sql("SELECT 1 FROM cf_agents_jobs LIMIT 1").length > 0;
   }

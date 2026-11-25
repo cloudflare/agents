@@ -4,6 +4,7 @@ import type {
 } from "./capability-runner";
 import type { Connection } from "./types";
 import type { LifecycleJobs } from "./job-queue";
+import type { LifecycleSchema } from "./schema";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -124,6 +125,12 @@ export type LifecycleServices = {
   ) => Promise<unknown>;
   readonly events: LifecycleEvents;
   readonly routes: LifecycleRoutes;
+  /**
+   * @internal This capability's schema version, kept with every other
+   * capability's in one record: declare the steps and call `migrate` or
+   * `migrateSync` from `onStart`.
+   */
+  readonly schema: LifecycleSchema;
 };
 
 const installedServices = new WeakMap<object, LifecycleServices>();
