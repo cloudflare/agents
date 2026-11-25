@@ -16,4 +16,4 @@ Agent tools and sub-agents.
 - Aged-media eviction runs for every sub-agent (#2974).
 - A sub-agent's broadcast followed by a direct send to a connection in the same call reaches that connection in that order (#3181).
 - A sub-agent upgraded from a version that kept chat streams in the old `cf_ai_chat_stream_*` tables now empties those tables instead of dropping them, so its first start cannot reset the storage of its agent tree (#3192).
-- A sub-agent now handles the frames a client sends over its socket in the order they were sent, also when they arrive right after the socket opens.
+- A sub-agent now handles the frames a client sends over its socket in the order they were sent, also when they arrive right after the socket opens (#3215).
