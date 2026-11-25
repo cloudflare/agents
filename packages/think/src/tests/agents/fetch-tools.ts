@@ -118,9 +118,19 @@ export class ThinkFetchToolsTestAgent extends Think {
    * a turn: the tool result the next model request carries, as JSON.
    */
   async fetchThroughModel(body: string): Promise<string> {
+    // A service binding that serves only the one path, and says which it
+    // was asked for: a wrong path gets a 404.
     const binding = {
-      fetch: async () =>
-        new Response(body, { headers: { "content-type": "text/plain" } })
+      fetch: async (input: string | Request) => {
+        const { pathname } = new URL(
+          typeof input === "string" ? input : input.url
+        );
+        return pathname === "/v1/docs/body"
+          ? new Response(`${pathname}: ${body}`, {
+              headers: { "content-type": "text/plain" }
+            })
+          : new Response("not found", { status: 404 });
+      }
     } as unknown as Fetcher;
     this.fetchTools = {
       bindings: { docs: { binding, allowlist: ["/v1/docs/**"] } }

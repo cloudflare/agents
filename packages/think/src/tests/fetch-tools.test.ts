@@ -592,7 +592,7 @@ describe("Think — fetchTools integration", () => {
     };
     const results = await a.fetchThroughModel("the docs say hello");
     expect(results).toContain("fetch_docs");
-    expect(results).toContain("the docs say hello");
+    expect(results).toContain("/v1/docs/body: the docs say hello");
   });
 
   it("does not register fetch tools by default", async () => {
