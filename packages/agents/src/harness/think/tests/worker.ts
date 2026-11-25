@@ -1153,20 +1153,27 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** Think's chat(): the chunk types the callback saw, and how it ended. */
-  async chatCallback(text: string): Promise<{ types: string[]; end: string }> {
+  async chatCallback(
+    text: string,
+    options: ThinkSubmitOptions = {}
+  ): Promise<{ types: string[]; end: string }> {
     const types: string[] = [];
     let end = "";
-    await this.harness.session().chat(text, {
-      onEvent: (json) => {
-        types.push((JSON.parse(json) as { type: string }).type);
+    await this.harness.session().chat(
+      text,
+      {
+        onEvent: (json) => {
+          types.push((JSON.parse(json) as { type: string }).type);
+        },
+        onDone: () => {
+          end = "done";
+        },
+        onError: (error) => {
+          end = `error: ${error}`;
+        }
       },
-      onDone: () => {
-        end = "done";
-      },
-      onError: (error) => {
-        end = `error: ${error}`;
-      }
-    });
+      options
+    );
     return { types, end };
   }
 
@@ -1179,7 +1186,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   /** An operation's key, metadata and times, as plain JSON for RPC. */
   async inspectRecord(operationId: string): Promise<string> {
-    const inspection = await this.harness.session().inspect(operationId);
+    const inspection = await this.harness.inspection(
+      this.harness.session().id,
+      operationId
+    );
     return JSON.stringify(inspection ?? null);
   }
 

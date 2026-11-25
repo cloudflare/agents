@@ -274,6 +274,16 @@ function runIdOf(session: ThinkSessionId, operationId: string): string {
 }
 
 /** The session and operation id a run id names. */
+/** A session's idempotency key as Tasks stores it: `[session, key]`. */
+function keyOf(session: ThinkSessionId, key: string): string {
+  return JSON.stringify([session, key]);
+}
+/** The caller's key from a stored one. */
+function callerKeyOf(stored: string): string {
+  // SAFETY: written only by keyOf, as a [session, key] pair.
+  return (JSON.parse(stored) as [string, string])[1];
+}
+
 function operationOf(runId: string): [ThinkSessionId, string] {
   // SAFETY: every run of the operation definition is named by runIdOf.
   return JSON.parse(runId) as [ThinkSessionId, string];
@@ -771,7 +781,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const whenBusy: unknown = options.whenBusy;
     if (whenBusy === "steer") throw new SteerNotSupportedError(session);
     await this.lifecycle.ready();
+    // A key names an operation in its own session only.
+    const key =
+      options.idempotencyKey === undefined
+        ? undefined
+        : keyOf(session, options.idempotencyKey);
+    const byKey =
+      key === undefined ? undefined : this.#tasks.peekByIdempotencyKey(key);
     const operationId = options.operationId ?? crypto.randomUUID();
+    const runId = runIdOf(session, operationId);
+    const byId = this.#tasks.peek(runId);
+    if (
+      (byKey && byKey.runId !== runId) ||
+      (key !== undefined &&
+        byId?.idempotencyKey !== undefined &&
+        byId.idempotencyKey !== key)
+    ) {
+      throw new Error(
+        "operationId and idempotencyKey refer to different operations"
+      );
+    }
     await this.#ensureSession(session);
     if (options.clientTools !== undefined) {
       await this.#handle(session).internal_setConfig(
@@ -789,20 +818,33 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       // answers as clients send them.
       stored as unknown as TaskJson,
       {
-        runId: runIdOf(session, operationId),
+        runId,
         lane: laneOf(session),
-        ...(options.idempotencyKey !== undefined && {
-          idempotencyKey: options.idempotencyKey
-        }),
+        // An existing run is found by its id; a key it was not given
+        // would not match its row.
+        ...(key !== undefined && !byId && { idempotencyKey: key }),
         ...(options.metadata !== undefined && { metadata: options.metadata })
       }
     );
-    // A repeated idempotency key names the operation the first one started.
+    // Two first submissions of one key can race past the checks above;
+    // Tasks dedupes them, and its receipt names the operation that won.
     return {
       operationId: operationOf(receipt.runId)[1],
       session,
       accepted: receipt.accepted
     };
+  }
+
+  /** @internal The operation an idempotency key started in a session. */
+  async keyedOperation(
+    session: ThinkSessionId,
+    idempotencyKey: string
+  ): Promise<string | undefined> {
+    await this.lifecycle.ready();
+    const record = this.#tasks.peekByIdempotencyKey(
+      keyOf(session, idempotencyKey)
+    );
+    return record && operationOf(record.runId)[1];
   }
 
   /** @internal Stop one operation, or everything open in a session. */
@@ -854,24 +896,46 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   async inspect(
     session: ThinkSessionId,
     operationId: string
+  ): Promise<ThinkOperationStatus | undefined> {
+    await this.lifecycle.ready();
+    const record = this.#tasks.peek(runIdOf(session, operationId));
+    return record && this.#status(record);
+  }
+
+  /**
+   * @internal An operation's status with its run's times, key and
+   * metadata, for the harness-backed Think's submissions.
+   */
+  async inspection(
+    session: ThinkSessionId,
+    operationId: string
   ): Promise<ThinkOperationInspection | undefined> {
     await this.lifecycle.ready();
     const record = this.#tasks.peek(runIdOf(session, operationId));
-    if (!record) return undefined;
-    const status: ThinkOperationStatus = TERMINAL.includes(record.status)
+    return record && this.#inspection(record);
+  }
+
+  /** A run's status. */
+  #status(record: TaskRecord): ThinkOperationStatus {
+    const [session, operationId] = operationOf(record.runId);
+    return TERMINAL.includes(record.status)
       ? this.#result(record)
       : {
           operationId,
           session,
           status: isQueued(record) ? "queued" : "running"
         };
+  }
+
+  /** A run's status, with its times, key and metadata. */
+  #inspection(record: TaskRecord): ThinkOperationInspection {
     return {
-      ...status,
+      ...this.#status(record),
       createdAt: record.createdAt,
       ...(record.startedAt !== undefined && { startedAt: record.startedAt }),
       ...(record.settledAt !== undefined && { settledAt: record.settledAt }),
       ...(record.idempotencyKey !== undefined && {
-        idempotencyKey: record.idempotencyKey
+        idempotencyKey: callerKeyOf(record.idempotencyKey)
       }),
       ...(record.metadata !== undefined && { metadata: record.metadata })
     };
@@ -2701,11 +2765,17 @@ export class ThinkSession implements HarnessSession {
   }
 
   /** Durably submit input. Resolves before the model runs. */
-  submit(
+  async submit(
     input: ThinkInput,
     options: ThinkSubmitOptions = {}
   ): Promise<ThinkReceipt> {
-    const operationId = options.operationId ?? crypto.randomUUID();
+    // A repeated key with no id names the operation the key started.
+    const operationId =
+      options.operationId ??
+      (options.idempotencyKey !== undefined
+        ? await this.#harness.keyedOperation(this.id, options.idempotencyKey)
+        : undefined) ??
+      crypto.randomUUID();
     return this.#harness.enqueue(
       this.id,
       operationInput(input, operationId, options.autoContinue ?? true),
@@ -2837,7 +2907,14 @@ export class ThinkSession implements HarnessSession {
     callback: ThinkStreamCallback,
     options: ThinkSubmitOptions = {}
   ): Promise<ThinkOperationResult> {
-    const operationId = options.operationId ?? crypto.randomUUID();
+    // The operation the chunks belong to: the receipt's, once known, which
+    // a repeated idempotency key makes an earlier one.
+    let operationId =
+      options.operationId ??
+      (options.idempotencyKey !== undefined
+        ? await this.#harness.keyedOperation(this.id, options.idempotencyKey)
+        : undefined) ??
+      crypto.randomUUID();
     let delivered = Promise.resolve();
     const deliver = (fn: () => void | Promise<void>) => {
       delivered = delivered.then(fn).catch((error: unknown) => {
@@ -2851,6 +2928,7 @@ export class ThinkSession implements HarnessSession {
     });
     try {
       const receipt = await this.submit(input, { ...options, operationId });
+      operationId = receipt.operationId;
       deliver(() => callback.onStart?.({ operationId: receipt.operationId }));
       const result = await this.wait(receipt.operationId);
       unsubscribe();
@@ -2864,7 +2942,7 @@ export class ThinkSession implements HarnessSession {
   }
 
   /** One operation's status, or undefined when the id is unknown. */
-  inspect(operationId: string): Promise<ThinkOperationInspection | undefined> {
+  inspect(operationId: string): Promise<ThinkOperationStatus | undefined> {
     return this.#harness.inspect(this.id, operationId);
   }
 

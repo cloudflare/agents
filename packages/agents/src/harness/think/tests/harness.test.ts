@@ -138,12 +138,20 @@ describe("ThinkHarness turns", () => {
       idempotencyKey: "key-1",
       metadata: { source: "test" }
     });
-    const again = await stub.submit("hello", {
-      operationId: "op-2",
-      idempotencyKey: "key-1"
-    });
+    const again = await stub.submit("hello", { idempotencyKey: "key-1" });
     // The repeated key names the operation the first submission started.
     expect(again).toMatchObject({ operationId: "op-1", accepted: false });
+    // A key paired with another operation's id is refused, as Think refuses.
+    await expect(
+      stub.submit("hello", { operationId: "op-2", idempotencyKey: "key-1" })
+    ).rejects.toThrow(/refer to different operations/);
+    // The same key in another session is that session's own.
+    const other = await stub.submit("hello", {
+      idempotencyKey: "key-1",
+      session: "other"
+    });
+    expect(other.accepted).toBe(true);
+    expect(other.operationId).not.toBe("op-1");
     await stub.wait(first.operationId);
     const inspection = JSON.parse(await stub.inspectRecord("op-1")) as {
       status: string;
@@ -161,6 +169,18 @@ describe("ThinkHarness turns", () => {
     expect(inspection.startedAt).toBeGreaterThanOrEqual(inspection.createdAt);
     expect(inspection.settledAt).toBeGreaterThanOrEqual(inspection.startedAt);
     expect(await stub.inspect("op-2")).toBeUndefined();
+  });
+
+  it("streams the joined operation's chunks when a chat repeats a running key", async () => {
+    const stub = fresh();
+    await stub.submit("gate", { operationId: "gated", idempotencyKey: "k" });
+    await stub.gateStarted(1);
+    const chat = stub.chatCallback("gate", { idempotencyKey: "k" });
+    await stub.release();
+    const { types, end } = await chat;
+    expect(end).toBe("done");
+    // The chunks of the operation the key started, which the chat joined.
+    expect(types).toContain("text-delta");
   });
 
   it("refuses to steer instead of queueing the input", async () => {

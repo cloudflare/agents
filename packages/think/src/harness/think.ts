@@ -700,9 +700,27 @@ export class Think<
       throw new Error("submitMessages requires at least one message");
     }
     const metadata = admittedSubmissionMetadata(options?.metadata);
+    const { submissionId, idempotencyKey } = options ?? {};
+    if (submissionId !== undefined && idempotencyKey !== undefined) {
+      // Think's message for a pair that names two submissions; the harness
+      // refuses the pair too.
+      const session = this.harness.session().id;
+      const keyed = await this.harness.keyedOperation(session, idempotencyKey);
+      const byId = await this.harness.inspection(session, submissionId);
+      if (
+        (keyed !== undefined && keyed !== submissionId) ||
+        (byId?.idempotencyKey !== undefined &&
+          byId.idempotencyKey !== idempotencyKey)
+      ) {
+        throw new Error(
+          "submissionId and idempotencyKey refer to different submissions"
+        );
+      }
+    }
     const receipt = await this.harness.session().submit(messages, {
-      operationId:
-        options?.submissionId ?? options?.idempotencyKey ?? crypto.randomUUID(),
+      ...(options?.submissionId !== undefined && {
+        operationId: options.submissionId
+      }),
       ...(options?.idempotencyKey !== undefined && {
         idempotencyKey: options.idempotencyKey
       }),
@@ -722,7 +740,10 @@ export class Think<
   async inspectSubmission(
     submissionId: string
   ): Promise<ThinkSubmissionInspection | null> {
-    const status = await this.harness.session().inspect(submissionId);
+    const status = await this.harness.inspection(
+      this.harness.session().id,
+      submissionId
+    );
     if (!status) return null;
     return {
       submissionId,
