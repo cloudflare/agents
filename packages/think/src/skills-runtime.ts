@@ -24,6 +24,14 @@ import { createSkillTools } from "agents/skills/tools/ai-sdk";
  */
 export const SKILLS_CONTEXT_LABEL = "think_skills";
 
+/**
+ * Description of the skill catalog's context block.
+ *
+ * @internal
+ */
+export const SKILLS_CONTEXT_DESCRIPTION =
+  "Think skills: available skill catalog";
+
 /** @internal */
 export class ThinkSkills {
   #sources: readonly SkillSource[] = [];
@@ -38,13 +46,8 @@ export class ThinkSkills {
     getSources: () => SkillSource[] | Promise<SkillSource[]>,
     context: Context
   ): Promise<void> {
+    if (!(await this.start(getSources))) return;
     try {
-      const sources = await getSources();
-      if (sources.length === 0) return;
-
-      this.#sources = sources;
-      await this.#load();
-
       // `whenChanged: "remind"` keeps the frozen system prompt (and the
       // provider's prefix cache) stable when skills change mid-conversation.
       // The new catalog goes out as a reminder after the cached prefix, and
@@ -52,17 +55,37 @@ export class ThinkSkills {
       // clearing history).
       await context.addBlock({
         label: SKILLS_CONTEXT_LABEL,
-        description: "Think skills: available skill catalog",
+        description: SKILLS_CONTEXT_DESCRIPTION,
         whenChanged: "remind",
-        provider: {
-          get: async () => this.#catalog?.prompt() ?? "No skills are available."
-        }
+        provider: { get: async () => this.prompt() }
       });
     } catch (error) {
-      console.warn(
-        `[think] Failed to initialize skills; continuing without them: ${error instanceof Error ? error.message : String(error)}`
-      );
+      warnInitializeFailed(error);
     }
+  }
+
+  /**
+   * Load the catalog. False when there are no sources or loading failed
+   * (logged): skills stay off.
+   */
+  async start(
+    getSources: () => SkillSource[] | Promise<SkillSource[]>
+  ): Promise<boolean> {
+    try {
+      const sources = await getSources();
+      if (sources.length === 0) return false;
+      this.#sources = sources;
+      await this.#load();
+      return true;
+    } catch (error) {
+      warnInitializeFailed(error);
+      return false;
+    }
+  }
+
+  /** The catalog's prompt block text. */
+  prompt(): string {
+    return this.#catalog?.prompt() ?? "No skills are available.";
   }
 
   /**
@@ -111,4 +134,10 @@ export class ThinkSkills {
     this.#warnings.add(warning);
     console.warn(`[think] ${warning}`);
   }
+}
+
+function warnInitializeFailed(error: unknown): void {
+  console.warn(
+    `[think] Failed to initialize skills; continuing without them: ${error instanceof Error ? error.message : String(error)}`
+  );
 }

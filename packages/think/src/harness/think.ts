@@ -42,6 +42,8 @@ import {
 import { Workspace } from "@cloudflare/computer";
 import { workspaceExtension } from "./extensions/workspace";
 import { fetchExtension } from "./extensions/fetch";
+import { skillsExtension } from "./extensions/skills";
+import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
@@ -197,8 +199,16 @@ export class Think<
               ).call(this, "tool:fetch", { ...event })
           )
         },
-        // MCP tools come after the agent's own and the context's, as in
-        // Think.
+        // Skills, then MCP tools, come after the agent's own and the
+        // context's, as in Think.
+        {
+          name: "skills",
+          after: true,
+          extension: skillsExtension(
+            () => this.getSkills(),
+            () => this.getSkillScriptRunner()
+          )
+        },
         {
           name: "mcp",
           after: true,
@@ -385,6 +395,16 @@ export class Think<
     return session;
   }
 
+  /** The skill sources, as in Think: none unless overridden. */
+  getSkills(): SkillSource[] | Promise<SkillSource[]> {
+    return [];
+  }
+
+  /** A runner for `run_skill_script`, as in Think: none unless overridden. */
+  getSkillScriptRunner(): SkillScriptRunner | null {
+    return null;
+  }
+
   /** Declare the prompt context blocks, as in Think. */
   configureContext(): ContextConfig[] | Promise<ContextConfig[]> {
     return [];
@@ -402,9 +422,6 @@ export class Think<
 
   // Think calls these with a default; the harness-backed Think has none of
   // the features behind them, so each returns Think's empty default.
-  getSkills(): unknown[] | Promise<unknown[]> {
-    return [];
-  }
   getExtensions(): unknown[] {
     return [];
   }
