@@ -400,7 +400,8 @@ export class EventLog<T = unknown, S = unknown> {
       const rows = this.#streams.readChunks(
         this.#streamId,
         from,
-        REPLAY_PAGE_EVENTS
+        REPLAY_PAGE_EVENTS,
+        REPLAY_PAGE_BYTES
       );
       if (rows.length === 0) break;
       // A frame holds at most REPLAY_PAGE_BYTES of events, whatever their

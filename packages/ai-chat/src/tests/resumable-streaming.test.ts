@@ -644,9 +644,8 @@ describe("Resumable Streaming", () => {
 
       const streamId = await agentStub.testStartStream("req-batch");
 
-      // 45 small chunks: auto-flushed every CHUNK_BUFFER_SIZE (10) → 4 packed
-      // rows of 10, plus a manual flush of the remaining 5 → 5 rows total,
-      // while all 45 chunks are still individually recoverable.
+      // 45 small chunks: auto-flushed every 10, plus a manual flush of the
+      // remaining 5, while all 45 chunks are still individually recoverable.
       const total = 45;
       for (let i = 0; i < total; i++) {
         await agentStub.testStoreStreamChunk(
@@ -665,9 +664,10 @@ describe("Resumable Streaming", () => {
         expect(chunks[i].body).toBe(`{"type":"text","text":"c${i}"}`);
       }
 
-      // The 45 chunks are packed into 5 rows (4×10 + 1×5), not 45.
-      const rowCount = await agentStub.getStreamChunkRowCount(streamId);
-      expect(rowCount).toBe(5);
+      // The 45 chunks are written in five flushes (4×10 + 1×5), each one
+      // row write, all into one block row, not 45.
+      expect(await agentStub.getStreamChunkRowCount(streamId)).toBe(45);
+      expect(await agentStub.getStreamBlockRowCount(streamId)).toBe(1);
 
       ws.close(1000);
     });
@@ -682,7 +682,7 @@ describe("Resumable Streaming", () => {
 
       const streamId = await agentStub.testStartStream("req-pack-one");
 
-      // 3 small chunks, then a manual flush → exactly one packed row.
+      // 3 small chunks, then a manual flush → one row holding three seqs.
       for (let i = 0; i < 3; i++) {
         await agentStub.testStoreStreamChunk(
           streamId,
@@ -691,7 +691,8 @@ describe("Resumable Streaming", () => {
       }
       await agentStub.testFlushChunkBuffer();
 
-      expect(await agentStub.getStreamChunkRowCount(streamId)).toBe(1);
+      expect(await agentStub.getStreamBlockRowCount(streamId)).toBe(1);
+      expect(await agentStub.getStreamChunkRowCount(streamId)).toBe(3);
 
       const chunks = await agentStub.getStreamChunks(streamId);
       expect(chunks.map((c) => c.body)).toEqual([
@@ -736,9 +737,9 @@ describe("Resumable Streaming", () => {
 
       const streamId = await agentStub.testStartStream("req-bytecap");
 
-      // A small chunk, then a chunk larger than SEGMENT_MAX_BYTES (512 KB),
-      // then another small chunk. The large chunk forces a flush boundary on
-      // each side, so it lands in its own (unwrapped) row.
+      // A small chunk, then a chunk larger than the 512 KB batch limit,
+      // then another small chunk. The large chunk passes the batch limit and
+      // forces a flush; each chunk keeps its own seq.
       const big = "x".repeat(600_000);
       await agentStub.testStoreStreamChunk(
         streamId,
@@ -754,8 +755,7 @@ describe("Resumable Streaming", () => {
       );
       await agentStub.testFlushChunkBuffer();
 
-      // 3 rows: [before], [big], [after] — the byte cap prevents packing the
-      // large chunk with its neighbors.
+      // Three seqs, one per chunk.
       expect(await agentStub.getStreamChunkRowCount(streamId)).toBe(3);
 
       const chunks = await agentStub.getStreamChunks(streamId);

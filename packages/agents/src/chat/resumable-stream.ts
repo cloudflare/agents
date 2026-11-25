@@ -6,7 +6,7 @@
  * request id so replay-by-request rides the capability's indexed lookup.
  *
  * Handles:
- * - Chunk buffering (packed segments — batched writes for storage-op economy)
+ * - Chunk buffering (Streams' batched appends: one block per 10 chunks)
  * - Stream lifecycle (start, complete, error) mapped onto Streams settlement
  * - Chunk replay for reconnecting clients (framing in `replay-frames.ts`)
  * - Stale stream cleanup (row-level retention; at most one indexed
@@ -27,31 +27,32 @@ import type { Connection } from "agents";
 import { Streams, type StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow, StreamState } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
-import { storedChunkBytes } from "./chunk-size";
 import {
   REPLAY_CHUNK_BYTES,
-  REPLAY_ITEM_BYTES
+  REPLAY_ITEM_BYTES,
+  utf8Length
 } from "../internal/platform-limits";
 import type { ChatTurnOutcome } from "./wire-types";
 
-/** Number of chunks to pack into a single stored segment before flushing */
-const CHUNK_BUFFER_SIZE = 10;
-/** Maximum buffer size to prevent memory issues on rapid reconnections */
-const CHUNK_BUFFER_MAX_SIZE = 100;
 /**
- * Max accumulated raw chunk bytes packed into one segment before forcing a
- * flush, well under `REPLAY_ITEM_BYTES`: packing serializes bodies into a JSON
- * array, which re-escapes their contents (quotes/backslashes), so we keep the
- * raw total well under the limit to leave generous headroom for escaping
- * overhead. A chunk larger than this is flushed as its own (unwrapped)
- * segment.
+ * When a turn's buffered chunks are written: every 10 chunks or 512 KB, in
+ * one row write, into the stream's newest block while it stays under
+ * 256 KB (a turn's stream is deleted whole, one row per block). Each chunk
+ * keeps its own seq. A crash loses at most the 9 chunks still buffered, as
+ * a packed segment did.
  */
-const SEGMENT_MAX_BYTES = 512_000;
+const CHUNK_BATCH = { maxChunks: 10, maxBytes: 512_000, fillBlocks: true };
 /**
- * Stored segments per page when replaying a stream's chunk log. Bounds
- * replay memory to one page of segment bodies rather than the whole turn.
+ * Stored chunks per page when replaying a stream's chunk log. Bounds
+ * replay memory to one page of chunk bodies rather than the whole turn.
  */
-const REPLAY_PAGE_SEGMENTS = 10;
+const REPLAY_PAGE_CHUNKS = 100;
+/**
+ * Characters of chunk JSON per replay page: a page stops at the first
+ * chunk past it, so a turn of large chunks holds about this much (plus one
+ * chunk) at a time, not a hundred of them.
+ */
+const REPLAY_PAGE_CHARS = 1_000_000;
 /**
  * Retention for abandoned `streaming` rows, measured from LAST chunk activity.
  *
@@ -143,7 +144,13 @@ type ChatStreamMetadata = {
    * the reply, so recovery still continues the turn.
    */
   cutOff?: boolean;
-  /** Terminal evidence pinned until its consumer durably settles and releases it. */
+  /**
+   * Set on a stream whose chunks are stored one per seq (Streams' batched
+   * appends). Absent on a stream from a version that stored packed
+   * segments, one seq per up to 10 chunks: the recovery work meter counts
+   * those seqs as they are.
+   */
+  perChunk?: 1;
 };
 
 /** Public status vocabulary predates the Streams state names. */
@@ -165,10 +172,19 @@ function parseChatMetadata(row: StreamRow): ChatStreamMetadata | null {
 }
 
 /**
- * A stored segment is either a single chunk body (a JSON string value) or a
- * packed segment (a JSON array of chunk body strings). Unpack to the
- * individual chunk bodies in order.
+ * A stored chunk is one chunk body (a JSON string value), or, from a
+ * version that packed them, a segment (a JSON array of chunk body
+ * strings). Unpack to the individual chunk bodies in order.
  */
+/**
+ * The recovery work units `seqs` stored seqs of a stream are: one per seq
+ * for a stream of packed segments, one per 10 chunks (rounded up) for a
+ * stream stored one chunk per seq, so a unit is what a segment held.
+ */
+function workUnits(chat: ChatStreamMetadata, seqs: number): number {
+  return chat.perChunk === 1 ? Math.ceil(seqs / CHUNK_BATCH.maxChunks) : seqs;
+}
+
 function unpackSegment(rawChunkJson: string): string[] {
   const parsed = JSON.parse(rawChunkJson) as StreamJson;
   if (Array.isArray(parsed)) return parsed as string[];
@@ -232,9 +248,8 @@ export class ResumableStream {
    */
   private _nextChunkSeq: number | null = null;
 
-  private _chunkBuffer: Array<{ streamId: string; body: string }> = [];
-  private _chunkBufferBytes = 0;
-  private _isFlushingChunks = false;
+  /** The stream with chunks waiting in Streams' buffer, if any. */
+  private _bufferedStreamId: string | null = null;
   /**
    * A stream whose producer finished but whose row is deliberately still
    * `streaming`: the host will {@link cutover} it together with the message
@@ -267,7 +282,7 @@ export class ResumableStream {
       this.ops.onDelete((row, cursor) => {
         const chat = parseChatMetadata(row);
         if (!chat) return;
-        this._retire(cursor);
+        this._retire(workUnits(chat, cursor));
         this._rememberDeleted(row, chat);
       })
     );
@@ -337,13 +352,16 @@ export class ResumableStream {
   }
 
   /**
-   * Segments a row still accounts for: a live stream's log tail, a settled
-   * stream's final cursor (stamped exact at settlement).
+   * Work units a row still accounts for, from a live stream's log tail or
+   * a settled stream's final cursor (stamped exact at settlement).
    */
-  private _segmentsOf(row: StreamRow): number {
-    return row.state === "streaming"
-      ? this.ops.cursor(row.stream_id)
-      : row.chunk_count;
+  private _segmentsOf(row: StreamRow & { chat: ChatStreamMetadata }): number {
+    return workUnits(
+      row.chat,
+      row.state === "streaming"
+        ? this.ops.cursor(row.stream_id)
+        : row.chunk_count
+    );
   }
 
   /**
@@ -587,6 +605,7 @@ export class ResumableStream {
     }
     if (this._activeIsContinuation) metadata.isContinuation = 1;
     if (seqBase > 0) metadata.seqBase = seqBase;
+    metadata.perChunk = 1;
     if (options.originMessageIds?.length) {
       metadata.originMessageIds = options.originMessageIds;
     }
@@ -764,7 +783,9 @@ export class ResumableStream {
     persist: () => void,
     options: { discard?: boolean } = {}
   ): void {
-    this.flushBuffer();
+    // No flush: the settle writes the buffered chunks, or drops them with
+    // the rows it discards.
+    if (this._bufferedStreamId === streamId) this._bufferedStreamId = null;
     const discard = options.discard ?? true;
     const commit = persist;
     // The discard deletes the rows inside the settle transaction, and the
@@ -832,7 +853,8 @@ export class ResumableStream {
     // Guard against chunks that would exceed the SQLite row limit, measured
     // on the stored (JSON-escaped) encoding. The chunk is still broadcast to
     // live clients; only replay storage is skipped.
-    const bodyBytes = storedChunkBytes(body);
+    const json = JSON.stringify(body);
+    const bodyBytes = utf8Length(json);
     if (bodyBytes > REPLAY_CHUNK_BYTES) {
       console.warn(
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
@@ -844,71 +866,30 @@ export class ResumableStream {
       streamId === this._activeStreamId && this._nextChunkSeq !== null
         ? this._nextChunkSeq++
         : undefined;
-
-    // Force flush if buffer is at max to prevent memory issues
-    if (this._chunkBuffer.length >= CHUNK_BUFFER_MAX_SIZE) {
-      this.flushBuffer();
-    }
-
-    // Byte guard: keep a packed segment safely under the SQLite row limit. If
-    // the buffer already holds chunks and adding this body would push the
-    // segment past the threshold, flush first so this chunk starts a fresh
-    // segment. A single large chunk therefore ends up alone and is written
-    // unwrapped by flushBuffer (no array-escaping inflation).
-    if (
-      this._chunkBuffer.length > 0 &&
-      this._chunkBufferBytes + bodyBytes > SEGMENT_MAX_BYTES
-    ) {
-      this.flushBuffer();
-    }
-
-    this._chunkBuffer.push({ streamId, body });
-    this._chunkBufferBytes += bodyBytes;
-
-    // Flush when buffer reaches the per-segment chunk threshold
-    if (this._chunkBuffer.length >= CHUNK_BUFFER_SIZE) {
-      this.flushBuffer();
+    // One stream buffers at a time: start() flushes before switching.
+    if (this._bufferedStreamId !== streamId) this.flushBuffer();
+    try {
+      this.ops.appendJson(streamId, json, bodyBytes, CHUNK_BATCH);
+      this._bufferedStreamId = streamId;
+    } catch {
+      // The stream settled or was deleted (a late writer after markError or
+      // cleanup), or its write failed; the chunk is dropped from replay.
     }
     return seq;
   }
 
   /**
-   * Flush the buffered chunks to storage as a single packed segment.
-   * Uses a lock to prevent concurrent flush operations.
-   *
-   * The whole buffer becomes one stored chunk on the backing stream: a
-   * single-chunk segment is stored unwrapped so a large chunk avoids
-   * array-escaping inflation, while a multi-chunk segment stores a JSON
-   * array of bodies. This collapses N chunk writes into one fenced append,
-   * cutting rows written / stored / scanned.
+   * Write the buffered chunks now, as one block (one INSERT). A write that
+   * fails drops them, as a crash would.
    */
   flushBuffer() {
-    if (this._isFlushingChunks || this._chunkBuffer.length === 0) {
-      return;
-    }
-
-    this._isFlushingChunks = true;
+    const streamId = this._bufferedStreamId;
+    if (streamId === null) return;
+    this._bufferedStreamId = null;
     try {
-      const chunks = this._chunkBuffer;
-      this._chunkBuffer = [];
-      this._chunkBufferBytes = 0;
-
-      // All chunks in a buffer belong to the same stream: start() flushes
-      // before switching streams, so the buffer is never cross-stream.
-      const streamId = chunks[0].streamId;
-      const segment: StreamJson =
-        chunks.length === 1
-          ? chunks[0].body
-          : chunks.map((chunk) => chunk.body);
-
-      try {
-        this.ops.append(streamId, segment);
-      } catch {
-        // The stream settled or was deleted while chunks were buffered (a
-        // late writer after markError/cleanup); the chunks are dropped.
-      }
-    } finally {
-      this._isFlushingChunks = false;
+      this.ops.flush(streamId);
+    } catch {
+      // The write failed; the buffered chunks are dropped.
     }
   }
 
@@ -924,12 +905,22 @@ export class ResumableStream {
   private *_storedBodies(streamId: string): Generator<string> {
     let next = 0;
     for (;;) {
-      const rows = this.ops.readChunks(streamId, next, REPLAY_PAGE_SEGMENTS);
+      const rows = this.ops.readChunks(
+        streamId,
+        next,
+        REPLAY_PAGE_CHUNKS,
+        REPLAY_PAGE_CHARS
+      );
       for (const row of rows) {
         next = row.seq + 1;
         yield* unpackSegment(row.chunk);
       }
-      if (rows.length < REPLAY_PAGE_SEGMENTS) return;
+      // A short page is the end, unless the character cap cut it short.
+      let chars = 0;
+      for (const row of rows) chars += row.chunk.length;
+      if (rows.length < REPLAY_PAGE_CHUNKS && chars < REPLAY_PAGE_CHARS) {
+        return;
+      }
     }
   }
 
@@ -1190,8 +1181,7 @@ export class ResumableStream {
    * producers opened on the same Durable Object are untouched.
    */
   clearAll() {
-    this._chunkBuffer = [];
-    this._chunkBufferBytes = 0;
+    this._bufferedStreamId = null;
     this._deleteRetiring(this._chatRows());
     this._deletedTerminals.clear();
     this._lastClosedStreamId = null;
