@@ -270,9 +270,9 @@ describe("inbound Email", () => {
         )
       )
     );
-    const surface = result.events[0]?.event.replySurface;
-    expect(
-      (surface?.address as { references?: string[] }).references?.[0]
-    ).toBe(root);
+    const address = result.events[0]?.event.replySurface?.address as
+      | { references?: string[] }
+      | undefined;
+    expect(address?.references?.[0]).toBe(root);
   });
 });
