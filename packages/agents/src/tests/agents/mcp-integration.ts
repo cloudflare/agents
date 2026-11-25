@@ -4,6 +4,7 @@ import {
   DurableObjectOAuthClientProvider
 } from "../../mcp/client/do-oauth-client-provider";
 import { MCPAuthorizationRequiredError } from "../../mcp/client/errors";
+import type { ServerLanes } from "../../mcp/client/server-lanes";
 import {
   ageAuthorizationRounds,
   expireOAuthStates
@@ -79,6 +80,11 @@ export class McpIntegrationAgent extends Agent {
   private _stateCheckGate: Promise<void> | undefined;
   private _openStateCheck = () => {};
   private _stateChecksWaiting = 0;
+  /** Per server, lane work that was queued and has not started yet. */
+  readonly #laneWaiting = new Map<string, number>();
+  #lanesWatched = false;
+  /** Per server, OAuth flows waiting for an earlier flow to finish. */
+  readonly #turnsWaiting = new Map<string, number>();
 
   /**
    * The default provider, except that a state check can be made to wait,
@@ -116,7 +122,83 @@ export class McpIntegrationAgent extends Agent {
     return this._stateChecksWaiting;
   }
 
+  /** The manager's per-server lanes, which order connection work. */
+  #lanes(): ServerLanes {
+    return (this.mcp as unknown as { _lanes: ServerLanes })._lanes;
+  }
+
+  /**
+   * Count lane work that waits for its turn, so a test can wait until work
+   * it started has queued behind other work, instead of sleeping.
+   */
+  #watchLanes(): void {
+    if (this.#lanesWatched) return;
+    this.#lanesWatched = true;
+    const lanes = this.#lanes();
+    const run = lanes.run.bind(lanes);
+    const waiting = this.#laneWaiting;
+    lanes.run = <T>(serverId: string, work: () => Promise<T>) => {
+      let started = false;
+      waiting.set(serverId, (waiting.get(serverId) ?? 0) + 1);
+      const begin = () => {
+        if (started) return;
+        started = true;
+        waiting.set(serverId, (waiting.get(serverId) ?? 1) - 1);
+      };
+      const result = run(serverId, () => {
+        begin();
+        return work();
+      });
+      // Cancelled work never starts.
+      result.then(begin, begin);
+      return result;
+    };
+  }
+
+  /**
+   * Count OAuth flows (refreshes, code exchanges) that wait for an earlier
+   * flow on `serverId`'s current connection. Call before starting them.
+   */
+  watchAuthorizationTurns(serverId: string): void {
+    type Turns = { run<T>(flow: () => Promise<T>): Promise<T> };
+    const connection = this.mcp.mcpConnections[serverId] as unknown as
+      | { _authorizationTurns: Turns }
+      | undefined;
+    if (!connection) throw new Error(`No connection for ${serverId}`);
+    const turns = connection._authorizationTurns;
+    const run = turns.run.bind(turns);
+    const waiting = this.#turnsWaiting;
+    waiting.set(serverId, 0);
+    turns.run = <T>(flow: () => Promise<T>) => {
+      waiting.set(serverId, (waiting.get(serverId) ?? 0) + 1);
+      return run(() => {
+        waiting.set(serverId, (waiting.get(serverId) ?? 1) - 1);
+        return flow();
+      });
+    };
+  }
+
+  /** OAuth flows on `serverId` that wait for an earlier one to finish. */
+  authorizationTurnsWaiting(serverId: string): number {
+    return this.#turnsWaiting.get(serverId) ?? 0;
+  }
+
+  /** Lane work for `serverId` that is queued and has not started. */
+  laneWaiting(serverId: string): number {
+    return this.#laneWaiting.get(serverId) ?? 0;
+  }
+
+  /** Resolve once no server has lane work queued or running. */
+  async lanesIdle(): Promise<void> {
+    while (true) {
+      const pending = this.#lanes().pending();
+      if (pending.length === 0) return;
+      await Promise.allSettled(pending);
+    }
+  }
+
   async onStart(): Promise<void> {
+    this.#watchLanes();
     this.mcp.configureOAuthCallback({
       successRedirect: OAUTH_SUCCESS_PATH,
       errorRedirect: OAUTH_ERROR_PATH

@@ -70,9 +70,27 @@ export async function eventually(
   }
 }
 
-/** Give queued work a moment to reach its queue. */
-export function pause(ms = 50): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Wait until `count` OAuth flows on a server's connection wait for an
+ * earlier one; `agent.watchAuthorizationTurns(serverId)` must run first.
+ */
+export function waitingForAuthorization(
+  agent: IntegrationAgent,
+  serverId: string,
+  count = 1
+) {
+  return eventually(
+    async () => (await agent.authorizationTurnsWaiting(serverId)) >= count
+  );
+}
+
+/** Wait until `count` items of work are queued in a server's lane. */
+export function queuedInLane(
+  agent: IntegrationAgent,
+  serverId: string,
+  count = 1
+) {
+  return eventually(async () => (await agent.laneWaiting(serverId)) >= count);
 }
 
 /** Wait until `count` requests are waiting at the server's hold. */

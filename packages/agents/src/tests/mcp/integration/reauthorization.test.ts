@@ -7,11 +7,11 @@ import {
   eventually,
   followCallback,
   newAgent,
-  pause,
   restartAgent,
   useOAuthMcpServer,
   waitingAtServer,
-  type IntegrationAgent
+  type IntegrationAgent,
+  waitingForAuthorization
 } from "./harness";
 import {
   ADMIN_SCOPE,
@@ -158,6 +158,7 @@ describe.each([
       const id = await connectAuthorized(agent, server);
 
       server.revokeAccessTokens();
+      await agent.watchAuthorizationTurns(id);
       // Both refreshes would reach the token endpoint together unless the
       // second waits for the first; rotation would then refuse one of them.
       const release = server.holdRequests("token");
@@ -166,7 +167,7 @@ describe.each([
         agent.callServerTool(id, "read")
       ]);
       await waitingAtServer(server);
-      await pause();
+      await waitingForAuthorization(agent, id);
       release();
       const [first, second] = await calls;
 
@@ -300,6 +301,7 @@ describe("MCP over the older SSE transport", () => {
     const id = await connectAuthorized(agent, server, undefined, sse);
 
     server.revokeAccessTokens();
+    await agent.watchAuthorizationTurns(id);
     // Both refreshes would reach the token endpoint together unless the
     // second waits for the first; rotation would then refuse one of them.
     const release = server.holdRequests("token");
@@ -308,7 +310,7 @@ describe("MCP over the older SSE transport", () => {
       agent.callServerTool(id, "read")
     ]);
     await waitingAtServer(server);
-    await pause();
+    await waitingForAuthorization(agent, id);
     release();
     const [first, second] = await calls;
 
