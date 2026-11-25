@@ -1,4 +1,5 @@
 import {
+  asSchema,
   convertToModelMessages,
   jsonSchema,
   streamText,
@@ -188,6 +189,29 @@ describe("extensions: the build", () => {
     // The input is validated by the tool's own schema: its default applies.
     expect(through.calls.map((c) => c.input)).toEqual([{ word: "hello" }]);
     expect(through.calls).toEqual(direct.calls);
+  });
+
+  it("keeps a tool's output schema, as JSON Schema, and still sends the same request", async () => {
+    const withOutput = {
+      lookup: tool({
+        description: "Look a word up",
+        inputSchema: z.object({ word: z.string() }),
+        outputSchema: z.object({ found: z.boolean() }),
+        execute: async () => ({ found: true })
+      })
+    };
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "options",
+      loadInProcess("options", optionsExtension({ tools: withOutput }))
+    );
+    const built = await manager.build("");
+    expect(await asSchema(built.tools.lookup?.outputSchema).jsonSchema).toEqual(
+      await asSchema(withOutput.lookup.outputSchema).jsonSchema
+    );
+    expect((await send(built.tools, undefined)).request).toBe(
+      (await send(withOutput, undefined)).request
+    );
   });
 
   it("builds the same tools and prompt twice, and in order", async () => {

@@ -207,6 +207,9 @@ function toolOf<M extends HookMap>(
         ? { validate: (value) => owner.validate(name, value, build) }
         : undefined
     ),
+    ...(entry.outputSchema !== undefined && {
+      outputSchema: jsonSchema(entry.outputSchema)
+    }),
     ...(entry.modelOutput && {
       toModelOutput: async (output) =>
         // SAFETY: the owner returns what the tool's toModelOutput returned.
