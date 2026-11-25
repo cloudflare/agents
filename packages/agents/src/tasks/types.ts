@@ -272,6 +272,22 @@ export interface TaskRunOptions {
   lane?: string;
 
   /**
+   * @internal What a run arriving at a busy `lane` does. `"queue"`
+   * (default) waits its turn. `"latest"` skips the lane's runs that have not
+   * started (and the running one, for a definition registered with
+   * `supersedeRunning`), listed in the receipt's `superseded`. `"drop"`
+   * stores nothing (`dropped` on the receipt). `{ debounceMs }` is `latest`
+   * whose run also waits `debounceMs` from its arrival before it may start.
+   */
+  policy?: "queue" | "latest" | "drop" | { readonly debounceMs: number };
+
+  /**
+   * @internal Goes ahead of the lane's runs that have not started (still
+   * behind a running one): a tool answer the running turn waits for.
+   */
+  front?: boolean;
+
+  /**
    * @internal Where the first attempt runs. Omitted: in this invocation,
    * without waiting for it. `"now"`: in this invocation, and `run()`
    * resolves when that attempt ends. `"alarm"`: from the alarm, where
@@ -303,6 +319,10 @@ export interface TaskReceipt {
   accepted: boolean;
   status: TaskStatus;
   createdAt: number;
+  /** @internal The runs a `latest` or debounced arrival skipped, in lane order. */
+  superseded?: string[];
+  /** @internal A `drop` arrival at a busy lane: nothing was stored. */
+  dropped?: true;
 }
 
 /**
@@ -484,6 +504,11 @@ export interface TaskRegisterOptions {
    * attempt due and wakes it then.
    */
   attached?: true;
+  /**
+   * @internal A `latest` or debounced arrival in this definition's lane also
+   * ends the run that is running (its signal aborts and it ends `skipped`).
+   */
+  supersedeRunning?: true;
 }
 
 /** @internal Raw `cf_agents_task_steps` SQLite row. */
