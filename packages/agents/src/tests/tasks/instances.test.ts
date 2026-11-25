@@ -178,6 +178,16 @@ describe("Tasks instances", () => {
       await without.lifecycle.start();
       expect(count(storage, "cf_agents_task_runs__n_probe")).toBe(1);
       expect(await without.capability.get("kept")).toBeNull();
+      // Its due wake is driven while it is missing, and kept for it.
+      await without.lifecycle.alarm();
+      const probeJobs = () =>
+        storage.sql
+          .exec<{ id: string }>(
+            "SELECT id FROM cf_agents_jobs WHERE capability = 'tasks/probe'"
+          )
+          .toArray()
+          .map((row) => row.id);
+      expect(probeJobs()).toEqual(["tasks/probe:task:kept"]);
 
       const back = tasks("probe", "probe");
       const after = install(tasks("default"));
