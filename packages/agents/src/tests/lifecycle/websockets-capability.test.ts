@@ -667,14 +667,25 @@ describe("state sync over connections on a plain host", () => {
     silent.addEventListener("message", (e) =>
       silentFrames.push(String(e.data))
     );
+    // A socket delivers in order: once the echo of `text` arrives, every
+    // frame sent to the socket before it has arrived too.
+    const echoed = (text: string) =>
+      new Promise<void>((resolve) => {
+        const onMessage = (e: MessageEvent) => {
+          if (String(e.data) !== `echo:${text}`) return;
+          silent.removeEventListener("message", onMessage);
+          resolve();
+        };
+        silent.addEventListener("message", onMessage);
+        silent.send(text);
+      });
     const loud = await upgrade(hostUrl(name));
     const loudNext = frameReader(loud);
     await loudNext();
     await loudNext();
     try {
       // The silent socket still works for the host's own frames.
-      silent.send("hello");
-      await new Promise((r) => setTimeout(r, 50));
+      await echoed("hello");
       expect(silentFrames).toEqual(["echo:hello"]);
 
       await env.StatefulPlainObject.getByName(name).setCount(4);
@@ -682,8 +693,8 @@ describe("state sync over connections on a plain host", () => {
         type: "cf_agent_state",
         state: { count: 4 }
       });
-      await new Promise((r) => setTimeout(r, 50));
-      expect(silentFrames).toEqual(["echo:hello"]);
+      await echoed("after-broadcast");
+      expect(silentFrames).toEqual(["echo:hello", "echo:after-broadcast"]);
     } finally {
       silent.close(1000, "done");
       loud.close(1000, "done");

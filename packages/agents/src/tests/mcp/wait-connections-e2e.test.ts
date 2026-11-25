@@ -1,7 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
 import { getAgentByName } from "../..";
+
+// Only the tests that add a handler use it; other requests go out as before.
+const mcpServer = setupServer();
+beforeAll(() => mcpServer.listen({ onUnhandledRequest: "bypass" }));
+afterEach(() => mcpServer.resetHandlers());
+afterAll(() => mcpServer.close());
 
 /**
  * E2E tests for waitForConnections() through the full Agent lifecycle.
@@ -214,22 +222,39 @@ describe("waitForConnections E2E", () => {
       const name = `hibernation-race-${crypto.randomUUID()}`;
       let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
 
+      // The server answers only when the test says so, so the restored
+      // connection is still connecting when it is read.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mcpServer.use(
+        http.all("http://held-mcp.example.com/*", async () => {
+          await released;
+          return new HttpResponse(null, { status: 404 });
+        })
+      );
+
       await stub.insertMcpServer(
         "race-roundtrip-server",
         "Race Round Trip Server",
-        "http://nonexistent-mcp.example.com",
+        "http://held-mcp.example.com/mcp",
         "http://localhost:3000/callback",
         null
       );
 
-      await evictDurableObject(stub);
-      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
-      const result = await stub.reportWithoutWait();
+      try {
+        await evictDurableObject(stub);
+        stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+        const result = await stub.reportWithoutWait();
 
-      expect(result.connectionIds).toContain("race-roundtrip-server");
-      expect(result.connectionStates["race-roundtrip-server"]).toBe(
-        "connecting"
-      );
+        expect(result.connectionIds).toContain("race-roundtrip-server");
+        expect(result.connectionStates["race-roundtrip-server"]).toBe(
+          "connecting"
+        );
+      } finally {
+        release();
+      }
     });
 
     it("should handle mixed server types through onStart lifecycle", async () => {
