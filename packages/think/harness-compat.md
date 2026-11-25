@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**232 of the 1257 tests that construct Think pass (18%).** Across the whole suite, 524 of 1549.
+**234 of the 1259 tests that construct Think pass (18%).** Across the whole suite, 526 of 1551.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -49,7 +49,7 @@ supported by the harness-backed Think yet".
 | `hooks.test.ts`                        | 38 / 149 | 25%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
-| `mcp-tool-materialization.test.ts`     | 1 / 3    | 33%  |
+| `mcp-tool-materialization.test.ts`     | 3 / 5    | 60%  |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
 | `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
 | `messengers.test.ts`                   | 79 / 104 | 75%  |
