@@ -140,6 +140,8 @@ function setup() {
   let holdList: Promise<void> | undefined;
   let keepAliveError: Error | undefined;
   let keepAliveGate: Promise<void> = Promise.resolve();
+  /** Waits before each next run's lifecycle starts, in order. */
+  const keepAliveHolds: Promise<void>[] = [];
   const lifecycles: Promise<unknown>[] = [];
   let requestIds = 0;
   let flushes = 0;
@@ -185,7 +187,8 @@ function setup() {
         const error = keepAliveError;
         return keepAliveGate.then(() => Promise.reject(error));
       }
-      const running = fn();
+      const hold = keepAliveHolds.shift();
+      const running = hold ? hold.then(fn) : fn();
       lifecycles.push(running);
       return running;
     },
@@ -246,6 +249,8 @@ function setup() {
     setActiveRequest: (requestId: string | null) => {
       activeRequestId = requestId;
     },
+    /** Make holding the isolate wait on `hold` for the next run to start. */
+    holdKeepAlive: (hold: Promise<void>) => void keepAliveHolds.push(hold),
     /** Make holding the isolate fail before the run's lifecycle runs. */
     failKeepAlive: (error: Error, gate?: Promise<void>) => {
       keepAliveError = error;
@@ -349,6 +354,33 @@ describe("agentToolRunOutcome", () => {
 });
 
 describe("AgentToolRuns", () => {
+  it("starts two runs' turns in the order they arrived, when the first waits longer to start (F4)", async () => {
+    const { runs, holdKeepAlive } = setup();
+    let releaseFirst = () => {};
+    // The first run on a fresh child takes longer to hold the isolate.
+    holdKeepAlive(
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      })
+    );
+    holdKeepAlive(Promise.resolve());
+    const order: string[] = [];
+    const turnOf =
+      (name: string) =>
+      async (turn: { requestId: string }): Promise<AgentToolTurnResult> => {
+        order.push(name);
+        return { requestId: turn.requestId, status: "completed" };
+      };
+    await runs.start("run-a", START, turnOf("a"));
+    await runs.start("run-b", START, turnOf("b"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // B is held behind A, which has not started.
+    expect(order).toEqual([]);
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(["a", "b"]);
+  });
+
   it("settles a run error when holding the isolate fails before it runs", async () => {
     const { runs, store, failKeepAlive } = setup();
     failKeepAlive(new Error("Subrequest depth limit exceeded"));

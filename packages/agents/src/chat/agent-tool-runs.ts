@@ -425,6 +425,9 @@ export class AgentToolRuns {
    *   reaches the front of the queue: a run cancelled while it waited
    *   stores nothing and never calls the model.
    */
+  /** Settles once the latest run to arrive has started its turn. */
+  #arrivals: Promise<void> = Promise.resolve();
+
   async start(
     runId: string,
     options: { input: unknown; terminalOnly: boolean; signal?: AbortSignal },
@@ -472,9 +475,20 @@ export class AgentToolRuns {
       }
     }
 
+    // Runs reach the turn queue in the order they arrived: each one's turn
+    // starts only after the one before has started its own. Holding the
+    // isolate awake can take longer for the first run on a fresh child than
+    // for the next (F4).
+    const before = this.#arrivals;
+    let arrived!: () => void;
+    this.#arrivals = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
     let lifecycleRan = false;
     const lifecycle = async () => {
       lifecycleRan = true;
+      await before;
+      arrived();
       // Set when the run is left open for chat recovery to finish.
       let recovering = false;
       try {
@@ -547,6 +561,7 @@ export class AgentToolRuns {
       // platform's subrequest depth), nothing will: settle it here, or the
       // parent waits on a run that never runs.
       if (lifecycleRan) return;
+      arrived();
       this.#settle(runId, () => ({
         status: "error",
         error: error instanceof Error ? error.message : String(error)
