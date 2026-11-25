@@ -1,4 +1,4 @@
-import { ROW_MAX_BYTES } from "agents/chat";
+import { ROW_VALUE_BYTES } from "agents/chat";
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
@@ -54,7 +54,7 @@ const PAYLOAD_BYTES = 12_000;
  * rows. The part is still an inline `data:` URL, so eviction decodes it in
  * place exactly as it does a small one.
  */
-const SPLIT_MEDIA_CHARS = 4 * Math.ceil((ROW_MAX_BYTES + 400_000) / 4);
+const SPLIT_MEDIA_CHARS = 4 * Math.ceil((ROW_VALUE_BYTES + 400_000) / 4);
 const SPLIT_PAYLOAD_BYTES = (SPLIT_MEDIA_CHARS / 4) * 3;
 
 async function evictionAgent(name: string): Promise<MediaEvictionStub> {

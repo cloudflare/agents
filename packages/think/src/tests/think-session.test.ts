@@ -1,4 +1,3 @@
-import { ROW_MAX_BYTES } from "agents/chat";
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
@@ -2440,67 +2439,6 @@ describe("Think — sanitization", () => {
     const sanitized = (await agent.sanitizeMessage(msg)) as UIMessage;
     expect(sanitized.parts).toHaveLength(1);
     expect((sanitized.parts[0] as { text: string }).text).toBe("Hello");
-  });
-});
-
-// ── Row size enforcement ─────────────────────────────────────────
-
-describe("Think — row size enforcement", () => {
-  it("should pass through small messages unchanged", async () => {
-    const agent = await freshAgent("rowsize-small");
-
-    const msg: UIMessage = {
-      id: "small-1",
-      role: "assistant",
-      parts: [{ type: "text", text: "Short message" }]
-    };
-
-    const result = (await agent.enforceRowSizeLimit(msg)) as UIMessage;
-    expect((result.parts[0] as { text: string }).text).toBe("Short message");
-  });
-
-  it("should compact large tool outputs", async () => {
-    const agent = await freshAgent("rowsize-tool");
-
-    const hugeOutput = "x".repeat(ROW_MAX_BYTES + 200_000);
-    const msg: UIMessage = {
-      id: "tool-big",
-      role: "assistant",
-      parts: [
-        {
-          type: "tool-read_file",
-          toolCallId: "tc-1",
-          toolName: "read_file",
-          state: "output-available",
-          input: {},
-          output: hugeOutput
-        } as UIMessage["parts"][number]
-      ]
-    };
-
-    const result = (await agent.enforceRowSizeLimit(msg)) as UIMessage;
-    const toolPart = result.parts[0] as Record<string, unknown>;
-    const output = toolPart.output as string;
-
-    expect(output).toContain("[truncated");
-    expect(output.length).toBeLessThan(hugeOutput.length);
-  });
-
-  it("should truncate large text parts for non-assistant messages", async () => {
-    const agent = await freshAgent("rowsize-user-text");
-
-    const hugeText = "y".repeat(ROW_MAX_BYTES + 200_000);
-    const msg: UIMessage = {
-      id: "user-big",
-      role: "user",
-      parts: [{ type: "text", text: hugeText }]
-    };
-
-    const result = (await agent.enforceRowSizeLimit(msg)) as UIMessage;
-    const textPart = result.parts[0] as { text: string };
-
-    expect(textPart.text).toContain("Text truncated");
-    expect(textPart.text.length).toBeLessThan(hugeText.length);
   });
 });
 

@@ -2,12 +2,9 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
-import type { UIMessage } from "ai";
 import { isChunkTooLargeToStore, storedChunkBytes } from "../chat/chunk-size";
-import { byteLength, enforceRowSizeLimit } from "../chat/sanitize";
 import {
   REPLAY_CHUNK_BYTES,
-  ROW_MAX_BYTES,
   ROW_PIECE_UNITS,
   ROW_VALUE_BYTES,
   SQLITE_ROW_BYTES
@@ -92,36 +89,6 @@ describe("row budgets fit one row", () => {
       );
       expect(sql.exec("SELECT length(data) AS l FROM piece").one().l).toBe(
         ROW_PIECE_UNITS
-      );
-    });
-  });
-
-  it("keeps a message at ROW_MAX_BYTES whole and compacts one byte more", async () => {
-    const message = (size: number): UIMessage => {
-      const empty = {
-        id: "m",
-        role: "user" as const,
-        parts: [{ type: "text" as const, text: "" }]
-      };
-      const overhead = byteLength(JSON.stringify(empty));
-      return {
-        ...empty,
-        parts: [{ type: "text", text: "x".repeat(size - overhead) }]
-      };
-    };
-    const atLimit = message(ROW_MAX_BYTES);
-    expect(byteLength(JSON.stringify(atLimit))).toBe(ROW_MAX_BYTES);
-    expect(enforceRowSizeLimit(atLimit)).toBe(atLimit);
-    const over = enforceRowSizeLimit(message(ROW_MAX_BYTES + 1));
-    expect(byteLength(JSON.stringify(over))).toBeLessThanOrEqual(ROW_MAX_BYTES);
-    await withSql((sql) => {
-      sql.exec(
-        "CREATE TABLE msg (id TEXT, session_id TEXT, content TEXT, created_at INTEGER)"
-      );
-      sql.exec(
-        "INSERT INTO msg VALUES ('m', 's', ?, ?)",
-        JSON.stringify(atLimit),
-        Date.now()
       );
     });
   });

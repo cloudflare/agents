@@ -1,6 +1,6 @@
 # Platform limits
 
-`packages/agents/src/internal/platform-limits.ts` holds the SQLite row budget and the budgets derived from it. Streams, event logs, chat message compaction and chunk storage, held-message pieces, Sessions chunks and attachments, and the chat and harness stream segments take their row ceiling from it. Tasks sets its run-row caps (inline input 500,000 units, framework metadata 1.9 MB) together, because one run row holds several of them. The harness store splits at its own 256 K units. The module is internal. It is not exported to apps and has no docs page.
+`packages/agents/src/internal/platform-limits.ts` holds the SQLite row budget and the budgets derived from it. Streams, event logs, chat chunk storage, held-message pieces, Sessions chunks and attachments, and the chat and harness stream segments take their row ceiling from it. Tasks sets its run-row caps (inline input 500,000 units, framework metadata 1.9 MB) together, because one run row holds several of them. The harness store splits at its own 256 K units. The module is internal. It is not exported to apps and has no docs page.
 
 ## How it works
 
@@ -37,7 +37,7 @@ A runtime cannot read a row larger than its own cap. A 5 MB value written by wor
 
 `packages/agents/src/tests/platform-limits.test.ts` binds an 8,000,000-byte value in the installed pool, without writing a row, and fails if the pool can no longer hold it. Size errors in tests use values over every cap: `sql-error.test.ts` and the State capability test bind 9,000,000 bytes. `sql-error.test.ts` checks the size message against `SQLITE_ROW_BYTES`; the State test checks the production cap in it. The raising change:
 
-- Edit only `SQLITE_ROW_BYTES`. Every budget follows: `ROW_VALUE_BYTES`, `ROW_MAX_BYTES`, `ROW_PIECE_UNITS`, and through them the Streams flush, event log, chat stream and harness stream ceilings, chat message compaction, held-message and Tasks input pieces, and Sessions chunks. Keep a margin under the measured 8,388,637 bytes for the other columns in a row. 8,000,000 leaves 388 KB.
+- Edit only `SQLITE_ROW_BYTES`. Every budget follows: `ROW_VALUE_BYTES`, `ROW_PIECE_UNITS`, and through them the Streams flush, event log, chat stream and harness stream ceilings, held-message and Tasks input pieces, and Sessions chunks. Keep a margin under the measured 8,388,637 bytes for the other columns in a row. 8,000,000 leaves 388 KB.
 - Add a boundary test per budget: a value exactly at it is stored in one row, and one byte more splits, is compacted, or is refused, as that caller does today.
 - Put cost in the PR: rows written per 2, 5 and 10 MB value, before and after.
 - Probe on a deployment: write 2-8 MB values with the new code, then deploy the previous SDK release over the same objects and read them back. Sessions has been measured reading slices of either size; Streams, chat and Tasks need the same check.

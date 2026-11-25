@@ -4,7 +4,7 @@ import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 import { getAgentByName } from "agents";
-import { REPLAY_CHUNK_BYTES, ROW_MAX_BYTES } from "agents/chat";
+import { REPLAY_CHUNK_BYTES, ROW_VALUE_BYTES } from "agents/chat";
 import { MessageType } from "../types";
 
 describe("Oversized rows and incremental persistence", () => {
@@ -216,7 +216,7 @@ describe("Oversized rows and incremental persistence", () => {
 
       // A tool output that cannot fit one SQLite row. Sessions splits the
       // message across continuation rows instead of truncating it.
-      const hugeOutput = "X".repeat(ROW_MAX_BYTES + 100_000);
+      const hugeOutput = "X".repeat(ROW_VALUE_BYTES + 100_000);
       const message: ChatMessage = {
         id: "size-big",
         role: "assistant",
@@ -253,7 +253,7 @@ describe("Oversized rows and incremental persistence", () => {
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
-      const largeText = "Z".repeat(ROW_MAX_BYTES + 100_000);
+      const largeText = "Z".repeat(ROW_VALUE_BYTES + 100_000);
       const message: ChatMessage = {
         id: "user-big",
         role: "user",
@@ -285,7 +285,9 @@ describe("Oversized rows and incremental persistence", () => {
 
       // CJK character \u4e00 is 1 JS char but 3 bytes in UTF-8.
       // This many CJK chars fit a character-count limit but not a byte budget.
-      const cjkOutput = "\u4e00".repeat(Math.ceil(ROW_MAX_BYTES / 3) + 100_000);
+      const cjkOutput = "\u4e00".repeat(
+        Math.ceil(ROW_VALUE_BYTES / 3) + 100_000
+      );
 
       const message: ChatMessage = {
         id: "unicode-test",
@@ -380,7 +382,7 @@ describe("Oversized rows and incremental persistence", () => {
       const room = `row-chunk-wake-${crypto.randomUUID()}`;
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
-      const url = `data:image/png;base64,${btoa("o".repeat(ROW_MAX_BYTES + 1_000_000))}`;
+      const url = `data:image/png;base64,${btoa("o".repeat(ROW_VALUE_BYTES + 1_000_000))}`;
       await agentStub.persistMessages([
         {
           id: "wake-user",
@@ -405,7 +407,9 @@ describe("Oversized rows and incremental persistence", () => {
         {
           id: "wake-long",
           role: "assistant",
-          parts: [{ type: "text", text: "p".repeat(ROW_MAX_BYTES + 1_000_000) }]
+          parts: [
+            { type: "text", text: "p".repeat(ROW_VALUE_BYTES + 1_000_000) }
+          ]
         }
       ]);
       expect(await agentStub.continuationRowCountForTest()).toBeGreaterThan(0);

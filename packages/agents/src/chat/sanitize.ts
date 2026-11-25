@@ -1,20 +1,28 @@
 /**
- * Row-size enforcement for chat tables that are NOT session storage.
- *
- * Sessions offloads oversized payloads losslessly and never truncates. Hosts
- * that write messages into their own SQLite tables (Think's submission queue,
- * for one) have no payload store behind them, so they still need a guard that
- * makes a row fit. Message hygiene itself lives in `agents/sessions`.
+ * `enforceRowSizeLimit` is kept only for released packages that import it
+ * from `agents/chat`: `@cloudflare/think` 0.21 to 0.24 and
+ * `@cloudflare/ai-chat` 0.10 and 0.11 cut a message to fit one row before storing it,
+ * and their peer ranges let them install beside this `agents`. Nothing in
+ * this repo calls it: Sessions stores a large message whole across rows.
+ * Message hygiene itself lives in `agents/sessions`.
  */
 
 import type { UIMessage } from "ai";
-import { ROW_MAX_BYTES } from "../internal/platform-limits";
+import { SQLITE_ROW_BYTES } from "../internal/platform-limits";
 import { byteLength, sanitizeMessage } from "../sessions/sanitize";
 import { truncateToolOutput } from "./tool-output-truncation";
 
 export { byteLength, sanitizeMessage };
 
-/** Optional hooks for {@link enforceRowSizeLimit}. */
+/** The largest serialized message {@link enforceRowSizeLimit} leaves whole. */
+const ROW_MAX_BYTES = SQLITE_ROW_BYTES - 200_000;
+
+/**
+ * Optional hooks for {@link enforceRowSizeLimit}.
+ *
+ * @internal Kept for released packages (see the top of this file).
+ * @deprecated
+ */
 export interface EnforceRowSizeLimitOptions {
   /**
    * Optional logger invoked when a message has to be compacted/truncated. The
@@ -25,8 +33,7 @@ export interface EnforceRowSizeLimitOptions {
 
 /**
  * Enforce SQLite row size limits by compacting tool outputs and text parts
- * when a serialized message exceeds `ROW_MAX_BYTES`. Shared by
- * `@cloudflare/ai-chat` and `@cloudflare/think` so both compact identically.
+ * when a serialized message exceeds one row less 200,000 bytes.
  *
  * Compaction strategy:
  * 1. Compact tool outputs over 1KB with {@link truncateToolOutput}, preserving
@@ -34,6 +41,10 @@ export interface EnforceRowSizeLimitOptions {
  *    with the compacted tool-call IDs.
  * 2. If still too big, truncate text parts from oldest to newest, annotating
  *    `metadata.compactedTextParts` with the truncated part indices.
+ *
+ * @internal Kept for `@cloudflare/think` 0.21 to 0.24 and
+ * `@cloudflare/ai-chat` 0.10 and 0.11, which import it; nothing here calls it.
+ * @deprecated
  */
 export function enforceRowSizeLimit(
   message: UIMessage,
