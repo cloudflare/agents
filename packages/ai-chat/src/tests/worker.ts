@@ -6140,14 +6140,32 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     );
   }
 
-  /** The pre-capability chat stream tables that still exist. */
-  legacyChatTablesForTest(): string[] {
-    return this.ctx.storage.sql
+  /**
+   * The pre-capability chat stream tables that still exist, the rows left
+   * in them, and the chunks of the seeded stream now in Streams.
+   */
+  legacyChatTablesForTest(): {
+    tables: string[];
+    rowsLeft: number;
+    importedChunks: number;
+  } {
+    const sql = this.ctx.storage.sql;
+    const tables = sql
       .exec<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_ai_chat_stream_%' ORDER BY name"
       )
       .toArray()
       .map((row) => row.name);
+    let rowsLeft = 0;
+    for (const table of tables) {
+      rowsLeft += sql.exec(`SELECT 1 FROM ${table}`).toArray().length;
+    }
+    return {
+      tables,
+      rowsLeft,
+      importedChunks:
+        this._resumableStream.getStreamChunks("legacy-stream").length
+    };
   }
 
   /**
@@ -7681,7 +7699,9 @@ export class AIChatAgentToolParent extends Agent<Env> {
     await child.seedLegacyChatTablesForTest();
   }
 
-  async childLegacyChatTablesForTest(childName: string): Promise<string[]> {
+  async childLegacyChatTablesForTest(
+    childName: string
+  ): Promise<{ tables: string[]; rowsLeft: number; importedChunks: number }> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);
     return child.legacyChatTablesForTest();
   }

@@ -21,7 +21,9 @@ import { connectChatWS } from "./test-utils";
 type ParentStub = DurableObjectStub & {
   resetChildForTest(childName: string): Promise<void>;
   seedChildLegacyChatTablesForTest(childName: string): Promise<void>;
-  childLegacyChatTablesForTest(childName: string): Promise<string[]>;
+  childLegacyChatTablesForTest(
+    childName: string
+  ): Promise<{ tables: string[]; rowsLeft: number; importedChunks: number }>;
   runChild(
     input: {
       prompt: string;
@@ -373,10 +375,11 @@ describe("AIChatAgent as an agent-tool child", () => {
     const childName = `legacy-${crypto.randomUUID()}`;
     await parent.seedChildLegacyChatTablesForTest(childName);
     await parent.resetChildForTest(childName);
-    expect(await parent.childLegacyChatTablesForTest(childName)).toEqual([
-      "cf_ai_chat_stream_chunks",
-      "cf_ai_chat_stream_metadata"
-    ]);
+    expect(await parent.childLegacyChatTablesForTest(childName)).toEqual({
+      tables: ["cf_ai_chat_stream_chunks", "cf_ai_chat_stream_metadata"],
+      rowsLeft: 0,
+      importedChunks: 1
+    });
   });
 
   it("returns an error, and settles its row, when the start call fails and the child has no such run", async () => {

@@ -57,9 +57,7 @@ import type {
   RootFacetRpcSurface,
   StoredDynamicAgentConnection
 } from "./types";
-
-/** The storage key a parent sets on a facet it creates. */
-const FACET_FLAG_KEY = "cf_agents_is_facet";
+import { FACET_FLAG_KEY } from "./facet-flag";
 /**
  * Internal key used to remember the outer `/sub/...` URL for a
  * WebSocket accepted by the parent on behalf of a child facet.
@@ -2048,13 +2046,4 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // bridge, so neither touches the parent's own WebSocket handles (#1679).
     await this.#host.__unsafe_ensureInitialized();
   }
-}
-
-/**
- * @internal Whether this Durable Object was set up as a facet, read from
- * the flag its parent stored. Readable before the Agent's own start has
- * restored its facet context.
- */
-export function storedAsFacet(kv: { get(key: string): unknown }): boolean {
-  return kv.get(FACET_FLAG_KEY) === true;
 }
