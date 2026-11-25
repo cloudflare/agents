@@ -63,6 +63,11 @@ type AgentToolInternals = {
     completedAt?: number
   ): Promise<void>;
   _hasOutstandingDetachedRuns(): boolean;
+  _detachedFastPath(
+    runInfo: AgentToolRunInfo,
+    cls: unknown,
+    runId: string
+  ): Promise<void>;
   _armDetachedBackbone(options?: { resetCadence?: boolean }): Promise<void>;
 };
 
@@ -222,6 +227,16 @@ export class TestAgentToolReplayAgent extends Agent {
 
   getDetachedDeliveryLog(): DetachedDeliveryLogEntry[] {
     return this.detachedDeliveryLog;
+  }
+
+  /** Milestone notifications delivered through the `onMilestones` seam. */
+  detachedMilestoneLog: { runId: string; name: string }[] = [];
+
+  protected override async _deliverDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: { name: string }
+  ): Promise<void> {
+    this.detachedMilestoneLog.push({ runId: run.runId, name: milestone.name });
   }
 
   /** Seed a `running` detached run row with the `onDetachedDone` hook wired. */
@@ -426,9 +441,14 @@ export class TestAgentToolReplayAgent extends Agent {
    * it as `running` but before its cancel lands (#2768 review). Runs one
    * backbone tick and reports what was delivered.
    */
-  async giveUpRacingChildCompletionForTest(runId: string): Promise<{
+  async giveUpRacingChildCompletionForTest(
+    runId: string,
+    lateMilestone?: string
+  ): Promise<{
     log: DetachedDeliveryLogEntry[];
+    milestones: string[];
     outstanding: boolean;
+    schedules: number;
     status: string | null;
   }> {
     const child = await this.subAgent(TestAgentToolStubChild, runId);
@@ -436,13 +456,18 @@ export class TestAgentToolReplayAgent extends Agent {
       { chunkBodies: [], pendingChunkBodies: [], summary: "real result" },
       { runId }
     );
+    const onMilestones = lateMilestone
+      ? JSON.stringify({ names: [lateMilestone], mode: "narrate" })
+      : null;
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, status, display_order,
-        started_at, detached, detached_on_finish, detached_max_budget_at
+        started_at, detached, detached_on_finish, detached_max_budget_at,
+        detached_on_milestones
       ) VALUES (
         ${runId}, ${null}, 'TestAgentToolStubChild', 'running', 0,
-        ${Date.now()}, 1, 'onDetachedDone', ${Date.now() - 1000}
+        ${Date.now()}, 1, 'onDetachedDone', ${Date.now() - 1000},
+        ${onMilestones}
       )
     `;
     const self = this as unknown as {
@@ -452,7 +477,10 @@ export class TestAgentToolReplayAgent extends Agent {
     let resolves = 0;
     self._cf_resolveSubAgent = async (className, name) => {
       // The second resolve is the cancel: the child finishes right before it.
+      // A milestone recorded in that window is only seen after the cancel.
       if (name === runId && ++resolves === 2) {
+        if (lateMilestone)
+          await child.addMilestoneForTest(runId, lateMilestone);
         await child.completeRunForTest(runId);
       }
       return original(className, name);
@@ -464,8 +492,50 @@ export class TestAgentToolReplayAgent extends Agent {
     }
     return {
       log: this.detachedDeliveryLog.filter((entry) => entry.runId === runId),
+      milestones: this.detachedMilestoneLog
+        .filter((entry) => entry.runId === runId)
+        .map((entry) => entry.name),
       outstanding: this._agentTool._hasOutstandingDetachedRuns(),
+      schedules: (await this.detachedBackboneSchedulesForTest()).length,
       status: this.readRunStatusForTest(runId)
+    };
+  }
+
+  /**
+   * A detached run already given up with its child torn down (so polling has
+   * stopped), whose warm fast path then claims the child's terminal and its
+   * finish callback fails once. Returns the backbone schedules left behind.
+   */
+  async fastPathFailsAfterGiveUpForTest(
+    runId: string
+  ): Promise<{ outstanding: boolean; schedules: number }> {
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    await child.startAgentToolRun(
+      { chunkBodies: [], summary: "late result" },
+      { runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish, child_still_running,
+        give_up_delivered_at
+      ) VALUES (
+        ${runId}, ${null}, 'TestAgentToolStubChild', 'interrupted', 0,
+        ${Date.now()}, 1, 'onDetachedFinishFailsOnce', 0, ${Date.now()}
+      )
+    `;
+    await this._agentTool._detachedFastPath(
+      {
+        runId,
+        agentType: "TestAgentToolStubChild",
+        parentToolCallId: undefined
+      } as unknown as AgentToolRunInfo,
+      TestAgentToolStubChild,
+      runId
+    );
+    return {
+      outstanding: this._agentTool._hasOutstandingDetachedRuns(),
+      schedules: (await this.detachedBackboneSchedulesForTest()).length
     };
   }
 
@@ -802,6 +872,17 @@ export class TestAgentToolStubChild extends Agent {
       UPDATE cf_test_stub_runs
       SET status = 'aborted', completed_at = ${Date.now()}
       WHERE run_id = ${runId} AND completed_at IS NULL
+    `;
+  }
+
+  /** Record a milestone on a stub run so later inspections report it. */
+  addMilestoneForTest(runId: string, name: string): void {
+    this._ensureTables();
+    const milestones = this._milestones(runId);
+    milestones.push({ beforeChunk: milestones.length, name });
+    this.sql`
+      UPDATE cf_test_stub_runs SET milestones_json = ${JSON.stringify(milestones)}
+      WHERE run_id = ${runId}
     `;
   }
 

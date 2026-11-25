@@ -4151,7 +4151,16 @@ export class Agent<
         );
       }
     } catch {
-      // Leave it to the backbone reconcile.
+      // Leave it to the backbone reconcile. A failed finish callback can land
+      // after the last tick already stopped polling (e.g. a give-up that tore
+      // the child down), so make sure a backbone is armed to retry the claim.
+      try {
+        if (this._hasOutstandingDetachedRuns()) {
+          await this._armDetachedBackbone();
+        }
+      } catch {
+        // Startup recovery re-arms the backbone if this fails too.
+      }
     }
   }
 
@@ -4521,6 +4530,18 @@ export class Agent<
         } catch {
           // Could not confirm teardown; the child may complete anyway and the
           // finish slot (still open) will deliver the real result.
+        }
+        // The post-cancel snapshot can report milestones the first inspection
+        // missed; deliver them now, as this run may not be polled again.
+        if (afterCancel?.milestones && row.detached_on_milestones) {
+          const milestoneRunInfo = this._agentToolRunInfoFromRow(row);
+          for (const milestone of afterCancel.milestones) {
+            this._maybeDeliverDetachedMilestone(
+              row,
+              milestoneRunInfo,
+              milestone
+            );
+          }
         }
         if (
           afterCancel &&

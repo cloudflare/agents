@@ -114,6 +114,9 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
     await agent.deliverGiveUpForTest("run-torn-down", false);
     expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    // A backbone tick over the settled row does not re-arm itself.
+    await agent.detachedReconcileTickForTest();
+    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
 
     // A child that may still be running can deliver a late finish.
     agent.seedDetachedRunForTest("run-still-running");
@@ -171,6 +174,43 @@ describe("detached agent-tool delivery (#1752)", () => {
       { hook: "onDetachedDone", runId: "run-giveup-race", status: "completed" }
     ]);
     expect(result.outstanding).toBe(false);
+    expect(result.schedules).toBe(0);
+  });
+
+  it("delivers a milestone only the post-cancel inspection reports (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-milestone-${crypto.randomUUID()}`
+    );
+
+    const result = await agent.giveUpRacingChildCompletionForTest(
+      "run-giveup-milestone",
+      "sources-gathered"
+    );
+    expect(result.status).toBe("completed");
+    expect(result.milestones).toEqual(["sources-gathered"]);
+    expect(result.outstanding).toBe(false);
+  });
+
+  it("arms the backbone when a fast-path finish fails after polling stopped (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-fastpath-retry-${crypto.randomUUID()}`
+    );
+
+    const result =
+      await agent.fastPathFailsAfterGiveUpForTest("run-fastpath-retry");
+    expect(result.outstanding).toBe(true);
+    expect(result.schedules).toBe(1);
+
+    // The armed backbone retries the claim once its lease expires.
+    agent.expireDetachedFinishClaimForTest("run-fastpath-retry");
+    await agent.detachedReconcileTickForTest();
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    const delivered = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-fastpath-retry" && e.hook === "onDetachedDone"
+    );
+    expect(delivered.map((e) => e.status)).toEqual(["completed"]);
   });
 
   it("gives up a silent detached run once its no-progress window elapses (reason: no-progress)", async () => {
