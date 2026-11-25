@@ -468,9 +468,11 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    // Wait for tool result to be applied and continuation to happen
-    // Note: When there's no active stream, the continuation waits 500ms before proceeding
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // The result is applied and its continuation runs to the end.
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
+      true
+    );
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1684,8 +1686,11 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       })
     );
 
-    // Wait for approval + continuation (500ms wait + stream)
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // The approval is applied and its continuation runs to the end.
+    await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
+      true
+    );
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
