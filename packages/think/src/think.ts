@@ -382,11 +382,7 @@ import type {
   ReplyRemoval,
   TurnFailureHost
 } from "agents/chat";
-import {
-  backoffDelay,
-  replyIsEmpty,
-  stripTrailingReasoning
-} from "agents/chat";
+import { replyIsEmpty, stripTrailingReasoning } from "agents/chat";
 import type {
   BeforeTurnRepairResult,
   RepairedTranscriptSink,

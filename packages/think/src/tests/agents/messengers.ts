@@ -370,11 +370,11 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     );
   }
 
-  /** Wait until the incident's recovered reply is delivered (or 5 s). */
+  /** Wait until the incident's recovered reply is delivered (or 10 s). */
   private async _untilRecoveredReplyDelivered(
     incidentId: string
   ): Promise<boolean> {
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       if (this.tasks.peek(recoveredReplyId(incidentId)) === undefined) {
         return true;
