@@ -166,6 +166,32 @@ describe("Sessions instances", () => {
     });
   });
 
+  it("starts without reading sqlite_master or pragma_table_info", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const sessions = new Sessions();
+      const { lifecycle } = install(sessions);
+      const exec = storage.sql.exec.bind(storage.sql);
+      const queries: string[] = [];
+      (storage.sql as { exec: SqlStorage["exec"] }).exec = ((
+        query: string,
+        ...params: unknown[]
+      ) => {
+        queries.push(query);
+        return exec(query, ...(params as never[]));
+        // SAFETY: forwards every argument and the cursor unchanged.
+      }) as SqlStorage["exec"];
+      try {
+        await lifecycle.start();
+        await sessions.session().appendMessage(text("m1"));
+      } finally {
+        (storage.sql as { exec: SqlStorage["exec"] }).exec = exec;
+      }
+      expect(
+        queries.filter((query) => /sqlite_master|pragma_table_info/.test(query))
+      ).toEqual([]);
+    });
+  });
+
   it("starts a named instance at the current schema version, with nothing to lift", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       // Legacy tables a named instance must leave to the default.
@@ -175,12 +201,13 @@ describe("Sessions instances", () => {
       const audit = new Sessions({ name: "audit" });
       const { lifecycle } = install(audit);
       await lifecycle.start();
-      expect(
-        storage.kv.get("cf_agents:sessions/audit:sessions_schema_version")
-      ).toBe(2);
-      expect(storage.kv.get("cf_agents:sessions_schema_version")).toBe(
-        undefined
+      // On the one schema record, under the instance's id; nothing for the
+      // default instance.
+      const record = storage.kv.get<Record<string, number>>(
+        "cf_agents:schema_versions"
       );
+      expect(record?.["sessions/audit"]).toBe(2);
+      expect(record?.sessions).toBeUndefined();
       const tables = storage.sql
         .exec<{ name: string }>(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'assistant_messages'"

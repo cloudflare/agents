@@ -122,7 +122,11 @@ describe("Sessions legacy migration", () => {
         { id: "m3", seq: 3, type: "message", parent_id: "m1" }
       ]);
       expect(
-        await instance.kvGet<number>("cf_agents:sessions_schema_version")
+        (
+          await instance.kvGet<Record<string, number>>(
+            "cf_agents:schema_versions"
+          )
+        )?.sessions
       ).toBe(2);
 
       // Every lifted source is dropped once its rows are verified present.

@@ -508,25 +508,34 @@ export class SessionsCore {
    * row back once.
    */
   #addMessageContentHashColumn(): void {
-    const columns = this.io
-      .sql<{
-        name: string;
-      }>(`SELECT name FROM pragma_table_info('${this.#t.messages}')`, [])
-      .map((row) => row.name);
-    if (columns.includes("content_hash")) return;
+    if (
+      this.#probe(`SELECT [content_hash] FROM [${this.#t.messages}] LIMIT 0`)
+    ) {
+      return;
+    }
     this.io.sqlWrite(
       `ALTER TABLE ${this.#t.messages} ADD COLUMN content_hash TEXT`,
       []
     );
   }
 
+  /**
+   * Whether `query` runs: a `LIMIT 0` read of a missing table, column or
+   * index throws, of an existing one reads no row. No `sqlite_master` or
+   * `pragma_table_info` read (STANDARDISE row 7; `hasTable` in
+   * lifecycle/schema.ts, through Sessions' own `io`).
+   */
+  #probe(query: string): boolean {
+    try {
+      this.io.sql(query, []);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   #tableExists(name: string): boolean {
-    return (
-      this.io.sql<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
-        [name]
-      ).length > 0
-    );
+    return this.#probe(`SELECT 1 FROM [${name}] LIMIT 0`);
   }
 
   /**
@@ -639,12 +648,9 @@ export class SessionsCore {
    * interrupted after the rebuild repeats nothing.
    */
   rebuildCompactions(): void {
-    const rebuilt =
-      this.io.sql<{ one: number }>(
-        `SELECT 1 AS one FROM pragma_table_info('${this.#t.compactions}')
-         WHERE name = 'resume_id'`,
-        []
-      ).length > 0;
+    const rebuilt = this.#probe(
+      `SELECT [resume_id] FROM [${this.#t.compactions}] LIMIT 0`
+    );
     if (rebuilt) return;
     this.io.transaction(() => {
       this.io.sqlWrite(
@@ -1228,11 +1234,10 @@ export class SessionsCore {
   /** Whether the tail index exists; a positive answer is remembered. */
   #hasTailIndex(): boolean {
     if (!this.#tailIndexed) {
-      this.#tailIndexed =
-        this.io.sql<{ one: number }>(
-          `SELECT 1 AS one FROM sqlite_master WHERE type = 'index' AND name = '${this.#t.tailIndex}'`,
-          []
-        ).length > 0;
+      // `INDEXED BY` a missing index throws.
+      this.#tailIndexed = this.#probe(
+        `SELECT 1 FROM [${this.#t.messages}] INDEXED BY [${this.#t.tailIndex}] LIMIT 0`
+      );
     }
     return this.#tailIndexed;
   }
