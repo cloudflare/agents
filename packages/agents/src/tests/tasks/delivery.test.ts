@@ -7,7 +7,13 @@ import {
   sendDelivery,
   type DeliveryAttempt
 } from "../../internal/delivery";
+import type { Tasks } from "../../tasks/tasks";
 import { seedTaskRun, type TaskHarnessObject } from "../capabilities/tasks";
+
+/** The harness's Tasks as a host's untyped one, as deliveries take it. */
+function tasksOf(instance: TaskHarnessObject): Tasks {
+  return instance.tasks as unknown as Tasks;
+}
 
 type Seen = Pick<DeliveryAttempt, "id" | "attempt" | "idempotencyKey">;
 
@@ -44,7 +50,7 @@ describe("deliveries", () => {
         await instance.lifecycle.start();
         const seen: Seen[] = [];
         let failures = 2;
-        registerDeliverySink<{ text: string }>(instance.tasks, "flaky", {
+        registerDeliverySink<{ text: string }>(tasksOf(instance), "flaky", {
           retry: { baseDelayMs: 100 },
           deliver: (payload, attempt) => {
             seen.push({
@@ -56,7 +62,7 @@ describe("deliveries", () => {
           }
         });
         const before = Date.now();
-        await sendDelivery(instance.tasks, "flaky", "k1", { text: "hi" });
+        await sendDelivery(tasksOf(instance), "flaky", "k1", { text: "hi" });
         await until(() => seen.length === 1);
         await until(() => openRuns(state.storage)[0]?.status === "pending");
         const [waiting] = openRuns(state.storage);
@@ -83,14 +89,14 @@ describe("deliveries", () => {
       const gate = new Promise<void>((resolve) => {
         release = resolve;
       });
-      registerDeliverySink<string>(instance.tasks, "slow", {
+      registerDeliverySink<string>(tasksOf(instance), "slow", {
         deliver: async (payload) => {
           payloads.push(payload);
           await gate;
         }
       });
-      await sendDelivery(instance.tasks, "slow", "k", "first");
-      await sendDelivery(instance.tasks, "slow", "k", "second");
+      await sendDelivery(tasksOf(instance), "slow", "k", "first");
+      await sendDelivery(tasksOf(instance), "slow", "k", "second");
       release();
       await until(() => instance.tasks.peek("k") === undefined);
       expect(payloads).toEqual(["first"]);
@@ -103,7 +109,7 @@ describe("deliveries", () => {
       await instance.lifecycle.start();
       const attempts: number[] = [];
       let aborted = false;
-      registerDeliverySink<null>(instance.tasks, "hung", {
+      registerDeliverySink<null>(tasksOf(instance), "hung", {
         retry: { baseDelayMs: 50, attemptTimeoutMs: 100 },
         deliver: (_payload, attempt) => {
           attempts.push(attempt.attempt);
@@ -114,7 +120,7 @@ describe("deliveries", () => {
           return new Promise<never>(() => {});
         }
       });
-      await sendDelivery(instance.tasks, "hung", "h", null);
+      await sendDelivery(tasksOf(instance), "hung", "h", null);
       await until(() => instance.tasks.peek("h") === undefined);
       expect(attempts).toEqual([1, 2]);
       expect(aborted).toBe(true);
@@ -125,13 +131,13 @@ describe("deliveries", () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       await instance.lifecycle.start();
-      registerDeliverySink<null>(instance.tasks, "gone", {
+      registerDeliverySink<null>(tasksOf(instance), "gone", {
         retry: { baseDelayMs: 100, giveUpAfterMs: 250 },
         deliver: () => {
           throw new Error("unreachable");
         }
       });
-      await instance.tasks.run(deliveryDefinition("gone"), null, {
+      await tasksOf(instance).run(deliveryDefinition("gone"), null, {
         runId: "g"
       });
       await until(() => instance.tasks.peek("g")?.status === "error");
@@ -150,7 +156,7 @@ describe("deliveries", () => {
       stub,
       async (instance: TaskHarnessObject, state) => {
         await instance.lifecycle.start();
-        registerDeliverySink<string>(instance.tasks, "cut", {
+        registerDeliverySink<string>(tasksOf(instance), "cut", {
           deliver: (payload, attempt) => {
             (instance as unknown as { delivered: unknown[] }).delivered = [
               payload,
@@ -184,16 +190,16 @@ describe("deliveries", () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       await instance.lifecycle.start();
-      registerDeliverySink<null>(instance.tasks, "old", {
+      registerDeliverySink<null>(tasksOf(instance), "old", {
         deliver: () => {
           throw new Error("still down");
         }
       });
-      await sendDelivery(instance.tasks, "old", "o", null, {
+      await sendDelivery(tasksOf(instance), "old", "o", null, {
         sentAt: Date.now() - 13 * 60 * 60 * 1000,
         attempts: 4
       });
-      await instance.tasks.runDue(deliveryDefinition("old"));
+      await tasksOf(instance).runDue(deliveryDefinition("old"));
       // Given up on its first attempt here (attempt 5); nothing is kept.
       expect(instance.tasks.peek("o")).toBeUndefined();
       expect(instance.runErrors).toContainEqual(
