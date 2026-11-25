@@ -142,6 +142,13 @@ export const ROOT_SESSION: ThinkSessionId = "";
 /** The Tasks definition every operation is a run of. */
 const OPERATION_DEFINITION = "__cf_think_harness_operation";
 /**
+ * An operation submitted as a submission (internal `submission` option):
+ * the same handler and lane, a definition of its own so submissions can be
+ * listed and deleted apart from other operations, and kept across a reset.
+ */
+const SUBMISSION_DEFINITION = "__cf_think_harness_submission";
+const DEFINITIONS = [OPERATION_DEFINITION, SUBMISSION_DEFINITION] as const;
+/**
  * The session value (Sessions config) that records a session the harness
  * knows of: `{ parent?, createdAt }`. Not a `transcript:` key, so a reset
  * keeps it.
@@ -613,18 +620,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     this.#streams = this.compose(
       new Streams({ name: this.composedName, maxChunkBytes: REPLAY_ITEM_BYTES })
     );
-    this.#tasks.register(
-      OPERATION_DEFINITION,
-      // SAFETY: every run of this definition was accepted by `enqueue` or
-      // carried forward by `onStart`, both with an OperationRunInput.
-      (input, run) => this.#operate(input as OperationRunInput, run),
-      {
-        onStatus: (record) => this.#onStatus(record),
-        // The terminal report of a run that ended outside its handler (an
-        // abort, the memory-limit breaker) finishes it from its progress.
-        keepCheckpoint: true
-      }
-    );
+    for (const definition of DEFINITIONS) {
+      this.#tasks.register(
+        definition,
+        // SAFETY: every run of these definitions was accepted by `enqueue`
+        // or carried forward by `onStart`, both with an OperationRunInput.
+        (input, run) => this.#operate(input as OperationRunInput, run),
+        {
+          onStatus: (record) => this.#onStatus(record),
+          // The terminal report of a run that ended outside its handler (an
+          // abort, the memory-limit breaker) finishes it from its progress.
+          keepCheckpoint: true
+        }
+      );
+    }
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -827,7 +836,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       source: options.source ?? "server"
     };
     const receipt = await this.#tasks.run(
-      OPERATION_DEFINITION,
+      options.submission ? SUBMISSION_DEFINITION : OPERATION_DEFINITION,
       // SAFETY: an OperationRunInput is plain JSON: UI messages and tool
       // answers as clients send them.
       stored as unknown as TaskJson,
@@ -859,6 +868,51 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       keyOf(session, idempotencyKey)
     );
     return record && operationOf(record.runId)[1];
+  }
+
+  /**
+   * @internal A session's submissions (operations submitted with the
+   * internal `submission` option), newest first unless asked: at most
+   * `limit`, each read with its result, as `inspect` reads one.
+   */
+  async submissions(
+    session: ThinkSessionId,
+    options: {
+      status?: readonly TaskStatus[];
+      order?: "oldest" | "newest";
+      limit: number;
+    }
+  ): Promise<ThinkOperationInspection[]> {
+    await this.lifecycle.ready();
+    return this.#tasks
+      .peekList({
+        definition: SUBMISSION_DEFINITION,
+        lane: laneOf(session),
+        ...(options.status && { status: options.status }),
+        order: options.order ?? "newest",
+        limit: options.limit
+      })
+      .map((record) => this.#inspection(record));
+  }
+
+  /**
+   * @internal Delete one settled submission. False when there is none by
+   * that id, or it is still open.
+   */
+  async deleteSubmission(
+    session: ThinkSessionId,
+    operationId: string
+  ): Promise<boolean> {
+    await this.lifecycle.ready();
+    const record = this.#tasks.peek(runIdOf(session, operationId));
+    if (
+      !record ||
+      record.definition !== SUBMISSION_DEFINITION ||
+      !TERMINAL.includes(record.status)
+    ) {
+      return false;
+    }
+    return this.#tasks.deleteRun(record.runId);
   }
 
   /** @internal Stop one operation, or everything open in a session. */
@@ -2238,14 +2292,32 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * the list has no cap of its own.
    */
   #open(session?: ThinkSessionId): TaskRecord[] {
-    return this.#tasks.peekList({
-      definition: OPERATION_DEFINITION,
-      ...(session !== undefined && { lane: laneOf(session) }),
-      status: ["pending", "running"],
-      results: false,
-      order: "oldest",
-      limit: Number.MAX_SAFE_INTEGER
-    });
+    const [operations, submissions] = DEFINITIONS.map((definition) =>
+      this.#tasks.peekList({
+        definition,
+        ...(session !== undefined && { lane: laneOf(session) }),
+        status: ["pending", "running"],
+        results: false,
+        order: "oldest",
+        limit: Number.MAX_SAFE_INTEGER
+      })
+    );
+    if (submissions.length === 0) return operations;
+    if (operations.length === 0) return submissions;
+    // Both lists are oldest first: merge them by acceptance time.
+    const merged: TaskRecord[] = [];
+    let i = 0;
+    let j = 0;
+    while (i < operations.length || j < submissions.length) {
+      const next =
+        j >= submissions.length ||
+        (i < operations.length &&
+          operations[i].createdAt <= submissions[j].createdAt)
+          ? operations[i++]
+          : submissions[j++];
+      merged.push(next);
+    }
+    return merged;
   }
 
   /** A placed operation's progress, read from outside its attempt. */

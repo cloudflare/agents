@@ -62,7 +62,15 @@ import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
-import { admittedSubmissionMetadata } from "../submissions";
+import {
+  admittedSubmissionMetadata,
+  isTerminalSubmissionStatus,
+  TERMINAL_SUBMISSION_STATUSES,
+  type DeleteSubmissionsOptions,
+  type ListSubmissionsOptions,
+  type ThinkSubmissionStatus
+} from "../submissions";
+import type { TaskStatus } from "agents/tasks";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
@@ -134,6 +142,63 @@ function submissionStatus(
           ? "aborted"
           : "error";
   }
+}
+
+/** An operation's inspection: its status, times, key and metadata. */
+type ThinkOperationInspection = NonNullable<
+  Awaited<ReturnType<ThinkHarness["inspection"]>>
+>;
+
+/** A harness operation as Think's submission inspection. */
+function submissionInspection(
+  status: ThinkOperationInspection
+): ThinkSubmissionInspection {
+  return {
+    submissionId: status.operationId,
+    requestId: status.operationId,
+    status: submissionStatus(status),
+    createdAt: status.createdAt,
+    ...(status.startedAt !== undefined && { startedAt: status.startedAt }),
+    ...(status.settledAt !== undefined && { completedAt: status.settledAt }),
+    ...(status.idempotencyKey !== undefined && {
+      idempotencyKey: status.idempotencyKey
+    }),
+    ...(status.metadata !== undefined && { metadata: status.metadata }),
+    ...(status.status === "unanswered" &&
+      status.reason !== undefined && { error: status.reason }),
+    ...("messageId" in status &&
+      status.messageId !== undefined && { messageId: status.messageId })
+  };
+}
+
+/** A status filter as a list, or none. */
+function submissionStatuses(
+  status: ThinkSubmissionStatus | ThinkSubmissionStatus[] | undefined
+): ThinkSubmissionStatus[] | undefined {
+  if (status === undefined) return undefined;
+  return Array.isArray(status) ? status : [status];
+}
+
+/**
+ * The run statuses a submission of these statuses can have. An operation
+ * that ended unanswered is a completed run, so a terminal status other
+ * than `completed` also looks at completed runs; callers match the mapped
+ * status after.
+ */
+function taskStatusesFor(
+  wanted: readonly ThinkSubmissionStatus[]
+): TaskStatus[] {
+  const out = new Set<TaskStatus>();
+  for (const status of wanted) {
+    if (status === "pending" || status === "running") {
+      out.add("pending");
+      out.add("running");
+    } else {
+      out.add("completed");
+      if (status !== "completed") out.add(status);
+    }
+  }
+  return [...out];
 }
 
 function saveResult(result: ThinkOperationResult): SaveMessagesResult {
@@ -876,6 +941,7 @@ export class Think<
       ...(options?.submissionId !== undefined && {
         operationId: options.submissionId
       }),
+      submission: true,
       // An empty key is no key, as on Think.
       ...(options?.idempotencyKey && {
         idempotencyKey: options.idempotencyKey
@@ -900,25 +966,62 @@ export class Think<
       this.harness.session().id,
       submissionId
     );
-    if (!status) return null;
-    return {
-      submissionId,
-      requestId: submissionId,
-      status: submissionStatus(status),
-      createdAt: status.createdAt,
-      ...(status.startedAt !== undefined && { startedAt: status.startedAt }),
-      ...(status.settledAt !== undefined && {
-        completedAt: status.settledAt
-      }),
-      ...(status.idempotencyKey !== undefined && {
-        idempotencyKey: status.idempotencyKey
-      }),
-      ...(status.metadata !== undefined && { metadata: status.metadata }),
-      ...(status.status === "unanswered" &&
-        status.reason !== undefined && { error: status.reason }),
-      ...("messageId" in status &&
-        status.messageId !== undefined && { messageId: status.messageId })
-    };
+    return status ? submissionInspection(status) : null;
+  }
+
+  async listSubmissions(
+    options?: ListSubmissionsOptions
+  ): Promise<ThinkSubmissionInspection[]> {
+    const wanted = submissionStatuses(options?.status);
+    if (wanted?.length === 0) return [];
+    const listed = await this.harness.submissions(this.harness.session().id, {
+      ...(wanted && { status: taskStatusesFor(wanted) }),
+      limit: Math.min(Math.max(options?.limit ?? 50, 1), 100)
+    });
+    return listed
+      .map(submissionInspection)
+      .filter((submission) => !wanted || wanted.includes(submission.status));
+  }
+
+  async deleteSubmission(submissionId: string): Promise<boolean> {
+    return this.harness.deleteSubmission(
+      this.harness.session().id,
+      submissionId
+    );
+  }
+
+  async deleteSubmissions(options?: DeleteSubmissionsOptions): Promise<number> {
+    const wanted = (
+      submissionStatuses(options?.status) ?? TERMINAL_SUBMISSION_STATUSES
+    ).filter(isTerminalSubmissionStatus);
+    if (wanted.length === 0) return 0;
+    const session = this.harness.session().id;
+    // Oldest first, as Think deletes; matched on Think's status, so a run
+    // the harness counts as completed but which ended unanswered is not
+    // taken for a completed submission.
+    const listed = await this.harness.submissions(session, {
+      status: taskStatusesFor(wanted),
+      order: "oldest",
+      limit: Math.min(Math.max(options?.limit ?? 100, 1), 500)
+    });
+    const matches: readonly ThinkSubmissionStatus[] = wanted;
+    let deleted = 0;
+    for (const submission of listed.map(submissionInspection)) {
+      if (!matches.includes(submission.status)) continue;
+      if (
+        options?.completedBefore &&
+        (submission.completedAt === undefined ||
+          submission.completedAt >= options.completedBefore.getTime())
+      ) {
+        continue;
+      }
+      if (
+        await this.harness.deleteSubmission(session, submission.submissionId)
+      ) {
+        deleted++;
+      }
+    }
+    return deleted;
   }
 
   async waitForSubmission(

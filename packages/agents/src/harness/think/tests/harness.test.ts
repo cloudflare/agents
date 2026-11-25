@@ -194,6 +194,41 @@ describe("ThinkHarness turns", () => {
     expect(types).toContain("text-delta");
   });
 
+  it("lists submissions apart from other operations, keeps them across a reset, and deletes settled ones", async () => {
+    const stub = fresh();
+    await stub.submit("plain", { operationId: "op-plain" });
+    const first = await stub.submit("one", {
+      operationId: "sub-1",
+      submission: true
+    });
+    await stub.wait(first.operationId);
+    const gate = await stub.submit("gate", {
+      operationId: "sub-2",
+      submission: true
+    });
+    await stub.gateStarted(1);
+    expect(await stub.submissionList()).toEqual([
+      { id: "sub-2", status: "running" },
+      { id: "sub-1", status: "done" }
+    ]);
+    // An open submission is not deleted.
+    expect(await stub.deleteSubmission("sub-2")).toBe(false);
+    await stub.release();
+    await stub.wait(gate.operationId);
+    // A reset keeps submissions, as Think keeps its own.
+    await stub.reset();
+    expect((await stub.submissionList()).map((s) => s.id)).toEqual([
+      "sub-2",
+      "sub-1"
+    ]);
+    // Only submissions are deleted here, and only settled ones.
+    expect(await stub.deleteSubmission("op-plain")).toBe(false);
+    expect(await stub.deleteSubmission("sub-1")).toBe(true);
+    expect(await stub.submissionList()).toEqual([
+      { id: "sub-2", status: "done" }
+    ]);
+  });
+
   it("refuses to steer instead of queueing the input", async () => {
     const stub = fresh();
     expect(await stub.steer("hello")).toBe("SteerNotSupportedError");

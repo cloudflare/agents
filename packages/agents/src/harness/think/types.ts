@@ -111,6 +111,12 @@ export type ThinkSubmitOptions = {
    * operation the first one started.
    */
   readonly idempotencyKey?: string;
+  /**
+   * @internal Submit it as a submission: listed and deleted with the
+   * harness's `submissions` and `deleteSubmissions`, and kept across a
+   * reset, as Think keeps its submissions.
+   */
+  readonly submission?: boolean;
   /** @internal JSON kept with the operation and returned by `inspect`. */
   readonly metadata?: Record<string, TaskJson>;
 };
