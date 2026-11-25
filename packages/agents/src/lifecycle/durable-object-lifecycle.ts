@@ -271,6 +271,16 @@ export function armFacetWake(
  * @internal At the root: drop the wake jobs of a facet path and every path
  * below it, when that sub-tree is deleted.
  */
+const schemaForgetters = new WeakMap<object, (id: string) => void>();
+
+/**
+ * @internal Drop capability `id`'s schema version in `lifecycle`, so its
+ * migration steps run again (tests that re-run a migration).
+ */
+export function forgetSchemaVersion(lifecycle: object, id: string): void {
+  schemaForgetters.get(lifecycle)?.(id);
+}
+
 /** What a Lifecycle holds, by capability id. */
 export type LifecycleInstances = {
   /** Installed capability ids, in install order. */
@@ -467,6 +477,7 @@ export class Lifecycle<
     );
     facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
     instanceListers.set(this, (stored) => this.#instances(stored));
+    schemaForgetters.set(this, (id) => this.#schemaVersions.forget(id));
     facetWakeArmers.set(this, (address, time) =>
       this.#holdFacetWake(address, time, 0)
     );

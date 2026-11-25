@@ -4,6 +4,7 @@ import {
   type AgentContext,
   type Connection
 } from "../../index.ts";
+import { forgetSchemaVersion } from "../../lifecycle/durable-object-lifecycle";
 import { MCPConnectionState } from "../../mcp/client/connection.ts";
 
 // Test Agent for state management tests
@@ -162,7 +163,7 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
 
   // Re-run the State capability's own migration (owner of cf_agents_state).
   async runStateMigration() {
-    await this.ctx.storage.delete("cf_agents:state_schema_version");
+    forgetSchemaVersion(this.lifecycle, "state");
     await this._state.onStart();
   }
 
@@ -297,7 +298,7 @@ export class TestStateAgentNoInitial extends Agent {
 
   // Re-run the State capability's own migration (owner of cf_agents_state).
   async runStateMigration() {
-    await this.ctx.storage.delete("cf_agents:state_schema_version");
+    forgetSchemaVersion(this.lifecycle, "state");
     await this._state.onStart();
   }
 

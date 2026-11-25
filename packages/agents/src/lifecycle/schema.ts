@@ -106,6 +106,13 @@ export class SchemaVersions {
     this.#dirty = true;
   }
 
+  /** Drop capability `id`'s version, so its steps run again from 0. */
+  forget(id: string): void {
+    delete this.#record()[id];
+    this.#dirty = true;
+    this.flush();
+  }
+
   /** Write the record if anything moved. Returns true when it wrote. */
   flush(): boolean {
     if (!this.#dirty) return false;
