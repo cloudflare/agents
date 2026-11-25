@@ -431,6 +431,13 @@ type AgentToolRecoveryInspection =
  * capability's version, and checks it on wake to skip DDL on established DOs.
  */
 const CURRENT_SCHEMA_VERSION = 14;
+/**
+ * The host version after the tables: fiber rows from a release before
+ * fibers ran on Tasks have been carried forward (at start, after the
+ * constructor's DDL, because the import awaits Tasks).
+ */
+const FIBERS_IMPORTED_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION + 1;
+
 /** The key it had before the one record: folded in once, then deleted. */
 const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
@@ -2502,12 +2509,21 @@ export class Agent<
    * dead isolate left, before onStart runs.
    */
   private async _recoverFibers(): Promise<void> {
-    await importLegacyFibers(
-      this.tasks,
-      this.ctx.storage,
-      this._isFacet,
-      this.lifecycle
-    );
+    // Recorded once as the host's next version, so a later start reads no
+    // table list. Only a release from before the record has these tables.
+    await this.lifecycle.hostSchema.migrate({
+      version: FIBERS_IMPORTED_SCHEMA_VERSION,
+      legacyKey: SCHEMA_VERSION_KEY,
+      steps: {
+        [FIBERS_IMPORTED_SCHEMA_VERSION]: () =>
+          importLegacyFibers(
+            this.tasks,
+            this.ctx.storage,
+            this._isFacet,
+            this.lifecycle
+          )
+      }
+    });
     const scanMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
     const startedAt = Date.now();
     const deadline = scanMs > 0 ? startedAt + scanMs : undefined;

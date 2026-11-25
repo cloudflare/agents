@@ -320,6 +320,15 @@ describe("runFiber", () => {
       expect(recovered[0].createdAt).toBeLessThanOrEqual(Date.now());
     });
 
+    it("reads no table list once the fiber import is recorded", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        `recovery-recorded-${crypto.randomUUID()}`
+      );
+      await agent.triggerRecoveryCheck();
+      expect(await agent.schemaReadsDuringRecovery()).toEqual([]);
+    });
+
     it("recovers a fiber row from the oldest released table shape", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,
