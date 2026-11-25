@@ -14,7 +14,7 @@ import {
   bindLifecycleCapability,
   LifecycleCapability
 } from "../../lifecycle/capability";
-import { ROW_VALUE_BYTES } from "../../internal/platform-limits";
+import { REPLAY_ITEM_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
 import type { MemoryLimitContext } from "../../lifecycle/capability-runner";
@@ -405,7 +405,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * it rather than asking the host to install a Streams capability. It
    * shares the `cf_agents_streams` tables with any Streams the host has.
    */
-  readonly #streams = new Streams({ maxChunkBytes: ROW_VALUE_BYTES });
+  readonly #streams = new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
   /**
    * The transcripts. The harness writes every message, and its operations
    * point at them, so it owns the Sessions capability too; a second one

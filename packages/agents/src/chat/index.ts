@@ -20,6 +20,7 @@ export {
 export {
   KV_DELETE_MAX_KEYS,
   MAX_BOUND_PARAMS,
+  REPLAY_CHUNK_BYTES,
   ROW_MAX_BYTES
 } from "../internal/platform-limits";
 

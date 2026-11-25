@@ -7,7 +7,6 @@
  * plain: `"null"` is JSON `null`, column `NULL` is `undefined`.
  */
 
-import { ROW_PIECE_UNITS, ROW_VALUE_BYTES } from "../internal/platform-limits";
 import { TaskSerializationError } from "./errors";
 
 /** Default ceiling for one serialized value (1 MiB). */
@@ -78,14 +77,15 @@ export function deserializeTaskValue(stored: string | null): unknown {
 export const MAX_PARTED_INPUT_BYTES = 16 * 1_048_576;
 
 /**
- * Largest metadata a framework definition's run may keep: what one SQLite
- * row leaves once its input is in pieces. Think's released submissions
- * stored metadata in a row of their own.
+ * Largest metadata a framework definition's run may keep. Think's released
+ * submissions stored metadata in a row of their own. The run row also holds
+ * the inline input, the result and the checkpoint, so these caps are set
+ * together to fit one row, not each from the row size.
  */
-export const MAX_FRAMEWORK_METADATA_BYTES = ROW_VALUE_BYTES;
+export const MAX_FRAMEWORK_METADATA_BYTES = 1_900_000;
 
 /**
- * Longest input kept in the run's own row, in UTF-16 code units: the row's
- * other columns share what is left.
+ * Longest input kept in the run's own row, in UTF-16 code units (at most
+ * 1.5 MB of UTF-8); longer input goes to the task-parts table.
  */
-export const INLINE_INPUT_UNITS = ROW_PIECE_UNITS;
+export const INLINE_INPUT_UNITS = 500_000;

@@ -1,4 +1,4 @@
-import { ROW_MAX_BYTES } from "../internal/platform-limits";
+import { REPLAY_CHUNK_BYTES } from "../internal/platform-limits";
 
 const textEncoder = new TextEncoder();
 
@@ -12,5 +12,5 @@ export function storedChunkBytes(body: string): number {
  * broadcast live, but absent from replay.
  */
 export function isChunkTooLargeToStore(body: string): boolean {
-  return storedChunkBytes(body) > ROW_MAX_BYTES;
+  return storedChunkBytes(body) > REPLAY_CHUNK_BYTES;
 }

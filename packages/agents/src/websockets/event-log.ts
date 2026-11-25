@@ -11,7 +11,11 @@
  * Event seq n is chunk n - 1 of that stream. See design/event-log.md.
  */
 
-import { ROW_VALUE_BYTES } from "../internal/platform-limits";
+import {
+  REPLAY_ITEM_BYTES,
+  REPLAY_PAGE_BYTES,
+  utf8Length
+} from "../internal/platform-limits";
 import type { Connection } from "../lifecycle";
 import type { Streams, StreamsSyncInternal } from "../streams/streams";
 import {
@@ -85,7 +89,8 @@ export interface EventLogOptions<S = unknown> {
   /**
    * Ceiling for one serialized event. `publish` and `append` throw for a
    * larger one before assigning it a seq. Default 1 MiB; at most
-   * `ROW_VALUE_BYTES` (1.9 MB), so one event fits one row.
+   * `REPLAY_ITEM_BYTES` (1.9 MB), so a replay frame of several events stays
+   * under the WebSocket message limit.
    */
   readonly maxEventBytes?: number;
   /**
@@ -222,7 +227,7 @@ export class EventLog<T = unknown, S = unknown> {
     );
     this.#maxEventBytes = Math.min(
       positive(options.maxEventBytes, DEFAULT_MAX_EVENT_BYTES),
-      ROW_VALUE_BYTES
+      REPLAY_ITEM_BYTES
     );
     this.#snapshot = options.snapshot;
     this.#canSubscribe = options.canSubscribe;
@@ -384,10 +389,22 @@ export class EventLog<T = unknown, S = unknown> {
         REPLAY_PAGE_EVENTS
       );
       if (rows.length === 0) break;
-      const entries = rows.map(
-        (row) => `{"seq":${row.seq + 1},"data":${row.chunk}}`
-      );
-      trySend(connection, `${prefix}[${entries.join(",")}]}`);
+      // A frame holds at most REPLAY_PAGE_BYTES of events, whatever their
+      // count: a larger WebSocket message is dropped on the way out.
+      let frame: string[] = [];
+      let bytes = 0;
+      for (const row of rows) {
+        const entry = `{"seq":${row.seq + 1},"data":${row.chunk}}`;
+        const size = utf8Length(entry) + 1;
+        if (frame.length > 0 && bytes + size > REPLAY_PAGE_BYTES) {
+          trySend(connection, `${prefix}[${frame.join(",")}]}`);
+          frame = [];
+          bytes = 0;
+        }
+        frame.push(entry);
+        bytes += size;
+      }
+      trySend(connection, `${prefix}[${frame.join(",")}]}`);
       from = rows[rows.length - 1].seq + 1;
     }
   }

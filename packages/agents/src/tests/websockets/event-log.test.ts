@@ -1,3 +1,7 @@
+import {
+  REPLAY_ITEM_BYTES,
+  REPLAY_PAGE_BYTES
+} from "../../internal/platform-limits";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
@@ -21,9 +25,13 @@ class Client {
       const frame = JSON.parse(event.data) as Frame;
       if (!frame.type.startsWith("cf_agent_log_")) return;
       this.frames.push(frame);
+      this.sizes.push(new TextEncoder().encode(event.data).length);
       for (const wake of this.#waiters.splice(0)) wake();
     });
   }
+
+  /** UTF-8 size of every frame received, in order. */
+  readonly sizes: number[] = [];
 
   subscribe(log: string, cursor?: EventLogCursor): void {
     this.socket.send(
@@ -389,17 +397,42 @@ describe("event log", () => {
     const name = crypto.randomUUID();
     const { epoch } = await stub(name).head("big");
     await stub(name).openBatch("big");
-    // Buffered beside the next event, together over 1.9 MB.
-    expect(await stub(name).appendSized(200_000)).toBe(1);
-    expect(await stub(name).publishText("big", "y".repeat(1_800_000))).toBe(2);
+    // Four events at the event ceiling, buffered beside a fifth: together
+    // over the row budget, so the flush writes two blocks.
+    const size = REPLAY_ITEM_BYTES - 100_000;
+    for (let seq = 1; seq <= 4; seq++) {
+      expect(await stub(name).appendSized(size)).toBe(seq);
+    }
+    expect(await stub(name).publishText("big", "y".repeat(size))).toBe(5);
     expect(await stub(name).rows("big")).toEqual([
-      { seq_from: 0, seq_to: 1 },
-      { seq_from: 1, seq_to: 2 }
+      { seq_from: 0, seq_to: 4 },
+      { seq_from: 4, seq_to: 5 }
     ]);
     const client = await connect(name);
     client.subscribe("big", { epoch, seq: 0 });
     const frames = await client.until(isType("synced"));
-    expect(events(frames).map((event) => event.seq)).toEqual([1, 2]);
+    expect(events(frames).map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
+    client.close();
+  });
+
+  it("replays events in frames of at most REPLAY_PAGE_BYTES, whatever their count", async () => {
+    const name = crypto.randomUUID();
+    const { epoch } = await stub(name).head("big");
+    const size = REPLAY_ITEM_BYTES - 100_000;
+    // Ten events of 1.8 MB: one page by count, 18 MB by bytes.
+    for (let i = 1; i <= 10; i++) {
+      expect(await stub(name).publishText("big", "y".repeat(size))).toBe(i);
+    }
+    const client = await connect(name);
+    client.subscribe("big", { epoch, seq: 0 });
+    const frames = await client.until(isType("synced"));
+    expect(events(frames).map((event) => event.seq)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+    ]);
+    expect(frames.filter(isType("events")).length).toBeGreaterThan(1);
+    expect(Math.max(...client.sizes)).toBeLessThanOrEqual(
+      REPLAY_PAGE_BYTES + 1_000
+    );
     client.close();
   });
 
@@ -407,18 +440,21 @@ describe("event log", () => {
     const name = crypto.randomUUID();
     await stub(name).head("big");
     await stub(name).openBatch("big");
-    expect(await stub(name).appendSized(200_000)).toBe(1);
+    const size = REPLAY_ITEM_BYTES - 100_000;
+    for (let seq = 1; seq <= 4; seq++) {
+      expect(await stub(name).appendSized(size)).toBe(seq);
+    }
     // The second block of the coming split flush fails to write.
     await stub(name).failWrites("big", true, 1);
-    expect(await stub(name).tryPublish("big", "y".repeat(1_800_000))).toMatch(
+    expect(await stub(name).tryPublish("big", "y".repeat(size))).toMatch(
       /planted write failure/
     );
     // The first block was rolled back with it.
     expect(await stub(name).rows("big")).toEqual([]);
     await stub(name).failWrites("big", false);
     // The buffer was dropped; the log goes on past the dropped seqs.
-    expect(await stub(name).tryPublish("big", "z")).toBe(4);
-    expect(await stub(name).rows("big")).toEqual([{ seq_from: 3, seq_to: 4 }]);
+    expect(await stub(name).tryPublish("big", "z")).toBe(7);
+    expect(await stub(name).rows("big")).toEqual([{ seq_from: 6, seq_to: 7 }]);
   });
 
   it("drops a buffer whose write fails, leaves a gap a follower sees, and is not stuck", async () => {

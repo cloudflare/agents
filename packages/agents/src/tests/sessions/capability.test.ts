@@ -3,6 +3,10 @@ import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { SessionHarnessObject } from "../capabilities/sessions";
 import type { SessionChangeEvent, SessionMessage } from "../../sessions";
+import {
+  REPLAY_ITEM_BYTES as SEARCH_INDEX_BYTES,
+  REPLAY_PAGE_BYTES
+} from "../../internal/platform-limits";
 import { MAX_INLINE_ROW_BYTES, splitContent } from "../../sessions/chunking";
 
 /**
@@ -17,7 +21,7 @@ import { MAX_INLINE_ROW_BYTES, splitContent } from "../../sessions/chunking";
  */
 
 /** A payload no single message row can hold. */
-const OVER_BUDGET_BYTES = 2 * 1024 * 1024;
+const OVER_BUDGET_BYTES = MAX_INLINE_ROW_BYTES + 256 * 1024;
 
 function sqlOf(instance: object): SqlStorage {
   // SAFETY: tests read the object's own storage.
@@ -180,7 +184,7 @@ describe("Sessions capability", () => {
       await session.search("warm");
       // 3 MB of text: stored across continuation rows, more than one FTS
       // row can hold.
-      const body = `needle ${"x ".repeat(1_500_000)}`;
+      const body = `needle ${"x ".repeat(MAX_INLINE_ROW_BYTES / 2 + 100_000)}`;
       await session.appendMessage(text("big", body));
       expect((await session.search("needle")).map((hit) => hit.id)).toEqual([
         "big"
@@ -190,32 +194,32 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("does not index a word the row budget cuts in two", async () => {
+  it("does not index a word the search budget cuts in two", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
       await session.search("warm");
       // The budget ends three bytes into "needle".
-      const prefix = `${"x".repeat(MAX_INLINE_ROW_BYTES - 4)} `;
+      const prefix = `${"x".repeat(SEARCH_INDEX_BYTES - 4)} `;
       await session.appendMessage(text("cut", `${prefix}needle and more`));
       expect(await session.search("nee")).toEqual([]);
       expect(await session.search("needle")).toEqual([]);
     });
   });
 
-  it("treats punctuation as a word boundary at the row budget", async () => {
+  it("treats punctuation as a word boundary at the search budget", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
       await session.search("warm");
       // A comma, then a word the budget cuts three bytes in.
       await session.appendMessage(
-        text("comma", `${"x".repeat(MAX_INLINE_ROW_BYTES - 4)},needle more`)
+        text("comma", `${"x".repeat(SEARCH_INDEX_BYTES - 4)},needle more`)
       );
       expect(await session.search("nee")).toEqual([]);
       // A whole word right before a comma at the budget stays searchable.
       await session.appendMessage(
-        text("whole", `${"y".repeat(MAX_INLINE_ROW_BYTES - 7)} needle,more`)
+        text("whole", `${"y".repeat(SEARCH_INDEX_BYTES - 7)} needle,more`)
       );
       expect((await session.search("needle")).map((hit) => hit.id)).toEqual([
         "whole"
@@ -223,21 +227,21 @@ describe("Sessions capability", () => {
     });
   });
 
-  it("keeps a combining mark and an emoji whole at the row budget", async () => {
+  it("keeps a combining mark and an emoji whole at the search budget", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
       await session.search("warm");
       // The budget ends right before a combining accent, inside the word.
       await session.appendMessage(
-        text("accent", `${"x".repeat(MAX_INLINE_ROW_BYTES - 5)} nee\u0301dle`)
+        text("accent", `${"x".repeat(SEARCH_INDEX_BYTES - 5)} nee\u0301dle`)
       );
       expect(await session.search("nee")).toEqual([]);
       // The separator before the cut word is an emoji (two UTF-16 units).
       await session.appendMessage(
         text(
           "emoji",
-          `start ${"y".repeat(MAX_INLINE_ROW_BYTES - 13)}\u{1F600}abcdef`
+          `start ${"y".repeat(SEARCH_INDEX_BYTES - 13)}\u{1F600}abcdef`
         )
       );
       const [hit] = await session.search("start");
@@ -249,15 +253,84 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("indexes the first 1.9 MB of a message's text, though the row holds more", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      // Stored before the index exists, then after: both are indexed alike.
+      await session.appendMessage(
+        text("old", `early ${"x ".repeat(SEARCH_INDEX_BYTES / 2)}late`)
+      );
+      expect(instance.contentChunks("", "old")).toBe(0);
+      expect((await session.search("early")).map((hit) => hit.id)).toEqual([
+        "old"
+      ]);
+      expect(await session.search("late")).toEqual([]);
+      await session.deleteMessages(["old"]);
+      // One row (under MAX_INLINE_ROW_BYTES), with a word past the search
+      // budget: a search returns its hits' indexed text, so it stays small.
+      await session.appendMessage(
+        text("long", `early ${"x ".repeat(SEARCH_INDEX_BYTES / 2)}late`)
+      );
+      expect(instance.contentChunks("", "long")).toBe(0);
+      expect((await session.search("early")).map((hit) => hit.id)).toEqual([
+        "long"
+      ]);
+      expect(await session.search("late")).toEqual([]);
+      const [hit] = await session.search("early");
+      expect(new TextEncoder().encode(hit.content).length).toBeLessThanOrEqual(
+        SEARCH_INDEX_BYTES
+      );
+    });
+  });
+
+  it("returns search hits until their text passes REPLAY_PAGE_BYTES", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.search("warm");
+      // Twelve 1.8 MB hits: 21.6 MB by count, so only the first ones that
+      // fit in REPLAY_PAGE_BYTES come back, in rank order.
+      for (let i = 0; i < 12; i++) {
+        await session.appendMessage(
+          text(`big-${i}`, `needle ${"x ".repeat(900_000)}`)
+        );
+      }
+      const hits = await session.search("needle");
+      const bytes = hits.reduce(
+        (sum, hit) => sum + new TextEncoder().encode(hit.content).length,
+        0
+      );
+      expect(hits.length).toBeGreaterThan(0);
+      expect(hits.length).toBeLessThan(12);
+      expect(bytes).toBeLessThanOrEqual(REPLAY_PAGE_BYTES);
+      // A narrow query is still limited by count only.
+      await session.appendMessage(text("small", "haystack"));
+      expect((await session.search("haystack")).map((h) => h.id)).toEqual([
+        "small"
+      ]);
+    });
+  });
+
   it("backfills a split message whose id another session's indexed message shares", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       await instance.sessions
         .session("a")
-        .appendMessage(text("same", `alpha ${"x ".repeat(1_500_000)}`));
+        .appendMessage(
+          text(
+            "same",
+            `alpha ${"x ".repeat(MAX_INLINE_ROW_BYTES / 2 + 100_000)}`
+          )
+        );
       await instance.sessions
         .session("b")
-        .appendMessage(text("same", `beta ${"x ".repeat(1_500_000)}`));
+        .appendMessage(
+          text(
+            "same",
+            `beta ${"x ".repeat(MAX_INLINE_ROW_BYTES / 2 + 100_000)}`
+          )
+        );
       // An earlier release's index holding only session a's copy.
       sqlOf(instance).exec(
         `CREATE VIRTUAL TABLE cf_agents_session_fts
@@ -285,10 +358,13 @@ describe("Sessions capability", () => {
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
       await session.appendMessage(
-        text("big", `needle ${"x ".repeat(1_500_000)}`)
+        text("big", `needle ${"x ".repeat(MAX_INLINE_ROW_BYTES / 2 + 100_000)}`)
       );
       await session.appendMessage(
-        text("big2", `haystack ${"x ".repeat(1_500_000)}`)
+        text(
+          "big2",
+          `haystack ${"x ".repeat(MAX_INLINE_ROW_BYTES / 2 + 100_000)}`
+        )
       );
       // The index as an earlier release built it: no marker, one split
       // message missing and one already indexed.
@@ -335,7 +411,7 @@ describe("Sessions capability", () => {
       const session = instance.sessions.session();
       // Stored before anything searched: split across continuation rows.
       await session.appendMessage(
-        text("big", `needle ${"x ".repeat(1_500_000)}`)
+        text("big", `needle ${"x ".repeat(MAX_INLINE_ROW_BYTES / 2 + 100_000)}`)
       );
       expect((await session.search("needle")).map((hit) => hit.id)).toEqual([
         "big"
@@ -880,7 +956,7 @@ describe("Sessions capability", () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
-      const body = "y".repeat(3 * 1024 * 1024);
+      const body = "y".repeat(MAX_INLINE_ROW_BYTES + 1024 * 1024);
       await session.appendMessage(text("s1", body));
       expect(instance.continuationRows("", "s1").length).toBeGreaterThan(0);
 
@@ -1272,12 +1348,12 @@ describe("Sessions capability", () => {
       );
     });
 
-    it("keeps a 1.7 MB message in one row", async () => {
-      // Under the 1.9 MB row budget; the 1.5 MiB budget before split it.
+    it("keeps a message just under the row budget in one row", async () => {
+      // A real row near the budget: it must fit what the runtime stores.
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
         const session = instance.sessions.session();
-        const original = text("mid", "z".repeat(1_700_000));
+        const original = text("mid", "z".repeat(MAX_INLINE_ROW_BYTES - 1_000));
         await session.appendMessage(original);
 
         expect(instance.contentChunks("", "mid")).toBe(0);
@@ -1322,15 +1398,16 @@ describe("Sessions capability", () => {
       });
     });
 
-    it("round-trips a 5 MB text part", async () => {
+    it("round-trips a text part three rows long", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
         const session = instance.sessions.session();
-        const body = "t".repeat(5 * 1000 * 1000);
+        const body = "t".repeat(2 * MAX_INLINE_ROW_BYTES + 200_000);
         const original = text("big-text", body);
         await session.appendMessage(original);
 
-        // Three rows of at most 1.9 MB: the message row and two continuations.
+        // Three rows at most the budget each: the message row and two
+        // continuations.
         expect(instance.contentChunks("", "big-text")).toBe(2);
         const stored = await session.getMessage("big-text");
         expect(stored?.parts[0].text).toBe(body);
@@ -1338,11 +1415,11 @@ describe("Sessions capability", () => {
       });
     });
 
-    it("round-trips a 3 MB tool output", async () => {
+    it("round-trips a tool output over the row budget", async () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
         const session = instance.sessions.session();
-        const body = "o".repeat(3 * 1000 * 1000);
+        const body = "o".repeat(MAX_INLINE_ROW_BYTES + 1_000_000);
         const original: SessionMessage = {
           id: "tool-out",
           role: "assistant",
@@ -1387,7 +1464,7 @@ describe("Sessions capability", () => {
         const session = instance.sessions.session();
         // 4-byte emoji repeated past the row budget, so a boundary lands in
         // the middle of the run and would split a pair if it were naive.
-        const body = `${"🙂".repeat(500_000)}é漢${"🙂".repeat(200_000)}`;
+        const body = `${"🙂".repeat(MAX_INLINE_ROW_BYTES / 4)}é漢${"🙂".repeat(200_000)}`;
         const original = text("emoji", body);
         await session.appendMessage(original);
 
@@ -1403,12 +1480,12 @@ describe("Sessions capability", () => {
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
         const session = instance.sessions.session();
         await session.appendMessage(
-          text("shrink", "s".repeat(5 * 1000 * 1000))
+          text("shrink", "s".repeat(2 * MAX_INLINE_ROW_BYTES + 200_000))
         );
         expect(instance.contentChunks("", "shrink")).toBe(2);
 
         await session.updateMessage(
-          text("shrink", "s".repeat(2 * 1000 * 1000))
+          text("shrink", "s".repeat(MAX_INLINE_ROW_BYTES + 200_000))
         );
         expect(instance.contentChunks("", "shrink")).toBe(1);
         expect(
@@ -1428,8 +1505,9 @@ describe("Sessions capability", () => {
       const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
       await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
         const session = instance.sessions.session();
-        const body = "g".repeat(3 * 1000 * 1000);
+        const body = "g".repeat(MAX_INLINE_ROW_BYTES + 1_000_000);
         await session.appendMessage(text("guard", body));
+        expect(instance.contentChunks("", "guard")).toBeGreaterThan(0);
 
         const events: SessionChangeEvent[] = [];
         instance.sessions.subscribe((event) => {

@@ -1,3 +1,7 @@
+import {
+  REPLAY_ITEM_BYTES,
+  ROW_VALUE_BYTES
+} from "../../internal/platform-limits";
 import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { Streams } from "../../streams/streams";
@@ -81,17 +85,27 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     batching: { maxEvents: 100, maxDelayMs: 60_000 }
   });
 
-  /** Byte retention (300 KB) and the highest event ceiling (1.9 MB). */
+  /** Byte retention (300 KB) and the highest event ceiling (`REPLAY_ITEM_BYTES`). */
   readonly #small = declareEventLog(this.#webSockets, "small", {
     streams: this.#streams,
     retention: { maxBytes: 300_000 },
-    maxEventBytes: 1_900_000
+    maxEventBytes: REPLAY_ITEM_BYTES
   });
 
-  /** The highest event ceiling (1.9 MB) with default retention. */
+  /**
+   * The highest event ceiling (`REPLAY_ITEM_BYTES`), with byte retention
+   * room for a flush past one row (`ROW_VALUE_BYTES`) and for a replay past
+   * one frame (`REPLAY_PAGE_BYTES`) of such events.
+   */
   readonly #big = declareEventLog(this.#webSockets, "big", {
     streams: this.#streams,
-    maxEventBytes: 1_900_000
+    retention: { maxBytes: 3 * ROW_VALUE_BYTES },
+    batching: {
+      maxEvents: 100,
+      maxBytes: 2 * ROW_VALUE_BYTES,
+      maxDelayMs: 60_000
+    },
+    maxEventBytes: REPLAY_ITEM_BYTES
   });
 
   readonly #guarded = declareEventLog(this.#webSockets, "guarded", {

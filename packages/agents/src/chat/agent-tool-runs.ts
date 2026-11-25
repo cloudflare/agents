@@ -39,6 +39,8 @@
  */
 
 import type { SaveMessagesResult } from "./lifecycle";
+import { allChunks } from "../agent-tool-chunks";
+import { REPLAY_PAGE_BYTES, utf8Length } from "../internal/platform-limits";
 import {
   isPositionlessAgentToolChunk,
   type AgentToolProgress,
@@ -80,10 +82,10 @@ export interface AgentToolStreams {
   flushBuffer(): void;
   /** The newest stream a request wrote, or `null`. */
   latestStreamInfoForRequest(requestId: string): { id: string } | null;
-  /** A stream's stored chunks, with their position. */
-  getStreamChunks(
+  /** A stream's stored chunks in order, with their position, read lazily. */
+  storedChunks(
     streamId: string
-  ): Array<{ body: string; chunk_index: number }>;
+  ): Iterable<{ body: string; chunk_index: number }>;
   /** The request whose stream is active, or `null`. */
   readonly activeRequestId: string | null;
 }
@@ -821,10 +823,19 @@ export class AgentToolRuns {
     const streamId = run ? this.#streamId(run) : undefined;
     if (!streamId) return [];
     const after = options?.afterSequence ?? -1;
-    return streams
-      .getStreamChunks(streamId)
-      .filter((chunk) => chunk.chunk_index > after)
-      .map((chunk) => ({ sequence: chunk.chunk_index, body: chunk.body }));
+    // One reply holds at most REPLAY_PAGE_BYTES of chunk bodies (at least
+    // one chunk): it crosses RPC, which takes 32 MiB. Read the rest from the
+    // last sequence returned (`allChunks`).
+    const page: AgentToolStoredChunk[] = [];
+    let bytes = 0;
+    for (const chunk of streams.storedChunks(streamId)) {
+      if (chunk.chunk_index <= after) continue;
+      const size = utf8Length(chunk.body);
+      if (page.length > 0 && bytes + size > REPLAY_PAGE_BYTES) break;
+      page.push({ sequence: chunk.chunk_index, body: chunk.body });
+      bytes += size;
+    }
+    return page;
   }
 
   /**
@@ -945,10 +956,14 @@ export class AgentToolRuns {
           this.closers.set(runId, closers);
           registered = close;
 
-          const backlog = read.chunks
-            ? await read.chunks(runId, options)
-            : this.chunks(runId, options);
-          for (const chunk of backlog) emit(chunk);
+          await allChunks(
+            (afterSequence) =>
+              read.chunks
+                ? read.chunks(runId, { afterSequence })
+                : this.chunks(runId, { afterSequence }),
+            options?.afterSequence,
+            emit
+          );
           // No await between the drain and this handoff, so no live chunk
           // slips past it.
           draining = false;

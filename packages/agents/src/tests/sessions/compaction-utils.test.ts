@@ -91,7 +91,7 @@ describe("createCompactFunction", () => {
 
 describe("enforceRowSizeLimit", () => {
   it("compacts oversized object tool outputs without changing their shape", () => {
-    const largeContent = "x".repeat(2_000_000);
+    const largeContent = "x".repeat(ROW_MAX_BYTES + 200_000);
     const message: UIMessage = {
       id: "tool-big",
       role: "assistant",
@@ -128,7 +128,10 @@ describe("enforceRowSizeLimit", () => {
 
   it("falls back to a compact marker when object shape is too large to preserve", () => {
     const primitiveHeavyOutput = Object.fromEntries(
-      Array.from({ length: 140_000 }, (_, i) => [`key-${i}`, i])
+      Array.from({ length: Math.ceil(ROW_MAX_BYTES / 14) }, (_, i) => [
+        `key-${i}`,
+        i
+      ])
     );
     const message: UIMessage = {
       id: "tool-primitive-heavy",

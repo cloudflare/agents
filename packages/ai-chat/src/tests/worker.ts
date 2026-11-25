@@ -44,7 +44,8 @@ import {
   type ChatTurns,
   type ReplyFlushState,
   type ReplyStreams,
-  type ToolPartUpdate
+  type ToolPartUpdate,
+  REPLAY_CHUNK_BYTES
 } from "agents/chat";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
@@ -6868,7 +6869,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     };
     const delta = (value: string) =>
       JSON.stringify({ type: "text-delta", id: "t", delta: value });
-    const oversized = delta("x".repeat(1_900_000));
+    const oversized = delta("x".repeat(REPLAY_CHUNK_BYTES + 100_000));
 
     await send(JSON.stringify({ type: "text-start", id: "t" }));
     await send(delta("a"));
