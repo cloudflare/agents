@@ -1,8 +1,8 @@
 {
   "total": 1535,
-  "passed": 498,
+  "passed": 505,
   "needThink": 1247,
-  "needThinkPassed": 210,
+  "needThinkPassed": 217,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -66,7 +66,7 @@
     },
     "client-tools.test.ts": {
       "total": 136,
-      "passed": 34
+      "passed": 35
     },
     "cold-rpc-initialization.test.ts": {
       "total": 4,
@@ -214,7 +214,7 @@
     },
     "scheduled-tasks.test.ts": {
       "total": 9,
-      "passed": 1
+      "passed": 6
     },
     "stop-reason.test.ts": {
       "total": 46,
@@ -242,7 +242,7 @@
     },
     "think-eviction.test.ts": {
       "total": 3,
-      "passed": 1
+      "passed": 2
     },
     "think-session.test.ts": {
       "total": 305,
@@ -346,6 +346,7 @@
     "client-tools.test.ts > Think — tool results with nothing to continue > a second tab's result for an answered call does not continue again",
     "client-tools.test.ts > resume coordination during pending continuation > correlates idle STREAM_RESUME_NONE after a continuation completes",
     "client-tools.test.ts > resume coordination during pending continuation > does not send STREAM_RESUME_NONE for an immediate resume request after tool output",
+    "client-tools.test.ts > resume coordination during pending continuation > holds STREAM_RESUME_REQUEST while continuation is pending",
     "cold-rpc-initialization.test.ts > native RPC initialization > hydrates persisted Think history when native RPC is first after eviction",
     "cold-rpc-initialization.test.ts > native RPC initialization > initializes Think before the first inherited RPC method executes",
     "cold-rpc-initialization.test.ts > native RPC initialization > initializes Think before the first subclass RPC method executes",
@@ -685,7 +686,12 @@
     "run-turn.test.ts > Think — runTurn > wait mode returns TurnResult equivalent to saveMessages",
     "run-turn.test.ts > Think — runTurn > wait mode supports array input",
     "run-turn.test.ts > Think — runTurn > wait mode supports function input",
+    "scheduled-tasks.test.ts > Think scheduled tasks > arms declared tasks on a sub-agent too, without a warning",
+    "scheduled-tasks.test.ts > Think scheduled tasks > arms the next occurrence when scheduled task handlers keep failing",
     "scheduled-tasks.test.ts > Think scheduled tasks > does not arm a keepAlive heartbeat on alarm() when no workflow notifications are pending (#1703)",
+    "scheduled-tasks.test.ts > Think scheduled tasks > leaves the application's own declared schedules alone",
+    "scheduled-tasks.test.ts > Think scheduled tasks > reconciles declared tasks without touching unrelated schedules",
+    "scheduled-tasks.test.ts > Think scheduled tasks > retries scheduled task handlers before recording failure",
     "streaming-message-id.test.ts > Think — streaming assistant message-id alignment > stamps the persisted assistant id onto a new turn's start chunk",
     "submissions.test.ts > Think durable submissions > completes multiple submissions in FIFO order",
     "submissions.test.ts > Think durable submissions > deduplicates by submission id",
@@ -698,6 +704,7 @@
     "submissions.test.ts > Think durable submissions > takes no keep-alive hold when it starts with no stored requests to replay",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > allows unverified adapter webhooks only when Think verifies them",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > forwards nativeStreaming to the adapter",
+    "think-eviction.test.ts > Think recovery after forced Durable Object eviction > keeps a declared task's pending occurrence and runs it after eviction",
     "think-eviction.test.ts > Think recovery after forced Durable Object eviction > rebuilds the in-memory transcript cache without running a turn",
     "think-session.test.ts > Think — Session integration > does not append missing messages to cache on direct session updateMessage calls",
     "think-session.test.ts > Think — Session integration > keeps cache aligned for direct session appendMessage calls",
