@@ -1,6 +1,7 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
+import { createSlowClientToolMockModel } from "./client-tools";
 import {
   Agent,
   getCurrentAgent,
@@ -15511,8 +15512,18 @@ export class ThinkAdmissionTestAgent extends Think {
       }))
     );
     let body = ctx.body as
-      | { tag?: string; chunks?: number; delayMs?: number }
+      | {
+          tag?: string;
+          chunks?: number;
+          delayMs?: number;
+          clientToolThenHang?: boolean;
+        }
       | undefined;
+    // The reply calls a client tool and its stream stays open: only a stop
+    // or an eviction ends it. The answer's continuation replies with text.
+    if (body?.clientToolThenHang) {
+      return { model: createSlowClientToolMockModel(1000, 600) };
+    }
     // A turn with no body (a submission) streams slowly when the question
     // it answers says "slow".
     if (body?.tag === undefined) {

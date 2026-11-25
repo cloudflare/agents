@@ -109,6 +109,7 @@ function setup(scenario: Scenario = {}) {
       label: "[test]",
       beginRecoveryAttempt: () => ({
         signal: new AbortController().signal,
+        continuationWaiting: () => false,
         end: () => {}
       }),
       waitUntilStable: () => Promise.resolve(true),

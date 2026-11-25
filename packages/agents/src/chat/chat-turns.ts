@@ -108,7 +108,11 @@ import {
   type TurnFailureHost
 } from "./turn-failure";
 import { TurnLane, type TurnReservation } from "./turn-lane";
-import { CHAT_TURN_LANE, type ChatTurnTaskInput } from "./turn-task";
+import {
+  CHAT_TURN_LANE,
+  inLaneRecoveryAttempt,
+  type ChatTurnTaskInput
+} from "./turn-task";
 import type { Tasks } from "../tasks";
 
 const utf8 = new TextEncoder();
@@ -387,6 +391,12 @@ export interface RecoveryAttemptHandle {
   readonly signal: AbortSignal;
   /** Forget the attempt. Call when it settles, whatever its outcome. */
   end(): void;
+  /**
+   * Whether a client's answer fired a continuation that waits behind this
+   * attempt, which holds the lane (a lane run's attempt). That turn
+   * continues the reply; it cannot start before the attempt ends.
+   */
+  continuationWaiting(): boolean;
 }
 
 export class ChatTurns<
@@ -1888,8 +1898,10 @@ export class ChatTurns<
   ): RecoveryAttemptHandle {
     const controller = new AbortController();
     if (rootRequestId) this.#recoveryAttempts.set(rootRequestId, controller);
+    const inLane = inLaneRecoveryAttempt();
     return {
       signal: controller.signal,
+      continuationWaiting: () => inLane && this.#continuationFired(),
       end: () => {
         if (
           rootRequestId &&
@@ -1899,6 +1911,19 @@ export class ChatTurns<
         }
       }
     };
+  }
+
+  /** Whether a continuation fired and its turn has not started. */
+  #continuationFired(): boolean {
+    return this.#continuationParts.firing.size > 0;
+  }
+
+  /** Resolves once {@link #continuationFired}, or never once `watch` is done. */
+  async #untilContinuationFires(watch: { done: boolean }): Promise<void> {
+    while (!this.#continuationFired()) {
+      if (watch.done) return new Promise(() => {});
+      await sleep(50);
+    }
   }
 
   /**
@@ -1989,15 +2014,23 @@ export class ChatTurns<
     const hasPendingInteraction =
       options.hasPendingInteraction ?? (() => this.hasPendingInteraction());
 
+    // A lane run's recovery attempt holds the lane: a continuation a
+    // client's answer fires waits behind it, so the queue is never idle
+    // before the attempt ends. That continuation settles the chat instead.
+    const inLane = inLaneRecoveryAttempt();
     for (;;) {
-      if (
-        (await awaitWithDeadline(
-          this.submits.waitForIdle(() => this.queue.waitForIdle()),
-          deadline
-        )) === TIMED_OUT
-      ) {
-        return false;
-      }
+      const idle = this.submits.waitForIdle(() => this.queue.waitForIdle());
+      const watch = { done: false };
+      const waited = await awaitWithDeadline(
+        inLane
+          ? Promise.race([idle, this.#untilContinuationFires(watch)])
+          : idle,
+        deadline
+      ).finally(() => {
+        watch.done = true;
+      });
+      if (waited === TIMED_OUT) return false;
+      if (inLane && this.#continuationFired()) return true;
 
       if (!hasPendingInteraction()) {
         if (!this.hasPendingDecision()) return true;

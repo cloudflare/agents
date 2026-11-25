@@ -2192,6 +2192,43 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     const throwError = body?.throwError ?? false;
     const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
 
+    // The reply calls a tool, and its stream stays open: only a stop,
+    // a stall or an eviction ends it. The answer's continuation falls
+    // through to the plain reply.
+    // With `"approval"` the call is a server tool's, waiting on approval.
+    const hangOn = (
+      options?.body as { toolThenHang?: "call" | "approval" } | undefined
+    )?.toolThenHang;
+    if (hangOn && !options?.continuation) {
+      const sse = (chunk: unknown) =>
+        new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`);
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(sse({ type: "start" }));
+            controller.enqueue(
+              sse({
+                type: "tool-input-available",
+                toolCallId: "call-hang",
+                toolName: hangOn === "call" ? "chooseOption" : "deleteFile",
+                input: {}
+              })
+            );
+            if (hangOn === "approval") {
+              controller.enqueue(
+                sse({
+                  type: "tool-approval-request",
+                  toolCallId: "call-hang",
+                  approvalId: "approval-hang"
+                })
+              );
+            }
+          }
+        }),
+        { headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
+
     const failOnAbort = (options?.body as { failOnAbort?: string } | undefined)
       ?.failOnAbort;
     if (failOnAbort) {

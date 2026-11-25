@@ -392,6 +392,73 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
   }, 40_000);
 });
 
+describe("a tool call a reset cut off", () => {
+  it.each([
+    {
+      hangOn: "call",
+      answer: {
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolName: "chooseOption",
+        output: { choice: "a" }
+      }
+    },
+    {
+      hangOn: "approval",
+      answer: { type: MessageType.CF_AGENT_TOOL_APPROVAL, approved: true }
+    }
+  ])(
+    "continues with the client's answer ($hangOn), without waiting out recovery",
+    async ({ hangOn, answer }) => {
+      const room = crypto.randomUUID();
+      const binding = "RecoverySlowStreamAgent";
+      const path = `/agents/recovery-slow-stream-agent/${room}`;
+      const { ws } = await connectChatWS(path);
+      sendChatRequest(ws, "r1", [user("u1", "one")], {
+        toolThenHang: hangOn,
+        ...(hangOn === "call" && { clientTools: [{ name: "chooseOption" }] })
+      });
+      // The call reached the tab before the reset cut the reply.
+      const sent = record(ws);
+      await waitFor(
+        async () => sent,
+        (frames) => JSON.stringify(frames).includes("call-hang")
+      );
+      await reset(binding, room);
+
+      const { ws: tab } = await connectChatWS(path);
+      const frames = record(tab);
+      const stub = await agent(binding, room);
+      // Recovery stores the cut-off reply, its call waiting on the client.
+      await waitFor(
+        () => stub.getPersistedMessages(),
+        (messages) => JSON.stringify(messages).includes("call-hang")
+      );
+      const answeredAt = Date.now();
+      tab.send(
+        JSON.stringify({
+          ...answer,
+          toolCallId: "call-hang",
+          autoContinue: true
+        })
+      );
+      const messages = await waitFor(
+        () => stub.getPersistedMessages(),
+        (m) => m.some((x) => x.role === "assistant" && textOf(x).length > 0)
+      );
+      expect(
+        messages.some((x) => x.role === "assistant" && textOf(x).length > 0)
+      ).toBe(true);
+      expect(Date.now() - answeredAt).toBeLessThan(15_000);
+      // The cut-off request is not reported as failed.
+      expect(JSON.stringify(doneFrame(frames, "r1") ?? {})).not.toContain(
+        "interrupted"
+      );
+      tab.close();
+    },
+    40_000
+  );
+});
+
 describe("a turn started from onStart", () => {
   it("runs while onStart waits for it", async () => {
     const stub = await getAgentByName(

@@ -366,3 +366,52 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(textOf(messages[3])).toBe(QUICK_REPLY);
   }, 60_000);
 });
+
+describe("a client tool call a reset cut off", () => {
+  it("continues with the client's answer, without waiting out recovery", async () => {
+    const binding = "ThinkAdmissionTestAgent";
+    const room = crypto.randomUUID();
+    const ws = await connect(binding, room);
+    const sent = record(ws);
+    send(ws, "r1", [user("u1", "one")], {
+      clientToolThenHang: true,
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    // The call reached the tab before the reset cut the reply.
+    await waitFor(
+      async () => sent,
+      (frames) => JSON.stringify(frames).includes("tc-client-1")
+    );
+    await reset(binding, room);
+
+    const tab = await connect(binding, room);
+    const frames = record(tab);
+    const restarted = await agent(binding, room);
+    // Recovery stores the cut-off reply, its call waiting on the client.
+    await waitFor(
+      () => restarted.getMessagesForTest(),
+      (messages) => JSON.stringify(messages).includes("tc-client-1")
+    );
+    const answeredAt = Date.now();
+    tab.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+    const messages = await waitFor(
+      () => restarted.getMessagesForTest(),
+      (m) => JSON.stringify(m).includes("Continuation after tool")
+    );
+    expect(JSON.stringify(messages)).toContain("Continuation after tool");
+    expect(Date.now() - answeredAt).toBeLessThan(15_000);
+    // The cut-off request is not reported as failed.
+    expect(JSON.stringify(doneFrame(frames, "r1") ?? {})).not.toContain(
+      "interrupted"
+    );
+    tab.close();
+  }, 40_000);
+});
