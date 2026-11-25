@@ -2842,9 +2842,9 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void> {
+  ): Promise<number | void> {
     await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.broadcastToPath(ownerPath, message, without);
+    return this._dynamicAgents.broadcastToPath(ownerPath, message, without);
   }
 
   async _cf_subAgentConnectionMetas(

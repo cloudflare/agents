@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { takeDeliveryReport } from "../../dynamic-agents/unlisted-sockets";
 import { ChatFrames, EndedRequests } from "../chat-frames";
 import { CHAT_MESSAGE_TYPES } from "../protocol";
 
@@ -100,5 +101,47 @@ describe("EndedRequests", () => {
     // Every listed socket is left out, so a sub-agent skips the fan-out:
     // an unlisted socket got nothing.
     expect(frames.ended.has({ id: "tab", acceptedAt: 0 }, "req-1")).toBe(false);
+  });
+
+  it("dates a broadcast by when the root sent it, after a connect it was queued behind (F5c)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const kv = new Map<string, unknown>();
+    let report: ((sentAt: number) => void) | undefined;
+    const frames = new ChatFrames({
+      // A starting sub-agent's broadcast: it takes the report before it
+      // awaits the root, which sends it later.
+      broadcast: () => {
+        report = takeDeliveryReport();
+      },
+      connections: () => [],
+      reachesUnlisted: () => true,
+      kv: {
+        get: (key: string) => kv.get(key),
+        put: (key: string, value: unknown) => void kv.set(key, value),
+        delete: (key: string) => kv.delete(key)
+      },
+      resuming: new Set<string>(),
+      storedOriginIds: () => undefined,
+      recoveryOriginIds: () => undefined,
+      clientView: (messages: unknown) => ({ messages })
+    } as unknown as ConstructorParameters<typeof ChatFrames>[0]);
+    frames.broadcast({
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      id: "req-1",
+      body: "",
+      done: true
+    } as Parameters<ChatFrames["broadcast"]>[0]);
+    const tab = { id: "tab", acceptedAt: 10_500 };
+    // Accepted after the hand-over, before the root sent it.
+    expect(frames.ended.has(tab, "req-1")).toBe(false);
+    report?.(11_000);
+    expect(frames.ended.has(tab, "req-1")).toBe(true);
+    // A socket accepted after the root sent it got nothing.
+    expect(frames.ended.has({ id: "late", acceptedAt: 11_500 }, "req-1")).toBe(
+      false
+    );
+    // Only the broadcast that took it gets the report.
+    expect(takeDeliveryReport()).toBeUndefined();
   });
 });

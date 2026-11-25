@@ -69,7 +69,7 @@ export type DynamicAgentConnectionBridgeLike = {
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void | Promise<void>;
+  ): void | Promise<number | void>;
 };
 
 export type DynamicAgentConnectionOperationName =
@@ -161,11 +161,12 @@ export type RootFacetRpcSurface = {
   _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
+  /** Resolves to when the root sent the frame (ms, root clock). */
   _cf_broadcastToSubAgent(
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void>;
+  ): Promise<number | void>;
   _cf_subAgentConnectionMetas(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<DynamicAgentConnectionMeta[]>;

@@ -139,7 +139,7 @@ export class DynamicAgentConnectionBridge
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ) => void | Promise<void>;
+  ) => void | Promise<number | void>;
 
   constructor(
     connection: Connection,
@@ -147,7 +147,7 @@ export class DynamicAgentConnectionBridge
       ownerPath: ReadonlyArray<{ className: string; name: string }>,
       message: string | ArrayBuffer | ArrayBufferView,
       without?: string[]
-    ) => void | Promise<void>
+    ) => void | Promise<number | void>
   ) {
     super();
     this.#connection = connection;
@@ -180,7 +180,7 @@ export class DynamicAgentConnectionBridge
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): void | Promise<void> {
+  ): void | Promise<number | void> {
     return this.#broadcast?.(ownerPath, message, without);
   }
 }
@@ -235,7 +235,7 @@ export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionB
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void> {
+  ): Promise<number | void> {
     return this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
   }
 }
