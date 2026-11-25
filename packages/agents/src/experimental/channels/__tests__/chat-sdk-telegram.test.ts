@@ -86,6 +86,14 @@ function webhook(update: unknown, secret = SECRET) {
 }
 
 function chunks(...texts: string[]): ReadableStream<ResponseChunk> {
+  return answer(texts, false);
+}
+
+/** An answer's chunks; `broken` ends it with an error instead of its end. */
+function answer(
+  texts: string[],
+  broken: boolean
+): ReadableStream<ResponseChunk> {
   const queue: ResponseChunk[] = [
     { type: "text-start", id: "a" },
     ...texts.map((delta): ResponseChunk => ({
@@ -93,12 +101,13 @@ function chunks(...texts: string[]): ReadableStream<ResponseChunk> {
       id: "a",
       delta
     })),
-    { type: "text-end", id: "a" }
+    ...(broken ? [] : [{ type: "text-end", id: "a" } as ResponseChunk])
   ];
   return new ReadableStream({
     pull(controller) {
       const next = queue.shift();
       if (next) controller.enqueue(next);
+      else if (broken) controller.error(new Error("interrupted"));
       else controller.close();
     }
   });
@@ -205,5 +214,44 @@ describe("Chat SDK Channel over the Telegram adapter (recorded webhooks)", () =>
             call.method === "sendRichMessageDraft")
       )
     ).toBe(true);
+  });
+
+  it("posts the whole answer to a group, where the adapter will not stream", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.groupMention));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    const delivered = await c.stream!(surface, chunks("Hel", "lo"), {});
+    expect(delivered).toMatchObject({ status: "delivered" });
+    const posts = sends().filter((call) => !call.method.endsWith("Draft"));
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({ chat: "-100", text: "Hello" });
+  });
+
+  it("posts what an interrupted answer had, once, and says it is incomplete", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.directMessage));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    const delivered = await c.stream!(surface, answer(["Hel"], true), {});
+    expect(delivered).toMatchObject({ status: "uncertain" });
+    const posts = sends().filter((call) => call.method === "sendRichMessage");
+    expect(posts).toEqual([
+      { method: "sendRichMessage", chat: "42", text: "Hel" }
+    ]);
+  });
+
+  it("gives an edited message a new event id, so Channels takes the edit", async () => {
+    const c = channel();
+    const original = await c.ingress!.receive(webhook(updates.directMessage));
+    const edit = await c.ingress!.receive(webhook(updates.edited));
+    expect(edit?.events[0]?.event.eventId).toBeDefined();
+    expect(edit?.events[0]?.event.eventId).not.toBe(
+      original?.events[0]?.event.eventId
+    );
   });
 });

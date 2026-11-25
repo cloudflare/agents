@@ -168,8 +168,7 @@ export function chatSdkChannel(
       );
     },
     async stream(surface, chunks) {
-      const stream = adapter.stream;
-      if (!stream) {
+      const collectAndPost = async (): Promise<DeliveryResult> => {
         const collected = await collectText(chunks);
         const result = await send(
           surface,
@@ -178,43 +177,74 @@ export function chatSdkChannel(
           () => false
         );
         return collected.interrupted && result.status === "delivered"
-          ? {
-              status: "uncertain",
-              ...(result.reference && { reference: result.reference }),
-              error: {
-                code: "CHANNEL_STREAM_INTERRUPTED",
-                message: "An incomplete answer was posted"
-              }
-            }
+          ? interruptedAnswer(result.reference)
           : result;
-      }
-      let started = false;
-      return send(
+      };
+      const stream = adapter.stream;
+      if (!stream) return collectAndPost();
+      const text = textOf(chunks);
+      let fallback = false;
+      const result = await send(
         surface,
-        (threadId) =>
-          stream.call(
-            adapter,
-            threadId,
-            textOf(chunks, () => (started = true))
-          ),
-        () => started
+        async (threadId) => {
+          const sent = await stream.call(adapter, threadId, text.deltas);
+          // An adapter that will not stream to this thread (Telegram groups)
+          // returns null before it reads any text: post it instead.
+          if (sent === null && !text.started()) fallback = true;
+          return sent;
+        },
+        () => text.started()
       );
+      if (fallback) return collectAndPost();
+      // The answer broke off: the adapter posted what there was.
+      return text.interrupted() && result.status === "delivered"
+        ? interruptedAnswer(result.reference)
+        : result;
     }
   };
 }
 
-/** A response's text deltas, as the adapter's `stream` takes them. */
-async function* textOf(
-  chunks: ReadableStream<ResponseChunk>,
-  onFirst: () => void
-): AsyncIterable<string> {
-  const collect = createTextCollector();
-  for await (const chunk of chunks) {
-    const text = collect(chunk);
-    if (text.length === 0) continue;
-    onFirst();
-    yield text;
+function interruptedAnswer(reference: string | undefined): DeliveryResult {
+  return {
+    status: "uncertain",
+    ...(reference && { reference }),
+    error: {
+      code: "CHANNEL_STREAM_INTERRUPTED",
+      message: "An incomplete answer was posted"
+    }
+  };
+}
+
+/**
+ * A response's text deltas, as the adapter's `stream` takes them. A
+ * response that breaks off ends the deltas there, without an error, so the
+ * adapter still posts what it has; `interrupted()` says it broke off.
+ */
+function textOf(chunks: ReadableStream<ResponseChunk>): {
+  deltas: AsyncIterable<string>;
+  started(): boolean;
+  interrupted(): boolean;
+} {
+  let started = false;
+  let interrupted = false;
+  async function* deltas(): AsyncIterable<string> {
+    const collect = createTextCollector();
+    try {
+      for await (const chunk of chunks) {
+        const text = collect(chunk);
+        if (text.length === 0) continue;
+        started = true;
+        yield text;
+      }
+    } catch {
+      interrupted = true;
+    }
   }
+  return {
+    deltas: deltas(),
+    started: () => started,
+    interrupted: () => interrupted
+  };
 }
 
 function toEvent(
@@ -226,7 +256,10 @@ function toEvent(
   const { author } = message;
   return {
     type: "message",
-    eventId: `${name}:${message.id}`,
+    // An edit is a new event for the same message.
+    eventId: message.metadata.edited
+      ? `${name}:${message.id}:edited:${message.metadata.editedAt?.getTime() ?? message.text}`
+      : `${name}:${message.id}`,
     thread: {
       id: threadId,
       isDirectMessage: adapter.isDM ? adapter.isDM(threadId) : "unknown"
