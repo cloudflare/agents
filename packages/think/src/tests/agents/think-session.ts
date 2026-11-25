@@ -9462,7 +9462,49 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this._submissionStatusHookWaits;
   }
 
+  /** While set, a turn waits at the top of `beforeTurn` until opened. */
+  private _turnGate: {
+    entered: boolean;
+    opened: Promise<void>;
+    open: () => void;
+  } | null = null;
+
+  /** Start an RPC turn and park it in `beforeTurn`, after its user message. */
+  private async _holdActiveTurnForTest(text: string): Promise<{
+    turn: Promise<void>;
+    release: () => void;
+  }> {
+    let open!: () => void;
+    const gate = {
+      entered: false,
+      opened: new Promise<void>((resolve) => {
+        open = resolve;
+      }),
+      open: () => open()
+    };
+    this._turnGate = gate;
+    const turn = this.chat(text, new TestCollectingCallback());
+    const deadline = Date.now() + 5000;
+    while (!gate.entered) {
+      if (Date.now() > deadline) throw new Error("active turn never started");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return {
+      turn,
+      release: () => {
+        if (this._turnGate === gate) this._turnGate = null;
+        gate.open();
+      }
+    };
+  }
+
   override async beforeTurn(ctx: TurnContext): Promise<void> {
+    const gate = this._turnGate;
+    if (gate && !ctx.continuation) {
+      this._turnGate = null;
+      gate.entered = true;
+      await gate.opened;
+    }
     if (this._throwBeforeTurnError) {
       throw new Error(this._throwBeforeTurnError);
     }
@@ -10055,34 +10097,11 @@ export class ThinkProgrammaticTestAgent extends Think {
       event: { type: string; payload?: unknown };
     }>;
   }> {
-    const previousDelayedChunks = this._delayedChunks;
-    this._delayedChunks = {
-      chunks: ["active ", "turn ", "still ", "running"],
-      delayMs: 50
-    };
-
-    const activeCallback = new TestCollectingCallback();
-    const activeTurn = this.chat("active turn", activeCallback);
+    // The active turn is parked in `beforeTurn` until the queued submission
+    // is cancelled, so the cancel always lands before the queue slot.
+    const active = await this._holdActiveTurnForTest("active turn");
+    const activeTurn = active.turn;
     try {
-      let activeTurnStarted = false;
-      for (let attempt = 0; attempt < 80; attempt++) {
-        const activeUserMessage = (await this.getMessages()).find(
-          (message) =>
-            message.role === "user" &&
-            message.parts.some(
-              (part) => part.type === "text" && part.text === "active turn"
-            )
-        );
-        if (activeUserMessage) {
-          activeTurnStarted = true;
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      if (!activeTurnStarted) {
-        throw new Error("Active turn did not start before queued submission");
-      }
-
       const submissionId = options?.submissionId ?? "sub-queued-running-cancel";
       const messageTexts = options?.messageTexts ?? ["queued then cancelled"];
       await this.submitMessages(
@@ -10104,6 +10123,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
       await this.cancelSubmission(submissionId, "cancelled before queue slot");
 
+      active.release();
       await activeTurn;
       await (
         this as unknown as {
@@ -10120,7 +10140,7 @@ export class ThinkProgrammaticTestAgent extends Think {
         workflowEvents: this._workflowEventLog
       };
     } finally {
-      this._delayedChunks = previousDelayedChunks;
+      active.release();
       await activeTurn.catch(() => {});
     }
   }
