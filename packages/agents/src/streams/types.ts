@@ -195,4 +195,12 @@ export type StreamChunkRow = {
 export interface StreamBatching {
   readonly maxChunks: number;
   readonly maxBytes: number;
+  /**
+   * Write a flush into the stream's newest block while that block stays
+   * under 256 KB, instead of a new block per flush: one row per 256 KB of
+   * chunks, for a stream that is deleted whole (a chat turn), where each
+   * block costs a row to delete. A stream trimmed from its head (an event
+   * log) leaves it off, so a trim can drop one flush at a time.
+   */
+  readonly fillBlocks?: boolean;
 }

@@ -257,6 +257,8 @@ export class Streams extends LifecycleCapability {
       /** Each chunk's UTF-8 size, as the caller measured it. */
       readonly sizes: number[];
       bytes: number;
+      /** Whether the flush fills the newest block (`fillBlocks`). */
+      readonly fill: boolean;
     }
   >();
   /**
@@ -283,7 +285,7 @@ export class Streams extends LifecycleCapability {
    */
   readonly #liveTails = new Map<
     string,
-    { block: number; seq_to: number } | null
+    { block: number; seq_to: number; len: number } | null
   >();
   /** Stored chunk and character totals per trimmed stream, read once. */
   readonly #totals = new Map<string, { chunks: number; bytes: number }>();
@@ -773,7 +775,9 @@ export class Streams extends LifecycleCapability {
         const tail = this.#blockTail(streamId);
         this.#liveTails.set(
           streamId,
-          tail ? { block: tail.block, seq_to: tail.seq_to } : null
+          tail
+            ? { block: tail.block, seq_to: tail.seq_to, len: tail.len }
+            : null
         );
       }
       const durable = this.#liveTails.get(streamId)?.seq_to ?? 0;
@@ -787,7 +791,13 @@ export class Streams extends LifecycleCapability {
         floor ?? 0
       );
       this.#bufferedHere.add(streamId);
-      buffer = { firstSeq, jsons: [], sizes: [], bytes: 0 };
+      buffer = {
+        firstSeq,
+        jsons: [],
+        sizes: [],
+        bytes: 0,
+        fill: batch.fillBlocks === true
+      };
       this.#buffers.set(streamId, buffer);
     }
     const seq = buffer.firstSeq + buffer.jsons.length;
@@ -809,7 +819,8 @@ export class Streams extends LifecycleCapability {
 
   /**
    * Write a stream's buffered chunks as one new block: one INSERT, no read,
-   * and no rewrite of an earlier block. Wakes readers.
+   * and no rewrite of an earlier block. With `fillBlocks`, a flush that
+   * fits goes into the newest block instead (one UPDATE). Wakes readers.
    */
   #flushBuffer(streamId: string): void {
     const buffer = this.#buffers.get(streamId);
@@ -851,8 +862,26 @@ export class Streams extends LifecycleCapability {
       block += 1;
       start = end;
     }
+    // Filling: one flush that fits goes into the newest block, right after
+    // its last seq (no hole between them), as one UPDATE.
+    const body = rows.length === 1 ? String(rows[0][4]) : "";
+    const filled =
+      buffer.fill &&
+      rows.length === 1 &&
+      tail != null &&
+      tail.seq_to === firstSeq &&
+      tail.len + body.length + 1 <= BLOCK_MAX_CHARS
+        ? tail
+        : undefined;
     try {
-      if (rows.length === 1) this.#sqlWrite(this.#insertBlock, rows[0]);
+      if (filled) {
+        this.#sqlWrite(
+          `UPDATE ${this.#tables.blocks}
+           SET body = body || ',' || ?, seq_to = ?, updated_at = ?
+           WHERE stream_id = ? AND block = ?`,
+          [body, firstSeq + jsons.length, at, streamId, filled.block]
+        );
+      } else if (rows.length === 1) this.#sqlWrite(this.#insertBlock, rows[0]);
       else {
         // All blocks or none: a retry writes the same seqs, never half.
         this.lifecycle.storage.transactionSync(() => {
@@ -871,10 +900,14 @@ export class Streams extends LifecycleCapability {
       throw error;
     }
     this.#buffers.delete(streamId);
+    if (filled) block = filled.block + 1;
     if (this.#liveTails.has(streamId)) {
       this.#liveTails.set(streamId, {
         block: block - 1,
-        seq_to: firstSeq + jsons.length
+        seq_to: firstSeq + jsons.length,
+        len: filled
+          ? filled.len + body.length + 1
+          : String(rows.at(-1)![4]).length
       });
     }
     const totals = this.#totals.get(streamId);
