@@ -56,13 +56,17 @@ export interface ExtensionManifest {
 
 export interface ExtensionPermissions {
   /**
-   * Allowed network hosts. If empty or undefined, the extension has
-   * no outbound network access (globalOutbound: null).
-   * If set, the extension inherits the parent Worker's network.
+   * Hosts the extension may fetch: `example.com` matches that host only,
+   * `*.example.com` its subdomains, `*` any public host. If empty or
+   * undefined, the extension has no outbound network access.
    *
-   * Note: per-host filtering is not yet enforced at the runtime level.
-   * This field serves as a declaration of intent; actual enforcement
-   * is all-or-nothing via globalOutbound.
+   * Enforced when Think creates the manager and the Worker entry
+   * re-exports `HostBridgeLoopback`: every request goes through it, and
+   * one to an unlisted host or to a private or local address is refused
+   * with `403`. A TCP socket (`connect()`) is then refused too, even to a
+   * listed host, because the check reads HTTP requests. Without the
+   * re-export, or for an `ExtensionManager` an app creates itself, the
+   * hosts are not enforced and the extension can reach any host.
    */
   network?: string[];
 

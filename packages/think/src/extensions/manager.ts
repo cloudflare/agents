@@ -397,6 +397,20 @@ export class ReleasedWorkerHandle implements ExtensionHandle<ReleasedHooks> {
   }
 }
 
+/** Host binding factories whose bindings are `HostBridgeLoopback`s. */
+const GATEWAYS = new WeakSet<object>();
+
+/**
+ * Mark `createHostBinding` as making `HostBridgeLoopback` bindings, which
+ * also enforce an extension's network hosts.
+ *
+ * @internal
+ */
+export function asNetworkGateway<F extends object>(createHostBinding: F): F {
+  GATEWAYS.add(createHostBinding);
+  return createHostBinding;
+}
+
 /** Each manager's extension core, and the hook timeout it runs under. */
 const cores = new WeakMap<
   ExtensionManager,
@@ -435,6 +449,7 @@ export class ExtensionManager {
   readonly #core: ExtensionCore<ReleasedHooks>;
   #restored = false;
   #warnedContextType = false;
+  #warnedNetwork = false;
   #onUnload:
     | ((name: string, contextLabels: string[]) => void | Promise<void>)
     | null = null;
@@ -527,7 +542,10 @@ export class ExtensionManager {
     // Fetcher as env.host when the extension declares ANY permission
     // that requires host access (workspace, context, messages, session).
     const workerEnv: Record<string, Fetcher> = {};
-    let ownLabels: string[] = [];
+    const prefix = sanitizeName(manifest.name);
+    const ownLabels = (manifest.context ?? []).map(
+      (c) => `${prefix}_${c.label}`
+    );
     const needsHost =
       (permissions.workspace ?? "none") !== "none" ||
       permissions.context?.read !== undefined ||
@@ -535,24 +553,49 @@ export class ExtensionManager {
       (permissions.messages ?? "none") !== "none" ||
       permissions.session?.sendMessage ||
       permissions.session?.metadata;
-    if (this.#createHostBinding && needsHost) {
-      const prefix = sanitizeName(manifest.name);
-      ownLabels = (manifest.context ?? []).map((c) => `${prefix}_${c.label}`);
-      workerEnv.host = this.#createHostBinding(permissions, ownLabels);
+    // The listed hosts are enforced by HostBridgeLoopback's `fetch`, which
+    // the Worker's fetch() goes through. Only a binding Think created is
+    // known to be one; an app's own `createHostBinding` may serve the host
+    // operations alone, so its Worker keeps the agent's network, as does
+    // one with no binding at all.
+    const needsNetwork = (permissions.network?.length ?? 0) > 0;
+    const gateway =
+      needsNetwork &&
+      this.#createHostBinding !== null &&
+      GATEWAYS.has(this.#createHostBinding);
+    const binding =
+      this.#createHostBinding && (needsHost || gateway)
+        ? this.#createHostBinding(permissions, ownLabels)
+        : undefined;
+    if (binding && needsHost) workerEnv.host = binding;
+
+    let globalOutbound: Fetcher | null | undefined = null;
+    if (needsNetwork) {
+      globalOutbound = gateway ? binding : undefined;
+      if (!gateway && !this.#warnedNetwork) {
+        this.#warnedNetwork = true;
+        console.warn(
+          `[Think] Extension "${manifest.name}": its network hosts are not enforced, so it can reach any host. They are enforced only through the host binding Think creates when the Worker entry re-exports HostBridgeLoopback.`
+        );
+      }
     }
 
     // Stable, content-derived id: Dynamic Workers are billed per distinct
     // id, so restarts must reuse the id while code/permissions are unchanged.
-    // A cached worker keeps the env it was created with, so an id that
-    // carries `env.host` must also cover the agent and the context labels
-    // that binding was created for.
-    const globalOutbound = permissions.network?.length ? undefined : null;
+    // A cached worker keeps the env and outbound it was created with, so an
+    // id whose Worker carries the host binding must also cover the agent
+    // and the context labels that binding was created for.
     const hash = await hashWorkerConfig({
       workerModule,
-      globalOutbound: globalOutbound === null ? "null" : "inherit",
+      globalOutbound:
+        globalOutbound === null
+          ? "null"
+          : globalOutbound === undefined
+            ? "inherit"
+            : "gateway",
       envBindings: Object.keys(workerEnv).sort(),
       permissions,
-      ...(workerEnv.host
+      ...(binding
         ? { hostScope: this.#workerIdScope, ownContextLabels: ownLabels }
         : {})
     });

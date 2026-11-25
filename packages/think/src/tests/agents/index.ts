@@ -50,6 +50,7 @@ export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export {
   ThinkExtensionHookAgent,
+  ThinkExtensionNetworkAgent,
   ThinkExtensionBeforeTurnModelAgent
 } from "./extension-hooks";
 export {

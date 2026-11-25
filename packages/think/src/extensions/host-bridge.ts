@@ -19,6 +19,7 @@
  */
 
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { validateUrl } from "agents/internal";
 import type {
   ThinkHostApi,
   ThinkHostFileEntry,
@@ -177,6 +178,34 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
   async sendMessage(content: string): Promise<void> {
     this.#requireSendMessage();
     return this.#call("sendMessage", content);
+  }
+
+  // ── Network ────────────────────────────────────────────────────
+
+  /**
+   * The extension Worker's outbound network, when its manifest lists
+   * `network` hosts: every `fetch()` it makes arrives here. A request to a
+   * host the list does not match, or to a private or local address, is
+   * refused with `403`. Redirects are not followed here, so each hop comes
+   * back through this check.
+   *
+   * @internal The runtime calls it for the extension Worker; not for apps.
+   */
+  async fetch(request: Request): Promise<Response> {
+    const hosts = this._permissions.network ?? [];
+    const checked =
+      hosts.length === 0
+        ? { ok: false as const, message: "no network permission declared" }
+        : validateUrl(request.url, {
+            allowedHosts: hosts,
+            maxUrlLength: Number.POSITIVE_INFINITY
+          });
+    if (!checked.ok) {
+      return new Response(`Extension error: ${checked.message}`, {
+        status: 403
+      });
+    }
+    return fetch(new Request(request, { redirect: "manual" }));
   }
 
   // ── Session metadata ───────────────────────────────────────────
