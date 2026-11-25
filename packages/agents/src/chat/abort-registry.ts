@@ -1,9 +1,13 @@
 /**
- * AbortRegistry — manages per-request AbortControllers.
+ * Kept for released `@cloudflare/ai-chat` (0.12) and `@cloudflare/think`
+ * (0.24), which import it from `agents/chat` and allow a newer `agents`.
+ * Chat no longer uses it: a chat keeps its requests' abort controllers in
+ * `ChatTurns.aborts` (`turnSignal` in `turn-stop.ts`).
  *
- * Shared between AIChatAgent and Think for chat turn cancellation.
- * Each request gets its own AbortController keyed by request ID.
- * Controllers are created lazily on first signal access.
+ * Manages per-request AbortControllers, created lazily on first signal
+ * access.
+ *
+ * @internal
  */
 
 const NOOP = () => {};

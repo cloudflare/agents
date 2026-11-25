@@ -46,7 +46,8 @@ import {
   type ReplyStreams,
   type ToolPartUpdate,
   REPLAY_CHUNK_BYTES,
-  CHAT_RECOVERY_PROGRESS_KEY
+  CHAT_RECOVERY_PROGRESS_KEY,
+  turnSignal
 } from "agents/chat";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
@@ -1995,9 +1996,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _abortRegistry: { size: number };
+        _turns: { aborts: { size: number } };
       }
-    )._abortRegistry.size;
+    )._turns.aborts.size;
   }
 }
 
@@ -2517,9 +2518,9 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _abortRegistry: { size: number };
+        _turns: { aborts: { size: number } };
       }
-    )._abortRegistry.size;
+    )._turns.aborts.size;
   }
 
   getStartedRequestIds(): string[] {
@@ -5945,7 +5946,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
     }
     const internals = this as unknown as {
       _chatTurnFibers: { liveTurns: Map<string, unknown> };
-      _abortRegistry: { size: number };
+      _turns: { aborts: { size: number } };
       _turnQueue: { isActive: boolean };
     };
     return {
@@ -5956,7 +5957,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
         SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE checkpoint IS NOT NULL
       `[0].n,
       fibers: this.getActiveFibers().length,
-      abortControllers: internals._abortRegistry.size,
+      abortControllers: internals._turns.aborts.size,
       queueIdle: !internals._turnQueue.isActive
     };
   }
@@ -5981,9 +5982,9 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _abortRegistry: { size: number };
+        _turns: { aborts: { size: number } };
       }
-    )._abortRegistry.size;
+    )._turns.aborts.size;
   }
 
   async waitForIdleForTest(): Promise<void> {
@@ -6885,15 +6886,15 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     const finished = await this._waitForRunTerminalForTest(runId);
     await this._waitForRunsSettledForTest();
     const store = this["_agentToolRuns"].store;
-    const signal = this["_abortRegistry"].getSignal("another-turn");
+    const signal = turnSignal(this["_turns"].aborts, "another-turn");
     // A later turn could run under the finished run's old request id.
     const ownRequestId = store.read(runId)?.requestId ?? "";
-    const own = this["_abortRegistry"].getSignal(ownRequestId);
+    const own = turnSignal(this["_turns"].aborts, ownRequestId);
     await this.cancelAgentToolRun(runId, "late cancel");
     const otherTurnAborted = signal?.aborted ?? false;
     const ownRequestAborted = own?.aborted ?? false;
-    this["_abortRegistry"].remove("another-turn");
-    this["_abortRegistry"].remove(ownRequestId);
+    this["_turns"].aborts.delete("another-turn");
+    this["_turns"].aborts.delete(ownRequestId);
     const row = store.read(runId);
     return {
       status: finished?.status,
@@ -6921,9 +6922,9 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       VALUES (${runId}, 'recovered-request', 'first-request', 'running',
         ${Date.now()})
     `;
-    const registry = this["_abortRegistry"];
-    const recoveredTurn = registry.getSignal("recovered-request");
-    const otherTurn = registry.getSignal("a-users-turn");
+    const registry = this["_turns"].aborts;
+    const recoveredTurn = turnSignal(registry, "recovered-request");
+    const otherTurn = turnSignal(registry, "a-users-turn");
     const attempt = this["_turns"].beginRecoveryAttempt("first-request");
     const otherAttempt = this["_turns"].beginRecoveryAttempt("a-users-root");
     try {
@@ -6937,8 +6938,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     } finally {
       attempt.end();
       otherAttempt.end();
-      registry.remove("recovered-request");
-      registry.remove("a-users-turn");
+      registry.delete("recovered-request");
+      registry.delete("a-users-turn");
     }
   }
 
@@ -7863,11 +7864,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, started_at)
       VALUES (${runId}, 'recovered-request', 'running', ${Date.now()})
     `;
-    const signal = (
-      this as unknown as {
-        _abortRegistry: { getSignal(id: string): AbortSignal | undefined };
-      }
-    )._abortRegistry.getSignal("recovered-request");
+    const signal = turnSignal(
+      (
+        this as unknown as {
+          _turns: { aborts: Map<string, AbortController> };
+        }
+      )._turns.aborts,
+      "recovered-request"
+    );
     const abortedBefore = signal?.aborted ?? false;
     await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
     return {

@@ -463,7 +463,6 @@ export class AIChatAgent<
    * Registry of per-request AbortControllers.
    * Used to propagate cancellation signals for any external calls made by the agent.
    */
-  private readonly _abortRegistry = this._turns.aborts;
 
   /** Durable chat history for this Agent (lifts the pre-Sessions table). */
   readonly sessions = new Sessions({
@@ -840,7 +839,7 @@ export class AIChatAgent<
     fiberName: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
     snapshotKey: "__cfAIChatFiberSnapshot",
     generateId: () => nanoid(),
-    turnSignal: (requestId) => this._abortRegistry.getExistingSignal(requestId),
+    turnSignal: (requestId) => this._turns.aborts.get(requestId)?.signal,
     runTask: (input, local) =>
       this.tasks.run(
         (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
@@ -2038,7 +2037,7 @@ export class AIChatAgent<
                   }
                   throw error;
                 } finally {
-                  this._abortRegistry.remove(chatMessageId);
+                  this._turns.aborts.delete(chatMessageId);
                   // Settle the pre-stream turn on the normal path (#1784):
                   // a no-op release when the turn streamed (already flushed
                   // into STREAM_RESUMING on _startStream) or a release on
@@ -4313,7 +4312,7 @@ export class AIChatAgent<
           }
           return result;
         } finally {
-          if (chatMessageId) this._abortRegistry.remove(chatMessageId);
+          if (chatMessageId) this._turns.aborts.delete(chatMessageId);
         }
       }, abortSignal)
     );
@@ -4412,7 +4411,8 @@ export class AIChatAgent<
    * When the DO is destroyed, cancel all pending requests and clean up resources
    */
   async destroy() {
-    this._abortRegistry.destroyAll();
+    for (const controller of this._turns.aborts.values()) controller.abort();
+    this._turns.aborts.clear();
     this._resumableStream.destroy();
     await super.destroy();
   }

@@ -525,7 +525,11 @@ export {
   iterateWithStallWatchdog
 } from "./stall-watchdog";
 
-export { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
+export {
+  ChatRecoverySupersededError,
+  isTurnStopped,
+  turnSignal
+} from "./turn-stop";
 
 /**
  * @internal The reply pump both chat hosts run every reply through, with

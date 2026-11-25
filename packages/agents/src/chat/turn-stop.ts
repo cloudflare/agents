@@ -52,3 +52,23 @@ export class ChatRecoverySupersededError extends Error {
     this.name = "ChatRecoverySupersededError";
   }
 }
+
+/**
+ * The abort controllers of a chat's requests, by request id. A turn takes
+ * its controller when it starts and deletes it when it ends.
+ *
+ * @internal
+ */
+export type TurnAborts = Map<string, AbortController>;
+
+/**
+ * The abort signal of request `requestId`, made on first ask, so a stop
+ * that lands before the turn starts still reaches it.
+ *
+ * @internal
+ */
+export function turnSignal(aborts: TurnAborts, requestId: string): AbortSignal {
+  let controller = aborts.get(requestId);
+  if (!controller) aborts.set(requestId, (controller = new AbortController()));
+  return controller.signal;
+}

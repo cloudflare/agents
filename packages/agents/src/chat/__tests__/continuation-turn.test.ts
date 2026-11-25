@@ -7,6 +7,7 @@ import {
   afterEach,
   onTestFinished
 } from "vitest";
+import { turnSignal } from "../turn-stop";
 import { memoryLane, memoryStorage } from "./memory-lane";
 import { CHAT_CONTINUATION_KEY_PREFIX } from "../admissions";
 import { AutoContinuationController } from "../auto-continuation-controller";
@@ -954,13 +955,13 @@ describe("the continuation turn", () => {
       // "original": its abort signal is linked to the attempt's.
       const attempt = turns.beginRecoveryAttempt("original");
       await startReply();
-      turns.aborts.getSignal("req-1");
-      turns.aborts.linkExternal("req-1", attempt.signal);
+      turnSignal(turns.aborts, "req-1");
+      turns.linkExternal("req-1", attempt.signal);
       await result("a1");
 
       // The client only knows the original id.
       turns.cancel("original");
-      expect(turns.aborts.getExistingSignal("req-1")?.aborted).toBe(true);
+      expect(turns.aborts.get("req-1")?.signal?.aborted).toBe(true);
       expect(connection.sent).toEqual([RESUME_NONE]);
 
       await endReply();
@@ -975,7 +976,7 @@ describe("the continuation turn", () => {
       // runs, and its continuation is not the attempt's to drop.
       const attempt = turns.beginRecoveryAttempt("original");
       await startReply();
-      turns.aborts.getSignal("req-1");
+      turnSignal(turns.aborts, "req-1");
       await result("a1");
       turns.cancel("original");
 
@@ -1052,8 +1053,8 @@ describe("the continuation turn", () => {
 
     it("a stop for another request does not drop what waits on a reply the runtime aborted", async () => {
       await startReply();
-      turns.aborts.getSignal("req-1");
-      turns.aborts.getSignal("other");
+      turnSignal(turns.aborts, "req-1");
+      turnSignal(turns.aborts, "other");
       await result("a1");
       // The stall watchdog's abort: recovery continues the reply.
       turns.runtimeAbort(() => turns.cancel("req-1"));
@@ -1110,7 +1111,7 @@ describe("the continuation turn", () => {
 
     it("a stop after the runtime aborted the reply still drops", async () => {
       await startReply();
-      turns.aborts.getSignal("req-1");
+      turnSignal(turns.aborts, "req-1");
       await result("a1");
       turns.runtimeAbort(() => turns.cancel("req-1"));
       turns.cancel("req-1");
@@ -1124,7 +1125,7 @@ describe("the continuation turn", () => {
 
     it("stopping every request drops the continuation too", async () => {
       await startReply();
-      turns.aborts.getSignal("req-1");
+      turnSignal(turns.aborts, "req-1");
       await result("a1");
       turns.stopAll(new Error("stop everything"));
       expect(turns.aborts.size).toBe(0);
@@ -1139,7 +1140,7 @@ describe("the continuation turn", () => {
 
     it("stopping every request reports a fired continuation that waits behind the running turn once", async () => {
       await startReply();
-      turns.aborts.getSignal("req-1");
+      turnSignal(turns.aborts, "req-1");
       await result("a1");
       // The reply is finalized but its turn is still in the queue: the
       // continuation fires and waits behind it.
@@ -1257,7 +1258,7 @@ describe("the continuation turn", () => {
 
     it("a stop drops a connection-less continuation that waits behind the stopped turn", async () => {
       await startReply();
-      turns.aborts.getSignal("req-1");
+      turnSignal(turns.aborts, "req-1");
       const waiting = turns.runUnscheduledContinuationTurn(
         host.turn(),
         {
@@ -1278,11 +1279,11 @@ describe("the continuation turn", () => {
     it("a linked signal that stops the reply drops the continuation too", async () => {
       const external = new AbortController();
       await startReply();
-      turns.aborts.getSignal("req-1");
+      turnSignal(turns.aborts, "req-1");
       const unlink = turns.linkExternal("req-1", external.signal);
       await result("a1");
       external.abort(new Error("caller stopped"));
-      expect(turns.aborts.getExistingSignal("req-1")?.aborted).toBe(true);
+      expect(turns.aborts.get("req-1")?.signal?.aborted).toBe(true);
 
       await endReply();
       unlink();
@@ -1294,11 +1295,11 @@ describe("the continuation turn", () => {
     it("a linked signal for a request that is not running drops nothing", async () => {
       const external = new AbortController();
       await startReply();
-      turns.aborts.getSignal("req-2");
+      turnSignal(turns.aborts, "req-2");
       turns.linkExternal("req-2", external.signal);
       await result("a1");
       external.abort();
-      expect(turns.aborts.getExistingSignal("req-2")?.aborted).toBe(true);
+      expect(turns.aborts.get("req-2")?.signal?.aborted).toBe(true);
 
       await endReply();
       await fire();
@@ -1310,7 +1311,7 @@ describe("the continuation turn", () => {
       const external = new AbortController();
       external.abort(new Error("too late"));
       turns.linkExternal("req-9", external.signal);
-      expect(turns.aborts.getExistingSignal("req-9")?.aborted).toBe(true);
+      expect(turns.aborts.get("req-9")?.signal?.aborted).toBe(true);
     });
 
     it("keeps the continuation when another request is stopped", async () => {
@@ -1331,9 +1332,9 @@ describe("the continuation turn", () => {
       // The stall watchdog aborts the turn, and recovery continues it.
       // That is not a stop, even though it goes through the host's
       // `abortRequest`, which is `cancel`.
-      turns.aborts.getSignal("req-1");
+      turnSignal(turns.aborts, "req-1");
       turns.runtimeAbort(() => turns.cancel("req-1"));
-      expect(turns.aborts.getExistingSignal("req-1")?.aborted).toBe(true);
+      expect(turns.aborts.get("req-1")?.signal?.aborted).toBe(true);
 
       await endReply();
       await fire();
@@ -1545,10 +1546,9 @@ describe("what a continuation turn runs", () => {
   it("hands the host the error of a turn the stall watchdog aborted", async () => {
     // The watchdog's abort is the runtime's, not a stop.
     host.model = async (continuation) => {
-      turns.aborts.cancel(
-        continuation.requestId,
-        new ChatStreamStalledError("stalled")
-      );
+      turns.aborts
+        .get(continuation.requestId)
+        ?.abort(new ChatStreamStalledError("stalled"));
       throw new Error("stalled");
     };
     await result("a1");

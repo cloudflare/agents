@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { AbortRegistry } from "../abort-registry";
+import { turnSignal, type TurnAborts } from "../turn-stop";
 import {
   mapServerTurnOutcome,
   pinnedOr,
@@ -13,6 +13,12 @@ import { ChatStreamStalledError } from "../stall-watchdog";
 import { TurnLane } from "../turn-lane";
 import { memoryLaneRun } from "./memory-lane";
 
+/** Abort every request's controller, and forget them (a reset). */
+function abortAll(aborts: TurnAborts): void {
+  for (const controller of aborts.values()) controller.abort();
+  aborts.clear();
+}
+
 /** Let queued microtasks and the queue's own awaits run. */
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -23,7 +29,18 @@ describe("runServerTurn", () => {
   beforeEach(() => {
     parts = {
       queue: new TurnLane(memoryLaneRun()),
-      aborts: new AbortRegistry()
+      aborts: new Map(),
+      linkExternal: (requestId, signal) => {
+        if (!signal) return () => {};
+        const stop = () => parts.aborts.get(requestId)?.abort(signal.reason);
+        if (signal.aborted) {
+          turnSignal(parts.aborts, requestId);
+          stop();
+          return () => {};
+        }
+        signal.addEventListener("abort", stop, { once: true });
+        return () => signal.removeEventListener("abort", stop);
+      }
     };
     log = [];
   });
@@ -111,7 +128,7 @@ describe("runServerTurn", () => {
     expect(parts.aborts.has("s1")).toBe(true);
 
     // abortAllRequests(): the turn has not started, and still hears it.
-    parts.aborts.destroyAll();
+    abortAll(parts.aborts);
     release();
 
     expect(await pending).toEqual({ status: "aborted", reason: "stopped" });
@@ -126,7 +143,7 @@ describe("runServerTurn", () => {
       parts,
       turn("s1", {
         prepare: async () => {
-          parts.aborts.cancel("s1");
+          parts.aborts.get("s1")?.abort();
           return { input: "messages" };
         }
       })
@@ -142,7 +159,7 @@ describe("runServerTurn", () => {
       turn("s1", {
         persist: async () => {
           log.push("s1:persist");
-          parts.aborts.cancel("s1");
+          parts.aborts.get("s1")?.abort();
         }
       })
     );
@@ -186,7 +203,7 @@ describe("runServerTurn", () => {
         prepare: undefined,
         persist: undefined,
         run: async () => {
-          parts.aborts.cancel("s1");
+          parts.aborts.get("s1")?.abort();
         }
       })
     );
@@ -200,7 +217,7 @@ describe("runServerTurn", () => {
       turn("s1", {
         onAborted: undefined,
         run: async () => {
-          parts.aborts.cancel("s1");
+          parts.aborts.get("s1")?.abort();
         }
       })
     );
@@ -219,10 +236,10 @@ describe("runServerTurn", () => {
           await run();
           // The host is still busy with the turn here (its onChatResponse).
           registeredAfterTurn = parts.aborts.has("s1");
-          const later = parts.aborts.getSignal("s1");
+          const later = turnSignal(parts.aborts, "s1");
           controller.abort();
           abortedByLateSignal = later?.aborted;
-          parts.aborts.remove("s1");
+          parts.aborts.delete("s1");
           return "completed";
         }
       })
@@ -310,7 +327,7 @@ describe("runServerTurn", () => {
       parts,
       turn("s1", {
         run: async () => {
-          parts.aborts.cancel("s1");
+          parts.aborts.get("s1")?.abort();
         }
       })
     );
@@ -324,7 +341,7 @@ describe("runServerTurn", () => {
       parts,
       turn("s1", {
         run: async (signal) => {
-          parts.aborts.destroyAll();
+          abortAll(parts.aborts);
           aborted = signal.aborted;
         }
       })
@@ -339,7 +356,7 @@ describe("runServerTurn", () => {
       turn("s1", {
         run: async () => {
           // The reply finished and was stored; the stop comes too late.
-          parts.aborts.cancel("s1");
+          parts.aborts.get("s1")?.abort();
           return { status: "completed" };
         }
       })
@@ -354,7 +371,7 @@ describe("runServerTurn", () => {
       turn("s1", {
         run: async () => {
           parts.queue.reset();
-          parts.aborts.destroyAll();
+          abortAll(parts.aborts);
           // The reply path saw its signal abort and reported that.
           return { status: "aborted" };
         }
@@ -385,7 +402,7 @@ describe("runServerTurn", () => {
       turn("s1", { prepare: undefined, persist: undefined })
     );
     await settle();
-    parts.aborts.cancel("s1");
+    parts.aborts.get("s1")?.abort();
     release();
     expect(await pending).toEqual({ status: "aborted", reason: "stopped" });
     expect(log).toEqual([]);
@@ -439,7 +456,9 @@ describe("runServerTurn", () => {
         parts,
         turn("s1", {
           run: async () => {
-            parts.aborts.cancel("s1", new ChatStreamStalledError("stalled"));
+            parts.aborts
+              .get("s1")
+              ?.abort(new ChatStreamStalledError("stalled"));
             throw new Error("recovery could not be scheduled");
           }
         })
@@ -524,7 +543,7 @@ describe("runServerTurn", () => {
       turn("s1", {
         prepare: async () => {
           parts.queue.reset();
-          parts.aborts.destroyAll();
+          abortAll(parts.aborts);
           return { declined: "aborted" };
         }
       })
@@ -560,7 +579,7 @@ describe("runServerTurn", () => {
     );
     await settle();
     parts.queue.reset();
-    parts.aborts.destroyAll();
+    abortAll(parts.aborts);
     release();
 
     expect(await pending).toEqual({ status: "skipped", reason: "cleared" });
@@ -577,7 +596,7 @@ describe("runServerTurn", () => {
       turn("s1", {
         prepare: async () => {
           parts.queue.reset();
-          parts.aborts.destroyAll();
+          abortAll(parts.aborts);
           return { input: "messages" };
         }
       })
@@ -592,7 +611,7 @@ describe("runServerTurn", () => {
       turn("s1", {
         persist: async () => {
           parts.queue.reset();
-          parts.aborts.destroyAll();
+          abortAll(parts.aborts);
         }
       })
     );
@@ -606,7 +625,7 @@ describe("runServerTurn", () => {
       turn("s1", {
         run: async () => {
           parts.queue.reset();
-          parts.aborts.destroyAll();
+          abortAll(parts.aborts);
         }
       })
     );
@@ -622,7 +641,7 @@ describe("runServerTurn", () => {
           // The reply finished and was stored. The clear lands while the
           // host still awaits the app's onChatResponse inside the turn.
           parts.queue.reset();
-          parts.aborts.destroyAll();
+          abortAll(parts.aborts);
           return { status: "completed" };
         }
       })
