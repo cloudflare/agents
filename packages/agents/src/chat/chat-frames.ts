@@ -196,14 +196,21 @@ export class ChatFrames {
     if (ends !== undefined) {
       // A socket is told a request's end once.
       const left = new Set(without);
+      let listed = false;
       for (const connection of this.options.connections()) {
         if (left.has(connection.id)) continue;
+        listed = true;
         if (this.ended.has(connection, ends)) without.push(connection.id);
         else this.ended.note(connection, ends);
       }
-      // Only a broadcast that goes out to sockets nobody here lists: a
-      // facet that knows its sockets skips one with no listed recipient.
-      if (this.options.reachesUnlisted?.()) this.ended.broadcast(ends, without);
+      // A broadcast that goes out reaches, through the root, sockets it
+      // accepted that nobody here lists yet. One goes out when a listed
+      // socket gets it, or when the host says it reaches unlisted ones (a
+      // starting sub-agent); a sub-agent that knows its sockets skips one
+      // with no listed recipient.
+      if (listed || this.options.reachesUnlisted?.()) {
+        this.ended.broadcast(ends, without);
+      }
     }
     this.options.broadcast(JSON.stringify(ready), without);
     this.#record(ready);

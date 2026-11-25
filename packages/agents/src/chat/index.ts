@@ -612,3 +612,9 @@ export {
 
 /** @internal The SDK's one backoff formula, for `Think`. Not a public API. */
 export { backoffDelay } from "../retries";
+
+/**
+ * Whether a host's broadcast reaches sockets it does not list yet (a
+ * starting sub-agent). Sibling-package support, not a public API.
+ */
+export { broadcastReachesUnlistedSockets } from "../dynamic-agents/dynamic-agents";

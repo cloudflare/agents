@@ -37,11 +37,17 @@ describe("EndedRequests", () => {
   });
 
   it("records a broadcast as reaching unlisted sockets only when the host says it does", () => {
-    for (const reachesUnlisted of [true, false]) {
+    for (const [reachesUnlisted, listedTab, told] of [
+      [true, false, true],
+      [false, false, false],
+      // A listed socket gets it, so the root's fan-out also reaches its
+      // unlisted ones.
+      [false, true, true]
+    ] as const) {
       const kv = new Map<string, unknown>();
       const frames = new ChatFrames({
         broadcast: () => {},
-        connections: () => [],
+        connections: () => (listedTab ? [{ id: "listed" }] : []),
         reachesUnlisted: () => reachesUnlisted,
         kv: {
           get: (key: string) => kv.get(key),
@@ -62,7 +68,7 @@ describe("EndedRequests", () => {
       // A facet that lists its sockets and skipped a broadcast with no
       // listed recipient told an unlisted socket nothing.
       expect(frames.ended.has({ id: "tab", acceptedAt: 0 }, "req-1")).toBe(
-        reachesUnlisted
+        told
       );
     }
   });

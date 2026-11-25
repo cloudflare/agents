@@ -73,6 +73,18 @@ export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
  */
 export const CF_SUB_AGENT_ACCEPTED_AT_KEY = "_cf_subAgentAcceptedAt";
 
+/** Each host's capability, for {@link broadcastReachesUnlistedSockets}. */
+const capabilityOf = new WeakMap<object, DynamicAgentsInternal>();
+
+/**
+ * Whether a broadcast by `agent` now reaches sockets its `getConnections()`
+ * does not list: a sub-agent during its start, before it read its sockets
+ * from the root.
+ */
+export function broadcastReachesUnlistedSockets(agent: object): boolean {
+  return capabilityOf.get(agent)?.broadcastsToUnlistedSockets ?? false;
+}
+
 /** When the root accepted `connection`, if it was routed to a sub-agent. */
 export function connectionAcceptedAt(
   connection: Connection
@@ -218,6 +230,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
 
   constructor(host: DynamicAgentHostPort) {
     super("dynamic-agents");
+    capabilityOf.set(host, this);
     this.#host = host;
     // The newest instance of this object in the isolate; a channel an older
     // instance handed out stops working.
@@ -1366,7 +1379,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     if (
       !this.#host._isFacet &&
       connectionAcceptedAt(connection) === undefined &&
-      this.requestTargetsChild(request)
+      this.connectionRoutesToChild(connection)
     ) {
       this.#host._unsafe_setConnectionFlag(
         connection,

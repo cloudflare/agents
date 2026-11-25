@@ -2921,14 +2921,6 @@ export class Agent<
     return this._dynamicAgents.requestTargetsChild(request);
   }
 
-  /**
-   * Whether a broadcast now reaches sockets `getConnections()` does not list
-   * (a sub-agent during its start). @internal
-   */
-  protected _cf_broadcastReachesUnlistedSockets(): boolean {
-    return this._dynamicAgents.broadcastsToUnlistedSockets;
-  }
-
   private _cf_forwardSubAgentWebSocketConnect(
     connection: Connection,
     request: Request,
