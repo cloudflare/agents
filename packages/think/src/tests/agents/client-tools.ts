@@ -1320,6 +1320,43 @@ export class ThinkClientToolsAgent extends Think {
 
   private _streamParents: Array<string | null> = [];
 
+  /** The type of every socket message this agent has finished handling. */
+  private readonly _handledMessageTypes: string[] = [];
+
+  /**
+   * Whether a client tool result or approval is queued or being applied. The
+   * chat protocol starts the apply without awaiting it, so a handled message
+   * can still have its apply to come.
+   */
+  hasPendingInteractionForTest(): boolean {
+    return (
+      (this["_turns"] as unknown as { pendingInteraction: unknown })
+        .pendingInteraction !== null
+    );
+  }
+
+  /** How many socket messages of `type` the agent has finished handling. */
+  handledMessageCountForTest(type: string): number {
+    return this._handledMessageTypes.filter((handled) => handled === type)
+      .length;
+  }
+
+  // Think installs its chat protocol handler at start, before this hook, so
+  // the wrapper here sees every message, the protocol's included.
+  override onStart(): void {
+    const handle = this.onMessage;
+    this.onMessage = async (connection, message) => {
+      await handle.call(this, connection, message);
+      if (typeof message !== "string") return;
+      try {
+        const { type } = JSON.parse(message) as { type?: unknown };
+        if (typeof type === "string") this._handledMessageTypes.push(type);
+      } catch {
+        // Not JSON: nothing to record.
+      }
+    };
+  }
+
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     // Every reply's stream starts here (`pumpReply`). Only this Think has
