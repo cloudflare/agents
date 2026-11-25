@@ -114,6 +114,7 @@ function runningKey(call: Pick<ToolCall, "id" | "session">): string {
 type Converted = {
   readonly entry: { -readonly [K in keyof ToolEntry]: ToolEntry[K] };
   readonly schema?: PromiseLike<JSONSchema7>;
+  readonly outputSchema?: PromiseLike<JSONSchema7>;
 };
 
 /**
@@ -218,6 +219,16 @@ export class ExtensionRuntime<
             })
           );
         }
+        if (converted.outputSchema) {
+          pending.push(
+            converted.outputSchema.then(
+              (schema) => {
+                converted.entry.outputSchema = schema;
+              },
+              (error: unknown) => this.#warnOutputSchema(toolName, error)
+            )
+          );
+        }
         return converted.entry;
       },
       (toolName) => kept.delete(toolName)
@@ -267,12 +278,23 @@ export class ExtensionRuntime<
     const json = schema.jsonSchema;
     const isAsync = typeof (json as PromiseLike<unknown>).then === "function";
     const needsApproval = tool.needsApproval;
+    // An output schema is data a hook may read (Think's `beforeTurn` sees
+    // the tools whole); it is converted as the input schema is.
+    // Not every schema has a JSON Schema (a zod `date()` or `bigint()` has
+    // none), and nothing the model is sent needs this one, so a schema
+    // that cannot convert is left out rather than failing the build.
+    const output = this.#outputSchemaOf(tool.outputSchema);
+    const outputIsAsync =
+      output !== undefined &&
+      typeof (output as PromiseLike<unknown>).then === "function";
     const converted: Converted = {
       entry: {
         owner: this.#name,
         definition,
         // SAFETY: replaced by the resolved schema before the build returns.
         inputSchema: isAsync ? {} : (json as JSONSchema7),
+        ...(output !== undefined &&
+          !outputIsAsync && { outputSchema: output as JSONSchema7 }),
         execute: typeof tool.execute === "function",
         validate: schema.validate !== undefined,
         modelOutput: typeof tool.toModelOutput === "function",
@@ -282,10 +304,32 @@ export class ExtensionRuntime<
           approval: "call" as const
         })
       },
-      ...(isAsync && { schema: json as PromiseLike<JSONSchema7> })
+      ...(isAsync && { schema: json as PromiseLike<JSONSchema7> }),
+      ...(outputIsAsync && {
+        outputSchema: output as PromiseLike<JSONSchema7>
+      })
     };
     this.#converted.set(tool, converted);
     return converted;
+  }
+
+  #outputSchemaOf(
+    schema: unknown
+  ): JSONSchema7 | PromiseLike<JSONSchema7> | undefined {
+    if (schema === undefined) return undefined;
+    try {
+      return this.#schemaOf(schema).jsonSchema;
+    } catch (error) {
+      this.#warnOutputSchema(undefined, error);
+      return undefined;
+    }
+  }
+
+  #warnOutputSchema(tool: string | undefined, error: unknown): void {
+    console.warn(
+      `Extension "${this.#name}": ${tool ? `tool "${tool}"'s` : "a tool's"} output schema has no JSON Schema, so it is left out`,
+      error
+    );
   }
 
   /**

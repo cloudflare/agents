@@ -1,4 +1,5 @@
 import {
+  asSchema,
   convertToModelMessages,
   jsonSchema,
   streamText,
@@ -188,6 +189,70 @@ describe("extensions: the build", () => {
     // The input is validated by the tool's own schema: its default applies.
     expect(through.calls.map((c) => c.input)).toEqual([{ word: "hello" }]);
     expect(through.calls).toEqual(direct.calls);
+  });
+
+  it("keeps a tool's output schema, as JSON Schema, and still sends the same request", async () => {
+    const withOutput = {
+      lookup: tool({
+        description: "Look a word up",
+        inputSchema: z.object({ word: z.string() }),
+        outputSchema: z.object({ found: z.boolean() }),
+        execute: async () => ({ found: true })
+      })
+    };
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "options",
+      loadInProcess("options", optionsExtension({ tools: withOutput }))
+    );
+    const built = await manager.build("");
+    expect(await asSchema(built.tools.lookup?.outputSchema).jsonSchema).toEqual(
+      await asSchema(withOutput.lookup.outputSchema).jsonSchema
+    );
+    expect((await send(built.tools, undefined)).request).toBe(
+      (await send(withOutput, undefined)).request
+    );
+  });
+
+  it("leaves out an output schema with no JSON Schema, instead of failing the build", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tools = {
+      dated: tool({
+        description: "Has a date",
+        inputSchema: z.object({}),
+        outputSchema: z.object({ at: z.date() }),
+        execute: async () => ({ at: new Date(0) })
+      }),
+      big: tool({
+        description: "Has a bigint",
+        inputSchema: z.object({}),
+        outputSchema: z.object({ n: z.bigint() }),
+        execute: async () => ({ n: 1n })
+      }),
+      // A schema whose JSON Schema comes later and fails.
+      later: tool({
+        description: "Has a schema that rejects",
+        inputSchema: z.object({}),
+        outputSchema: jsonSchema<{ ok: boolean }>(() =>
+          Promise.reject(new Error("no JSON Schema"))
+        ),
+        execute: async () => ({ ok: true })
+      })
+    };
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "options",
+      loadInProcess("options", optionsExtension({ tools }))
+    );
+    const built = await manager.build("");
+    warn.mockRestore();
+    expect(Object.keys(built.tools)).toEqual(["dated", "big", "later"]);
+    expect(built.tools.dated?.outputSchema).toBeUndefined();
+    expect(built.tools.big?.outputSchema).toBeUndefined();
+    expect(built.tools.later?.outputSchema).toBeUndefined();
+    expect((await send(built.tools, undefined)).request).toBe(
+      (await send(tools, undefined)).request
+    );
   });
 
   it("builds the same tools and prompt twice, and in order", async () => {
