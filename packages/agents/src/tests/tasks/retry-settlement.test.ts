@@ -18,6 +18,10 @@ function runRow(storage: DurableObjectStorage, runId: string): Row {
 }
 
 describe("Tasks retry settlement", () => {
+  it("refuses a time that is not finite", () => {
+    expect(() => TaskSettlement.retry(Number.NaN)).toThrow(TypeError);
+  });
+
   it("waits until the time it names, then runs the next attempt", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     const at = Date.now() + 200;

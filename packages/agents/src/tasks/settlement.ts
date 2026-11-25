@@ -36,11 +36,18 @@ export class TaskSettlement {
   }
 
   /**
-   * Leave the run `pending` with wait reason `retry` until `at` (epoch ms);
-   * its next attempt runs then. No journal row: the handler decides the
-   * backoff and when to give up.
+   * Leave the run `pending` with wait reason `retry` until `at` (epoch ms;
+   * a past `at` is due now); its next attempt runs then, as `attempt + 1`,
+   * and counts against the definition's `maxAttempts` if it sets one. No
+   * journal row and no error status between attempts: the handler owns the
+   * backoff and the give-up, which a thrown error would hand to Tasks.
    */
   static retry(at: number): TaskSettlement {
+    if (!Number.isFinite(at)) {
+      throw new TypeError(
+        `TaskSettlement.retry: \`at\` must be finite, got ${at}`
+      );
+    }
     return new TaskSettlement("retry", undefined, undefined, at);
   }
 }
