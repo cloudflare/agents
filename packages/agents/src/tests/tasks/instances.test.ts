@@ -1,0 +1,167 @@
+import { describe, expect, it } from "vitest";
+import { Tasks } from "../../tasks";
+import type { TaskStep } from "../../tasks";
+import { withCapabilityHarness } from "../shared/capability-harness";
+import { describeInstanceConformance } from "../shared/instance-conformance";
+
+/** A Tasks whose one definition tags its output with the instance's tag. */
+function tasks(tag: string, name?: string) {
+  return new Tasks({
+    name,
+    definitions: {
+      echo: async (input: { x: string }, step: TaskStep) =>
+        step.do("tag", async () => `${tag}:${input.x}`)
+    }
+  });
+}
+
+const count = (storage: DurableObjectStorage, table: string) =>
+  storage.sql.exec<{ n: number }>(`SELECT count(*) AS n FROM ${table}`).one().n;
+
+describe("Tasks instances", () => {
+  describeInstanceConformance({
+    kind: "tasks",
+    make: (name) => tasks(name ?? "default", name),
+    smoke: async (instance) => {
+      await instance.run(
+        "echo",
+        { x: "1" },
+        {
+          runId: "invoice-1",
+          lane: "chat:x",
+          idempotencyKey: "k",
+          retain: true
+        }
+      );
+      await instance.wait("invoice-1", { timeoutMs: 5_000 });
+      // One left pending, so the instance holds a job.
+      await instance.run(
+        "echo",
+        { x: "2" },
+        { runId: "later", start: "alarm" }
+      );
+    }
+  });
+
+  it("keeps the default instance on the released table and index names", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { lifecycle, capability } = install(tasks("default"));
+      await lifecycle.start();
+      await capability.run("echo", { x: "1" }, { runId: "r", start: "alarm" });
+      const names = storage.sql
+        .exec<{ name: string }>(
+          `SELECT name FROM sqlite_master
+           WHERE name LIKE 'cf_agents_task%' ORDER BY name`
+        )
+        .toArray()
+        .map((row) => row.name);
+      expect(names).toEqual([
+        "cf_agents_task_parts",
+        "cf_agents_task_runs",
+        "cf_agents_task_runs_definition",
+        "cf_agents_task_runs_idempotency_key",
+        "cf_agents_task_runs_lane",
+        "cf_agents_task_steps"
+      ]);
+      expect(storage.kv.get("cf_agents:tasks_schema_version")).toBe(4);
+    });
+  });
+
+  it("keeps the same run id, lane and idempotency key apart in two instances", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const plain = tasks("default");
+      const probe = tasks("probe", "probe");
+      const { lifecycle } = install(plain);
+      lifecycle.use(probe);
+      await lifecycle.start();
+
+      const options = {
+        runId: "invoice-1",
+        lane: "chat:x",
+        idempotencyKey: "k",
+        retain: true
+      };
+      await plain.run("echo", { x: "a" }, options);
+      await probe.run("echo", { x: "b" }, options);
+      const [a, b] = await Promise.all([
+        plain.wait("invoice-1", { timeoutMs: 5_000 }),
+        probe.wait("invoice-1", { timeoutMs: 5_000 })
+      ]);
+      expect(a).toMatchObject({ status: "completed", result: "default:a" });
+      expect(b).toMatchObject({ status: "completed", result: "probe:b" });
+      expect(await plain.getByIdempotencyKey("k")).toMatchObject({
+        result: "default:a"
+      });
+      expect(await probe.getByIdempotencyKey("k")).toMatchObject({
+        result: "probe:b"
+      });
+
+      // A queued run in each; clearing one lane, cancelling or deleting in
+      // one instance leaves the other's alone.
+      await plain.run("echo", { x: "c" }, { runId: "q", start: "alarm" });
+      await probe.run("echo", { x: "d" }, { runId: "q", start: "alarm" });
+      expect(await plain.cancel("q")).toBe(true);
+      expect((await probe.get("q"))?.status).toBe("pending");
+      await plain.clear("chat:x");
+      expect((await probe.list()).map((run) => run.runId).sort()).toEqual([
+        "invoice-1",
+        "q"
+      ]);
+      await plain.delete({});
+      expect(await plain.list()).toEqual([]);
+      expect(await probe.list()).toHaveLength(2);
+    });
+  });
+
+  it("recovers each instance's runs with its own definitions after a restart", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const first = install(tasks("default"));
+      const firstProbe = tasks("probe", "probe");
+      first.lifecycle.use(firstProbe);
+      await first.lifecycle.start();
+      await first.capability.run(
+        "echo",
+        { x: "1" },
+        { runId: "r", start: "alarm" }
+      );
+      await firstProbe.run("echo", { x: "2" }, { runId: "r", start: "alarm" });
+
+      // A restart: new instances over the same storage.
+      const plain = tasks("default");
+      const probe = tasks("probe", "probe");
+      const again = install(plain);
+      again.lifecycle.use(probe);
+      await again.lifecycle.start();
+      await plain.runDue("echo");
+      await probe.runDue("echo");
+      expect(await plain.get("r")).toMatchObject({ result: "default:1" });
+      expect(await probe.get("r")).toMatchObject({ result: "probe:2" });
+    });
+  });
+
+  it("keeps a named instance's runs while it is not installed, and runs them when it is again", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const before = install(tasks("default"));
+      const probe = tasks("probe", "probe");
+      before.lifecycle.use(probe);
+      await before.lifecycle.start();
+      await probe.run("echo", { x: "1" }, { runId: "kept", start: "alarm" });
+
+      // A deploy without it: its rows stay.
+      const without = install(tasks("default"));
+      await without.lifecycle.start();
+      expect(count(storage, "cf_agents_task_runs__n_probe")).toBe(1);
+      expect(await without.capability.get("kept")).toBeNull();
+
+      const back = tasks("probe", "probe");
+      const after = install(tasks("default"));
+      after.lifecycle.use(back);
+      await after.lifecycle.start();
+      await back.runDue("echo");
+      expect(await back.get("kept")).toMatchObject({
+        status: "completed",
+        result: "probe:1"
+      });
+    });
+  });
+});

@@ -23,7 +23,8 @@ import type {
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
-import { RUN_LIST_COLUMNS, TaskStore } from "./store";
+import { RUN_LIST_COLUMNS, SqlName, TaskStore } from "./store";
+import type { TaskTables } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";
 import { MissingTaskDefinitionError } from "./errors";
@@ -91,7 +92,6 @@ export function setTaskDefinitionResolver(
   taskDefinitionResolvers.set(tasks, resolver);
 }
 
-const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
 /**
  * 2 renames the run statuses and adds `cf_agents_task_checkpoint`; 3 adds
  * lanes and `skipped`; 4 moves the checkpoint into the run's `checkpoint`
@@ -279,6 +279,10 @@ export class Tasks<
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
+  /** This instance's tables, resolved once. */
+  readonly #tables: TaskTables;
+  /** This instance's schema version key. */
+  readonly #schemaVersionKey: string;
 
   /**
    * Create a Tasks capability.
@@ -290,7 +294,20 @@ export class Tasks<
    * rejected unless a composition-root resolver supplies them.
    */
   constructor(options: TasksOptions<Handlers> = {}) {
-    super("tasks");
+    super("tasks", options.name);
+    const table = (name: string) => new SqlName(this.store.table(name));
+    this.#tables = {
+      runs: table("task_runs"),
+      steps: table("task_steps"),
+      parts: table("task_parts"),
+      // Tasks' index names predate `store.index()`; kept as they are.
+      runsIndex: {
+        definition: table("task_runs_definition"),
+        idempotencyKey: table("task_runs_idempotency_key"),
+        lane: table("task_runs_lane")
+      }
+    };
+    this.#schemaVersionKey = this.store.key("tasks_schema_version");
     this.#definitions = options.definitions ?? {};
     this.#stepDefaults = {
       retryLimit: options.retries?.limit ?? DEFAULT_STEP_POLICY.retryLimit,
@@ -314,7 +331,7 @@ export class Tasks<
 
   /** The SQL store over this Lifecycle's storage (see `store.ts`). */
   get #store(): TaskStore {
-    this.#storeInstance ??= new TaskStore(this.lifecycle.storage);
+    this.#storeInstance ??= new TaskStore(this.lifecycle.storage, this.#tables);
     return this.#storeInstance;
   }
 
@@ -486,13 +503,13 @@ export class Tasks<
   /** Migrate storage and reconcile run deadlines during Lifecycle startup. */
   async onStart(): Promise<void> {
     const storage = this.lifecycle.storage;
-    const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
+    const version = (await storage.get<number>(this.#schemaVersionKey)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
       if (version === 1 || version === 2) this.#store.rebuildRuns();
       if (version === 3) this.#store.addCheckpointColumn();
       if (version === 2 || version === 3) this.#store.moveCheckpointTable();
       this.#store.ensureTables();
-      await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
+      await storage.put(this.#schemaVersionKey, CURRENT_FIBER_SCHEMA_VERSION);
     }
     this.#reconcile();
     await this.#syncAllWakes();
@@ -595,7 +612,7 @@ export class Tasks<
     const now = Date.now();
     const timeout = this.#claimTimeoutMs(definition);
     this.#store.sql`
-      UPDATE cf_agents_task_runs
+      UPDATE ${this.#tables.runs}
       SET next_at = ${now + timeout}, updated_at = ${now}
       WHERE run_id = ${runId} AND status = 'running'
         AND (next_at IS NULL OR next_at < ${now + timeout / 2})
@@ -703,7 +720,7 @@ export class Tasks<
     if (context.nextTime === undefined) return;
     const now = Date.now();
     this.#store.write(
-      `UPDATE cf_agents_task_runs
+      `UPDATE ${this.#tables.runs}
        SET generation = NULL,
            next_at = CASE
              WHEN next_at IS NULL OR next_at < ? THEN ?
@@ -731,7 +748,7 @@ export class Tasks<
       status: string;
       generation: string | null;
     }>`
-      SELECT next_at, status, generation FROM cf_agents_task_runs
+      SELECT next_at, status, generation FROM ${this.#tables.runs}
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
@@ -760,7 +777,7 @@ export class Tasks<
       generation: string | null;
       created_at: number;
     }>`
-      SELECT next_at, status, generation, created_at FROM cf_agents_task_runs
+      SELECT next_at, status, generation, created_at FROM ${this.#tables.runs}
       WHERE run_id = ${runId}
         AND status IN ('pending', 'running')
     `;
@@ -813,7 +830,7 @@ export class Tasks<
   /** Mirror every non-terminal run into the queue (startup reconcile). */
   async #syncAllWakes(): Promise<void> {
     const rows = this.#store.sql<{ run_id: string }>`
-      SELECT run_id FROM cf_agents_task_runs
+      SELECT run_id FROM ${this.#tables.runs}
       WHERE status IN ('pending', 'running')
         AND next_at IS NOT NULL
     `;
@@ -848,7 +865,7 @@ export class Tasks<
     options: TaskListOptions = {}
   ): Promise<TaskRunSnapshot<TaskValue>[]> {
     await this.lifecycle.ready();
-    let query = "SELECT * FROM cf_agents_task_runs WHERE 1 = 1";
+    let query = `SELECT * FROM ${this.#tables.runs} WHERE 1 = 1`;
     const params: (string | number)[] = [];
     if (options.definition !== undefined) {
       query += " AND definition = ?";
@@ -918,7 +935,7 @@ export class Tasks<
       "skipped"
     ];
     if (states.length === 0) return 0;
-    let query = `SELECT run_id, definition FROM cf_agents_task_runs WHERE status IN (${states.map(() => "?").join(", ")})`;
+    let query = `SELECT run_id, definition FROM ${this.#tables.runs} WHERE status IN (${states.map(() => "?").join(", ")})`;
     const params: (string | number)[] = [...states];
     if (options.definition !== undefined) {
       query += " AND definition = ?";
@@ -1058,7 +1075,7 @@ export class Tasks<
     // no wake job) until that run settles.
     const queued = lane !== null && this.#store.laneHead(lane) !== undefined;
     this.#store.sql`
-      INSERT INTO cf_agents_task_runs
+      INSERT INTO ${this.#tables.runs}
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, next_at, cancel_requested, created_at, updated_at, lane, seq,
          input_parts)
@@ -1172,7 +1189,7 @@ export class Tasks<
     const generation = nanoid();
     const attempt = row.attempt + 1;
     this.#store.sql`
-      UPDATE cf_agents_task_runs
+      UPDATE ${this.#tables.runs}
       SET status = 'running', attempt = ${attempt}, generation = ${generation},
           started_at = coalesce(started_at, ${now}),
           next_at = ${now + this.#claimTimeoutMs(row.definition)}, wait_reason = NULL,
@@ -1305,7 +1322,7 @@ export class Tasks<
         this.#store.fencedWrite(
           runId,
           generation,
-          `UPDATE cf_agents_task_runs
+          `UPDATE ${this.#tables.runs}
            SET status = 'completed', result = ?, generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL,
                settled_at = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND status = 'running'
@@ -1337,7 +1354,7 @@ export class Tasks<
       return this.#store.fencedWrite(
         runId,
         generation,
-        `DELETE FROM cf_agents_task_runs
+        `DELETE FROM ${this.#tables.runs}
          WHERE run_id = ? AND generation = ? AND status = 'running'
            AND cancel_requested = 0`,
         []
@@ -1395,7 +1412,7 @@ export class Tasks<
       const settled = this.#store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs
+        `UPDATE ${this.#tables.runs}
          SET status = 'skipped', cancel_reason = ?, generation = NULL, ${this.#clearCheckpointSql()},
              next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ? AND status = 'running'`,
@@ -1414,7 +1431,7 @@ export class Tasks<
     const parked = this.#store.fencedWrite(
       runId,
       generation,
-      `UPDATE cf_agents_task_runs
+      `UPDATE ${this.#tables.runs}
        SET status = 'pending', wait_reason = 'park', cancel_reason = ?,
            generation = NULL, next_at = NULL, updated_at = ?
        WHERE run_id = ? AND generation = ? AND status = 'running'`,
@@ -1454,7 +1471,7 @@ export class Tasks<
     // are fenced like an attempt's and a racing settle finds nothing.
     const generation = nanoid();
     const claimed = this.#store.write(
-      `UPDATE cf_agents_task_runs
+      `UPDATE ${this.#tables.runs}
        SET status = 'running', generation = ?, wait_reason = NULL,
            updated_at = ?
        WHERE run_id = ? AND status = ? AND generation IS ?`,
@@ -1472,7 +1489,7 @@ export class Tasks<
     const settled = this.#store.fencedWrite(
       runId,
       generation,
-      `UPDATE cf_agents_task_runs
+      `UPDATE ${this.#tables.runs}
        SET status = 'completed', result = ?, generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL,
            settled_at = ?, updated_at = ?
        WHERE run_id = ? AND generation = ? AND status = 'running'`,
@@ -1529,7 +1546,7 @@ export class Tasks<
       const suspended = this.#store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs
+        `UPDATE ${this.#tables.runs}
          SET status = 'pending', wait_reason = ?, next_at = ?, generation = NULL,
              updated_at = ?
          WHERE run_id = ? AND generation = ? AND status = 'running'`,
@@ -1594,7 +1611,7 @@ export class Tasks<
   /** The step a lost attempt left mid-execution — replay-entry evidence. */
   #interruptedStep(runId: string): { name: string; attempt: number } | null {
     const rows = this.#store.sql<{ step_name: string; attempt: number }>`
-      SELECT step_name, attempt FROM cf_agents_task_steps
+      SELECT step_name, attempt FROM ${this.#tables.steps}
       WHERE run_id = ${runId} AND state = 'running'
       ORDER BY started_at DESC
       LIMIT 1
@@ -1619,7 +1636,7 @@ export class Tasks<
       settled = this.#store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs
+        `UPDATE ${this.#tables.runs}
          SET status = 'aborted', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
@@ -1628,7 +1645,7 @@ export class Tasks<
       );
     } else {
       const written = this.#store.write(
-        `UPDATE cf_agents_task_runs
+        `UPDATE ${this.#tables.runs}
          SET status = 'aborted', cancel_requested = 1, cancel_reason = ?,
              generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
@@ -1663,7 +1680,7 @@ export class Tasks<
       settled = this.#store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs
+        `UPDATE ${this.#tables.runs}
          SET status = 'error', error_name = ?, error_message = ?,
              generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ? AND generation = ?
@@ -1672,7 +1689,7 @@ export class Tasks<
       );
     } else {
       const written = this.#store.write(
-        `UPDATE cf_agents_task_runs
+        `UPDATE ${this.#tables.runs}
          SET status = 'error', error_name = ?, error_message = ?,
              generation = NULL, ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?, updated_at = ?
          WHERE run_id = ?
@@ -1788,7 +1805,7 @@ export class Tasks<
       this.#reporting.delete(runId);
     }
     this.#store.sql`
-      UPDATE cf_agents_task_runs SET notified = ${row.status}
+      UPDATE ${this.#tables.runs} SET notified = ${row.status}
       WHERE run_id = ${runId} AND status = ${row.status}
     `;
     return record;
@@ -1846,7 +1863,7 @@ export class Tasks<
     );
     if (names.length === 0) return;
     const rows = this.#store.sql<TaskRunRow>`
-      SELECT * FROM cf_agents_task_runs
+      SELECT * FROM ${this.#tables.runs}
       WHERE status IN ('completed', 'error', 'aborted', 'skipped')
         AND (notified IS NULL OR notified != status)
         AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
@@ -1963,7 +1980,7 @@ export class Tasks<
     if (names.length === 0) return false;
     return (
       this.#store.sql`
-        SELECT 1 FROM cf_agents_task_runs
+        SELECT 1 FROM ${this.#tables.runs}
         WHERE status IN ('completed', 'error', 'aborted', 'skipped')
           AND (notified IS NULL OR notified != status)
           AND definition IN (SELECT value FROM json_each(${JSON.stringify(names)}))
@@ -1984,7 +2001,7 @@ export class Tasks<
     ) {
       const now = Date.now();
       this.#store.sql`
-        UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
+        UPDATE ${this.#tables.runs} SET next_at = ${now}, updated_at = ${now}
         WHERE run_id = ${head.run_id} AND status = 'pending'
       `;
     }
@@ -2028,7 +2045,7 @@ export class Tasks<
     if (options.status?.length === 0) return [];
     const params: (string | number)[] = [options.definition];
     const withResults = options.results !== false;
-    let query = `SELECT ${withResults ? "*" : RUN_LIST_COLUMNS} FROM cf_agents_task_runs WHERE definition = ?`;
+    let query = `SELECT ${withResults ? "*" : RUN_LIST_COLUMNS} FROM ${this.#tables.runs} WHERE definition = ?`;
     if (options.input !== undefined) {
       query += " AND input = ?";
       params.push(serializeTaskValue(options.input, "input filter") ?? "");
@@ -2115,7 +2132,7 @@ export class Tasks<
       )
     );
     this.#store.sql`
-      INSERT INTO cf_agents_task_runs
+      INSERT INTO ${this.#tables.runs}
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, generation, next_at, error_name, error_message,
          cancel_requested, cancel_reason, created_at, started_at, updated_at,
@@ -2166,7 +2183,7 @@ export class Tasks<
     deadline?: number
   ): Promise<string | undefined> {
     const rows = this.#store.sql<{ run_id: string }>`
-      SELECT run_id FROM cf_agents_task_runs
+      SELECT run_id FROM ${this.#tables.runs}
       WHERE definition = ${definition} AND status IN ('pending', 'running')
         AND next_at IS NOT NULL AND next_at <= ${Date.now()}
       ORDER BY created_at
@@ -2241,7 +2258,7 @@ export class Tasks<
     const params = [key, key, key, ...set, ...remove];
     return (
       this.#store.write(
-        `UPDATE cf_agents_task_runs
+        `UPDATE ${this.#tables.runs}
          SET metadata = ${next}, updated_at = ?
          WHERE run_id = ? AND length(CAST(${next} AS BLOB)) <= ?`,
         [...params, Date.now(), runId, ...params, MAX_FRAMEWORK_METADATA_BYTES]
@@ -2273,7 +2290,7 @@ export class Tasks<
         : MAX_SERIALIZED_BYTES
     );
     this.#store.sql`
-      UPDATE cf_agents_task_runs SET metadata = ${json}, updated_at = ${Date.now()}
+      UPDATE ${this.#tables.runs} SET metadata = ${json}, updated_at = ${Date.now()}
       WHERE run_id = ${runId}
     `;
     return true;
@@ -2288,7 +2305,7 @@ export class Tasks<
   async clear(lane: string, reason?: string): Promise<void> {
     if (this.lifecycle.status() !== "started") await this.lifecycle.ready();
     const now = Date.now();
-    const query = `UPDATE cf_agents_task_runs
+    const query = `UPDATE ${this.#tables.runs}
       SET status = 'skipped', cancel_reason = ?, generation = NULL,
           ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?,
           updated_at = ?
@@ -2339,18 +2356,18 @@ export class Tasks<
     // A fresh isolate has no live attempts, so every claimed row is an
     // interrupted attempt: make it due immediately for reclaim and replay.
     this.#store.sql`
-      UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
+      UPDATE ${this.#tables.runs} SET next_at = ${now}, updated_at = ${now}
       WHERE status = 'running' AND generation IS NOT NULL
     `;
     // Non-terminal rows must always carry a deadline, except runs queued
     // behind their lane's head; repair any without one.
     this.#store.sql`
-      UPDATE cf_agents_task_runs SET next_at = ${now}, updated_at = ${now}
+      UPDATE ${this.#tables.runs} SET next_at = ${now}, updated_at = ${now}
       WHERE status = 'pending' AND next_at IS NULL
         AND (wait_reason IS NULL OR wait_reason != 'park') AND (
         lane IS NULL OR run_id = (
-          SELECT head.run_id FROM cf_agents_task_runs AS head
-          WHERE head.lane = cf_agents_task_runs.lane
+          SELECT head.run_id FROM ${this.#tables.runs} AS head
+          WHERE head.lane = ${this.#tables.runs}.lane
             AND head.status IN ('pending', 'running')
           ORDER BY head.seq LIMIT 1
         )

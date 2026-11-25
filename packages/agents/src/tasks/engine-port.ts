@@ -39,6 +39,7 @@ export type TaskStepEngineDeps = {
 /** @internal Build the engine port for one claimed attempt. */
 export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
   const { runId, generation } = deps;
+  const t = deps.store.tables;
   // The newest claim deadline known durable. The queue's own backstop push
   // (a due wake observing the live attempt) only ever moves `next_at`
   // forward, so this stays a conservative lower bound.
@@ -49,7 +50,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
   // Every journal write carries the attempt's fence in its own statement
   // (no read of the run row first): a write that lands nothing means a
   // newer attempt owns the run.
-  const OWNS = `EXISTS (SELECT 1 FROM cf_agents_task_runs
+  const OWNS = `EXISTS (SELECT 1 FROM ${t.runs}
                   WHERE run_id = ? AND generation = ?)`;
   const fenced = (query: string, params: (string | number | null)[]) => {
     if (deps.store.write(query, [...params, runId, generation]) === 0) {
@@ -59,21 +60,21 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
   return {
     readStep: (name) => {
       const rows = deps.store.sql<TaskStepRow>`
-          SELECT * FROM cf_agents_task_steps
+          SELECT * FROM ${t.steps}
           WHERE run_id = ${runId} AND step_name = ${name}
         `;
       return rows[0];
     },
     countSteps: () => {
       const rows = deps.store.sql<{ count: number }>`
-          SELECT COUNT(*) AS count FROM cf_agents_task_steps WHERE run_id = ${runId}
+          SELECT COUNT(*) AS count FROM ${t.steps} WHERE run_id = ${runId}
         `;
       return rows[0]?.count ?? 0;
     },
     insertStep: (name, kind, wakeAt) => {
       const now = Date.now();
       fenced(
-        `INSERT INTO cf_agents_task_steps
+        `INSERT INTO ${t.steps}
            (run_id, step_name, kind, state, attempt, next_at, created_at,
             started_at, updated_at)
          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${OWNS}`,
@@ -97,7 +98,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       // same synchronous block (one durable commit either way, so the
       // split bought no crash evidence).
       fenced(
-        `INSERT INTO cf_agents_task_steps
+        `INSERT INTO ${t.steps}
            (run_id, step_name, kind, state, attempt, next_at, created_at,
             completed_at, updated_at)
          SELECT ?, ?, 'sleep', 'completed', 0, NULL, ?, ?, ? WHERE ${OWNS}`,
@@ -107,11 +108,11 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     claimStepAttempt: (name) => {
       const now = Date.now();
       const rows = deps.store.sql<{ attempt: number }>`
-          UPDATE cf_agents_task_steps
+          UPDATE ${t.steps}
           SET state = 'running', attempt = attempt + 1, next_at = NULL,
               started_at = ${now}, updated_at = ${now}
           WHERE run_id = ${runId} AND step_name = ${name}
-            AND EXISTS (SELECT 1 FROM cf_agents_task_runs
+            AND EXISTS (SELECT 1 FROM ${t.runs}
                         WHERE run_id = ${runId} AND generation = ${generation})
           RETURNING attempt
         `;
@@ -125,7 +126,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       );
       const now = Date.now();
       fenced(
-        `UPDATE cf_agents_task_steps
+        `UPDATE ${t.steps}
          SET state = 'completed', result = ?, next_at = NULL,
              completed_at = ?, updated_at = ?
          WHERE run_id = ? AND step_name = ? AND ${OWNS}`,
@@ -135,7 +136,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     failStep: (name, error) => {
       const now = Date.now();
       fenced(
-        `UPDATE cf_agents_task_steps
+        `UPDATE ${t.steps}
          SET state = 'failed', error_name = ?, error_message = ?,
              next_at = NULL, updated_at = ?
          WHERE run_id = ? AND step_name = ? AND ${OWNS}`,
@@ -145,7 +146,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
     waitStep: (name, wakeAt) => {
       const now = Date.now();
       fenced(
-        `UPDATE cf_agents_task_steps
+        `UPDATE ${t.steps}
          SET state = 'waiting', next_at = ?, updated_at = ?
          WHERE run_id = ? AND step_name = ? AND ${OWNS}`,
         [wakeAt, now, runId, name]
@@ -157,7 +158,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       const written = deps.store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs SET next_at = ?, updated_at = ?
+        `UPDATE ${t.runs} SET next_at = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [now + deps.claimTimeoutMs(), now]
       );
@@ -168,7 +169,7 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
       const written = deps.store.fencedWrite(
         runId,
         generation,
-        `UPDATE cf_agents_task_runs SET status_message = ?, updated_at = ?
+        `UPDATE ${t.runs} SET status_message = ?, updated_at = ?
            WHERE run_id = ? AND generation = ? AND status = 'running'`,
         [message, Date.now()]
       );

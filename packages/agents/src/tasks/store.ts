@@ -62,27 +62,60 @@ export const RUN_LIST_COLUMNS = RUNS_COLUMNS.split(",\n")
   )
   .join(", ");
 
+/**
+ * @internal A table name, written into statement text where it appears
+ * instead of bound as a parameter. Only built from an instance's resolved
+ * names (`this.store.table()`), never from input.
+ */
+export class SqlName {
+  constructor(readonly name: string) {}
+  toString(): string {
+    return this.name;
+  }
+}
+
+/** @internal One Tasks instance's tables. */
+export type TaskTables = {
+  readonly runs: SqlName;
+  readonly steps: SqlName;
+  readonly parts: SqlName;
+  /** The runs table's indexes, by the name after `cf_agents_task_runs_`. */
+  readonly runsIndex: {
+    readonly definition: SqlName;
+    readonly idempotencyKey: SqlName;
+    readonly lane: SqlName;
+  };
+};
+
 /** @internal SQL-backed store for one Tasks capability instance. */
 export class TaskStore {
   readonly #storage: DurableObjectStorage;
+  readonly tables: TaskTables;
 
-  constructor(storage: DurableObjectStorage) {
+  constructor(storage: DurableObjectStorage, tables: TaskTables) {
     this.#storage = storage;
+    this.tables = tables;
   }
 
   sql<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
-    ...values: (string | number | boolean | null)[]
+    ...values: (string | number | boolean | null | SqlName)[]
   ): T[] {
-    const query = strings.reduce(
-      (result, part, index) =>
-        result + part + (index < values.length ? "?" : ""),
-      ""
-    );
+    const params: (string | number | boolean | null)[] = [];
+    let query = strings[0];
+    for (let index = 0; index < values.length; index++) {
+      const value = values[index];
+      if (value instanceof SqlName) query += value.name;
+      else {
+        query += "?";
+        params.push(value);
+      }
+      query += strings[index + 1];
+    }
     try {
       // SAFETY: Tasks queries select from its own schema; T describes the
       // projected columns of the accompanying query text.
-      return [...this.#storage.sql.exec(query, ...values)] as T[];
+      return [...this.#storage.sql.exec(query, ...params)] as T[];
     } catch (cause) {
       throw new SqlError(query, cause);
     }
@@ -121,7 +154,7 @@ export class TaskStore {
 
   getRun(runId: string): TaskRunRow | undefined {
     const rows = this.sql<TaskRunRow>`
-      SELECT * FROM cf_agents_task_runs WHERE run_id = ${runId}
+      SELECT * FROM ${this.tables.runs} WHERE run_id = ${runId}
     `;
     return rows[0];
   }
@@ -132,7 +165,7 @@ export class TaskStore {
    */
   laneHead(lane: string): TaskRunRow | undefined {
     return this.sql<TaskRunRow>`
-      SELECT * FROM cf_agents_task_runs
+      SELECT * FROM ${this.tables.runs}
       WHERE lane = ${lane} AND status IN ('pending', 'running')
       ORDER BY seq LIMIT 1
     `[0];
@@ -142,14 +175,14 @@ export class TaskStore {
   nextLaneSeq(lane: string): number {
     return (
       (this.sql<{ seq: number | null }>`
-        SELECT MAX(seq) AS seq FROM cf_agents_task_runs WHERE lane = ${lane}
+        SELECT MAX(seq) AS seq FROM ${this.tables.runs} WHERE lane = ${lane}
       `[0]?.seq ?? 0) + 1
     );
   }
 
   getRunByKey(idempotencyKey: string): TaskRunRow | undefined {
     const rows = this.sql<TaskRunRow>`
-      SELECT * FROM cf_agents_task_runs WHERE idempotency_key = ${idempotencyKey}
+      SELECT * FROM ${this.tables.runs} WHERE idempotency_key = ${idempotencyKey}
     `;
     return rows[0];
   }
@@ -169,7 +202,7 @@ export class TaskStore {
     const pieces = splitPieces(json, INLINE_INPUT_UNITS);
     pieces.forEach((data, piece) => {
       this.sql`
-        INSERT INTO cf_agents_task_parts (run_id, piece, data)
+        INSERT INTO ${this.tables.parts} (run_id, piece, data)
         VALUES (${runId}, ${piece}, ${data})
       `;
     });
@@ -182,7 +215,7 @@ export class TaskStore {
       return row.input;
     }
     return this.sql<{ data: string }>`
-      SELECT data FROM cf_agents_task_parts
+      SELECT data FROM ${this.tables.parts}
       WHERE run_id = ${row.run_id} ORDER BY piece
     `
       .map((part) => part.data)
@@ -190,15 +223,15 @@ export class TaskStore {
   }
 
   deleteRun(runId: string): void {
-    this.sql`DELETE FROM cf_agents_task_parts WHERE run_id = ${runId}`;
-    this.sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${runId}`;
-    this.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${runId}`;
+    this.sql`DELETE FROM ${this.tables.parts} WHERE run_id = ${runId}`;
+    this.sql`DELETE FROM ${this.tables.steps} WHERE run_id = ${runId}`;
+    this.sql`DELETE FROM ${this.tables.runs} WHERE run_id = ${runId}`;
   }
 
   /** A checkpoint entry of a run, or `undefined`. */
   getCheckpoint(runId: string, key: string): TaskJson | undefined {
     const rows = this.sql<{ checkpoint: string | null }>`
-      SELECT checkpoint FROM cf_agents_task_runs WHERE run_id = ${runId}
+      SELECT checkpoint FROM ${this.tables.runs} WHERE run_id = ${runId}
     `;
     const checkpoint = rows[0]?.checkpoint;
     if (checkpoint == null) return undefined;
@@ -218,7 +251,7 @@ export class TaskStore {
     value: TaskJson
   ): void {
     this.write(
-      `UPDATE cf_agents_task_runs
+      `UPDATE ${this.tables.runs}
        SET checkpoint = json_set(coalesce(checkpoint, '{}'), '$.' || json_quote(?), json(?))
        WHERE run_id = ? AND generation = ?`,
       [key, JSON.stringify(value), runId, generation]
@@ -232,11 +265,11 @@ export class TaskStore {
    */
   addCheckpointColumn(): void {
     const [present] = this.sql<{ name: string }>`
-      SELECT name FROM pragma_table_info('cf_agents_task_runs')
+      SELECT name FROM pragma_table_info('${this.tables.runs}')
       WHERE name = 'checkpoint'
     `;
     if (present) return;
-    this.sql`ALTER TABLE cf_agents_task_runs ADD COLUMN checkpoint TEXT`;
+    this.sql`ALTER TABLE ${this.tables.runs} ADD COLUMN checkpoint TEXT`;
   }
 
   /**
@@ -246,10 +279,10 @@ export class TaskStore {
   moveCheckpointTable(): void {
     this.#storage.transactionSync(() => {
       this.#storage.sql.exec(`
-        UPDATE cf_agents_task_runs SET checkpoint = (
+        UPDATE ${this.tables.runs} SET checkpoint = (
           SELECT json_group_object(key, json(value))
           FROM cf_agents_task_checkpoint c
-          WHERE c.run_id = cf_agents_task_runs.run_id
+          WHERE c.run_id = ${this.tables.runs}.run_id
         )
         WHERE run_id IN (SELECT run_id FROM cf_agents_task_checkpoint)`);
       this.#storage.sql.exec(`DROP TABLE cf_agents_task_checkpoint`);
@@ -267,7 +300,7 @@ export class TaskStore {
   rebuildRuns(): void {
     const columns = new Set(
       this.sql<{ name: string }>`
-        SELECT name FROM pragma_table_info('cf_agents_task_runs')
+        SELECT name FROM pragma_table_info('${this.tables.runs}')
       `.map((row) => row.name)
     );
     if (columns.size === 0) return;
@@ -292,10 +325,10 @@ export class TaskStore {
         }
       };
       exec(
-        `CREATE TABLE cf_agents_task_runs_next (${RUNS_COLUMNS}) WITHOUT ROWID`
+        `CREATE TABLE ${this.tables.runs}_next (${RUNS_COLUMNS}) WITHOUT ROWID`
       );
       exec(`
-        INSERT INTO cf_agents_task_runs_next (
+        INSERT INTO ${this.tables.runs}_next (
           run_id, definition, input, status, result, error_name,
           error_message, status_message, metadata, idempotency_key, retain,
           attempt, generation, next_at, wait_reason, cancel_requested,
@@ -308,10 +341,10 @@ export class TaskStore {
           idempotency_key, retain, attempt, generation, next_at, wait_reason,
           cancel_requested, cancel_reason, created_at, started_at, updated_at,
           settled_at, ${lane}, ${notified}, ${parts}, ${checkpoint}
-        FROM cf_agents_task_runs`);
-      exec(`DROP TABLE cf_agents_task_runs`);
+        FROM ${this.tables.runs}`);
+      exec(`DROP TABLE ${this.tables.runs}`);
       exec(
-        `ALTER TABLE cf_agents_task_runs_next RENAME TO cf_agents_task_runs`
+        `ALTER TABLE ${this.tables.runs}_next RENAME TO ${this.tables.runs}`
       );
     });
   }
@@ -325,7 +358,7 @@ export class TaskStore {
       }
     };
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_task_runs (${RUNS_COLUMNS}) WITHOUT ROWID`);
+      CREATE TABLE IF NOT EXISTS ${this.tables.runs} (${RUNS_COLUMNS}) WITHOUT ROWID`);
     // No (state, next_at) index: every claim, refresh, and settle rewrites
     // next_at, and Cloudflare bills each touched index as a row written —
     // a per-write tax on the hottest run mutations, paid to accelerate the
@@ -333,23 +366,23 @@ export class TaskStore {
     // definition index stays: list-by-definition reads scale with retained
     // runs, and definition/created_at never change after insert.
     rawSql(`
-      CREATE INDEX IF NOT EXISTS cf_agents_task_runs_definition
-      ON cf_agents_task_runs (definition, created_at)
+      CREATE INDEX IF NOT EXISTS ${this.tables.runsIndex.definition}
+      ON ${this.tables.runs} (definition, created_at)
     `);
     // Partial: a run without a key (most of them) writes no entry here.
     rawSql(`
-      CREATE UNIQUE INDEX IF NOT EXISTS cf_agents_task_runs_idempotency_key
-      ON cf_agents_task_runs (idempotency_key)
+      CREATE UNIQUE INDEX IF NOT EXISTS ${this.tables.runsIndex.idempotencyKey}
+      ON ${this.tables.runs} (idempotency_key)
       WHERE idempotency_key IS NOT NULL
     `);
     // A lane's head and next run are read on every lane settle; only lane
     // runs carry an entry.
     rawSql(`
-      CREATE INDEX IF NOT EXISTS cf_agents_task_runs_lane
-      ON cf_agents_task_runs (lane, seq) WHERE lane IS NOT NULL
+      CREATE INDEX IF NOT EXISTS ${this.tables.runsIndex.lane}
+      ON ${this.tables.runs} (lane, seq) WHERE lane IS NOT NULL
     `);
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_task_steps (
+      CREATE TABLE IF NOT EXISTS ${this.tables.steps} (
         run_id TEXT NOT NULL,
         step_name TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
@@ -368,7 +401,7 @@ export class TaskStore {
         PRIMARY KEY (run_id, step_name)
       ) WITHOUT ROWID`);
     rawSql(`
-      CREATE TABLE IF NOT EXISTS cf_agents_task_parts (
+      CREATE TABLE IF NOT EXISTS ${this.tables.parts} (
         run_id TEXT NOT NULL,
         piece INTEGER NOT NULL,
         data TEXT NOT NULL,

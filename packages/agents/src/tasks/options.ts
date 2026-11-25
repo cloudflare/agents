@@ -23,6 +23,16 @@ export type TaskEventType =
  */
 export interface TasksOptions<Handlers extends TaskHandlers = TaskCallbacks> {
   /**
+   * This instance's name, for more than one Tasks in one Durable Object:
+   * each named instance keeps its own runs, steps and jobs, apart from the
+   * default (unnamed) one and from each other. A lowercase letter, then up
+   * to 31 lowercase letters, digits or hyphens.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly name?: string;
+
+  /**
    * Named Task definitions this capability can run. Each run row persists a
    * definition name; declaring the map in the constructor re-registers the
    * names on every Durable Object wake, so recovery of in-flight runs is
