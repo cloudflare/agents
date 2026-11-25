@@ -50,8 +50,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-123");
@@ -80,8 +78,6 @@ describe("Resumable Streaming", () => {
     it("records the allocated assistant message id in stream metadata for a real turn (#1691 wiring)", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       // Drive a real turn whose response carries NO provider `start.messageId`
       // (the common case — and the #1691 scenario). We assert that `_reply`
@@ -160,8 +156,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-456");
@@ -197,8 +191,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-789");
@@ -223,8 +215,6 @@ describe("Resumable Streaming", () => {
     it("marks stream as error on failure", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -475,8 +465,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // Insert a stale stream (6 minutes old)
@@ -507,8 +495,6 @@ describe("Resumable Streaming", () => {
     it("restores fresh streams (under 5 minutes old)", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -541,8 +527,6 @@ describe("Resumable Streaming", () => {
     it("clears stream data when chat history is cleared", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -582,8 +566,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // Start first stream and add chunks without explicit flush
@@ -614,8 +596,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-flush");
@@ -637,8 +617,6 @@ describe("Resumable Streaming", () => {
     it("persists many chunks in order, packed into far fewer rows", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -682,8 +660,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-pack-one");
@@ -714,8 +690,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-single");
@@ -736,8 +710,6 @@ describe("Resumable Streaming", () => {
     it("splits a large chunk into its own row to respect the byte cap", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -776,8 +748,6 @@ describe("Resumable Streaming", () => {
     it("reads back legacy per-chunk rows (backward compatibility)", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1903,7 +1873,6 @@ describe("Resumable Streaming", () => {
     it("buffered chunks are not flushed to SQLite after clearAll", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1935,7 +1904,6 @@ describe("Resumable Streaming", () => {
     it("errored streams are cleaned up alongside completed streams", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1965,7 +1933,6 @@ describe("Resumable Streaming", () => {
     it("abandoned streaming rows are cleaned up after the stale-in-flight window", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1997,7 +1964,6 @@ describe("Resumable Streaming", () => {
     it("never arms a cleanup alarm, before or after a turn", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       expect(await agentStub.testCountStreamCleanupSchedules()).toBe(0);
 
@@ -2096,7 +2062,6 @@ describe("Resumable Streaming", () => {
     it("reclaims finished streams of any age and abandoned in-flight rows past the stale window", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       await agentStub.testInsertOldErroredStream("done-recent", "req-1", 5_000);
@@ -2123,7 +2088,6 @@ describe("Resumable Streaming", () => {
     it("does not reclaim a long-running stream that is still emitting chunks", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       await agentStub.testInsertStaleStream(
