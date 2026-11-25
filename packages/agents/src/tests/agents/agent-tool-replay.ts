@@ -378,6 +378,20 @@ export class TestAgentToolReplayAgent extends Agent {
     );
   }
 
+  /**
+   * Make the pending detached backbone schedule due now and point the
+   * Durable Object alarm at it, so `runDurableObjectAlarm` fires the real
+   * scheduled retry instead of the test calling the tick directly.
+   */
+  async makeDetachedBackboneDueForTest(): Promise<void> {
+    const past = Date.now() - 1_000;
+    this.sql`
+      UPDATE cf_agents_jobs SET time = ${past}
+      WHERE fn = '_cfDetachedReconcileTick'
+    `;
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+  }
+
   async detachedBackboneSchedulesForTest(): Promise<
     DetachedBackboneSchedule[]
   > {

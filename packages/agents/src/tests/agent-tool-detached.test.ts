@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../index";
 
@@ -203,10 +204,12 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(result.outstanding).toBe(true);
     expect(result.schedules).toBe(1);
 
-    // The armed backbone retries the claim once its lease expires.
+    // The armed backbone's own alarm retries the claim once its lease expires.
     agent.expireDetachedFinishClaimForTest("run-fastpath-retry");
-    await agent.detachedReconcileTickForTest();
+    await agent.makeDetachedBackboneDueForTest();
+    expect(await runDurableObjectAlarm(agent)).toBe(true);
     expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
     const delivered = (await agent.getDetachedDeliveryLog()).filter(
       (e) => e.runId === "run-fastpath-retry" && e.hook === "onDetachedDone"
     );
