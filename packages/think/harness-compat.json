@@ -1,8 +1,8 @@
 {
-  "total": 1551,
-  "passed": 526,
-  "needThink": 1259,
-  "needThinkPassed": 234,
+  "total": 1553,
+  "passed": 529,
+  "needThink": 1261,
+  "needThinkPassed": 237,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -66,7 +66,7 @@
     },
     "client-tools.test.ts": {
       "total": 136,
-      "passed": 34
+      "passed": 33
     },
     "cold-rpc-initialization.test.ts": {
       "total": 4,
@@ -134,7 +134,7 @@
     },
     "mcp-tool-materialization.test.ts": {
       "total": 5,
-      "passed": 3
+      "passed": 5
     },
     "media-eviction.test.ts": {
       "total": 22,
@@ -215,6 +215,10 @@
     "scheduled-tasks.test.ts": {
       "total": 9,
       "passed": 6
+    },
+    "skills-tools.test.ts": {
+      "total": 2,
+      "passed": 2
     },
     "stop-reason.test.ts": {
       "total": 46,
@@ -333,7 +337,6 @@
     "client-tools.test.ts > Think — regeneration > regeneration preserves conversation history before the branch point",
     "client-tools.test.ts > Think — tool approval > does NOT update tool in output-available state",
     "client-tools.test.ts > Think — tool approval > non-existent toolCallId is a no-op",
-    "client-tools.test.ts > Think — tool approval > preserves approval data",
     "client-tools.test.ts > Think — tool broadcast and persistence > other tabs receive continuation stream chunks",
     "client-tools.test.ts > Think — tool broadcast and persistence > tool state survives across agent instances",
     "client-tools.test.ts > Think — tool result application > applies to tool in approval-responded state",
@@ -502,8 +505,10 @@
     "hooks.test.ts > Think — tool-call hooks expose typed input/output > beforeToolCall receives toolName and typed input",
     "hydration-budget.test.ts > hydrationByteBudget — windowed hydration (#1710) > chat works on a windowed-boot agent and persists past the window",
     "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > DOES count an in-flight `running` run toward the cap",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > automatically exposes MCP tools by default for compatibility",
     "mcp-tool-materialization.test.ts > Think MCP tool materialization > hands the model an MCP tool's result when it calls one",
     "mcp-tool-materialization.test.ts > Think MCP tool materialization > sends the MCP tools as getAITools() gives them, byte for byte, after the workspace's",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > skips automatic AI tool conversion while preserving MCP connector access",
     "mcp-tool-materialization.test.ts > Think MCP tool materialization > waits for MCP connections before it builds the agent's own tools",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > ignores text, markers, remote urls and small payloads",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees a payload nested inside a tool output",
@@ -706,6 +711,8 @@
     "scheduled-tasks.test.ts > Think scheduled tasks > leaves the application's own declared schedules alone",
     "scheduled-tasks.test.ts > Think scheduled tasks > reconciles declared tasks without touching unrelated schedules",
     "scheduled-tasks.test.ts > Think scheduled tasks > retries scheduled task handlers before recording failure",
+    "skills-tools.test.ts > Think skills > sends a changed catalog once, as a reminder, without rewriting the system prompt",
+    "skills-tools.test.ts > Think skills > sends the workspace and skill tools as they are given directly, in that order, byte for byte",
     "streaming-message-id.test.ts > Think — streaming assistant message-id alignment > stamps the persisted assistant id onto a new turn's start chunk",
     "submissions.test.ts > Think durable submissions > completes multiple submissions in FIFO order",
     "submissions.test.ts > Think durable submissions > deduplicates by submission id",

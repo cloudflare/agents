@@ -200,6 +200,10 @@
         "name": "ThinkFetchToolsTestAgent"
       },
       {
+        "class_name": "ThinkSkillsToolsTestAgent",
+        "name": "ThinkSkillsToolsTestAgent"
+      },
+      {
         "class_name": "ThinkOnStartReconcileFailureAgent",
         "name": "ThinkOnStartReconcileFailureAgent"
       },
@@ -304,6 +308,7 @@
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",
         "ThinkFetchToolsTestAgent",
+        "ThinkSkillsToolsTestAgent",
         "ThinkOnStartReconcileFailureAgent",
         "ThinkOnStartHydrationFailureAgent",
         "ThinkWindowedHydrationAgent",
