@@ -1,7 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   Channels,
+  deliverToSurfaces,
   type AgentHarness,
+  type Channel,
+  type ChannelMessageSurface,
+  type DeliveryResult,
   type EventOrigin,
   type GatewayEvent,
   type GatewayOrigin,
@@ -13,8 +17,10 @@ import {
   type SubmitOptions
 } from "../../experimental/channels";
 import { WebChannel } from "../../experimental/channels/web";
+import { email } from "../../experimental/channels/email";
 import { Lifecycle } from "../../lifecycle";
 import { Streams } from "../../streams";
+import { Tasks } from "../../tasks";
 
 type Listener = (events: readonly SessionEvent[]) => Promise<void>;
 
@@ -210,5 +216,154 @@ export class ChannelsHarnessObject extends DurableObject<Cloudflare.Env> {
 
   async responseState(responseId: string): Promise<string | null> {
     return (await this.channels.streams.status(responseId))?.state ?? null;
+  }
+}
+
+/**
+ * The fake Channel's scripts, by object id: in the isolate, not the
+ * object's storage, so a reset cannot roll a step of one back.
+ */
+const fakeScripts = new Map<string, FakePost[]>();
+
+/** What the fake gateway Channel does with the next posts, in order. */
+export type FakePost =
+  | "ok"
+  | "retryable"
+  | "refused"
+  | "uncertain"
+  /** The object resets after the provider saw the post. */
+  | "reset"
+  /** The object resets before the post left it. */
+  | "reset-before-send";
+
+/**
+ * Channels whose `fake` Channel is a gateway Channel served inside the
+ * agent (`deliverToSurfaces`): it records what each post streamed, and does
+ * with each what the test scripted.
+ */
+export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
+  readonly harness = new ScriptedHarness();
+  readonly tasks = new Tasks();
+
+  readonly #fake: Channel = {
+    stream: async (surface, chunks): Promise<DeliveryResult> => {
+      const id = this.ctx.id.toString();
+      const [outcome = "ok", ...rest] = fakeScripts.get(id) ?? [];
+      fakeScripts.set(id, rest);
+      if (outcome === "reset-before-send") {
+        // Nothing has left the object: its writes since its last I/O go.
+        this.ctx.abort("reset before the post");
+        return new Promise<never>(() => {});
+      }
+      let text = "";
+      for await (const chunk of chunks) {
+        if (chunk.type === "text-delta") text += chunk.delta;
+      }
+      // Kept so they outlive a reset.
+      this.ctx.storage.kv.put("posts", [
+        ...this.getPosts(),
+        { label: surface.label, text, outcome }
+      ]);
+      switch (outcome) {
+        case "ok":
+          return { status: "delivered" };
+        case "retryable":
+          return {
+            status: "failed",
+            retryable: true,
+            error: { code: "RATE_LIMITED", message: "slow down" }
+          };
+        case "refused":
+          return {
+            status: "failed",
+            retryable: false,
+            error: { code: "CHANNEL_NOT_FOUND", message: "no such thread" }
+          };
+        case "uncertain":
+          return {
+            status: "uncertain",
+            reference: "msg-1",
+            error: { code: "STREAM_CUT", message: "cut mid-stream" }
+          };
+        case "reset":
+          // The provider saw the post: a real send waits for the object's
+          // writes to be durable first (the output gate), as this sync does.
+          await this.ctx.storage.sync();
+          this.ctx.abort("reset mid-post");
+          return new Promise<never>(() => {});
+      }
+    }
+  };
+
+  readonly channels = Channels.forHarness(this.harness, {
+    streams: new Streams({ maxChunkBytes: 1024 }),
+    channels: {
+      fake: deliverToSurfaces(this.#fake, { tasks: this.tasks }),
+      email: deliverToSurfaces(
+        email({
+          from: "agent@example.com",
+          binding: {
+            send: async (message) => {
+              this.ctx.storage.kv.put("emails", [
+                ...this.getEmails(),
+                {
+                  to: message.to as string | string[],
+                  subject: message.subject,
+                  text: String(message.text)
+                }
+              ]);
+              return { messageId: "m-1" };
+            }
+          }
+        }),
+        { tasks: this.tasks }
+      )
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.tasks)
+    .use(this.channels.streams)
+    .use(this.channels);
+
+  setScript(script: FakePost[]): void {
+    fakeScripts.set(this.ctx.id.toString(), script);
+  }
+
+  /** A message from a surface of the fake Channel, as the gateway sends it. */
+  receive(event: GatewayEvent, origin: GatewayOrigin): Promise<void> {
+    return this.channels.receive(event, origin);
+  }
+
+  emit(events: SessionEvent[], session = "default"): Promise<void> {
+    return this.harness.emit(session, events);
+  }
+
+  /** Posts as the Channel saw them: the surface label and the text. */
+  getPosts(): Array<{ label: string; text: string; outcome: FakePost }> {
+    return this.ctx.storage.kv.get("posts") ?? [];
+  }
+
+  /** What the email Channel sent. */
+  getEmails(): Array<{ to: string | string[]; subject: string; text: string }> {
+    return this.ctx.storage.kv.get("emails") ?? [];
+  }
+
+  /** Deliveries still open (pending or running). */
+  openDeliveries(): number {
+    return this.ctx.storage.sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE definition = '__cf_delivery:channels:fake' AND status IN ('pending', 'running')"
+      )
+      .one().n;
+  }
+
+  surfaceOf(label: string): ChannelMessageSurface {
+    return {
+      version: 1,
+      channelKey: "fake",
+      address: { thread: label },
+      label
+    };
   }
 }

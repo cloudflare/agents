@@ -2629,6 +2629,8 @@
     "ConversationOperation",
     "ConversationSnapshot",
     "ConversationUpdate",
+    "deliverToSurfaces",
+    "DeliverToSurfacesOptions",
     "DeliveryFailure",
     "DeliveryResult",
     "DispatchResult",

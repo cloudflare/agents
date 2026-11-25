@@ -1,6 +1,7 @@
 export * from "./apply-chunks";
 export * from "./channel";
 export * from "./conversations";
+export * from "./deliveries";
 export * from "./gateway";
 // Draft and internal: the harness interface may change without notice.
 export type * from "./harness";
