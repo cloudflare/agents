@@ -815,20 +815,17 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       .map((row) => row.name);
   }
 
-  /** The root session's state as the shared harness store holds it. */
-  storedSessionState(): string {
-    return JSON.stringify(
-      openHarnessStore(this.ctx.storage, {
-        prefix: SHARED_STORE_PREFIX
-      }).session("")?.state
+  /** A session's client tools, as the session value the harness keeps. */
+  clientToolsValue(session: string): string | null {
+    return (
+      this.ctx.storage.sql
+        .exec<{ value: string }>(
+          `SELECT value FROM cf_agents_session_config
+           WHERE session_id = ? AND key = 'think-harness:client-tools'`,
+          session
+        )
+        .toArray()[0]?.value ?? null
     );
-  }
-
-  /** How many operations the shared harness store holds. */
-  storedOperations(): number {
-    return openHarnessStore(this.ctx.storage, {
-      prefix: SHARED_STORE_PREFIX
-    }).operations().length;
   }
 
   /**

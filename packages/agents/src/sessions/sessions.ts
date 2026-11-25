@@ -125,6 +125,18 @@ export class Sessions extends LifecycleCapability {
   }
 
   /**
+   * @internal Every session that holds the value `key` (`internal_setConfig`
+   * on its handle), with the value: how a first-party module lists the
+   * sessions it keeps something for.
+   */
+  async internal_configs(
+    key: string
+  ): Promise<{ sessionId: string; value: string }[]> {
+    await this.lifecycle.ready();
+    return this.#core.configs(key);
+  }
+
+  /**
    * Subscribe to the change feed: ordered dispatch after every durable
    * write, with the stored message. The host cache mirror lives here;
    * telemetry additionally flows through capability events.

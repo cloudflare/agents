@@ -313,6 +313,21 @@ describe("Session config", () => {
     });
   });
 
+  it("lists the sessions that hold a key, with their values", async () => {
+    await withSession(async (session, instance) => {
+      await session.internal_setConfig("owner", "root");
+      await instance.sessions.session("b").internal_setConfig("owner", "b");
+      await instance.sessions.session("c").internal_setConfig("other", "c");
+      const listed = await instance.sessions.internal_configs("owner");
+      expect(
+        listed.sort((x, y) => (x.sessionId < y.sessionId ? -1 : 1))
+      ).toEqual([
+        { sessionId: "", value: "root" },
+        { sessionId: "b", value: "b" }
+      ]);
+    });
+  });
+
   it("clearMessages deletes transcript: keys and keeps the rest", async () => {
     await withSession(async (session) => {
       await appendAll(session, 1, 2);

@@ -484,13 +484,10 @@ describe("ThinkHarness durability", () => {
       { id: "zeta", parent: "", busy: false },
       { id: "alpha", busy: false }
     ]);
-    // The store keeps the sessions and no operation; the old tables are gone.
-    expect(await stub.storedOperations()).toBe(0);
-    expect(await stub.harnessTables()).toEqual([
-      "cf_think_harness_store_log",
-      "cf_think_harness_store_operations",
-      "cf_think_harness_store_sessions"
-    ]);
+    // A session's client tools are a session value now.
+    expect(await stub.clientToolsValue("zeta")).toBe('[{"name":"lookup"}]');
+    // Sessions and Tasks hold it all; the harness's own tables are gone.
+    expect(await stub.harnessTables()).toEqual([]);
   });
 
   it("recovers a tool call a released version's records left in flight", async () => {
@@ -519,7 +516,7 @@ describe("ThinkHarness durability", () => {
     );
     expect(await stub.gateRuns()).toBe(1);
     expect(await stub.messages()).toHaveLength(2);
-    expect(await stub.storedOperations()).toBe(0);
+    expect(await stub.harnessTables()).toEqual([]);
   });
 
   it("finishes a turn a released version's memory-limit breaker sealed, keeping its partial", async () => {
@@ -554,7 +551,7 @@ describe("ThinkHarness durability", () => {
     stub = fresh(name);
     await runDurableObjectAlarm(stub);
     expect(text(await stub.wait("left-59"))).toBe("echo: left 59");
-    expect(await stub.storedOperations()).toBe(0);
+    expect(await stub.harnessTables()).toEqual([]);
     const users = (await stub.messages()).filter((m) => m.startsWith("user:"));
     expect(users).toEqual(
       Array.from({ length: 60 }, (_, i) => `user: left ${i}`)
@@ -570,16 +567,7 @@ describe("ThinkHarness durability", () => {
     await evictDurableObject(stub);
     stub = fresh(name);
     expect(text(await stub.prompt("hello"))).toBe("echo: hello");
-    expect(await stub.storedOperations()).toBe(0);
-    // The tool calls it had recorded for them go with the session's next
-    // state write.
-    await stub.wait(
-      (await stub.submitAsClient([{ id: "u", role: "user", text: "hi" }], []))
-        .operationId
-    );
-    expect(JSON.parse(await stub.storedSessionState())).toEqual({
-      clientTools: []
-    });
+    expect(await stub.harnessTables()).toEqual([]);
   });
 
   it("keeps work a rolled-back version queued under an id the store already holds", async () => {
@@ -603,11 +591,7 @@ describe("ThinkHarness durability", () => {
     // Upgraded again: the newer, queued operation wins and runs.
     await runDurableObjectAlarm(stub);
     expect(text(await stub.wait("op-1"))).toBe("echo: after the rollback");
-    expect(await stub.harnessTables()).toEqual([
-      "cf_think_harness_store_log",
-      "cf_think_harness_store_operations",
-      "cf_think_harness_store_sessions"
-    ]);
+    expect(await stub.harnessTables()).toEqual([]);
   });
 
   it("finishes queued work after a restart, woken by the alarm", async () => {
