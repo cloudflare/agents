@@ -432,7 +432,7 @@ export class ChatTurns<
    * stream start is held by an unresolved `onMessage` handler promise or, for a
    * request replayed after a reset, by `keepAliveWhile`; either keeps the DO
    * alive, so eviction only happens once a durable stream exists (resumed via
-   * `ResumableStream`) or the turn finished. Breaks if a pre-stream wait is ever
+   * `ReplyStreams`) or the turn finished. Breaks if a pre-stream wait is ever
    * moved onto a durable alarm that releases the DO; if so, persist this state.
    */
   readonly preStream = new PreStreamTurns<TConnection>();

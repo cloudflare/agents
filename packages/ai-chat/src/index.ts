@@ -83,7 +83,6 @@ import {
 } from "agents/chat";
 import {
   ChatFrames,
-  ResumableStream,
   createChatStreams,
   mergeQueuedUserMessages,
   truncateProviderToolPayloads
@@ -196,7 +195,7 @@ type ChatRecoveryContinueData = {
 // both consumers round-trip the same record across the deploy that ships them.
 
 // The monotonic forward-progress marker the recovery budget keys off is
-// derived from the stream log (`ResumableStream.progressMarker`): durably
+// derived from the stream log (`ReplyStreams.progressMarker`): durably
 // flushed segments, folded into a retired total as their rows are deleted.
 // Nothing is written per chunk. The pre-derivation KV counter
 // (`CHAT_RECOVERY_PROGRESS_KEY`) is read once per isolate and seeded into the
@@ -411,7 +410,7 @@ export class AIChatAgent<
             );
           });
       },
-      hasActiveStream: () => this._resumableStream.hasActiveStream(),
+      hasActiveStream: () => this._replyStreams.hasActiveStream(),
       generateRequestId: () => nanoid(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
       abortRequest: (requestId, reason) => this.abortRequest(requestId, reason),
@@ -494,21 +493,18 @@ export class AIChatAgent<
   readonly #session: Session = this.sessions.session();
 
   /**
-   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * The Streams capability backing `_replyStreams`: chat's in-flight
    * output lives in the shared durable chunk log, readable by any
    * `streams.read()` consumer on this Durable Object.
    */
   readonly streams: Streams = createChatStreams();
 
   /**
-   * Resumable stream manager -- handles chunk buffering, persistence, and replay.
+   * The stream every reply writes (`pumpReply`): chunk buffering,
+   * persistence and replay.
    * @internal Protected for testing purposes.
    */
-  protected _resumableStream!: ResumableStream;
-
-  /** The stream every reply writes (`pumpReply`). */
-  private readonly _replyStreams = new ReplyStreams({
-    resumable: () => this._resumableStream,
+  protected readonly _replyStreams: ReplyStreams = new ReplyStreams({
     streamStarted: (requestId) =>
       this._turns.streamStarted(requestId, (c) =>
         this._resumeHandshake().notifyStreamResuming(c)
@@ -598,7 +594,7 @@ export class AIChatAgent<
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>
-      this._resumableStream.getOriginMessageIds(requestId),
+      this._replyStreams.getOriginMessageIds(requestId),
     recoveryOriginIds: () => this._chatRecoveryEngine().activeOriginMessageIds,
     clientView: (messages) => this._turns.clientView(messages)
   });
@@ -623,7 +619,7 @@ export class AIChatAgent<
    * turn between `begin()` and `_startStream()` is an unresolved `onMessage`
    * handler promise (queue/debounce/MCP/model awaits) that pins the DO in
    * memory, so the DO is only evicted once the turn either recorded a durable
-   * stream (resumed via `ResumableStream` on wake) or finished. This breaks if a
+   * stream (resumed via `ReplyStreams` on wake) or finished. This breaks if a
    * pre-stream wait is ever moved onto a durable alarm that releases the DO; if
    * that changes, this state must become durable.
    */
@@ -640,14 +636,14 @@ export class AIChatAgent<
       requestIndex: "idx_ai_chat_agent_tool_request_id",
       turnDefinition: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME
     }),
-    streams: () => this._resumableStream,
+    streams: () => this._replyStreams,
     storage: () => this.ctx.storage,
     responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
     resetError: "Agent tool run was skipped because the chat was cleared.",
     turnGeneration: () => this._turns.queue.generation,
     keepAliveWhile: (fn) => this.keepAliveWhile(fn),
     generateRequestId: () => nanoid(),
-    activeRequestId: () => this._resumableStream?.activeRequestId ?? null,
+    activeRequestId: () => this._replyStreams.activeRequestId,
     broadcastChunk: (requestId, body) =>
       this._frames.broadcast({
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
@@ -1003,17 +999,15 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this._resumableStream = new ResumableStream(
-              this.streams,
-              this.sql.bind(this),
-              () => storedAsFacet(this.ctx.storage.kv)
+            this._replyStreams.open(this.streams, this.sql.bind(this), () =>
+              storedAsFacet(this.ctx.storage.kv)
             );
           }
         );
 
         update({
           "cloudflare.agents.chat.active_stream.restored":
-            this._resumableStream.hasActiveStream()
+            this._replyStreams.hasActiveStream()
         });
       }
     );
@@ -1071,7 +1065,7 @@ export class AIChatAgent<
       }
 
       // Notify client about active streams that can be resumed
-      if (this._resumableStream.hasActiveStream()) {
+      if (this._replyStreams.hasActiveStream()) {
         this._resumeHandshake().notifyStreamResuming(connection);
       } else if (this._preStream.park(connection)) {
         // A turn is accepted but its stream hasn't started yet (#1784): park
@@ -1177,7 +1171,7 @@ export class AIChatAgent<
         // client reconnects and runs the resume probe.
         await clearChatTerminal(this.ctx.storage);
         clearRecentChatTerminals(this.ctx.storage.kv);
-        this._resumableStream.clearAll();
+        this._replyStreams.clearAll();
         this._pendingResumeConnections.clear();
         this._preStream.releaseAwaiting();
         this._preStream.reset();
@@ -1246,13 +1240,13 @@ export class AIChatAgent<
 
   /**
    * The shared resume-handshake driver (Tier-2). Lazily built; the
-   * `ResumableStream` / `ContinuationState` / pending set are stable after the
+   * `ReplyStreams` / `ContinuationState` / pending set are stable after the
    * constructor, so a single instance threads them for the agent's lifetime.
    */
   private _resumeHandshake(): ResumeHandshake {
     return (this._resumeHandshakeInstance ??= new ResumeHandshake({
       responseMessageType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-      resumableStream: this._resumableStream,
+      replyStreams: this._replyStreams,
       continuation: this._continuation,
       preStream: this._preStream,
       pendingResumeConnections: this._pendingResumeConnections,
@@ -3282,7 +3276,7 @@ export class AIChatAgent<
    * genuinely advanced could read as "no progress" between attempts and exhaust
    * its budget prematurely (#1628). It then became a KV counter bumped per
    * credited chunk. It is now derived from the stream log the chunks were
-   * already flushed to (`ResumableStream.progressMarker`): the log only grows
+   * already flushed to (`ReplyStreams.progressMarker`): the log only grows
    * when new content lands durably, a reconnect replay or a recovery
    * re-persist reads it without appending (#1637), and compaction rewrites
    * the transcript, not the log. Nothing is written per chunk.
@@ -3293,7 +3287,7 @@ export class AIChatAgent<
    */
   private readonly _chatRecoveryProgressMarker = chatRecoveryProgressReader(
     this.ctx.storage,
-    () => this._resumableStream
+    () => this._replyStreams
   );
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
@@ -3313,7 +3307,7 @@ export class AIChatAgent<
    */
   protected override async _onAgentToolStreamProgress(): Promise<void> {
     if (this._agentToolStreamProgress.shouldCredit(Date.now())) {
-      this._resumableStream.creditProgress();
+      this._replyStreams.creditProgress();
     }
   }
 
@@ -3643,7 +3637,7 @@ export class AIChatAgent<
       persistOrphanedStream: (streamId) =>
         this._persistOrphanedStream(streamId),
       completeRecoveredStream: (streamId) => {
-        this._resumableStream.complete(streamId);
+        this._replyStreams.complete(streamId);
       },
       // Nothing continues the cut-off request (the app declined, or the
       // conversation moved on): end it for the tabs, and record it for a
@@ -3671,15 +3665,15 @@ export class AIChatAgent<
     let streamId = "";
     if (requestId) {
       streamId =
-        this._resumableStream.latestStreamInfoForRequest(requestId)?.id ?? "";
+        this._replyStreams.latestStreamInfoForRequest(requestId)?.id ?? "";
     }
-    if (!streamId && this._resumableStream.hasActiveStream()) {
-      streamId = this._resumableStream.activeStreamId ?? "";
+    if (!streamId && this._replyStreams.hasActiveStream()) {
+      streamId = this._replyStreams.activeStreamId ?? "";
     }
     const streamStillActive = Boolean(
       streamId &&
-      this._resumableStream.hasActiveStream() &&
-      this._resumableStream.activeStreamId === streamId
+      this._replyStreams.hasActiveStream() &&
+      this._replyStreams.activeStreamId === streamId
     );
     return { streamId, streamStillActive };
   }
@@ -3945,7 +3939,7 @@ export class AIChatAgent<
     hasSettledToolResults: boolean;
   } {
     return aiSdkRecoveryCodec.toRecoveryPartial(
-      this._resumableStream.getStreamChunks(streamId).map((chunk) => chunk.body)
+      this._replyStreams.getStreamChunks(streamId).map((chunk) => chunk.body)
     );
   }
 
@@ -4018,7 +4012,7 @@ export class AIChatAgent<
       const sync = this.#session.__DO_NOT_USE_WILL_BREAK__sync();
       const afters: Array<() => Promise<void>> = [];
       try {
-        this._resumableStream.cutover(
+        this._replyStreams.cutover(
           cutover.streamId,
           () => {
             for (const message of toWrite)
@@ -4375,7 +4369,7 @@ export class AIChatAgent<
         // tails them after the run ends, and the next start reclaims them.
         if (
           context.kind === "final" &&
-          this._resumableStream.pendingCutoverId === context.streamId
+          this._replyStreams.pendingCutoverId === context.streamId
         ) {
           this.#pendingCutover = {
             streamId: context.streamId,
@@ -4413,7 +4407,7 @@ export class AIChatAgent<
   async destroy() {
     for (const controller of this._turns.aborts.values()) controller.abort();
     this._turns.aborts.clear();
-    this._resumableStream.destroy();
+    this._replyStreams.destroy();
     await super.destroy();
   }
 }

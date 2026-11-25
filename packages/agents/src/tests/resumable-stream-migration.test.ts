@@ -3,12 +3,12 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { getAgentByName } from "..";
 
 /**
- * ResumableStream legacy-table migration.
+ * ReplyStreams legacy-table migration.
  *
  * Pre-replatform releases stored chat stream buffers in their own
  * `cf_ai_chat_stream_*` tables (in two on-disk generations: with and without
  * the #1691/#1733 metadata columns). Constructing a Streams-backed
- * `ResumableStream` over a database holding those tables must migrate every
+ * `ReplyStreams` over a database holding those tables must migrate every
  * row into the Streams capability's tables — preserving the in-flight active
  * stream, both stored chunk formats (plain body and packed segment), and
  * last-activity semantics — then drop the legacy tables. Only a real workerd
@@ -38,7 +38,7 @@ async function getAgent(name: string): Promise<LegacyMigrationStub> {
   ) as unknown as Promise<LegacyMigrationStub>;
 }
 
-describe("ResumableStream — legacy table migration", () => {
+describe("ReplyStreams — legacy table migration", () => {
   let name: string;
   beforeEach(() => {
     name = `rs-migrate-${Date.now()}-${Math.random().toString(36).slice(2)}`;

@@ -27,7 +27,7 @@ import {
 } from "./protocol";
 import type { ContinuationState } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
-import type { ResumableStream } from "./resumable-stream";
+import type { ReplyStreams } from "./reply-stream";
 import { replayCompletedChunks, replayErroredChunks } from "./stream-rows";
 import type { ChatRecentTerminal } from "./recent-terminals";
 import { endedRequestOf, type EndedRequests } from "./chat-frames";
@@ -48,7 +48,7 @@ export interface PendingChatTerminal {
 export interface ResumeHandshakeHost {
   /** The host's use-chat-response message-type constant (wire string). */
   readonly responseMessageType: string;
-  readonly resumableStream: ResumableStream;
+  readonly replyStreams: ReplyStreams;
   readonly continuation: ContinuationState<Connection>;
   /**
    * Accepted-but-not-yet-streamed turns (#1784). Optional: experimental
@@ -105,7 +105,7 @@ export interface ResumeHandshakeHost {
 /**
  * Drives the server side of the stream-resume protocol over a
  * {@link ResumeHandshakeHost}. Construct once per agent (the host wires its
- * `ResumableStream` / `ContinuationState` / pending set in) and call the three
+ * `ReplyStreams` / `ContinuationState` / pending set in) and call the three
  * public methods from the host's existing onConnect / onMessage wiring, so
  * handler registration timing stays host-owned.
  */
@@ -179,17 +179,17 @@ export class ResumeHandshake {
    * Direct responses echo the opaque probe id; proactive notifications omit it.
    */
   notifyStreamResuming(connection: Connection, probeId?: string): void {
-    const { resumableStream, pendingResumeConnections } = this.host;
-    if (!resumableStream.hasActiveStream()) return;
+    const { replyStreams, pendingResumeConnections } = this.host;
+    if (!replyStreams.hasActiveStream()) return;
     const sent = sendIfOpen(
       connection,
       JSON.stringify({
         type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
-        id: resumableStream.activeRequestId,
+        id: replyStreams.activeRequestId,
         ...(probeId ? { probeId } : {})
       })
     );
-    const requestId = resumableStream.activeRequestId;
+    const requestId = replyStreams.activeRequestId;
     const acked =
       this.#acked?.requestId === requestId &&
       this.#acked.ids.has(connection.id);
@@ -212,8 +212,8 @@ export class ResumeHandshake {
     requestIds: readonly string[] = []
   ): Promise<void> {
     connection = this.#once(connection);
-    const { resumableStream, continuation, preStream } = this.host;
-    if (resumableStream.hasActiveStream()) {
+    const { replyStreams, continuation, preStream } = this.host;
+    if (replyStreams.hasActiveStream()) {
       // A request the tab waits on that ended while it was away, and a
       // recovery now streams under another id: end it first, or the tab
       // never learns it is over.
@@ -221,7 +221,7 @@ export class ResumeHandshake {
         this.sendEnded(connection, requestId);
       }
       if (
-        continuation.activeRequestId === resumableStream.activeRequestId &&
+        continuation.activeRequestId === replyStreams.activeRequestId &&
         continuation.activeConnectionId !== null &&
         continuation.activeConnectionId !== connection.id &&
         this._ownerStillPresent(continuation.activeConnectionId)
@@ -305,10 +305,10 @@ export class ResumeHandshake {
    * request ended while the tab was away.
    */
   endedFrame(requestId: string): string | null {
-    const { resumableStream } = this.host;
+    const { replyStreams } = this.host;
     if (
-      (resumableStream.hasActiveStream() &&
-        resumableStream.activeRequestId === requestId) ||
+      (replyStreams.hasActiveStream() &&
+        replyStreams.activeRequestId === requestId) ||
       this.host.holdsTerminalFrames?.(requestId)
     ) {
       return null;
@@ -316,7 +316,7 @@ export class ResumeHandshake {
     const ended = this.host.recentTerminal?.([requestId]);
     if (!ended || ended.outcome === "recovering") return null;
     const messageIds =
-      ended.messageIds ?? resumableStream.getOriginMessageIds(requestId);
+      ended.messageIds ?? replyStreams.getOriginMessageIds(requestId);
     return JSON.stringify({
       body: ended.body,
       done: true,
@@ -374,15 +374,15 @@ export class ResumeHandshake {
   ): Promise<void> {
     const toldEnd = this.host.ended?.has(connection, requestId) ?? false;
     connection = this.#once(connection);
-    const { resumableStream, pendingResumeConnections, responseMessageType } =
+    const { replyStreams, pendingResumeConnections, responseMessageType } =
       this.host;
     // An ACK for a stream other than the active one (a notice from before
     // that stream finished) leaves the connection waiting for the active
     // stream's ACK: it was told to resume that stream and gets its chunks
     // from the replay, not from the middle of the live broadcast.
     if (
-      !resumableStream.hasActiveStream() ||
-      resumableStream.activeRequestId === requestId
+      !replyStreams.hasActiveStream() ||
+      replyStreams.activeRequestId === requestId
     ) {
       pendingResumeConnections.delete(connection.id);
     }
@@ -391,15 +391,15 @@ export class ResumeHandshake {
     if (
       toldEnd &&
       !(
-        resumableStream.hasActiveStream() &&
-        resumableStream.activeRequestId === requestId
+        replyStreams.hasActiveStream() &&
+        replyStreams.activeRequestId === requestId
       )
     ) {
       return;
     }
     if (
-      resumableStream.hasActiveStream() &&
-      resumableStream.activeRequestId === requestId
+      replyStreams.hasActiveStream() &&
+      replyStreams.activeRequestId === requestId
     ) {
       if (this.#acked?.requestId !== requestId) {
         this.#acked = { requestId, ids: new Set() };
@@ -408,12 +408,12 @@ export class ResumeHandshake {
     }
 
     if (
-      resumableStream.hasActiveStream() &&
-      resumableStream.activeRequestId === requestId
+      replyStreams.hasActiveStream() &&
+      replyStreams.activeRequestId === requestId
     ) {
-      const orphanedStreamId = resumableStream.replayChunks(
+      const orphanedStreamId = replyStreams.replayChunks(
         connection,
-        resumableStream.activeRequestId
+        replyStreams.activeRequestId
       );
       // If the stream was orphaned (restored from SQLite after hibernation with
       // no live reader), reconstruct the partial assistant message from stored
@@ -432,18 +432,18 @@ export class ResumeHandshake {
         });
         await this.host.persistOrphanedStream(orphanedStreamId);
       }
-    } else if (resumableStream.hasActiveStream()) {
+    } else if (replyStreams.hasActiveStream()) {
       // Ignore ACKs for a different active stream request id.
     } else if (this.host.holdsTerminalFrames?.(requestId)) {
       // The stream closed (finished, recovering, or errored) but its message
       // is still being persisted; the held terminal frames are broadcast
       // after the transcript (#2334).
-      resumableStream.replayClosedStreamChunks(connection, requestId);
+      replyStreams.replayClosedStreamChunks(connection, requestId);
     } else if (await this._replayTerminalOnAck(connection, requestId)) {
       // Delivered the pending terminal error frame on the resumed stream the
       // client just ACKed (#1645).
     } else if (
-      resumableStream.latestStreamInfoForRequest(requestId)?.cutOff &&
+      replyStreams.latestStreamInfoForRequest(requestId)?.cutOff &&
       this._replayRecentTerminalOnAck(connection, requestId)
     ) {
       // A stream closed with no producer left (a recovery took the request
@@ -451,12 +451,12 @@ export class ResumeHandshake {
       // the app kept it, and must not come back if it did not. Only its
       // recorded end is sent.
     } else if (
-      replayCompletedChunks(resumableStream.streamOps, connection, requestId)
+      replayCompletedChunks(replyStreams.streamOps, connection, requestId)
     ) {
       // A stream that closed into recovery ends on "recovering", which is
       // not an end for the tab. A stop since then recorded the request's
       // real end; send it after the replay.
-      if (resumableStream.getOutcome(requestId) === "recovering") {
+      if (replyStreams.getOutcome(requestId) === "recovering") {
         this._replayRecentTerminalOnAck(connection, requestId);
       }
     } else if (
@@ -465,8 +465,8 @@ export class ResumeHandshake {
       // streamed, or a stream whose rows its cutover deleted).
       !this._replayRecentTerminalOnAck(connection, requestId)
     ) {
-      const messageIds = resumableStream.getOriginMessageIds(requestId);
-      const outcome = resumableStream.getOutcome(requestId);
+      const messageIds = replyStreams.getOriginMessageIds(requestId);
+      const outcome = replyStreams.getOutcome(requestId);
       sendIfOpen(
         connection,
         JSON.stringify({
@@ -509,8 +509,7 @@ export class ResumeHandshake {
     const ended = this.host.recentTerminal?.([requestId]);
     if (!ended) return false;
     const messageIds =
-      ended.messageIds ??
-      this.host.resumableStream.getOriginMessageIds(requestId);
+      ended.messageIds ?? this.host.replyStreams.getOriginMessageIds(requestId);
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -564,7 +563,7 @@ export class ResumeHandshake {
     connection: Connection,
     requestId: string
   ): Promise<boolean> {
-    const { resumableStream, responseMessageType } = this.host;
+    const { replyStreams, responseMessageType } = this.host;
     const pending = await this.host.pendingChatTerminal();
     if (!pending || pending.requestId !== requestId) return false;
     // Replay any partial content the errored stream produced before the error,
@@ -574,7 +573,7 @@ export class ResumeHandshake {
     // reconnect retries the whole sequence.
     if (
       !replayErroredChunks(
-        resumableStream.streamOps,
+        replyStreams.streamOps,
         connection,
         pending.requestId
       )
@@ -582,8 +581,7 @@ export class ResumeHandshake {
       return true;
     }
     const messageIds =
-      pending.messageIds ??
-      resumableStream.getOriginMessageIds(pending.requestId);
+      pending.messageIds ?? replyStreams.getOriginMessageIds(pending.requestId);
     sendIfOpen(
       connection,
       JSON.stringify({

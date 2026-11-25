@@ -253,7 +253,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     // Stream many small deltas at 500ms each so the turn takes long enough to be
     // interrupted by SIGKILL. The chunk count matters for recovery semantics:
-    // ResumableStream flushes to SQLite in batches of CHUNK_BUFFER_SIZE (10), so
+    // ReplyStreams flushes to SQLite in batches of CHUNK_BUFFER_SIZE (10), so
     // an interruption BEFORE that threshold leaves an empty (unflushed) partial
     // — the RETRY path (test kills at ~3s, ~6 chunks) — while an interruption
     // AFTER it leaves a non-empty partial — the CONTINUE path (test kills at
@@ -445,7 +445,7 @@ export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
    */
   @callable()
   forceSweep(nowMs: number): number {
-    return this._resumableStream.reclaim(nowMs);
+    return this._replyStreams.reclaim(nowMs);
   }
 }
 

@@ -899,7 +899,7 @@ function findDataPartByTypeAndId(
  * stored resumable-stream chunks. Replays each chunk body through
  * {@link applyChunkToParts}; malformed bodies are skipped. Shared by
  * `AIChatAgent` and `Think`, which read the chunks from their
- * `ResumableStream` (`getStreamChunks`) and pass them in.
+ * `ReplyStreams` (`getStreamChunks`) and pass them in.
  *
  * `@internal`
  */

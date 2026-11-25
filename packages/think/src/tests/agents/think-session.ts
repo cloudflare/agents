@@ -73,7 +73,7 @@ import {
 import { currentTurnCheckpoint } from "agents/chat";
 import type {
   ClientToolSchema,
-  ResumableStream,
+  ReplyStreams,
   ToolPartUpdate,
   TurnLane
 } from "agents/chat";
@@ -1276,7 +1276,7 @@ export class ThinkTestAgent extends Think {
         this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
       if (requestId) {
         const streamId =
-          this["_resumableStream"]
+          this["_replyStreams"]
             .getAllStreamMetadata()
             .find((m) => m.request_id === requestId)?.id ?? undefined;
         if (streamId) return { requestId, streamId };
@@ -1312,8 +1312,8 @@ export class ThinkTestAgent extends Think {
       // so the chunk is buffered and replayed in order instead of being dropped.
       const live = await this._waitForLiveTurnForTest(runId);
       if (live) {
-        this["_resumableStream"].storeChunk(live.streamId, race.body);
-        this["_resumableStream"].flushBuffer();
+        this["_replyStreams"].storeChunk(live.streamId, race.body);
+        this["_replyStreams"].flushBuffer();
         this.broadcast(
           JSON.stringify({
             type: "cf_agent_use_chat_response",
@@ -1493,14 +1493,14 @@ export class ThinkTestAgent extends Think {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     this["_agentToolRuns"].store.ensure();
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of backlog) {
-      this["_resumableStream"].storeChunk(streamId, body);
+      this["_replyStreams"].storeChunk(streamId, body);
     }
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
@@ -1585,7 +1585,7 @@ export class ThinkTestAgent extends Think {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     this["_agentToolRuns"].store.ensure();
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
@@ -1602,7 +1602,7 @@ export class ThinkTestAgent extends Think {
         })
       );
     const send = (body: string) => {
-      this["_resumableStream"].storeChunk(streamId, body);
+      this["_replyStreams"].storeChunk(streamId, body);
       broadcast(body);
     };
     const delta = (value: string) =>
@@ -1612,8 +1612,8 @@ export class ThinkTestAgent extends Think {
     send(delta("a"));
     send(delta("b"));
     send(oversized);
-    this["_resumableStream"].storeChunk(streamId, delta("c"));
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].storeChunk(streamId, delta("c"));
+    this["_replyStreams"].flushBuffer();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(delta("c"));
@@ -1667,14 +1667,14 @@ export class ThinkTestAgent extends Think {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     this["_agentToolRuns"].store.ensure();
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of backlog) {
-      this["_resumableStream"].storeChunk(streamId, body);
+      this["_replyStreams"].storeChunk(streamId, body);
     }
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
@@ -1712,7 +1712,7 @@ export class ThinkTestAgent extends Think {
         id: "t",
         delta: "post-restart"
       });
-      this["_resumableStream"].storeChunk(streamId, postBody);
+      this["_replyStreams"].storeChunk(streamId, postBody);
       this.broadcast(
         JSON.stringify({
           type: "cf_agent_use_chat_response",
@@ -1768,7 +1768,7 @@ export class ThinkTestAgent extends Think {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     this["_agentToolRuns"].store.ensure();
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
@@ -1795,12 +1795,12 @@ export class ThinkTestAgent extends Think {
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of stored.slice(0, 2)) {
-      this["_resumableStream"].storeChunk(streamId, body);
+      this["_replyStreams"].storeChunk(streamId, body);
       broadcast(body);
     }
     broadcast(progress("before-attach"));
-    this["_resumableStream"].storeChunk(streamId, stored[2]);
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].storeChunk(streamId, stored[2]);
+    this["_replyStreams"].flushBuffer();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(progress("during-drain"));
@@ -2765,12 +2765,12 @@ export class ThinkTestAgent extends Think {
    * sends on connect mid-stream.
    */
   async testStartResumableStream(requestId: string): Promise<string> {
-    return this._resumableStream.start(requestId);
+    return this._replyStreams.start(requestId);
   }
 
   async testStoreResumableChunk(streamId: string, body: string): Promise<void> {
-    this._resumableStream.storeChunk(streamId, body);
-    this._resumableStream.flushBuffer();
+    this._replyStreams.storeChunk(streamId, body);
+    this._replyStreams.flushBuffer();
   }
 
   /**
@@ -2781,7 +2781,7 @@ export class ThinkTestAgent extends Think {
     requestId: string,
     close: "finish" | "complete" | "error"
   ): Promise<void> {
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._replyStreams.start(requestId);
     const [connection] = [...this.getConnections()];
     if (!connection) {
       throw new Error(
@@ -2799,7 +2799,7 @@ export class ThinkTestAgent extends Think {
     internals._resumeHandshake().notifyStreamResuming(connection);
     if (close === "finish") {
       this["_replyStreams"].finish(streamId);
-      this._resumableStream.finalizePending();
+      this._replyStreams.finalizePending();
     } else if (close === "complete") {
       this["_replyStreams"].complete(streamId);
     } else {
@@ -2815,7 +2815,7 @@ export class ThinkTestAgent extends Think {
 
   /** Emit the real resume notification followed by a terminal broadcast. */
   async testSendStreamResumingBeforeTerminal(requestId: string): Promise<void> {
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._replyStreams.start(requestId);
     const [connection] = [...this.getConnections()];
     if (!connection) {
       throw new Error(
@@ -2834,7 +2834,7 @@ export class ThinkTestAgent extends Think {
     )
       ._resumeHandshake()
       .notifyStreamResuming(connection);
-    this._resumableStream.complete(streamId);
+    this._replyStreams.complete(streamId);
     this.broadcast(
       JSON.stringify({
         type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
@@ -2847,7 +2847,7 @@ export class ThinkTestAgent extends Think {
 
   /** Pair with `testStartResumableStream` — clean up the simulated stream. */
   async testCompleteResumableStream(streamId: string): Promise<void> {
-    this._resumableStream.complete(streamId);
+    this._replyStreams.complete(streamId);
   }
 
   /**
@@ -2907,7 +2907,7 @@ export class ThinkTestAgent extends Think {
   }
 
   async getLatestStreamStatusForTest(): Promise<string | null> {
-    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
+    return this._replyStreams.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   /** Store a `think_config` value, as an earlier isolate would have. */
@@ -3442,11 +3442,13 @@ export class ThinkTestAgent extends Think {
     };
     const callback = new TestCollectingCallback();
     let stampAtClose: string | null | undefined;
-    const stream = this._resumableStream as unknown as {
-      complete(streamId: string, outcome?: string): void;
+    // SAFETY: the fixture wraps the log's private row settle, which every
+    // close of a stream goes through.
+    const stream = this._replyStreams as unknown as {
+      _completeRow(streamId: string, outcome?: string): void;
     };
-    const complete = stream.complete.bind(stream);
-    stream.complete = (streamId, outcome) => {
+    const complete = stream._completeRow.bind(stream);
+    stream._completeRow = (streamId, outcome) => {
       complete(streamId, outcome);
       if (via === "submit" && stampAtClose === undefined) {
         const [running] = submissionRecords(this, ["running"]);
@@ -3495,11 +3497,11 @@ export class ThinkTestAgent extends Think {
         routeOutcomes: this._routeOutcomesForTest,
         stampAtClose,
         activeStream:
-          this._resumableStream.hasActiveStream() ||
-          this._resumableStream.pendingCutoverId !== null
+          this._replyStreams.hasActiveStream() ||
+          this._replyStreams.pendingCutoverId !== null
       };
     } finally {
-      stream.complete = complete;
+      stream._completeRow = complete;
       self._routeStreamInterruption = route;
       this._stopRightAfterStall = false;
       this._stallAfterChunks = null;
@@ -3702,9 +3704,9 @@ export class ThinkTestAgent extends Think {
     const requestId = crypto.randomUUID();
     // Any read creates the run table.
     await this.inspectAgentToolRun(runId);
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     for (const delta of ["a", "b", "c"]) {
-      this["_resumableStream"].storeChunk(
+      this["_replyStreams"].storeChunk(
         streamId,
         JSON.stringify({ type: "text-delta", id: "t", delta })
       );
@@ -3982,7 +3984,7 @@ export class ThinkTestAgent extends Think {
 
   /** The close outcome recorded on the request's latest chat stream. */
   async getStreamOutcomeForTest(requestId: string): Promise<string | null> {
-    return this._resumableStream.getOutcome(requestId) ?? null;
+    return this._replyStreams.getOutcome(requestId) ?? null;
   }
 
   /**
@@ -4123,12 +4125,11 @@ export class ThinkTestAgent extends Think {
       this._midStreamHookForTest = {
         afterChunks: 5,
         run: async () => {
-          const streamId = this._resumableStream.activeStreamId;
+          const streamId = this._replyStreams.activeStreamId;
           if (!streamId) throw new Error("no active continuation stream");
           recorded = {
-            messageId: this._resumableStream.getStreamMessageId(streamId),
-            basePartCount:
-              this._resumableStream.getStreamBasePartCount(streamId)
+            messageId: this._replyStreams.getStreamMessageId(streamId),
+            basePartCount: this._replyStreams.getStreamBasePartCount(streamId)
           };
           await internals._persistOrphanedStream(streamId);
           await internals._persistOrphanedStream(streamId);
@@ -9410,7 +9411,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   /** Abort the request (not cancelSubmission), after it starts streaming. */
   async abortSubmissionRequestForTest(requestId: string): Promise<void> {
     for (let attempt = 0; attempt < 200; attempt++) {
-      if (this._resumableStream.latestActiveStreamInfoForRequest(requestId)) {
+      if (this._replyStreams.latestActiveStreamInfoForRequest(requestId)) {
         this.abortRequest(requestId);
         return;
       }
@@ -10546,20 +10547,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     messageId: string
   ): Promise<void> {
     const internals = this as unknown as {
-      _resumableStream: {
+      _replyStreams: {
         start(requestId: string): string;
         storeChunk(streamId: string, body: string): unknown;
       };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
-    const streamId = internals._resumableStream.start(requestId);
+    const streamId = internals._replyStreams.start(requestId);
     for (const chunk of [
       { type: "start", messageId },
       { type: "text-start", id: "t1" },
       { type: "text-delta", id: "t1", delta: "recovered" },
       { type: "text-end", id: "t1" }
     ]) {
-      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+      internals._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
     }
     await internals._persistOrphanedStream(streamId);
   }
@@ -10594,7 +10595,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       ...(options.leafMetadata && { metadata: options.leafMetadata })
     } as UIMessage);
     const internals = this as unknown as {
-      _resumableStream: {
+      _replyStreams: {
         start(
           requestId: string,
           options: {
@@ -10607,7 +10608,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
-    const streamId = internals._resumableStream.start(requestId, {
+    const streamId = internals._replyStreams.start(requestId, {
       messageId: leafId,
       basePartCount: leafParts.length,
       continuation: true
@@ -10624,7 +10625,7 @@ export class ThinkProgrammaticTestAgent extends Think {
         { type: "text-end", id: "t2" }
       ])
     ]) {
-      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+      internals._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
     }
     if (options.deleteLeaf) await this.session.deleteMessages([leafId]);
     for (let i = 0; i < times; i++) {
@@ -10738,17 +10739,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     chunks: Array<Record<string, unknown>>;
   }): Promise<{ scheduledContinueCount: number; scheduledRetryCount: number }> {
     const internals = this as unknown as {
-      _resumableStream: {
+      _replyStreams: {
         start(requestId: string): string;
         storeChunk(streamId: string, body: string): unknown;
         flushBuffer(): void;
       };
     };
-    const streamId = internals._resumableStream.start(input.requestId);
+    const streamId = internals._replyStreams.start(input.requestId);
     for (const chunk of input.chunks) {
-      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+      internals._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
     }
-    internals._resumableStream.flushBuffer();
+    internals._replyStreams.flushBuffer();
     const snapshot = {
       __cfThinkChatFiberSnapshot: {
         kind: "think-chat-turn",
@@ -11235,7 +11236,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     });
     return {
       streamStatus:
-        this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
+        this._replyStreams.latestStreamInfoForRequest(requestId)?.status ??
         null,
       resultStatus: (() => {
         const record = submissionRecords(this).find(
@@ -11244,10 +11245,9 @@ export class ThinkProgrammaticTestAgent extends Think {
         );
         return (record && progressOf(record).resultStatus) ?? null;
       })(),
-      hasActiveStream: this._resumableStream.hasActiveStream(),
+      hasActiveStream: this._replyStreams.hasActiveStream(),
       hasActiveRequestStream:
-        this._resumableStream.latestActiveStreamInfoForRequest(requestId) !==
-        null,
+        this._replyStreams.latestActiveStreamInfoForRequest(requestId) !== null,
       resumeFrames
     };
   }
@@ -12036,12 +12036,12 @@ export class ThinkRecoveryTestAgent extends Think {
   async bumpRecoveryProgressForTest(): Promise<void> {
     // One explicit credit — the same unit a flushed segment or a forwarded
     // child chunk adds to the derived marker.
-    this._resumableStream.creditProgress();
+    this._replyStreams.creditProgress();
   }
 
   /** The recovery progress marker as the engine would read it now. */
   async readProgressMarkerForTest(): Promise<number> {
-    return this._resumableStream.progressMarker();
+    return this._replyStreams.progressMarker();
   }
 
   /** Simulate compaction collapsing the transcript by dropping all assistant
@@ -12067,8 +12067,8 @@ export class ThinkRecoveryTestAgent extends Think {
     afterToolOutputCount: number;
   }> {
     const self = this as unknown as {
-      _resumableStream: { start(id: string): string };
       _replyStreams: {
+        start(id: string): string;
         store(
           streamId: string,
           chunk: { type: string; [key: string]: unknown },
@@ -12077,7 +12077,7 @@ export class ThinkRecoveryTestAgent extends Think {
         ): number | undefined;
       };
     };
-    const streamId = self._resumableStream.start("req-tool-durability");
+    const streamId = self._replyStreams.start("req-tool-durability");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
     const store = async (chunk: {
       type: string;
@@ -12114,8 +12114,8 @@ export class ThinkRecoveryTestAgent extends Think {
     afterCall: number;
   }> {
     const self = this as unknown as {
-      _resumableStream: { start(id: string): string };
       _replyStreams: {
+        start(id: string): string;
         store(
           streamId: string,
           chunk: { type: string; [key: string]: unknown },
@@ -12124,7 +12124,7 @@ export class ThinkRecoveryTestAgent extends Think {
         ): number | undefined;
       };
     };
-    const streamId = self._resumableStream.start("req-tool-call-durability");
+    const streamId = self._replyStreams.start("req-tool-call-durability");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
     const store = async (chunk: {
       type: string;
@@ -12160,8 +12160,8 @@ export class ThinkRecoveryTestAgent extends Think {
     afterPersist: number;
   }> {
     const self = this as unknown as {
-      _resumableStream: { start(id: string): string };
       _replyStreams: {
+        start(id: string): string;
         store(
           streamId: string,
           chunk: { type: string; [key: string]: unknown },
@@ -12172,10 +12172,10 @@ export class ThinkRecoveryTestAgent extends Think {
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      this._resumableStream.progressMarker();
+      this._replyStreams.progressMarker();
 
     const start = await read();
-    const streamId = self._resumableStream.start("req-progress-immunity");
+    const streamId = self._replyStreams.start("req-progress-immunity");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
     const store = async (chunk: {
       type: string;
@@ -12228,7 +12228,7 @@ export class ThinkRecoveryTestAgent extends Think {
     };
     self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
-      this._resumableStream.progressMarker();
+      this._replyStreams.progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -12886,18 +12886,18 @@ export class ThinkRecoveryTestAgent extends Think {
     chunkCount: number;
     text: string;
   } | null> {
-    const stream = this._resumableStream.getAllStreamMetadata()[0] ?? null;
+    const stream = this._replyStreams.getAllStreamMetadata()[0] ?? null;
     if (!stream) return null;
 
-    // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
+    // Use ReplyStreams.getStreamChunks so packed segment rows are unpacked
     // into individual chunk bodies (matching production replay/reconstruction).
     const chunks = (
       this as unknown as {
-        _resumableStream: {
+        _replyStreams: {
           getStreamChunks(id: string): Array<{ body: string }>;
         };
       }
-    )._resumableStream.getStreamChunks(stream.id);
+    )._replyStreams.getStreamChunks(stream.id);
 
     const text = chunks
       .map((chunk) => {
@@ -13137,7 +13137,7 @@ export class ThinkRecoveryTestAgent extends Think {
     }
     // What startup does after a restart: pick the streaming row back up as
     // the active stream, so recovery persists its partial.
-    if (options.restore) this["_resumableStream"].restore();
+    if (options.restore) this["_replyStreams"].restore();
   }
 
   /**
@@ -13147,7 +13147,7 @@ export class ThinkRecoveryTestAgent extends Think {
    */
   async acknowledgeResumeForTest(requestId: string): Promise<boolean> {
     const self = this as unknown as {
-      _resumableStream: {
+      _replyStreams: {
         replayChunks(
           connection: { id: string; send(message: string): void },
           requestId: string
@@ -13155,7 +13155,7 @@ export class ThinkRecoveryTestAgent extends Think {
       };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
-    const orphaned = self._resumableStream.replayChunks(
+    const orphaned = self._replyStreams.replayChunks(
       { id: "tab-after-reset", send: () => {} },
       requestId
     );
@@ -13189,7 +13189,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
   /** Status of a single stream row, or null if absent. */
   async getStreamStatusForTest(streamId: string): Promise<string | null> {
-    return this._resumableStream.getStreamMetadata(streamId)?.status ?? null;
+    return this._replyStreams.getStreamMetadata(streamId)?.status ?? null;
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
@@ -13209,7 +13209,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
   /** Reclaim leftover streams now, as the next stream start does. */
   async runStreamCleanupForTest(nowMs?: number): Promise<number> {
-    return this._resumableStream.reclaim(nowMs);
+    return this._replyStreams.reclaim(nowMs);
   }
 
   /** Complete a reply's stream (mirrors a real turn end). */
@@ -13752,11 +13752,11 @@ export class ThinkRecoveryTestAgent extends Think {
         // A foreign producer invokes reclaim after the successor's cutover,
         // while the recovery callback is still paused before ledger settlement.
         // SAFETY: the fixture accesses the existing private stream adapter.
-        const { _resumableStream } = this as unknown as {
-          _resumableStream: ResumableStream;
+        const { _replyStreams } = this as unknown as {
+          _replyStreams: ReplyStreams;
         };
-        const foreignStream = _resumableStream.start("foreign-terminal-gap");
-        _resumableStream.complete(foreignStream);
+        const foreignStream = _replyStreams.start("foreign-terminal-gap");
+        _replyStreams.complete(foreignStream);
       }
       await this.recoverSubmissionsOnStartForTest();
       // Repeated reconciliation must not duplicate terminal notifications.

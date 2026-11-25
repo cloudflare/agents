@@ -1,7 +1,8 @@
 import { Agent } from "../../index";
-import { ResumableStream, createChatStreams } from "../../chat";
+import { createChatStreams, type ReplyStreams } from "../../chat";
+import { openChatLog } from "../shared/chat-log";
 
-/** Test Agent retained for ResumableStream legacy migration coverage. */
+/** Test Agent retained for ReplyStreams legacy migration coverage. */
 export class TestSessionAgent extends Agent {
   readonly streams = createChatStreams();
 
@@ -10,12 +11,12 @@ export class TestSessionAgent extends Agent {
     this.lifecycle.use(this.streams);
   }
 
-  // ── ResumableStream legacy migration helpers ────────────────────
+  // ── ReplyStreams legacy migration helpers ────────────────────
 
   /**
    * Recreate `cf_ai_chat_stream_metadata` with the pre-#1691/#1733 schema
    * (no `message_id` / `is_continuation`) and seed one in-flight row, so a
-   * fresh `ResumableStream` exercises the legacy lazy-migration path on a
+   * fresh `ReplyStreams` exercises the legacy lazy-migration path on a
    * real workerd SQLite (validates the runtime's actual error strings).
    */
   async setupLegacyStreamTableForTest(): Promise<void> {
@@ -81,7 +82,7 @@ export class TestSessionAgent extends Agent {
     appDone.append({ x: 2 });
     appDone.close();
 
-    const stream = new ResumableStream(
+    const stream = openChatLog(
       this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,
@@ -102,7 +103,7 @@ export class TestSessionAgent extends Agent {
   }
 
   /**
-   * Drive a `ResumableStream` over seeded legacy `cf_ai_chat_stream_*` tables
+   * Drive a `ReplyStreams` over seeded legacy `cf_ai_chat_stream_*` tables
    * and report what happened, so the test can assert construction migrated
    * the rows into the Streams capability's tables (preserving both stored
    * chunk formats and the in-flight active stream) and dropped the legacy
@@ -122,7 +123,7 @@ export class TestSessionAgent extends Agent {
   }> {
     const columnsBefore = this.streamMetadataColumnsForTest();
 
-    const stream = new ResumableStream(
+    const stream = openChatLog(
       this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,

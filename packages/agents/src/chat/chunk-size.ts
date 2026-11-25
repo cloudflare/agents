@@ -8,7 +8,7 @@ export function storedChunkBytes(body: string): number {
 }
 
 /**
- * Whether `ResumableStream.storeChunk` skips storing this body: it is still
+ * Whether `ReplyStreams.storeChunk` skips storing this body: it is still
  * broadcast live, but absent from replay.
  */
 export function isChunkTooLargeToStore(body: string): boolean {

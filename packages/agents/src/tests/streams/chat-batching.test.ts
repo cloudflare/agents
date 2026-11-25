@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { ResumableStream } from "../../chat/resumable-stream";
-import type { SqlTaggedTemplate } from "../../chat/resumable-stream";
+import type { ReplyStreams } from "../../chat";
+import { openChatLog } from "../shared/chat-log";
+import type { SqlTaggedTemplate } from "../../chat";
 import { Streams } from "../../streams";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
@@ -53,7 +54,7 @@ describe("chat chunks on Streams' batched appends", () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const { lifecycle, capability: streams } = install(new Streams());
       await lifecycle.start();
-      const chat = new ResumableStream(streams, sqlOf(storage));
+      const chat = openChatLog(streams, sqlOf(storage));
       const streamId = chat.start("req-1");
 
       const seqs: Array<number | undefined> = [];
@@ -105,7 +106,7 @@ describe("chat chunks on Streams' batched appends", () => {
       sync.importChunk("released", packed, 2);
       sync.importChunk("released", "last", 3);
 
-      const chat = new ResumableStream(streams, sqlOf(storage));
+      const chat = openChatLog(streams, sqlOf(storage));
       expect(chat.progressMarker()).toBe(3);
       expect(chat.getStreamChunks("released")).toHaveLength(21);
       chat.complete("released");
@@ -179,7 +180,7 @@ describe("chat chunks on Streams' batched appends", () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const { lifecycle, capability: streams } = install(new Streams());
       await lifecycle.start();
-      const chat = new ResumableStream(streams, sqlOf(storage));
+      const chat = openChatLog(streams, sqlOf(storage));
       const streamId = chat.start("req-big");
       const big = "y".repeat(400_000);
       for (let i = 0; i < 6; i++) chat.storeChunk(streamId, big);

@@ -89,7 +89,7 @@ export interface StreamsOptions {
 /**
  * @internal Synchronous operations returned by
  * {@link Streams.__DO_NOT_USE_WILL_BREAK__sync}. For same-isolate first-party
- * machinery only (the chat `ResumableStream` adapter); every method bypasses
+ * machinery only (the chat `ReplyStreams` adapter); every method bypasses
  * `lifecycle.ready()`, so the caller owns startup ordering.
  */
 export interface StreamsSyncInternal {
@@ -571,7 +571,7 @@ export class Streams extends LifecycleCapability {
 
   /**
    * @internal Synchronous storage operations for same-isolate first-party
-   * machinery — today the chat `ResumableStream` adapter, whose whole public
+   * machinery — today the chat `ReplyStreams` adapter, whose whole public
    * surface is synchronous and constructed before the Lifecycle starts.
    * Bypasses `lifecycle.ready()`: the caller owns startup ordering. The
    * invariant-bearing writes (append fence, settlement, wakeups, events) go

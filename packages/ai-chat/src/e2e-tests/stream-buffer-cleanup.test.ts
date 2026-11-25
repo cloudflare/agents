@@ -4,7 +4,7 @@
  * A completed chat turn leaves a resumable-stream buffer (a
  * `cf_ai_chat_stream_metadata` row + packed `cf_ai_chat_stream_chunks` rows)
  * that is redundant with the persisted assistant message. The lazy sweep in
- * `ResumableStream` only fires when a *subsequent* stream completes, which never
+ * `ReplyStreams` only fires when a *subsequent* stream completes, which never
  * happens for an idle/one-off chat DO — so the framework arms a
  * no cleanup alarm any more: the cutover deletes the buffer, and that
  * alarm re-arms only while reclaimable rows remain.

@@ -1374,7 +1374,7 @@ export class ThinkClientToolsAgent extends Think {
     streams.start = (requestId, options) => {
       const streamId = start(requestId, options);
       this._streamParents.push(
-        this["_resumableStream"].getStreamParentMessageId(streamId)
+        this["_replyStreams"].getStreamParentMessageId(streamId)
       );
       return streamId;
     };
