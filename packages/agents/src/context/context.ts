@@ -45,9 +45,9 @@ const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
 const REFRESH = "transcript:context:refresh";
 /**
- * Set by the host when it clears the session's transcript (Think does), a
- * key a clear keeps: a session cleared since the upgrade has no turn from
- * before Context left, so a frozen prompt no longer applies.
+ * Set by Sessions at every clear and kept by it: a session cleared since
+ * the upgrade has no turn from before Context left, so a frozen prompt no
+ * longer applies.
  */
 const CLEARED_AT = "session:cleared-at";
 
@@ -129,8 +129,12 @@ export interface ContextOptions {
    * Where a prompt frozen before Context is kept (`ContextBlocks`' prompt
    * store). Read once, never written: the turns sent before Context have
    * no record, so they are sent this prompt, the first turn after the
-   * upgrade included, until the session is cleared: a host that clears
-   * sets the session config key `session:cleared-at` (Think does).
+   * upgrade included, until the session is cleared. Context knows of a
+   * clear from the session config key `session:cleared-at`, which a
+   * Sessions session's `clearMessages()` sets; a session of your own that
+   * clears its history must set it too (to any value), or the frozen
+   * prompt applies again after the clear. A store that throws or holds
+   * nothing counts as no prompt.
    */
   readonly promptStore?: ContextProvider;
 }

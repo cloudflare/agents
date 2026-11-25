@@ -91,6 +91,8 @@ const TAIL_INDEX_ROWS = 3 * 1_000;
  */
 const TRANSCRIPT_CONFIG_PREFIX = "transcript:";
 const TRANSCRIPT_CONFIG_PREFIX_END = "transcript;";
+/** Session config key `clearMessages()` sets to the time of the clear. */
+const CLEARED_AT_CONFIG_KEY = "session:cleared-at";
 
 /**
  * First batch of a newest-first annotation lookup: the record it looks for
@@ -2335,6 +2337,10 @@ export class SessionsCore {
            AND key < '${TRANSCRIPT_CONFIG_PREFIX_END}'`,
         [sessionId]
       );
+      // When the transcript was last cleared, kept across clears: a module
+      // that keeps something for turns from before a point (Context's
+      // prompt frozen by an earlier release) reads it.
+      this.setConfig(sessionId, CLEARED_AT_CONFIG_KEY, String(Date.now()));
       this.#attachments.releaseSession(sessionId);
       if (this.#fts) {
         this.io.sqlWrite(

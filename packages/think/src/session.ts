@@ -274,15 +274,8 @@ export class ThinkSession {
     return this.#handle.deleteMessages(messageIds);
   }
 
-  async clearMessages(): Promise<void> {
-    // Marked before the clear: a prompt frozen by an earlier release is the
-    // prompt of turns from before the upgrade, and a cleared session has
-    // none left (Context reads this key; a clear keeps it).
-    await this.#handle.internal_setConfig(
-      "session:cleared-at",
-      String(Date.now())
-    );
-    await this.#handle.clearMessages();
+  clearMessages(): Promise<void> {
+    return this.#handle.clearMessages();
   }
 
   // ── Compaction ───────────────────────────────────────────────────────────

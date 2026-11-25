@@ -724,8 +724,7 @@ describe("Context", () => {
       await session.appendMessage(user("u2", "again"));
       expect((await context.build()).system).toBe(released);
 
-      // As Think clears: mark it, the transcript, then a refresh.
-      await session.internal_setConfig("session:cleared-at", "1");
+      // As Think clears: the transcript, then a refresh.
       await session.clearMessages();
       await context.refreshSystemPrompt();
       await session.appendMessage(user("n1", "new chat"));
@@ -780,10 +779,9 @@ describe("Context", () => {
       await session.appendMessage(user("u2", "again"));
       expect((await context.build()).system).toBe(released);
 
-      // A session-level clear, as a host marks it: no refresh. A new turn is
+      // A session-level clear: no refresh. A new turn is
       // accepted, then recovered before it was prepared, in this instance
       // and in a new one.
-      await session.internal_setConfig("session:cleared-at", "1");
       await session.clearMessages();
       await session.appendMessage(user("n1", "new chat"));
       expect((await make().prepare({ retry: true })).system).not.toBe(released);
@@ -866,7 +864,6 @@ describe("Context", () => {
       await session.appendMessage(user("u1", "hello"));
       await session.appendMessage(assistant("a1", "hi"));
       memory = "likes tea";
-      await session.internal_setConfig("session:cleared-at", "1");
       await session.clearMessages();
 
       // A new turn, cut before it prepared and recovered, then the next one.
