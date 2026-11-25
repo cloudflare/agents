@@ -586,6 +586,15 @@ describe("Think — fetchTools integration", () => {
     expect(turn).toBe(direct);
   });
 
+  it("hands the model a fetched body when it calls a fetch tool", async () => {
+    const a = (await agent(`fetch-call-${crypto.randomUUID()}`)) as unknown as {
+      fetchThroughModel(body: string): Promise<string>;
+    };
+    const results = await a.fetchThroughModel("the docs say hello");
+    expect(results).toContain("fetch_docs");
+    expect(results).toContain("the docs say hello");
+  });
+
   it("does not register fetch tools by default", async () => {
     const a = await agent(`fetch-off-${crypto.randomUUID()}`);
     const { toolNames } = await a.captureTurn();

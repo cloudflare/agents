@@ -41,7 +41,19 @@ class CollectingCallback implements StreamCallback {
 /** The tool definitions each model request carried, in order. */
 type RequestTools = { name?: string }[] | undefined;
 
-function createTextModel(requests: RequestTools[] = []): LanguageModel {
+/** A tool result as a later model request carries it. */
+type SeenResult = { role: string; content?: unknown };
+
+/**
+ * A model that answers "ok", or, while `call` is set and the request has no
+ * tool result yet, asks for that one tool call. Every request's messages go
+ * to `seen`.
+ */
+function createTextModel(
+  requests: RequestTools[] = [],
+  call?: () => { toolName: string; input: unknown } | undefined,
+  seen: SeenResult[][] = []
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -50,11 +62,29 @@ function createTextModel(requests: RequestTools[] = []): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream(options: { tools?: { name?: string }[] }) {
+    doStream(options: { tools?: { name?: string }[]; prompt?: SeenResult[] }) {
       requests.push(options.tools);
+      seen.push(options.prompt ?? []);
+      const wanted = call?.();
+      const answered = options.prompt?.some((m) => m.role === "tool");
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
+          if (wanted && !answered) {
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "fetch-1",
+              toolName: wanted.toolName,
+              input: JSON.stringify(wanted.input)
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+            controller.close();
+            return;
+          }
           controller.enqueue({ type: "text-start", id: "t" });
           controller.enqueue({ type: "text-delta", id: "t", delta: "ok" });
           controller.enqueue({ type: "text-end", id: "t" });
@@ -76,9 +106,31 @@ export class ThinkFetchToolsTestAgent extends Think {
   private _lastToolNames: string[] = [];
   private _lastSystem = "";
   readonly #requests: RequestTools[] = [];
+  readonly #seen: SeenResult[][] = [];
+  #call: { toolName: string; input: unknown } | undefined;
 
   override getModel(): LanguageModel {
-    return createTextModel(this.#requests);
+    return createTextModel(this.#requests, () => this.#call, this.#seen);
+  }
+
+  /**
+   * Have the model call `fetch_docs` on a binding that answers `body`, in
+   * a turn: the tool result the next model request carries, as JSON.
+   */
+  async fetchThroughModel(body: string): Promise<string> {
+    const binding = {
+      fetch: async () =>
+        new Response(body, { headers: { "content-type": "text/plain" } })
+    } as unknown as Fetcher;
+    this.fetchTools = {
+      bindings: { docs: { binding, allowlist: ["/v1/docs/**"] } }
+    };
+    this.maxSteps = 2;
+    this.#call = { toolName: "fetch_docs", input: { path: "/v1/docs/body" } };
+    await this.chat("fetch it", new CollectingCallback());
+    this.#call = undefined;
+    const next = this.#seen.at(-1) ?? [];
+    return JSON.stringify(next.filter((message) => message.role === "tool"));
   }
 
   /**
