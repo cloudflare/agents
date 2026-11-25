@@ -490,6 +490,39 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("hands a facet its frames in send order when one waits on a slow facet init (F11)", async () => {
+    const parentName = uniqueName();
+    const path =
+      `/agents/test-sub-agent-parent/${parentName}` +
+      `/sub/counter-sub-agent/${uniqueName()}`;
+    const response = await exports.default.fetch(`http://example.com${path}`, {
+      headers: { Upgrade: "websocket" }
+    });
+    const ws = response.webSocket as WebSocket;
+    ws.accept();
+    try {
+      // The facet is up once a first frame comes back.
+      const warm = waitForTextMessage(ws, "seen:order:warm", 5000);
+      ws.send("order:warm");
+      await warm;
+      // The next frame's facet init is slow, as a facet still starting is.
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      await parent.delayFacetInitForTest(1, 200);
+      const sent = Array.from({ length: 5 }, (_, i) => `order:${i}`);
+      const delivered = waitForTextMessages(
+        ws,
+        new Set(sent.map((frame) => `seen:${frame}`)),
+        5000
+      );
+      for (const frame of sent) ws.send(frame);
+      await expect(delivered).resolves.toEqual(
+        sent.map((frame) => `seen:${frame}`)
+      );
+    } finally {
+      ws.close();
+    }
+  });
+
   it("preserves consecutive message order after frame completion", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());

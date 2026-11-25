@@ -1455,23 +1455,52 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     );
   }
 
+  /**
+   * Per socket, the frame the facet is being handed now: resolved once its
+   * call to the facet has gone out. Bounded by the open sockets; an entry
+   * goes when its socket's last frame has been handed over.
+   */
+  readonly #inboundTails = new Map<string, Promise<void>>();
+
   async forwardWebSocketMessage(
     connection: Connection,
     message: WSMessage,
     replyBridge?: DynamicAgentConnectionBridge
   ): Promise<boolean> {
-    const routed = await this.#resolveConnection(connection, { create: false });
-    if (routed.status === "no-match") return false;
-    if (routed.status === "dropped") return true;
+    // Frames reach the facet in the order the socket delivered them (F11).
+    // Each waits until the frame before it has been handed over, not until
+    // the facet handled it: resolving the facet takes a call of its own,
+    // and one slower than the next frame's would let that frame go first.
+    const previous = this.#inboundTails.get(connection.id);
+    let handedOver!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      handedOver = resolve;
+    });
+    this.#inboundTails.set(connection.id, tail);
+    try {
+      await previous;
+      const routed = await this.#resolveConnection(connection, {
+        create: false
+      });
+      if (routed.status === "no-match") return false;
+      if (routed.status === "dropped") return true;
 
-    const bridge = this.#createConnectionBridge(connection);
-    await routed.child._cf_handleSubAgentWebSocketMessage(
-      message,
-      bridge,
-      routed.meta,
-      replyBridge ?? bridge
-    );
-    return true;
+      const bridge = this.#createConnectionBridge(connection);
+      const handled = routed.child._cf_handleSubAgentWebSocketMessage(
+        message,
+        bridge,
+        routed.meta,
+        replyBridge ?? bridge
+      );
+      handedOver();
+      await handled;
+      return true;
+    } finally {
+      handedOver();
+      if (this.#inboundTails.get(connection.id) === tail) {
+        this.#inboundTails.delete(connection.id);
+      }
+    }
   }
 
   async forwardWebSocketClose(
