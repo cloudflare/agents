@@ -221,6 +221,45 @@ describe("Tasks lanes", () => {
     });
   });
 
+  it("reads the lane once to start a run accepted at its free head", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const sql = state.storage.sql as unknown as {
+          exec: (query: string, ...rest: unknown[]) => unknown;
+        };
+        const exec = sql.exec.bind(sql);
+        const queries: string[] = [];
+        sql.exec = (query: string, ...rest: unknown[]) => {
+          queries.push(query);
+          return exec(query, ...rest);
+        };
+        try {
+          await instance.tasks.run(
+            "laned",
+            { label: "a" },
+            { runId: "a", lane: "l" }
+          );
+          await until(
+            async () => (await instance.tasks.get("a"))?.status === "completed"
+          );
+        } finally {
+          sql.exec = exec;
+        }
+        // The accept's placement read; no lane-head read before the claim.
+        // (The settle reads the head once, to move the lane on.)
+        const headReads = queries.filter((q) =>
+          /WHERE lane = \? AND status IN \('pending', 'running'\)\s+ORDER BY seq LIMIT 1/.test(
+            q
+          )
+        );
+        expect(headReads).toHaveLength(1);
+      }
+    );
+  });
+
   it("starts nothing in a held lane until it is released", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
