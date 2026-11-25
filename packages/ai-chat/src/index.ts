@@ -108,6 +108,8 @@ import {
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
+  replayCompletedChunks,
+  replayErroredChunks,
   storedAsFacet,
   type ChatRecoveryTaskReason,
   type StreamInterruptionOutcome
@@ -1213,6 +1215,18 @@ export class AIChatAgent<
     return (this._resumeHandshakeInstance ??= new ResumeHandshake({
       responseMessageType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
       resumableStream: this._resumableStream,
+      replayCompleted: (connection, requestId) =>
+        replayCompletedChunks(
+          this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
+          connection,
+          requestId
+        ),
+      replayErrored: (connection, requestId) =>
+        replayErroredChunks(
+          this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
+          connection,
+          requestId
+        ),
       continuation: this._continuation,
       preStream: this._preStream,
       pendingResumeConnections: this._pendingResumeConnections,

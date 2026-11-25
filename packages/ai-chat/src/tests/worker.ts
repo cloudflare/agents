@@ -46,7 +46,8 @@ import {
   type ReplyStreams,
   type ToolPartUpdate,
   REPLAY_CHUNK_BYTES,
-  CHAT_RECOVERY_PROGRESS_KEY
+  CHAT_RECOVERY_PROGRESS_KEY,
+  replayErroredChunks
 } from "agents/chat";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
@@ -2758,7 +2759,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * #1575: drive `ResumableStream.replayErroredChunksByRequestId` against a
+   * #1575: drive `replayErroredChunks` against a
    * controllable connection so the return-value contract is testable in
    * isolation: `failAfter` sends succeed, then the connection simulates a
    * post-close send (the only error `sendIfOpen` swallows). Returns the
@@ -2777,11 +2778,9 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         sent++;
       }
     };
-    const rs = this["_resumableStream"];
-    const returned = rs.replayErroredChunksByRequestId(
-      fakeConnection as unknown as Parameters<
-        typeof rs.replayErroredChunksByRequestId
-      >[0],
+    const returned = replayErroredChunks(
+      this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
+      fakeConnection as unknown as Parameters<typeof replayErroredChunks>[1],
       requestId
     );
     return { returned, sent };

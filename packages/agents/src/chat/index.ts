@@ -85,6 +85,7 @@ export {
   type SqlTaggedTemplate
 } from "./resumable-stream";
 export { storedAsFacet } from "../dynamic-agents/facet-flag";
+export { replayCompletedChunks, replayErroredChunks } from "./stream-rows";
 export {
   createChatTurnTaskDefinition,
   currentTurnCheckpoint,

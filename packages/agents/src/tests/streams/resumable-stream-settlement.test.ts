@@ -3,6 +3,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Connection } from "../../index";
 import { ResumableStream } from "../../chat/resumable-stream";
+import { replayCompletedChunks } from "../../chat/stream-rows";
 import type { StreamBenchObject } from "../capabilities/streams-bench";
 
 function createAdapter(
@@ -110,7 +111,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
 
       const frames: Record<string, unknown>[] = [];
       expect(
-        stream.replayCompletedChunksByRequestId(
+        replayCompletedChunks(
+          instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
           collectingConnection(frames),
           "req-done"
         )
@@ -155,7 +157,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
       stream.cutover(id, () => {});
 
       expect(
-        stream.replayCompletedChunksByRequestId(
+        replayCompletedChunks(
+          instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
           collectingConnection([]),
           "req-cut"
         )
@@ -171,7 +174,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
       const stream = createAdapter(instance, ctx.storage.sql);
       const outcomeOf = (requestId: string) => {
         const frames: Record<string, unknown>[] = [];
-        stream.replayCompletedChunksByRequestId(
+        replayCompletedChunks(
+          instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
           collectingConnection(frames),
           requestId
         );
@@ -210,7 +214,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
       expect(live.at(-1)).toMatchObject({ done: true, outcome: "aborted" });
 
       const later: Record<string, unknown>[] = [];
-      restored.replayCompletedChunksByRequestId(
+      replayCompletedChunks(
+        instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
         collectingConnection(later),
         "req-orphan-outcome"
       );
@@ -306,7 +311,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
       stream.complete(id);
       expect(stream.getOriginMessageIds("req-plain")).toBeUndefined();
       const frames: Record<string, unknown>[] = [];
-      stream.replayCompletedChunksByRequestId(
+      replayCompletedChunks(
+        instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
         collectingConnection(frames),
         "req-plain"
       );

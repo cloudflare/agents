@@ -259,6 +259,8 @@ import {
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
+  replayCompletedChunks,
+  replayErroredChunks,
   storedAsFacet,
   type StreamInterruptionOutcome,
   createChatFiberSnapshot,
@@ -11272,6 +11274,18 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return (this._resumeHandshakeInstance ??= new ResumeHandshake({
       responseMessageType: MSG_CHAT_RESPONSE,
       resumableStream: this._resumableStream,
+      replayCompleted: (connection, requestId) =>
+        replayCompletedChunks(
+          this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
+          connection,
+          requestId
+        ),
+      replayErrored: (connection, requestId) =>
+        replayErroredChunks(
+          this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
+          connection,
+          requestId
+        ),
       continuation: this._turns.continuation,
       preStream: this._turns.preStream,
       pendingResumeConnections: this._pendingResumeConnections,

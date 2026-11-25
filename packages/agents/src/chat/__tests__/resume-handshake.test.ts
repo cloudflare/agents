@@ -71,6 +71,9 @@ interface FakeStreamState {
   };
 }
 
+/** Each fake stream's state, for the host's replay functions. */
+const fakeStates = new WeakMap<ResumableStream, FakeStreamState>();
+
 function makeStream(over: Partial<FakeStreamState> = {}): {
   state: FakeStreamState;
   resumableStream: ResumableStream;
@@ -97,7 +100,6 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
       state.calls.replayChunks.push(requestId);
       return state.orphanedStreamId;
     },
-    replayCompletedChunksByRequestId: () => state.replayCompletedReturn,
     getOriginMessageIds: () => state.originMessageIds,
     latestStreamInfoForRequest: (requestId: string) => {
       const status = state.streams?.[requestId];
@@ -106,15 +108,12 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
         : null;
     },
     getOutcome: () => state.outcome,
-    replayErroredChunksByRequestId: (_c: Connection, requestId: string) => {
-      state.calls.replayErrored.push(requestId);
-      return state.replayErroredReturn;
-    },
     replayClosedStreamChunks: (_c: Connection, requestId: string) => {
       state.calls.replayPending.push(requestId);
       return true;
     }
   } as unknown as ResumableStream;
+  fakeStates.set(resumableStream, state);
   return { state, resumableStream };
 }
 
@@ -134,6 +133,13 @@ function makeHost(opts: {
     }),
     responseMessageType: RESPONSE_TYPE,
     resumableStream: opts.resumableStream,
+    replayCompleted: () =>
+      fakeStates.get(opts.resumableStream)?.replayCompletedReturn ?? false,
+    replayErrored: (_c: Connection, requestId: string) => {
+      const state = fakeStates.get(opts.resumableStream);
+      state?.calls.replayErrored.push(requestId);
+      return state?.replayErroredReturn ?? true;
+    },
     continuation: opts.continuation ?? new ContinuationState<Connection>(),
     preStream: opts.preStream,
     pendingResumeConnections:
@@ -773,13 +779,9 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         cutOff: true
       });
       let replayed = false;
-      (
-        resumableStream as unknown as {
-          replayCompletedChunksByRequestId: () => boolean;
-        }
-      ).replayCompletedChunksByRequestId = () => (replayed = true);
       const handshake = new ResumeHandshake({
         ...makeHost({ resumableStream }),
+        replayCompleted: () => (replayed = true),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
       });
 
