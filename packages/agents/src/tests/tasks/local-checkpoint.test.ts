@@ -77,6 +77,7 @@ describe("Tasks local and checkpoint", () => {
   });
 
   it("gives an attempt after a reset no `local`, and the checkpoint the last one wrote", async () => {
+    const queries: string[] = [];
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
@@ -97,6 +98,17 @@ describe("Tasks local and checkpoint", () => {
           JSON.stringify({ note: { attempt: 1 } }),
           "reset-run"
         );
+        // Count the replayed attempt's statements from before its alarm is
+        // armed: its checkpoint comes with the claim, so it reads the
+        // stored note without a query of its own.
+        const sql = state.storage.sql as unknown as {
+          exec: (query: string, ...rest: unknown[]) => unknown;
+        };
+        const exec = sql.exec.bind(sql);
+        sql.exec = (query: string, ...rest: unknown[]) => {
+          queries.push(query);
+          return exec(query, ...rest);
+        };
         await instance.lifecycle.rearmAlarm();
       }
     );
@@ -112,6 +124,14 @@ describe("Tasks local and checkpoint", () => {
         expect(instance.rememberingSeen).toEqual([
           { local: undefined, note: { attempt: 1 } }
         ]);
+        expect(instance.rememberingAfter).toEqual([true]);
+        // The replay's own claim was recorded.
+        expect(
+          queries.some((q) => /SET status = 'running', attempt/.test(q))
+        ).toBe(true);
+        expect(queries.filter((q) => /SELECT checkpoint FROM/.test(q))).toEqual(
+          []
+        );
         expect((await instance.tasks.get("reset-run"))?.status).toBe(
           "completed"
         );
@@ -145,6 +165,8 @@ describe("Tasks local and checkpoint", () => {
         expect(checkpointRows(state.storage, receipt.runId)).toEqual([
           { key: "note", value: JSON.stringify({ attempt: 1 }) }
         ]);
+        // Nor does the superseded attempt read back the write it lost.
+        expect(instance.rememberingAfter).toEqual([null]);
       }
     );
   });
@@ -468,6 +490,42 @@ describe("Tasks step writes are fenced in their own statement", () => {
 });
 
 describe("Tasks step cost", () => {
+  it("reads the checkpoint once per attempt, with the claim, however many keys it reads", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const sql = state.storage.sql as unknown as {
+          exec: (query: string, ...rest: unknown[]) => unknown;
+        };
+        const exec = sql.exec.bind(sql);
+        const queries: string[] = [];
+        sql.exec = (query: string, ...rest: unknown[]) => {
+          queries.push(query);
+          return exec(query, ...rest);
+        };
+        try {
+          // Sets four keys and reads four back.
+          await instance.tasks.run("oddKeys" as never, undefined as never, {
+            runId: "odd",
+            start: "now"
+          });
+        } finally {
+          sql.exec = exec;
+        }
+        expect(instance.tasks.peek("odd")?.result).toEqual([
+          { i: 0 },
+          { i: 1 },
+          { i: 2 },
+          { i: 9 }
+        ]);
+        expect(queries.filter((q) => /SELECT checkpoint FROM/.test(q))).toEqual(
+          []
+        );
+      }
+    );
+  });
+
   it("reads no run row to journal a step", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(

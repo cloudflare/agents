@@ -249,12 +249,14 @@ export class TaskStore {
     generation: string,
     key: string,
     value: TaskJson
-  ): void {
-    this.write(
-      `UPDATE ${this.tables.runs}
+  ): boolean {
+    return (
+      this.write(
+        `UPDATE ${this.tables.runs}
        SET checkpoint = json_set(coalesce(checkpoint, '{}'), '$.' || json_quote(?), json(?))
        WHERE run_id = ? AND generation = ?`,
-      [key, JSON.stringify(value), runId, generation]
+        [key, JSON.stringify(value), runId, generation]
+      ) > 0
     );
   }
 

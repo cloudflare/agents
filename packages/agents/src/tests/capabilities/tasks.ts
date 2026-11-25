@@ -31,6 +31,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly guardedEntries: string[] = [];
   /** What each `remembering` attempt saw: its `local` and checkpoint. */
   readonly rememberingSeen: Array<{ local: unknown; note: unknown }> = [];
+  /** What each `remembering` attempt read back after its last write. */
+  readonly rememberingAfter: unknown[] = [];
   /** `remembering` parks on this until a test opens it. */
   rememberingGate: Promise<void> | null = null;
   /** Labels of `laned` runs, in the order they started. */
@@ -83,6 +85,7 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         step.checkpoint.set("note", { attempt: this.rememberingSeen.length });
         await this.rememberingGate;
         step.checkpoint.set("after", true);
+        this.rememberingAfter.push(step.checkpoint.get("after") ?? null);
         return "done";
       },
 

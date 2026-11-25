@@ -1285,6 +1285,17 @@ export class Tasks<
       claimedAtMs
     );
     const store = this.#store;
+    // The checkpoint as the claim found it, read once: only this attempt
+    // writes it from here on (every write is fenced to its generation), so
+    // its reads come from here and each write updates both. Values are kept
+    // as JSON so a caller that changes what it got changes nothing stored.
+    const checkpoint = new Map<string, string>(
+      Object.entries(
+        row.checkpoint === null
+          ? {}
+          : (JSON.parse(row.checkpoint) as Record<string, TaskJson>)
+      ).map(([key, value]) => [key, JSON.stringify(value)])
+    );
     const step = new ReplayStep(engine, {
       startsLive: attempt === 1,
       interrupted,
@@ -1294,9 +1305,16 @@ export class Tasks<
       signal: controller.signal,
       createdAt: row.created_at,
       checkpoint: {
-        get: <T extends TaskJson>(key: string) =>
-          store.getCheckpoint(runId, key) as T | undefined,
-        set: (key, value) => store.setCheckpoint(runId, generation, key, value)
+        get: <T extends TaskJson>(key: string) => {
+          const json = checkpoint.get(key);
+          return json === undefined ? undefined : (JSON.parse(json) as T);
+        },
+        set: (key, value) => {
+          // A write a newer attempt fenced out is not seen here either.
+          if (store.setCheckpoint(runId, generation, key, value)) {
+            checkpoint.set(key, JSON.stringify(value));
+          }
+        }
       }
     });
 
