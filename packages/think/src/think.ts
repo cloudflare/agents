@@ -89,7 +89,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
 import {
-  toDeclaredSchedules,
+  reconcileScheduledTasks,
   type ThinkScheduledTasks
 } from "./scheduled-tasks";
 import {
@@ -201,7 +201,6 @@ import type {
   SubAgentClass,
   WSMessage
 } from "agents";
-import { declareSchedules } from "agents/internal";
 import {
   sanitizeMessage,
   CHAT_MESSAGE_TYPES,
@@ -2895,21 +2894,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * after changing app-owned data that `getScheduledTasks()` reads.
    */
   internal_reconcileScheduledTasks(): Promise<void> {
-    const ownerKey = stableHash(this.selfPath);
-    return declareSchedules(
-      this.scheduler,
-      async () =>
-        toDeclaredSchedules(
-          await this.getScheduledTasks(),
-          ownerKey,
-          (messages, options) => this.submitMessages(messages, options)
-        ),
-      {
-        group: "think",
-        defaultTimezone: () => this.getDefaultTimezone(),
-        idempotencyKeyPrefix: `think-schedule:${ownerKey}`
-      }
-    );
+    return reconcileScheduledTasks({
+      scheduler: this.scheduler,
+      selfPath: this.selfPath,
+      tasks: () => this.getScheduledTasks(),
+      timezone: () => this.getDefaultTimezone(),
+      submit: (messages, options) => this.submitMessages(messages, options)
+    });
   }
 
   /**

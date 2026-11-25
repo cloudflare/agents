@@ -6,11 +6,14 @@
 
 import type { UIMessage } from "ai";
 import type { RetryOptions } from "agents";
-import type {
-  DeclaredSchedule,
-  DeclaredScheduleContext,
-  DeclaredScheduleExpression,
-  DeclaredSchedules
+import type { Scheduler } from "agents/schedules";
+import { stableHash } from "./action-ledger";
+import {
+  declareSchedules,
+  type DeclaredSchedule,
+  type DeclaredScheduleContext,
+  type DeclaredScheduleExpression,
+  type DeclaredSchedules
 } from "agents/internal";
 
 // Think's public schedule types are its own, written out, so its published
@@ -153,5 +156,31 @@ export function toDeclaredSchedules(
       };
       return [taskId, declared];
     })
+  );
+}
+
+/**
+ * Reconcile an agent's code-declared scheduled tasks with the Scheduler's
+ * declared schedules, keyed by the agent's path. `tasks` and `timezone`
+ * are read again when an occurrence runs; a prompt task submits through
+ * `submit`.
+ */
+export function reconcileScheduledTasks(options: {
+  readonly scheduler: Scheduler;
+  readonly selfPath: unknown;
+  readonly tasks: () => ThinkScheduledTasks | Promise<ThinkScheduledTasks>;
+  readonly timezone: () => string | undefined | Promise<string | undefined>;
+  readonly submit: SubmitScheduledPrompt;
+}): Promise<void> {
+  const ownerKey = stableHash(options.selfPath);
+  return declareSchedules(
+    options.scheduler,
+    async () =>
+      toDeclaredSchedules(await options.tasks(), ownerKey, options.submit),
+    {
+      group: "think",
+      defaultTimezone: options.timezone,
+      idempotencyKeyPrefix: `think-schedule:${ownerKey}`
+    }
   );
 }

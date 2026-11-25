@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**210 of the 1247 tests that construct Think pass (16%).** Across the whole suite, 498 of 1535.
+**217 of the 1247 tests that construct Think pass (17%).** Across the whole suite, 505 of 1535.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -32,7 +32,7 @@ supported by the harness-backed Think yet".
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 34 / 136 | 25%  |
+| `client-tools.test.ts`                 | 35 / 136 | 25%  |
 | `cold-rpc-initialization.test.ts`      | 3 / 4    | 75%  |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
@@ -69,14 +69,14 @@ supported by the harness-backed Think yet".
 | `rpc-chat-turns.test.ts`               | 0 / 5    | 0%   |
 | `run-turn-recovery.test.ts`            | 1 / 10   | 10%  |
 | `run-turn.test.ts`                     | 13 / 35  | 37%  |
-| `scheduled-tasks.test.ts`              | 1 / 9    | 11%  |
+| `scheduled-tasks.test.ts`              | 6 / 9    | 66%  |
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1    | 100% |
 | `submissions.test.ts`                  | 9 / 116  | 7%   |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
-| `think-eviction.test.ts`               | 1 / 3    | 33%  |
+| `think-eviction.test.ts`               | 2 / 3    | 66%  |
 | `think-session.test.ts`                | 59 / 305 | 19%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
