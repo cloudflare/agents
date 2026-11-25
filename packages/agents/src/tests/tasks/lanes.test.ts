@@ -243,7 +243,9 @@ describe("Tasks lanes", () => {
             { runId: "a", lane: "l" }
           );
           // Resolves after the terminal report, so after the settle's read.
-          await instance.tasks.wait("a", { timeoutMs: 5_000 });
+          expect(
+            (await instance.tasks.wait("a", { timeoutMs: 5_000 }))?.status
+          ).toBe("completed");
         } finally {
           sql.exec = exec;
         }
