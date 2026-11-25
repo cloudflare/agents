@@ -2089,32 +2089,40 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     this.ctx.abort("test: forced reset");
   }
 
-  /** The admission records, as `ChatTurns` stores them. */
   /** The next admission record write fails, as SQLite's row limit would. */
   failNextAdmissionForTest(): void {
-    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
-    const store = (
-      admissions as unknown as {
-        host: { store: { add: (...args: unknown[]) => void } };
-      }
-    ).host.store;
-    const add = store.add;
-    store.add = () => {
-      store.add = add;
-      throw new Error("SQLITE_TOOBIG: string or blob too big");
+    // A client request's record is its run on the chat lane.
+    const tasks = this.tasks as unknown as {
+      run: (...args: unknown[]) => Promise<unknown>;
+    };
+    const run = tasks.run;
+    tasks.run = (...args: unknown[]) => {
+      const input = args[1] as { admission?: unknown } | undefined;
+      if (!input?.admission) return run.apply(this.tasks, args);
+      tasks.run = run;
+      return Promise.reject(new Error("SQLITE_TOOBIG: string or blob too big"));
     };
   }
 
   /** Make every admission record `ms` older, as a long wait would. */
   ageAdmissionsForTest(ms: number): void {
-    this
-      .sql`UPDATE cf_agents_chat_admissions SET created_at = created_at - ${ms}`;
+    this.sql`
+      UPDATE cf_agents_task_runs SET created_at = created_at - ${ms}
+      WHERE lane = 'chat'
+    `;
   }
 
+  /** The client requests waiting on the chat lane, in order. */
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
-      return this.sql<{ request_id: string; stopped: number }>`
-        SELECT request_id, stopped FROM cf_agents_chat_admissions ORDER BY seq
+      return this.sql<{ request_id: string; stopped: number | null }>`
+        SELECT json_extract(metadata, '$.requestId') AS request_id,
+               json_extract(metadata, '$.chat.stopped') AS stopped
+        FROM cf_agents_task_runs
+        WHERE lane = 'chat' AND status IN ('pending', 'running')
+          AND json_type(input, '$.admission') IS NOT NULL
+          AND json_type(checkpoint, '$.snapshot') IS NULL
+        ORDER BY seq
       `.map((row) => ({
         requestId: row.request_id,
         stopped: row.stopped === 1
@@ -2125,20 +2133,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * Write an admission record by hand: the record a reset leaves when it
-   * lands between a turn's fiber and the record's delete.
+   * A record left between a turn's fiber and the record's delete. There is
+   * no such window any more: the record is the turn's run, which recovery
+   * owns once its model call began. Nothing to write.
    */
-  seedAdmissionForTest(requestId: string, messageIds: string[]): void {
-    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
-    admissions?.admit({
-      requestId,
-      messages: messageIds.map((id) => ({ id, role: "user", parts: [] })),
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: { trigger: "submit-message", body: {}, clientTools: undefined }
-    });
-    admissions?.live.delete(requestId);
-  }
+  seedAdmissionForTest(_requestId: string, _messageIds: string[]): void {}
 
   /** The messages waiting requests hold, not stored yet. */
   getQueuedMessageIdsForTest(): string[] {
@@ -5935,21 +5934,39 @@ export class AsyncStartAdmissionAgent extends SlowStreamAgent {
    */
   async seedQueuedRequestForTest(requestId: string): Promise<void> {
     const id = `u-${requestId}`;
-    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
-    admissions?.admit({
+    const nonce = crypto.randomUUID();
+    await this.tasks.get(nonce);
+    const input = {
       requestId,
-      messages: [
-        { id, role: "user", parts: [{ type: "text", text: requestId }] }
-      ] as ChatMessage[],
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: {
-        trigger: "submit-message",
-        body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 },
-        clientTools: undefined
+      continuation: false,
+      nonce,
+      lane: true,
+      admission: {
+        messages: [
+          { id, role: "user", parts: [{ type: "text", text: requestId }] }
+        ],
+        afterUserId: null,
+        decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+        payload: {
+          trigger: "submit-message",
+          body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 },
+          clientTools: undefined
+        }
       }
-    });
-    admissions?.live.delete(requestId);
+    };
+    const now = Date.now();
+    // Its run on the chat lane, as a reset leaves it before it started.
+    this.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, metadata, idempotency_key, retain,
+         attempt, next_at, cancel_requested, created_at, updated_at, lane, seq)
+      VALUES
+        (${`chat_${nonce}`}, ${AIChatAgent.CHAT_FIBER_NAME},
+         ${JSON.stringify(input)}, 'pending', ${JSON.stringify({ requestId })},
+         NULL, 0, 0, ${now}, 0, ${now}, ${now}, 'chat',
+         (SELECT coalesce(MAX(seq), 0) + 1 FROM cf_agents_task_runs
+          WHERE lane = 'chat'))
+    `;
   }
 }
 

@@ -57,7 +57,7 @@ import {
   ChatTurns,
   AgentToolRuns,
   createAgentToolRunStore,
-  createChatAdmissionStore,
+  takeReleasedChatAdmissions,
   newUserMessageIds,
   clientResolvableToolNames,
   chatRecoveryNames,
@@ -424,9 +424,9 @@ export class AIChatAgent<
       },
       // A request waiting in the queue survives an isolate reset.
       admissions: {
-        store: createChatAdmissionStore(() => this.ctx.storage.sql),
+        storage: () => this.ctx.storage,
         recoveryPending: () => this._chatRecoveryNames(),
-        recoveryOwns: (requestId) => this._chatRecoveryNames(requestId),
+        released: () => takeReleasedChatAdmissions(() => this.ctx.storage.sql),
         replayRequest: (record) => this._replayClientChatRequest(record)
       }
     }
@@ -830,6 +830,7 @@ export class AIChatAgent<
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn),
+        replay: (runId, record) => this._turns.replayInRun(runId, record),
         attempts
       })
     );

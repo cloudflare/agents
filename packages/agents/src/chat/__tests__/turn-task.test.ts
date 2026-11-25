@@ -53,7 +53,8 @@ const hooks = {
   attempts: {
     _chatRecoveryContinue: async () => {},
     _chatRecoveryRetry: async () => {}
-  }
+  },
+  replay: async () => {}
 };
 
 describe("createChatTurnTaskDefinition", () => {

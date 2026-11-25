@@ -101,10 +101,9 @@ export {
   CHAT_ADMISSIONS_TABLE,
   ChatAdmissions,
   chatRecoveryNames,
-  createChatAdmissionStore,
   newUserMessageIds,
+  takeReleasedChatAdmissions,
   type ChatAdmissionRecord,
-  type ChatAdmissionStore,
   type ChatAdmissionsHost,
   type HeldChatMessage,
   type StoredSubmitDecision

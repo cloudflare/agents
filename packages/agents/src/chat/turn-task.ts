@@ -14,6 +14,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { TaskJson, TaskStep } from "../tasks";
 import type { TaskCheckpoint } from "../tasks/types";
+import type { ChatAdmissionInput, ChatAdmissionRecord } from "./admissions";
 import type { ChatRecoveryAttemptInput } from "./recovery-engine";
 import {
   journalableAttempt,
@@ -86,6 +87,8 @@ export type ChatTurnTaskInput = {
   nonce: string;
   envelope?: TaskJson;
   lane?: true;
+  /** A client request's record, until its turn starts (`admissions.ts`). */
+  admission?: ChatAdmissionInput;
 };
 
 /** The host internals one chat-turn definition runs against. */
@@ -120,6 +123,11 @@ export type ChatTurnTaskHooks = {
   }): Promise<void>;
   /** The host's recovery callbacks, as the recovery Task runs them. */
   readonly attempts: ChatRecoveryTaskHooks;
+  /**
+   * Run again, inside its run `runId`, a client request whose isolate died
+   * before its turn started (`ChatTurns.replayInRun`).
+   */
+  replay(runId: string, record: ChatAdmissionRecord): Promise<void>;
 };
 
 /** The Tasks lane the chat turns of an agent run on, one at a time. */
@@ -188,11 +196,36 @@ export function createChatTurnTaskDefinition(
   hooks: ChatTurnTaskHooks
 ): (input: unknown, step: TaskStep) => Promise<void> {
   return async (input, step) => {
-    const { requestId, nonce, envelope, lane } = input as ChatTurnTaskInput;
-    const local = step.local as
-      | ChatTurnClosureEntry
-      | ChatLaneEntry
-      | undefined;
+    const { requestId, nonce, envelope, lane, admission } =
+      input as ChatTurnTaskInput;
+    let local = step.local as ChatTurnClosureEntry | ChatLaneEntry | undefined;
+    // A client request its isolate left before its turn started runs here,
+    // in its place in the lane.
+    if (
+      !local &&
+      lane &&
+      admission &&
+      step.checkpoint.get(SNAPSHOT) === undefined
+    ) {
+      const record: ChatAdmissionRecord = {
+        requestId,
+        seq: 0,
+        messageIds: admission.messages.map((message) => message.id),
+        messages: admission.messages,
+        afterUserId: admission.afterUserId,
+        decision: admission.decision,
+        payload: admission.payload,
+        stopped: false,
+        createdAt: step.createdAt
+      };
+      local = {
+        lane: true,
+        run: (inside) => inside(() => hooks.replay(step.id, record)),
+        dropped: () => {}
+      };
+    }
+    // A replay's recovery attempt, journaled as the step's result so a
+    // reset during its backoff or dispatch runs the same attempt again.
     if (local && "lane" in local) {
       try {
         return await runLaneTurn(
@@ -205,8 +238,6 @@ export function createChatTurnTaskDefinition(
         local.dropped();
       }
     }
-    // A replay's recovery attempt, journaled as the step's result so a
-    // reset during its backoff or dispatch runs the same attempt again.
     const attempt = await step.do(
       "model-turn",
       { retries: { limit: 1 }, timeout: "1 day" },
@@ -261,8 +292,7 @@ export function createChatTurnTaskDefinition(
               persisted,
               createdAt: typeof beganAt === "number" ? beganAt : step.createdAt,
               attempt: (next) => {
-                // A lane turn's attempt would hold the lane: the Task takes it.
-                if (lane || !journalableAttempt(next)) return false;
+                if (!journalableAttempt(next)) return false;
                 scheduled = next;
                 return true;
               }
@@ -321,22 +351,38 @@ export function createChatTurnTaskDefinition(
     );
     if (attempt) {
       const scheduled = attempt as unknown as ChatRecoveryAttemptInput;
-      await runChatRecoveryAttempt(step, hooks.attempts, {
-        ...scheduled,
-        // Always suspend first, even with no backoff: the attempt then runs
-        // from the alarm, where the host keeps the continuation's model turn
-        // inside the memory-limit breaker, as the recovery Task did.
-        delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
-      });
+      const run = () =>
+        runChatRecoveryAttempt(step, hooks.attempts, {
+          ...scheduled,
+          // Always suspend first, even with no backoff: the attempt then
+          // runs from the alarm, where the host keeps the continuation's
+          // model turn inside the memory-limit breaker, as the recovery
+          // Task did.
+          delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
+        });
+      // A lane turn replayed after a reset recovers holding the lane, so the
+      // requests its isolate left behind it wait for it (ChatOrder), as
+      // their records did; the attempt's own turns run in place.
+      await (lane ? laneAttempt.run(true, run) : run());
     }
   };
 }
 
+/** Set while a lane run runs its turn's recovery attempt. */
+const laneAttempt = new AsyncLocalStorage<boolean>();
+
+/**
+ * Whether the caller runs in a lane run's recovery attempt: a turn it
+ * queues runs in place, not behind the run that holds the lane.
+ */
+export function inLaneRecoveryAttempt(): boolean {
+  return laneAttempt.getStore() === true;
+}
+
 /**
  * A lane turn's attempt in the isolate that queued it: run the turn, and its
- * model call in the run's `model-turn` step. An interruption's recovery
- * attempt goes to the recovery Task: one in this run would hold the lane,
- * and the turns queued behind it, through its backoff.
+ * model call in the run's `model-turn` step. Returns the recovery attempt an
+ * interruption inside it planned, which this run then runs.
  */
 async function runLaneTurn(
   hooks: ChatTurnTaskHooks,
@@ -391,6 +437,10 @@ async function runLaneTurn(
           )
         );
       };
+      // A live turn's interruption hands its recovery attempt to the
+      // recovery Task, which does not hold the lane: a request sent during
+      // its backoff runs, as it did before. A turn replayed after a reset
+      // runs its attempt in this run instead (the handler, below).
       await hooks.keepAliveWhile(() =>
         entry.run((fn) =>
           turnAttempt.run(

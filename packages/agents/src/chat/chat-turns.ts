@@ -36,8 +36,8 @@ import type { UIMessage } from "ai";
 import { AbortRegistry } from "./abort-registry";
 import {
   ChatAdmissions,
+  type ChatAdmissionInput,
   type ChatAdmissionRecord,
-  type ChatAdmissionsHost,
   type HeldChatMessage
 } from "./admissions";
 import {
@@ -103,7 +103,7 @@ import {
   type TurnFailure,
   type TurnFailureHost
 } from "./turn-failure";
-import { TurnLane } from "./turn-lane";
+import { TurnLane, type TurnReservation } from "./turn-lane";
 import { CHAT_TURN_LANE, type ChatTurnTaskInput } from "./turn-task";
 import type { Tasks } from "../tasks";
 import { ChatStreamStalledError } from "./stall-watchdog";
@@ -185,7 +185,13 @@ export interface ChatTurnsOptions {
    * Where each queued turn is a run: the host's Tasks, and its chat-turn
    * definition.
    */
-  lane: { tasks(): Pick<Tasks, "run">; definition: string };
+  lane: {
+    tasks(): Pick<
+      Tasks,
+      "run" | "peek" | "peekList" | "inputOf" | "patchMetadata"
+    >;
+    definition: string;
+  };
   /**
    * Durable admission of client requests (`admissions.ts`). Without it a
    * request waiting in the queue is lost when the isolate resets.
@@ -194,10 +200,16 @@ export interface ChatTurnsOptions {
 }
 
 /** What durable admission needs from the host. See `admissions.ts`. */
-export interface ChatTurnsAdmissionOptions extends Omit<
-  ChatAdmissionsHost,
-  "replay" | "beginReplay"
-> {
+export interface ChatTurnsAdmissionOptions {
+  /** Where continuations' records are kept. */
+  storage(): Pick<DurableObjectStorage, "put" | "delete" | "list">;
+  /** Whether a chat turn waits for recovery. */
+  recoveryPending(): Promise<boolean>;
+  /**
+   * Take the records an earlier release left (`takeReleasedChatAdmissions`).
+   * Called once, on the first {@link ChatTurns.resumeAdmissions}.
+   */
+  released(): ChatAdmissionRecord[];
   /**
    * The request a record describes, to run again after a reset. It has no
    * connection: its frames go to every connection. Return `null` when it
@@ -400,27 +412,33 @@ export class ChatTurns<
 
   /** Durable admission records, when the host keeps them. */
   readonly admissions: ChatAdmissions | null;
-  /** Concurrency decisions of replays not started yet, by request id. */
+  /** Decisions of the replays an earlier isolate left, by request id. */
   readonly #restoredDecisions = new Map<string, SubmitConcurrencyDecision>();
-  /** Client requests decided and not queued yet (not replays). */
-  readonly #decidedNotQueued = new Set<{
-    decision: SubmitConcurrencyDecision;
-    concurrency: MessageConcurrency;
-    isSubmitMessage: boolean;
-  }>();
+  /** Where queued turns are runs. */
+  readonly #lane: ChatTurnsOptions["lane"];
+  /** The host's request for a record, to replay it inside its run. */
+  readonly #replayRequest:
+    | ((record: ChatAdmissionRecord) => ClientChatRequest<unknown> | null)
+    | null;
+  /** The records an earlier release left, until they are carried over. */
+  #released: (() => ChatAdmissionRecord[]) | null;
+  /** Whether a chat turn waits for recovery, for continuations' records. */
+  readonly #recoveryPending: (() => Promise<boolean>) | null;
 
   constructor(
     private readonly host: ChatTurnsHost,
     options: ChatTurnsOptions
   ) {
     const { lane } = options;
-    this.queue = new TurnLane((requestId, entry) => {
+    this.#lane = lane;
+    this.queue = new TurnLane((requestId, entry, extra) => {
       const nonce = crypto.randomUUID();
       const input: ChatTurnTaskInput = {
         requestId,
         continuation: false,
         nonce,
-        lane: true
+        lane: true,
+        ...extra
       };
       return lane.tasks().run(lane.definition, input, {
         runId: `chat_${nonce}`,
@@ -433,64 +451,18 @@ export class ChatTurns<
     const admissions = options.admissions;
     this.admissions = admissions
       ? new ChatAdmissions({
-          store: admissions.store,
-          recoveryPending: () => admissions.recoveryPending(),
-          recoveryOwns: (requestId) => admissions.recoveryOwns(requestId),
-          beginReplay: (records) => {
-            for (const record of records) {
-              this.#restoredDecisions.set(
-                record.requestId,
-                this.submits.restore(record.decision)
-              );
-            }
-            // A request decided before these replays is newer than every one
-            // of them, and they now hold newer sequence numbers. Decide it
-            // again against them: under `latest`, `merge` or `debounce` it
-            // supersedes them, as it would have before the reset.
-            if (records.length === 0) return;
-            for (const slot of this.#decidedNotQueued) {
-              const again = this.submits.decide({
-                concurrency: slot.concurrency,
-                isSubmitMessage: slot.isSubmitMessage,
-                queuedTurns: 1
-              });
-              if (again.action === "execute" && again.submitSequence !== null) {
-                slot.decision = again;
-              }
-            }
-          },
-          replay: (record, onQueued) => {
-            const continuation = continuationRecord(record);
-            if (continuation && record.stopped) {
-              this.admissions?.end(record.requestId);
-              onQueued();
-              return Promise.resolve();
-            }
-            if (continuation) {
-              // Settles once the continuation's turn is queued: the replay
-              // settling counts as queued.
-              return new Promise<void>((resolve) =>
-                this.#resumeContinuation(
-                  record.requestId,
-                  continuation.targetMessageIds,
-                  () => {
-                    onQueued();
-                    resolve();
-                  }
-                )
-              );
-            }
-            const request = admissions.replayRequest(record);
-            if (!request) {
-              this.#restoredDecisions.delete(record.requestId);
-              this.admissions?.end(record.requestId);
-              onQueued();
-              return Promise.resolve();
-            }
-            return this.#runClientRequest(request, { record, onQueued });
-          }
+          tasks: lane.tasks,
+          definition: lane.definition,
+          storage: admissions.storage
         })
       : null;
+    this.#replayRequest = admissions
+      ? (record) => admissions.replayRequest(record)
+      : null;
+    this.#recoveryPending = admissions
+      ? () => admissions.recoveryPending()
+      : null;
+    this.#released = admissions ? () => admissions.released() : null;
     this.submits = new SubmitConcurrencyController({
       defaultDebounceMs: options.defaultDebounceMs
     });
@@ -592,7 +564,7 @@ export class ChatTurns<
    */
   async #runClientRequest<TPrepared>(
     request: ClientChatRequest<TPrepared>,
-    replay?: { record: ChatAdmissionRecord; onQueued: () => void }
+    replay?: { record: ChatAdmissionRecord }
   ): Promise<void> {
     const { requestId } = request;
     if (!request.join && (request.admission?.messages.length ?? 0) > 0) {
@@ -603,20 +575,14 @@ export class ChatTurns<
     const restored = replay && this.#restoredDecisions.get(requestId);
     if (replay) this.#restoredDecisions.delete(requestId);
     const decision = replay
-      ? (restored ?? this.submits.restore(replay.record.decision))
+      ? restored || this.submits.restore(replay.record.decision)
       : this.decideSubmit(request.concurrency, request.isSubmitMessage);
     request.onDecision?.(decision);
     if (decision.action === "drop") {
       request.onDropped();
       return;
     }
-    // Until it is queued, replays that start meanwhile decide it again.
-    const slot = {
-      decision,
-      concurrency: request.concurrency,
-      isSubmitMessage: request.isSubmitMessage
-    };
-    if (!replay) this.#decidedNotQueued.add(slot);
+    const slot = { decision };
 
     // The registry hands out a signal for every string id. Anything else
     // would give a turn no stop can reach.
@@ -628,13 +594,10 @@ export class ChatTurns<
     if (replay?.record.stopped) this.aborts.cancel(requestId);
     this.preStream.begin(requestId);
     const releasePendingEnqueue = this.submits.beginEnqueue();
-    let queued = false;
-    const onQueued = () => {
-      queued = true;
-      this.#decidedNotQueued.delete(slot);
-      releasePendingEnqueue();
-      replay?.onQueued();
-    };
+    const onQueued = () => releasePendingEnqueue();
+    // A replay runs inside the run that holds its record.
+    if (replay) this.queue.reserveInline(requestId);
+    let reservation: TurnReservation | undefined;
     let stage: "persist" | "turn" = "persist";
     // The messages the request holds until its turn starts.
     const held: HeldChatMessage[] = replay
@@ -646,8 +609,7 @@ export class ChatTurns<
       // before its turn has a fiber leaves them on the record, and only
       // there, so the replay stores them once and nothing else can.
       if (admissions && !replay && request.admission) {
-        admissions.admit({
-          requestId,
+        const admission: ChatAdmissionInput = {
           messages: held,
           afterUserId: this.#latestUserId(),
           decision: {
@@ -656,7 +618,11 @@ export class ChatTurns<
             debounceUntilMs: decision.debounceUntilMs
           },
           payload: request.admission.payload
-        });
+        };
+        reservation = this.queue.reserve(requestId, { admission });
+        // Held at once: a request admitted next is after it.
+        admissions.hold(requestId, null, held);
+        admissions.hold(requestId, await reservation.accepted, held);
       }
       // Inside the try, so a failure here is reported and settled like any
       // other step's.
@@ -671,8 +637,6 @@ export class ChatTurns<
         return;
       }
       stage = "turn";
-      // Requests an earlier isolate left go first.
-      if (admissions && !replay) await admissions.beforeEnqueue();
       const outcome = await request.enqueue(
         async () => {
           const current = await this.awaitSubmitTurn(slot.decision, generation);
@@ -733,9 +697,9 @@ export class ChatTurns<
       await request.onError(error, stage);
     } finally {
       releasePendingEnqueue();
-      this.#decidedNotQueued.delete(slot);
-      if (!queued) replay?.onQueued();
-      if (admissions) admissions.end(requestId);
+      reservation?.release();
+      if (replay) this.queue.releaseInline(requestId);
+      this.admissions?.end(requestId);
       // Tabs drew its messages as queued. They are not coming.
       if (!joined && this.queue.generation === generation) {
         this.host.waitingChanged?.();
@@ -752,22 +716,114 @@ export class ChatTurns<
    * goes. Call it where the host's fiber is durably accepted.
    */
   turnAccepted(requestId: string): void {
-    this.admissions?.release(requestId);
+    this.admissions?.end(requestId);
   }
 
   /**
-   * Queue again, in order, the requests an earlier isolate accepted and
-   * never gave a turn with a fiber. Call it when the host starts and when a
-   * recovery settles: nothing happens while an interrupted turn still waits
-   * for recovery. See `admissions.ts`.
+   * Run the client request a record describes, inside the lane run that
+   * holds the record (its isolate died before the turn started). The host's
+   * chat-turn definition calls it.
+   */
+  async replayInRun(runId: string, record: ChatAdmissionRecord): Promise<void> {
+    const marks = this.#lane.tasks().peek(runId)?.metadata?.chat as
+      | { stopped?: unknown; cleared?: unknown }
+      | undefined;
+    // The requests an earlier isolate left keep their order under
+    // `latest`, `merge` and `debounce`: their decisions are restored
+    // together, in lane order, so a later one supersedes an earlier one.
+    for (const { requestId, decision } of this.admissions?.takeSeeded() ?? []) {
+      this.#restoredDecisions.set(requestId, this.submits.restore(decision));
+    }
+    // A clear discards a waiting request, messages and all.
+    if (marks?.cleared === true) return;
+    const stopped =
+      marks?.stopped === true ||
+      (this.admissions?.takeStop(record.requestId) ?? false);
+    const request = this.#replayRequest?.({ ...record, stopped });
+    if (!request) return;
+    this.admissions?.hold(record.requestId, runId, record.messages);
+    await this.#runClientRequest(request, {
+      record: { ...record, stopped }
+    });
+  }
+
+  /**
+   * Carry the admission records an earlier release left
+   * (`takeReleasedChatAdmissions`) onto this release's: a client request's
+   * becomes a run on the chat lane, in their order, which runs it again by
+   * itself; a continuation's becomes its record key.
+   */
+  async #carryReleasedAdmissions(
+    records: ReadonlyArray<ChatAdmissionRecord>
+  ): Promise<void> {
+    const admissions = this.admissions;
+    if (!admissions) return;
+    for (const record of records) {
+      const continuation = continuationRecord(record);
+      if (continuation) {
+        if (!record.stopped) {
+          await admissions.admitContinuation(
+            record.requestId,
+            continuation.targetMessageIds
+          );
+        }
+        continue;
+      }
+      const nonce = crypto.randomUUID();
+      const admission: ChatAdmissionInput = {
+        messages: record.messages,
+        afterUserId: record.afterUserId,
+        decision: record.decision,
+        payload: record.payload
+      };
+      const input: ChatTurnTaskInput = {
+        requestId: record.requestId,
+        continuation: false,
+        nonce,
+        lane: true,
+        admission
+      };
+      await this.#lane.tasks().run(this.#lane.definition, input, {
+        runId: `chat_${nonce}`,
+        retain: false,
+        metadata: {
+          requestId: record.requestId,
+          ...(record.stopped && { chat: { stopped: true } })
+        },
+        lane: CHAT_TURN_LANE
+      });
+    }
+  }
+
+  /**
+   * Schedule again the continuations an earlier isolate kept a record of.
+   * Call it when the host starts and when a recovery settles: nothing
+   * happens while an interrupted turn still waits for recovery. A client
+   * request's record is its lane run, which runs again by itself.
    */
   async resumeAdmissions(): Promise<void> {
     const admissions = this.admissions;
-    // Held awake only while there is something to replay: a start with no
-    // records arms and drops no keep-alive job. Async, so a store that
-    // throws rejects (the hosts log it) instead of failing their start.
-    if (!admissions?.hasOrphans()) return;
-    await this.host.keepAliveWhile(() => admissions.resume());
+    if (!admissions) return;
+    if (this.#released) {
+      const released = this.#released();
+      this.#released = null;
+      if (released.length > 0) await this.#carryReleasedAdmissions(released);
+    }
+    const kept = await admissions.continuations();
+    if (kept.length === 0) return;
+    // Scheduled again only once no interrupted turn waits for recovery: a
+    // later call (a recovery settling) asks again.
+    if (await this.#recoveryPending?.()) {
+      admissions.forgetRead(kept.map((c) => c.requestId));
+      return;
+    }
+    await this.host.keepAliveWhile(async () => {
+      for (const { requestId, targetMessageIds } of kept) {
+        await new Promise<void>((queued) =>
+          this.#resumeContinuation(requestId, targetMessageIds, queued)
+        );
+      }
+    });
   }
 
   /**
@@ -991,16 +1047,11 @@ export class ChatTurns<
   #admitContinuation(): void {
     const pending = this.continuation.pending;
     if (!this.admissions || !pending || pending.pastCoalesce) return;
-    this.admissions.admit({
-      requestId: pending.requestId,
-      messages: [],
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: {
-        trigger: CONTINUATION_TRIGGER,
-        targetMessageIds: [...pending.targetMessageIds]
-      }
-    });
+    void this.admissions
+      .admitContinuation(pending.requestId, [...pending.targetMessageIds])
+      .catch((error: unknown) =>
+        console.error("[chat] a continuation record was not kept:", error)
+      );
   }
 
   /**
@@ -1623,11 +1674,11 @@ export class ChatTurns<
     // A late tool result must not land on the reply of a cleared chat.
     this.liveReply = null;
     this.admissions?.clear();
-    this.#restoredDecisions.clear();
     this.queue.reset();
     this.#lastReply = null;
     this.aborts.destroyAll();
     this.submits.reset();
+    this.#restoredDecisions.clear();
     this.pendingInteraction = null;
     // New interactions must not serialize behind a stale, possibly hung,
     // apply from the turn being reset (#1649).

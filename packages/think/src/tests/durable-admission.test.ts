@@ -78,7 +78,14 @@ function record(ws: WebSocket): Array<Record<string, unknown>> {
   const frames: Array<Record<string, unknown>> = [];
   ws.addEventListener("message", (event: MessageEvent) => {
     try {
-      frames.push(JSON.parse(event.data as string));
+      const frame = JSON.parse(event.data as string);
+      frames.push(frame);
+      // A tab acks a resumed stream, as a client does.
+      if (frame.type === "cf_agent_stream_resuming") {
+        ws.send(
+          JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+        );
+      }
     } catch {
       // not JSON
     }

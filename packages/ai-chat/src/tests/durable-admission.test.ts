@@ -49,10 +49,23 @@ function sendChatRequest(
 }
 
 /** Every frame a socket receives, from now on. */
+/** Record what a tab is sent; it acks a resumed stream, as a client does. */
 function record(ws: WebSocket): unknown[] {
   const frames: unknown[] = [];
   ws.addEventListener("message", (event: MessageEvent) => {
-    frames.push(JSON.parse(event.data as string));
+    const frame = JSON.parse(event.data as string) as {
+      type?: unknown;
+      id?: unknown;
+    };
+    frames.push(frame);
+    if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: frame.id
+        })
+      );
+    }
   });
   return frames;
 }

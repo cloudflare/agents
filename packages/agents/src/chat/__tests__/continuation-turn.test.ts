@@ -7,9 +7,8 @@ import {
   afterEach,
   onTestFinished
 } from "vitest";
-import { memoryLane } from "./memory-lane";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { createChatAdmissionStore } from "../admissions";
+import { memoryLane, memoryStorage } from "./memory-lane";
+import { CHAT_CONTINUATION_KEY_PREFIX } from "../admissions";
 import { AutoContinuationController } from "../auto-continuation-controller";
 import {
   ChatTurns,
@@ -337,25 +336,23 @@ describe("the continuation turn", () => {
   });
 
   it("keeps a continuation's record until its turn or its drop, deferred follow-ups included", async () => {
-    const db = new DatabaseSync(":memory:");
-    const store = createChatAdmissionStore(() => ({
-      exec: (query: string, ...bindings: unknown[]) => {
-        const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-        return { toArray: () => rows as Record<string, unknown>[] };
-      }
-    }));
+    const kept = memoryStorage();
     turns = new ChatTurns<TestConnection>(host, {
       defaultDebounceMs: 750,
       lane: memoryLane(),
       admissions: {
-        store,
+        storage: kept.storage,
         recoveryPending: async () => false,
-        recoveryOwns: async () => false,
+        released: () => [],
         replayRequest: () => null
       }
     });
     host.turns = turns;
-    const records = () => store.list().map((r) => r.requestId);
+    // A continuation's record is its key; the delete settles after a tick.
+    const records = () =>
+      [...kept.keys.keys()].map((key) =>
+        key.slice(CHAT_CONTINUATION_KEY_PREFIX.length)
+      );
 
     // The answer's continuation is kept until it runs; the conversation moved
     // on before it did, so it ends without a turn and its record goes.
@@ -388,16 +385,11 @@ describe("the continuation turn", () => {
   });
 
   it("holds a restored continuation's replay until its turn is on the queue", async () => {
-    const db = new DatabaseSync(":memory:");
+    const kept = memoryStorage();
     const admissions = () => ({
-      store: createChatAdmissionStore(() => ({
-        exec: (query: string, ...bindings: unknown[]) => {
-          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-          return { toArray: () => rows as Record<string, unknown>[] };
-        }
-      })),
+      storage: kept.storage,
       recoveryPending: async () => false,
-      recoveryOwns: async () => false,
+      released: () => [],
       replayRequest: () => null
     });
     turns = new ChatTurns<TestConnection>(host, {
