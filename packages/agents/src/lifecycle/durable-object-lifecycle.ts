@@ -21,6 +21,7 @@ import {
 import {
   bindLifecycleCapability,
   capabilityInstallOrder,
+  checkDerivedName,
   instanceSuffix,
   lifecycleCapabilityId,
   LifecycleCapability,
@@ -570,6 +571,11 @@ export class Lifecycle<
       capability instanceof LifecycleCapability
         ? capabilityInstallOrder(capability)
         : [capability];
+    // The capability given here was not reached through a composer; what
+    // it composes was.
+    if (capability instanceof LifecycleCapability) {
+      checkDerivedName(capability, false);
+    }
     for (const each of order) {
       this.#useOne(each as DurableObjectCapability<Props>);
     }

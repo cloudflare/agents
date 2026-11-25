@@ -131,8 +131,12 @@ const installedServices = new WeakMap<object, LifecycleServices>();
 /** A name an app gives an instance: `[a-z][a-z0-9-]{0,31}`. */
 const INSTANCE_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 
-/** Names a composer derived ({@link LifecycleCapability.composedName}). */
-const composedNames = new Set<string>();
+/**
+ * The shape of a name a composer derives ({@link LifecycleCapability.composedName}):
+ * `@` and the composer's id. Only a composer may give it: see
+ * {@link checkDerivedName}.
+ */
+const DERIVED_NAME = /^@[a-z][a-z0-9-]*(?:\/@?[a-z][a-z0-9-]*)*$/;
 
 /** The capabilities each capability composes, in the order it composed them. */
 const composedBy = new WeakMap<LifecycleCapability, LifecycleCapability[]>();
@@ -177,7 +181,7 @@ export abstract class LifecycleCapability<Props extends object = object> {
     if (
       instanceName !== undefined &&
       !INSTANCE_NAME.test(instanceName) &&
-      !composedNames.has(instanceName)
+      !DERIVED_NAME.test(instanceName)
     ) {
       throw new Error(
         `${JSON.stringify(instanceName)} is not a valid instance name: use ` +
@@ -196,9 +200,7 @@ export abstract class LifecycleCapability<Props extends object = object> {
    * from this instance's id, so it can never equal a name an app chose.
    */
   protected get composedName(): string {
-    const name = `@${this.capabilityId}`;
-    composedNames.add(name);
-    return name;
+    return `@${this.capabilityId}`;
   }
 
   /**
@@ -206,6 +208,12 @@ export abstract class LifecycleCapability<Props extends object = object> {
    * installs it (and what it composes) before this one. Returns it.
    */
   protected compose<T extends LifecycleCapability>(capability: T): T {
+    const name = capability.instanceName;
+    if (name?.startsWith("@") && name !== this.composedName) {
+      throw new Error(
+        `${JSON.stringify(name)} is not this composer's name to give: use composedName`
+      );
+    }
     const list = composedBy.get(this) ?? [];
     list.push(capability);
     composedBy.set(this, list);
@@ -297,6 +305,23 @@ export function instanceSuffix(instanceName: string): string {
       char === "@" ? "_a" : char === "/" ? "_s" : "_h"
     );
   return `__c_${escaped}`;
+}
+
+/**
+ * @internal Throw for a derived (`@`) name on a capability no composer
+ * gave it to: an app's own instance must have a plain name, or it could
+ * take the rows of a composer's instance.
+ */
+export function checkDerivedName(
+  capability: LifecycleCapability,
+  composed: boolean
+): void {
+  const name = capability.instanceName;
+  if (name?.startsWith("@") && !composed) {
+    throw new Error(
+      `${JSON.stringify(name)} is not a valid instance name: names starting with "@" are given by a composer. Use a lowercase letter, then up to 31 lowercase letters, digits or hyphens.`
+    );
+  }
 }
 
 /**

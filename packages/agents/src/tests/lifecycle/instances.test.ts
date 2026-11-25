@@ -188,10 +188,23 @@ describe("capability instances", () => {
 
   it("rejects a name that is not a plain lowercase name", () => {
     expect(() => new Notes("Audit")).toThrow(/not a valid instance name/);
-    expect(() => new Notes("@desk")).toThrow(/not a valid instance name/);
     expect(() => new Notes("a".repeat(33))).toThrow(
       /not a valid instance name/
     );
+  });
+
+  it("refuses a derived @ name an app gives its own instance", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      // Even the very name a composer derives: only the composer may give it.
+      const desk = new Desk();
+      const { lifecycle } = install(desk);
+      expect(() =>
+        lifecycle.use(new NoteTaker(desk.taker.instanceName))
+      ).toThrow(/names starting with "@" are given by a composer/);
+      expect(() => lifecycle.use(new Notes("@desk"))).toThrow(
+        /not a valid instance name/
+      );
+    });
   });
 
   it("installs what a capability composes first, named after its composer, two levels deep", async () => {
