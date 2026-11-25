@@ -2,7 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitUntilHandled } from "./test-utils";
 import { getAgentByName } from "agents";
 
 /**
@@ -135,7 +135,7 @@ describe("Regenerate message (reconcile stale rows)", () => {
       })
     );
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_CHAT_MESSAGES, 1);
 
     // All 3 messages should be preserved — CF_AGENT_CHAT_MESSAGES does not reconcile
     const persisted = await fetchPersistedMessages(room);

@@ -1,7 +1,12 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { MessageType, type OutgoingMessage } from "../types";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import {
+  connectChatWS,
+  isUseChatResponseMessage,
+  socketBarrier,
+  waitUntilHandled
+} from "./test-utils";
 import { getAgentByName } from "agents";
 
 function isStreamResumingMessage(
@@ -444,9 +449,15 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitUntilHandled(
+        agentStub,
+        MessageType.CF_AGENT_STREAM_RESUME_ACK,
+        1
+      );
 
       // Should NOT receive chunks (only state/mcp messages)
+      // Every frame the ACK could have caused is in by the barrier's reply.
+      await socketBarrier(ws2, messages2);
       const chunkMsgs = messages2.filter(isUseChatResponseMessage);
       expect(chunkMsgs.length).toBe(0);
 

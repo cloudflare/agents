@@ -121,6 +121,35 @@ function messageReceivedAtForTest(
   return messageReceivedAt.get(agent)?.[id] ?? null;
 }
 
+type ContinuationStateForTest = {
+  hasPending: boolean;
+  hasDeferred: boolean;
+  activeRequestId: string | null;
+  activeConnectionId: string | null;
+};
+
+/** What `agent`'s auto-continuation holds: armed, deferred, running. */
+function continuationStateForTest(
+  agent: AIChatAgent
+): ContinuationStateForTest {
+  const continuation = (
+    agent as unknown as {
+      _continuation: {
+        pending: unknown;
+        deferred: unknown;
+        activeRequestId: string | null;
+        activeConnectionId: string | null;
+      };
+    }
+  )._continuation;
+  return {
+    hasPending: continuation.pending !== null,
+    hasDeferred: continuation.deferred !== null,
+    activeRequestId: continuation.activeRequestId,
+    activeConnectionId: continuation.activeConnectionId
+  };
+}
+
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
   return sql
     .exec<{ run_id: string }>(
@@ -1407,29 +1436,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this.hasPendingInteraction();
   }
 
-  getContinuationStateForTest(): {
-    hasPending: boolean;
-    hasDeferred: boolean;
-    activeRequestId: string | null;
-    activeConnectionId: string | null;
-  } {
-    const continuation = (
-      this as unknown as {
-        _continuation: {
-          pending: unknown;
-          deferred: unknown;
-          activeRequestId: string | null;
-          activeConnectionId: string | null;
-        };
-      }
-    )._continuation;
-
-    return {
-      hasPending: continuation.pending !== null,
-      hasDeferred: continuation.deferred !== null,
-      activeRequestId: continuation.activeRequestId,
-      activeConnectionId: continuation.activeConnectionId
-    };
+  getContinuationStateForTest(): ContinuationStateForTest {
+    return continuationStateForTest(this);
   }
 
   getLatestStreamStatusForTest(): string | null {
@@ -2318,6 +2326,10 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     // Keep it under the request's id too, for release and checks by id.
     if (requestId) this._streamGates.set(requestId, next);
     return next;
+  }
+
+  getContinuationStateForTest(): ContinuationStateForTest {
+    return continuationStateForTest(this);
   }
 
   holdStreamForTest(requestId = "next"): void {

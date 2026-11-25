@@ -1,4 +1,5 @@
 import { env, exports } from "cloudflare:workers";
+import { waitUntilHandled } from "./test-utils";
 import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
@@ -8,24 +9,6 @@ import {
   type MessageParts,
   type StreamChunkData
 } from "agents/chat";
-
-/**
- * Wait until the agent has handled `count` socket messages of `type`: the
- * socket and the RPCs that follow are separate channels.
- */
-async function waitUntilHandled(
-  agent: { handledMessageCountForTest(type: string): Promise<number> },
-  type: string,
-  count: number
-) {
-  const deadline = Date.now() + 3000;
-  while ((await agent.handledMessageCountForTest(type)) < count) {
-    if (Date.now() > deadline) {
-      throw new Error(`${type} was not handled ${count} time(s)`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
 
 describe("Client-side tool duplicate message prevention", () => {
   it("merges tool output into existing message by toolCallId", async () => {

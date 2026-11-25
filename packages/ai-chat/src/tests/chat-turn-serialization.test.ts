@@ -1,12 +1,13 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
 import {
   connectChatWS,
   isUseChatResponseMessage,
-  waitForChatClearBroadcast
+  waitForChatClearBroadcast,
+  waitUntilHandled
 } from "./test-utils";
 
 function connectSlowStream(room: string) {
@@ -226,7 +227,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(20);
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
 
     const idlePromise = agentStub.waitForIdleForTest();
 
@@ -295,7 +296,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(20);
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 2);
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getStartedRequestIds()).toEqual([
@@ -445,6 +446,10 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn stays active until the test releases its stream.
+    await agentStub.holdStreamForTest("req-pre-clear");
+    // Released however the test ends.
+    onTestFinished(() => agentStub.releaseStreamForTest("req-pre-clear"));
     sendChatRequest(ws, "req-pre-clear", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
@@ -472,11 +477,17 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(50);
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    // The continuation is queued behind the active turn.
+    await waitUntil(async () => {
+      const state = await agentStub.getContinuationStateForTest();
+      return state.hasPending || state.hasDeferred;
+    });
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
     await clearBroadcast;
+    await agentStub.releaseStreamForTest("req-pre-clear");
 
     await agentStub.waitForIdleForTest();
 
