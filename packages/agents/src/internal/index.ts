@@ -76,7 +76,9 @@ export {
   type EventLogSubscription
 } from "../event-log-client";
 export {
+  deliveryDefinition,
   registerDeliverySink,
+  releaseDelivery,
   sendDelivery,
   type DeliverySink
 } from "./delivery";

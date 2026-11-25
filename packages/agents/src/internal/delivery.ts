@@ -13,16 +13,36 @@ import {
 } from "../retries";
 import { TaskSettlement } from "../tasks/settlement";
 import type { Tasks } from "../tasks/tasks";
-import type { TaskJson, TaskStep } from "../tasks/types";
+import type { TaskCheckpoint, TaskJson, TaskStep } from "../tasks/types";
+
+/**
+ * One attempt of a delivery, as its sink sees it.
+ *
+ * @internal
+ */
+export interface DeliveryAttempt {
+  /**
+   * Progress inside one delivery (a reply posted in parts), read by the next
+   * attempt. A write after the attempt timed out throws.
+   */
+  readonly checkpoint: TaskCheckpoint;
+}
 
 /**
  * Where deliveries of one kind go. Returning acknowledges the delivery;
  * throwing fails this attempt, and it is tried again with backoff.
+ * Returning `"hold"` keeps the delivery, with no deadline, until
+ * {@link releaseDelivery} gives it what it waits for.
  *
  * @internal
  */
 export interface DeliverySink<Payload> {
-  deliver(payload: Payload): void | Promise<void>;
+  deliver(
+    payload: Payload,
+    attempt: DeliveryAttempt
+  ): void | "hold" | Promise<void | "hold">;
+  /** How long one attempt may run before it fails. Default 60 s. */
+  attemptTimeoutMs?: number;
   /**
    * The error a delivery gives up with; `cause` is the last failure. The
    * run ends `error` with it. Default: "Delivery <id> gave up after <n>
@@ -104,8 +124,8 @@ export function registerDeliverySink<Payload>(
  * nothing is kept once the delivery is acknowledged.
  *
  * `resume` carries a delivery an earlier version already tried: its give-up
- * window counts from `sentAt`, its backoff from `attempts`, and it waits
- * for the alarm.
+ * window counts from `sentAt`, its backoff from `attempts`, its checkpoint
+ * starts as `progress`, and it waits for the alarm.
  *
  * @internal
  */
@@ -114,7 +134,11 @@ export async function sendDelivery<Payload>(
   sink: string,
   id: string,
   payload: Payload,
-  resume?: { sentAt: number; attempts: number }
+  resume?: {
+    sentAt: number;
+    attempts: number;
+    progress?: Record<string, TaskJson>;
+  }
 ): Promise<void> {
   if (!resume) {
     // The first attempt runs here and now: its claim arms the run's only
@@ -136,7 +160,27 @@ export async function sendDelivery<Payload>(
     createdAt: resume.sentAt,
     // Its earlier attempts ended (they were the released version's), so
     // none of them counts as lost.
-    checkpoint: { [ENDED]: resume.attempts }
+    checkpoint: { ...resume.progress, [ENDED]: resume.attempts }
+  });
+}
+
+/**
+ * Run a held delivery now, with `progress` written to its checkpoint first.
+ * Two releases that race run it once.
+ *
+ * @returns False unless the delivery was held.
+ * @internal
+ */
+export async function releaseDelivery(
+  tasks: Tasks,
+  id: string,
+  progress: Record<string, TaskJson>
+): Promise<boolean> {
+  // `settle` also takes a run a reset left running; a release must not
+  // rewrite the progress of one that is no longer held.
+  if (tasks.peek(id)?.waitReason !== "park") return false;
+  return tasks.settle(id, TaskSettlement.retry(Date.now()), {
+    checkpoint: progress
   });
 }
 
@@ -205,19 +249,39 @@ async function attemptDelivery<Payload>(
     return retryLater(now);
   }
 
+  const timeoutMs = sink.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       reject(
         new Error(
-          `Delivery ${step.id} attempt ${step.attempt} timed out after ${ATTEMPT_TIMEOUT_MS}ms`
+          `Delivery ${step.id} attempt ${step.attempt} timed out after ${timeoutMs}ms`
         )
       );
-    }, ATTEMPT_TIMEOUT_MS);
+    }, timeoutMs);
   });
+  // A sink that times out keeps running; its later writes throw.
+  let live = true;
+  const checkpoint: TaskCheckpoint = {
+    get: (key) => step.checkpoint.get(key),
+    set: (key, value) => {
+      if (!live) throw new Error(`Delivery ${step.id}: attempt timed out`);
+      if (key.startsWith("__delivery:")) {
+        throw new Error(`Delivery checkpoint key "${key}" is reserved`);
+      }
+      step.checkpoint.set(key, value);
+    }
+  };
   try {
-    // A sink that times out keeps running; its late result is not read.
-    await Promise.race([sink.deliver(payload), timedOut]);
+    const outcome = await Promise.race([
+      sink.deliver(payload, { checkpoint }),
+      timedOut
+    ]);
+    if (outcome === "hold") {
+      // Ended, so the release's attempt does not count it as lost.
+      step.checkpoint.set(ENDED, step.attempt);
+      return TaskSettlement.park("hold");
+    }
     return;
   } catch (error) {
     // The isolate is going away: leave the run to the next one.
@@ -239,6 +303,7 @@ async function attemptDelivery<Payload>(
     );
     return retry;
   } finally {
+    live = false;
     clearTimeout(timer);
   }
 }

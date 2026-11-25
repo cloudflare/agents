@@ -79,8 +79,13 @@ import type { Schedule } from "agents";
 import {
   declareSchedules,
   listDeclaredSchedules,
+  sendDelivery,
   type DeclaredScheduleInfo
 } from "agents/internal";
+import {
+  RECOVERED_REPLY_SINK,
+  recoveredReplyId
+} from "../../messengers/recovered-reply";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
 import {
@@ -12497,9 +12502,9 @@ export class ThinkRecoveryTestAgent extends Think {
       });
     }
 
-    const messengerKey = `cf_think_messenger_recovery:${begun.incidentId}`;
+    const messengerReply = recoveredReplyId(begun.incidentId);
     if (input.seedMessengerDelivery) {
-      await this.ctx.storage.put(messengerKey, {
+      await sendDelivery(this.tasks, RECOVERED_REPLY_SINK, messengerReply, {
         messengerId: "fake",
         threadId: "fake:thread",
         partialText: ""
@@ -12573,8 +12578,7 @@ export class ThinkRecoveryTestAgent extends Think {
           setTimeout(resolve, 50)
         ).then(
           async () =>
-            (await this.ctx.storage.get<{ outcome?: string }>(messengerKey))
-              ?.outcome ?? null
+            this.tasks.checkpointOf<string>(messengerReply, "outcome") ?? null
         )
       })
     };

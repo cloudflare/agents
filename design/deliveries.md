@@ -23,7 +23,7 @@ await sendDelivery(tasks, "think-workflow-notification", id, payload);
 
 - A sink is a framework definition `__cf_delivery:<name>`, registered from the host's constructor like any other, so a delivery sent before a reset finds it again.
 - `sendDelivery` is `tasks.run(definition, payload, { runId: id, retain: false, start: "now" })`. The first attempt runs at once, so its claim arms the run's only wake job. The id is the key: a second send under an id that is still open joins it (one delivery per key). Acknowledged, the run is deleted in one write.
-- The sink sees only its payload. What a later sink needs (an attempt's idempotency key, a checkpoint for progress inside one delivery, its own retry policy) comes with the call site that uses it.
+- The sink sees its payload and the run's `checkpoint`, for progress inside one delivery (a reply posted in parts); a write after the attempt timed out throws. A sink may set its own `attemptTimeoutMs`. What a later sink needs (an attempt's idempotency key, its own backoff) comes with the call site that uses it.
 
 ## Retry and give-up
 
@@ -36,9 +36,10 @@ A code-update or memory-limit reset thrown by the sink is rethrown, so the run s
 ## Guarantees
 
 - **At least once.** An attempt that failed may still have arrived; the receiver must tolerate a repeat (a workflow event for a step that already resumed is ignored).
-- **The attempt is durable before the sink runs, and a lost one backs off.** Sinks are registered with `maxAttempts` (200), so Tasks commits each attempt with `storage.sync()` before the handler. An attempt that ends (the sink threw or timed out) records its number in the checkpoint (`__delivery:ended`, with `__delivery:lost` for losses in a row). An attempt that starts and finds an earlier counted attempt that never ended (the object reset while the sink ran) does not run the sink: it backs off like a failure, and after three such attempts in a row the delivery gives up. Without this, a sink that resets its object before its first I/O would run again on every start, about every 5 s (measured on a deployment). The handler also gives up three attempts before the cap, so Tasks never ends a delivery without its `onGiveUp`.
+- **The attempt is durable before the sink runs, and a lost one backs off.** Sinks are registered with `maxAttempts` (200), so Tasks commits each attempt with `storage.sync()` before the handler. An attempt that ends (the sink threw, timed out, or held the delivery) records its number in the checkpoint (`__delivery:ended`, with `__delivery:lost` for losses in a row). An attempt that starts and finds an earlier counted attempt that never ended (the object reset while the sink ran) does not run the sink: it backs off like a failure, and after three such attempts in a row the delivery gives up. Without this, a sink that resets its object before its first I/O would run again on every start, about every 5 s (measured on a deployment). The handler also gives up three attempts before the cap, so Tasks never ends a delivery without its `onGiveUp`.
 - **The alarm is not held.** Tasks' dispatch budget hands a long attempt to `trackAlarmWork`; a waiting retry holds only its wake job.
 - **Facets.** A delivery in a facet is woken through its root by the one facet wake, like any Tasks run.
+- **Held deliveries.** A sink may return `"hold"`: the run parks (`pending`, wait reason `park`, no deadline) until `releaseDelivery(tasks, id, progress)` writes `progress` to its checkpoint and makes it due now (Tasks `settle` with `TaskSettlement.retry(now)`). Two releases that race run it once; a release of a delivery that is not held does nothing, so it cannot rewrite the progress of one already under way. A recovered messenger reply is held from the interruption until recovery knows what to post.
 - **Memory.** Nothing beyond Tasks' own state for a live attempt (one timer per running attempt).
 
 ## Carrying a delivery from an earlier version
@@ -47,9 +48,10 @@ A code-update or memory-limit reset thrown by the sink is rethrown, so the run s
 
 ## Call sites
 
-| Sink                          | Key                                                | Replaces                                                                                                                   |
-| ----------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `think-workflow-notification` | `workflow-notification:<submissionId>:<eventType>` | Think's queue push with in-process retry off, the scheduled-retry backoff, the `attempts` / `firstFailedAt` payload fields |
+| Sink                          | Key                                                | Replaces                                                                                                                                                                                                                                                                                    |
+| ----------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `think-workflow-notification` | `workflow-notification:<submissionId>:<eventType>` | Think's queue push with in-process retry off, the scheduled-retry backoff, the `attempts` / `firstFailedAt` payload fields                                                                                                                                                                  |
+| `think-messenger-recovery`    | `messenger-recovery:<incidentId>`                  | Think's `cf_think_messenger_recovery:*` KV records, the per-key promise chain, the eight scheduled retries. Held from the interruption; released with `{ outcome, text }` when recovery settles; `posted` in the checkpoint is the cursor over the reply's posts (5-minute attempt timeout) |
 
 ## For Channels
 
@@ -58,5 +60,4 @@ A Channel's `deliver()` returns `delivered`, `failed` (retryable or not) or `unc
 ## What was not built
 
 - Replacing a delivery's value while it is open (latest value per key): no call site replaces; each key is sent once.
-- A held delivery released later: comes with its call site (recovered messenger replies).
 - Keeping failed deliveries for inspection: the released code kept none.
