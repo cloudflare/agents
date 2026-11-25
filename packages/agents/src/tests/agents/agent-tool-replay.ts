@@ -515,6 +515,120 @@ export class TestAgentToolReplayAgent extends Agent {
     };
   }
 
+  /** A detached run past its budget whose stub child is still running. */
+  private async seedRunningRunPastBudget(
+    runId: string,
+    onFinish: string
+  ): Promise<void> {
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    await child.startAgentToolRun(
+      { chunkBodies: [], pendingChunkBodies: [], summary: "never reached" },
+      { runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish, detached_max_budget_at
+      ) VALUES (
+        ${runId}, ${null}, 'TestAgentToolStubChild', 'running', 0,
+        ${Date.now()}, 1, ${onFinish}, ${Date.now() - 1000}
+      )
+    `;
+  }
+
+  /**
+   * A budget give-up whose callback fails once, on a cold parent: the next
+   * tick, once the give-up claim's lease has expired, finds the child
+   * `aborted` by that give-up's cancel. Returns the per-run callback statuses.
+   */
+  async giveUpCallbackFailsOnceForTest(
+    runId: string
+  ): Promise<{ statuses: string[]; outstanding: boolean }> {
+    await this.seedRunningRunPastBudget(runId, "onDetachedFailsOnce");
+    await this._cfDetachedReconcileTick().catch(() => {});
+    this.sql`
+      UPDATE cf_agent_tool_runs SET give_up_claimed_at = 0
+      WHERE run_id = ${runId}
+    `;
+    await this._cfDetachedReconcileTick();
+    return {
+      statuses: this.detachedDeliveryLog
+        .filter(
+          (entry) => entry.runId === runId && entry.hook === "onDetachedDone"
+        )
+        .map((entry) => entry.status),
+      outstanding: this._agentTool._hasOutstandingDetachedRuns()
+    };
+  }
+
+  /**
+   * A detached run past its budget whose child is still running, with the warm
+   * fast path tailing it. The backbone tick cancels the child for the give-up,
+   * which ends the warm tail on the child's `aborted`. `tail` picks when the
+   * fast path inspects the child: between the tick's cancel and its give-up
+   * delivery, or after the tick. Returns the per-run callback statuses.
+   */
+  async giveUpWithWarmTailForTest(
+    runId: string,
+    tail: "during-give-up" | "after-give-up"
+  ): Promise<{ statuses: string[]; outstanding: boolean; schedules: number }> {
+    await this.seedRunningRunPastBudget(runId, "onDetachedDone");
+    const runFastPath = () =>
+      this._agentTool._detachedFastPath(
+        {
+          runId,
+          agentType: "TestAgentToolStubChild",
+          parentToolCallId: undefined
+        } as unknown as AgentToolRunInfo,
+        TestAgentToolStubChild,
+        runId
+      );
+    const self = this as unknown as {
+      _asAgentToolChildAdapter(child: unknown): {
+        inspectAgentToolRun(runId: string): Promise<unknown>;
+      };
+    };
+    const original = self._asAgentToolChildAdapter.bind(this);
+    let tickInspections = 0;
+    let fastPathRan = false;
+    if (tail === "during-give-up") {
+      self._asAgentToolChildAdapter = (resolved) => {
+        const adapter = original(resolved);
+        return new Proxy(adapter, {
+          get(target, key, receiver) {
+            if (key !== "inspectAgentToolRun" || fastPathRan) {
+              return Reflect.get(target, key, receiver);
+            }
+            // The tick's second inspection follows its cancel: run the warm
+            // fast path to the end first, as the closed tail would.
+            return async (id: string) => {
+              if (++tickInspections === 2) {
+                fastPathRan = true;
+                await runFastPath();
+              }
+              return target.inspectAgentToolRun(id);
+            };
+          }
+        });
+      };
+    }
+    try {
+      await this._cfDetachedReconcileTick();
+    } finally {
+      self._asAgentToolChildAdapter = original;
+    }
+    if (tail === "after-give-up") await runFastPath();
+    return {
+      statuses: this.detachedDeliveryLog
+        .filter(
+          (entry) => entry.runId === runId && entry.hook === "onDetachedDone"
+        )
+        .map((entry) => entry.status),
+      outstanding: this._agentTool._hasOutstandingDetachedRuns(),
+      schedules: (await this.detachedBackboneSchedulesForTest()).length
+    };
+  }
+
   /**
    * A detached run already given up with its child torn down (so polling has
    * stopped), whose warm fast path then claims the child's terminal and its
@@ -884,7 +998,7 @@ export class TestAgentToolStubChild extends Agent {
     // Like Think / AIChat, cancelling an already-finished run is a no-op.
     this.sql`
       UPDATE cf_test_stub_runs
-      SET status = 'aborted', completed_at = ${Date.now()}
+      SET status = 'aborted', completed_at = ${Date.now()}, pending_json = NULL
       WHERE run_id = ${runId} AND completed_at IS NULL
     `;
   }

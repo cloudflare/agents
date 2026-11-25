@@ -193,6 +193,39 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(result.outstanding).toBe(false);
   });
 
+  it.each(["during-give-up", "after-give-up"] as const)(
+    "delivers a budget give-up once when the warm tail sees the child's aborted %s (#2768)",
+    async (tail) => {
+      const agent = await getAgentByName(
+        env.TestAgentToolReplayAgent,
+        `detached-giveup-warm-${tail}-${crypto.randomUUID()}`
+      );
+
+      const result = await agent.giveUpWithWarmTailForTest(
+        `run-warm-${tail}`,
+        tail
+      );
+      // The same callbacks as a cold parent: the give-up, and no `aborted`
+      // finish for the cancel the give-up itself made.
+      expect(result.statuses).toEqual(["interrupted"]);
+      expect(result.outstanding).toBe(false);
+      expect(result.schedules).toBe(0);
+    }
+  );
+
+  it("retries a failed give-up callback instead of delivering the aborted it caused (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-retry-cold-${crypto.randomUUID()}`
+    );
+
+    const result = await agent.giveUpCallbackFailsOnceForTest(
+      "run-giveup-retry-cold"
+    );
+    expect(result.statuses).toEqual(["interrupted"]);
+    expect(result.outstanding).toBe(false);
+  });
+
   it("arms the backbone when a fast-path finish fails after polling stopped (#2768)", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,
