@@ -70,8 +70,6 @@ const CHUNK_BATCH = { maxChunks: 10, maxBytes: 512_000, fillBlocks: true };
  * the next {@link ResumableStream.start}.
  */
 const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
-/** Deleted streams whose terminal details a late resume ACK can still read. */
-const MAX_REMEMBERED_DELETED_TERMINALS = 32;
 
 /**
  * Construct the Streams capability instance a chat host must install to back
@@ -247,7 +245,6 @@ export class ResumableStream {
         const chat = parseChatMetadata(row);
         if (!chat) return;
         this._retire(workUnits(chat, cursor));
-        this._rememberDeleted(row, chat);
       })
     );
     importLegacyChatStreams(sql, this.ops, isFacet);
@@ -499,49 +496,24 @@ export class ResumableStream {
 
   /**
    * The user message ids the request's latest chat stream was started for
-   * (#2280), or undefined when no stream recorded them.
+   * (#2280), or undefined when no stream recorded them. Once the stream's
+   * rows are deleted, the request's recorded terminal frame carries them
+   * (`recent-terminals.ts`).
    */
   getOriginMessageIds(requestId: string): string[] | undefined {
     const row = latestChatRowByTag(this.ops, requestId);
-    return (
-      (row ? parseChatMetadata(row)?.originMessageIds : undefined) ??
-      this._deletedTerminals.get(requestId)?.messageIds
-    );
+    return row ? parseChatMetadata(row)?.originMessageIds : undefined;
   }
 
   /**
    * How the request's latest chat stream ended (recorded by {@link complete}
-   * or {@link finish}), or undefined for a normal completion.
+   * or {@link finish}), or undefined for a normal completion. Once the
+   * stream's rows are deleted, the request's recorded terminal frame carries
+   * it.
    */
   getOutcome(requestId: string): ChatTurnOutcome | undefined {
     const row = latestChatRowByTag(this.ops, requestId);
-    return (
-      (row ? parseChatMetadata(row)?.outcome : undefined) ??
-      this._deletedTerminals.get(requestId)?.outcome
-    );
-  }
-
-  /**
-   * Origin ids and outcome of recently deleted streams (cutover, reclaim),
-   * so a resume ACK that arrives after the rows are gone still gets them on
-   * its replay terminal.
-   */
-  private readonly _deletedTerminals = new Map<
-    string,
-    { messageIds?: string[]; outcome?: ChatTurnOutcome }
-  >();
-
-  private _rememberDeleted(row: StreamRow, chat: ChatStreamMetadata): void {
-    if (!row.tag || (!chat.originMessageIds && !chat.outcome)) return;
-    this._deletedTerminals.delete(row.tag);
-    this._deletedTerminals.set(row.tag, {
-      messageIds: chat.originMessageIds,
-      outcome: chat.outcome
-    });
-    if (this._deletedTerminals.size > MAX_REMEMBERED_DELETED_TERMINALS) {
-      const oldest = this._deletedTerminals.keys().next().value;
-      if (oldest !== undefined) this._deletedTerminals.delete(oldest);
-    }
+    return row ? parseChatMetadata(row)?.outcome : undefined;
   }
 
   private _recordOutcome(
@@ -907,7 +879,6 @@ export class ResumableStream {
   clearAll() {
     this._bufferedStreamId = null;
     this._deleteRetiring(this._chatRows());
-    this._deletedTerminals.clear();
     this._lastClosedStreamId = null;
     this._activeStreamId = null;
     this._activeRequestId = null;

@@ -150,27 +150,6 @@ describe("ResumableStream originating message ids (#2280)", () => {
     });
   });
 
-  it("keeps them after a cutover deletes the stream", async () => {
-    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
-      const stream = createAdapter(instance, ctx.storage.sql);
-      const id = stream.start("req-cut", { originMessageIds: ["m4"] });
-      stream.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "y" }));
-      stream.finish(id);
-      stream.cutover(id, () => {});
-
-      expect(
-        replayCompletedChunks(
-          instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
-          collectingConnection([]),
-          "req-cut"
-        )
-      ).toBe(false);
-      expect(stream.getOriginMessageIds("req-cut")).toEqual(["m4"]);
-      expect(stream.getOriginMessageIds("req-other")).toBeUndefined();
-    });
-  });
-
   it("replays the outcome a stream was closed with", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
@@ -194,12 +173,6 @@ describe("ResumableStream originating message ids (#2280)", () => {
 
       stream.complete(stream.start("req-completed"));
       expect(outcomeOf("req-completed")).toBeUndefined();
-
-      // The next start reclaims the settled rows; the outcome outlives them.
-      stream.start("req-successor");
-      expect(stream.getOutcome("req-recovering")).toBe("recovering");
-      expect(stream.getOutcome("req-aborted")).toBe("aborted");
-      expect(stream.getOutcome("req-completed")).toBeUndefined();
     });
   });
 
@@ -223,18 +196,6 @@ describe("ResumableStream originating message ids (#2280)", () => {
         "req-orphan-outcome"
       );
       expect(later.at(-1)).toMatchObject({ done: true, outcome: "aborted" });
-    });
-  });
-
-  it("keeps the outcome after a cutover deletes the stream", async () => {
-    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
-      const stream = createAdapter(instance, ctx.storage.sql);
-      const id = stream.start("req-cut-aborted");
-      stream.finish(id, "aborted");
-      stream.cutover(id, () => {});
-      expect(stream.getOutcome("req-cut-aborted")).toBe("aborted");
-      expect(stream.getOutcome("req-other")).toBeUndefined();
     });
   });
 
