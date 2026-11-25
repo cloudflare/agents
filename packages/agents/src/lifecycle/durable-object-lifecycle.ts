@@ -10,6 +10,7 @@ import {
 } from "./capability-runner";
 import { backoffDelay } from "../retries";
 import { abortWithoutAlarmRetry } from "./abort";
+import { SchemaVersions } from "./schema";
 import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
@@ -457,6 +458,7 @@ export class Lifecycle<
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
     this.#jobQueue = new JobQueue(this.#ctx.storage);
+    this.#schemaVersions = new SchemaVersions(this.#ctx.storage);
     facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
     instanceListers.set(this, (stored) => this.#instances(stored));
     facetWakeArmers.set(this, (address, time) =>
@@ -728,6 +730,10 @@ export class Lifecycle<
             type,
             payload: named ? withInstance(payload, instanceName) : payload
           })
+      }),
+      // Written once at the end of startup; at once after a later migrate.
+      schema: this.#schemaVersions.forCapability(capabilityId, () => {
+        if (this.#status !== "starting") this.#schemaVersions.flush();
       }),
       routes: Object.freeze({
         get source() {
@@ -1273,6 +1279,7 @@ export class Lifecycle<
           await runInLifecycleHostContext({ host: this.#host }, () =>
             this.#host.onStart?.(this.#props)
           );
+          this.#schemaVersions.flush();
           this.#status = "started";
         } catch (cause) {
           this.#status = "zero";
@@ -1586,6 +1593,9 @@ export class Lifecycle<
       payload: { capability: owner }
     });
   }
+
+  /** Every capability's schema version, in one record. */
+  readonly #schemaVersions: SchemaVersions;
 
   /** Alarm invocations running on this instance. */
   #alarmsRunning = 0;
