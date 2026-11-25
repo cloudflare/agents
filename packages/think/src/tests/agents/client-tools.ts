@@ -1322,8 +1322,14 @@ export class ThinkClientToolsAgent extends Think {
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
-    // Every reply's stream starts here (`pumpReply`).
-    const streams = this["_replyStreams"];
+    // Every reply's stream starts here (`pumpReply`). Only this Think has
+    // reply streams; on the harness-backed Think (`pnpm test:harness`) the
+    // agent still constructs, `getStreamParentsForTest` stays empty, and only
+    // the test that reads it fails there.
+    const streams = this["_replyStreams"] as
+      | ThinkClientToolsAgent["_replyStreams"]
+      | undefined;
+    if (!streams) return;
     const start = streams.start.bind(streams);
     streams.start = (requestId, options) => {
       const streamId = start(requestId, options);
