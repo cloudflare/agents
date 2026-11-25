@@ -182,13 +182,16 @@ export interface StreamsSyncInternal {
   deleteMany(streamIds: string[]): void;
   /**
    * One page of a stream's chunk log from `fromSeq` (inclusive), ordered by
-   * seq. Paged rather than read-it-all so replaying a large stream holds
-   * one page of segment bodies in memory, not the whole turn.
+   * seq: at most `limit` chunks, and no more chunks once the page holds
+   * `maxChars` characters of chunk JSON (always at least one). Paged rather
+   * than read-it-all so replaying a large stream holds one page of chunks
+   * in memory, not the whole turn.
    */
   readChunks(
     streamId: string,
     fromSeq: number,
-    limit: number
+    limit: number,
+    maxChars?: number
   ): StreamChunkRow[];
   /** Every stream row, newest first (created_at, then insertion order). */
   listRows(): StreamRow[];
@@ -286,6 +289,12 @@ export class Streams extends LifecycleCapability {
     string,
     { block: number; seq_to: number; len: number } | null
   >();
+  /**
+   * Streams inside a discarding cutover's transaction. Their row still
+   * reads `streaming` (it is deleted, not stamped settled), so appends from
+   * the cutover's `commit` are refused here instead. Empty outside one.
+   */
+  readonly #discarding = new Set<string>();
   /** Stored chunk and character totals per trimmed stream, read once. */
   readonly #totals = new Map<string, { chunks: number; bytes: number }>();
   /**
@@ -654,8 +663,8 @@ export class Streams extends LifecycleCapability {
           this.#wake(streamId);
         }
       },
-      readChunks: (streamId, fromSeq, limit) =>
-        this.#readChunks(streamId, fromSeq, limit),
+      readChunks: (streamId, fromSeq, limit, maxChars) =>
+        this.#readChunks(streamId, fromSeq, limit, maxChars),
       listRows: () => this.#sql<StreamRow>`
         SELECT * FROM ${this.#tables.streams} ORDER BY created_at DESC, rowid DESC
       `,
@@ -737,7 +746,9 @@ export class Streams extends LifecycleCapability {
     // here and the write may await or call user code — either would
     // reintroduce the lost-update races the old guarded-UPDATE fence
     // prevented, at the cost of one stream-row write per append.
-    const state = this.#state(streamId);
+    const state = this.#discarding.has(streamId)
+      ? "completed"
+      : this.#state(streamId);
     if (state !== "streaming") {
       throw new StreamClosedError(
         streamId,
@@ -755,6 +766,9 @@ export class Streams extends LifecycleCapability {
     chunkBytes: number,
     batch: StreamBatching
   ): number {
+    if (this.#discarding.has(streamId)) {
+      throw new StreamClosedError(streamId, "it is being discarded");
+    }
     let skipped = false;
     let buffer = this.#buffers.get(streamId);
     if (!buffer) {
@@ -1042,12 +1056,14 @@ export class Streams extends LifecycleCapability {
   #readChunks(
     streamId: string,
     fromSeq: number,
-    limit: number
+    limit: number,
+    maxChars = Number.POSITIVE_INFINITY
   ): StreamChunkRow[] {
     this.#foldLegacyChunks(streamId);
     const rows: StreamChunkRow[] = [];
+    let chars = 0;
     let block = -1;
-    while (rows.length < limit) {
+    while (rows.length < limit && chars < maxChars) {
       const next = this.#sql<{
         block: number;
         seq_from: number;
@@ -1066,13 +1082,15 @@ export class Streams extends LifecycleCapability {
       const chunks = JSON.parse(`[${next.body}]`) as StreamJson[];
       for (
         let seq = Math.max(fromSeq, next.seq_from);
-        seq < next.seq_to && rows.length < limit;
+        seq < next.seq_to && rows.length < limit && chars < maxChars;
         seq++
       ) {
+        const chunk = JSON.stringify(chunks[seq - next.seq_from]);
+        chars += chunk.length;
         rows.push({
           stream_id: streamId,
           seq,
-          chunk: JSON.stringify(chunks[seq - next.seq_from]),
+          chunk,
           created_at: next.updated_at
         });
       }
@@ -1159,6 +1177,7 @@ export class Streams extends LifecycleCapability {
           ? this.#state(streamId) === "streaming"
           : this.#settleRow(streamId, state, reason);
         if (!settled) return;
+        if (options.discard) this.#discarding.add(streamId);
         // Reject a native async `commit` before calling it: once started,
         // its code after the first `await` runs outside the transaction and
         // cannot be rolled back, so it must never start. Checked only once
@@ -1192,6 +1211,7 @@ export class Streams extends LifecycleCapability {
         if (options.discard) deleted = this.#deleteRows(streamId) > 0;
       });
     } finally {
+      this.#discarding.delete(streamId);
       // The settle's tail read may have folded this stream's v1 rows and,
       // if they were the last, dropped the legacy table and cleared the
       // flag — inside the transaction. A rollback restores the table but

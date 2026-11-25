@@ -4,6 +4,8 @@ import type { SqlTaggedTemplate } from "../../chat/resumable-stream";
 import { Streams } from "../../streams";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
+const BATCH = { maxChunks: 10, maxBytes: 512_000 };
+
 /**
  * Chat's chunk packing lives in Streams' batched appends: each wire chunk
  * has its own seq, a flush is one row write, and a turn's flushes fill its
@@ -142,6 +144,52 @@ describe("chat chunks on Streams' batched appends", () => {
       expect(storage.sql.exec("SELECT id FROM message").toArray()).toEqual([
         { id: "m" }
       ]);
+    });
+  });
+
+  it("refuses an append from a discarding cutover's commit", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const { lifecycle, capability: streams } = install(new Streams());
+      await lifecycle.start();
+      const writer = await streams.open("turn");
+      writer.append("a");
+      const sync = streams.__DO_NOT_USE_WILL_BREAK__sync();
+      const refused: string[] = [];
+      writer.close({
+        commit: () => {
+          for (const attempt of [
+            () => writer.append("late"),
+            () => sync.appendJson("turn", '"late"', 6, BATCH)
+          ]) {
+            try {
+              attempt();
+            } catch (error) {
+              refused.push((error as Error).name);
+            }
+          }
+        },
+        discard: true
+      });
+      expect(refused).toEqual(["StreamClosedError", "StreamClosedError"]);
+      expect(await streams.status("turn")).toBeNull();
+    });
+  });
+
+  it("pages a replay of large chunks by size, not only by count", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const { lifecycle, capability: streams } = install(new Streams());
+      await lifecycle.start();
+      const chat = new ResumableStream(streams, sqlOf(storage));
+      const streamId = chat.start("req-big");
+      const big = "y".repeat(400_000);
+      for (let i = 0; i < 6; i++) chat.storeChunk(streamId, big);
+      chat.flushBuffer();
+      const sync = streams.__DO_NOT_USE_WILL_BREAK__sync();
+      // A page stops at the first chunk past the cap.
+      expect(sync.readChunks(streamId, 0, 100, 1_000_000)).toHaveLength(3);
+      expect(sync.readChunks(streamId, 0, 100)).toHaveLength(6);
+      // The replay still reads every chunk, a page at a time.
+      expect(chat.getStreamChunks(streamId)).toHaveLength(6);
     });
   });
 });

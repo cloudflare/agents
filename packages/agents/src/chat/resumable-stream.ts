@@ -27,10 +27,10 @@ import type { Connection } from "agents";
 import { Streams, type StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow, StreamState } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
-import { storedChunkBytes } from "./chunk-size";
 import {
   REPLAY_CHUNK_BYTES,
-  REPLAY_ITEM_BYTES
+  REPLAY_ITEM_BYTES,
+  utf8Length
 } from "../internal/platform-limits";
 import type { ChatTurnOutcome } from "./wire-types";
 
@@ -47,6 +47,12 @@ const CHUNK_BATCH = { maxChunks: 10, maxBytes: 512_000, fillBlocks: true };
  * replay memory to one page of chunk bodies rather than the whole turn.
  */
 const REPLAY_PAGE_CHUNKS = 100;
+/**
+ * Characters of chunk JSON per replay page: a page stops at the first
+ * chunk past it, so a turn of large chunks holds about this much (plus one
+ * chunk) at a time, not a hundred of them.
+ */
+const REPLAY_PAGE_CHARS = 1_000_000;
 /**
  * Retention for abandoned `streaming` rows, measured from LAST chunk activity.
  *
@@ -848,7 +854,7 @@ export class ResumableStream {
     // on the stored (JSON-escaped) encoding. The chunk is still broadcast to
     // live clients; only replay storage is skipped.
     const json = JSON.stringify(body);
-    const bodyBytes = storedChunkBytes(body);
+    const bodyBytes = utf8Length(json);
     if (bodyBytes > REPLAY_CHUNK_BYTES) {
       console.warn(
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
@@ -899,12 +905,22 @@ export class ResumableStream {
   private *_storedBodies(streamId: string): Generator<string> {
     let next = 0;
     for (;;) {
-      const rows = this.ops.readChunks(streamId, next, REPLAY_PAGE_CHUNKS);
+      const rows = this.ops.readChunks(
+        streamId,
+        next,
+        REPLAY_PAGE_CHUNKS,
+        REPLAY_PAGE_CHARS
+      );
       for (const row of rows) {
         next = row.seq + 1;
         yield* unpackSegment(row.chunk);
       }
-      if (rows.length < REPLAY_PAGE_CHUNKS) return;
+      // A short page is the end, unless the character cap cut it short.
+      let chars = 0;
+      for (const row of rows) chars += row.chunk.length;
+      if (rows.length < REPLAY_PAGE_CHUNKS && chars < REPLAY_PAGE_CHARS) {
+        return;
+      }
     }
   }
 
