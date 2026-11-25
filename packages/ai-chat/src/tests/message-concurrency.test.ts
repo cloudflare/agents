@@ -170,7 +170,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/latest-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.LatestMessageConcurrencyAgent,
@@ -253,7 +252,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/drop-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const seenMessages = recordMessages(ws);
     const agentStub = await getAgentByName(
@@ -326,7 +324,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/merge-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.MergeMessageConcurrencyAgent,
@@ -413,7 +410,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/overriding-persist-merge-agent/${room}`
     );
-    await delay(50);
     const agentStub = await getAgentByName(
       env.OverridingPersistMergeAgent,
       room
@@ -471,7 +467,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/debounce-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.DebounceMessageConcurrencyAgent,
@@ -570,7 +565,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/missing-debounce-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.MissingDebounceMessageConcurrencyAgent,
@@ -600,14 +594,16 @@ describe("AIChatAgent messageConcurrency", () => {
     }, 5000);
     await agentStub.waitForIdleForTest();
 
-    const firstStart = await agentStub.getRequestStartTime(
-      "req-missing-debounce-1"
+    // The debounce runs from when the second request arrived, not from
+    // when the first one started (which load can delay).
+    const secondReceived = await agentStub.receivedAtForTest(
+      "req-missing-debounce-2"
     );
     const secondStart = await agentStub.getRequestStartTime(
       "req-missing-debounce-2"
     );
 
-    expectDebounceGap(firstStart, secondStart, 700);
+    expectDebounceGap(secondReceived, secondStart, 700);
 
     ws.close(1000);
   });
@@ -617,7 +613,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/invalid-debounce-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.InvalidDebounceMessageConcurrencyAgent,
@@ -647,14 +642,16 @@ describe("AIChatAgent messageConcurrency", () => {
     }, 5000);
     await agentStub.waitForIdleForTest();
 
-    const firstStart = await agentStub.getRequestStartTime(
-      "req-invalid-debounce-1"
+    // The debounce runs from when the second request arrived, not from
+    // when the first one started (which load can delay).
+    const secondReceived = await agentStub.receivedAtForTest(
+      "req-invalid-debounce-2"
     );
     const secondStart = await agentStub.getRequestStartTime(
       "req-invalid-debounce-2"
     );
 
-    expectDebounceGap(firstStart, secondStart, 700);
+    expectDebounceGap(secondReceived, secondStart, 700);
 
     ws.close(1000);
   });
@@ -664,7 +661,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/drop-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.DropMessageConcurrencyAgent,
@@ -707,7 +703,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws: observerWs } = await connectChatWS(
       `/agents/latest-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.LatestMessageConcurrencyAgent,
@@ -770,7 +765,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws: observerWs } = await connectChatWS(
       `/agents/drop-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.DropMessageConcurrencyAgent,
@@ -845,7 +839,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/latest-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.LatestMessageConcurrencyAgent,
@@ -917,7 +910,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/drop-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.DropMessageConcurrencyAgent,
@@ -960,7 +952,6 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/merge-message-concurrency-agent/${room}`
     );
-    await delay(50);
 
     const agentStub = await getAgentByName(
       env.MergeMessageConcurrencyAgent,
@@ -1021,7 +1012,6 @@ describe("AIChatAgent messageConcurrency", () => {
   it("queue: onChatResponse fires for every turn when messageConcurrency is queue", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
