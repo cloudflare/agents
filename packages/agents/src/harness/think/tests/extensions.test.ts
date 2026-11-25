@@ -10,6 +10,7 @@ import {
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { harnessHookRules } from "../extensions/hooks";
 import { ExtensionManager } from "../extensions/manager";
 import { optionsExtension } from "../extensions/own";
 import { loadInProcess } from "../extensions/runtime";
@@ -171,7 +172,7 @@ describe("extensions: the build", () => {
     const tools = sampleTools();
     const direct = await send(tools, "Be brief.");
 
-    const manager = new ExtensionManager();
+    const manager = new ExtensionManager(harnessHookRules);
     manager.load(
       "options",
       loadInProcess(
@@ -190,7 +191,7 @@ describe("extensions: the build", () => {
   });
 
   it("builds the same tools and prompt twice, and in order", async () => {
-    const manager = new ExtensionManager();
+    const manager = new ExtensionManager(harnessHookRules);
     manager.load(
       "first",
       loadInProcess("first", (ctx) => {
@@ -239,21 +240,20 @@ describe("extensions: the build", () => {
           });
           if (label === "early") tools.set("y", sampleTools().described);
         });
-    const manager = new ExtensionManager();
+    const manager = new ExtensionManager(harnessHookRules);
     manager.load("early", loadInProcess("early", setter("early")));
     manager.load("late", loadInProcess("late", setter("late")));
     const { tools } = await manager.build("");
     expect(Object.keys(tools)).toEqual(["x", "y"]);
     expect(tools.x?.description).toBe("late");
-    const outputs: unknown[] = [];
-    const stream = tools.x?.execute?.(
-      {},
-      { toolCallId: "c", messages: [], context: undefined }
-    );
-    for await (const output of stream as AsyncIterable<unknown>) {
-      outputs.push(output);
-    }
-    expect(outputs).toEqual(["late"]);
+    // A tool that does not stream returns its one output, as the AI SDK
+    // expects of a plain tool.
+    expect(
+      await tools.x?.execute?.(
+        {},
+        { toolCallId: "c", messages: [], context: undefined }
+      )
+    ).toBe("late");
     expect(ran).toEqual(["late"]);
   });
 
@@ -312,7 +312,7 @@ describe("extensions: conformance in process and across a boundary", () => {
   };
 
   async function observe(handle: Promise<ExtensionHandle>) {
-    const manager = new ExtensionManager();
+    const manager = new ExtensionManager(harnessHookRules);
     manager.load("ext", handle);
     const direct = await handle;
     const built = await manager.build("s");
@@ -478,7 +478,7 @@ describe("extensions: conformance in process and across a boundary", () => {
 
   it("does not start a tool whose call is already aborted", async () => {
     let ran = false;
-    const manager = new ExtensionManager();
+    const manager = new ExtensionManager(harnessHookRules);
     manager.load(
       "options",
       loadInProcess(
@@ -528,7 +528,7 @@ describe("extensions: conformance in process and across a boundary", () => {
       });
     for (const fail of [false, true]) {
       const original = streaming(fail);
-      const manager = new ExtensionManager();
+      const manager = new ExtensionManager(harnessHookRules);
       manager.load(
         "options",
         loadInProcess("options", optionsExtension({ tools: { s: original } }))
@@ -564,7 +564,7 @@ describe("extensions: conformance in process and across a boundary", () => {
         return this.label === "mine" ? ("retry" as const) : ("fail" as const);
       }
     };
-    const manager = new ExtensionManager();
+    const manager = new ExtensionManager(harnessHookRules);
     manager.load(
       "options",
       loadInProcess("options", optionsExtension({ hooks }))

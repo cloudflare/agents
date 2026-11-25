@@ -7,22 +7,25 @@
  * made, and a later `set` of a name takes the tool over, execution
  * included. The result depends only on what is loaded and in what order.
  *
- * @internal Not exported from any entry point.
+ * The manager is generic over its hooks: ThinkHarness's (`harnessHookRules`)
+ * and the hooks `Think` gives the extensions it loads from source.
+ *
+ * @internal Sibling-package support through `agents/internal`.
  */
 import { jsonSchema, type ModelMessage, type Tool, type ToolSet } from "ai";
 import type { ThinkSessionId } from "../types";
-import { dispatchHook } from "./hooks";
 import type {
   Drafts,
   ExtensionHandle,
-  ExtensionHookName,
   ExtensionHooks,
+  HookMap,
+  HookRules,
   ToolEntry
 } from "./types";
 
-type Loaded = {
-  readonly handle: ExtensionHandle;
-  readonly hooks: ReadonlySet<ExtensionHookName>;
+type Loaded<M extends HookMap> = {
+  readonly handle: ExtensionHandle<M>;
+  readonly hooks: ReadonlySet<string>;
 };
 
 /** What the loaded extensions built for one session. @internal */
@@ -40,14 +43,19 @@ export type ExtensionBuild = {
 const NO_DRAFTS: Drafts = { tools: [], prompt: [] };
 
 /** @internal */
-export class ExtensionManager {
-  readonly #loaded: {
+export class ExtensionManager<M extends HookMap = ExtensionHooks> {
+  readonly #rules: HookRules<M>;
+  #loaded: {
     readonly name: string;
-    readonly ready: Promise<Loaded>;
+    readonly ready: Promise<Loaded<M>>;
   }[] = [];
 
+  constructor(rules: HookRules<M>) {
+    this.#rules = rules;
+  }
+
   /** Add an extension after those already loaded. */
-  load(name: string, handle: Promise<ExtensionHandle>): void {
+  load(name: string, handle: Promise<ExtensionHandle<M>>): void {
     if (this.#loaded.some((loaded) => loaded.name === name)) {
       throw new Error(`An extension named "${name}" is already loaded`);
     }
@@ -60,7 +68,14 @@ export class ExtensionManager {
     this.#loaded.push({ name, ready });
   }
 
-  async #all(): Promise<(Loaded & { readonly name: string })[]> {
+  /** Remove an extension; the next build is made without it. */
+  unload(name: string): boolean {
+    const before = this.#loaded.length;
+    this.#loaded = this.#loaded.filter((loaded) => loaded.name !== name);
+    return this.#loaded.length < before;
+  }
+
+  async #all(): Promise<(Loaded<M> & { readonly name: string })[]> {
     return Promise.all(
       this.#loaded.map(async ({ name, ready }) => ({ name, ...(await ready) }))
     );
@@ -72,15 +87,12 @@ export class ExtensionManager {
     for (const { handle } of loaded) {
       drafts = await handle.build(drafts, { session });
     }
-    const owners = new Map(loaded.map(({ name, handle }) => [name, handle]));
-    const tools: ToolSet = {};
-    for (const [name, entry] of drafts.tools) {
-      const owner = owners.get(entry.owner);
-      if (!owner) throw new Error(`No extension "${entry.owner}" is loaded`);
-      tools[name] = toolOf(name, entry, owner, session);
-    }
     return {
-      tools,
+      tools: toolsOf(
+        drafts.tools,
+        new Map(loaded.map(({ name, handle }) => [name, handle])),
+        session
+      ),
       system:
         drafts.prompt.length === 0
           ? undefined
@@ -89,31 +101,49 @@ export class ExtensionManager {
   }
 
   /** Run hook `name`'s handlers across the extensions, in order. */
-  async hook<H extends ExtensionHookName>(
+  async hook<H extends keyof M & string>(
     name: H,
-    context: ExtensionHooks[H][0]
-  ): Promise<ExtensionHooks[H][1]> {
+    context: M[H][0]
+  ): Promise<M[H][1]> {
     const loaded = await this.#all();
-    return dispatchHook(
-      name,
+    return this.#rules[name](
       context,
       loaded
         .filter(({ hooks }) => hooks.has(name))
         .map(
           ({ handle }) =>
-            // SAFETY: dispatchHook passes each runner a context of hook `name`.
-            (current: unknown) =>
-              handle.hook(name, current as ExtensionHooks[H][0])
+            (current: M[H][0]) =>
+              handle.hook(name, current)
         )
     );
   }
 }
 
+/**
+ * The AI SDK tools over built entries, whose functions call each entry's
+ * owner in `owners`.
+ *
+ * @internal
+ */
+export function toolsOf<M extends HookMap>(
+  entries: Drafts["tools"],
+  owners: ReadonlyMap<string, ExtensionHandle<M>>,
+  session: ThinkSessionId
+): ToolSet {
+  const tools: ToolSet = {};
+  for (const [name, entry] of entries) {
+    const owner = owners.get(entry.owner);
+    if (!owner) throw new Error(`No extension "${entry.owner}" is loaded`);
+    tools[name] = toolOf(name, entry, owner, session);
+  }
+  return tools;
+}
+
 /** An AI SDK tool over an entry, whose functions call its owner. */
-function toolOf(
+function toolOf<M extends HookMap>(
   name: string,
   entry: ToolEntry,
-  owner: ExtensionHandle,
+  owner: ExtensionHandle<M>,
   session: ThinkSessionId
 ): Tool {
   const build = { session };
@@ -145,8 +175,18 @@ function toolOf(
         owner.needsApproval(name, input, call(options))
     }),
     ...(entry.execute && {
-      execute: (input, options) =>
-        execute(owner, name, input, call(options), options.abortSignal)
+      execute: (input, options) => {
+        const outputs = execute(
+          owner,
+          name,
+          input,
+          call(options),
+          options.abortSignal
+        );
+        // The AI SDK streams whatever returns an async iterable, so a tool
+        // that does not stream returns its one output.
+        return entry.streams ? outputs : lastOf(outputs);
+      }
     })
   } as Tool;
 }
@@ -157,8 +197,14 @@ function toolOf(
  * owner's error text. So whoever runs it sees the same outputs as from
  * the tool itself. A call whose signal is already aborted never starts.
  */
-async function* execute(
-  owner: ExtensionHandle,
+async function lastOf(outputs: AsyncIterable<unknown>): Promise<unknown> {
+  let last: unknown;
+  for await (const output of outputs) last = output;
+  return last;
+}
+
+async function* execute<M extends HookMap>(
+  owner: ExtensionHandle<M>,
   name: string,
   input: unknown,
   call: {

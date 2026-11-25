@@ -53,6 +53,11 @@ export type ToolEntry = {
   readonly validate: boolean;
   /** The tool converts its output for the model (`toModelOutput`). */
   readonly modelOutput: boolean;
+  /**
+   * The tool's `execute` is an async generator: it streams outputs, and
+   * each one before the last is preliminary.
+   */
+  readonly streams: boolean;
   /** `"always"`, or `"call"` to ask the owner per call. */
   readonly approval?: "always" | "call";
 };
@@ -98,8 +103,28 @@ export type Transform<D> = (
 ) => void | Promise<void>;
 
 /**
- * The hooks an extension subscribes to, with their context and what a
- * handler may return. Contexts and results are data.
+ * Hooks by name, each with its context and what a handler may return.
+ * Contexts and results are data.
+ *
+ * @internal
+ */
+export type HookMap = Readonly<Record<string, readonly [unknown, unknown]>>;
+
+/**
+ * How the handlers of each hook in `M` combine: given a context and the
+ * handlers in order, the hook's result.
+ *
+ * @internal
+ */
+export type HookRules<M extends HookMap> = {
+  readonly [H in keyof M]: (
+    context: M[H][0],
+    handlers: readonly ((context: M[H][0]) => Promise<M[H][1]>)[]
+  ) => Promise<M[H][1]>;
+};
+
+/**
+ * ThinkHarness's hooks.
  *
  * @internal
  */
@@ -165,8 +190,8 @@ export type Validation =
  *
  * @internal
  */
-export interface ExtensionHandle {
-  describe(): Promise<{ readonly hooks: readonly ExtensionHookName[] }>;
+export interface ExtensionHandle<M extends HookMap = ExtensionHooks> {
+  describe(): Promise<{ readonly hooks: readonly (keyof M & string)[] }>;
   /** Run this extension's transforms over what the ones before it built. */
   build(drafts: Drafts, build: BuildContext): Promise<Drafts>;
   /**
@@ -192,8 +217,5 @@ export interface ExtensionHandle {
     build: BuildContext
   ): Promise<unknown>;
   needsApproval(tool: string, input: unknown, call: ToolCall): Promise<boolean>;
-  hook<H extends ExtensionHookName>(
-    name: H,
-    context: ExtensionHooks[H][0]
-  ): Promise<ExtensionHooks[H][1]>;
+  hook<H extends keyof M & string>(name: H, context: M[H][0]): Promise<M[H][1]>;
 }
