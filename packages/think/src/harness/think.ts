@@ -35,6 +35,10 @@ import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
 import { isWorkersAIModelId } from "../model";
+import {
+  reconcileScheduledTasks,
+  type ThinkScheduledTasks
+} from "../scheduled-tasks";
 import { ThinkSession } from "../session";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
@@ -262,6 +266,13 @@ export class Think<
       await this.#sync();
       this.#installProtocol();
       await onStart(props);
+      // Best-effort, as in Think: a getScheduledTasks() that throws must
+      // not stop the agent from starting.
+      try {
+        await this.internal_reconcileScheduledTasks();
+      } catch (error) {
+        console.error("[Think] Scheduled tasks were not reconciled", error);
+      }
     };
   }
 
@@ -343,10 +354,23 @@ export class Think<
     | Promise<Record<string, unknown>> {
     return {};
   }
-  getScheduledTasks():
-    | Record<string, unknown>
-    | Promise<Record<string, unknown>> {
+  getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
     return {};
+  }
+
+  getDefaultTimezone(): string | undefined | Promise<string | undefined> {
+    return undefined;
+  }
+
+  /** Reconcile code-declared scheduled tasks, as Think does. */
+  internal_reconcileScheduledTasks(): Promise<void> {
+    return reconcileScheduledTasks({
+      scheduler: this.scheduler,
+      selfPath: this.selfPath,
+      tasks: () => this.getScheduledTasks(),
+      timezone: () => this.getDefaultTimezone(),
+      submit: (messages, options) => this.submitMessages(messages, options)
+    });
   }
 
   // ── Lifecycle hooks ───────────────────────────────────────────────
