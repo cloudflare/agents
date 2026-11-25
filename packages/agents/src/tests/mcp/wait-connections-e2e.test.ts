@@ -14,9 +14,11 @@ import { setupServer } from "msw/node";
 import { getAgentByName } from "../..";
 
 // No request leaves the test. The unreachable servers fail at once, as an
-// unresolvable host does; the slow ones answer only when a test ends, so a
-// test that reads a connection before it settles sees it connecting.
+// unresolvable host does. The slow ones answer only when the test calls
+// `releaseSlowServers()`, so a connection read before that is connecting;
+// the very slow one never answers.
 let releaseSlowServers = () => {};
+let slowServersReleased = Promise.resolve();
 const mcpServer = setupServer(
   ...[
     "http://nonexistent-mcp.example.com/*",
@@ -24,27 +26,22 @@ const mcpServer = setupServer(
     "http://oauth-mcp.example.com/*",
     "https://auth.example.com/*"
   ].map((url) => http.all(url, () => HttpResponse.error())),
-  ...[
-    "http://slow-mcp.example.com/*",
-    "http://very-slow-mcp.example.com/*"
-  ].map((url) =>
-    http.all(url, async () => {
-      await slowServersReleased;
-      return new HttpResponse(null, { status: 404 });
-    })
-  )
+  ...["http://slow-mcp.example.com/*", "http://held-mcp.example.com/*"].map(
+    (url) =>
+      http.all(url, async () => {
+        await slowServersReleased;
+        return HttpResponse.error();
+      })
+  ),
+  http.all("http://very-slow-mcp.example.com/*", () => new Promise(() => {}))
 );
-let slowServersReleased = Promise.resolve();
 beforeAll(() => mcpServer.listen({ onUnhandledRequest: "error" }));
 beforeEach(() => {
   slowServersReleased = new Promise((resolve) => {
     releaseSlowServers = resolve;
   });
 });
-afterEach(() => {
-  releaseSlowServers();
-  mcpServer.resetHandlers();
-});
+afterEach(() => mcpServer.resetHandlers());
 afterAll(() => mcpServer.close());
 
 /**
@@ -186,6 +183,11 @@ describe("waitForConnections E2E", () => {
     // The server has not answered yet, so without waiting the connection is
     // still connecting (the race the wait fixes).
     expect(result.connectionStates["race-server"]).toBe("connecting");
+
+    // Once the server answers, the connection settles.
+    releaseSlowServers();
+    const settled = await stub.waitAndReport();
+    expect(settled.connectionStates["race-server"]).toBe("failed");
   });
 
   it("should handle OAuth servers that skip restore (authenticating state)", async () => {
@@ -255,19 +257,8 @@ describe("waitForConnections E2E", () => {
       const name = `hibernation-race-${crypto.randomUUID()}`;
       let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
 
-      // The server answers only when the test says so, so the restored
+      // The server answers only once the test has ended, so the restored
       // connection is still connecting when it is read.
-      let release!: () => void;
-      const released = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      mcpServer.use(
-        http.all("http://held-mcp.example.com/*", async () => {
-          await released;
-          return new HttpResponse(null, { status: 404 });
-        })
-      );
-
       await stub.insertMcpServer(
         "race-roundtrip-server",
         "Race Round Trip Server",
@@ -276,18 +267,18 @@ describe("waitForConnections E2E", () => {
         null
       );
 
-      try {
-        await evictDurableObject(stub);
-        stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
-        const result = await stub.reportWithoutWait();
+      await evictDurableObject(stub);
+      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      const result = await stub.reportWithoutWait();
 
-        expect(result.connectionIds).toContain("race-roundtrip-server");
-        expect(result.connectionStates["race-roundtrip-server"]).toBe(
-          "connecting"
-        );
-      } finally {
-        release();
-      }
+      expect(result.connectionIds).toContain("race-roundtrip-server");
+      expect(result.connectionStates["race-roundtrip-server"]).toBe(
+        "connecting"
+      );
+
+      releaseSlowServers();
+      const settled = await stub.waitAndReport();
+      expect(settled.connectionStates["race-roundtrip-server"]).toBe("failed");
     });
 
     it("should handle mixed server types through onStart lifecycle", async () => {

@@ -1,34 +1,13 @@
 import { Agent } from "../../index.ts";
-import type { AgentContext } from "../../index.ts";
-import { MCPConnectionState } from "../../mcp/client/connection.ts";
 
 /**
  * Test Agent that exposes waitForConnections() for E2E testing.
  * Simulates the full hibernation → restore → wait → getAITools flow.
  *
- * connectToServer is mocked in the constructor so it's in place before
- * the Agent's onStart triggers restoreConnectionsFromStorage. The mock
- * fails with a small delay instead of making real network requests,
- * avoiding DNS "nodename nor servname" spam from fake server URLs.
+ * It connects for real: the tests fake the MCP servers with msw, so a
+ * connection settles when the fake server answers, not after a time.
  */
 export class TestWaitConnectionsAgent extends Agent {
-  constructor(ctx: AgentContext, env: Cloudflare.Env) {
-    super(ctx, env);
-    // Patch immediately — before onStart calls restoreConnectionsFromStorage
-    const mcp = this.mcp;
-    mcp.connectToServer = async (id: string) => {
-      // Small delay so background _restoreServer tasks don't resolve
-      // synchronously, preserving the "connecting" initial state for
-      // race-condition tests that check state without waiting.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const conn = mcp.mcpConnections[id];
-      if (conn) {
-        conn.connectionState = MCPConnectionState.FAILED;
-      }
-      return { state: MCPConnectionState.FAILED, error: "test: mock server" };
-    };
-  }
-
   async onRequest(_request: Request): Promise<Response> {
     return new Response("TestWaitConnectionsAgent");
   }
