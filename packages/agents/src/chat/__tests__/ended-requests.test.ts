@@ -72,4 +72,33 @@ describe("EndedRequests", () => {
       );
     }
   });
+
+  it("does not record a broadcast whose only listed socket was told already", () => {
+    const kv = new Map<string, unknown>();
+    const listed = { id: "listed" };
+    const frames = new ChatFrames({
+      broadcast: () => {},
+      connections: () => [listed],
+      reachesUnlisted: () => false,
+      kv: {
+        get: (key: string) => kv.get(key),
+        put: (key: string, value: unknown) => void kv.set(key, value),
+        delete: (key: string) => kv.delete(key)
+      },
+      resuming: new Set<string>(),
+      storedOriginIds: () => undefined,
+      recoveryOriginIds: () => undefined,
+      clientView: (messages: unknown) => ({ messages })
+    } as unknown as ConstructorParameters<typeof ChatFrames>[0]);
+    frames.ended.note(listed, "req-1");
+    frames.broadcast({
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      id: "req-1",
+      body: "",
+      done: true
+    } as Parameters<ChatFrames["broadcast"]>[0]);
+    // Every listed socket is left out, so a sub-agent skips the fan-out:
+    // an unlisted socket got nothing.
+    expect(frames.ended.has({ id: "tab", acceptedAt: 0 }, "req-1")).toBe(false);
+  });
 });

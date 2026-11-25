@@ -617,4 +617,4 @@ export { backoffDelay } from "../retries";
  * Whether a host's broadcast reaches sockets it does not list yet (a
  * starting sub-agent). Sibling-package support, not a public API.
  */
-export { broadcastReachesUnlistedSockets } from "../dynamic-agents/dynamic-agents";
+export { broadcastReachesUnlistedSockets } from "../dynamic-agents/unlisted-sockets";
