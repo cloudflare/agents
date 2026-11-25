@@ -15,12 +15,18 @@ import updates from "./fixtures/telegram-updates.json";
 
 const TOKEN = "123:secret";
 const SECRET = "webhook-secret";
-const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+const calls: Array<{
+  method: string;
+  body: Record<string, unknown>;
+  at: number;
+}> = [];
 let nextMessageId = 500;
 /** Resolved by the next call the adapter makes to the Bot API. */
 let onCall: ((method: string) => void) | undefined;
 /** Bot API methods answered once with a rate limit before they succeed. */
 const rateLimitOnce = new Set<string>();
+/** Bot API methods whose answer is lost once, after Telegram took the call. */
+const loseAnswerOnce = new Set<string>();
 
 const server = setupServer(
   http.post(
@@ -31,8 +37,9 @@ const server = setupServer(
         string,
         unknown
       >;
-      calls.push({ method, body });
+      calls.push({ method, body, at: Date.now() });
       onCall?.(method);
+      if (loseAnswerOnce.delete(method)) return HttpResponse.error();
       if (rateLimitOnce.delete(method)) {
         return HttpResponse.json(
           {
@@ -75,6 +82,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => {
   calls.length = 0;
   rateLimitOnce.clear();
+  loseAnswerOnce.clear();
   onCall = undefined;
 });
 afterAll(() => server.close());
@@ -361,9 +369,18 @@ describe("Chat SDK Channel over the Telegram adapter (recorded webhooks)", () =>
     await expect(
       c.stream!(surface, chunks("Hel", "lo"), options)
     ).resolves.toMatchObject({ status: "delivered" });
-    // A reset during the drafts finds no mark, so the reply is sent again.
-    expect(marks).not.toContain("posting");
-    expect(marks.at(-1)).toBe("sendRichMessage");
+    // A reset during the drafts that stream the answer finds no mark, so
+    // the reply is sent again. The mark comes once the adapter has read the
+    // whole answer (it then flushes one last draft), before the post.
+    const seen = marks.filter((mark) => mark !== "getMe");
+    expect(seen.indexOf("posting")).toBeGreaterThan(
+      seen.indexOf("sendRichMessageDraft")
+    );
+    expect(seen.slice(seen.indexOf("posting"))).toEqual([
+      "posting",
+      "sendRichMessageDraft",
+      "sendRichMessage"
+    ]);
   });
 
   it("marks a group reply as posting just before its first post", async () => {
@@ -396,5 +413,51 @@ describe("Chat SDK Channel over the Telegram adapter (recorded webhooks)", () =>
     await expect(
       c.stream!(surface, chunks("Hello"), {})
     ).resolves.toMatchObject({ status: "failed", retryable: true });
+  });
+
+  it("is uncertain about a private reply whose post's answer was lost", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.directMessage));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    loseAnswerOnce.add("sendRichMessage");
+    // Telegram may have posted it: sending it again could post it twice.
+    await expect(
+      c.stream!(surface, chunks("Hel", "lo"), {})
+    ).resolves.toMatchObject({ status: "uncertain" });
+  });
+
+  it("waits for real text before a group reply's first post", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.groupMention));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    await expect(
+      c.stream!(surface, chunks("\n\n", "Here are the results"), {})
+    ).resolves.toMatchObject({ status: "delivered" });
+    expect(sends()).toEqual([
+      {
+        method: "sendRichMessage",
+        chat: "-100",
+        text: "\n\nHere are the results"
+      }
+    ]);
+  });
+
+  it("keeps a group reply's last edit a second after the one before", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.groupMention));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    await c.stream!(surface, chunks("Hel", "lo"), {});
+    const post = calls.find(({ method }) => method === "sendRichMessage")!;
+    const edit = calls.find(({ method }) => method === "editMessageText")!;
+    expect(edit.at - post.at).toBeGreaterThanOrEqual(1000);
   });
 });

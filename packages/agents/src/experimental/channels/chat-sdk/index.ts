@@ -113,7 +113,7 @@ export function chatSdkChannel(
   const send = async (
     surface: ChannelMessageSurface,
     post: (threadId: string) => Promise<{ id: string } | null>,
-    started: () => boolean
+    started: (error: unknown) => boolean
   ): Promise<DeliveryResult> => {
     const threadId = threadOf(surface);
     if (!threadId) {
@@ -135,7 +135,7 @@ export function chatSdkChannel(
         code: "CHAT_SDK_SEND_FAILED",
         message: error instanceof Error ? error.message : String(error)
       };
-      if (started()) return { status: "uncertain", error: failure };
+      if (started(error)) return { status: "uncertain", error: failure };
       return { status: "failed", retryable: retryable(error), error: failure };
     }
   };
@@ -171,16 +171,28 @@ export function chatSdkChannel(
     async stream(surface, chunks, options) {
       const text = textOf(chunks);
       const stream = adapter.stream;
+      // A post landed: what reached the reader is unknown on a failure.
       let posted = false;
+      // A post's call began: unknown too, unless the provider refused it.
+      let sending = false;
+      const beforePost = () => {
+        posting(options);
+        sending = true;
+        return () => (posted = true);
+      };
+      async function* untilThePost(): AsyncIterable<string> {
+        yield* text.deltas;
+        // The adapter read it all: what it sends next is its post. Until
+        // then it showed previews (Telegram's drafts), so a stream cut
+        // short before here is streamed again in full. An adapter that
+        // posts as it streams may then show a cut-off copy above it.
+        beforePost();
+      }
       const result = await send(
         surface,
         async (threadId) => {
           if (stream) {
-            // What an adapter shows while it streams is taken as previews
-            // (Telegram's drafts) until it returns: a stream cut short is
-            // streamed again in full. An adapter that posts as it streams
-            // may then show a cut-off copy above the answer.
-            const sent = await stream.call(adapter, threadId, text.deltas);
+            const sent = await stream.call(adapter, threadId, untilThePost());
             // An adapter that will not stream to this thread (Telegram
             // groups) returns null before it reads any text.
             if (sent !== null || text.started()) {
@@ -188,12 +200,9 @@ export function chatSdkChannel(
               return sent;
             }
           }
-          return postAndEdit(threadId, text, () => {
-            posting(options);
-            return () => (posted = true);
-          });
+          return postAndEdit(threadId, text, beforePost);
         },
-        () => posted
+        (error) => posted || (sending && !refused(error))
       );
       // The answer broke off after text went out: what there was is posted.
       return posted && text.interrupted() && result.status === "delivered"
@@ -219,6 +228,8 @@ export function chatSdkChannel(
     for await (const delta of text.deltas) {
       markdown += delta;
       if (!sent) {
+        // Telegram refuses a blank message: wait for the first real text.
+        if (markdown.trim().length === 0) continue;
         const afterPost = beforePost();
         sent = await adapter.postMessage(threadId, { markdown });
         afterPost();
@@ -236,6 +247,8 @@ export function chatSdkChannel(
       return adapter.postMessage(threadId, { markdown: INTERRUPTED_NOTICE });
     }
     if (shown !== markdown) {
+      const wait = shownAt + EDIT_INTERVAL_MS - Date.now();
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
       await adapter.editMessage(threadId, sent.id, { markdown });
     }
     return sent;
@@ -347,6 +360,17 @@ function threadOf(surface: ChannelMessageSurface): string | undefined {
 }
 
 /** A send that failed for a reason trying again will not change. */
+/** The provider answered and refused the call, so it posted nothing. */
+function refused(error: unknown): boolean {
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? Number((error as { status: unknown }).status)
+      : undefined;
+  if (status !== undefined && status >= 400 && status < 500) return true;
+  const name = error instanceof Error ? error.name : "";
+  return /RateLimit|Auth|Permission|NotFound|Validation/i.test(name);
+}
+
 function retryable(error: unknown): boolean {
   const status =
     error && typeof error === "object" && "status" in error
