@@ -36,7 +36,10 @@ import type {
   StreamInterruptionHost,
   StreamInterruptionOutcome
 } from "./recovery-route";
-import { dispatchChatRecoveryToHandoff } from "./recovery-task";
+import {
+  currentRunAttempt,
+  dispatchChatRecoveryToHandoff
+} from "./recovery-task";
 import type {
   RecoveredTurnHost,
   RecoveredTurnResult,
@@ -1367,12 +1370,21 @@ export class ChatRecoveryEngine {
       };
     });
     if (!after) return false;
-    await adapter.scheduleRecovery(
-      input.callback,
-      input.data ?? {},
-      "stable_timeout_retry",
-      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
-    );
+    const next = {
+      callback: input.callback,
+      data: input.data ?? {},
+      delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+    };
+    // The run of the attempt that timed out runs the next one; otherwise
+    // (no such run, or it cannot keep it) the host's recovery Task does.
+    if (!currentRunAttempt()?.(next)) {
+      await adapter.scheduleRecovery(
+        next.callback,
+        next.data,
+        "stable_timeout_retry",
+        next.delaySeconds
+      );
+    }
     return true;
   }
 
