@@ -782,7 +782,9 @@ export class ChatTurns<
         }
         continue;
       }
-      const nonce = crypto.randomUUID();
+      // Named by the request, so a carry a reset cut short and runs again
+      // finds the run it already made.
+      const nonce = `released-${record.requestId}`;
       const admission: ChatAdmissionInput = {
         order: record.seq,
         messages: record.messages,

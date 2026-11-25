@@ -131,6 +131,15 @@ export function memoryLane(world = new MemoryWorld()) {
           }
         ) => {
           const runId = options?.runId ?? `run-${world.seq + 1}`;
+          if (world.runs.has(runId)) {
+            return {
+              runId,
+              definition: "turn",
+              accepted: false,
+              status: "pending" as const,
+              createdAt: Date.now()
+            };
+          }
           world.runs.set(runId, {
             runId,
             input: input as MemoryRun["input"],

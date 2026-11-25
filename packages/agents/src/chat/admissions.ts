@@ -425,6 +425,13 @@ export class ChatAdmissions {
     for (const run of runs) {
       const requestId = run.metadata?.requestId;
       if (typeof requestId !== "string" || this.#held.has(requestId)) continue;
+      // A cleared request's messages are discarded: they wait no more.
+      if (
+        (run.metadata?.chat as { cleared?: unknown } | undefined)?.cleared ===
+        true
+      ) {
+        continue;
+      }
       const admission = tasks.inputOf<{ admission?: ChatAdmissionInput }>(
         run.runId
       )?.admission;

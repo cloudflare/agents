@@ -493,6 +493,43 @@ describe("durable admission", () => {
     expect(b.started).toEqual(["old"]);
   });
 
+  it("carries an earlier release's records once, though a reset cut the first carry short", async () => {
+    const db = new MemoryWorld();
+    const record: ChatAdmissionRecord = {
+      requestId: "old",
+      seq: 1,
+      messageIds: ["u-old"],
+      messages: [{ id: "u-old", role: "user" }],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: { requestId: "old" },
+      stopped: false,
+      // The table was never dropped: the reset landed first.
+      createdAt: 1
+    };
+    const released = () => ({ records: [record], drop: () => {} });
+    const first = isolate(db, { released });
+    await first.turns.resumeAdmissions();
+    const b = isolate(db, { released });
+    await b.turns.resumeAdmissions();
+    // One run for the request, not one per carry.
+    expect(db.runs.size).toBe(1);
+    await b.resume();
+    await flush();
+    expect(b.started).toEqual(["old"]);
+  });
+
+  it("a cleared request's message is not drawn as waiting after a restart", async () => {
+    const db = new MemoryWorld();
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    a.turns.reset();
+    const b = isolate(db);
+    b.copyTranscript(a);
+    expect(b.turns.clientView(b.host.transcript).queuedMessageIds).toBe(
+      undefined
+    );
+  });
+
   it("replays in admission order when the lane's listing ties", async () => {
     const db = new MemoryWorld();
     const first = isolate(db, { concurrency: "latest" });
