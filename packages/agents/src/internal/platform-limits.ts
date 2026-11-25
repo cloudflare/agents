@@ -100,15 +100,6 @@ export function utf8Length(text: string): number {
   return bytes;
 }
 
-/**
- * The largest serialized chat message, or stream chunk body, kept in one
- * row. Chat compacts a larger message and leaves a larger chunk out of
- * replay.
- *
- * @internal
- */
-export const ROW_MAX_BYTES = SQLITE_ROW_BYTES - 200_000;
-
 /** UTF-8 bytes one UTF-16 code unit takes at most. */
 const UTF8_BYTES_PER_UNIT = 3;
 

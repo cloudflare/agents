@@ -107,19 +107,19 @@ Features that are implemented or designed and ready to implement (via existing T
 
 ### Shared chat layer (`agents/chat` — used by both Think and AIChatAgent)
 
-| Feature              | Source                                   | Notes                                                                                   |
-| -------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------- |
-| Turn queue           | `TurnQueue`                              | Serial execution with generation-based invalidation                                     |
-| Resumable streams    | `ResumableStream`                        | Chunk buffering in SQLite, replay on reconnect                                          |
-| Stream accumulation  | `StreamAccumulator`                      | Build assistant message from stream chunks                                              |
-| Abort registry       | `AbortRegistry`                          | Per-request `AbortController` management (extracted from both agents)                   |
-| Tool state machine   | `findAndUpdateToolPart`                  | Find tool part by `toolCallId`, match states, apply update (extracted from both agents) |
-| Protocol handling    | `ChatProtocolHandler`                    | WebSocket protocol message parsing and dispatch (extracted from both agents)            |
-| Continuation state   | `ContinuationState`                      | Pending/active/deferred continuation tracking                                           |
-| Message sanitization | `sanitizeMessage`, `enforceRowSizeLimit` | Strip provider metadata, enforce 1.8MB row limit                                        |
-| Client tools         | `createToolsFromClientSchemas`           | Convert client-side tool schemas to AI SDK tools                                        |
-| Broadcast state      | `broadcastTransition`                    | Client-side stream state machine for cross-tab broadcast                                |
-| Request context      | `RequestContextStore`                    | Key-value persistence for client tools, body, config (extracted from both agents)       |
+| Feature              | Source                         | Notes                                                                                   |
+| -------------------- | ------------------------------ | --------------------------------------------------------------------------------------- |
+| Turn queue           | `TurnQueue`                    | Serial execution with generation-based invalidation                                     |
+| Resumable streams    | `ResumableStream`              | Chunk buffering in SQLite, replay on reconnect                                          |
+| Stream accumulation  | `StreamAccumulator`            | Build assistant message from stream chunks                                              |
+| Abort registry       | `AbortRegistry`                | Per-request `AbortController` management (extracted from both agents)                   |
+| Tool state machine   | `findAndUpdateToolPart`        | Find tool part by `toolCallId`, match states, apply update (extracted from both agents) |
+| Protocol handling    | `ChatProtocolHandler`          | WebSocket protocol message parsing and dispatch (extracted from both agents)            |
+| Continuation state   | `ContinuationState`            | Pending/active/deferred continuation tracking                                           |
+| Message sanitization | `sanitizeMessage`              | Strip provider metadata                                                                 |
+| Client tools         | `createToolsFromClientSchemas` | Convert client-side tool schemas to AI SDK tools                                        |
+| Broadcast state      | `broadcastTransition`          | Client-side stream state machine for cross-tab broadcast                                |
+| Request context      | `RequestContextStore`          | Key-value persistence for client tools, body, config (extracted from both agents)       |
 
 See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#shared-code-extraction) for the extraction plan. Items marked "extracted from both agents" are currently duplicated between AIChatAgent and Think and will be consolidated into `agents/chat` before Think Phase 1.
 

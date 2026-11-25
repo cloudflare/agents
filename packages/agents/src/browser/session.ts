@@ -291,10 +291,10 @@ const ATTACH_HANDLE_PREFIX = "target:";
 const CDP_SESSION_NOT_FOUND = -32001;
 
 /**
- * Screenshots are kept whole in the chat message for the UI, and a stored
- * message must fit one row (`ROW_MAX_BYTES` in internal/platform-limits.ts),
- * or the image is compacted away. Failing early lets the model retake it
- * smaller. Other results are cut to a preview before they're stored.
+ * Screenshots are kept whole in the chat message for the UI, so every
+ * later load of the conversation carries them. Failing early lets the model
+ * retake a large one smaller. Other results are cut to a preview before
+ * they're stored.
  *
  * @internal The tools also refuse to keep a returned screenshot over it.
  */

@@ -60,7 +60,6 @@ import {
   chatRecoveryTaskRunOptions,
   dispatchChatProtocol,
   sanitizeMessage,
-  enforceRowSizeLimit,
   LiveReply,
   StreamAccumulator,
   recentChatTerminal,
@@ -5462,10 +5461,6 @@ export class ThinkTestAgent extends Think {
 
   async sanitizeMessage(msg: UIMessage): Promise<UIMessage> {
     return sanitizeMessage(msg);
-  }
-
-  async enforceRowSizeLimit(msg: UIMessage): Promise<UIMessage> {
-    return enforceRowSizeLimit(msg);
   }
 
   async hostWriteFile(path: string, content: string): Promise<void> {

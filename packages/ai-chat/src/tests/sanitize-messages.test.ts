@@ -455,7 +455,6 @@ describe("Message Sanitization", () => {
     const toolPart = persisted[0].parts[0] as Record<string, unknown>;
 
     // User-defined tool output should NOT be truncated by the provider stripping
-    // (it may still be compacted by _enforceRowSizeLimit at 1.8MB, but not here)
     expect(toolPart.output).toBe(longOutput);
 
     ws.close(1000);

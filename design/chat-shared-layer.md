@@ -21,7 +21,6 @@ On the ai-chat side, `index.ts` and `react.tsx` already mixed too many concerns 
 packages/agents/src/chat/          ← shared foundation
   index.ts                         barrel exports
   message-builder.ts               applyChunkToParts, getPartialStreamText + types
-  sanitize.ts                      sanitizeMessage, enforceRowSizeLimit
   tool-output-truncation.ts        provider-executed tool payload truncation
   stream-accumulator.ts            StreamAccumulator class
   turn-queue.ts                    TurnQueue class
@@ -112,9 +111,7 @@ Row-size enforcement for chat tables that are **not** session storage. Message p
 
 **`sanitizeMessage(message) → UIMessage`** — re-exported from `agents/sessions/sanitize`. Strips OpenAI ephemeral fields (`itemId`, `reasoningEncryptedContent`) from `providerMetadata` and `callProviderMetadata`, then filters truly empty reasoning parts.
 
-**`enforceRowSizeLimit(message, { warn? }) → UIMessage`** — compacts messages exceeding 1.8MB (`ROW_MAX_BYTES`, below SQLite's 2MB row limit). Two-pass: first compact tool outputs over 1KB (annotating `metadata.compactedToolOutputs`), then truncate text parts oldest-first (annotating `metadata.compactedTextParts`). The host passes `warn` to log with its own prefix.
-
-Think calls `enforceRowSizeLimit` only when serializing its submission queue (`cf_think_submissions`). `AIChatAgent` does not call it: its `_sanitizeMessageForPersistence` runs `_truncateProviderExecutedToolPayloads` (large strings in Anthropic-style server-executed tool payloads) and then the protected `sanitizeMessageForPersistence()` hook, and Sessions handles size.
+`enforceRowSizeLimit` stays exported, deprecated, only because released Think (0.21–0.24) and ai-chat (0.10–0.11) import it. Neither host in this repo cuts a message to fit a row: Sessions splits a large message across rows and reads it back whole. `AIChatAgent`'s `_sanitizeMessageForPersistence` runs `_truncateProviderExecutedToolPayloads` (large strings in Anthropic-style server-executed tool payloads) and then the protected `sanitizeMessageForPersistence()` hook.
 
 ### stream-accumulator.ts
 
