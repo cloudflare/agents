@@ -947,8 +947,8 @@ describe("ExtensionManager network hosts with an app's own host binding", () => 
         configs.push(make());
         return {
           getEntrypoint: () => ({
-            describe: async () => "[]",
-            manifest: async () => JSON.stringify({ hooks: [] })
+            describe: async () => ({ hooks: [] }),
+            build: async () => ({ tools: [], prompt: [] })
           })
         };
       }
