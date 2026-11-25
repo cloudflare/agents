@@ -1363,6 +1363,58 @@ describe("Context", () => {
     });
   });
 
+  it("keeps each call's tools to its own record when two calls overlap", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      // A remind block whose read can be held at a gate.
+      let hold = false;
+      let waiting = false;
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes" },
+        {
+          label: "clock",
+          whenChanged: "remind",
+          provider: {
+            get: async () => {
+              if (hold) {
+                waiting = true;
+                await gate;
+              }
+              return "noon";
+            }
+          }
+        }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      await context.prepare();
+      await session.appendMessage(assistant("a1", "hi"));
+      await context.setBlock("notes", "likes tea");
+      await session.appendMessage(user("u2", "again"));
+      const u1 = (await session.getMessage("u1"))!;
+      // A regeneration of a1 that passes tools stops inside prepare...
+      hold = true;
+      const regeneration = context.prepare({
+        messages: [u1],
+        tools: [{ name: "search", hash: "1" }]
+      });
+      while (!waiting) await new Promise((resolve) => setTimeout(resolve, 1));
+      hold = false;
+      // ...while the new turn u2 records the code write, passing no tools.
+      await context.prepare();
+      release();
+      await regeneration;
+      const record = JSON.parse(
+        (await session.internal_annotations("context", ["u2"])).get("u2") ??
+          "{}"
+      ) as { tools?: unknown; changes?: unknown };
+      expect(record.changes).toBeDefined();
+      expect(record.tools).toBeUndefined();
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>

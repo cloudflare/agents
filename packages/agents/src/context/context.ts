@@ -222,8 +222,6 @@ export class Context {
   #frozen: string | null | undefined;
   /** The CHANGED labels, read from the session once. */
   #changed: Set<string> | undefined;
-  /** The tools of the turn `prepare` is recording, while it runs. */
-  #turnTools: readonly (readonly [string, string])[] | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
   /** Records by message id, as last read or written (see `#records`). */
@@ -275,13 +273,7 @@ export class Context {
     if (!options.tools) return this.#prepareBlocks(options, history);
     const tools = options.tools.map(({ name, hash }) => [name, hash] as const);
     const before = (await this.#delivered(history)).tools;
-    this.#turnTools = tools;
-    let prepared: PreparedContext;
-    try {
-      prepared = await this.#prepareBlocks(options, history);
-    } finally {
-      this.#turnTools = undefined;
-    }
+    const prepared = await this.#prepareBlocks(options, history, tools);
     if (options.retry) return prepared;
     const notice = before ? toolNotice(before, tools) : null;
     const tail = history.at(-1);
@@ -334,9 +326,11 @@ export class Context {
     return prepared;
   }
 
+  /** `tools`, when given, goes on every record this writes. */
   async #prepareBlocks(
     options: ContextPrepareOptions,
-    history: readonly SessionMessage[]
+    history: readonly SessionMessage[],
+    tools?: readonly (readonly [string, string])[]
   ): Promise<PreparedContext> {
     const refresh = await this.#refreshPending();
     let delivered = await this.#delivered(history);
@@ -393,7 +387,10 @@ export class Context {
       const at = await target();
       if (at) {
         if (!unchanged) {
-          await this.#put(at.id, { system: sections });
+          await this.#put(at.id, {
+            system: sections,
+            ...(tools && { tools })
+          });
         }
         if (refresh) await this.#setRefresh(false);
         await this.#setChanged(null);
@@ -409,7 +406,8 @@ export class Context {
       // The release's frozen prompt becomes this session's first record.
       await this.#put(at.id, {
         system: delivered.system,
-        delivered: [...delivered.values].filter(([label]) => label !== CARRIED)
+        delivered: [...delivered.values].filter(([label]) => label !== CARRIED),
+        ...(tools && { tools })
       });
       delivered = { ...delivered, base: at.id };
     }
@@ -434,7 +432,8 @@ export class Context {
       ...existing,
       changes: mergeSections(existing?.changes ?? [], changes),
       ...(delivered.base !== at.id && { base: delivered.base }),
-      delivered: [...values]
+      delivered: [...values],
+      ...(tools && { tools })
     });
     await this.#setChanged(null);
     return { system, reminder: null };
@@ -917,12 +916,7 @@ export class Context {
     return found;
   }
 
-  async #put(id: string, given: ContextRecord): Promise<void> {
-    // A record written while a turn's tools are known carries them.
-    const record =
-      this.#turnTools && !given.tools
-        ? { ...given, tools: this.#turnTools }
-        : given;
+  async #put(id: string, record: ContextRecord): Promise<void> {
     await this.#session.internal_setAnnotation(
       RECORD,
       id,
