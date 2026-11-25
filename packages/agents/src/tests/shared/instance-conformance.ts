@@ -26,7 +26,7 @@ type Snapshot = {
   indexes: string[];
   keys: string[];
   jobs: string[];
-  /** `<table> <row count>` for every table but the job queue. */
+  /** `<table> <rows as JSON>` for every table but the job queue. */
   rows: string[];
 };
 
@@ -53,16 +53,19 @@ function snapshot(storage: DurableObjectStorage): Snapshot {
   return {
     tables,
     indexes: names("index"),
-    keys: [...storage.kv.list()].map(([key]) => key).sort(),
+    // Keys and rows with their values, so an overwrite in place shows.
+    keys: [...storage.kv.list()]
+      .map(([key, value]) => `${key} ${JSON.stringify(value)}`)
+      .sort(),
     jobs,
     rows: tables
       .filter((table) => table !== "cf_agents_jobs")
-      .map((table) => {
-        const { n } = storage.sql
-          .exec<{ n: number }>(`SELECT count(*) AS n FROM "${table}"`)
-          .one();
-        return `${table} ${n}`;
-      })
+      .map(
+        (table) =>
+          `${table} ${JSON.stringify(
+            storage.sql.exec(`SELECT * FROM "${table}" ORDER BY 1`).toArray()
+          )}`
+      )
   };
 }
 
@@ -132,9 +135,12 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
       );
     }
   }
-  for (const key of alone.keys) {
-    if (lifecycleOwn("keys", key) || !key.startsWith("cf_agents:")) continue;
-    expect(both.keys, `the probe instance's copy of ${key}`).toContain(
+  const keyName = (entry: string) => entry.slice(0, entry.indexOf(" "));
+  const bothKeys = both.keys.map(keyName);
+  for (const entry of alone.keys) {
+    const key = keyName(entry);
+    if (lifecycleOwn("keys", entry) || !key.startsWith("cf_agents:")) continue;
+    expect(bothKeys, `the probe instance's copy of ${key}`).toContain(
       `cf_agents:${id}:${key.slice("cf_agents:".length)}`
     );
   }

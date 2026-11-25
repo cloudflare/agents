@@ -196,7 +196,7 @@ export abstract class LifecycleCapability<Props extends object = object> {
    * from this instance's id, so it can never equal a name an app chose.
    */
   protected get composedName(): string {
-    const name = `@${this.capabilityId.replace(/\//g, "-")}`;
+    const name = `@${this.capabilityId}`;
     composedNames.add(name);
     return name;
   }
@@ -272,17 +272,31 @@ export function capabilityStore(
       key: (name) => `cf_agents:${name}`
     };
   }
-  const derived = instanceName.startsWith("@");
-  const plain = (derived ? instanceName.slice(1) : instanceName).replace(
-    /-/g,
-    "_"
-  );
-  const suffix = `__${derived ? "c" : "n"}_${plain}`;
+  const suffix = instanceSuffix(instanceName);
   return {
     table: (name) => `cf_agents_${name}${suffix}`,
     index: (name) => `idx_cf_agents_${name}${suffix}`,
     key: (name) => `cf_agents:${capabilityId}:${name}`
   };
+}
+
+/**
+ * @internal The storage-name suffix of a named instance. A chosen name
+ * (`[a-z][a-z0-9-]*`) becomes `__n_<name>` with `-` as `_`. A derived name
+ * (`@<composer id>`, which can hold `@`, `/` and `-`) becomes `__c_<name>`
+ * with each of those escaped (`_a`, `_s`, `_h`), so no two names meet and
+ * the result is a plain SQLite identifier.
+ */
+export function instanceSuffix(instanceName: string): string {
+  if (!instanceName.startsWith("@")) {
+    return `__n_${instanceName.replace(/-/g, "_")}`;
+  }
+  const escaped = instanceName
+    .slice(1)
+    .replace(/[@/-]/g, (char) =>
+      char === "@" ? "_a" : char === "/" ? "_s" : "_h"
+    );
+  return `__c_${escaped}`;
 }
 
 /**

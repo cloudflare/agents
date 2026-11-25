@@ -55,6 +55,17 @@ class Notes extends LifecycleCapability {
     return this.lifecycle.jobs.list().map((job) => job.id);
   }
 
+  pushUnnamed() {
+    return this.lifecycle.jobs.push({
+      fn: "report",
+      time: Date.now() + 60_000
+    });
+  }
+
+  cancel(id: string): Promise<boolean> {
+    return this.lifecycle.jobs.cancel(id);
+  }
+
   makeDue(id: string): Promise<boolean> {
     return this.lifecycle.jobs.reschedule(id, Date.now() - 1);
   }
@@ -145,6 +156,23 @@ describe("capability instances", () => {
     });
   });
 
+  it("keeps a named instance's job pushed without an id its own", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const audit = new Notes("audit");
+      const { lifecycle } = install(audit);
+      await lifecycle.start();
+      const job = await audit.pushUnnamed();
+      expect(job.id).not.toContain("notes/audit");
+      expect(
+        storage.sql
+          .exec<{ id: string }>("SELECT id FROM cf_agents_jobs")
+          .toArray()[0]?.id
+      ).toBe(`notes/audit:${job.id}`);
+      expect(await audit.cancel(job.id)).toBe(true);
+      expect(audit.jobIds()).toEqual([]);
+    });
+  });
+
   it("names a duplicate by kind and instance", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const { lifecycle } = install(new Notes());
@@ -167,19 +195,35 @@ describe("capability instances", () => {
   });
 
   it("installs what a capability composes first, named after its composer, two levels deep", async () => {
-    await withCapabilityHarness(async ({ install }) => {
+    await withCapabilityHarness(async ({ install, storage }) => {
       const desk = new Desk();
       const { lifecycle } = install(desk);
       expect(lifecycleInstances(lifecycle).installed).toEqual([
-        "notes/@note-taker-@desk",
+        "notes/@note-taker/@desk",
         "note-taker/@desk",
         "desk"
       ]);
-      // An app's own instance with the same plain name is another one.
+      // An app's own instance with the same plain name is another one, and
+      // so is what it composes.
       lifecycle.use(new NoteTaker("desk"));
-      expect(lifecycleInstances(lifecycle).installed).toContain(
+      expect(lifecycleInstances(lifecycle).installed.slice(3)).toEqual([
+        "notes/@note-taker/desk",
         "note-taker/desk"
-      );
+      ]);
+      // They start, each on tables of its own.
+      await lifecycle.start();
+      await desk.taker.notes.add("d", "t");
+      expect(desk.taker.notes.ids()).toEqual(["d"]);
+      const tables = storage.sql
+        .exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_agents_notes%' ORDER BY name"
+        )
+        .toArray()
+        .map((row) => row.name);
+      expect(tables).toEqual([
+        "cf_agents_notes__c_note_htaker_s_adesk",
+        "cf_agents_notes__c_note_htaker_sdesk"
+      ]);
     });
   });
 

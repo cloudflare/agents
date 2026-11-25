@@ -21,7 +21,7 @@ import {
 import {
   bindLifecycleCapability,
   capabilityInstallOrder,
-  capabilityStore,
+  instanceSuffix,
   lifecycleCapabilityId,
   LifecycleCapability,
   type LifecycleHostContextScope,
@@ -368,13 +368,13 @@ function namedInstanceJobs(
   const prefix = `${capabilityId}:`;
   const stored = (id: string) => `${prefix}${id}`;
   return Object.freeze({
+    // A job with no id gets one here, so it is stored under the prefix too.
     push: async (options: LifecycleJobPushOptions) =>
       ownJob(
-        await jobs.push(
-          options.id === undefined
-            ? options
-            : { ...options, id: stored(options.id) }
-        ),
+        await jobs.push({
+          ...options,
+          id: stored(options.id ?? crypto.randomUUID())
+        }),
         prefix
       ),
     cancel: (id: string) => jobs.cancel(stored(id)),
@@ -650,25 +650,24 @@ export class Lifecycle<
     }
     // A named instance's tables end with its suffix; tables whose suffix no
     // installed instance has are listed by name.
-    const suffixes = this.#capabilities.flatMap((capability) =>
-      capability instanceof LifecycleCapability &&
-      capability.instanceName !== undefined
-        ? [
-            capabilityStore(
-              capability.capabilityId,
-              capability.instanceName
-            ).table("")
-          ]
-        : []
+    // A table name does not say its kind, only its instance's suffix: a
+    // table is listed when no installed instance has that suffix.
+    const suffixes = new Set(
+      this.#capabilities.flatMap((capability) =>
+        capability instanceof LifecycleCapability &&
+        capability.instanceName !== undefined
+          ? [instanceSuffix(capability.instanceName)]
+          : []
+      )
     );
     for (const { name } of this.#ctx.storage.sql
       .exec<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_agents_%'"
       )
       .toArray()) {
-      if (!/__[nc]_[a-z0-9_]+$/.test(name)) continue;
-      const suffix = name.slice(name.lastIndexOf("__"));
-      if (!suffixes.some((owned) => owned.endsWith(suffix))) found.add(name);
+      const at = name.search(/__[nc]_/);
+      if (at === -1) continue;
+      if (!suffixes.has(name.slice(at))) found.add(name);
     }
     return { installed, stored: [...found] };
   }
@@ -1564,6 +1563,24 @@ export class Lifecycle<
     }
   }
 
+  /** Owners reported missing in this isolate. */
+  readonly #reportedMissing = new Set<string>();
+
+  /**
+   * A stored job's owner is not installed: the instance itself is missing
+   * (a deploy removed or renamed it). Its rows are kept. Reported once per
+   * owner per isolate, which is once per start.
+   */
+  #reportMissingCapability(owner: string): void {
+    if (this.#reportedMissing.has(owner)) return;
+    this.#reportedMissing.add(owner);
+    this.#emitCapabilityEvent({
+      source: "lifecycle",
+      type: "capability_missing",
+      payload: { capability: owner }
+    });
+  }
+
   /** Alarm invocations running on this instance. */
   #alarmsRunning = 0;
 
@@ -1585,6 +1602,7 @@ export class Lifecycle<
       };
     }
     const capability = await this.#capabilityRunner.findById(owner);
+    if (!capability) this.#reportMissingCapability(owner);
     if (!capability?.onJob) return undefined;
     // A named instance sees its job ids without the prefix they are stored
     // under.
