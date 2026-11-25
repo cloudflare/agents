@@ -365,6 +365,10 @@ describe("Resumable Streaming", () => {
       expect(preAckChunks.length).toBe(0);
 
       // ws1 should receive the live chunks
+      await waitFor(
+        () => messages1.filter(isUseChatResponseMessage).length >= 2,
+        5000
+      );
       const ws1Chunks = messages1.filter(isUseChatResponseMessage);
       expect(ws1Chunks.map((m) => m.body)).toEqual([
         '{"type":"text-delta","id":"0","delta":"A"}',
