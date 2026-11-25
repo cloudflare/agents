@@ -27,4 +27,27 @@ describe("legacy chat stream import", () => {
       ]);
     });
   });
+  it("moves the progress marker's durable part into Streams' counters, once", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      const root = await instance.probeLegacyProgressImport(false);
+      expect(root).toEqual({ marker: 7, tables: [], rowsLeft: 0 });
+    });
+    const facetStub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(facetStub, async (instance: StreamBenchObject) => {
+      const facet = await instance.probeLegacyProgressImport(true);
+      expect(facet).toEqual({
+        marker: 7,
+        tables: ["cf_agents_chat_progress"],
+        rowsLeft: 0
+      });
+    });
+  });
+
+  it("makes no counters table until something is counted", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      expect(await instance.probeCountersTableAfterStart()).toBe(false);
+    });
+  });
 });

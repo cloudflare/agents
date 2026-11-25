@@ -177,6 +177,16 @@ export interface StreamsSyncInternal {
     reason: string | null,
     options?: StreamSettleOptions
   ): boolean;
+  /**
+   * A counter kept with this Streams, 0 when never set. Its table is made
+   * by the first write, so a Streams nobody counts with has none and a
+   * start reads nothing for it.
+   */
+  counter(name: string): number;
+  /** Add `delta` to a counter: one row write. */
+  addToCounter(name: string, delta: number): void;
+  /** Set a counter: one row write. */
+  setCounter(name: string, value: number): void;
   /** Delete a stream and its chunks regardless of state. */
   deleteUnchecked(streamId: string): void;
   /** Delete many streams and their chunks regardless of state, silently. */
@@ -240,7 +250,11 @@ export interface StreamsSyncInternal {
 export class Streams extends LifecycleCapability {
   readonly #maxChunkBytes: number;
   /** This instance's tables, resolved once. */
-  readonly #tables: { readonly streams: SqlName; readonly blocks: SqlName };
+  readonly #tables: {
+    readonly streams: SqlName;
+    readonly blocks: SqlName;
+    readonly counters: SqlName;
+  };
   /** This instance's schema version key. */
   readonly #schemaVersionKey: string;
   /** The one-block INSERT, built once from this instance's table. */
@@ -309,7 +323,8 @@ export class Streams extends LifecycleCapability {
     super("streams", options.name);
     this.#tables = {
       streams: new SqlName(this.store.table("streams")),
-      blocks: new SqlName(this.store.table("stream_blocks"))
+      blocks: new SqlName(this.store.table("stream_blocks")),
+      counters: new SqlName(this.store.table("stream_counters"))
     };
     this.#schemaVersionKey = this.store.key("streams_schema_version");
     // The default's text is the released statement's, byte for byte.
@@ -575,6 +590,34 @@ export class Streams extends LifecycleCapability {
   #buildSyncAperture(): StreamsSyncInternal {
     return {
       ensureTables: () => this.#ensureTables(),
+      counter: (name) => {
+        try {
+          const rows = this.lifecycle.storage.sql
+            .exec<{
+              value: number;
+            }>(`SELECT value FROM ${this.#tables.counters} WHERE key = ?`, name)
+            .toArray();
+          return rows[0]?.value ?? 0;
+        } catch (cause) {
+          if (!hasTable(this.lifecycle.storage.sql, this.#tables.counters.name))
+            return 0;
+          throw cause;
+        }
+      },
+      addToCounter: (name, delta) =>
+        this.#writeCounter(
+          `INSERT INTO ${this.#tables.counters} (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = value + excluded.value`,
+          name,
+          delta
+        ),
+      setCounter: (name, value) =>
+        this.#writeCounter(
+          `INSERT INTO ${this.#tables.counters} (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          name,
+          value
+        ),
       getStream: (streamId) => this.#getStream(streamId),
       insertStream: (streamId, tag, metadata) => {
         this.#validateStreamId(streamId);
@@ -1531,6 +1574,24 @@ export class Streams extends LifecycleCapability {
       updatedAt,
       ...(row.closed_at !== null ? { closedAt: row.closed_at } : {})
     };
+  }
+
+  /** Run a counter write, making the counters table on the first one. */
+  #writeCounter(query: string, name: string, value: number): void {
+    const sql = this.lifecycle.storage.sql;
+    try {
+      sql.exec(query, name, value);
+      return;
+    } catch (cause) {
+      if (hasTable(sql, this.#tables.counters.name)) {
+        throw new SqlError(query, cause);
+      }
+    }
+    sql.exec(`CREATE TABLE IF NOT EXISTS ${this.#tables.counters} (
+      key TEXT PRIMARY KEY,
+      value INTEGER NOT NULL
+    ) WITHOUT ROWID`);
+    sql.exec(query, name, value);
   }
 
   #ensureTables(): void {

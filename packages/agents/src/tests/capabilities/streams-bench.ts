@@ -503,4 +503,67 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
       tables
     };
   }
+
+  /**
+   * Seed the host-made progress table an earlier version kept, start the
+   * adapter as a root or a facet would, and report the marker and tables.
+   */
+  async probeLegacyProgressImport(
+    facet: boolean
+  ): Promise<{ marker: number; tables: string[]; rowsLeft: number }> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE cf_agents_chat_progress (key TEXT PRIMARY KEY, retired INTEGER NOT NULL, legacy INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID"
+    );
+    sql.exec("INSERT INTO cf_agents_chat_progress VALUES ('chat', 5, 2)");
+    const adapter = this.#facetAdapter(facet);
+    // A second start must not count the moved total again.
+    this.#facetAdapter(facet);
+    const tables = sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_chat_progress'"
+      )
+      .toArray()
+      .map((row) => row.name);
+    const rowsLeft =
+      tables.length === 0
+        ? 0
+        : sql.exec("SELECT 1 FROM cf_agents_chat_progress").toArray().length;
+    return { marker: adapter.progressMarker(), tables, rowsLeft };
+  }
+
+  /** Whether a start with no counting yet made the counters table. */
+  async probeCountersTableAfterStart(): Promise<boolean> {
+    await this.lifecycle.start();
+    this.#adapter();
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%stream_counters'"
+        )
+        .toArray().length > 0
+    );
+  }
+
+  #facetAdapter(facet: boolean): ResumableStream {
+    const sql = this.ctx.storage.sql;
+    return new ResumableStream(
+      this.streams,
+      <T = Record<string, unknown>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] =>
+        [
+          ...sql.exec(
+            strings.reduce(
+              (q, part, i) => q + part + (i < values.length ? "?" : ""),
+              ""
+            ),
+            ...values
+          )
+        ] as T[],
+      () => facet
+    );
+  }
 }
