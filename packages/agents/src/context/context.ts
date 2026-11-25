@@ -313,7 +313,15 @@ export class Context {
     }
     // This record moves past the history it was given, so what the model
     // wrote itself there counts as delivered, as on a change record.
-    const { own } = await this.#changes(delivered, history);
+    // The model's own writes, from the transcript and the blocks as loaded
+    // this turn: no provider is read again.
+    const known = this.#known(delivered, history, await this.#changedLabels());
+    const own =
+      known.size > 0
+        ? (await this.#blocks.internal_sections()).filter(([label]) =>
+            known.has(label)
+          )
+        : [];
     const values = new Map(delivered.values);
     values.delete(CARRIED);
     for (const [label, text] of own) values.set(label, text);
@@ -794,19 +802,9 @@ export class Context {
     delivered: Delivered,
     history: readonly SessionMessage[]
   ): Promise<{ changes: Section[]; own: Section[] }> {
-    const writes = ownWrites(history, delivered.at);
     const remind = await this.#blocks.internal_remindSections();
     const changed = await this.#changedLabels();
-    const known = new Set<string>();
-    for (const [label, write] of writes) {
-      const content = this.#blocks.getBlock(label)?.content;
-      // A replace set the whole block; an append only its end, so code may
-      // have changed the rest since the model last saw it.
-      const holds = write.append
-        ? !changed.has(label) && content?.endsWith(write.content) === true
-        : content === write.content;
-      if (holds) known.add(label);
-    }
+    const known = this.#known(delivered, history, changed);
     const current =
       changed.size > 0 || known.size > 0
         ? await this.#blocks.internal_sections()
@@ -829,6 +827,28 @@ export class Context {
       changes,
       own: current.filter(([label]) => known.has(label))
     };
+  }
+
+  /**
+   * Blocks that hold what the model last wrote itself in the history since
+   * the newest record. Reads the transcript and the loaded blocks only.
+   */
+  #known(
+    delivered: Delivered,
+    history: readonly SessionMessage[],
+    changed: ReadonlySet<string>
+  ): Set<string> {
+    const known = new Set<string>();
+    for (const [label, write] of ownWrites(history, delivered.at)) {
+      const content = this.#blocks.getBlock(label)?.content;
+      // A replace set the whole block; an append only its end, so code may
+      // have changed the rest since the model last saw it.
+      const holds = write.append
+        ? !changed.has(label) && content?.endsWith(write.content) === true
+        : content === write.content;
+      if (holds) known.add(label);
+    }
+    return known;
   }
 
   async #changedLabels(): Promise<Set<string>> {

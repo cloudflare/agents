@@ -1367,7 +1367,10 @@ describe("Context", () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       // A remind block whose read can be held at a gate.
       let hold = false;
-      let waiting = false;
+      let reached = () => {};
+      const waiting = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
       let release = () => {};
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -1380,7 +1383,7 @@ describe("Context", () => {
           provider: {
             get: async () => {
               if (hold) {
-                waiting = true;
+                reached();
                 await gate;
               }
               return "noon";
@@ -1400,7 +1403,8 @@ describe("Context", () => {
         messages: [u1],
         tools: [{ name: "search", hash: "1" }]
       });
-      while (!waiting) await new Promise((resolve) => setTimeout(resolve, 1));
+      // Wait for it at the gate; a call that fails before it fails the test.
+      await Promise.race([waiting, regeneration]);
       hold = false;
       // ...while the new turn u2 records the code write, passing no tools.
       await context.prepare();
@@ -1412,6 +1416,31 @@ describe("Context", () => {
       ) as { tools?: unknown; changes?: unknown };
       expect(record.changes).toBeDefined();
       expect(record.tools).toBeUndefined();
+    });
+  });
+
+  it("reads each remind provider once on a turn that changes only tools", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      let reads = 0;
+      const { session, context } = await setup(storage, (s) => install(s), [
+        {
+          label: "clock",
+          whenChanged: "remind",
+          provider: {
+            get: async () => {
+              reads++;
+              return "noon";
+            }
+          }
+        }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      reads = 0;
+      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      expect(reads).toBe(1);
     });
   });
 
