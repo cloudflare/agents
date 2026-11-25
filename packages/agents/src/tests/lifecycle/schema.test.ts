@@ -5,6 +5,8 @@ import {
   hasTable,
   SCHEMA_VERSIONS_KEY
 } from "../../lifecycle/schema";
+import { ensureMcpServerTable } from "../../mcp/client/storage";
+import { McpServerStore } from "../../mcp/client/server-store";
 import { Queue } from "../../queue";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
@@ -18,7 +20,19 @@ class Versioned extends LifecycleCapability {
     super(kind);
   }
 
+  get schema() {
+    return this.lifecycle.schema;
+  }
+
   onStart(): void {
+    if (this.kind === "mcp") {
+      this.lifecycle.schema.migrateSync({
+        version: 1,
+        legacyKey: "cf_agents:mcp_schema_version",
+        steps: {}
+      });
+      return;
+    }
     this.lifecycle.schema.migrateSync({
       version: 2,
       legacyKey: this.legacyKey,
@@ -173,6 +187,23 @@ describe("the schema versions record", () => {
 
       expect(storage.kv.get("cf_agents:late_schema_version")).toBe(undefined);
       expect(storage.kv.get(SCHEMA_VERSIONS_KEY)).toMatchObject({ late: 1 });
+    });
+  });
+
+  it("records MCP's status columns on first use, so later starts read no column list", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      storage.kv.put("cf_agents:mcp_schema_version", 1);
+      ensureMcpServerTable(storage);
+      const owner = new Versioned("mcp");
+      const { lifecycle } = install(owner);
+      await lifecycle.start();
+      new McpServerStore(storage, owner.schema).isPendingStepUp("absent");
+
+      expect(storage.kv.get(SCHEMA_VERSIONS_KEY)).toMatchObject({ mcp: 2 });
+      expect(hasColumn(storage.sql, "cf_agents_mcp_servers", "failure")).toBe(
+        true
+      );
+      expect(storage.kv.get("cf_agents:mcp_schema_version")).toBe(undefined);
     });
   });
 });

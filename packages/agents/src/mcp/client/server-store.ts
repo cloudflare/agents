@@ -2,6 +2,8 @@ import type {
   ClientCapabilities,
   DiscoverResult
 } from "@modelcontextprotocol/client";
+import { hasColumn, type LifecycleSchema } from "../../lifecycle/schema";
+
 import {
   decodeMcpServerOptions,
   encodeMcpServerOptions,
@@ -46,6 +48,9 @@ type StoredMcpSession = {
   readonly discoverResult?: DiscoverResult;
 };
 
+/** The MCP schema version that adds the status columns (on first use). */
+const STATUS_COLUMNS_VERSION = 2;
+
 /**
  * The durable MCP server catalog: one `cf_agents_mcp_servers` row per
  * registered server. Every SQL statement the client manager runs lives here,
@@ -56,7 +61,10 @@ export class McpServerStore {
   /**
    * @param storage - The Durable Object storage holding the catalog table.
    */
-  constructor(private readonly storage: DurableObjectStorage) {}
+  constructor(
+    private readonly storage: DurableObjectStorage,
+    private readonly schema?: LifecycleSchema
+  ) {}
 
   #statusColumnsReady = false;
 
@@ -273,21 +281,28 @@ export class McpServerStore {
    */
   #ensureStatusColumns(): void {
     if (this.#statusColumnsReady) return;
-    const present = new Set(
-      this.#exec<{ name: string }>(
-        "SELECT name FROM pragma_table_info('cf_agents_mcp_servers')"
-      ).map((column) => column.name)
-    );
-    for (const [column, type] of [
-      ["failure", "TEXT"],
-      ["authorization_rounds", "TEXT"],
-      ["pending_step_up", "INTEGER"]
-    ] as const) {
-      if (!present.has(column)) {
-        this.#exec(
-          `ALTER TABLE cf_agents_mcp_servers ADD COLUMN ${column} ${type}`
-        );
+    const addColumns = () => {
+      for (const [column, type] of [
+        ["failure", "TEXT"],
+        ["authorization_rounds", "TEXT"],
+        ["pending_step_up", "INTEGER"]
+      ] as const) {
+        if (!hasColumn(this.storage.sql, "cf_agents_mcp_servers", column)) {
+          this.#exec(
+            `ALTER TABLE cf_agents_mcp_servers ADD COLUMN ${column} ${type}`
+          );
+        }
       }
+    };
+    // Version 2 of the MCP schema, recorded on first use: a start after
+    // that reads no column list.
+    if (this.schema) {
+      this.schema.migrateSync({
+        version: STATUS_COLUMNS_VERSION,
+        steps: { [STATUS_COLUMNS_VERSION]: addColumns }
+      });
+    } else {
+      addColumns();
     }
     this.#statusColumnsReady = true;
   }

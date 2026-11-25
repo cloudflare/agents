@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { storeAsReleased } from "../shared/schema-versions";
 import {
   evictDurableObject,
   runDurableObjectAlarm,
@@ -547,7 +548,12 @@ describe("Scheduler declared schedules", () => {
             owner_path_key: null
           })
         );
-        await state.storage.put("cf_agents:schedules_schema_version", 2);
+        storeAsReleased(
+          state.storage,
+          "scheduler",
+          "cf_agents:schedules_schema_version",
+          2
+        );
       }
     );
 

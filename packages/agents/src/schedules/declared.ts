@@ -8,6 +8,7 @@
  * next occurrence never depends on re-reading the declaration.
  */
 
+import { hasTable } from "../lifecycle/schema";
 import type { LifecycleServices } from "../lifecycle/capability";
 import type {
   LifecycleJob,
@@ -470,13 +471,8 @@ export class DeclaredScheduleSet {
       }
       await lifecycle.jobs.cancel(job.id);
     }
-    const tables = storage.sql
-      .exec(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        LEGACY_DECLARED_TABLE
-      )
-      .toArray();
-    if (tables.length > 0) {
+    const hasLegacyTable = hasTable(storage.sql, LEGACY_DECLARED_TABLE);
+    if (hasLegacyTable) {
       const rows = storage.sql
         .exec(`SELECT task_id, next_run_at FROM ${LEGACY_DECLARED_TABLE}`)
         .toArray() as Array<{ task_id: string; next_run_at: number | null }>;
@@ -489,7 +485,7 @@ export class DeclaredScheduleSet {
     if (Object.keys(next).length > 0) {
       await storage.put(LEGACY_NEXT_RUN_KEY, { ...next });
     }
-    if (tables.length > 0) {
+    if (hasLegacyTable) {
       storage.sql.exec(`DROP TABLE ${LEGACY_DECLARED_TABLE}`);
     }
   }

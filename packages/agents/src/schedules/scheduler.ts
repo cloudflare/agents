@@ -7,6 +7,7 @@
  * timing vocabulary.
  */
 
+import { hasTable } from "../lifecycle/schema";
 import {
   LifecycleCapability,
   type LifecycleRouteContext
@@ -243,17 +244,14 @@ export class Scheduler<
   async onStart(): Promise<void> {
     this.#warnedStartupCallbacks.clear();
     await this.#handOverSoon();
-    const storage = this.lifecycle.storage;
-    const version =
-      (await storage.get<number>(SCHEDULE_SCHEMA_VERSION_KEY)) ?? 0;
-    if (version >= CURRENT_SCHEDULE_SCHEMA_VERSION) return;
-
-    if (version < 2) await this.#migrateLegacyScheduleTable(storage);
-    await this.#declared.migrateLegacy();
-    await storage.put(
-      SCHEDULE_SCHEMA_VERSION_KEY,
-      CURRENT_SCHEDULE_SCHEMA_VERSION
-    );
+    await this.lifecycle.schema.migrate({
+      version: CURRENT_SCHEDULE_SCHEMA_VERSION,
+      legacyKey: SCHEDULE_SCHEMA_VERSION_KEY,
+      steps: {
+        2: () => this.#migrateLegacyScheduleTable(this.lifecycle.storage),
+        3: () => this.#declared.migrateLegacy()
+      }
+    });
   }
 
   /**
@@ -264,12 +262,7 @@ export class Scheduler<
   async #migrateLegacyScheduleTable(
     storage: DurableObjectStorage
   ): Promise<void> {
-    const tables = storage.sql
-      .exec(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
-      )
-      .toArray();
-    if (tables.length === 0) return;
+    if (!hasTable(storage.sql, "cf_agents_schedules")) return;
 
     const rows = storage.sql
       .exec("SELECT * FROM cf_agents_schedules")
