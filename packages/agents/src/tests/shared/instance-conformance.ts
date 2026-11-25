@@ -192,6 +192,12 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
     perOwner(both.jobs),
     "jobs per owner other than the probe, next to the probe"
   ).toEqual(perOwner(alone.jobs));
+  // And the probe's smoke leaves every other owner's jobs as they were.
+  const others = (jobs: string[]) => jobs.filter((job) => owner(job) !== id);
+  expect(
+    others(both.jobs),
+    "other owners' jobs across the probe's smoke"
+  ).toEqual(others(before.jobs));
   // The Lifecycle's own (the job queue, its bookkeeping keys) belongs to
   // no instance.
   const lifecycleOwn = (field: "tables" | "indexes" | "keys", name: string) =>
