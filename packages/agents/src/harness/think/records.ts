@@ -16,6 +16,7 @@ import {
   type JsonValue,
   type OperationRecord as StoredOperation
 } from "../store/store";
+import { hasTable } from "../../lifecycle/schema";
 
 /** What an operation asks the harness to do, as stored. */
 export type OperationInput =
@@ -218,24 +219,16 @@ export class ReleasedRecords {
 
   /**
    * The records, or `undefined` when no table of a released version is
-   * left (every start after the first): one read of the schema.
+   * there. Run once per object, as a schema step.
    */
   static open(storage: DurableObjectStorage): ReleasedRecords | undefined {
-    const names = [
-      ...STORE_TABLES.map((table) => `${STORE_PREFIX}${table}`),
-      LEGACY_SESSIONS,
-      LEGACY_OPERATIONS,
-      LEGACY_TOOL_CALLS
-    ];
     const present = new Set(
-      storage.sql
-        .exec<{ name: string }>(
-          `SELECT name FROM sqlite_master WHERE type = 'table'
-           AND name IN (${names.map(() => "?").join(", ")})`,
-          ...names
-        )
-        .toArray()
-        .map((row) => row.name)
+      [
+        ...STORE_TABLES.map((table) => `${STORE_PREFIX}${table}`),
+        LEGACY_SESSIONS,
+        LEGACY_OPERATIONS,
+        LEGACY_TOOL_CALLS
+      ].filter((name) => hasTable(storage.sql, name))
     );
     return present.size === 0
       ? undefined

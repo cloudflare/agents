@@ -10,6 +10,7 @@ import type {
 } from "../../../experimental/channels/harness";
 import { Context } from "../../../context";
 import { Lifecycle } from "../../../lifecycle";
+import { forgetSchemaVersion } from "../../../lifecycle/durable-object-lifecycle";
 import { openHarnessStore, type JsonValue } from "../../store/store";
 import { Streams } from "../../../streams/streams";
 import { Tasks } from "../../../tasks/tasks";
@@ -712,6 +713,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
    * into its own tables, reusing an id the shared store already holds.
    */
   seedRollbackRecords(operationId: string): void {
+    // The earlier version kept no schema version for the harness.
+    forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
     const sql = this.ctx.storage.sql;
     createLegacyTables(sql);
     sql.exec(
@@ -744,6 +747,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
    * untouched: their format did not change.
    */
   downgradeToStore(abandonReason: string | null = null): void {
+    // The released version kept no schema version for the harness.
+    forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
     const sql = this.ctx.storage.sql;
     const store = openHarnessStore(this.ctx.storage, {
       prefix: SHARED_STORE_PREFIX

@@ -584,25 +584,36 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     this.#bindOwned();
     await this.#sessions.onStart();
     await this.#streams.onStart();
-    const released = ReleasedRecords.open(this.lifecycle.storage);
-    if (released) {
-      await this.#carryForward(released);
-      for (const session of released.sessions()) {
-        const handle = this.#handle(session.id);
-        await handle.internal_setConfig(
-          SESSION_KEY,
-          sessionValue(session.parent, session.createdAt)
-        );
-        if (session.clientTools.length > 0) {
-          await handle.internal_setConfig(
-            CLIENT_TOOLS_KEY,
-            JSON.stringify(session.clientTools)
-          );
-        }
-      }
-      released.drop();
-    }
+    await this.lifecycle.schema.migrate({
+      version: 1,
+      steps: { 1: () => this.#carryReleased() }
+    });
     await this.#ensureSession(ROOT_SESSION);
+  }
+
+  /**
+   * Move what a released version kept in the harness store into Tasks and
+   * Sessions, then drop the store's tables. Idempotent, as a schema step
+   * must be: a reset part way runs it again.
+   */
+  async #carryReleased(): Promise<void> {
+    const released = ReleasedRecords.open(this.lifecycle.storage);
+    if (!released) return;
+    await this.#carryForward(released);
+    for (const session of released.sessions()) {
+      const handle = this.#handle(session.id);
+      await handle.internal_setConfig(
+        SESSION_KEY,
+        sessionValue(session.parent, session.createdAt)
+      );
+      if (session.clientTools.length > 0) {
+        await handle.internal_setConfig(
+          CLIENT_TOOLS_KEY,
+          JSON.stringify(session.clientTools)
+        );
+      }
+    }
+    released.drop();
   }
 
   /**
