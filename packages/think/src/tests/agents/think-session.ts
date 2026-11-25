@@ -10081,6 +10081,7 @@ export class ThinkProgrammaticTestAgent extends Think {
 
     // Never hand back a state the caller did not wait for.
     const submission = await this.inspectSubmission(submissionId);
+    if (submission && predicate(submission)) return submission;
     throw new Error(
       `Submission ${submissionId} is ${submission?.status ?? "missing"}; the awaited state never came`
     );
