@@ -136,6 +136,25 @@ describe("Tasks lane arrival policies", () => {
     );
   });
 
+  it("arms the wake of a debounced run whose caller holds its local", async () => {
+    await runInDurableObject(
+      harness(),
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        await instance.tasks.run(
+          "laned",
+          { label: "a" },
+          { runId: "a", lane: "l", policy: { debounceMs: 60_000 }, local: "A" }
+        );
+        expect(
+          state.storage.sql
+            .exec("SELECT id FROM cf_agents_jobs WHERE id = 'task:a'")
+            .toArray()
+        ).toHaveLength(1);
+      }
+    );
+  });
+
   it("front goes ahead of the runs that have not started, behind the running one", async () => {
     await runInDurableObject(harness(), async (instance: TaskHarnessObject) => {
       const a = gate();
