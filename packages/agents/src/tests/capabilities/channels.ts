@@ -42,7 +42,7 @@ export type HarnessCall =
  * test sends the session events a real harness would. Operations never
  * settle on their own.
  */
-class ScriptedHarness implements AgentHarness {
+export class ScriptedHarness implements AgentHarness {
   readonly calls: HarnessCall[] = [];
   reject = false;
   /** What a new watch starts from, per session. */
