@@ -591,16 +591,22 @@ export class Streams extends LifecycleCapability {
     return {
       ensureTables: () => this.#ensureTables(),
       counter: (name) => {
+        if (this.#countersTable === false) return 0;
         try {
           const rows = this.lifecycle.storage.sql
             .exec<{
               value: number;
             }>(`SELECT value FROM ${this.#tables.counters} WHERE key = ?`, name)
             .toArray();
+          this.#countersTable = true;
           return rows[0]?.value ?? 0;
         } catch (cause) {
-          if (!hasTable(this.lifecycle.storage.sql, this.#tables.counters.name))
+          if (
+            !hasTable(this.lifecycle.storage.sql, this.#tables.counters.name)
+          ) {
+            this.#countersTable = false;
             return 0;
+          }
           throw cause;
         }
       },
@@ -1576,11 +1582,19 @@ export class Streams extends LifecycleCapability {
     };
   }
 
+  /**
+   * Whether this instance's counters table exists, once a read or write
+   * found out: a read of a missing table then costs nothing, not a failed
+   * query and a probe each time. Only {@link #writeCounter} creates it.
+   */
+  #countersTable: boolean | undefined;
+
   /** Run a counter write, making the counters table on the first one. */
   #writeCounter(query: string, name: string, value: number): void {
     const sql = this.lifecycle.storage.sql;
     try {
       sql.exec(query, name, value);
+      this.#countersTable = true;
       return;
     } catch (cause) {
       if (hasTable(sql, this.#tables.counters.name)) {
@@ -1592,6 +1606,7 @@ export class Streams extends LifecycleCapability {
       value INTEGER NOT NULL
     ) WITHOUT ROWID`);
     sql.exec(query, name, value);
+    this.#countersTable = true;
   }
 
   #ensureTables(): void {
