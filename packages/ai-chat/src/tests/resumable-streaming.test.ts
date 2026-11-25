@@ -838,18 +838,23 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      // Send the client-initiated resume request
+      // Send the client-initiated resume request. Its reply echoes the
+      // probe id; the notice onConnect sends on its own does not.
       ws2.send(
         JSON.stringify({
-          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+          probeId: "probe-active-ai-chat"
         })
       );
-      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
-
-      // Should have received CF_AGENT_STREAM_RESUMING (from request, not just onConnect)
-      const resumeMsgs = messages2.filter(isStreamResumingMessage);
-      // May get 2 (one from onConnect, one from request) or 1 if timing collapses them
-      expect(resumeMsgs.length).toBeGreaterThanOrEqual(1);
+      await waitFor(
+        () =>
+          messages2.some(
+            (m) =>
+              isStreamResumingMessage(m) &&
+              (m as { probeId?: unknown }).probeId === "probe-active-ai-chat"
+          ),
+        5000
+      );
 
       ws2.close(1000);
     });
