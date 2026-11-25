@@ -299,6 +299,19 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     await this.context.load();
     const frozen = options.frozen ?? (await this.context.freezeSystemPrompt());
     await new AgentContextProvider(this, "_system_prompt").set(frozen);
+    // The turn the release answered with that prompt.
+    const self = this as unknown as {
+      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
+    };
+    await self._upsertMessageInHistory({
+      id: "r0",
+      role: "user",
+      parts: [{ type: "text", text: "before the upgrade" }]
+    });
+    await self._upsertMessageInHistory(
+      { id: "r1", role: "assistant", parts: [{ type: "text", text: "ok" }] },
+      "r0"
+    );
     this.setEnvironmentForTest(options.environment);
     const turns: UpgradeReport["turns"] = [];
     for (let turn = 0; turn < options.turns; turn++) {
@@ -385,6 +398,104 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
       retry: sent(retryIndex),
       next: sent(nextIndex)
     };
+  }
+
+  /** Rows the agent holds under a `_system_prompt` label. */
+  promptRowsForTest(): number {
+    const table = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM sqlite_master
+      WHERE type = 'table' AND name = 'cf_agents_context_blocks'
+    `;
+    if ((table[0]?.n ?? 0) === 0) return 0;
+    return (
+      this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM cf_agents_context_blocks
+        WHERE label LIKE '_system_prompt%'
+      `[0]?.n ?? 0
+    );
+  }
+
+  /**
+   * Turns on a new agent, a refresh, and one more turn: the prompt rows
+   * after each step.
+   */
+  async promptRowsOverTurnsForTest(): Promise<number[]> {
+    this.setEnvironmentForTest("Today is Monday.");
+    const rows: number[] = [];
+    for (const id of ["u0", "u1"]) {
+      await this.saveMessages([
+        { id, role: "user", parts: [{ type: "text", text: id }] }
+      ]);
+      rows.push(this.promptRowsForTest());
+    }
+    this.setEnvironmentForTest("Today is Tuesday.");
+    await this.context.refreshSystemPrompt();
+    await this.saveMessages([
+      { id: "u2", role: "user", parts: [{ type: "text", text: "u2" }] }
+    ]);
+    rows.push(this.promptRowsForTest());
+    return rows;
+  }
+
+  /**
+   * An agent upgraded from a prompt frozen in `_system_prompt`: the rows
+   * after the carried-forward turn, then after a refresh and a turn, and
+   * whether the refreshed turn sent the refreshed prompt.
+   */
+  async upgradedPromptRowForTest(): Promise<{
+    afterCarry: number;
+    afterRefresh: number;
+    unchanged: boolean;
+    refreshed: boolean;
+  }> {
+    const report = await this.upgradeFromFrozenPromptForTest({
+      frozenEnvironment: "Today is Monday.",
+      environment: "Today is Monday.",
+      turns: 1
+    });
+    const afterCarry = this.promptRowsForTest();
+    this.setEnvironmentForTest("Today is Tuesday.");
+    await this.context.refreshSystemPrompt();
+    const before = this.requestCountForTest();
+    await this.saveMessages([
+      { id: "u9", role: "user", parts: [{ type: "text", text: "u9" }] }
+    ]);
+    return {
+      afterCarry,
+      afterRefresh: this.promptRowsForTest(),
+      unchanged:
+        (await new AgentContextProvider(this, "_system_prompt").get()) ===
+        report.frozen,
+      refreshed: (systemOf(this.requestForTest(before)) ?? "").includes(
+        "Today is Tuesday."
+      )
+    };
+  }
+
+  /**
+   * An upgraded agent whose blocks changed since the freeze clears its
+   * transcript (through the session, or Think's chat clear) before any turn
+   * on this version, then takes two turns: their system prompts.
+   */
+  async clearedAfterUpgradeForTest(
+    how: "session" | "chat"
+  ): Promise<{ frozen: string; systems: string[] }> {
+    const report = await this.upgradeFromFrozenPromptForTest({
+      frozenEnvironment: "Today is Monday.",
+      environment: "Today is Tuesday.",
+      turns: 0
+    });
+    if (how === "session") await this.session.clearMessages();
+    else await this.clearMessages();
+    const systems: string[] = [];
+    for (const id of ["n1", "n2"]) {
+      const before = this.requestCountForTest();
+      await this.saveMessages([
+        { id, role: "user", parts: [{ type: "text", text: id }] }
+      ]);
+      systems.push(systemOf(this.requestForTest(before)) ?? "");
+    }
+    return { frozen: report.frozen, systems };
   }
 
   /** A client message that carries a context record of its own. */

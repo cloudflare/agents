@@ -129,4 +129,38 @@ describe("Think context upgrade", () => {
     expect(next.at(-1)).toContain("Today is Tuesday.");
     expect(next.join("").split("Today is Tuesday.").length - 1).toBe(1);
   });
+  it("stores the prompt only on the session, never in a _system_prompt row", async () => {
+    const agent = await getAgentByName(
+      env.ThinkUpgradeTestAgent,
+      crypto.randomUUID()
+    );
+    expect(await agent.promptRowsOverTurnsForTest()).toEqual([0, 0, 0]);
+  });
+
+  it("keeps the row a release froze its prompt in, for the turns before the upgrade", async () => {
+    const agent = await getAgentByName(
+      env.ThinkUpgradeTestAgent,
+      crypto.randomUUID()
+    );
+    expect(await agent.upgradedPromptRowForTest()).toEqual({
+      afterCarry: 1,
+      afterRefresh: 1,
+      unchanged: true,
+      refreshed: true
+    });
+  });
+  it("never sends the frozen prompt after the transcript is cleared", async () => {
+    for (const how of ["session", "chat"] as const) {
+      const agent = await getAgentByName(
+        env.ThinkUpgradeTestAgent,
+        crypto.randomUUID()
+      );
+      const { frozen, systems } = await agent.clearedAfterUpgradeForTest(how);
+      expect(frozen).toContain("Today is Monday.");
+      for (const system of systems) {
+        expect(system, how).not.toContain(frozen);
+        expect(system, how).toContain("Today is Tuesday.");
+      }
+    }
+  });
 });

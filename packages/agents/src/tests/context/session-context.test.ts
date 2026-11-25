@@ -3,7 +3,8 @@ import {
   AgentSearchProvider,
   Context,
   type ContextConfig,
-  type SqlProvider
+  type SqlProvider,
+  type WritableContextProvider
 } from "../../context";
 import { Sessions, type Session, type SessionMessage } from "../../sessions";
 import { withCapabilityHarness } from "../shared/capability-harness";
@@ -654,6 +655,348 @@ describe("Context", () => {
       expect(JSON.stringify(next.messages.at(-1))).toContain(
         "Today is Tuesday."
       );
+    });
+  });
+
+  it("gives a regenerated answer from before the upgrade the release's prompt, after a refresh", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      let date = "Monday";
+      const released = "Released prompt: today is Monday.";
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            {
+              label: "environment",
+              provider: { get: async () => `Today is ${date}.` },
+              whenChanged: "remind"
+            }
+          ],
+          // As Think's `_system_prompt` row.
+          promptStore: { get: async () => released }
+        });
+      const context = make();
+      // Turns the release answered: no record on them.
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toBe(released);
+      await session.appendMessage(assistant("a2", "ok"));
+      date = "Tuesday";
+      await context.refreshSystemPrompt();
+      await session.appendMessage(user("u3", "now?"));
+      expect((await context.build()).system).toContain("Today is Tuesday.");
+
+      // Regenerate a1: its history ends at u1, before any record.
+      const u1 = (await session.getMessage("u1"))!;
+      expect((await context.prepare({ messages: [u1] })).system).toBe(released);
+      // And after an eviction (a new instance).
+      expect((await make().prepare({ messages: [u1] })).system).toBe(released);
+    });
+  });
+
+  it("never brings a frozen prompt back after the transcript is cleared", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      let writes = 0;
+      // A writable store, as `withCachedPrompt()` takes: never written.
+      const store: WritableContextProvider = {
+        get: async () => released,
+        set: async () => {
+          writes++;
+        }
+      };
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [],
+          promptStore: store
+        });
+      const context = make();
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toBe(released);
+
+      // As Think clears: mark it, the transcript, then a refresh.
+      await session.internal_setConfig("session:cleared-at", "1");
+      await session.clearMessages();
+      await context.refreshSystemPrompt();
+      await session.appendMessage(user("n1", "new chat"));
+      expect((await context.build()).system).not.toContain(released);
+      await session.appendMessage(assistant("m1", "hi"));
+      await session.appendMessage(user("n2", "more"));
+      expect((await context.build()).system).not.toContain(released);
+      // After an eviction too.
+      expect((await make().build()).system).not.toContain(released);
+      expect(writes).toBe(0);
+    });
+  });
+
+  it("keeps the frozen prompt for a first turn from before the upgrade that is retried", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      const context = new Context(session, {
+        sql: storageSql(storage),
+        blocks: [{ label: "soul", provider: { get: async () => "Be kind." } }],
+        promptStore: { get: async () => released }
+      });
+      // The release sent u1 and was cut before an answer was stored.
+      await session.appendMessage(user("u1", "hello"));
+      expect((await context.prepare({ retry: true })).system).toBe(released);
+      // The answer, then a new turn: still the release's prompt.
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toBe(released);
+    });
+  });
+
+  it("never brings a frozen prompt back to a retry after a clear without a refresh", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            { label: "soul", provider: { get: async () => "Be kind." } }
+          ],
+          promptStore: { get: async () => released }
+        });
+      const context = make();
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toBe(released);
+
+      // A session-level clear, as a host marks it: no refresh. A new turn is
+      // accepted, then recovered before it was prepared, in this instance
+      // and in a new one.
+      await session.internal_setConfig("session:cleared-at", "1");
+      await session.clearMessages();
+      await session.appendMessage(user("n1", "new chat"));
+      expect((await make().prepare({ retry: true })).system).not.toBe(released);
+      expect((await context.prepare({ retry: true })).system).not.toBe(
+        released
+      );
+      await session.appendMessage(assistant("m1", "hi"));
+      await session.appendMessage(user("n2", "more"));
+      expect((await context.build()).system).not.toBe(released);
+    });
+  });
+
+  it("gives a regenerated answer from before the upgrade the release's prompt while a refresh waits", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      const context = new Context(session, {
+        sql: storageSql(storage),
+        blocks: [{ label: "soul", provider: { get: async () => "Be kind." } }],
+        promptStore: { get: async () => released }
+      });
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      // A refresh is asked for before any turn after the upgrade.
+      await context.refreshSystemPrompt();
+      const u1 = (await session.getMessage("u1"))!;
+      expect((await context.prepare({ messages: [u1] })).system).toBe(released);
+      // The next new turn takes the refresh.
+      await session.appendMessage(user("u2", "again"));
+      expect((await context.build()).system).toContain("Be kind.");
+    });
+  });
+
+  it("keeps the frozen prompt for turns from before the upgrade when a later message is deleted", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            { label: "soul", provider: { get: async () => "Be kind." } }
+          ],
+          promptStore: { get: async () => released }
+        });
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "follow-up"));
+      expect((await make().build()).system).toBe(released);
+      // Delete only the follow-up, which holds the session's first record.
+      await session.deleteMessages(["u2"]);
+      const u1 = (await session.getMessage("u1"))!;
+      expect((await make().prepare({ messages: [u1] })).system).toBe(released);
+    });
+  });
+
+  it("never brings a frozen prompt back after a clear that came before any record", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt: memory empty.";
+      let memory = "empty";
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            {
+              label: "memory",
+              provider: { get: async () => `Memory: ${memory}.` }
+            }
+          ],
+          promptStore: { get: async () => released }
+        });
+      // Turns the release answered; Context has not been asked anything yet.
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      memory = "likes tea";
+      await session.internal_setConfig("session:cleared-at", "1");
+      await session.clearMessages();
+
+      // A new turn, cut before it prepared and recovered, then the next one.
+      await session.appendMessage(user("n1", "new chat"));
+      const recovered = await make().prepare({ retry: true });
+      expect(recovered.system).not.toContain(released);
+      expect(recovered.system).toContain("likes tea");
+      await session.appendMessage(assistant("m1", "hi"));
+      await session.appendMessage(user("n2", "more"));
+      expect((await make().build()).system).toContain("likes tea");
+    });
+  });
+
+  it("never fails a turn on a frozen prompt store that throws or is empty", async () => {
+    for (const store of [
+      {
+        get: async (): Promise<string | null> => {
+          throw new Error("store down");
+        }
+      },
+      {
+        // Throws before returning a promise.
+        get: (): Promise<string | null> => {
+          throw new Error("store down");
+        }
+      },
+      { get: async (): Promise<string | null> => null },
+      { get: async () => "" }
+    ]) {
+      await withCapabilityHarness(async ({ storage, install }) => {
+        const sessions = new Sessions();
+        install(sessions);
+        const session = sessions.session();
+        const context = new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            { label: "soul", provider: { get: async () => "Be kind." } }
+          ],
+          promptStore: store
+        });
+        await session.appendMessage(user("u1", "hello"));
+        const built = await context.build();
+        expect(built.system).toContain("Be kind.");
+      });
+    }
+  });
+
+  it("records what a turn was sent while the frozen prompt store was down", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const released = "Released prompt.";
+      let down = true;
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [
+            { label: "soul", provider: { get: async () => "Be kind." } }
+          ],
+          promptStore: {
+            get: async () => {
+              if (down) throw new Error("store down");
+              return released;
+            }
+          }
+        });
+      const context = make();
+      // A turn the release answered, then the first turn after the upgrade
+      // while the store is down: sent the blocks, and that is recorded.
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      const outage = await context.build();
+      expect(outage.system).toContain("Be kind.");
+      await session.appendMessage(assistant("a2", "ok"));
+      down = false;
+      // The store is back. The next turn extends what was sent.
+      await session.appendMessage(user("u3", "more"));
+      expect((await context.build()).system).toBe(outage.system);
+      // Regenerating the outage reply sends what it was sent; regenerating
+      // the release's reply sends the release's prompt, in a new instance too.
+      const u1 = (await session.getMessage("u1"))!;
+      const u2 = (await session.getMessage("u2"))!;
+      for (const ctx of [context, make()]) {
+        expect(
+          (
+            await ctx.prepare({
+              messages: [u1, (await session.getMessage("a1"))!, u2]
+            })
+          ).system
+        ).toBe(outage.system);
+        expect((await ctx.prepare({ messages: [u1] })).system).toBe(released);
+      }
+    });
+  });
+
+  it("records the empty prompt a turn with no blocks was sent while the store was down", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      let down = true;
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [],
+          promptStore: {
+            get: async () => {
+              if (down) throw new Error("store down");
+              return "Released prompt.";
+            }
+          }
+        });
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await make().build()).system).toBe("");
+      await session.appendMessage(assistant("a2", "ok"));
+      down = false;
+      const history = await session.getHistory();
+      const throughU2 = history.slice(
+        0,
+        history.findIndex((m) => m.id === "u2") + 1
+      );
+      expect((await make().prepare({ messages: throughU2 })).system).toBe("");
+      // The release's own turn still gets the release's prompt.
+      expect(
+        (await make().prepare({ messages: history.slice(0, 1) })).system
+      ).toBe("Released prompt.");
     });
   });
 

@@ -1613,9 +1613,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             new ThinkSession(this.sessions.session(), () => this.context)
           );
           // The session records the prompt each turn was sent with. The
-          // prompt store (a custom one from `withCachedPrompt()`, or the
-          // `_system_prompt` row) carries the prompt frozen before Context
-          // forward on the first turn, and keeps holding the latest one.
+          // prompt a release froze (in a custom `withCachedPrompt()` store,
+          // or the `_system_prompt` row) is read, never written: the turns
+          // sent before the upgrade are sent it.
           const sessionId = this.session.sessionId;
           this.#contextBlocks = new Context(
             this.sessions.session(this.session.sessionId),

@@ -32,8 +32,7 @@ import {
   renderReminder,
   type ContextBlock,
   type ContextConfig,
-  type ContextProvider,
-  type WritableContextProvider
+  type ContextProvider
 } from "./blocks";
 import { AgentContextProvider, type SqlProvider } from "./sqlite-provider";
 
@@ -45,6 +44,12 @@ export const CONTEXT_RECORD_KIND = "context";
 const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
 const REFRESH = "transcript:context:refresh";
+/**
+ * Set by the host when it clears the session's transcript (Think does), a
+ * key a clear keeps: a session cleared since the upgrade has no turn from
+ * before Context left, so a frozen prompt no longer applies.
+ */
+const CLEARED_AT = "session:cleared-at";
 
 /** One block's prompt section: its label and its rendered text. */
 type Section = readonly [label: string, text: string];
@@ -121,12 +126,13 @@ export interface ContextOptions {
   /** Storage for blocks declared without a provider, instead of SQLite. */
   readonly defaultProvider?: (label: string) => ContextProvider;
   /**
-   * A store that also holds the system prompt as text. Read once, when the
-   * session has no recorded prompt yet, so a prompt frozen before Context
-   * (`ContextBlocks`' prompt store) carries forward unchanged; written with
-   * every snapshot Context records.
+   * Where a prompt frozen before Context is kept (`ContextBlocks`' prompt
+   * store). Read once, never written: the turns sent before Context have
+   * no record, so they are sent this prompt, the first turn after the
+   * upgrade included, until the session is cleared: a host that clears
+   * sets the session config key `session:cleared-at` (Think does).
    */
-  readonly promptStore?: WritableContextProvider;
+  readonly promptStore?: ContextProvider;
 }
 
 /**
@@ -191,8 +197,8 @@ export interface BuiltContext extends PreparedContext {
 export class Context {
   readonly #session: ContextSession;
   readonly #blocks: ContextBlocks;
-  readonly #promptStore: WritableContextProvider | undefined;
-  /** The prompt store's text, read once; only Context writes it after. */
+  readonly #promptStore: ContextProvider | undefined;
+  /** The prompt store's text, read once: the prompt of turns sent before Context. */
   #frozen: string | null | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
@@ -256,8 +262,13 @@ export class Context {
     // A retry is sent as its first attempt was: no refresh, no new change.
     const retry = options.retry === true;
 
-    if (!delivered.system && !refresh) {
-      delivered = await this.#carriedForward(delivered);
+    // A path with no record was sent the frozen prompt, if any: before a
+    // pending refresh is weighed, so a regeneration keeps it.
+    let storeFailed = false;
+    if (!delivered.system) {
+      const released = await this.#released();
+      storeFailed = released.failed;
+      delivered = await this.#carriedForward(delivered, released.prompt);
     }
 
     // A pending refresh applies only to a turn that can record it; a
@@ -271,8 +282,10 @@ export class Context {
       await this.#blocks.load();
       const sections = await this.#blocks.internal_sections();
       const system = renderSystem(sections);
-      // No blocks and no prompt from before: nothing to keep stable.
-      if (sections.length === 0 && !delivered.system) {
+      // No blocks and no prompt from before: nothing to keep stable. Unless
+      // the store that may hold one could not be read: then the empty
+      // prompt is what this turn was sent, and it is recorded.
+      if (sections.length === 0 && !delivered.system && !storeFailed) {
         if (refresh) await this.#setRefresh(false);
         return { system, reminder: null };
       }
@@ -288,8 +301,6 @@ export class Context {
       if (at) {
         if (!unchanged) {
           await this.#put(at.id, { system: sections });
-          await this.#promptStore?.set(system);
-          this.#frozen = system;
         }
         if (refresh) await this.#setRefresh(false);
       }
@@ -408,8 +419,10 @@ export class Context {
   async freezeSystemPrompt(options: ContextReadOptions = {}): Promise<string> {
     const history = await this.#history(options);
     if (!(await this.#refreshPending())) {
+      const found = await this.#delivered(history);
       const delivered = await this.#carriedForward(
-        await this.#delivered(history)
+        found,
+        found.system ? null : (await this.#released()).prompt
       );
       if (delivered.system) return renderSystem(delivered.system);
     }
@@ -436,8 +449,11 @@ export class Context {
    */
   async reminder(options: ContextReadOptions = {}): Promise<string | null> {
     if (await this.#refreshPending()) return null;
+    const history = await this.#history(options);
+    const found = await this.#delivered(history);
     const delivered = await this.#carriedForward(
-      await this.#delivered(await this.#history(options))
+      found,
+      found.system ? null : (await this.#released()).prompt
     );
     if (!delivered.system) return null;
     const changes = await this.#changes(delivered.values);
@@ -570,16 +586,54 @@ export class Context {
    * the same bytes. A remind block counts as delivered when the frozen text
    * shows its current section, which is how it was compared before.
    */
-  async #carriedForward(delivered: Delivered): Promise<Delivered> {
-    if (delivered.system || !this.#promptStore) return delivered;
-    this.#frozen ??= await this.#promptStore.get();
-    const frozen = this.#frozen;
-    if (frozen === null) return delivered;
+  async #carriedForward(
+    delivered: Delivered,
+    frozen: string | null
+  ): Promise<Delivered> {
+    if (delivered.system || frozen === null) return delivered;
     const values = new Map<string, string>([[CARRIED, frozen]]);
     for (const [label, text] of await this.#blocks.internal_remindSections()) {
       if (promptRendersSection(frozen, text)) values.set(label, text);
     }
     return { system: [[CARRIED, frozen]], values, carried: true };
+  }
+
+  /**
+   * The prompt frozen before Context, for a path with no record (a turn from
+   * before the upgrade), until the session is cleared. Read each time, so a
+   * clear counts at once; only a turn with no record asks.
+   */
+  async #released(): Promise<{ prompt: string | null; failed: boolean }> {
+    if (!this.#promptStore) return { prompt: null, failed: false };
+    // A store that fails never fails a turn: the turn is sent the blocks
+    // and records them, as what it was sent. Only a prompt is kept, so after
+    // a failure or an empty read the store is read again, for the turns
+    // from before the upgrade that have no record.
+    if (this.#frozen === undefined || this.#frozen === null) {
+      const store = this.#promptStore;
+      const read = await Promise.resolve()
+        .then(() => store.get())
+        .then(
+          (text) => (typeof text === "string" && text.length > 0 ? text : null),
+          (error: unknown) => {
+            console.warn(
+              "Context could not read the frozen prompt store",
+              error
+            );
+            return undefined;
+          }
+        );
+      if (read === undefined) return { prompt: null, failed: true };
+      this.#frozen = read;
+    }
+    if (this.#frozen === null) return { prompt: null, failed: false };
+    return {
+      prompt:
+        (await this.#session.internal_config(CLEARED_AT)) === null
+          ? this.#frozen
+          : null,
+      failed: false
+    };
   }
 
   async #refreshPending(): Promise<boolean> {

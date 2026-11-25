@@ -113,8 +113,8 @@ export class ThinkSession {
    * Persist the frozen system prompt.
    *
    * @deprecated The session records the prompt each turn was sent with, so
-   * this is not needed. A custom `provider` is still honoured: it carries a
-   * prompt frozen before forward and receives every new snapshot.
+   * this is not needed. A custom `provider` is still read: a prompt frozen
+   * in it before is what the turns sent before are sent. It is not written.
    */
   withCachedPrompt(provider?: WritableContextProvider): this {
     if (provider) this.#promptStore = provider;
@@ -274,8 +274,15 @@ export class ThinkSession {
     return this.#handle.deleteMessages(messageIds);
   }
 
-  clearMessages(): Promise<void> {
-    return this.#handle.clearMessages();
+  async clearMessages(): Promise<void> {
+    // Marked before the clear: a prompt frozen by an earlier release is the
+    // prompt of turns from before the upgrade, and a cleared session has
+    // none left (Context reads this key; a clear keeps it).
+    await this.#handle.internal_setConfig(
+      "session:cleared-at",
+      String(Date.now())
+    );
+    await this.#handle.clearMessages();
   }
 
   // ── Compaction ───────────────────────────────────────────────────────────
