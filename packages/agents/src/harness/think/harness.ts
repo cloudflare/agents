@@ -1302,8 +1302,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         // The answered message is published before the model loop runs, if
         // it runs at all: watches read its client tools from these. The
         // loop uses this build too.
+        // Only this operation's own run: one cancelled while it built must
+        // not hand its build to the next turn.
         const live = this.#live.get(session);
-        if (live) {
+        if (live?.operationId === operationId) {
           live.tools = tools;
           live.built = built;
         }
