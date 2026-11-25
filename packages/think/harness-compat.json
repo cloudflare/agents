@@ -1,8 +1,8 @@
 {
   "total": 1534,
-  "passed": 462,
+  "passed": 461,
   "needThink": 1246,
-  "needThinkPassed": 174,
+  "needThinkPassed": 173,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -66,7 +66,7 @@
     },
     "client-tools.test.ts": {
       "total": 136,
-      "passed": 35
+      "passed": 34
     },
     "cold-rpc-initialization.test.ts": {
       "total": 4,
@@ -346,7 +346,6 @@
     "client-tools.test.ts > Think — tool results with nothing to continue > a second tab's result for an answered call does not continue again",
     "client-tools.test.ts > resume coordination during pending continuation > correlates idle STREAM_RESUME_NONE after a continuation completes",
     "client-tools.test.ts > resume coordination during pending continuation > does not send STREAM_RESUME_NONE for an immediate resume request after tool output",
-    "client-tools.test.ts > resume coordination during pending continuation > holds STREAM_RESUME_REQUEST while continuation is pending",
     "connection-state.test.ts > preserves onConnect state for the first Think root client message",
     "connection-state.test.ts > preserves onConnect state for the first Think sub-agent client message",
     "context-upgrade.test.ts > Think context upgrade > does not send a change twice when the turn that recorded it failed",

@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**174 of the 1246 tests that construct Think pass (13%).** Across the whole suite, 462 of 1534.
+**173 of the 1246 tests that construct Think pass (13%).** Across the whole suite, 461 of 1534.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -32,7 +32,7 @@ supported by the harness-backed Think yet".
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 35 / 136 | 25%  |
+| `client-tools.test.ts`                 | 34 / 136 | 25%  |
 | `cold-rpc-initialization.test.ts`      | 0 / 4    | 0%   |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
