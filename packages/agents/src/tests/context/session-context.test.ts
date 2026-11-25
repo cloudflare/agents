@@ -1367,6 +1367,7 @@ describe("Context", () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       // A remind block whose read can be held at a gate.
       let hold = false;
+      let atGate = false;
       let reached = () => {};
       const waiting = new Promise<void>((resolve) => {
         reached = resolve;
@@ -1383,6 +1384,7 @@ describe("Context", () => {
           provider: {
             get: async () => {
               if (hold) {
+                atGate = true;
                 reached();
                 await gate;
               }
@@ -1405,6 +1407,8 @@ describe("Context", () => {
       });
       // Wait for it at the gate; a call that fails before it fails the test.
       await Promise.race([waiting, regeneration]);
+      // The calls overlap only if the regeneration is held at the gate.
+      expect(atGate).toBe(true);
       hold = false;
       // ...while the new turn u2 records the code write, passing no tools.
       await context.prepare();
