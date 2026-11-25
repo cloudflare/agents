@@ -1162,15 +1162,21 @@ describe("Think durable submissions", () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({ submissionId: "sub-wait-hook" });
     await agent.holdSubmissionStatusHookForTest();
+    onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
 
     // The terminal row is written and its hook is running.
     const cancel = agent.cancelSubmissionForTest("sub-wait-hook", "stop");
     await statusHookHeld(agent);
     let waitSettled = false;
     const waiting = agent.waitForSubmissionForTest("sub-wait-hook");
-    void waiting.then(() => {
-      waitSettled = true;
-    });
+    waiting.then(
+      () => {
+        waitSettled = true;
+      },
+      () => {
+        // A rejected wait fails the test where it is awaited below.
+      }
+    );
     // After a round trip to the agent, the wait still waits for the hook.
     await agent.isSubmissionStatusHookHeldForTest();
     expect(waitSettled).toBe(false);
@@ -1206,6 +1212,7 @@ describe("Think durable submissions", () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({ submissionId: "sub-reuse" });
     await agent.holdSubmissionStatusHookForTest();
+    onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
 
     // Deleted and reused while its terminal hook runs.
     const cancel = agent.cancelSubmissionForTest("sub-reuse", "stop");
@@ -1229,15 +1236,21 @@ describe("Think durable submissions", () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({ submissionId: "sub-del-hook" });
     await agent.holdSubmissionStatusHookForTest();
+    onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
 
     const waiting = agent.waitForSubmissionForTest("sub-del-hook");
     const cancel = agent.cancelSubmissionForTest("sub-del-hook", "stop");
     // Deleted while its terminal hook runs.
     await statusHookHeld(agent);
     let waitSettled = false;
-    void waiting.then(() => {
-      waitSettled = true;
-    });
+    waiting.then(
+      () => {
+        waitSettled = true;
+      },
+      () => {
+        // A rejected wait fails the test where it is awaited below.
+      }
+    );
     await expect(agent.deleteSubmissionForTest("sub-del-hook")).resolves.toBe(
       true
     );
