@@ -1149,7 +1149,7 @@ export class Tasks<
       ) {
         this.#locals.delete(runId);
       } else {
-        void this.#executeRun(runId)
+        void this.#executeRun(runId, false, lane !== null && !queued)
           .catch(() => {})
           // A lane run queued behind another keeps its `local` until its
           // first attempt here takes it, or it ends without one.
@@ -1175,13 +1175,21 @@ export class Tasks<
    * @param byOwnWake - The run's own wake job is dispatching it: that job's
    *   outcome moves it to the claim deadline, so the claim needs no push.
    */
-  async #executeRun(runId: string, byOwnWake = false): Promise<void> {
+  async #executeRun(
+    runId: string,
+    byOwnWake = false,
+    laneHead = false
+  ): Promise<void> {
     if (this.#liveAttempt(runId)) return;
     // Read now: the caller that passed it may finish before the claim lands.
     const local = this.#locals.get(runId);
     const row = this.#store.getRun(runId);
     if (!row || TERMINAL_STATUSES.has(row.status)) return;
-    if (!this.#laneAllows(row)) return;
+    // A caller that just found this run at its lane's head need not read
+    // the lane again; a run since queued behind another has no deadline.
+    const known =
+      laneHead && row.next_at !== null && !this.#heldLanes.has(row.lane ?? "");
+    if (!known && !this.#laneAllows(row)) return;
 
     const now = Date.now();
     if (row.cancel_requested === 1) {
@@ -2127,7 +2135,7 @@ export class Tasks<
       // the queue, as a head with no `local` gets.
       const runId = head.run_id;
       const claimed = () => (this.#store.getRun(runId)?.attempt ?? 1) > 0;
-      void this.#executeRun(runId)
+      void this.#executeRun(runId, false, true)
         .catch(() => {})
         .then(() => (claimed() ? undefined : this.#syncWake(runId)))
         .catch(() => {});
