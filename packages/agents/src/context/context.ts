@@ -264,8 +264,11 @@ export class Context {
 
     // A path with no record was sent the frozen prompt, if any: before a
     // pending refresh is weighed, so a regeneration keeps it.
+    let storeFailed = false;
     if (!delivered.system) {
-      delivered = await this.#carriedForward(delivered, await this.#released());
+      const released = await this.#readReleased();
+      storeFailed = released.failed;
+      delivered = await this.#carriedForward(delivered, released.prompt);
     }
 
     // A pending refresh applies only to a turn that can record it; a
@@ -279,8 +282,10 @@ export class Context {
       await this.#blocks.load();
       const sections = await this.#blocks.internal_sections();
       const system = renderSystem(sections);
-      // No blocks and no prompt from before: nothing to keep stable.
-      if (sections.length === 0 && !delivered.system) {
+      // No blocks and no prompt from before: nothing to keep stable. Unless
+      // the store that may hold one could not be read: then the empty
+      // prompt is what this turn was sent, and it is recorded.
+      if (sections.length === 0 && !delivered.system && !storeFailed) {
         if (refresh) await this.#setRefresh(false);
         return { system, reminder: null };
       }
@@ -599,7 +604,12 @@ export class Context {
    * clear counts at once; only a turn with no record asks.
    */
   async #released(): Promise<string | null> {
-    if (!this.#promptStore) return null;
+    return (await this.#readReleased()).prompt;
+  }
+
+  /** As `#released`, and whether the store could not be read. */
+  async #readReleased(): Promise<{ prompt: string | null; failed: boolean }> {
+    if (!this.#promptStore) return { prompt: null, failed: false };
     // A store that fails never fails a turn: the turn is sent the blocks
     // and records them, as what it was sent. Only a prompt is kept, so after
     // a failure or an empty read the store is read again, for the turns
@@ -618,13 +628,17 @@ export class Context {
             return undefined;
           }
         );
-      if (read === undefined) return null;
+      if (read === undefined) return { prompt: null, failed: true };
       this.#frozen = read;
     }
-    if (this.#frozen === null) return null;
-    return (await this.#session.internal_config(CLEARED_AT)) === null
-      ? this.#frozen
-      : null;
+    if (this.#frozen === null) return { prompt: null, failed: false };
+    return {
+      prompt:
+        (await this.#session.internal_config(CLEARED_AT)) === null
+          ? this.#frozen
+          : null,
+      failed: false
+    };
   }
 
   async #refreshPending(): Promise<boolean> {

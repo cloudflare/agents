@@ -964,6 +964,42 @@ describe("Context", () => {
     });
   });
 
+  it("records the empty prompt a turn with no blocks was sent while the store was down", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      let down = true;
+      const make = () =>
+        new Context(session, {
+          sql: storageSql(storage),
+          blocks: [],
+          promptStore: {
+            get: async () => {
+              if (down) throw new Error("store down");
+              return "Released prompt.";
+            }
+          }
+        });
+      await session.appendMessage(user("u1", "hello"));
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      expect((await make().build()).system).toBe("");
+      await session.appendMessage(assistant("a2", "ok"));
+      down = false;
+      const history = await session.getHistory();
+      const throughU2 = history.slice(
+        0,
+        history.findIndex((m) => m.id === "u2") + 1
+      );
+      expect((await make().prepare({ messages: throughU2 })).system).toBe("");
+      // The release's own turn still gets the release's prompt.
+      expect(
+        (await make().prepare({ messages: history.slice(0, 1) })).system
+      ).toBe("Released prompt.");
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>
