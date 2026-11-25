@@ -1,6 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { MemoryWorld, memoryLane, memoryStorage } from "./memory-lane";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   chatRecoveryNames,
   newUserMessageIds,
@@ -383,6 +383,31 @@ describe("durable admission", () => {
     await tick();
     expect(a.joins).toEqual(["u-r1"]);
     expect(a.turns.clientView(a.host.transcript).messages).toEqual([]);
+  });
+
+  it("a parked run is ended though its first settle throws", async () => {
+    const lane = memoryLane();
+    const tasks = lane.tasks();
+    const settled: string[] = [];
+    let calls = 0;
+    const turns = new ChatTurns(new Host(), {
+      defaultDebounceMs: 0,
+      lane: {
+        definition: lane.definition,
+        tasks: () => ({
+          ...tasks,
+          settle: async (runId: string) => {
+            if (++calls === 1) throw new Error("storage hiccup");
+            settled.push(runId);
+            return true;
+          }
+        })
+      }
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    turns.parkUntil("run-1", Promise.resolve());
+    await vi.waitFor(() => expect(settled).toEqual(["run-1"]));
+    errors.mockRestore();
   });
 
   it("a request whose record cannot be written ends with an error", async () => {

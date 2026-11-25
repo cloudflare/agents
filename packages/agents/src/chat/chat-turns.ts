@@ -32,6 +32,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import { tryN } from "../retries";
 import type { UIMessage } from "ai";
 import { AbortRegistry } from "./abort-registry";
 import {
@@ -856,14 +857,17 @@ export class ChatTurns<
   parkUntil(runId: string, reply: Promise<void>): void {
     this.#parked.add(runId);
     const tasks = this.#lane.tasks();
-    void reply
-      .then(async () => {
+    // A parked run has no wake: a settle that throws is tried again.
+    const settle = () =>
+      tryN(5, async () => {
         // The attempt that parks it may not have ended yet.
         while (!(await tasks.settle(runId, null))) {
           if (tasks.peek(runId)?.status !== "running") return;
           await new Promise((wait) => setTimeout(wait, 10));
         }
-      })
+      });
+    void reply
+      .then(settle)
       .catch((error) => console.error("[chat] parked run not ended:", error))
       .finally(() => this.#parked.delete(runId));
   }

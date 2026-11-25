@@ -365,12 +365,15 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       (m) => m.filter((x) => x.role === "assistant").length === 2,
       15_000
     );
+    // onStart's turn answers first, then the replay.
     expect(
-      messages
-        .filter((m) => m.role === "user")
-        .map((m) => m.id)
-        .sort()
-    ).toEqual(["on-start", "u-r9"]);
+      messages.map((m) => [m.role, m.role === "user" ? m.id : ""])
+    ).toEqual([
+      ["user", "on-start"],
+      ["assistant", ""],
+      ["user", "u-r9"],
+      ["assistant", ""]
+    ]);
   }, 40_000);
 
   it("a request replayed after a reset runs once the app's onStart is done", async () => {
