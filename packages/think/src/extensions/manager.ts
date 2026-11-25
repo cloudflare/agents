@@ -575,7 +575,7 @@ export class ExtensionManager {
       if (!gateway && !this.#warnedNetwork) {
         this.#warnedNetwork = true;
         console.warn(
-          `[Think] Extension "${manifest.name}": its network hosts are not enforced, because the Worker entry does not re-export HostBridgeLoopback. It can reach any host.`
+          `[Think] Extension "${manifest.name}": its network hosts are not enforced, so it can reach any host. They are enforced only through the host binding Think creates when the Worker entry re-exports HostBridgeLoopback.`
         );
       }
     }
