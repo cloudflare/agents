@@ -1,10 +1,13 @@
 import type { Protocol } from "devtools-protocol";
+import type { ProtocolMapping } from "devtools-protocol/types/protocol-mapping.js";
 import { expectTypeOf } from "vitest";
 import type {
   BrowserHostTab,
+  CdpCommandMethod,
   CdpCommandParams,
   CdpCommandResult,
-  CdpConnection
+  CdpConnection,
+  CdpSendArgs
 } from "../browser";
 
 declare const cdp: CdpConnection;
@@ -17,7 +20,11 @@ expectTypeOf(
 expectTypeOf(
   cdp.send("Runtime.evaluate", { expression: "1" }, { sessionId })
 ).resolves.toEqualTypeOf<Protocol.Runtime.EvaluateResponse>();
-expectTypeOf<CdpCommandResult<"Page.enable">>().toEqualTypeOf<void>();
+// One the protocol says returns nothing resolves with {}, as the browser
+// sends it.
+expectTypeOf<CdpCommandResult<"Page.enable">>().toEqualTypeOf<
+  Record<string, never>
+>();
 
 // Params the protocol requires are required, with their required fields,
 // and a misspelled one is caught.
@@ -58,6 +65,41 @@ expectTypeOf(cdp.send(method, params, { sessionId })).toEqualTypeOf<
   Promise<unknown>
 >();
 void cdp.send(method, custom);
+
+// A union of names takes params that fit every one of them, required if
+// any of them requires them: which one it is is only known at runtime.
+declare const enableOrNavigate: "Page.enable" | "Page.navigate";
+// @ts-expect-error Page.navigate needs params
+void cdp.send(enableOrNavigate);
+// @ts-expect-error Page.navigate needs a url
+void cdp.send(enableOrNavigate, {});
+void cdp.send(enableOrNavigate, { url: "about:blank" });
+declare const enable: "Page.enable" | "Runtime.enable";
+void cdp.send(enable, {}, { sessionId });
+// Its result is any of theirs.
+declare const createOrEvaluate: "Target.createTarget" | "Runtime.evaluate";
+expectTypeOf(
+  cdp.send(createOrEvaluate, { url: "about:blank", expression: "1" })
+).resolves.toEqualTypeOf<
+  Protocol.Target.CreateTargetResponse | Protocol.Runtime.EvaluateResponse
+>();
+// A CdpCommandMethod could be any name, so it stays loose.
+declare const anyMethod: CdpCommandMethod;
+void cdp.send(anyMethod);
+void cdp.send(anyMethod, custom);
+
+// For one name, the union handling changes nothing: every protocol
+// command keeps its own params.
+type Command = keyof ProtocolMapping.Commands;
+type SendParams<M extends Command> = Exclude<CdpSendArgs<M>[0], undefined>;
+type Changed = {
+  [M in Command]: [SendParams<M>] extends [CdpCommandParams<M>]
+    ? [CdpCommandParams<M>] extends [SendParams<M>]
+      ? never
+      : M
+    : M;
+}[Command];
+expectTypeOf<Changed>().toEqualTypeOf<never>();
 
 // A tab's send is typed the same, bound to the tab's session.
 declare const tab: BrowserHostTab;
