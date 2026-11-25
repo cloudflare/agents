@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { UIMessage as ChatMessage } from "ai";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
 import { connectChatWS, waitUntilHandled } from "./test-utils";
@@ -297,6 +297,8 @@ describe("AIChatAgent pending interaction helpers", () => {
 
     // The active turn stays active until the test releases its stream.
     await agentStub.holdStreamForTest("req-reset-turn");
+    // Released however the test ends.
+    onTestFinished(() => agentStub.releaseStreamForTest("req-reset-turn"));
     sendChatRequest(ws, "req-reset-turn", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,

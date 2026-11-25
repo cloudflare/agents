@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
@@ -448,6 +448,8 @@ describe("AIChatAgent chat turn serialization", () => {
 
     // The active turn stays active until the test releases its stream.
     await agentStub.holdStreamForTest("req-pre-clear");
+    // Released however the test ends.
+    onTestFinished(() => agentStub.releaseStreamForTest("req-pre-clear"));
     sendChatRequest(ws, "req-pre-clear", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
