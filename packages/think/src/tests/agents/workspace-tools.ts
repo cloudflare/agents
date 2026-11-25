@@ -7,13 +7,19 @@
 import { Workspace } from "@cloudflare/computer";
 import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createToolBindings } from "@cloudflare/computer/modules/tools";
-import { forAISDKTools } from "@cloudflare/computer/tools/ai-sdk";
-import { tool, type LanguageModel, type ToolSet } from "ai";
+import {
+  createAITools,
+  forAISDKTools
+} from "@cloudflare/computer/tools/ai-sdk";
+import { streamText, tool, type LanguageModel, type ToolSet } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
 import type { StreamCallback, TurnContext } from "../../think";
 
-function createTextModel(): LanguageModel {
+/** The tool definitions each model request carried, in order. */
+type RequestTools = { name?: string }[] | undefined;
+
+function createTextModel(requests: RequestTools[] = []): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -22,7 +28,8 @@ function createTextModel(): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream() {
+    doStream(options: { tools?: { name?: string }[] }) {
+      requests.push(options.tools);
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -62,9 +69,37 @@ export class ThinkWorkspaceToolsAgent extends Think {
   #tools: ToolSet = {};
   #system = "";
   #overrideRead = false;
+  readonly #requests: RequestTools[] = [];
 
   override getModel(): LanguageModel {
-    return createTextModel();
+    return createTextModel(this.#requests);
+  }
+
+  /**
+   * The workspace tools' definitions as a turn sent them to the model, and
+   * as `streamText` sends `createAITools()` given directly: both as JSON.
+   */
+  async workspaceToolRequests(): Promise<{
+    turn: string;
+    direct: string;
+    order: (string | undefined)[];
+  }> {
+    await this.chat("hello", noopCallback);
+    const turn = this.#requests.at(-1) ?? [];
+    const directRequests: RequestTools[] = [];
+    const result = streamText({
+      model: createTextModel(directRequests),
+      tools: createAITools({ workspace: this.workspace }),
+      prompt: "hello"
+    });
+    await result.consumeStream();
+    const direct = directRequests[0] ?? [];
+    const names = new Set(direct.map((entry) => entry.name));
+    return {
+      turn: JSON.stringify(turn.filter((entry) => names.has(entry.name))),
+      direct: JSON.stringify(direct),
+      order: turn.map((entry) => entry.name)
+    };
   }
 
   override getSystemPrompt(): string {

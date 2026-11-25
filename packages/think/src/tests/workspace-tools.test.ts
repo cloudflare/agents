@@ -24,6 +24,18 @@ describe("Think workspace tools", () => {
     );
   });
 
+  it("sends the workspace tools to the model as they are given directly, byte for byte", async () => {
+    const agent = await freshAgent();
+    const { turn, direct, order } = await agent.workspaceToolRequests();
+    const workspace = (JSON.parse(direct) as { name: string }[]).map(
+      (entry) => entry.name
+    );
+    expect(workspace.length).toBeGreaterThan(0);
+    expect(turn).toBe(direct);
+    // In Think's order: the workspace's tools, then the agent's own.
+    expect(order).toEqual([...workspace, "shout"]);
+  });
+
   it("lets a same-name tool from getTools() replace a built-in", async () => {
     const agent = await freshAgent();
     await agent.overrideRead();

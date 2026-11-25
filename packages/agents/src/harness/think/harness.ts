@@ -549,6 +549,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   constructor(options: ThinkHarnessOptions<TOOLS>) {
     super("think-harness");
     this.#options = options;
+    for (const { name, extension } of options.extensions ?? []) {
+      this.#extensions.load(name, loadInProcess(name, extension));
+    }
     this.#extensions.load(
       "context",
       loadInProcess(
@@ -1437,7 +1440,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         continuation: existing !== undefined,
         messages: request,
         system,
-        tools: Object.keys(tools)
+        tools: Object.keys(tools),
+        toolSet: tools
       })) ?? {};
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
