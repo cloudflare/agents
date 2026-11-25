@@ -457,8 +457,14 @@ export class Lifecycle<
     this.#host = host as unknown as LifecycleHost<Env, Props>;
     this.#ctx = this.#host.ctx;
     this.#parentClassName = this.#host.constructor.name;
-    this.#jobQueue = new JobQueue(this.#ctx.storage);
     this.#schemaVersions = new SchemaVersions(this.#ctx.storage);
+    // The queue's columns are recorded under the Lifecycle's own id.
+    this.#jobQueue = new JobQueue(
+      this.#ctx.storage,
+      this.#schemaVersions.forCapability("lifecycle", () => {
+        if (this.#status !== "starting") this.#schemaVersions.flush();
+      })
+    );
     facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
     instanceListers.set(this, (stored) => this.#instances(stored));
     facetWakeArmers.set(this, (address, time) =>
