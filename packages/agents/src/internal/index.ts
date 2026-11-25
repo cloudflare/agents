@@ -78,7 +78,5 @@ export {
 export {
   registerDeliverySink,
   sendDelivery,
-  type DeliveryAttempt,
-  type DeliveryRetryPolicy,
   type DeliverySink
 } from "./delivery";

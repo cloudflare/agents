@@ -1533,17 +1533,6 @@ export class Tasks<
     for (const [key, value] of Object.entries(options.checkpoint ?? {})) {
       this.#store.setCheckpoint(runId, generation, key, value);
     }
-    if (outcome instanceof TaskSettlement && outcome.kind === "retry") {
-      // Written before the first await, so a racing settle finds the run
-      // pending again and takes nothing.
-      await this.#suspend(
-        row,
-        generation,
-        "retry",
-        outcome.wakeAt ?? Date.now()
-      );
-      return true;
-    }
     if (outcome instanceof TaskSettlement) {
       await this.#settleReturned(row, generation, outcome);
       return true;

@@ -116,10 +116,9 @@ export class CounterSubAgent extends Agent {
     super(...args);
     this.lifecycle.use(this.imports).use(this.streams).use(this.audit);
     registerDeliverySink<{ n: number }>(this.tasks, "flaky", {
-      retry: { baseDelayMs: 100 },
-      deliver: (_payload, attempt) => {
-        this.deliveryAttempts.push(attempt.attempt);
-        if (attempt.attempt === 1) throw new Error("sink down");
+      deliver: () => {
+        this.deliveryAttempts.push(this.deliveryAttempts.length + 1);
+        if (this.deliveryAttempts.length === 1) throw new Error("sink down");
       }
     });
   }
@@ -152,7 +151,7 @@ export class CounterSubAgent extends Agent {
     attempts: number[];
   }> {
     await sendDelivery(this.tasks, "flaky", "d1", { n: 1 });
-    const record = await this.tasks.wait("d1", { timeoutMs: 5_000 });
+    const record = await this.tasks.wait("d1", { timeoutMs: 10_000 });
     return { status: record?.status, attempts: this.deliveryAttempts };
   }
 

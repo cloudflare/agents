@@ -13,53 +13,7 @@ import {
 } from "../retries";
 import { TaskSettlement } from "../tasks/settlement";
 import type { Tasks } from "../tasks/tasks";
-import type { TaskCheckpoint, TaskJson, TaskStep } from "../tasks/types";
-
-/**
- * When a failed delivery is tried again, and when it is given up.
- *
- * @internal
- */
-export interface DeliveryRetryPolicy {
-  /** The wait after the first failure, doubled after each one. Default 2 s. */
-  baseDelayMs?: number;
-  /** The longest wait between two attempts. Default 10 minutes. */
-  maxDelayMs?: number;
-  /**
-   * How long after the delivery was sent it is given up: the attempt that
-   * fails past it ends the run `error`. Default 12 hours.
-   */
-  giveUpAfterMs?: number;
-  /**
-   * How long one attempt may run. A sink still running then fails the
-   * attempt (its signal aborts) and the delivery backs off. Default 60 s.
-   */
-  attemptTimeoutMs?: number;
-}
-
-/**
- * One attempt of a delivery, as its sink sees it.
- *
- * @internal
- */
-export interface DeliveryAttempt {
-  /** The delivery's id: the run id it was sent under. */
-  readonly id: string;
-  /** 1 for the first attempt. */
-  readonly attempt: number;
-  /**
-   * The same on every attempt of this delivery: the key a receiver dedupes
-   * on, since an attempt that failed may still have arrived.
-   */
-  readonly idempotencyKey: string;
-  /** Aborts when the delivery is cancelled or the attempt times out. */
-  readonly signal: AbortSignal;
-  /**
-   * Progress inside one delivery (a reply posted in parts), read by the next
-   * attempt. A write of an attempt that timed out is dropped.
-   */
-  readonly checkpoint: TaskCheckpoint;
-}
+import type { TaskJson, TaskStep } from "../tasks/types";
 
 /**
  * Where deliveries of one kind go. Returning acknowledges the delivery;
@@ -68,8 +22,7 @@ export interface DeliveryAttempt {
  * @internal
  */
 export interface DeliverySink<Payload> {
-  deliver(payload: Payload, attempt: DeliveryAttempt): void | Promise<void>;
-  retry?: DeliveryRetryPolicy;
+  deliver(payload: Payload): void | Promise<void>;
   /**
    * The error a delivery gives up with; `cause` is the last failure. The
    * run ends `error` with it. Default: "Delivery <id> gave up after <n>
@@ -82,26 +35,43 @@ export interface DeliverySink<Payload> {
     cause: unknown
   ): Error;
   /**
-   * Called once when a delivery gives up, before its run ends `error`. A
-   * throw is logged and changes nothing.
+   * Told once that a delivery gave up. Not awaited: the run ends `error`
+   * whatever it does, and a throw or rejection is logged.
    */
   onGiveUp?(error: Error, payload: Payload): void | Promise<void>;
 }
 
-const DEFAULT_RETRY: Required<DeliveryRetryPolicy> = {
-  baseDelayMs: 2_000,
-  maxDelayMs: 10 * 60 * 1000,
-  giveUpAfterMs: 12 * 60 * 60 * 1000,
-  attemptTimeoutMs: 60_000
-};
+/** The wait after the first failure, doubled after each one. */
+const BASE_DELAY_MS = 2_000;
+/** The longest wait between two attempts. */
+const MAX_DELAY_MS = 10 * 60 * 1000;
+/** A delivery that fails this long after it was sent is given up. */
+const GIVE_UP_AFTER_MS = 12 * 60 * 60 * 1000;
+/** A sink still running after this fails its attempt. */
+const ATTEMPT_TIMEOUT_MS = 60_000;
 
 /**
- * Attempts a delivery may start. Above the ~80 that twelve hours of the
- * default backoff allows; it exists because Tasks commits an attempt
- * before the sink runs only for a capped definition, so a sink that resets
- * the object before its first I/O backs off instead of running again at once.
+ * Attempts a delivery may start. Above the ~80 that twelve hours of
+ * backoff allows. It is set because Tasks commits an attempt with
+ * `storage.sync()` before the handler only for a capped definition: that is
+ * what lets an attempt a reset cut short be counted. The handler gives up
+ * before Tasks' own cap, so a give-up is always reported.
  */
 const MAX_DELIVERY_ATTEMPTS = 200;
+
+/**
+ * Attempts in a row that started and never ended (the object reset before
+ * the sink returned or threw) after which a delivery gives up: a sink that
+ * kills its isolate every time is not tried forever.
+ */
+const MAX_LOST_ATTEMPTS = 3;
+
+/**
+ * The delivery's checkpoint keys: the last attempt that ended, and the
+ * attempts lost in a row before it.
+ */
+const ENDED = "__delivery:ended";
+const LOST = "__delivery:lost";
 
 /** The framework definition of one sink's deliveries. */
 export function deliveryDefinition(sink: string): string {
@@ -120,10 +90,9 @@ export function registerDeliverySink<Payload>(
   name: string,
   sink: DeliverySink<Payload>
 ): void {
-  const policy = { ...DEFAULT_RETRY, ...sink.retry };
   tasks.register(
     deliveryDefinition(name),
-    (input, step) => attemptDelivery(sink, policy, input as Payload, step),
+    (input, step) => attemptDelivery(sink, input as Payload, step),
     { maxAttempts: MAX_DELIVERY_ATTEMPTS }
   );
 }
@@ -164,49 +133,87 @@ export async function sendDelivery<Payload>(
     attempt: resume.attempts,
     input: payload as TaskJson,
     retain: false,
-    createdAt: resume.sentAt
+    createdAt: resume.sentAt,
+    // Its earlier attempts ended (they were the released version's), so
+    // none of them counts as lost.
+    checkpoint: { [ENDED]: resume.attempts }
   });
 }
 
 async function attemptDelivery<Payload>(
   sink: DeliverySink<Payload>,
-  policy: Required<DeliveryRetryPolicy>,
   payload: Payload,
   step: TaskStep
 ): Promise<void | TaskSettlement> {
-  const timeout = new AbortController();
-  const abort = () => timeout.abort(step.signal.reason);
-  step.signal.addEventListener("abort", abort, { once: true });
+  const giveUp = (cause: unknown): TaskSettlement => {
+    const error =
+      sink.giveUpError?.(payload, step.id, step.attempt, cause) ??
+      new Error(
+        `Delivery ${step.id} gave up after ${step.attempt} attempts: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`
+      );
+    console.error(`[agents] ${error.message}`);
+    // Not awaited: a hook that never returns must not hold the run open.
+    void Promise.resolve()
+      .then(() => sink.onGiveUp?.(error, payload))
+      .catch((hookError: unknown) => {
+        console.error(`[agents] delivery ${step.id} onGiveUp threw`, hookError);
+      });
+    // Returned, not thrown: Tasks reads some thrown messages (a lost
+    // connection) as a platform failure and would keep the run open.
+    return TaskSettlement.failed(error);
+  };
+  const retryLater = (now: number): TaskSettlement =>
+    TaskSettlement.retry(
+      now +
+        backoffDelay(step.attempt, {
+          baseMs: BASE_DELAY_MS,
+          maxMs: MAX_DELAY_MS
+        })
+    );
+  const outOfTime = (now: number) =>
+    now - step.createdAt >= GIVE_UP_AFTER_MS ||
+    step.attempt >= MAX_DELIVERY_ATTEMPTS - MAX_LOST_ATTEMPTS;
+
+  // Attempts counted (and committed) that never ended: the object reset
+  // while they ran. They back off like a failure, without running the
+  // sink, and give up after a few in a row; otherwise a sink that resets
+  // its object before its first I/O would run again on every start.
+  const ended = step.checkpoint.get<number>(ENDED) ?? 0;
+  if (step.attempt - 1 > ended) {
+    const lost =
+      (step.checkpoint.get<number>(LOST) ?? 0) + (step.attempt - 1 - ended);
+    const now = Date.now();
+    if (lost >= MAX_LOST_ATTEMPTS || outOfTime(now)) {
+      return giveUp(
+        new Error(
+          `${lost} attempt${lost === 1 ? "" : "s"} in a row never reported back`
+        )
+      );
+    }
+    step.checkpoint.set(LOST, lost);
+    step.checkpoint.set(ENDED, step.attempt);
+    console.error(
+      `[agents] delivery ${step.id}: an attempt never reported back (${lost} in a row); backing off`
+    );
+    return retryLater(now);
+  }
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      const error = new Error(
-        `Delivery ${step.id} attempt ${step.attempt} timed out after ${policy.attemptTimeoutMs}ms`
+      reject(
+        new Error(
+          `Delivery ${step.id} attempt ${step.attempt} timed out after ${ATTEMPT_TIMEOUT_MS}ms`
+        )
       );
-      timeout.abort(error);
-      reject(error);
-    }, policy.attemptTimeoutMs);
+    }, ATTEMPT_TIMEOUT_MS);
   });
-  // A timed-out sink keeps running; its later checkpoint writes are dropped.
-  let live = true;
-  const checkpoint: TaskCheckpoint = {
-    get: (key) => step.checkpoint.get(key),
-    set: (key, value) => {
-      if (!live) throw new Error(`Delivery ${step.id}: attempt timed out`);
-      step.checkpoint.set(key, value);
-    }
-  };
   try {
-    return await Promise.race([
-      sink.deliver(payload, {
-        id: step.id,
-        attempt: step.attempt,
-        idempotencyKey: step.idempotencyKey("deliver"),
-        signal: timeout.signal,
-        checkpoint
-      }),
-      timedOut
-    ]);
+    // A sink that times out keeps running; its late result is not read.
+    await Promise.race([sink.deliver(payload), timedOut]);
+    return;
   } catch (error) {
     // The isolate is going away: leave the run to the next one.
     if (
@@ -216,39 +223,17 @@ async function attemptDelivery<Payload>(
       throw error;
     }
     if (step.signal.aborted) throw error;
+    step.checkpoint.set(ENDED, step.attempt);
+    step.checkpoint.set(LOST, 0);
     const now = Date.now();
-    if (now - step.createdAt >= policy.giveUpAfterMs) {
-      const giveUp =
-        sink.giveUpError?.(payload, step.id, step.attempt, error) ??
-        new Error(
-          `Delivery ${step.id} gave up after ${step.attempt} attempts: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      console.error(`[agents] ${giveUp.message}`);
-      try {
-        await sink.onGiveUp?.(giveUp, payload);
-      } catch (hookError) {
-        console.error(`[agents] delivery ${step.id} onGiveUp threw`, hookError);
-      }
-      // Returned, not thrown: Tasks reads some thrown messages (a lost
-      // connection) as a platform failure and would keep the run open.
-      return TaskSettlement.failed(giveUp);
-    }
-    const next =
-      now +
-      backoffDelay(step.attempt, {
-        baseMs: policy.baseDelayMs,
-        maxMs: policy.maxDelayMs
-      });
+    if (outOfTime(now)) return giveUp(error);
+    const retry = retryLater(now);
     console.error(
-      `[agents] delivery ${step.id} failed (attempt ${step.attempt}); retrying in ${Math.round((next - now) / 1000)}s`,
+      `[agents] delivery ${step.id} failed (attempt ${step.attempt}); retrying in ${Math.round(((retry.wakeAt ?? now) - now) / 1000)}s`,
       error
     );
-    return TaskSettlement.retry(next);
+    return retry;
   } finally {
-    live = false;
     clearTimeout(timer);
-    step.signal.removeEventListener("abort", abort);
   }
 }
