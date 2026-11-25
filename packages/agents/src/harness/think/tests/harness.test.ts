@@ -413,6 +413,34 @@ describe("ThinkHarness durability", () => {
     expect(await stub.streamRows()).toBe(0);
   });
 
+  it("streams into its own Streams instance, not the default tables", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("slow");
+    await stub.streamed();
+    expect(await stub.streamRows()).toBe(1);
+    expect(await stub.defaultStreamRows()).toBe(0);
+    await stub.releaseSlow();
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+  });
+
+  it("continues a model call whose stream an earlier version kept in the default tables", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("slow");
+    await stub.streamed();
+    stub = await crash(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.moveStreamsToDefault()
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    await runDurableObjectAlarm(stub);
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+    expect(await stub.defaultStreamRows()).toBe(0);
+    expect(await stub.streamRows()).toBe(0);
+  });
+
   it("keeps output streamed just before an eviction, even short of a full segment", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);

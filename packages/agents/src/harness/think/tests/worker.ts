@@ -1001,6 +1001,54 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return (await session.wait(operationId)).status;
   }
 
+  /** Rows in the default Streams tables (the harness writes none there). */
+  defaultStreamRows(): number {
+    const sql = this.ctx.storage.sql;
+    return sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE name = 'cf_agents_streams'"
+      )
+      .toArray().length === 0
+      ? 0
+      : sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM cf_agents_streams")
+          .one().n;
+  }
+
+  /**
+   * Put the harness's in-flight streams where an earlier version kept
+   * them, in the default Streams tables, and forget the harness's schema
+   * version, as an object upgraded from that version has none.
+   */
+  moveStreamsToDefault(): void {
+    const sql = this.ctx.storage.sql;
+    // The default tables, created with the same schema as the harness's.
+    for (const { sql: create } of sql
+      .exec<{ sql: string }>(
+        `SELECT sql FROM sqlite_master WHERE name LIKE '%${HARNESS_SUFFIX}'
+           AND name LIKE '%stream%' AND sql IS NOT NULL`
+      )
+      .toArray()) {
+      sql.exec(
+        create
+          .replaceAll(HARNESS_SUFFIX, "")
+          .replace(
+            /^CREATE (TABLE|INDEX|UNIQUE INDEX) /,
+            "CREATE $1 IF NOT EXISTS "
+          )
+      );
+    }
+    sql.exec(
+      `INSERT INTO cf_agents_streams SELECT * FROM cf_agents_streams${HARNESS_SUFFIX}`
+    );
+    sql.exec(
+      `INSERT INTO cf_agents_stream_blocks SELECT * FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`
+    );
+    sql.exec(`DELETE FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`);
+    sql.exec(`DELETE FROM cf_agents_streams${HARNESS_SUFFIX}`);
+    forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
+  }
+
   releaseSlow(): void {
     this.#releaseSlow();
   }
@@ -1010,7 +1058,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     for (let i = 0; i < 300; i++) {
       const rows = this.ctx.storage.sql
         .exec<{ n: number }>(
-          "SELECT COUNT(*) AS n FROM cf_agents_stream_blocks"
+          `SELECT COUNT(*) AS n FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`
         )
         .one();
       if (rows.n > 0) return;
@@ -1021,7 +1069,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   streamRows(): number {
     return this.ctx.storage.sql
-      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM cf_agents_streams")
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM cf_agents_streams${HARNESS_SUFFIX}`
+      )
       .one().n;
   }
 
@@ -1397,6 +1447,9 @@ export class ThinkHarnessFacetRoot extends Agent<Cloudflare.Env> {
     return (await this.#child()).agentRuns();
   }
 }
+
+/** The table suffix of the instances the harness composes. */
+const HARNESS_SUFFIX = "__c_think_2dharness";
 
 /** The table prefix ThinkHarness keeps its records under in the shared store. */
 const SHARED_STORE_PREFIX = "cf_think_harness_store_";

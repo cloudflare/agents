@@ -24,6 +24,7 @@ import {
   isTaskSuspension
 } from "../../tasks/replay";
 import { Tasks } from "../../tasks/tasks";
+import { hasTable } from "../../lifecycle/schema";
 import type {
   TaskJson,
   TaskRecord,
@@ -139,6 +140,7 @@ const OPERATION_DEFINITION = "__cf_think_harness_operation";
 const SESSION_KEY = "think-harness:session";
 /** The session value holding the client tools its client last declared. */
 const CLIENT_TOOLS_KEY = "think-harness:client-tools";
+const UTF8 = new TextEncoder();
 /** Open operations carried forward from the harness store at a time. */
 const CARRY_BATCH = 50;
 /** The checkpoint key a placed operation's progress is kept under. */
@@ -524,11 +526,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   readonly #tasks: Tasks;
   /**
-   * In-flight model output. Only the harness reads it, so the harness owns
-   * it rather than asking the host to install a Streams capability. It
-   * shares the `cf_agents_streams` tables with any Streams the host has.
+   * In-flight model output, on a Streams instance the harness composes: its
+   * own tables, apart from any Streams the host has.
    */
-  readonly #streams = new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
+  readonly #streams: Streams;
   /**
    * The transcripts. The harness writes every message, and its operations
    * point at them, so it owns the Sessions capability too; a second one
@@ -560,6 +561,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     this.sessions = new ThinkSessions(this);
     this.#tasks =
       options.tasks ?? this.compose(new Tasks({ name: this.composedName }));
+    this.#streams = this.compose(
+      new Streams({ name: this.composedName, maxChunkBytes: REPLAY_ITEM_BYTES })
+    );
     this.#tasks.register(
       OPERATION_DEFINITION,
       // SAFETY: every run of this definition was accepted by `enqueue` or
@@ -583,10 +587,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   override async onStart(): Promise<void> {
     this.#bindOwned();
     await this.#sessions.onStart();
-    await this.#streams.onStart();
     await this.lifecycle.schema.migrate({
-      version: 1,
-      steps: { 1: () => this.#carryReleased() }
+      version: 2,
+      steps: {
+        1: () => this.#carryReleased(),
+        2: () => this.#carryStreams()
+      }
     });
     await this.#ensureSession(ROOT_SESSION);
   }
@@ -623,6 +629,58 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (sessions.length < CARRY_BATCH) break;
     }
     released.drop();
+  }
+
+  /**
+   * Move the stream of each open operation's interrupted model call into
+   * the harness's own Streams, out of the default instance's tables where
+   * an earlier version kept it. Read and written through the default
+   * instance's synchronous operations only: it is not started here, so it
+   * records no schema of its own. Idempotent: a stream already moved is
+   * no longer in the default tables.
+   */
+  async #carryStreams(): Promise<void> {
+    if (!hasTable(this.lifecycle.storage.sql, "cf_agents_streams")) return;
+    const shared = new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
+    bindLifecycleCapability(shared, this.lifecycle);
+    const from = shared.__DO_NOT_USE_WILL_BREAK__sync();
+    const to = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
+    for (const record of this.#open()) {
+      const streamId = this.#state(record.runId)?.streamId;
+      const row = streamId == null ? undefined : from.getStream(streamId);
+      if (streamId == null || !row) continue;
+      this.lifecycle.storage.transactionSync(() => {
+        if (!to.getStream(streamId)) {
+          to.insertStream(
+            streamId,
+            row.tag,
+            // SAFETY: stream metadata is JSON the harness wrote.
+            row.metadata === null
+              ? undefined
+              : (JSON.parse(row.metadata) as Record<string, StreamJson>)
+          );
+          for (let seq = 0; ;) {
+            const rows = from.readChunks(streamId, seq, READ_PAGE);
+            for (const chunk of rows) {
+              // Stored as it was: one segment the harness wrote per chunk.
+              to.appendJson(
+                streamId,
+                chunk.chunk,
+                UTF8.encode(chunk.chunk).byteLength,
+                {
+                  maxChunks: READ_PAGE,
+                  maxBytes: SEGMENT_MAX_BYTES
+                }
+              );
+            }
+            to.flush(streamId);
+            if (rows.length < READ_PAGE) break;
+            seq = (rows.at(-1)?.seq ?? seq) + 1;
+          }
+        }
+        from.deleteUnchecked(streamId);
+      });
+    }
   }
 
   /**
@@ -2088,15 +2146,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** The Sessions handle for a session, configured on first use. */
   /**
-   * Give the Sessions and Streams the harness owns this capability's
-   * Lifecycle services. Done on first use, not only in `onStart`, because an
+   * Give the Sessions the harness owns this capability's Lifecycle
+   * services. Done on first use, not only in `onStart`, because an
    * RPC can read a transcript before startup (the read itself then waits
    * for startup).
    */
   #bindOwned(): void {
     if (this.#bound) return;
     bindLifecycleCapability(this.#sessions, this.lifecycle);
-    bindLifecycleCapability(this.#streams, this.lifecycle);
     this.#bound = true;
     // Writes made on a session's Sessions handle (from `configureSession`)
     // go around the harness; pass them on as events, so listeners and chat
