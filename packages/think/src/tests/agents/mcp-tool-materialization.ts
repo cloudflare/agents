@@ -26,7 +26,18 @@ const usage = {
 /** The tool definitions each model request carried, in order. */
 type RequestTools = { name?: string }[] | undefined;
 
-function createTextModel(requests: RequestTools[] = []): LanguageModel {
+type PromptMessage = { role: string; content?: unknown };
+
+/**
+ * A model that answers "done", or, while `call` is set and the request has
+ * no tool result yet, asks for that one tool call. Every request's messages
+ * go to `prompts`.
+ */
+function createTextModel(
+  requests: RequestTools[] = [],
+  call?: () => { toolName: string; input: unknown } | undefined,
+  prompts: PromptMessage[][] = []
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -35,11 +46,32 @@ function createTextModel(requests: RequestTools[] = []): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream(options: { tools?: { name?: string }[] }) {
+    doStream(options: {
+      tools?: { name?: string }[];
+      prompt?: PromptMessage[];
+    }) {
       requests.push(options.tools);
+      prompts.push(options.prompt ?? []);
+      const wanted = call?.();
+      const answered = options.prompt?.some((m) => m.role === "tool");
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
+          if (wanted && !answered) {
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "mcp-1",
+              toolName: wanted.toolName,
+              input: JSON.stringify(wanted.input)
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: { unified: "tool-calls" as const, raw: undefined },
+              usage
+            });
+            controller.close();
+            return;
+          }
           controller.enqueue({ type: "text-start", id: "text" });
           controller.enqueue({
             type: "text-delta",
@@ -84,10 +116,50 @@ export class ThinkMcpToolMaterializationAgent extends Think {
   override waitForMcpConnections = true;
 
   readonly #requests: RequestTools[] = [];
+  readonly #prompts: PromptMessage[][] = [];
+  #call: { toolName: string; input: unknown } | undefined;
   #offerAll = false;
+  /** Whether each `getTools()` call came after the MCP wait. */
+  #getToolsAfterWait: boolean[] = [];
 
   override getModel(): LanguageModel {
-    return createTextModel(this.#requests);
+    return createTextModel(this.#requests, () => this.#call, this.#prompts);
+  }
+
+  override getTools() {
+    this.#getToolsAfterWait.push(this._waitForConnectionsCalls > 0);
+    return {};
+  }
+
+  /**
+   * Run a turn: whether every `getTools()` call in it came after the turn
+   * waited for the MCP connections, so tools built from the MCP catalog see
+   * servers that came up during the wait.
+   */
+  async getToolsFollowsWait(): Promise<boolean[]> {
+    await this._ensureBulkConnection();
+    this._waitForConnectionsCalls = 0;
+    this.#getToolsAfterWait = [];
+    await this.runTurn({ mode: "wait", input: "hello" });
+    return this.#getToolsAfterWait;
+  }
+
+  /**
+   * Have the model call the first MCP tool in a turn: the tool result the
+   * next model request carries, as JSON.
+   */
+  async callThroughModel(): Promise<string> {
+    await this._ensureBulkConnection();
+    const [toolName] = Object.keys(this.mcp.getAITools());
+    this.#offerAll = true;
+    this.maxSteps = 2;
+    this.#call = { toolName, input: { value: "from the model" } };
+    await this.runTurn({ mode: "wait", input: "call it" });
+    this.#call = undefined;
+    this.#offerAll = false;
+    this.maxSteps = 1;
+    const next = this.#prompts.at(-1) ?? [];
+    return JSON.stringify(next.filter((message) => message.role === "tool"));
   }
 
   override beforeTurn(ctx: TurnContext): TurnConfig | void {

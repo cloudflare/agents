@@ -42,7 +42,7 @@ import {
 import { Workspace } from "@cloudflare/computer";
 import { workspaceExtension } from "./extensions/workspace";
 import { fetchExtension } from "./extensions/fetch";
-import { mcpExtension } from "agents/internal";
+import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
@@ -170,6 +170,15 @@ export class Think<
       tasks: this.tasks,
       // In Think's tool order: the workspace's tools, then fetch.
       extensions: [
+        // Think waits for MCP connections at the top of a turn, before any
+        // tool is built.
+        {
+          name: "mcp-connections",
+          extension: mcpConnectionsExtension(
+            () => this.mcp,
+            () => this.waitForMcpConnections
+          )
+        },
         {
           name: "workspace",
           extension: workspaceExtension(() => this.workspace)
@@ -195,8 +204,7 @@ export class Think<
           after: true,
           extension: mcpExtension({
             manager: () => this.mcp,
-            include: () => this.includeMcpTools,
-            waitForConnections: () => this.waitForMcpConnections
+            include: () => this.includeMcpTools
           })
         }
       ],

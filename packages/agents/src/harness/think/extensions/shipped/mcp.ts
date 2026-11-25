@@ -14,27 +14,39 @@ export type McpExtensionOptions = {
   readonly manager: () => MCPClientManager;
   /** Whether the tools are offered; read once per build. Default: yes. */
   readonly include?: () => boolean;
-  /**
-   * Wait for the servers' connections before the tools are read: `true`
-   * for ten seconds, or a timeout. Read once per build. Default: no wait.
-   */
-  readonly waitForConnections?: () => boolean | { readonly timeout: number };
 };
 
 /** @internal */
 export function mcpExtension(options: McpExtensionOptions): ThinkExtension {
   return (ctx) =>
-    ctx.tools.transform(async (tools) => {
-      const wait = options.waitForConnections?.() ?? false;
-      const manager = options.manager();
-      if (wait) {
-        await manager.waitForConnections({
-          timeout: typeof wait === "object" ? wait.timeout : 10_000
-        });
-      }
+    ctx.tools.transform((tools) => {
       if (options.include?.() === false) return;
-      for (const [name, tool] of Object.entries(manager.getAITools())) {
+      for (const [name, tool] of Object.entries(
+        options.manager().getAITools()
+      )) {
         tools.set(name, tool);
       }
+    });
+}
+
+/**
+ * Wait for the MCP servers' connections, `true` for ten seconds or for a
+ * timeout, and set no tools. Loaded ahead of every other extension, as
+ * Think waits at the top of a turn, so tools built from the MCP catalog
+ * (the agent's own included) see servers that came up during the wait.
+ *
+ * @internal
+ */
+export function mcpConnectionsExtension(
+  manager: () => MCPClientManager,
+  waitForConnections: () => boolean | { readonly timeout: number }
+): ThinkExtension {
+  return (ctx) =>
+    ctx.tools.transform(async () => {
+      const wait = waitForConnections();
+      if (!wait) return;
+      await manager().waitForConnections({
+        timeout: typeof wait === "object" ? wait.timeout : 10_000
+      });
     });
 }

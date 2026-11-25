@@ -87,7 +87,10 @@ export {
   EXTENSION_WORKER_RUNTIME,
   EXTENSION_WORKER_RUNTIME_VERSION
 } from "../harness/think/extensions/worker-runtime.generated";
-export { mcpExtension } from "../harness/think/extensions/shipped/mcp";
+export {
+  mcpConnectionsExtension,
+  mcpExtension
+} from "../harness/think/extensions/shipped/mcp";
 export type {
   Drafts,
   ExtensionHandle,
