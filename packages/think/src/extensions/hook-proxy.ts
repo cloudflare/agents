@@ -7,7 +7,7 @@
  * are plain JSON-safe data objects that survive Workers RPC serialization.
  */
 
-import type { ThinkModel, TurnContext, TurnConfig } from "../turn-types";
+import type { ThinkModel, TurnContext } from "../turn-types";
 
 /**
  * Best-effort JSON-safe normalization. Strips functions, AbortSignals,
@@ -82,23 +82,6 @@ export function createTurnContextSnapshot(
     ...(ctx.requestId !== undefined && { requestId: ctx.requestId }),
     ...(ctx.trigger !== undefined && { trigger: ctx.trigger })
   };
-}
-
-/**
- * Parse a hook result from the extension Worker's JSON response.
- * Returns a TurnConfig or null if the extension skipped/errored.
- */
-export function parseHookResult(
-  json: string
-): { config: TurnConfig } | { skipped: true } | { error: string } {
-  try {
-    const parsed = JSON.parse(json) as Record<string, unknown>;
-    if (parsed.skipped) return { skipped: true };
-    if (parsed.error) return { error: parsed.error as string };
-    return { config: (parsed.result ?? {}) as TurnConfig };
-  } catch {
-    return { error: "Failed to parse hook result" };
-  }
 }
 
 // ── Per-tool / per-step / per-chunk snapshots ─────────────────────────

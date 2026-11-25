@@ -810,9 +810,10 @@ describe("ExtensionManager worker id scoping for host bindings", () => {
       get: (id: string) => {
         ids.push(id);
         return {
+          // The extension runtime's entrypoint, with nothing loaded.
           getEntrypoint: () => ({
-            describe: async () => "[]",
-            manifest: async () => JSON.stringify({ hooks: [] })
+            describe: async () => ({ hooks: [] }),
+            build: async () => ({ tools: [], prompt: [] })
           })
         };
       }

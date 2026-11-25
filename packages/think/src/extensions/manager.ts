@@ -35,6 +35,8 @@
 
 import type { ToolSet } from "ai";
 import {
+  EXTENSION_WORKER_RUNTIME,
+  EXTENSION_WORKER_RUNTIME_VERSION,
   ExtensionManager as ExtensionCore,
   toolsOf,
   type Drafts,
@@ -45,12 +47,11 @@ import {
   type ToolOutcome
 } from "agents/internal";
 import type { TurnConfig } from "../turn-types";
-import { parseHookResult, type createTurnContextSnapshot } from "./hook-proxy";
+import type { createTurnContextSnapshot } from "./hook-proxy";
 import type {
   ExtensionManifest,
   ExtensionPermissions,
-  ExtensionInfo,
-  ExtensionToolDescriptor
+  ExtensionInfo
 } from "./types";
 
 /**
@@ -68,19 +69,17 @@ export function sanitizeName(name: string): string {
     .replace(/^_|_$/g, "");
 }
 
-/** @internal The RPC methods of a released extension's Worker. */
+/**
+ * A loaded extension's hooks, as `getHookSubscribers()` hands them out:
+ * `hook` answers with JSON, `{ result }`, `{ skipped: true }` or
+ * `{ error }`.
+ */
 export interface ExtensionEntrypoint {
-  describe(): Promise<string>;
-  manifest(): Promise<string>;
-  execute(toolName: string, argsJson: string): Promise<string>;
   hook(name: string, ctxProxy: unknown): Promise<string>;
 }
 
 interface LoadedExtension {
   manifest: ExtensionManifest;
-  tools: ExtensionToolDescriptor[];
-  hooks: string[];
-  entrypoint: ExtensionEntrypoint;
   handle: ReleasedWorkerHandle;
 }
 
@@ -284,49 +283,67 @@ export function releasedHookRules(
   };
 }
 
+/** The extension handle's methods on the runtime in an extension's Worker. */
+interface ExtensionWorker {
+  describe(): Promise<{ hooks: string[] }>;
+  build(drafts: Drafts, build: { session: string }): Promise<Drafts>;
+  execute(
+    tool: string,
+    input: unknown,
+    call: { id: string; session: string; messages: [] },
+    onOutput: (output: unknown) => void
+  ): Promise<ToolOutcome>;
+  cancel(
+    call: { id: string; session: string },
+    reason?: unknown
+  ): Promise<void>;
+  hook(name: string, context: unknown): Promise<unknown>;
+}
+
+const NO_DRAFTS: Drafts = { tools: [], prompt: [] };
+
 /**
- * A released extension's Worker, as an extension handle. Its tools are
- * fixed when it loads: each is offered as `<extension>_<tool>`, described
- * as `[<extension>] <description>`.
+ * A released extension's Worker, which runs the extension runtime, as an
+ * extension handle. Its tools are fixed when it loads: each is offered as
+ * `<extension>_<tool>`, described as `[<extension>] <description>`, so a
+ * build merges the entries it read then and calls the Worker for nothing.
  *
  * @internal
  */
 export class ReleasedWorkerHandle implements ExtensionHandle<ReleasedHooks> {
-  readonly entries: readonly (readonly [string, ToolEntry])[];
   readonly #manifest: ExtensionManifest;
-  readonly #entrypoint: ExtensionEntrypoint;
+  readonly #worker: ExtensionWorker;
   readonly #hooks: readonly ReleasedHookName[];
-  /** The tool each offered name runs. */
-  readonly #toolNames = new Map<string, string>();
+  #entries: readonly (readonly [string, ToolEntry])[] = [];
   #unloaded = false;
 
   constructor(
     manifest: ExtensionManifest,
-    entrypoint: ExtensionEntrypoint,
-    tools: readonly ExtensionToolDescriptor[],
+    worker: ExtensionWorker,
     hooks: readonly string[]
   ) {
     this.#manifest = manifest;
-    this.#entrypoint = entrypoint;
+    this.#worker = worker;
     this.#hooks = RELEASED_HOOKS.filter((hook) => hooks.includes(hook));
-    const prefix = sanitizeName(manifest.name);
-    this.entries = tools.map((descriptor) => {
-      const name = `${prefix}_${descriptor.name}`;
-      this.#toolNames.set(name, descriptor.name);
-      const entry: ToolEntry = {
-        owner: manifest.name,
-        definition: {
-          description: `[${manifest.name}] ${descriptor.description}`
-        },
-        // SAFETY: a descriptor's input schema is a JSON Schema object.
-        inputSchema: descriptor.inputSchema as ToolEntry["inputSchema"],
-        execute: true,
-        validate: false,
-        modelOutput: false,
-        streams: false
-      };
-      return [name, entry] as const;
-    });
+  }
+
+  /** Read the Worker's tools and hooks once. */
+  static async open(
+    manifest: ExtensionManifest,
+    worker: ExtensionWorker
+  ): Promise<ReleasedWorkerHandle> {
+    const { hooks } = await worker.describe();
+    const handle = new ReleasedWorkerHandle(manifest, worker, hooks);
+    handle.#entries = (await worker.build(NO_DRAFTS, { session: "" })).tools;
+    return handle;
+  }
+
+  get entries(): readonly (readonly [string, ToolEntry])[] {
+    return this.#entries;
+  }
+
+  get hooks(): readonly ReleasedHookName[] {
+    return this.#hooks;
   }
 
   /** Its tools answer as unloaded from now on. */
@@ -340,32 +357,35 @@ export class ReleasedWorkerHandle implements ExtensionHandle<ReleasedHooks> {
 
   async build(drafts: Drafts): Promise<Drafts> {
     const tools = new Map(drafts.tools);
-    for (const [name, entry] of this.entries) tools.set(name, entry);
+    for (const [name, entry] of this.#entries) tools.set(name, entry);
     return { tools: [...tools], prompt: drafts.prompt };
   }
 
-  async execute(name: string, input: unknown): Promise<ToolOutcome> {
+  async execute(
+    name: string,
+    input: unknown,
+    call: { id: string; session: string },
+    onOutput: (output: unknown) => void | Promise<void>
+  ): Promise<ToolOutcome> {
     if (this.#unloaded) {
       return {
         ok: false,
         errorText: `Extension "${this.#manifest.name}" has been unloaded. Tool "${name}" is no longer available.`
       };
     }
-    const resultJson = await this.#entrypoint.execute(
-      this.#toolNames.get(name) ?? name,
-      JSON.stringify(input)
+    // A released tool is given its arguments and the host, never the
+    // transcript, so the transcript does not cross.
+    return this.#worker.execute(
+      name,
+      input,
+      { id: call.id, session: call.session, messages: [] },
+      (output) => void onOutput(output)
     );
-    const parsed = JSON.parse(resultJson) as {
-      result?: unknown;
-      error?: string;
-    };
-    return parsed.error
-      ? { ok: false, errorText: parsed.error }
-      : { ok: true, output: parsed.result };
   }
 
-  /** The released protocol has no way to stop a call. */
-  cancel(): void {}
+  cancel(call: { id: string; session: string }): void {
+    void this.#worker.cancel({ id: call.id, session: call.session });
+  }
 
   async validate(): Promise<never> {
     throw new Error("A released extension's tools take JSON Schema input");
@@ -383,17 +403,35 @@ export class ReleasedWorkerHandle implements ExtensionHandle<ReleasedHooks> {
     name: H,
     context: ReleasedHooks[H][0]
   ): Promise<ReleasedHooks[H][1]> {
+    // Only the snapshot crosses; `beforeTurn`'s config stays with the fold.
     const payload =
       name === "beforeTurn"
         ? (context as ReleasedHooks["beforeTurn"][0]).snapshot
         : context;
-    const parsed = parseHookResult(await this.#entrypoint.hook(name, payload));
-    if ("error" in parsed) throw new Error(parsed.error);
-    // SAFETY: only `beforeTurn` returns something; the observers' results
-    // are ignored.
-    return (
-      "config" in parsed && name === "beforeTurn" ? parsed.config : undefined
-    ) as ReleasedHooks[H][1];
+    // SAFETY: the Worker's handler of hook `name` returns its result type.
+    return (await this.#worker.hook(name, payload)) as ReleasedHooks[H][1];
+  }
+
+  /**
+   * The entrypoint `getHookSubscribers()` hands out, as released: `hook`
+   * answers with JSON, `{ result }`, `{ skipped: true }` or `{ error }`.
+   */
+  entrypoint(): ExtensionEntrypoint {
+    return {
+      hook: async (name, snapshot) => {
+        if (!(this.#hooks as readonly string[]).includes(name)) {
+          return JSON.stringify({ skipped: true });
+        }
+        try {
+          const result = await this.#worker.hook(name, snapshot);
+          return JSON.stringify({ result: result ?? {} });
+        } catch (error) {
+          return JSON.stringify({
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    };
   }
 }
 
@@ -535,7 +573,7 @@ export class ExtensionManager {
         `[Think] Extension "${manifest.name}": a context block's \`type\` is ignored. An extension writes its blocks with host.setContext(), which its context.write permission governs.`
       );
     }
-    const workerModule = wrapExtensionSource(source);
+    const workerModule = wrapExtensionSource(source, manifest.name);
     const permissions = manifest.permissions ?? {};
 
     // Build env bindings for the dynamic worker. Inject a loopback
@@ -585,8 +623,14 @@ export class ExtensionManager {
     // A cached worker keeps the env and outbound it was created with, so an
     // id whose Worker carries the host binding must also cover the agent
     // and the context labels that binding was created for.
+    const modules = {
+      "runtime.js": EXTENSION_WORKER_RUNTIME,
+      "extension.js": workerModule,
+      "manifest.js": `export default ${JSON.stringify({ name: manifest.name })};`
+    };
     const hash = await hashWorkerConfig({
       workerModule,
+      runtime: EXTENSION_WORKER_RUNTIME_VERSION,
       globalOutbound:
         globalOutbound === null
           ? "null"
@@ -605,41 +649,21 @@ export class ExtensionManager {
       () => ({
         compatibilityDate: "2025-06-01",
         compatibilityFlags: ["nodejs_compat"],
-        mainModule: "extension.js",
-        modules: { "extension.js": workerModule },
+        mainModule: "runtime.js",
+        modules,
         globalOutbound,
         ...(Object.keys(workerEnv).length > 0 ? { env: workerEnv } : {})
       })
     );
 
-    const entrypoint = worker.getEntrypoint() as unknown as ExtensionEntrypoint;
-
-    // Discover tools and hooks via RPC
-    const descriptorsJson = await entrypoint.describe();
-    const tools = JSON.parse(descriptorsJson) as ExtensionToolDescriptor[];
-
-    let hooks: string[] = [];
-    try {
-      const manifestJson = await entrypoint.manifest();
-      const runtimeManifest = JSON.parse(manifestJson) as {
-        hooks?: string[];
-      };
-      hooks = runtimeManifest.hooks ?? [];
-    } catch {
-      // Legacy extensions may not have manifest() — treat as no hooks
-    }
-
-    const handle = new ReleasedWorkerHandle(manifest, entrypoint, tools, hooks);
+    // SAFETY: the Worker's main module is the extension runtime, whose
+    // entrypoint methods are the extension handle's.
+    const entrypoint = worker.getEntrypoint() as unknown as ExtensionWorker;
+    const handle = await ReleasedWorkerHandle.open(manifest, entrypoint);
     this.#core.load(manifest.name, Promise.resolve(handle));
-    this.#extensions.set(manifest.name, {
-      manifest,
-      tools,
-      hooks,
-      entrypoint,
-      handle
-    });
+    this.#extensions.set(manifest.name, { manifest, handle });
 
-    return toExtensionInfo(manifest, tools);
+    return toExtensionInfo(manifest, handle);
   }
 
   /**
@@ -714,8 +738,11 @@ export class ExtensionManager {
   ): Array<{ name: string; entrypoint: ExtensionEntrypoint }> {
     const result: Array<{ name: string; entrypoint: ExtensionEntrypoint }> = [];
     for (const ext of this.#extensions.values()) {
-      if (ext.hooks.includes(hookName)) {
-        result.push({ name: ext.manifest.name, entrypoint: ext.entrypoint });
+      if ((ext.handle.hooks as readonly string[]).includes(hookName)) {
+        result.push({
+          name: ext.manifest.name,
+          entrypoint: ext.handle.entrypoint()
+        });
       }
     }
     return result;
@@ -726,7 +753,7 @@ export class ExtensionManager {
    */
   list(): ExtensionInfo[] {
     return [...this.#extensions.values()].map((ext) =>
-      toExtensionInfo(ext.manifest, ext.tools)
+      toExtensionInfo(ext.manifest, ext.handle)
     );
   }
 
@@ -750,28 +777,29 @@ export class ExtensionManager {
 
 function toExtensionInfo(
   manifest: ExtensionManifest,
-  tools: ExtensionToolDescriptor[]
+  handle: ReleasedWorkerHandle
 ): ExtensionInfo {
   const prefix = sanitizeName(manifest.name);
   return {
     name: manifest.name,
     version: manifest.version,
     description: manifest.description,
-    tools: tools.map((t) => `${prefix}_${t.name}`),
+    tools: handle.entries.map(([name]) => name),
     contextLabels: (manifest.context ?? []).map((c) => `${prefix}_${c.label}`),
     permissions: manifest.permissions ?? {}
   };
 }
 
 /**
- * Wrap an extension source in a Worker module that exposes
- * describe(), execute(), manifest(), and hook RPC methods.
- *
- * Source format: `({ tools: {...}, hooks: {...} })`
- * Both `tools` and `hooks` are optional.
+ * Wrap a released extension source (`({ tools: {...}, hooks: {...} })`,
+ * both optional) as the extension function the runtime runs: each tool
+ * set as `<prefix>_<name>` with its JSON Schema, each hook subscribed.
+ * A tool's `execute` and a hook get `(input, host)`, `host` being
+ * `env.host` or null.
  */
-function wrapExtensionSource(source: string): string {
-  return `import { WorkerEntrypoint } from "cloudflare:workers";
+function wrapExtensionSource(source: string, name: string): string {
+  const prefix = JSON.stringify(sanitizeName(name));
+  return `import { env } from "cloudflare:workers";
 
 const __ext = (${source});
 if (__ext && typeof __ext === "object" && !("tools" in __ext) && !("hooks" in __ext)) {
@@ -782,58 +810,32 @@ if (__ext && typeof __ext === "object" && !("tools" in __ext) && !("hooks" in __
 }
 const __tools = __ext.tools || {};
 const __hooks = __ext.hooks || {};
+const __name = ${JSON.stringify(name)};
+const __host = () => env.host ?? null;
 
-export default class Extension extends WorkerEntrypoint {
-  describe() {
-    const descriptors = [];
-    for (const [name, def] of Object.entries(__tools)) {
-      descriptors.push({
-        name,
-        description: def.description || name,
+export default (ctx) => {
+  ctx.tools.transform((tools) => {
+    for (const [tool, def] of Object.entries(__tools)) {
+      tools.set(${prefix} + "_" + tool, {
+        description: "[" + __name + "] " + (def.description || tool),
         inputSchema: {
           type: "object",
           properties: def.parameters || {},
           required: def.required || []
+        },
+        execute: async (args) => {
+          if (!def.execute) throw new Error("Unknown tool: " + tool);
+          return def.execute(args, __host());
         }
       });
     }
-    return JSON.stringify(descriptors);
-  }
-
-  manifest() {
-    return JSON.stringify({
-      hooks: Object.keys(__hooks)
+  });
+  for (const [hook, fn] of Object.entries(__hooks)) {
+    ctx.on(hook, async (snapshot) => {
+      const result = await fn(snapshot, __host());
+      return hook === "beforeTurn" ? (result ?? {}) : undefined;
     });
   }
-
-  async execute(toolName, argsJson) {
-    const def = __tools[toolName];
-    if (!def || !def.execute) {
-      return JSON.stringify({ error: "Unknown tool: " + toolName });
-    }
-    try {
-      const args = JSON.parse(argsJson);
-      const result = await def.execute(args, this.env.host ?? null);
-      return JSON.stringify({ result });
-    } catch (err) {
-      return JSON.stringify({ error: err.message || String(err) });
-    }
-  }
-
-  async hook(name, ctxSnapshot) {
-    const fn = __hooks[name];
-    if (!fn) return JSON.stringify({ skipped: true });
-    try {
-      // Hook handlers receive (ctxSnapshot, host) — symmetric with tool
-      // executes. \`host\` is null when the extension was loaded without
-      // host-requiring permissions or when the worker entry point doesn't
-      // re-export HostBridgeLoopback.
-      const result = await fn(ctxSnapshot, this.env.host ?? null);
-      return JSON.stringify({ result: result ?? {} });
-    } catch (err) {
-      return JSON.stringify({ error: err.message || String(err) });
-    }
-  }
-}
+};
 `;
 }
