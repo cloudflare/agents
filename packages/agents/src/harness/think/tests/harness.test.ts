@@ -522,6 +522,40 @@ describe("ThinkHarness durability", () => {
     expect(await stub.storedOperations()).toBe(0);
   });
 
+  it("finishes a turn a released version's memory-limit breaker sealed, keeping its partial", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("slow");
+    await stub.streamed();
+    stub = await crash(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.downgradeToStore("out_of_memory")
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    await runDurableObjectAlarm(stub);
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "out_of_memory"
+    });
+    const messages = await stub.messages();
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatch(/^assistant: x+$/);
+    expect(await stub.streamRows()).toBe(0);
+  });
+
+  it("drops a released version's settled operations without reading them", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.seedUnreadableSettledOperation()
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    expect(text(await stub.prompt("hello"))).toBe("echo: hello");
+    expect(await stub.storedOperations()).toBe(0);
+  });
+
   it("keeps work a rolled-back version queued under an id the store already holds", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
@@ -641,6 +675,30 @@ describe("ThinkHarness durability", () => {
     expect(messages).toHaveLength(4);
     expect(messages[1]).toMatch(/^assistant: x+$/);
     expect(messages.slice(2)).toEqual(["user: next", "assistant: echo: next"]);
+  });
+
+  it("writes nothing more after a reset that lands while afterToolCall runs", async () => {
+    const stub = fresh();
+    await stub.holdAfterToolCall(true);
+    await stub.submit("multiply 2");
+    await stub.afterToolCall("entered");
+    await stub.reset();
+    await stub.holdAfterToolCall(false);
+    await stub.afterToolCall("returned");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await stub.messages()).toEqual([]);
+  });
+
+  it("clears every queued operation of a session, past a page of them", async () => {
+    const stub = fresh();
+    await stub.submit("gate");
+    await stub.gateStarted(1);
+    for (let i = 0; i < 101; i++) await stub.submit(`queued ${i}`);
+    expect(await stub.pending()).toHaveLength(102);
+    await stub.reset();
+    expect(await stub.pending()).toEqual([]);
+    await stub.release();
+    expect(await stub.messages()).toEqual([]);
   });
 
   it("compacts and retries once on a context overflow", async () => {

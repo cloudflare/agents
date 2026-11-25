@@ -219,6 +219,11 @@ type TurnState = {
   readonly ended?: { readonly reason?: string };
   /** Tool calls an earlier version started for it and did not finish. */
   readonly started?: string[];
+  /**
+   * Why an earlier version's memory-limit breaker sealed it: the next
+   * attempt finishes it as abandoned, with this reason.
+   */
+  readonly abandon?: string;
 };
 
 /** A change to a turn's progress; a field left out is unchanged. */
@@ -580,7 +585,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   async #carryForward(store: OperationRecords): Promise<void> {
     const left = store.leftOperations();
-    if (!left) return;
     for (const op of left) {
       const {
         session,
@@ -602,7 +606,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       const state: TurnState = {
         ...progress,
-        ...(abandonReason !== null && { ended: { reason: abandonReason } }),
+        ...(abandonReason !== null && { abandon: abandonReason }),
         ...(startedToolCalls.length > 0 && { started: startedToolCalls })
       };
       await this.#tasks.importRun({
@@ -620,7 +624,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         })
       });
     }
-    store.dropOperations();
+    store.dropOperations(left);
   }
 
   // ── The harness interface ────────────────────────────────────────────────
@@ -1012,6 +1016,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (turn?.ended) {
         return outcomeOf(turn.ended, await this.#message(turn));
       }
+      if (turn?.abandon !== undefined) {
+        return this.#giveUp(run, turn, turn.abandon);
+      }
       if (!turn) {
         const placed = await this.#place(run, session, operationId, stored);
         if ("status" in placed) return placed;
@@ -1031,31 +1038,41 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     } catch (error) {
       if (endsAttempt(error, run)) throw error;
       console.error(`ThinkHarness operation ${operationId} failed`, error);
-      const reason = errorText(error);
       const current = run.checkpoint.get<TurnState>(TURN_KEY);
-      const kept = await this.#abandon(
-        session,
-        current,
-        this.#streamChunks(current?.streamId),
-        reason,
-        (change) => {
-          if (current) {
-            this.#write(
-              run,
-              turnOf(session, operationId, stored, current),
-              change
-            );
-          }
-        }
+      return this.#giveUp(
+        run,
+        current && turnOf(session, operationId, stored, current),
+        errorText(error)
       );
-      return {
-        status: "unanswered",
-        reason,
-        ...(kept && { messageId: kept.id })
-      };
     } finally {
       if (this.#live.get(session) === live) this.#live.delete(session);
     }
+  }
+
+  /**
+   * End the operation from inside its run: keep the partial answer, fail
+   * the tool calls it left open, and mark it ended with `reason`.
+   */
+  async #giveUp(
+    run: TaskStep,
+    turn: Turn | undefined,
+    reason: string
+  ): Promise<OperationOutcome> {
+    const kept =
+      turn &&
+      (await this.#abandon(
+        turn.session,
+        stateOf(turn),
+        this.#streamChunks(turn.streamId),
+        reason,
+        run,
+        (change) => this.#write(run, turn, change)
+      ));
+    return {
+      status: "unanswered",
+      reason,
+      ...(kept && { messageId: kept.id })
+    };
   }
 
   async #steps(
@@ -1156,7 +1173,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "empty";
           break;
         }
-        await this.#commit(session, undefined, (put) => {
+        await this.#commit(run, session, undefined, (put) => {
           let parentId: string | undefined;
           for (const message of messages) {
             put(message, { parentId, source });
@@ -1217,7 +1234,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             (name) => isServerTool(tools, name),
             Number.POSITIVE_INFINITY
           )._tag !== "await-input";
-        await this.#commit(session, undefined, (put) => {
+        await this.#commit(run, session, undefined, (put) => {
           put(answered);
           placed.push(answered);
           // An answer that does not continue the turn ends the operation
@@ -1239,7 +1256,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "not_found";
           break;
         }
-        await this.#commit(session, undefined, () =>
+        await this.#commit(run, session, undefined, () =>
           progress({ parentId: target, messageId: crypto.randomUUID() })
         );
         break;
@@ -1250,7 +1267,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "not_found";
           break;
         }
-        await this.#commit(session, undefined, () =>
+        await this.#commit(run, session, undefined, () =>
           latest.role === "assistant"
             ? progress({ messageId: latest.id })
             : progress({
@@ -1481,7 +1498,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         turn.overflowRetries < MAX_OVERFLOW_RETRIES
       ) {
         let next = turn;
-        await this.#commit(session, streamId, (put) => {
+        await this.#commit(run, session, streamId, (put) => {
           if (keep) put(keep, { parentId });
           next = this.#write(run, turn, {
             streamId: null,
@@ -1499,7 +1516,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         return this.#interrupted(run, turn, streamId, keep);
       }
       const reason = errorText(failure);
-      await this.#commit(session, streamId, (put) => {
+      await this.#commit(run, session, streamId, (put) => {
         if (keep) put(keep, { parentId });
         this.#write(run, turn, { streamId: null, ended: { reason } });
       });
@@ -1515,7 +1532,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       (part) => isToolCallPart(part) && !part.providerExecuted
     );
     let next = turn;
-    await this.#commit(session, streamId, (put) => {
+    await this.#commit(run, session, streamId, (put) => {
       put(message, { parentId });
       next = this.#write(run, turn, {
         streamId: null,
@@ -1584,7 +1601,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       });
     }
     let next = turn;
-    await this.#commit(session, streamId, (put) => {
+    await this.#commit(run, session, streamId, (put) => {
       if (partial) put(partial, { parentId: turn.parentId ?? undefined });
       next = this.#write(run, turn, {
         streamId: null,
@@ -1686,7 +1703,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         );
       }
       const snapshot = current;
-      await this.#commit(session, undefined, (put) => put(snapshot));
+      await this.#commit(run, session, undefined, (put) => put(snapshot));
       this.#events.emit(session, {
         type: "message",
         message: snapshot,
@@ -1774,7 +1791,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               withOutcome(part, settled)
             );
             const snapshot = current;
-            await this.#commit(session, undefined, (put) => {
+            await this.#commit(run, session, undefined, (put) => {
               put(snapshot);
               turn = this.#write(run, turn, { interruptions: 0 });
             });
@@ -1819,6 +1836,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     state: TurnState | undefined,
     chunks: readonly UIMessageChunk[],
     reason: string,
+    run?: TaskStep,
     progress?: (change: TurnChange) => void
   ): Promise<UIMessage | undefined> {
     if (!state) return undefined;
@@ -1854,7 +1872,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       message && hasContent(message) && message !== existing
         ? message
         : undefined;
-    await this.#commit(session, state.streamId ?? undefined, (put) => {
+    await this.#commit(run, session, state.streamId ?? undefined, (put) => {
       if (keep) put(keep, { parentId: state.parentId ?? undefined });
       progress?.({ streamId: null, ended: { reason } });
     });
@@ -1974,14 +1992,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return this.#records;
   }
 
-  /** Open operations, oldest first, in one session's lane or every one. */
+  /**
+   * Every open operation, oldest first, in one session's lane or in all.
+   * Open operations are what callers submitted and have not settled, so
+   * the list has no cap of its own.
+   */
   #open(session?: ThinkSessionId): TaskRecord[] {
     return this.#tasks.peekList({
       definition: OPERATION_DEFINITION,
       ...(session !== undefined && { lane: laneOf(session) }),
       status: ["pending", "running"],
       results: false,
-      order: "oldest"
+      order: "oldest",
+      limit: Number.MAX_SAFE_INTEGER
     });
   }
 
@@ -2165,10 +2188,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * cutover), so an eviction leaves either the stream or the message.
    */
   async #commit(
+    run: TaskStep | undefined,
     session: ThinkSessionId,
     streamId: string | undefined,
     writes: (put: Put) => void
   ): Promise<void> {
+    // A cancelled attempt may still be unwinding (a hook it awaited, a tool
+    // that ignores its signal); it writes nothing more. Checked in the same
+    // synchronous block as the write, so nothing lands between the two.
+    if (run?.signal.aborted) throw run.signal.reason;
     const sync = this.#handle(session).__DO_NOT_USE_WILL_BREAK__sync();
     const afters: (() => Promise<void>)[] = [];
     const ids: string[] = [];

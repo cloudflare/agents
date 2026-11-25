@@ -39,6 +39,8 @@ const CONTEXT_SESSION = "with-context";
 const BLOCK_KEY = "test:block";
 const ENDED_KEY = "test:ended";
 const LATE_TOOL_KEY = "test:late-tool";
+const HOLD_AFTER_KEY = "test:hold-after-tool-call";
+const AFTER_KEY = "test:after-tool-call";
 
 const usage = {
   inputTokens: {
@@ -223,6 +225,15 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           return { action: "substitute", output: 1000 };
         }
         return undefined;
+      },
+      afterToolCall: async () => {
+        const kv = this.ctx.storage.kv;
+        if (!kv.get(HOLD_AFTER_KEY)) return;
+        kv.put(AFTER_KEY, "entered");
+        while (kv.get(HOLD_AFTER_KEY)) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        kv.put(AFTER_KEY, "returned");
       },
       onTurnEnd: ({ status }) => {
         const ended = this.ctx.storage.kv.get<string[]>(ENDED_KEY) ?? [];
@@ -732,7 +743,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
    * started in its session's state. The transcript and streams are
    * untouched: their format did not change.
    */
-  downgradeToStore(): void {
+  downgradeToStore(abandonReason: string | null = null): void {
     const sql = this.ctx.storage.sql;
     const store = openHarnessStore(this.ctx.storage, {
       prefix: SHARED_STORE_PREFIX
@@ -768,7 +779,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         session,
         id,
         input,
-        meta: { source, ...turn, abandonReason: null }
+        meta: { source, ...turn, abandonReason }
       });
       if (run.status === "running") store.start(session, id);
       const started = sql
@@ -885,6 +896,36 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   dangerousRuns(): number {
     return this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0;
+  }
+
+  /** Hold every `afterToolCall` until `holdAfterToolCall(false)`. */
+  holdAfterToolCall(hold: boolean): void {
+    this.ctx.storage.kv.put(HOLD_AFTER_KEY, hold);
+  }
+
+  /** Resolve once `afterToolCall` has reached `stage`. */
+  async afterToolCall(stage: "entered" | "returned"): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      if (this.ctx.storage.kv.get(AFTER_KEY) === stage) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`afterToolCall never ${stage}`);
+  }
+
+  /**
+   * A settled operation as a released version kept it, whose input does
+   * not parse: only reading it would fail.
+   */
+  seedUnreadableSettledOperation(): void {
+    const store = openHarnessStore(this.ctx.storage, {
+      prefix: SHARED_STORE_PREFIX
+    });
+    store.createSession({ id: "" });
+    store.enqueue({ session: "", id: "op-old", input: {}, meta: {} });
+    store.settle("", "op-old", { status: "done", result: { text: "old" } });
+    this.ctx.storage.sql.exec(
+      `UPDATE ${SHARED_STORE_PREFIX}operations SET input = '{' WHERE id = 'op-old'`
+    );
   }
 
   releaseSlow(): void {

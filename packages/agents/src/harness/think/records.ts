@@ -193,14 +193,13 @@ function sessionStateJson(state: SessionState): JsonValue {
 function parseOpenOperation(
   stored: StoredOperation,
   state: SessionState
-): StoredOpenOperation | undefined {
-  if (stored.status !== "queued" && stored.status !== "running") return;
+): StoredOpenOperation {
   const meta = parseMeta(stored.meta);
   return {
     session: stored.session,
     operationId: stored.id,
     input: parseInput(stored.input),
-    status: stored.status,
+    status: stored.status === "running" ? "running" : "queued",
     ...meta,
     startedToolCalls: Object.entries(state.toolCalls)
       .filter(([, call]) => call.operationId === stored.id)
@@ -279,39 +278,35 @@ export class OperationRecords {
   // ── Operations a released version left ───────────────────────────────────
 
   /**
-   * The operations a released version left: `undefined` when the store
-   * holds none (every start after the first), else the open ones in
-   * submission order.
+   * The open operations a released version left, in submission order. Only
+   * those rows are read: settled ones can be many, and hold whole messages.
    */
-  leftOperations(): StoredOpenOperation[] | undefined {
-    const stored = this.#store.operations();
-    if (stored.length === 0) return undefined;
+  leftOperations(): StoredOpenOperation[] {
     const states = new Map<string, SessionState>();
-    const open: StoredOpenOperation[] = [];
-    for (const operation of stored) {
-      let state = states.get(operation.session);
-      if (!state) {
-        state = this.#state(operation.session);
-        states.set(operation.session, state);
-      }
-      const parsed = parseOpenOperation(operation, state);
-      if (parsed) open.push(parsed);
-    }
-    return open;
+    return this.#store
+      .operations({ status: ["queued", "running"] })
+      .map((operation) => {
+        let state = states.get(operation.session);
+        if (!state) {
+          state = this.#state(operation.session);
+          states.set(operation.session, state);
+        }
+        return parseOpenOperation(operation, state);
+      });
   }
 
   /**
-   * Forget every operation and started tool call the store holds, once the
-   * open ones were carried forward.
+   * Forget every operation the store holds, without reading the settled
+   * ones, once the open ones (`carried`) are runs, and the tool calls those
+   * started.
    */
-  dropOperations(): void {
+  dropOperations(carried: readonly StoredOpenOperation[]): void {
     this.#store.transaction(() => {
-      for (const operation of this.#store.operations()) {
-        this.#store.deleteOperation(operation.session, operation.id);
-      }
-      for (const session of this.#store.sessions()) {
-        if (Object.keys(parseSessionState(session.state).toolCalls).length) {
-          this.#updateState(session.id, (state) => ({
+      this.#store.deleteSettled();
+      for (const operation of carried) {
+        this.#store.deleteOperation(operation.session, operation.operationId);
+        if (operation.startedToolCalls.length > 0) {
+          this.#updateState(operation.session, (state) => ({
             ...state,
             toolCalls: {}
           }));
