@@ -4,10 +4,10 @@ import {
   eventually,
   followCallback,
   newAgent,
-  pause,
   restartAgent,
   waitingAtServer,
-  useOAuthMcpServers
+  useOAuthMcpServers,
+  queuedInLane
 } from "./harness";
 import { CLIENT_ORIGIN, MCP_URL, READ_SCOPE } from "./oauth-mcp-server";
 
@@ -46,8 +46,8 @@ describe("MCP connection work in an Agent", () => {
       callbackHost: CLIENT_ORIGIN,
       id: "files"
     });
-    // The add queues behind the restore; nothing outside shows it queued.
-    await pause();
+    // The add queues behind the restore.
+    await queuedInLane(agent, "files");
     await agent.remove("files");
     release();
 
@@ -70,8 +70,8 @@ describe("MCP connection work in an Agent", () => {
     const connecting = agent.connectNow(id);
     await waitingAtServer(server);
     const callback = followCallback(server.authorize(denied.authUrl));
-    // The callback queues behind the connect; nothing outside shows it queued.
-    await pause();
+    // The callback queues behind the connect.
+    await queuedInLane(agent, id);
     await agent.remove(id);
     release();
 

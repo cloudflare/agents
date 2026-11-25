@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   connectAuthorized,
   newAgent,
-  pause,
   restartAgent,
   waitingAtServer,
-  useOAuthMcpServer
+  useOAuthMcpServer,
+  queuedInLane
 } from "./harness";
 import { CLIENT_ORIGIN, MCP_URL } from "./oauth-mcp-server";
 
@@ -36,7 +36,7 @@ describe("a server removed and added again under the same id", () => {
       callbackHost: CLIENT_ORIGIN,
       id: "files"
     });
-    await pause();
+    await queuedInLane(agent, "files");
     release();
     expect((await adding).state).toBe("authenticating");
     await agent.settle();
@@ -67,7 +67,7 @@ describe("a server removed and added again under the same id", () => {
       callbackHost: CLIENT_ORIGIN,
       id: "files"
     });
-    await pause();
+    await queuedInLane(agent, "files");
     release();
     expect((await adding).state).toBe("authenticating");
     await agent.settle();

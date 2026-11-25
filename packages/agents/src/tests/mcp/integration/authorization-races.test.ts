@@ -4,10 +4,10 @@ import {
   eventually,
   followCallback,
   newAgent,
-  pause,
   restartAgent,
   waitingAtServer,
-  useOAuthMcpServer
+  useOAuthMcpServer,
+  waitingForAuthorization
 } from "./harness";
 import { CLIENT_ORIGIN, MCP_URL, READ_SCOPE } from "./oauth-mcp-server";
 
@@ -35,7 +35,7 @@ describe("a server's OAuth storage after it is removed", () => {
     expect(await agent.oauthKeys("files")).toEqual([]);
     release();
     await agent.settle();
-    await pause();
+    await agent.lanesIdle();
 
     expect(await agent.serverIds()).toEqual([]);
     expect(await agent.oauthKeys("files")).toEqual([]);
@@ -54,7 +54,7 @@ describe("a server's OAuth storage after it is removed", () => {
     await agent.remove("files");
     release();
     await call;
-    await pause();
+    await agent.lanesIdle();
 
     expect(await agent.oauthKeys("files")).toEqual([]);
   });
@@ -74,7 +74,7 @@ describe("a server's OAuth storage after it is removed", () => {
     await agent.remove("files");
     release();
     await call;
-    await pause();
+    await agent.lanesIdle();
 
     expect(await agent.oauthKeys("files")).toEqual([]);
   });
@@ -97,7 +97,7 @@ describe("a server's OAuth storage after it is removed", () => {
     await agent.remove("files");
     release();
     await call;
-    await pause();
+    await agent.lanesIdle();
 
     expect(await agent.oauthKeys("files")).toEqual([]);
   });
@@ -122,7 +122,7 @@ describe("a server's OAuth storage after it is removed", () => {
     const before = await agent.oauthStorage("files");
     release();
     await call;
-    await pause();
+    await agent.lanesIdle();
 
     expect(await agent.oauthStorage("files")).toEqual(before);
     expect(await agent.oauthKeys(generated)).toEqual([]);
@@ -235,11 +235,13 @@ describe("a step-up callback while a token refresh runs", () => {
     if (asked.ok || !asked.authUrl) throw new Error("expected a link");
 
     server.revokeAccessTokens();
+    await agent.watchAuthorizationTurns(id);
     const release = server.holdRequests("refresh");
     const call = agent.callServerTool(id, "read");
     await waitingAtServer(server);
     const callback = followCallback(server.authorize(asked.authUrl));
-    await pause();
+    // The callback's code exchange waits for the refresh.
+    await waitingForAuthorization(agent, id);
     release();
     expect(await callback).toEqual({ authorized: true });
     await call;
