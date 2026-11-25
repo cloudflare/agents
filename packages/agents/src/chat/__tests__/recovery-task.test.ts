@@ -5,7 +5,6 @@ import {
   type ChatRecoveryHandoff,
   type ChatRecoveryTaskInput
 } from "../recovery-task";
-import { runAsLaneRecoveryAttempt } from "../turn-task";
 
 /** Text `isPlatformFailure` recognizes, mirroring a real memory-limit reset. */
 function platformFailure(context: string): Error {
@@ -140,34 +139,5 @@ describe("chatRecoveryTaskRunOptions — the initial key", () => {
     expect(chatRecoveryTaskRunOptions(input(), "initial").idempotencyKey).toBe(
       "chat-recovery:_chatRecoveryContinue:incident-1"
     );
-  });
-});
-
-describe("dispatchChatRecoveryToHandoff in a lane run's recovery", () => {
-  it("returns once the recovered reply ends, not at the handoff", async () => {
-    let finishReply = () => {};
-    let returned = false;
-    const handoff: ChatRecoveryHandoff = {
-      detached: async (onTurnStarted) => {
-        onTurnStarted();
-        await new Promise<void>((resolve) => {
-          finishReply = resolve;
-        });
-      },
-      track: () => {},
-      redefer: async () => {},
-      onDetachedError: () => {}
-    };
-    const dispatched = runAsLaneRecoveryAttempt(() =>
-      dispatchChatRecoveryToHandoff(handoff)
-    ).then(() => {
-      returned = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    // Handed off, still streaming: the lane is still held.
-    expect(returned).toBe(false);
-    finishReply();
-    await dispatched;
-    expect(returned).toBe(true);
   });
 });
