@@ -451,6 +451,23 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("a started root sends a facet's broadcast before the facet's next direct send can run", async () => {
+    // The facet's live frame calls the root's broadcast and then its send,
+    // back to back. The send runs synchronously at the root, so the
+    // broadcast must reach the sockets before its first await, or the send
+    // overtakes it (#2055).
+    const parent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await runInDurableObject(parent, async (agent) => {
+      await agent.__unsafe_ensureInitialized();
+      const internals = agent as unknown as {
+        _dynamicAgents: { broadcastToPath: (...args: unknown[]) => unknown };
+      };
+      const sent = vi.spyOn(internals._dynamicAgents, "broadcastToPath");
+      void agent._cf_broadcastToSubAgent([], "first");
+      expect(sent).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("preserves consecutive message order after frame completion", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());

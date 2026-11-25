@@ -2853,7 +2853,10 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<number | void> {
-    await this.__unsafe_ensureInitialized();
+    // A started root sends at once: a facet's live frame sends straight
+    // after it broadcasts, and that send runs synchronously here, so an
+    // await first would let it overtake the broadcast (#2055).
+    if (!this.lifecycle.isStarted()) await this.__unsafe_ensureInitialized();
     return this._dynamicAgents.broadcastToPath(ownerPath, message, without);
   }
 
