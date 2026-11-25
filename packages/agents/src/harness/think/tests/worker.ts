@@ -36,6 +36,7 @@ const SYSTEM_KEY = "test:system";
 const ENVIRONMENT_KEY = "test:environment";
 const REMIND_SECTION_KEY = "test:remind-section";
 const REMIND_LABEL_KEY = "test:remind-label";
+const NO_GATE_SAFE_KEY = "test:no-gate-safe";
 const CATALOGUE_KEY = "test:catalogue";
 const HANG_KEY = "test:hang-provider";
 /** The session that has context blocks. */
@@ -186,14 +187,17 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         inputSchema: z.object({}),
         execute: () => this.#gate()
       }),
-      gate_safe: {
-        ...tool({
-          description: "Wait until released; safe to rerun",
-          inputSchema: z.object({}),
-          execute: () => this.#gate()
-        }),
-        recovery: "rerun"
-      },
+      // Gone from the tools once a test removes it.
+      ...(!this.ctx.storage.kv.get<boolean>(NO_GATE_SAFE_KEY) && {
+        gate_safe: {
+          ...tool({
+            description: "Wait until released; safe to rerun",
+            inputSchema: z.object({}),
+            execute: () => this.#gate()
+          }),
+          recovery: "rerun" as const
+        }
+      }),
       dangerous: tool({
         description: "Needs approval",
         inputSchema: z.object({}),
@@ -1204,6 +1208,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   setRemindSection(value: string): void {
     this.ctx.storage.kv.put(REMIND_SECTION_KEY, value);
+  }
+
+  removeGateSafe(): void {
+    this.ctx.storage.kv.put(NO_GATE_SAFE_KEY, true);
   }
 
   setEnvironment(value: string): void {

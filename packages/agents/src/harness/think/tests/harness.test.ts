@@ -395,6 +395,25 @@ describe("ThinkHarness durability", () => {
     expect(await stub.gateRuns()).toBe(2);
   });
 
+  it("answers a call to a tool the next attempt no longer has, instead of waiting for it", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("gate-safe");
+    await stub.gateStarted(1);
+
+    stub = await crash(name);
+    // The tool was removed while the call was cut off: the next attempt's
+    // tools do not have it, and no client runs it.
+    await stub.removeGateSafe();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "done",
+      text: 'tool said: error: Tool "gate_safe" is no longer available.'
+    });
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
   it("keeps a model call's streamed output across an eviction and continues the same message", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
