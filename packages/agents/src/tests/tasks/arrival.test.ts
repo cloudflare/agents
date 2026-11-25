@@ -58,30 +58,6 @@ describe("Tasks lane arrival policies", () => {
     });
   });
 
-  it("latest ends the running run too for a definition registered with supersedeRunning", async () => {
-    await runInDurableObject(harness(), async (instance: TaskHarnessObject) => {
-      instance.lanedGates.set("a", gate().promise);
-      await instance.tasks.run(
-        "__cf_superseding" as never,
-        { label: "a" } as never,
-        { runId: "a", lane: "l" }
-      );
-      await until(() => instance.lanedStarted.includes("a"));
-      const receipt = await instance.tasks.run(
-        "__cf_superseding" as never,
-        { label: "b" } as never,
-        { runId: "b", lane: "l", policy: "latest" }
-      );
-      expect(receipt.superseded).toEqual(["a"]);
-      expect((await instance.tasks.get("a"))?.status).toBe("skipped");
-      await until(() => instance.supersededSignals.includes("a"));
-      instance.lanedGates.set("b", Promise.resolve());
-      await until(
-        async () => (await instance.tasks.get("b"))?.status === "completed"
-      );
-    });
-  });
-
   it("drop stores nothing at a busy lane and runs at a free one", async () => {
     await runInDurableObject(harness(), async (instance: TaskHarnessObject) => {
       const a = gate();
@@ -155,48 +131,11 @@ describe("Tasks lane arrival policies", () => {
     );
   });
 
-  it("front goes ahead of the runs that have not started, behind the running one", async () => {
-    await runInDurableObject(harness(), async (instance: TaskHarnessObject) => {
-      const a = gate();
-      instance.lanedGates.set("a", a.promise);
-      const lane = { lane: "l" };
-      await instance.tasks.run(
-        "laned",
-        { label: "a" },
-        { runId: "a", ...lane }
-      );
-      await until(() => instance.lanedStarted.includes("a"));
-      await instance.tasks.run(
-        "laned",
-        { label: "b" },
-        { runId: "b", ...lane }
-      );
-      await instance.tasks.run(
-        "laned",
-        { label: "c" },
-        { runId: "c", ...lane }
-      );
-      await instance.tasks.run(
-        "laned",
-        { label: "t" },
-        { runId: "t", ...lane, front: true }
-      );
-      a.open();
-      await until(
-        async () => (await instance.tasks.get("c"))?.status === "completed"
-      );
-      expect(instance.lanedStarted).toEqual(["a", "t", "b", "c"]);
-    });
-  });
-
-  it("refuses a policy or front without a lane", async () => {
+  it("refuses a policy without a lane", async () => {
     await runInDurableObject(harness(), async (instance: TaskHarnessObject) => {
       await expect(
         instance.tasks.run("laned", { label: "x" }, { policy: "latest" })
-      ).rejects.toThrow(/need a lane/);
-      await expect(
-        instance.tasks.run("laned", { label: "x" }, { front: true })
-      ).rejects.toThrow(/need a lane/);
+      ).rejects.toThrow(/needs a lane/);
     });
   });
 });

@@ -425,8 +425,7 @@ export class Tasks<
       options.maxAttempts !== undefined ||
       options.keepCheckpoint ||
       options.claimMs !== undefined ||
-      options.attached ||
-      options.supersedeRunning
+      options.attached
     ) {
       this.#registeredOptions.set(name, options);
     }
@@ -1094,8 +1093,8 @@ export class Tasks<
     const lane = options.lane ?? null;
     const policy = options.policy ?? "queue";
     const debounceMs = typeof policy === "object" ? policy.debounceMs : 0;
-    if ((options.policy !== undefined || options.front) && lane === null) {
-      throw new Error("A Task run's policy and front need a lane");
+    if (options.policy !== undefined && lane === null) {
+      throw new Error("A Task run's policy needs a lane");
     }
     if (!Number.isFinite(debounceMs) || debounceMs < 0) {
       throw new Error("A Task run's debounceMs must be a finite number >= 0");
@@ -1117,7 +1116,7 @@ export class Tasks<
         superseded = await this.#skipLane(
           lane,
           `superseded by ${runId}`,
-          this.#registeredOptions.get(definition)?.supersedeRunning === true
+          false
         );
       }
     }
@@ -1127,34 +1126,7 @@ export class Tasks<
     // no wake job) until that run settles; a debounced one waits its quiet
     // period first.
     const place = lane === null ? null : this.#store.lanePlace(lane);
-    let queued = place?.open ?? false;
-    let seq = place?.seq ?? null;
-    let displaced: string[] = [];
-    if (lane !== null && options.front) {
-      // Ahead of the runs that have not started, which wait behind it with
-      // no deadline; behind a started one.
-      displaced = this.#store.sql<{ run_id: string; seq: number }>`
-        SELECT run_id, seq FROM ${this.#tables.runs}
-        WHERE lane = ${lane} AND status = 'pending' AND attempt = 0
-        ORDER BY seq
-      `.map((row) => row.run_id);
-      if (displaced.length > 0) {
-        seq = this.#store.sql<{ seq: number }>`
-          SELECT seq FROM ${this.#tables.runs} WHERE run_id = ${displaced[0]}
-        `[0]!.seq;
-        this.#store.sql`
-          UPDATE ${this.#tables.runs}
-          SET seq = seq + 1, next_at = NULL, updated_at = ${now}
-          WHERE lane = ${lane} AND status = 'pending' AND attempt = 0
-        `;
-      }
-      queued =
-        this.#store.sql<{ n: number }>`
-          SELECT COUNT(*) AS n FROM ${this.#tables.runs}
-          WHERE lane = ${lane} AND (status = 'running' OR
-            (status = 'pending' AND attempt > 0))
-        `[0]!.n > 0;
-    }
+    const queued = place?.open ?? false;
     this.#store.sql`
       INSERT INTO ${this.#tables.runs}
         (run_id, definition, input, status, metadata, idempotency_key, retain,
@@ -1164,9 +1136,8 @@ export class Tasks<
         (${runId}, ${definition}, ${placed.input}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
          0, ${queued ? null : now + debounceMs}, 0, ${now}, ${now}, ${lane},
-         ${seq}, ${placed.parts})
+         ${place?.seq ?? null}, ${placed.parts})
     `;
-    for (const id of displaced) await this.#syncWake(id);
     // Before the wake is published: an attempt this isolate starts from it
     // (the alarm can win the claim) still gets the caller's `local`.
     if (options.local !== undefined && startMode !== "queued") {
