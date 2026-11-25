@@ -74,7 +74,7 @@ export function isSettled(part: ToolCallPart): boolean {
 export function nextAction(
   progress: TurnProgress,
   message: UIMessage | undefined,
-  isServerTool: (name: string) => boolean,
+  isServerTool: (name: string, part: ToolCallPart) => boolean,
   maxSteps: number
 ): TurnAction {
   if (progress.streamId !== undefined) return { _tag: "recover-model" };
@@ -87,7 +87,7 @@ export function nextAction(
     if (!isToolCallPart(part) || isSettled(part) || part.providerExecuted) {
       continue;
     }
-    const server = isServerTool(toolNameOf(part));
+    const server = isServerTool(toolNameOf(part), part);
     switch (part.state) {
       case "input-available":
         if (server) runnable.push(part);
