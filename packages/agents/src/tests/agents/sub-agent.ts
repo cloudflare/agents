@@ -3728,6 +3728,54 @@ export class SlowReplySubAgent extends Agent {
     return "sent";
   }
 
+  /**
+   * A send whose root call is still in flight, then a broadcast and a send:
+   * the broadcast and the second send both queue behind the first (#2055).
+   */
+  @callable()
+  sendBroadcastSendNow(
+    first: string,
+    broadcast: string,
+    direct: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendBroadcastSendNow requires an active connection"
+      );
+    }
+
+    connection.send(first);
+    this.broadcast(broadcast);
+    connection.send(direct);
+    return "sent";
+  }
+
+  /**
+   * Two sends (the second waits in an open batch), a broadcast, then a
+   * send that must not join the batch ahead of the broadcast (#2055).
+   */
+  @callable()
+  sendTwiceBroadcastSendNow(
+    first: string,
+    second: string,
+    broadcast: string,
+    direct: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendTwiceBroadcastSendNow requires an active connection"
+      );
+    }
+
+    connection.send(first);
+    connection.send(second);
+    this.broadcast(broadcast);
+    connection.send(direct);
+    return "sent";
+  }
+
   /** Broadcasts after the current frame completes, optionally skipping the caller. */
   @callable()
   broadcastMessagesAfterDelay(messages: string[], withoutSelf = false): string {

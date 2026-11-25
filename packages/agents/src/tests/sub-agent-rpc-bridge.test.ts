@@ -451,6 +451,45 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("keeps a broadcast queued behind a send ahead of the next send (#2055)", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const first = `queued-first-${crypto.randomUUID()}`;
+      const broadcast = `queued-broadcast-${crypto.randomUUID()}`;
+      const direct = `queued-direct-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessages(
+        ws,
+        new Set([first, broadcast, direct])
+      );
+
+      const response = await callRPC(ws, "sendBroadcastSendNow", [
+        first,
+        broadcast,
+        direct
+      ]);
+      expectSuccessfulResult(response, "sent");
+      await expect(delivered).resolves.toEqual([first, broadcast, direct]);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("keeps a send after a queued broadcast out of an older open send batch (#2055)", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const ids = ["first", "second", "broadcast", "direct"].map(
+        (name) => `batched-${name}-${crypto.randomUUID()}`
+      );
+      const delivered = waitForTextMessages(ws, new Set(ids));
+
+      const response = await callRPC(ws, "sendTwiceBroadcastSendNow", ids);
+      expectSuccessfulResult(response, "sent");
+      await expect(delivered).resolves.toEqual(ids);
+    } finally {
+      ws.close();
+    }
+  });
+
   it("preserves consecutive message order after frame completion", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());
