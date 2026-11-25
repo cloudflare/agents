@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**173 of the 1246 tests that construct Think pass (13%).** Across the whole suite, 461 of 1534.
+**210 of the 1247 tests that construct Think pass (16%).** Across the whole suite, 498 of 1535.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -33,7 +33,7 @@ supported by the harness-backed Think yet".
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
 | `client-tools.test.ts`                 | 34 / 136 | 25%  |
-| `cold-rpc-initialization.test.ts`      | 0 / 4    | 0%   |
+| `cold-rpc-initialization.test.ts`      | 3 / 4    | 75%  |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
 | `deliver-notice.test.ts`               | 0 / 7    | 0%   |
@@ -46,7 +46,7 @@ supported by the harness-backed Think yet".
 | `extension-manager.test.ts`            | 38 / 38  | 100% |
 | `fetch-tools.test.ts`                  | 48 / 51  | 94%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
-| `hooks.test.ts`                        | 36 / 149 | 24%  |
+| `hooks.test.ts`                        | 38 / 149 | 25%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
 | `mcp-tool-materialization.test.ts`     | 0 / 2    | 0%   |
@@ -61,23 +61,23 @@ supported by the harness-backed Think yet".
 | `periphery-channels.test.ts`           | 12 / 12  | 100% |
 | `periphery-extensions.test.ts`         | 12 / 12  | 100% |
 | `periphery-inference.test.ts`          | 19 / 19  | 100% |
-| `periphery-modules.test.ts`            | 9 / 18   | 50%  |
+| `periphery-modules.test.ts`            | 11 / 19  | 57%  |
 | `periphery-transcript.test.ts`         | 12 / 12  | 100% |
 | `periphery-turn-policy.test.ts`        | 13 / 13  | 100% |
 | `prompt-cache.test.ts`                 | 4 / 10   | 40%  |
 | `queued-order.test.ts`                 | 0 / 5    | 0%   |
 | `rpc-chat-turns.test.ts`               | 0 / 5    | 0%   |
 | `run-turn-recovery.test.ts`            | 1 / 10   | 10%  |
-| `run-turn.test.ts`                     | 0 / 35   | 0%   |
-| `scheduled-tasks.test.ts`              | 0 / 9    | 0%   |
+| `run-turn.test.ts`                     | 13 / 35  | 37%  |
+| `scheduled-tasks.test.ts`              | 1 / 9    | 11%  |
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1    | 100% |
-| `submissions.test.ts`                  | 0 / 116  | 0%   |
+| `submissions.test.ts`                  | 9 / 116  | 7%   |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
 | `think-eviction.test.ts`               | 1 / 3    | 33%  |
-| `think-session.test.ts`                | 52 / 305 | 17%  |
+| `think-session.test.ts`                | 59 / 305 | 19%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
 | `workspace-tools.test.ts`              | 1 / 8    | 12%  |
