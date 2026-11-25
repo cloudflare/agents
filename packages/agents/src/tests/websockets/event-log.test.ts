@@ -727,6 +727,13 @@ describe("event logs of composed capabilities", () => {
     client.close();
   });
 
+  it("refuses a declared name with a slash, so it cannot take a composed log's name", async () => {
+    const name = crypto.randomUUID();
+    expect(await stub(name).declareForTest("log-composer/one/chat")).toMatch(
+      /must not contain "\/"/
+    );
+  });
+
   it("keeps cursors per log: one log's cursor resyncs on the other", async () => {
     const name = crypto.randomUUID();
     await stub(name).publishMany(ONE, 3);

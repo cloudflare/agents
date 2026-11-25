@@ -204,6 +204,13 @@ export class EventLog<T = unknown, S = unknown> {
         `Event log names must be 1 to ${MAX_LOG_NAME_LENGTH} characters`
       );
     }
+    // `/` joins a composer's id to the names of its logs, so a declared
+    // name without one can never equal a composed log's name.
+    if (name.includes("/")) {
+      throw new RangeError(
+        `Event log names must not contain "/": ${JSON.stringify(name)}`
+      );
+    }
     // A log over a Streams a composer composed (`@<composer id>`) is named
     // under that composer, so two composers' logs of one name never meet
     // on the object's sockets. Its stream keeps the declared name: it is

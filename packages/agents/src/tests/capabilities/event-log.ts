@@ -158,6 +158,16 @@ export class EventLogObject extends DurableObject<Cloudflare.Env> {
     return this.#log(log).publish(data);
   }
 
+  /** Declare another log on this object; returns the error, if any. */
+  declareForTest(name: string): string | undefined {
+    try {
+      declareEventLog(this.#webSockets, name, { streams: this.#streams });
+      return undefined;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   async publishMany(log: string, count: number): Promise<number[]> {
     await this.lifecycle.start();
     const seqs: number[] = [];

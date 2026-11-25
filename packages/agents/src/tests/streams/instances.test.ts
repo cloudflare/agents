@@ -141,6 +141,40 @@ describe("Streams instances", () => {
     });
   });
 
+  it("drops a buffer whose write failed and leaves the same hole on a named instance", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const plain = new Streams();
+      const audit = new Streams({ name: "audit" });
+      const { lifecycle } = install(plain);
+      lifecycle.use(audit);
+      await lifecycle.start();
+
+      const run = (streams: Streams, table: string) => {
+        const sync = streams.__DO_NOT_USE_WILL_BREAK__sync();
+        sync.insertStream("log", null, { epoch: "e" });
+        appendBuffered(streams, "log", 3);
+        sync.flush("log");
+        appendBuffered(streams, "log", 2);
+        storage.sql.exec(
+          `CREATE TRIGGER fail_${table} BEFORE INSERT ON ${table}
+           BEGIN SELECT RAISE(ABORT, 'planted'); END`
+        );
+        expect(() => sync.flush("log")).toThrow(/planted/);
+        storage.sql.exec(`DROP TRIGGER fail_${table}`);
+        appendBuffered(streams, "log", 2);
+        sync.flush("log");
+        return {
+          bounds: sync.bounds("log"),
+          dropped: [3, 4, 5].map((seq) => sync.holds("log", seq)),
+          rows: sync.readChunks("log", 0, 100).map((row) => row.seq)
+        };
+      };
+      const named = run(audit, "cf_agents_stream_blocks__n_audit");
+      expect(named.dropped).toEqual([false, false, false]);
+      expect(named).toEqual(run(plain, "cf_agents_stream_blocks"));
+    });
+  });
+
   it("reads streams written by the released version as the default instance's", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       // The released schema (v2) and its rows, as the release wrote them:
