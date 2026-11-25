@@ -84,6 +84,10 @@ export {
 } from "./delivery";
 export { ExtensionManager, toolsOf } from "../harness/think/extensions/manager";
 export { ExtensionRuntime } from "../harness/think/extensions/runtime";
+export {
+  EXTENSION_WORKER_RUNTIME,
+  EXTENSION_WORKER_RUNTIME_VERSION
+} from "../harness/think/extensions/worker-runtime.generated";
 export type {
   Drafts,
   ExtensionHandle,

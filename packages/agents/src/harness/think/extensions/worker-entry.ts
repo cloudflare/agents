@@ -52,7 +52,9 @@ const rules = new Proxy(harnessHookRules, {
     })
 }) as HookRules<Record<string, readonly [unknown, unknown]>>;
 
-let loaded: Promise<ExtensionRuntime<Record<string, readonly [unknown, unknown]>>> | undefined;
+let loaded:
+  | Promise<ExtensionRuntime<Record<string, readonly [unknown, unknown]>>>
+  | undefined;
 
 function runtime() {
   loaded ??= (async () => {

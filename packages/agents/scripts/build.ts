@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 import { buildDaemon } from "./build-daemon";
+import { buildExtensionRuntime } from "./build-extension-runtime";
 
 const entries = [
   "src/*.ts",
@@ -94,6 +95,7 @@ for (const entry of entries) {
 async function main() {
   // Embedded in agents/harness/container, so it must exist first.
   await buildDaemon();
+  await buildExtensionRuntime();
 
   await build({
     clean: true,
