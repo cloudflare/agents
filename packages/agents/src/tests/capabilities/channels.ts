@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
+import { deliverToSurfaces } from "../../experimental/channels/deliveries";
 import {
   Channels,
-  deliverToSurfaces,
   type AgentHarness,
   type Channel,
   type ChannelMessageSurface,
@@ -256,8 +256,24 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
         return new Promise<never>(() => {});
       }
       let text = "";
-      for await (const chunk of chunks) {
-        if (chunk.type === "text-delta") text += chunk.delta;
+      let interrupted = false;
+      try {
+        for await (const chunk of chunks) {
+          if (chunk.type === "text-delta") text += chunk.delta;
+        }
+      } catch {
+        // A Channel finalizes what it has: the response was interrupted.
+        interrupted = true;
+      }
+      if (interrupted && outcome === "ok") {
+        this.ctx.storage.kv.put("posts", [
+          ...this.getPosts(),
+          { label: surface.label, text, outcome: "uncertain" }
+        ]);
+        return {
+          status: "uncertain",
+          error: { code: "INTERRUPTED", message: "the response was cut" }
+        };
       }
       // Kept so they outlive a reset.
       this.ctx.storage.kv.put("posts", [
@@ -299,6 +315,24 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
     streams: new Streams({ maxChunkBytes: 1024 }),
     channels: {
       fake: deliverToSurfaces(this.#fake, { tasks: this.tasks }),
+      // A Channel that cannot stream, whose first send throws.
+      thrower: deliverToSurfaces(
+        {
+          deliver: async (_surface, message) => {
+            const thrown = this.ctx.storage.kv.get<number>("thrown") ?? 0;
+            if (thrown === 0) {
+              this.ctx.storage.kv.put("thrown", 1);
+              throw new Error("socket hang up");
+            }
+            this.ctx.storage.kv.put("thrower", [
+              ...(this.ctx.storage.kv.get<string[]>("thrower") ?? []),
+              message.markdown
+            ]);
+            return { status: "delivered" };
+          }
+        },
+        { tasks: this.tasks }
+      ),
       email: deliverToSurfaces(
         email({
           from: "agent@example.com",
@@ -309,7 +343,10 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
                 {
                   to: message.to as string | string[],
                   subject: message.subject,
-                  text: String(message.text)
+                  text: String(message.text),
+                  inReplyTo: (message.headers as Record<string, string>)?.[
+                    "In-Reply-To"
+                  ]
                 }
               ]);
               return { messageId: "m-1" };
@@ -344,8 +381,23 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.kv.get("posts") ?? [];
   }
 
+  /** Run startup again, as a new instance would. */
+  async wake(): Promise<void> {
+    await this.channels.onStart();
+  }
+
+  /** What the thrower Channel delivered, after its first send threw. */
+  getThrown(): string[] {
+    return this.ctx.storage.kv.get<string[]>("thrower") ?? [];
+  }
+
   /** What the email Channel sent. */
-  getEmails(): Array<{ to: string | string[]; subject: string; text: string }> {
+  getEmails(): Array<{
+    to: string | string[];
+    subject: string;
+    text: string;
+    inReplyTo?: string;
+  }> {
     return this.ctx.storage.kv.get("emails") ?? [];
   }
 
@@ -353,7 +405,7 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
   openDeliveries(): number {
     return this.ctx.storage.sql
       .exec<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE definition = '__cf_delivery:channels:fake' AND status IN ('pending', 'running')"
+        "SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE definition LIKE '__cf_delivery:channels:%' AND status IN ('pending', 'running')"
       )
       .one().n;
   }

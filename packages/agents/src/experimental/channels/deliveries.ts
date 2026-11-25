@@ -18,6 +18,7 @@ type SurfaceDelivery = {
   surface: ChannelMessageSurface;
 };
 
+/** @internal */
 export type DeliverToSurfacesOptions = {
   /**
    * The Tasks capability the deliveries run on: the agent's own
@@ -30,7 +31,7 @@ export type DeliverToSurfacesOptions = {
 const POSTING = "posting";
 
 /**
- * Serve a gateway Channel (Slack, Telegram, email…) inside the agent: every
+ * Serve a gateway Channel that sends (email today) inside the agent: every
  * response of a conversation goes to each of that Channel's surfaces that
  * joined it, as a durable delivery run. Mount it under the key the
  * Channel has in the gateway, so the surfaces it serves are the ones the
@@ -40,17 +41,23 @@ const POSTING = "posting";
  * readonly channels = Channels.forHarness(this.harness, {
  *   channels: {
  *     web: new WebChannel(),
- *     slack: deliverToSurfaces(slack({ botToken }), { tasks: this.tasks })
+ *     email: deliverToSurfaces(email({ binding: env.EMAIL, from }), {
+ *       tasks: this.tasks
+ *     })
  *   }
  * });
  * ```
  *
- * A delivery is tried again with backoff while the Channel says the failure
- * is retryable. It is given up, and never posted twice, when the Channel
+ * A Channel that streams gets the response as it is produced; one that
+ * cannot gets it once it has ended (the provider is called then, so a long
+ * generation does not count against its attempt): what the response
+ * produced, a short notice when it was interrupted before any text, and
+ * nothing for a response that ended with no text. A delivery is tried again with backoff while the Channel says the
+ * failure is retryable. It is given up, and never posted twice, when the Channel
  * refuses it, when only part of it may have reached the reader
  * (`uncertain`), and when the object reset while it was being posted.
  *
- * @experimental The API surface may change before stabilizing.
+ * @internal Not exported to apps until its first in-repo user ships.
  */
 export function deliverToSurfaces(
   channel: Channel,
@@ -70,6 +77,9 @@ export function deliverToSurfaces(
       const sink = `channels:${host.channelKey}`;
       mounted = { host, sink };
       registerDeliverySink<SurfaceDelivery>(options.tasks, sink, {
+        // An attempt follows the response while it is generated: a streamed
+        // post lasts that long, and a collected one waits that long.
+        attemptTimeoutMs: RESPONSE_TIMEOUT_MS,
         deliver: async (delivery, attempt) => {
           if (attempt.checkpoint.get(POSTING) === true) {
             // An attempt the object's reset cut short may have posted part
@@ -78,8 +88,10 @@ export function deliverToSurfaces(
               "An earlier attempt may have posted part of this response"
             );
           }
-          attempt.checkpoint.set(POSTING, true);
-          const result = await post(channel, host, delivery);
+          const result = await post(channel, host, delivery, () =>
+            attempt.checkpoint.set(POSTING, true)
+          );
+          if (result === undefined) return;
           // The Channel answered: what reached the reader is known.
           attempt.checkpoint.set(POSTING, false);
           if (result.status === "delivered") return;
@@ -106,7 +118,7 @@ export function deliverToSurfaces(
       if (!mounted || !responseId) return;
       const { host, sink } = mounted;
       for (const surface of await host.surfaces(conversationId)) {
-        const id = `${sink}:${responseId}:${await addressKey(surface)}`;
+        const id = `${sink}:${responseId}:${await surfaceKeyOf(surface)}`;
         // Not awaited: the first attempt streams the whole response.
         void sendDelivery<SurfaceDelivery>(options.tasks, sink, id, {
           conversationId,
@@ -120,6 +132,13 @@ export function deliverToSurfaces(
   };
 }
 
+/** Sent for a response interrupted before it produced any text. */
+const INTERRUPTED_NOTICE =
+  "The answer was interrupted before it could be written. Please ask again.";
+
+/** How long one attempt may take: the answer's whole generation. */
+const RESPONSE_TIMEOUT_MS = 60 * 60 * 1000;
+
 /** The response a turn update starts, if it starts one. */
 function startedResponse(update: ConversationUpdate): string | undefined {
   return update.type === "turn" && update.turn.status === "running"
@@ -127,23 +146,60 @@ function startedResponse(update: ConversationUpdate): string | undefined {
     : undefined;
 }
 
-/** Post one response to one surface: streamed, or collected and delivered. */
+/**
+ * Post one response to one surface: streamed, or collected and delivered.
+ * `sending` runs just before the provider call. Returns `undefined` when
+ * there was nothing to send (a response with no text).
+ */
 async function post(
   channel: Channel,
   host: ChannelsHost,
-  { conversationId, responseId, surface }: SurfaceDelivery
-): Promise<DeliveryResult> {
+  { conversationId, responseId, surface }: SurfaceDelivery,
+  sending: () => void
+): Promise<DeliveryResult | undefined> {
   const chunks = readResponse(host, conversationId, responseId);
   const options = { delivery: { deliveryId: responseId } };
-  if (channel.stream) return channel.stream(surface, chunks, options);
+  if (channel.stream) {
+    sending();
+    try {
+      return await channel.stream(surface, chunks, options);
+    } catch (error) {
+      // A Channel should finalize and say what reached the reader; one that
+      // threw mid-stream may have posted part of it.
+      return {
+        status: "uncertain",
+        error: { code: "CHANNEL_STREAM_THREW", message: String(error) }
+      };
+    }
+  }
   const collected = await collectText(chunks);
-  // SAFETY: mount refused a Channel with neither.
-  const result = await channel.deliver!(
-    surface,
-    { markdown: collected.text },
-    options
-  );
-  if (!collected.interrupted || result.status !== "delivered") return result;
+  const text =
+    collected.text.trim().length > 0
+      ? collected.text
+      : collected.interrupted
+        ? INTERRUPTED_NOTICE
+        : undefined;
+  if (text === undefined) return undefined;
+  sending();
+  let result: DeliveryResult;
+  try {
+    // SAFETY: mount refused a Channel with neither.
+    result = await channel.deliver!(surface, { markdown: text }, options);
+  } catch (error) {
+    // One provider call that threw: nothing reached the reader.
+    return {
+      status: "failed",
+      retryable: true,
+      error: { code: "CHANNEL_DELIVER_THREW", message: String(error) }
+    };
+  }
+  if (
+    !collected.interrupted ||
+    text === INTERRUPTED_NOTICE ||
+    result.status !== "delivered"
+  ) {
+    return result;
+  }
   return {
     status: "uncertain",
     ...(result.reference !== undefined && { reference: result.reference }),
@@ -155,31 +211,61 @@ async function post(
   };
 }
 
-/** A response's chunks from its start, live to its end, as a stream. */
+/**
+ * A response's chunks from its start, live to its end, as a stream. An
+ * interrupted response errors the stream only after every chunk it produced
+ * was read.
+ */
 function readResponse(
   host: ChannelsHost,
   conversationId: string,
   responseId: string
 ): ReadableStream<ResponseChunk> {
   const controller = new AbortController();
+  const queue: ResponseChunk[] = [];
+  let ending: { error?: unknown } | undefined;
+  let wake: (() => void) | undefined;
+  const notify = () => {
+    wake?.();
+    wake = undefined;
+  };
+  void host
+    .readResponse(conversationId, responseId, {
+      from: 0,
+      signal: controller.signal,
+      onChunks: (_from, chunks) => {
+        queue.push(...chunks);
+        notify();
+      },
+      onCaughtUp: () => {}
+    })
+    .then(
+      (end) => {
+        ending =
+          end === "ended"
+            ? {}
+            : { error: new Error(`Response ${responseId} ${end}`) };
+        notify();
+      },
+      (error: unknown) => {
+        ending = { error };
+        notify();
+      }
+    );
   return new ReadableStream<ResponseChunk>({
-    start(stream) {
-      void host
-        .readResponse(conversationId, responseId, {
-          from: 0,
-          signal: controller.signal,
-          onChunks: (_from, chunks) => {
-            for (const chunk of chunks) stream.enqueue(chunk);
-          },
-          onCaughtUp: () => {}
-        })
-        .then(
-          (ending) => {
-            if (ending === "ended") stream.close();
-            else stream.error(new Error(`Response ${responseId} ${ending}`));
-          },
-          (error: unknown) => stream.error(error)
-        );
+    async pull(stream) {
+      while (queue.length === 0 && !ending) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+      const next = queue.shift();
+      if (next !== undefined) {
+        stream.enqueue(next);
+        return;
+      }
+      if (ending?.error === undefined) stream.close();
+      else stream.error(ending.error);
     },
     cancel() {
       controller.abort();
@@ -187,11 +273,18 @@ function readResponse(
   });
 }
 
-/** A short, stable key for a surface's address, for its delivery's id. */
-async function addressKey(surface: ChannelMessageSurface): Promise<string> {
+/**
+ * A short, stable key for a surface, for its delivery's id: its `key` when
+ * its Channel gives one (an email thread's root), else its address.
+ */
+async function surfaceKeyOf(surface: ChannelMessageSurface): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(JSON.stringify(surface.address))
+    new TextEncoder().encode(
+      JSON.stringify(
+        surface.key !== undefined ? { key: surface.key } : surface.address
+      )
+    )
   );
   return Array.from(new Uint8Array(digest).slice(0, 12), (byte) =>
     byte.toString(16).padStart(2, "0")

@@ -96,3 +96,7 @@ export type {
   ToolOutcome
 } from "../harness/think/extensions/types";
 export { validateUrl } from "../web/url-policy";
+export {
+  deliverToSurfaces,
+  type DeliverToSurfacesOptions
+} from "../experimental/channels/deliveries";

@@ -55,7 +55,7 @@ A code-update or memory-limit reset thrown by the sink is rethrown, so the run s
 
 ## Channels: responses to gateway surfaces
 
-`deliverToSurfaces(channel, { tasks })` (`agents/experimental/channels`) is a `ConversationChannel` that serves a gateway Channel (email today; Slack and Telegram once they send) inside the agent. When a turn starts a response, each surface of that Channel that joined the conversation gets one delivery run (sink `channels:<key>`, id `channels:<key>:<responseId>:<address hash>`). Its handler reads the response from Streams, live to its end, and calls the Channel's `stream` (or collects it and calls `deliver`). The Channel's result decides what happens:
+`deliverToSurfaces(channel, { tasks })` (`agents/experimental/channels/deliveries.ts`, internal until its first in-repo user) is a `ConversationChannel` that serves a gateway Channel (email today; Slack and Telegram once they send) inside the agent. When a turn starts a response, each surface of that Channel that joined the conversation gets one delivery run (sink `channels:<key>`, id `channels:<key>:<responseId>:<address hash>`). Its handler reads the response from Streams, live to its end, and calls the Channel's `stream` (or collects it and calls `deliver`). The Channel's result decides what happens:
 
 | Result                  | Delivery                                                                        |
 | ----------------------- | ------------------------------------------------------------------------------- |
@@ -64,7 +64,9 @@ A code-update or memory-limit reset thrown by the sink is rethrown, so the run s
 | `failed`, not retryable | `NonRetryableError`: given up at once                                           |
 | `uncertain`             | `NonRetryableError`, with the Channel's reference: given up, never posted again |
 
-Before its provider call the handler writes `posting` to the run's checkpoint, and after the Channel answers it writes `false`. An attempt that finds `posting: true` belongs to a run whose earlier attempt was cut by a reset after the provider may have seen the post, so it gives up instead of posting again. A reset before anything left the object loses that write with it (a send waits for the object's writes to be durable), so that delivery is posted once, on a later attempt. Continuing the same provider message after a reset needs a Channel that can resume a message; none can yet.
+An attempt follows the response while it is generated, so its timeout is an hour, not the module's 60 s. A Channel that cannot stream is called only once the response has ended: with its text, with a short notice when it was interrupted before any text, or not at all when it ended with none. A Channel call that throws counts as a retryable failure for `deliver` (one provider call; nothing arrived) and as `uncertain` for `stream`. Surfaces are kept one per `surface.key` when the Channel gives one (an email thread's root), so a thread that writes twice gets each response once, at its latest message.
+
+Just before its provider call the handler writes `posting` to the run's checkpoint, and after the Channel answers it writes `false`. An attempt that finds `posting: true` belongs to a run whose earlier attempt was cut by a reset after the provider may have seen the post, so it gives up instead of posting again. A reset before anything left the object loses that write with it (a send waits for the object's writes to be durable), so that delivery is posted once, on a later attempt. Continuing the same provider message after a reset needs a Channel that can resume a message; none can yet.
 
 ## What was not built
 

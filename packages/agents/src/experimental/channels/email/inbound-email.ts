@@ -197,7 +197,9 @@ export function inboundEmail(
           inReplyTo: reference,
           references: [...new Set(references)]
         },
-        label: `Email · ${recipientLabel(replyTo)}`
+        label: `Email · ${recipientLabel(replyTo)}`,
+        // One surface per thread: each reply's headers replace the last.
+        key: threadRoot
       };
 
       const event: ChannelInboundMessageInput = {

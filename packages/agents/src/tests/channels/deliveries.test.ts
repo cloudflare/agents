@@ -152,9 +152,199 @@ describe("deliverToSurfaces", () => {
       () => stub.getEmails(),
       (e) => e.length === 1
     );
-    expect(emails).toEqual([
+    expect(emails).toMatchObject([
       { to: "alice@example.com", subject: "Re: Question", text: "Hello" }
     ]);
     expect(await stub.getPosts()).toEqual([]);
+  });
+
+  it("sends one email per response to a thread that wrote twice, answering its latest message", async () => {
+    const stub = fresh();
+    const mail = (inReplyTo: string): ChannelMessageSurface => ({
+      version: 1,
+      channelKey: "email",
+      address: {
+        from: "agent@example.com",
+        to: "alice@example.com",
+        subject: "Question",
+        inReplyTo
+      },
+      label: "Email · alice@example.com",
+      key: "thread-root"
+    });
+    for (const [eventId, inReplyTo] of [
+      ["m1", "m-1"],
+      ["m2", "m-2"]
+    ]) {
+      await stub.receive(
+        {
+          type: "message",
+          eventId,
+          message: {
+            id: eventId,
+            role: "user",
+            parts: [{ type: "text", text: "hi" }]
+          }
+        },
+        {
+          route: "default",
+          participant: { id: "alice" },
+          surface: mail(inReplyTo)
+        }
+      );
+    }
+    await stub.emit([
+      { type: "run-start", operations: ["m1", "m2"] },
+      chunk({ type: "text-start", id: "a" }),
+      chunk({ type: "text-delta", id: "a", delta: "Hello" }),
+      chunk({ type: "text-end", id: "a" }),
+      { type: "run-end", operations: ["m1", "m2"] }
+    ]);
+    const emails = await until(
+      () => stub.getEmails(),
+      (e) => e.length >= 1
+    );
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 0
+    );
+    expect(await stub.getEmails()).toEqual([
+      expect.objectContaining({ text: "Hello", inReplyTo: "<m-2>" })
+    ]);
+    expect(emails).toHaveLength(1);
+  });
+
+  it("emails a response only once it has ended, and not at all without text", async () => {
+    const stub = fresh();
+    await stub.receive(
+      {
+        type: "message",
+        eventId: "e1",
+        message: {
+          id: "e1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      },
+      {
+        route: "default",
+        participant: { id: "alice" },
+        surface: {
+          version: 1,
+          channelKey: "email",
+          address: { from: "agent@example.com", to: "alice@example.com" },
+          label: "Email · alice@example.com"
+        }
+      }
+    );
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "a" })
+    ]);
+    // Still running: the delivery waits for the response, nothing is sent.
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 1
+    );
+    expect(await stub.getEmails()).toEqual([]);
+    await stub.emit([
+      chunk({ type: "text-end", id: "a" }),
+      { type: "run-end", operations: ["e1"] }
+    ]);
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 0
+    );
+    expect(await stub.getEmails()).toEqual([]);
+  });
+
+  it("emails what an interrupted response produced, once, and does not send it again", async () => {
+    const stub = fresh();
+    await stub.receive(
+      {
+        type: "message",
+        eventId: "e1",
+        message: {
+          id: "e1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      },
+      {
+        route: "default",
+        participant: { id: "alice" },
+        surface: {
+          version: 1,
+          channelKey: "email",
+          address: { from: "agent@example.com", to: "alice@example.com" },
+          label: "Email · alice@example.com"
+        }
+      }
+    );
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "a" }),
+      chunk({ type: "text-delta", id: "a", delta: "Hel" })
+    ]);
+    // A new instance finds the response still streaming: interrupted.
+    await stub.wake();
+    await until(
+      () => stub.getEmails(),
+      (e) => e.length === 1
+    );
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 0
+    );
+    expect(await stub.getEmails()).toEqual([
+      expect.objectContaining({ text: "Hel" })
+    ]);
+  });
+
+  it("retries a send that threw: nothing reached the reader", async () => {
+    const stub = fresh();
+    await answer(stub, [], async () => ({
+      version: 1,
+      channelKey: "thrower",
+      address: { to: "x" },
+      label: "Thrower"
+    }));
+    await until(
+      () => stub.getThrown(),
+      (sent) => sent.length === 1
+    );
+    expect(await stub.getThrown()).toEqual(["Hello"]);
+  });
+
+  it("emails a notice for a response interrupted before it wrote anything", async () => {
+    const stub = fresh();
+    await stub.receive(
+      {
+        type: "message",
+        eventId: "e1",
+        message: {
+          id: "e1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      },
+      {
+        route: "default",
+        participant: { id: "alice" },
+        surface: {
+          version: 1,
+          channelKey: "email",
+          address: { from: "agent@example.com", to: "alice@example.com" },
+          label: "Email · alice@example.com"
+        }
+      }
+    );
+    await stub.emit([{ type: "run-start", operations: ["e1"] }]);
+    await stub.wake();
+    const emails = await until(
+      () => stub.getEmails(),
+      (e) => e.length === 1
+    );
+    expect(emails[0].text).toMatch(/^The answer was interrupted/);
   });
 });

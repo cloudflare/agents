@@ -103,7 +103,8 @@ describe("inbound Email", () => {
           inReplyTo: "message-2",
           references: ["message-2"]
         },
-        label: "Email · operator@example.com"
+        label: "Email · operator@example.com",
+        key: "message-2"
       },
       actor: {
         id: "operator@example.com",
