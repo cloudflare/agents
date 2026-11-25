@@ -1253,30 +1253,4 @@ export class ResumableStream {
       message_id: row.chat.messageId ?? null
     }));
   }
-
-  /** @internal For testing only */
-  insertStaleStream(streamId: string, requestId: string, ageMs: number): void {
-    const createdAt = Date.now() - ageMs;
-    this.ops.importStream({
-      streamId,
-      state: "streaming",
-      tag: requestId,
-      metadata: { cfChat: 1 },
-      chunkCount: 0,
-      createdAt,
-      updatedAt: createdAt,
-      closedAt: null
-    });
-  }
-
-  /**
-   * Append a chunk to a stream dated `ageMs` in the past. Used to exercise
-   * reclaim's phase-2 verification: a long-running streaming row with a
-   * *recent* chunk must survive even when its row `updated_at` (stamped at
-   * open, not per append) is older than the coarse cutoff.
-   * @internal For testing only
-   */
-  insertChunkAt(streamId: string, body: string, ageMs: number): void {
-    this.ops.importChunk(streamId, body, Date.now() - ageMs);
-  }
 }

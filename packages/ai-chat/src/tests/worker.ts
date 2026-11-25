@@ -1833,12 +1833,24 @@ export class TestChatAgent extends AIChatAgent<Env> {
     requestId: string,
     ageMs: number
   ): void {
-    this._resumableStream.insertStaleStream(streamId, requestId, ageMs);
+    const createdAt = Date.now() - ageMs;
+    this.streams.__DO_NOT_USE_WILL_BREAK__sync().importStream({
+      streamId,
+      state: "streaming",
+      tag: requestId,
+      metadata: { cfChat: 1 },
+      chunkCount: 0,
+      createdAt,
+      updatedAt: createdAt,
+      closedAt: null
+    });
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
   testInsertStreamChunkAt(streamId: string, ageMs: number): void {
-    this._resumableStream.insertChunkAt(streamId, '{"type":"text"}', ageMs);
+    this.streams
+      .__DO_NOT_USE_WILL_BREAK__sync()
+      .importChunk(streamId, '{"type":"text"}', Date.now() - ageMs);
   }
 
   testInsertOldErroredStream(
