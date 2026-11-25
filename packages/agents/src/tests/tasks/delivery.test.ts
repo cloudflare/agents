@@ -170,8 +170,11 @@ describe("deliveries", () => {
       async (instance: TaskHarnessObject, state) => {
         await instance.lifecycle.start();
         const gaveUp: string[] = [];
-        registerDeliverySink<null>(tasksOf(instance), "late", {
-          deliver: () => {},
+        const sends: unknown[] = [];
+        registerDeliverySink<string>(tasksOf(instance), "late", {
+          deliver: (payload) => {
+            sends.push(payload);
+          },
           onGiveUp: (error) => {
             gaveUp.push(error.message);
           }
@@ -182,18 +185,21 @@ describe("deliveries", () => {
           definition: deliveryDefinition("late"),
           status: "running",
           attempt: 1,
-          input: null,
+          input: "result",
           retain: false,
           createdAt: Date.now() - 13 * 60 * 60 * 1000
         });
         await instance.tasks.onStart();
         await instance.tasks.runDue(deliveryDefinition("late"));
+        // Backing off: nothing sent yet, nothing given up.
+        expect(sends).toEqual([]);
         expect(gaveUp).toEqual([]);
         expect(runs(state.storage)).toMatchObject([
           { run_id: "late", status: "pending", wait_reason: "retry" }
         ]);
-        // The next attempt sends, and it lands.
+        // The next attempt sends once, and it lands.
         await until(() => runs(state.storage).length === 0);
+        expect(sends).toEqual(["result"]);
         expect(gaveUp).toEqual([]);
       }
     );
