@@ -25,6 +25,7 @@ import {
 } from "../harness";
 import type {
   ThinkOperationResult,
+  ThinkOperationStatus,
   ThinkReceipt,
   ThinkSubmitOptions
 } from "../types";
@@ -470,6 +471,22 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   ): Promise<ThinkReceipt> {
     const { session, ...rest } = options;
     return this.harness.session(session).submit(text, rest);
+  }
+
+  /**
+   * Submit, and return why it was refused, or null. Caught here, so a
+   * refusal does not also surface as the object's unhandled rejection.
+   */
+  async submitRefusal(
+    text: string,
+    options: ThinkSubmitOptions = {}
+  ): Promise<string | null> {
+    try {
+      await this.harness.session().submit(text, options);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   /** Submit through the shared harness interface, asking to steer. */
@@ -1157,25 +1174,44 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** Think's chat(): the chunk types the callback saw, and how it ended. */
-  async chatCallback(text: string): Promise<{ types: string[]; end: string }> {
+  async chatCallback(
+    text: string,
+    options: ThinkSubmitOptions = {}
+  ): Promise<{ types: string[]; end: string }> {
     const types: string[] = [];
     let end = "";
-    await this.harness.session().chat(text, {
-      onEvent: (json) => {
-        types.push((JSON.parse(json) as { type: string }).type);
+    await this.harness.session().chat(
+      text,
+      {
+        onEvent: (json) => {
+          types.push((JSON.parse(json) as { type: string }).type);
+        },
+        onDone: () => {
+          end = "done";
+        },
+        onError: (error) => {
+          end = `error: ${error}`;
+        }
       },
-      onDone: () => {
-        end = "done";
-      },
-      onError: (error) => {
-        end = `error: ${error}`;
-      }
-    });
+      options
+    );
     return { types, end };
   }
 
-  inspect(operationId: string) {
+  /** An operation's status (see `inspectRecord` for the rest). */
+  async inspect(
+    operationId: string
+  ): Promise<ThinkOperationStatus | undefined> {
     return this.harness.session().inspect(operationId);
+  }
+
+  /** An operation's key, metadata and times, as plain JSON for RPC. */
+  async inspectRecord(operationId: string): Promise<string> {
+    const inspection = await this.harness.inspection(
+      this.harness.session().id,
+      operationId
+    );
+    return JSON.stringify(inspection ?? null);
   }
 
   setSystem(system: string): void {

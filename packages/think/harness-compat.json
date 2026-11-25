@@ -1,8 +1,8 @@
 {
   "total": 1553,
-  "passed": 529,
+  "passed": 534,
   "needThink": 1261,
-  "needThinkPassed": 237,
+  "needThinkPassed": 242,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -234,7 +234,7 @@
     },
     "submissions.test.ts": {
       "total": 116,
-      "passed": 9
+      "passed": 14
     },
     "telegram-messenger.test.ts": {
       "total": 2,
@@ -719,10 +719,15 @@
     "submissions.test.ts > Think durable submissions > deduplicates concurrent first submissions with the same idempotency key",
     "submissions.test.ts > Think durable submissions > deduplicates retries by idempotency key without appending duplicate messages",
     "submissions.test.ts > Think durable submissions > does not treat public workflow-shaped metadata as workflow configuration",
+    "submissions.test.ts > Think durable submissions > ignores an app's own __cf_progress field and still records the turn's progress",
+    "submissions.test.ts > Think durable submissions > never marks a live turn stale, however long it runs past the stale window (#2498)",
+    "submissions.test.ts > Think durable submissions > refuses metadata that leaves no room for the turn's progress, and keeps the progress of metadata that fits",
+    "submissions.test.ts > Think durable submissions > rejects conflicting submission id and idempotency key pairs",
     "submissions.test.ts > Think durable submissions > stores a submitted message over 1.8 MB whole",
     "submissions.test.ts > Think durable submissions > stores error status and message when an in-band stream error occurs",
     "submissions.test.ts > Think durable submissions > stores error status and message when turn setup throws",
     "submissions.test.ts > Think durable submissions > takes no keep-alive hold when it starts with no stored requests to replay",
+    "submissions.test.ts > Think durable submissions > waitForSubmission resolves when a running submission completes",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > allows unverified adapter webhooks only when Think verifies them",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > forwards nativeStreaming to the adapter",
     "think-eviction.test.ts > Think recovery after forced Durable Object eviction > keeps a declared task's pending occurrence and runs it after eviction",

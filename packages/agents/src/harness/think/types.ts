@@ -26,6 +26,7 @@ import type {
 import type { Session } from "../../sessions/handle";
 import type { Context } from "../../context/context";
 import type { Tasks } from "../../tasks/tasks";
+import type { TaskJson } from "../../tasks/types";
 import type { ThinkExtension } from "./extensions/types";
 
 /**
@@ -104,6 +105,14 @@ export type ThinkSubmitOptions = {
    * recorded and the turn waits for `session.continue()`.
    */
   readonly autoContinue?: boolean;
+  /**
+   * @internal A key that deduplicates repeated submissions onto one
+   * operation, as Tasks' `idempotencyKey` does: the receipt names the
+   * operation the first one started.
+   */
+  readonly idempotencyKey?: string;
+  /** @internal JSON kept with the operation and returned by `inspect`. */
+  readonly metadata?: Record<string, TaskJson>;
 };
 
 /** Returned once a submission is durable. @experimental */
@@ -149,6 +158,18 @@ export type ThinkOperationStatus =
       readonly status: "queued" | "running";
     }
   | ThinkOperationResult;
+
+/**
+ * @internal An operation's status with what its run records: when it was
+ * accepted, started and settled, and the key and metadata it was given.
+ */
+export type ThinkOperationInspection = ThinkOperationStatus & {
+  readonly createdAt: number;
+  readonly startedAt?: number;
+  readonly settledAt?: number;
+  readonly idempotencyKey?: string;
+  readonly metadata?: Record<string, TaskJson>;
+};
 
 /**
  * Receives one operation's answer as it streams, as Think's `chat()`

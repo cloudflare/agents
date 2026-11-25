@@ -47,6 +47,7 @@ import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
+import { admittedSubmissionMetadata } from "../submissions";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
@@ -695,22 +696,44 @@ export class Think<
     messages: UIMessage[],
     options?: SubmitMessagesOptions
   ): Promise<SubmitMessagesResult> {
-    const submissionId =
-      options?.submissionId ?? options?.idempotencyKey ?? crypto.randomUUID();
-    const receipt = await this.harness
-      .session()
-      .submit(messages, { operationId: submissionId });
-    const inspection = await this.inspectSubmission(submissionId);
+    if (messages.length === 0) {
+      throw new Error("submitMessages requires at least one message");
+    }
+    const metadata = admittedSubmissionMetadata(options?.metadata);
+    const { submissionId, idempotencyKey } = options ?? {};
+    if (submissionId !== undefined && idempotencyKey) {
+      // Think's message for a pair that names two submissions; the harness
+      // refuses the pair too.
+      const session = this.harness.session().id;
+      const keyed = await this.harness.keyedOperation(session, idempotencyKey);
+      const byId = await this.harness.inspection(session, submissionId);
+      if (
+        (keyed !== undefined && keyed !== submissionId) ||
+        (byId?.idempotencyKey !== undefined &&
+          byId.idempotencyKey !== idempotencyKey)
+      ) {
+        throw new Error(
+          "submissionId and idempotencyKey refer to different submissions"
+        );
+      }
+    }
+    const receipt = await this.harness.session().submit(messages, {
+      ...(options?.submissionId !== undefined && {
+        operationId: options.submissionId
+      }),
+      // An empty key is no key, as on Think.
+      ...(options?.idempotencyKey && {
+        idempotencyKey: options.idempotencyKey
+      }),
+      ...(metadata !== undefined && { metadata })
+    });
+    const inspection = await this.inspectSubmission(receipt.operationId);
     return {
       ...(inspection ?? {
-        submissionId,
+        submissionId: receipt.operationId,
         status: "pending",
         createdAt: Date.now()
       }),
-      ...(options?.idempotencyKey !== undefined && {
-        idempotencyKey: options.idempotencyKey
-      }),
-      ...(options?.metadata !== undefined && { metadata: options.metadata }),
       accepted: receipt.accepted
     };
   }
@@ -718,13 +741,24 @@ export class Think<
   async inspectSubmission(
     submissionId: string
   ): Promise<ThinkSubmissionInspection | null> {
-    const status = await this.harness.session().inspect(submissionId);
+    const status = await this.harness.inspection(
+      this.harness.session().id,
+      submissionId
+    );
     if (!status) return null;
     return {
       submissionId,
       requestId: submissionId,
       status: submissionStatus(status),
-      createdAt: Date.now(),
+      createdAt: status.createdAt,
+      ...(status.startedAt !== undefined && { startedAt: status.startedAt }),
+      ...(status.settledAt !== undefined && {
+        completedAt: status.settledAt
+      }),
+      ...(status.idempotencyKey !== undefined && {
+        idempotencyKey: status.idempotencyKey
+      }),
+      ...(status.metadata !== undefined && { metadata: status.metadata }),
       ...(status.status === "unanswered" &&
         status.reason !== undefined && { error: status.reason }),
       ...("messageId" in status &&
