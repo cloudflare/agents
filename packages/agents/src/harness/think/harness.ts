@@ -128,6 +128,8 @@ export const ROOT_SESSION: ThinkSessionId = "";
 
 /** The Tasks definition every operation is a run of. */
 const OPERATION_DEFINITION = "__cf_think_harness_operation";
+/** Open operations carried forward from the harness store at a time. */
+const CARRY_BATCH = 50;
 /** The checkpoint key a placed operation's progress is kept under. */
 const TURN_KEY = "turn";
 const DEFAULT_MAX_STEPS = 10;
@@ -584,47 +586,53 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * dropped: their answers are in the transcript.
    */
   async #carryForward(store: OperationRecords): Promise<void> {
-    const left = store.leftOperations();
-    for (const op of left) {
-      const {
-        session,
-        operationId,
-        input,
-        source,
-        status,
-        abandonReason,
-        startedToolCalls,
-        createdAt,
-        ...progress
-      } = op;
-      const runId = runIdOf(session, operationId);
-      // A version rolled back to before this one may have reused the id of
-      // a settled run: the open operation is the newer.
-      const existing = this.#tasks.peek(runId);
-      if (existing && TERMINAL.includes(existing.status)) {
-        this.#tasks.deleteRun(runId);
+    // In batches, each forgotten once its runs are written, so a long
+    // queue is never held in memory whole.
+    for (;;) {
+      const left = store.leftOperations(CARRY_BATCH);
+      if (left.length === 0) break;
+      for (const op of left) {
+        const {
+          session,
+          operationId,
+          input,
+          source,
+          status,
+          abandonReason,
+          startedToolCalls,
+          createdAt,
+          ...progress
+        } = op;
+        const runId = runIdOf(session, operationId);
+        // A version rolled back to before this one may have reused the id of
+        // a settled run: the open operation is the newer.
+        const existing = this.#tasks.peek(runId);
+        if (existing && TERMINAL.includes(existing.status)) {
+          this.#tasks.deleteRun(runId);
+        }
+        const state: TurnState = {
+          ...progress,
+          ...(abandonReason !== null && { abandon: abandonReason }),
+          ...(startedToolCalls.length > 0 && { started: startedToolCalls })
+        };
+        await this.#tasks.importRun({
+          runId,
+          definition: OPERATION_DEFINITION,
+          status: status === "running" ? "running" : "pending",
+          attempt: status === "running" ? 1 : 0,
+          // SAFETY: as for enqueue's input.
+          input: { input, source } as unknown as TaskJson,
+          lane: laneOf(session),
+          createdAt,
+          ...(status === "running" && {
+            startedAt: createdAt,
+            checkpoint: { [TURN_KEY]: state }
+          })
+        });
       }
-      const state: TurnState = {
-        ...progress,
-        ...(abandonReason !== null && { abandon: abandonReason }),
-        ...(startedToolCalls.length > 0 && { started: startedToolCalls })
-      };
-      await this.#tasks.importRun({
-        runId,
-        definition: OPERATION_DEFINITION,
-        status: status === "running" ? "running" : "pending",
-        attempt: status === "running" ? 1 : 0,
-        // SAFETY: as for enqueue's input.
-        input: { input, source } as unknown as TaskJson,
-        lane: laneOf(session),
-        createdAt,
-        ...(status === "running" && {
-          startedAt: createdAt,
-          checkpoint: { [TURN_KEY]: state }
-        })
-      });
+      store.dropOperations(left);
     }
-    store.dropOperations(left);
+    store.dropSettled();
   }
 
   // ── The harness interface ────────────────────────────────────────────────

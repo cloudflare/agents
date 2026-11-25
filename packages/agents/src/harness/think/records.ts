@@ -278,13 +278,14 @@ export class OperationRecords {
   // ── Operations a released version left ───────────────────────────────────
 
   /**
-   * The open operations a released version left, in submission order. Only
-   * those rows are read: settled ones can be many, and hold whole messages.
+   * The oldest open operations a released version left, at most `limit`,
+   * in submission order. Only those rows are read: settled ones can be
+   * many, and hold whole messages.
    */
-  leftOperations(): StoredOpenOperation[] {
+  leftOperations(limit: number): StoredOpenOperation[] {
     const states = new Map<string, SessionState>();
     return this.#store
-      .operations({ status: ["queued", "running"] })
+      .operations({ status: ["queued", "running"], limit })
       .map((operation) => {
         let state = states.get(operation.session);
         if (!state) {
@@ -296,13 +297,11 @@ export class OperationRecords {
   }
 
   /**
-   * Forget every operation the store holds, without reading the settled
-   * ones, once the open ones (`carried`) are runs, and the tool calls those
-   * started.
+   * Forget open operations once they are runs (`carried`), and the tool
+   * calls they started.
    */
   dropOperations(carried: readonly StoredOpenOperation[]): void {
     this.#store.transaction(() => {
-      this.#store.deleteSettled();
       for (const operation of carried) {
         this.#store.deleteOperation(operation.session, operation.operationId);
         if (operation.startedToolCalls.length > 0) {
@@ -313,6 +312,11 @@ export class OperationRecords {
         }
       }
     });
+  }
+
+  /** Forget every settled operation, in SQL, without reading one. */
+  dropSettled(): void {
+    this.#store.deleteSettled();
   }
 }
 

@@ -544,6 +544,23 @@ describe("ThinkHarness durability", () => {
     expect(await stub.streamRows()).toBe(0);
   });
 
+  it("carries forward more open operations than one batch, in order, past many settled ones", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.seedStoreOperations(300, 60)
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    await runDurableObjectAlarm(stub);
+    expect(text(await stub.wait("left-59"))).toBe("echo: left 59");
+    expect(await stub.storedOperations()).toBe(0);
+    const users = (await stub.messages()).filter((m) => m.startsWith("user:"));
+    expect(users).toEqual(
+      Array.from({ length: 60 }, (_, i) => `user: left ${i}`)
+    );
+  });
+
   it("drops a released version's settled operations without reading them", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);

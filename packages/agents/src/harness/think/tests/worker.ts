@@ -928,6 +928,38 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
+  /**
+   * A released version's store with `settled` settled operations and
+   * `queued` queued ones after them, in the root session.
+   */
+  seedStoreOperations(settled: number, queued: number): void {
+    const store = openHarnessStore(this.ctx.storage, {
+      prefix: SHARED_STORE_PREFIX
+    });
+    store.createSession({ id: "" });
+    const input = (id: string, text: string) => ({
+      kind: "messages",
+      messages: [{ id, role: "user", parts: [{ type: "text", text }] }]
+    });
+    for (let i = 0; i < settled; i++) {
+      store.enqueue({
+        session: "",
+        id: `old-${i}`,
+        input: input(`old-user-${i}`, "x".repeat(1_000)),
+        meta: { source: "server" }
+      });
+      store.settle("", `old-${i}`, { status: "done", result: { text: "" } });
+    }
+    for (let i = 0; i < queued; i++) {
+      store.enqueue({
+        session: "",
+        id: `left-${i}`,
+        input: input(`left-user-${i}`, `left ${i}`),
+        meta: { source: "server" }
+      });
+    }
+  }
+
   releaseSlow(): void {
     this.#releaseSlow();
   }

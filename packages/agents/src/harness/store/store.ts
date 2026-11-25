@@ -429,6 +429,8 @@ export class HarnessStore {
     filter: {
       readonly session?: string;
       readonly status?: readonly OperationStatus[];
+      /** At most this many, the oldest. Default: all. */
+      readonly limit?: number;
     } = {}
   ): OperationRecord[] {
     const where: string[] = [];
@@ -446,8 +448,10 @@ export class HarnessStore {
       .exec<OperationRow>(
         `SELECT * FROM ${this.#operations}
          ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
-         ORDER BY seq`,
-        ...params
+         ORDER BY seq
+         ${filter.limit === undefined ? "" : "LIMIT ?"}`,
+        ...params,
+        ...(filter.limit === undefined ? [] : [filter.limit])
       )
       .toArray()
       .map((row) => this.#operationOf(row));
