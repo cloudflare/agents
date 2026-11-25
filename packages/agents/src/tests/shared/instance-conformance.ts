@@ -92,27 +92,31 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
     await lifecycle.start();
     return snapshot(storage);
   });
-  const alone = await withCapabilityHarness(async ({ install, storage }) => {
-    const capability = subject.make();
-    const { lifecycle } = install(capability);
-    await lifecycle.start();
-    await subject.smoke(capability);
-    return snapshot(storage);
-  });
+  const { aloneStarted, alone } = await withCapabilityHarness(
+    async ({ install, storage }) => {
+      const capability = subject.make();
+      const { lifecycle } = install(capability);
+      await lifecycle.start();
+      const aloneStarted = snapshot(storage);
+      await subject.smoke(capability);
+      return { aloneStarted, alone: snapshot(storage) };
+    }
+  );
   // Values are compared within one run: a smoke may write times and random
   // ids, which differ from run to run. `before` is after the default's
   // smoke and before the probe's.
-  const { before, both } = await withCapabilityHarness(
+  const { bothStarted, before, both } = await withCapabilityHarness(
     async ({ install, storage }) => {
       const capability = subject.make();
       const probe = subject.make("probe");
       const { lifecycle } = install(capability);
       lifecycle.use(probe);
       await lifecycle.start();
+      const bothStarted = snapshot(storage);
       await subject.smoke(capability);
       const before = snapshot(storage);
       await subject.smoke(probe);
-      return { before, both: snapshot(storage) };
+      return { bothStarted, before, both: snapshot(storage) };
     }
   );
 
@@ -148,9 +152,16 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
       .map(keyName)
       .filter((key) => !alone.keys.map(keyName).includes(key))
   };
-  // Values within the run: what the probe's smoke wrote or changed.
-  const changedRows = both.rows.filter((row) => !before.rows.includes(row));
-  const changedKeys = both.keys.filter((key) => !before.keys.includes(key));
+  // Values within the run, both ways: what the probe's smoke wrote,
+  // changed or deleted.
+  const changedRows = [
+    ...both.rows.filter((row) => !before.rows.includes(row)),
+    ...before.rows.filter((row) => !both.rows.includes(row))
+  ];
+  const changedKeys = [
+    ...both.keys.filter((key) => !before.keys.includes(key)),
+    ...before.keys.filter((key) => !both.keys.includes(key))
+  ];
   const misplaced = [
     ...addedNames.tables.filter((name) => !isProbeName(name)),
     ...addedNames.indexes.filter((name) => !isProbeName(name)),
@@ -163,6 +174,21 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
   expect(misplaced, "stored by the probe instance outside its names").toEqual(
     []
   );
+  // Startup writes nothing that varies by run, so the default's rows and
+  // keys right after start must be the same with or without the probe.
+  const outsideProbe = (entries: string[], name: (entry: string) => string) =>
+    entries.filter(
+      (entry) =>
+        !isProbeName(name(entry)) && !name(entry).startsWith(`cf_agents:${id}:`)
+    );
+  expect(
+    outsideProbe(bothStarted.rows, rowTable),
+    "the default instance's rows after start, next to the probe"
+  ).toEqual(aloneStarted.rows);
+  expect(
+    outsideProbe(bothStarted.keys, keyName),
+    "the default instance's keys after start, next to the probe"
+  ).toEqual(aloneStarted.keys);
   for (const field of ["tables", "indexes"] as const) {
     expect(
       both[field].filter((value) => !addedNames[field].includes(value)),

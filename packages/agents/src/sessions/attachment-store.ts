@@ -48,16 +48,25 @@ function chunkBuffer(
   return bytes.slice(start, end).buffer as ArrayBuffer;
 }
 
+/** The real names of one Sessions instance's attachment tables. */
+export interface AttachmentTables {
+  attachmentMeta: string;
+  attachmentChunks: string;
+  attachmentRefs: string;
+}
+
 export class AttachmentStore {
   readonly #io: SessionsIo;
+  readonly #t: AttachmentTables;
 
-  constructor(io: SessionsIo) {
+  constructor(io: SessionsIo, tables: AttachmentTables) {
     this.#io = io;
+    this.#t = tables;
   }
 
   ensureTables(): void {
     this.#io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_attachment_meta (
+      `CREATE TABLE IF NOT EXISTS ${this.#t.attachmentMeta} (
         hash TEXT PRIMARY KEY,
         bytes INTEGER NOT NULL,
         media_type TEXT NOT NULL,
@@ -66,7 +75,7 @@ export class AttachmentStore {
       []
     );
     this.#io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_attachment_chunks (
+      `CREATE TABLE IF NOT EXISTS ${this.#t.attachmentChunks} (
         hash TEXT NOT NULL,
         idx INTEGER NOT NULL,
         data BLOB NOT NULL,
@@ -79,7 +88,7 @@ export class AttachmentStore {
     // the reachability check that reads it is a scan of a small table, which is
     // far cheaper than maintaining an index on the write path.
     this.#io.sqlWrite(
-      `CREATE TABLE IF NOT EXISTS cf_agents_session_attachment_refs (
+      `CREATE TABLE IF NOT EXISTS ${this.#t.attachmentRefs} (
         session_id TEXT NOT NULL,
         message_id TEXT NOT NULL,
         hash TEXT NOT NULL,
@@ -100,7 +109,7 @@ export class AttachmentStore {
   put(payload: AttachmentBytes, hash: string): void {
     const { bytes, mediaType } = payload;
     const existing = this.#io.sql<{ hash: string }>(
-      "SELECT hash FROM cf_agents_session_attachment_meta WHERE hash = ?",
+      `SELECT hash FROM ${this.#t.attachmentMeta} WHERE hash = ?`,
       [hash]
     );
     if (existing.length > 0) return;
@@ -109,13 +118,13 @@ export class AttachmentStore {
     for (let start = 0; start < bytes.length; start += ATTACHMENT_CHUNK_BYTES) {
       const end = Math.min(start + ATTACHMENT_CHUNK_BYTES, bytes.length);
       this.#io.sqlWrite(
-        "INSERT INTO cf_agents_session_attachment_chunks (hash, idx, data) VALUES (?, ?, ?)",
+        `INSERT INTO ${this.#t.attachmentChunks} (hash, idx, data) VALUES (?, ?, ?)`,
         [hash, chunks, chunkBuffer(bytes, start, end)]
       );
       chunks++;
     }
     this.#io.sqlWrite(
-      `INSERT INTO cf_agents_session_attachment_meta (hash, bytes, media_type, chunks)
+      `INSERT INTO ${this.#t.attachmentMeta} (hash, bytes, media_type, chunks)
        VALUES (?, ?, ?, ?)`,
       [hash, bytes.length, mediaType, chunks]
     );
@@ -128,7 +137,7 @@ export class AttachmentStore {
       media_type: string;
       chunks: number;
     }>(
-      "SELECT bytes, media_type, chunks FROM cf_agents_session_attachment_meta WHERE hash = ?",
+      `SELECT bytes, media_type, chunks FROM ${this.#t.attachmentMeta} WHERE hash = ?`,
       [hash]
     );
     if (!meta) return undefined;
@@ -136,7 +145,7 @@ export class AttachmentStore {
     const out = new Uint8Array(meta.bytes);
     if (meta.chunks > 0) {
       const rows = this.#io.sql<{ idx: number; data: ArrayBuffer }>(
-        "SELECT idx, data FROM cf_agents_session_attachment_chunks WHERE hash = ? ORDER BY idx",
+        `SELECT idx, data FROM ${this.#t.attachmentChunks} WHERE hash = ? ORDER BY idx`,
         [hash]
       );
       let offset = 0;
@@ -157,7 +166,7 @@ export class AttachmentStore {
   ): void {
     for (const hash of hashes) {
       this.#io.sqlWrite(
-        `INSERT OR IGNORE INTO cf_agents_session_attachment_refs
+        `INSERT OR IGNORE INTO ${this.#t.attachmentRefs}
            (session_id, message_id, hash) VALUES (?, ?, ?)`,
         [sessionId, messageId, hash]
       );
@@ -175,7 +184,7 @@ export class AttachmentStore {
     hashes: readonly string[]
   ): void {
     const current = this.#io.sql<{ hash: string }>(
-      `SELECT hash FROM cf_agents_session_attachment_refs
+      `SELECT hash FROM ${this.#t.attachmentRefs}
         WHERE session_id = ? AND message_id = ?`,
       [sessionId, messageId]
     );
@@ -185,7 +194,7 @@ export class AttachmentStore {
     for (const hash of held) {
       if (wanted.has(hash)) continue;
       this.#io.sqlWrite(
-        `DELETE FROM cf_agents_session_attachment_refs
+        `DELETE FROM ${this.#t.attachmentRefs}
           WHERE session_id = ? AND message_id = ? AND hash = ?`,
         [sessionId, messageId, hash]
       );
@@ -207,13 +216,13 @@ export class AttachmentStore {
     if (messageIds.length === 0) return;
     const ids = JSON.stringify(messageIds);
     const orphanCandidates = this.#io.sql<{ hash: string }>(
-      `SELECT DISTINCT hash FROM cf_agents_session_attachment_refs
+      `SELECT DISTINCT hash FROM ${this.#t.attachmentRefs}
         WHERE session_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
       [sessionId, ids]
     );
     if (orphanCandidates.length === 0) return;
     this.#io.sqlWrite(
-      `DELETE FROM cf_agents_session_attachment_refs
+      `DELETE FROM ${this.#t.attachmentRefs}
         WHERE session_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
       [sessionId, ids]
     );
@@ -223,12 +232,12 @@ export class AttachmentStore {
   /** Drop every reference held by one session and collect what it orphaned. */
   releaseSession(sessionId: string): void {
     const candidates = this.#io.sql<{ hash: string }>(
-      "SELECT DISTINCT hash FROM cf_agents_session_attachment_refs WHERE session_id = ?",
+      `SELECT DISTINCT hash FROM ${this.#t.attachmentRefs} WHERE session_id = ?`,
       [sessionId]
     );
     if (candidates.length === 0) return;
     this.#io.sqlWrite(
-      "DELETE FROM cf_agents_session_attachment_refs WHERE session_id = ?",
+      `DELETE FROM ${this.#t.attachmentRefs} WHERE session_id = ?`,
       [sessionId]
     );
     this.#collect(candidates.map((row) => row.hash));
@@ -238,16 +247,16 @@ export class AttachmentStore {
   #collect(hashes: readonly string[]): void {
     for (const hash of hashes) {
       const stillReferenced = this.#io.sql<{ hash: string }>(
-        "SELECT hash FROM cf_agents_session_attachment_refs WHERE hash = ? LIMIT 1",
+        `SELECT hash FROM ${this.#t.attachmentRefs} WHERE hash = ? LIMIT 1`,
         [hash]
       );
       if (stillReferenced.length > 0) continue;
       this.#io.sqlWrite(
-        "DELETE FROM cf_agents_session_attachment_chunks WHERE hash = ?",
+        `DELETE FROM ${this.#t.attachmentChunks} WHERE hash = ?`,
         [hash]
       );
       this.#io.sqlWrite(
-        "DELETE FROM cf_agents_session_attachment_meta WHERE hash = ?",
+        `DELETE FROM ${this.#t.attachmentMeta} WHERE hash = ?`,
         [hash]
       );
     }
