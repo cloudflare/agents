@@ -90,16 +90,35 @@ function recordHandledMessages(agent: AIChatAgent): string[] {
   const handled: string[] = [];
   const handle = agent.onMessage;
   agent.onMessage = async (connection: Connection, message: WSMessage) => {
-    await handle.call(agent, connection, message);
-    if (typeof message !== "string") return;
-    try {
-      const { type } = JSON.parse(message) as { type?: unknown };
-      if (typeof type === "string") handled.push(type);
-    } catch {
-      // Not JSON: nothing to record.
+    let frame: { type?: unknown; id?: unknown } | undefined;
+    if (typeof message === "string") {
+      try {
+        frame = JSON.parse(message) as typeof frame;
+      } catch {
+        // Not JSON: nothing to record.
+      }
     }
+    if (typeof frame?.id === "string") {
+      messageReceivedAt.set(agent, {
+        ...messageReceivedAt.get(agent),
+        [frame.id]: Date.now()
+      });
+    }
+    await handle.call(agent, connection, message);
+    if (typeof frame?.type === "string") handled.push(frame.type);
   };
   return handled;
+}
+
+/** When each agent received a socket message, by the message's id. */
+const messageReceivedAt = new WeakMap<AIChatAgent, Record<string, number>>();
+
+/** When `agent` received the socket message with id `id`, if it has. */
+function messageReceivedAtForTest(
+  agent: AIChatAgent,
+  id: string
+): number | null {
+  return messageReceivedAt.get(agent)?.[id] ?? null;
 }
 
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
@@ -569,6 +588,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
   handledMessageCountForTest(type: string): number {
     return this._handledMessageTypes.filter((handled) => handled === type)
       .length;
+  }
+
+  /** When the agent received the socket message with this id. */
+  receivedAtForTest(id: string): number | null {
+    return messageReceivedAtForTest(this, id);
   }
 
   /** Holds the next model call (inside onChatMessage) until released. */
@@ -2045,6 +2069,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   handledMessageCountForTest(type: string): number {
     return this._handledMessageTypes.filter((handled) => handled === type)
       .length;
+  }
+
+  /** When the agent received the socket message with this id. */
+  receivedAtForTest(id: string): number | null {
+    return messageReceivedAtForTest(this, id);
   }
 
   /** Reset this agent's isolate, as an eviction or a deploy does. */
