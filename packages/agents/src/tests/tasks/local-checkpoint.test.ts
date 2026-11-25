@@ -368,6 +368,9 @@ describe("Tasks schema 4", () => {
             .toArray()
         ).toEqual([]);
         expect(tasksSchemaVersion(state.storage)).toBe(4);
+        expect(
+          await state.storage.get("cf_agents:tasks_schema_version")
+        ).toBeUndefined();
       }
     );
   });
