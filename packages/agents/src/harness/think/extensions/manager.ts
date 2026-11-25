@@ -191,8 +191,12 @@ function toolOf<M extends HookMap>(
         // The AI SDK streams whatever returns an async iterable, so a tool
         // declared as an async generator returns its outputs as they come.
         // Any other tool returns its one result, or, when what it returned
-        // turns out to stream, a promise of the outputs, as the tool itself
-        // would have.
+        // turns out to stream, a promise of the outputs. ThinkHarness's
+        // executeTool awaits before it checks for an iterable, so it streams
+        // them. The AI SDK's checks first, so a tool it runs would get the
+        // outputs object as its result. Its only such caller is Think's
+        // sandboxed extensions, whose results never stream.
+        // TODO(E4): decide this from the result on the AI SDK path too.
         if (entry.streams) return run.outputs;
         return run.streams.then((streams) =>
           streams ? run.outputs : lastOf(run.outputs)
