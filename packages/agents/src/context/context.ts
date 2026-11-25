@@ -73,6 +73,10 @@ type ContextRecord = {
    * included, by label.
    */
   readonly delivered?: readonly Section[];
+  /** The tools the turn was sent, `[name, hash]`, when the host gave them. */
+  readonly tools?: readonly (readonly [string, string])[];
+  /** A change in the tools, delivered after this message (see `prepare`). */
+  readonly toolNotice?: string;
 };
 
 /**
@@ -166,6 +170,13 @@ export interface ContextPrepareOptions extends ContextReadOptions {
    * was: a change or a pending refresh since then waits for the next turn.
    */
   readonly retry?: boolean;
+  /**
+   * @internal The tools this request sends, each with a hash of its
+   * definition. When the list differs from the one the newest record holds,
+   * the model is told once, after the user message: what was added, what
+   * is gone (not to be called), what changed.
+   */
+  readonly tools?: readonly { readonly name: string; readonly hash: string }[];
 }
 
 /**
@@ -259,6 +270,76 @@ export class Context {
    */
   async prepare(options: ContextPrepareOptions = {}): Promise<PreparedContext> {
     const history = await this.#history(options);
+    if (!options.tools) return this.#prepareBlocks(options, history);
+    const tools = options.tools.map(({ name, hash }) => [name, hash] as const);
+    const before = (await this.#delivered(history)).tools;
+    const prepared = await this.#prepareBlocks(options, history, tools);
+    if (options.retry) return prepared;
+    const notice = before ? toolNotice(before, tools) : null;
+    const tail = history.at(-1);
+    const at =
+      tail?.role === "user" &&
+      (await this.#session.getLatestLeaf())?.id === tail.id
+        ? tail
+        : undefined;
+    if (!at) {
+      if (!notice) return prepared;
+      return {
+        system: prepared.system,
+        reminder: prepared.reminder
+          ? `${prepared.reminder}\n\n${notice}`
+          : notice
+      };
+    }
+    const existing = (await this.#records([at.id])).get(at.id);
+    // Written this turn: it already holds the tools; add the notice to it.
+    if (existing?.tools) {
+      if (notice) await this.#put(at.id, { ...existing, toolNotice: notice });
+      return prepared;
+    }
+    if (!notice && before) return prepared;
+    // Nothing recorded this turn: one record holds the new fingerprint
+    // (and the notice), naming the snapshot as a change record does.
+    const delivered = await this.#delivered(history);
+    if (!delivered.system || !delivered.base) {
+      // No blocks and no prompt from before: the empty prompt this turn was
+      // sent is the snapshot the fingerprint rides on.
+      await this.#put(at.id, {
+        system: [],
+        tools,
+        ...(notice && { toolNotice: notice })
+      });
+      return prepared;
+    }
+    // This record moves past the history it was given, so what the model
+    // wrote itself there counts as delivered, as on a change record.
+    // The model's own writes, from the transcript and the blocks as loaded
+    // this turn: no provider is read again.
+    const known = this.#known(delivered, history, await this.#changedLabels());
+    const own =
+      known.size > 0
+        ? (await this.#blocks.internal_sections()).filter(([label]) =>
+            known.has(label)
+          )
+        : [];
+    const values = new Map(delivered.values);
+    values.delete(CARRIED);
+    for (const [label, text] of own) values.set(label, text);
+    await this.#put(at.id, {
+      base: delivered.base,
+      delivered: [...values],
+      tools,
+      ...(notice && { toolNotice: notice })
+    });
+    return prepared;
+  }
+
+  /** `tools`, when given, goes on every record this writes. */
+  async #prepareBlocks(
+    options: ContextPrepareOptions,
+    history: readonly SessionMessage[],
+    tools?: readonly (readonly [string, string])[]
+  ): Promise<PreparedContext> {
     const refresh = await this.#refreshPending();
     let delivered = await this.#delivered(history);
     const tail = history.at(-1);
@@ -314,7 +395,10 @@ export class Context {
       const at = await target();
       if (at) {
         if (!unchanged) {
-          await this.#put(at.id, { system: sections });
+          await this.#put(at.id, {
+            system: sections,
+            ...(tools && { tools })
+          });
         }
         if (refresh) await this.#setRefresh(false);
         await this.#setChanged(null);
@@ -330,7 +414,8 @@ export class Context {
       // The release's frozen prompt becomes this session's first record.
       await this.#put(at.id, {
         system: delivered.system,
-        delivered: [...delivered.values].filter(([label]) => label !== CARRIED)
+        delivered: [...delivered.values].filter(([label]) => label !== CARRIED),
+        ...(tools && { tools })
       });
       delivered = { ...delivered, base: at.id };
     }
@@ -355,7 +440,8 @@ export class Context {
       ...existing,
       changes: mergeSections(existing?.changes ?? [], changes),
       ...(delivered.base !== at.id && { base: delivered.base }),
-      delivered: [...values]
+      delivered: [...values],
+      ...(tools && { tools })
     });
     await this.#setChanged(null);
     return { system, reminder: null };
@@ -400,6 +486,7 @@ export class Context {
         projected.push(message);
         continue;
       }
+      const notice = records.get(message.id)?.toolNotice;
       // A value this message delivers again is not restated before it.
       const own = new Set(changes.map(([label]) => label));
       const before = carried.filter(([label]) => !own.has(label));
@@ -411,7 +498,10 @@ export class Context {
         ...message.parts,
         ...(changes.length > 0
           ? [textPart(renderReminder(changes.map(([, text]) => text)))]
-          : [])
+          : []),
+        // A change in the tools stays where it was delivered, whatever
+        // snapshot came later: no prompt says which tools went away.
+        ...(notice ? [textPart(notice)] : [])
       ];
       projected.push(
         parts.length === message.parts.length ? message : { ...message, parts }
@@ -591,7 +681,13 @@ export class Context {
       for (const [label, text] of record.changes ?? []) {
         values.set(label, text);
       }
-      return { system: record.system, values, base: id, at: id };
+      return {
+        system: record.system,
+        values,
+        base: id,
+        at: id,
+        ...(record.tools && { tools: record.tools })
+      };
     }
     const baseId = record.base;
     const system = baseId
@@ -602,7 +698,8 @@ export class Context {
       system,
       values: new Map([...system, ...(record.delivered ?? [])]),
       base: baseId,
-      at: id
+      at: id,
+      ...(record.tools && { tools: record.tools })
     };
   }
 
@@ -705,19 +802,9 @@ export class Context {
     delivered: Delivered,
     history: readonly SessionMessage[]
   ): Promise<{ changes: Section[]; own: Section[] }> {
-    const writes = ownWrites(history, delivered.at);
     const remind = await this.#blocks.internal_remindSections();
     const changed = await this.#changedLabels();
-    const known = new Set<string>();
-    for (const [label, write] of writes) {
-      const content = this.#blocks.getBlock(label)?.content;
-      // A replace set the whole block; an append only its end, so code may
-      // have changed the rest since the model last saw it.
-      const holds = write.append
-        ? !changed.has(label) && content?.endsWith(write.content) === true
-        : content === write.content;
-      if (holds) known.add(label);
-    }
+    const known = this.#known(delivered, history, changed);
     const current =
       changed.size > 0 || known.size > 0
         ? await this.#blocks.internal_sections()
@@ -740,6 +827,28 @@ export class Context {
       changes,
       own: current.filter(([label]) => known.has(label))
     };
+  }
+
+  /**
+   * Blocks that hold what the model last wrote itself in the history since
+   * the newest record. Reads the transcript and the loaded blocks only.
+   */
+  #known(
+    delivered: Delivered,
+    history: readonly SessionMessage[],
+    changed: ReadonlySet<string>
+  ): Set<string> {
+    const known = new Set<string>();
+    for (const [label, write] of ownWrites(history, delivered.at)) {
+      const content = this.#blocks.getBlock(label)?.content;
+      // A replace set the whole block; an append only its end, so code may
+      // have changed the rest since the model last saw it.
+      const holds = write.append
+        ? !changed.has(label) && content?.endsWith(write.content) === true
+        : content === write.content;
+      if (holds) known.add(label);
+    }
+    return known;
   }
 
   async #changedLabels(): Promise<Set<string>> {
@@ -849,6 +958,8 @@ type Delivered = {
   base?: string;
   /** The message that holds the newest record. */
   at?: string;
+  /** The tools on the newest record, when it holds them. */
+  tools?: readonly (readonly [string, string])[];
   /** The snapshot is a prompt frozen before Context, not yet recorded. */
   carried?: boolean;
 };
@@ -896,6 +1007,36 @@ function ownWrites(
     }
   }
   return writes;
+}
+
+/** What changed between two tool lists, for the model; `null` when nothing did. */
+function toolNotice(
+  before: readonly (readonly [string, string])[],
+  now: readonly (readonly [string, string])[]
+): string | null {
+  const was = new Map(before);
+  const is = new Map(now);
+  const added = [...is.keys()].filter((name) => !was.has(name));
+  const removed = [...was.keys()].filter((name) => !is.has(name));
+  const changed = [...is].filter(
+    ([name, hash]) => was.has(name) && was.get(name) !== hash
+  );
+  if (added.length + removed.length + changed.length === 0) return null;
+  const lines = [
+    "The tools you can call changed since earlier in this conversation."
+  ];
+  if (added.length > 0) lines.push(`Added: ${added.join(", ")}.`);
+  if (removed.length > 0) {
+    lines.push(
+      `Removed: ${removed.join(", ")}. Do not call them, and disregard their earlier descriptions.`
+    );
+  }
+  if (changed.length > 0) {
+    lines.push(
+      `Changed: ${changed.map(([name]) => name).join(", ")}. Use their current definitions.`
+    );
+  }
+  return lines.join("\n");
 }
 
 function renderSystem(sections: readonly Section[]): string {
