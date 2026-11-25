@@ -2320,6 +2320,15 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return next;
   }
 
+  /** How many submits were decided while another turn was in flight. */
+  overlappingSubmitCountForTest(): number {
+    return (
+      this as unknown as {
+        _turns: { submits: { _submitSequence: number } };
+      }
+    )._turns.submits._submitSequence;
+  }
+
   holdStreamForTest(requestId = "next"): void {
     this._streamGates.set(requestId, new TestGate());
   }

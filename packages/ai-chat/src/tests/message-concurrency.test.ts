@@ -571,11 +571,16 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // The first reply is held, so the second request overlaps it.
+    await agentStub.holdStreamForTest("req-missing-debounce-1");
     sendChatRequest(ws, "req-missing-debounce-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 5,
       chunkDelayMs: 50
     });
+    await waitUntil(
+      async () => await agentStub.isStreamHeldForTest("req-missing-debounce-1")
+    );
 
     sendChatRequest(
       ws,
@@ -587,6 +592,11 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkDelayMs: 10
       }
     );
+    // The second was decided as an overlapping submit, so it debounces.
+    await waitUntil(
+      async () => (await agentStub.overlappingSubmitCountForTest()) === 1
+    );
+    await agentStub.releaseStreamForTest("req-missing-debounce-1");
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
@@ -619,11 +629,16 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // The first reply is held, so the second request overlaps it.
+    await agentStub.holdStreamForTest("req-invalid-debounce-1");
     sendChatRequest(ws, "req-invalid-debounce-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 5,
       chunkDelayMs: 50
     });
+    await waitUntil(
+      async () => await agentStub.isStreamHeldForTest("req-invalid-debounce-1")
+    );
 
     sendChatRequest(
       ws,
@@ -635,6 +650,11 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkDelayMs: 10
       }
     );
+    // The second was decided as an overlapping submit, so it debounces.
+    await waitUntil(
+      async () => (await agentStub.overlappingSubmitCountForTest()) === 1
+    );
+    await agentStub.releaseStreamForTest("req-invalid-debounce-1");
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
