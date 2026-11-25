@@ -25,9 +25,6 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return JSON.stringify({ type: "text-delta", delta: `${index}:${filler}` });
   }
 
-  /** Durable-marker values the adapter reported through `onProgress`. */
-  readonly progressReports: number[] = [];
-
   #adapter(): ResumableStream {
     return new ResumableStream(
       this.streams,
@@ -43,8 +40,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
             ),
             ...values
           )
-        ] as T[],
-      { onProgress: (durable) => this.progressReports.push(durable) }
+        ] as T[]
     );
   }
 
@@ -53,7 +49,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
    * capability. A stream retired afterwards must count once, not once per
    * construction.
    */
-  async probeReconstruction(): Promise<{ marker: number; reports: number }> {
+  async probeReconstruction(): Promise<{ marker: number }> {
     await this.lifecycle.start();
     this.#adapter();
     this.#adapter();
@@ -62,10 +58,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     for (let i = 0; i < 10; i++) adapter.storeChunk(id, this.#body(i, 60));
     adapter.finish(id);
     adapter.cutover(id, () => {});
-    return {
-      marker: adapter.progressMarker(),
-      reports: this.progressReports.length
-    };
+    return { marker: adapter.progressMarker() };
   }
 
   /**
@@ -159,9 +152,9 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     adapter.cutover(first, () => {});
     marker.afterTurn = adapter.progressMarker();
     for (let isolate = 1; isolate <= 3; isolate++) {
-      // The host's `onProgress` wrote the last report to KV; a new isolate
-      // reads it back and seeds it.
-      const mirrored = this.progressReports.at(-1) ?? 0;
+      // An earlier version mirrored the marker's durable part to KV; each
+      // new isolate reads that value back and seeds it.
+      const mirrored = marker.afterTurn;
       const next = this.#adapter();
       next.seedProgress(mirrored);
       marker[`isolate${isolate}`] = next.progressMarker();

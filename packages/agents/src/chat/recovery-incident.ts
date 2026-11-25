@@ -198,10 +198,10 @@ export const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
  * credited chunk. The marker is now derived from the stream log
  * (`ResumableStream.progressMarker`), and this key is only read — once per
  * isolate, to seed the derived marker so it never reads lower than the
- * high-water mark an incident recorded before the upgrade. Current code
- * writes it only as a mirror of the derived marker's durable part — one put
- * per stream retired, none per chunk — so a build rolled back to the
- * counter never reads a marker lower than an incident recorded here.
+ * high-water mark an incident recorded before the upgrade. The chat hosts
+ * no longer write it (earlier versions mirrored the derived marker's
+ * durable part into it); `bumpChatRecoveryProgress` is for hosts that keep
+ * the counter themselves.
  */
 export const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 /**

@@ -61,25 +61,13 @@ describe("ResumableStream.progressMarker", () => {
     });
   });
 
-  it("reports the durable marker to the host per retire and per credit, never per chunk", async () => {
-    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
-      await instance.probeProgressMarker();
-      // Cutover, reclaim, credit, clear: four reports for 36 stored chunks,
-      // each carrying the durable total as it stood, never decreasing.
-      expect(instance.progressReports).toEqual([3, 4, 5, 6]);
-    });
-  });
-
   it("retires a stream once when the adapter was constructed more than once", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {
-      const { marker, reports } = await instance.probeReconstruction();
+      const { marker } = await instance.probeReconstruction();
       // Three constructions, one cutover of a one-segment stream: the
-      // earlier hooks were replaced, so the segment is retired once and the
-      // host hears about it once.
+      // earlier hooks were replaced, so the segment is retired once.
       expect(marker).toBe(1);
-      expect(reports).toBe(1);
     });
   });
 
