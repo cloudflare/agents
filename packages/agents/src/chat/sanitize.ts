@@ -14,8 +14,12 @@ import { truncateToolOutput } from "./tool-output-truncation";
 
 export { byteLength, sanitizeMessage };
 
-/** The largest serialized message {@link enforceRowSizeLimit} leaves whole. */
-const ROW_MAX_BYTES = SQLITE_ROW_BYTES - 200_000;
+/**
+ * The largest serialized message {@link enforceRowSizeLimit} leaves whole.
+ *
+ * @internal Exported for its tests.
+ */
+export const ROW_MAX_BYTES = SQLITE_ROW_BYTES - 200_000;
 
 /**
  * Optional hooks for {@link enforceRowSizeLimit}.
