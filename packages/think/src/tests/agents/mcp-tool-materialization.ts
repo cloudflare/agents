@@ -1,5 +1,5 @@
 import { McpConnector, type McpConnectionLike } from "@cloudflare/codemode";
-import type { LanguageModel } from "ai";
+import { streamText, type LanguageModel } from "ai";
 import { Think } from "../../think";
 import type { TurnConfig, TurnContext } from "../../think";
 
@@ -23,7 +23,21 @@ const usage = {
   outputTokens: { total: 1, text: 1, reasoning: 0 }
 };
 
-function createTextModel(): LanguageModel {
+/** The tool definitions each model request carried, in order. */
+type RequestTools = { name?: string }[] | undefined;
+
+type PromptMessage = { role: string; content?: unknown };
+
+/**
+ * A model that answers "done", or, while `call` is set and the request has
+ * no tool result yet, asks for that one tool call. Every request's messages
+ * go to `prompts`.
+ */
+function createTextModel(
+  requests: RequestTools[] = [],
+  call?: () => { toolName: string; input: unknown } | undefined,
+  prompts: PromptMessage[][] = []
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -32,10 +46,32 @@ function createTextModel(): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream() {
+    doStream(options: {
+      tools?: { name?: string }[];
+      prompt?: PromptMessage[];
+    }) {
+      requests.push(options.tools);
+      prompts.push(options.prompt ?? []);
+      const wanted = call?.();
+      const answered = options.prompt?.some((m) => m.role === "tool");
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
+          if (wanted && !answered) {
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "mcp-1",
+              toolName: wanted.toolName,
+              input: JSON.stringify(wanted.input)
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: { unified: "tool-calls" as const, raw: undefined },
+              usage
+            });
+            controller.close();
+            return;
+          }
           controller.enqueue({ type: "text-start", id: "text" });
           controller.enqueue({
             type: "text-delta",
@@ -73,21 +109,98 @@ class BulkMcpConnector extends McpConnector<Cloudflare.Env> {
 export class ThinkMcpToolMaterializationAgent extends Think {
   private _getAIToolsCalls = 0;
   private _waitForConnectionsCalls = 0;
+  /** Waits that have finished, not only begun. */
+  private _waitsFinished = 0;
   private _mcpToolCountBeforeTurn = 0;
   private _connector?: BulkMcpConnector;
 
   override maxSteps = 1;
   override waitForMcpConnections = true;
 
+  readonly #requests: RequestTools[] = [];
+  readonly #prompts: PromptMessage[][] = [];
+  #call: { toolName: string; input: unknown } | undefined;
+  #offerAll = false;
+  /** Whether each `getTools()` call came after the MCP wait. */
+  #getToolsAfterWait: boolean[] = [];
+
   override getModel(): LanguageModel {
-    return createTextModel();
+    return createTextModel(this.#requests, () => this.#call, this.#prompts);
   }
 
-  override beforeTurn(ctx: TurnContext): TurnConfig {
+  override getTools() {
+    this.#getToolsAfterWait.push(this._waitsFinished > 0);
+    return {};
+  }
+
+  /**
+   * Run a turn: whether every `getTools()` call in it came after the turn
+   * waited for the MCP connections, so tools built from the MCP catalog see
+   * servers that came up during the wait.
+   */
+  async getToolsFollowsWait(): Promise<boolean[]> {
+    await this._ensureBulkConnection();
+    this._waitForConnectionsCalls = 0;
+    this._waitsFinished = 0;
+    this.#getToolsAfterWait = [];
+    await this.runTurn({ mode: "wait", input: "hello" });
+    return this.#getToolsAfterWait;
+  }
+
+  /**
+   * Have the model call the first MCP tool in a turn: the tool result the
+   * next model request carries, as JSON.
+   */
+  async callThroughModel(): Promise<string> {
+    await this._ensureBulkConnection();
+    const [toolName] = Object.keys(this.mcp.getAITools());
+    this.#offerAll = true;
+    this.maxSteps = 2;
+    this.#call = { toolName, input: { value: "from the model" } };
+    await this.runTurn({ mode: "wait", input: "call it" });
+    this.#call = undefined;
+    this.#offerAll = false;
+    this.maxSteps = 1;
+    const next = this.#prompts.at(-1) ?? [];
+    return JSON.stringify(next.filter((message) => message.role === "tool"));
+  }
+
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
     this._mcpToolCountBeforeTurn = Object.keys(ctx.tools).filter((name) =>
       name.startsWith("tool_bulkserver_")
     ).length;
+    if (this.#offerAll) return;
     return { activeTools: [] };
+  }
+
+  /**
+   * The MCP tools' definitions as one turn sent them to the model, and as
+   * `streamText` sends `getAITools()` given directly: both as JSON, and the
+   * turn's tool names in order.
+   */
+  async mcpToolRequests(): Promise<{
+    turn: string;
+    direct: string;
+    order: (string | undefined)[];
+  }> {
+    await this._ensureBulkConnection();
+    this.#offerAll = true;
+    await this.runTurn({ mode: "wait", input: "hello" });
+    this.#offerAll = false;
+    const turn = this.#requests.at(-1) ?? [];
+    const directRequests: RequestTools[] = [];
+    await streamText({
+      model: createTextModel(directRequests),
+      tools: this.mcp.getAITools(),
+      prompt: "hello"
+    }).consumeStream();
+    const direct = directRequests[0] ?? [];
+    const names = new Set(direct.map((entry) => entry.name));
+    return {
+      turn: JSON.stringify(turn.filter((entry) => names.has(entry.name))),
+      direct: JSON.stringify(direct),
+      order: turn.map((entry) => entry.name)
+    };
   }
 
   private async _ensureBulkConnection(): Promise<void> {
@@ -136,7 +249,11 @@ export class ThinkMcpToolMaterializationAgent extends Think {
     );
     this.mcp.waitForConnections = async (options) => {
       this._waitForConnectionsCalls++;
-      return originalWaitForConnections(options);
+      // Discovery that is not finished yet: the wait settles a few ticks
+      // later, so a getTools() run while it is in flight sees no finish.
+      await originalWaitForConnections(options);
+      for (let tick = 0; tick < 5; tick++) await Promise.resolve();
+      this._waitsFinished++;
     };
 
     this._connector = new BulkMcpConnector(this.ctx, this.env, connection);

@@ -1,8 +1,8 @@
 {
-  "total": 1547,
-  "passed": 522,
-  "needThink": 1255,
-  "needThinkPassed": 230,
+  "total": 1551,
+  "passed": 526,
+  "needThink": 1259,
+  "needThinkPassed": 234,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -113,8 +113,8 @@
       "passed": 42
     },
     "fetch-tools.test.ts": {
-      "total": 52,
-      "passed": 51
+      "total": 53,
+      "passed": 52
     },
     "fiber.test.ts": {
       "total": 7,
@@ -133,8 +133,8 @@
       "passed": 1
     },
     "mcp-tool-materialization.test.ts": {
-      "total": 2,
-      "passed": 0
+      "total": 5,
+      "passed": 3
     },
     "media-eviction.test.ts": {
       "total": 22,
@@ -404,6 +404,7 @@
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > never reuses a host extension id without a scope",
     "extension-manager.test.ts > ExtensionManager worker id stability > reuses the same worker id across managers for identical extensions",
     "fetch-tools.test.ts > Think — fetchTools integration > does not register fetch tools by default",
+    "fetch-tools.test.ts > Think — fetchTools integration > hands the model a fetched body when it calls a fetch tool",
     "fetch-tools.test.ts > Think — fetchTools integration > sends the workspace and fetch tools as they are given directly, in that order, byte for byte",
     "fetch-tools.test.ts > createFetchTools — config > generates one fetch_<name> tool per binding with a sanitized name",
     "fetch-tools.test.ts > createFetchTools — config > registers fetch_url only when a public allowlist is set",
@@ -501,6 +502,9 @@
     "hooks.test.ts > Think — tool-call hooks expose typed input/output > beforeToolCall receives toolName and typed input",
     "hydration-budget.test.ts > hydrationByteBudget — windowed hydration (#1710) > chat works on a windowed-boot agent and persists past the window",
     "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > DOES count an in-flight `running` run toward the cap",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > hands the model an MCP tool's result when it calls one",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > sends the MCP tools as getAITools() gives them, byte for byte, after the workspace's",
+    "mcp-tool-materialization.test.ts > Think MCP tool materialization > waits for MCP connections before it builds the agent's own tools",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > ignores text, markers, remote urls and small payloads",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees a payload nested inside a tool output",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees an inline file payload at or above the threshold",

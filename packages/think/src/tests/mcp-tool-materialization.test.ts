@@ -24,6 +24,32 @@ describe("Think MCP tool materialization", () => {
     });
   });
 
+  it("sends the MCP tools as getAITools() gives them, byte for byte, after the workspace's", async () => {
+    const agent = await freshAgent(`bytes-${crypto.randomUUID()}`);
+    const { turn, direct, order } = await agent.mcpToolRequests();
+    const mcp = (JSON.parse(direct) as { name: string }[]).map((t) => t.name);
+    expect(mcp).toHaveLength(313);
+    expect(turn).toBe(direct);
+    // MCP tools come after the workspace's tools, as Think merges them.
+    expect(order.indexOf("read")).toBeLessThan(order.indexOf(mcp[0]));
+    expect(order.slice(-mcp.length)).toEqual(mcp);
+  });
+
+  it("hands the model an MCP tool's result when it calls one", async () => {
+    const agent = await freshAgent(`call-${crypto.randomUUID()}`);
+    const results = await agent.callThroughModel();
+    // The server echoes the call it got: this tool, with the model's input.
+    expect(results).toContain("bulk_tool_0");
+    expect(results).toContain("from the model");
+  });
+
+  it("waits for MCP connections before it builds the agent's own tools", async () => {
+    const agent = await freshAgent(`wait-${crypto.randomUUID()}`);
+    const calls = await agent.getToolsFollowsWait();
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every(Boolean)).toBe(true);
+  });
+
   it("automatically exposes MCP tools by default for compatibility", async () => {
     const agent = await freshAgent(`default-${crypto.randomUUID()}`);
 

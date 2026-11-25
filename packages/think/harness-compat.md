@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**230 of the 1255 tests that construct Think pass (18%).** Across the whole suite, 522 of 1547.
+**234 of the 1259 tests that construct Think pass (18%).** Across the whole suite, 526 of 1551.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -44,12 +44,12 @@ supported by the harness-backed Think yet".
 | `execute-hitl.test.ts`                 | 0 / 16   | 0%   |
 | `execute-tool.test.ts`                 | 6 / 6    | 100% |
 | `extension-manager.test.ts`            | 42 / 45  | 93%  |
-| `fetch-tools.test.ts`                  | 51 / 52  | 98%  |
+| `fetch-tools.test.ts`                  | 52 / 53  | 98%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
 | `hooks.test.ts`                        | 38 / 149 | 25%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
-| `mcp-tool-materialization.test.ts`     | 0 / 2    | 0%   |
+| `mcp-tool-materialization.test.ts`     | 3 / 5    | 60%  |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
 | `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
 | `messengers.test.ts`                   | 79 / 104 | 75%  |
