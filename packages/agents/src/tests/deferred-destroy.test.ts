@@ -172,7 +172,9 @@ describe("deferred destroy (#1625)", () => {
           Date.now() - 1_000
         );
       }
-      await ctx.storage.setAlarm(Date.now() + 10);
+      // Far ahead, so only runDurableObjectAlarm below runs it: an alarm due
+      // now can fire on its own first, and the call then waits for nothing.
+      await ctx.storage.setAlarm(Date.now() + 60_000);
     });
     await runDurableObjectAlarm(stub);
     await runInDurableObject(stub, async (_instance, ctx) => {

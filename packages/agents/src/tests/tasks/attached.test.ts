@@ -76,9 +76,13 @@ describe("Tasks attached definitions", () => {
         expect(jobIds(state.storage)).toContain("task:cut");
       }
     );
+    // The wake is due now, so its alarm can fire on its own and
+    // runDurableObjectAlarm then returns at once: wait for the run to settle.
     await runDurableObjectAlarm(stub);
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      expect(await instance.tasks.get("cut")).toMatchObject({
+      expect(
+        await instance.tasks.wait("cut", { timeoutMs: 10_000 })
+      ).toMatchObject({
         status: "completed",
         result: "recovered"
       });
@@ -108,9 +112,13 @@ describe("Tasks attached definitions", () => {
         expect(jobIds(state.storage)).toContain("task:accepted");
       }
     );
+    // The wake is due now, so its alarm can fire on its own and
+    // runDurableObjectAlarm then returns at once: wait for the run to settle.
     await runDurableObjectAlarm(stub);
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
-      expect(await instance.tasks.get("accepted")).toMatchObject({
+      expect(
+        await instance.tasks.wait("accepted", { timeoutMs: 10_000 })
+      ).toMatchObject({
         status: "completed",
         result: "late"
       });
@@ -274,6 +282,15 @@ describe("Tasks attached definitions", () => {
 
   it("keep the back-off when a whole batch of reports fails, through the alarm", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const readJobTime = () =>
+      runInDurableObject(stub, (_instance, state) => {
+        const [job] = state.storage.sql
+          .exec<{ time: number }>(
+            "SELECT time FROM cf_agents_jobs WHERE id = 'tasks:reports'"
+          )
+          .toArray();
+        return job.time;
+      });
     const stuck = "__cf_test_batch_report" as unknown as "pipeline";
     await runInDurableObject(
       stub,
@@ -303,16 +320,18 @@ describe("Tasks attached definitions", () => {
       }
     );
 
-    await runDurableObjectAlarm(stub);
+    const due = await readJobTime();
 
-    await runInDurableObject(stub, async (_instance, state) => {
-      const [job] = state.storage.sql
-        .exec<{ time: number }>(
-          "SELECT time FROM cf_agents_jobs WHERE id = 'tasks:reports'"
-        )
-        .toArray();
-      expect(job.time).toBeGreaterThan(Date.now() + 20_000);
-    });
+    // The alarm is due now, so it can fire on its own before
+    // runDurableObjectAlarm, which then returns at once. Wait for the batch
+    // to have run: the job's time is rewritten.
+    await runDurableObjectAlarm(stub);
+    let time = await readJobTime();
+    for (let i = 0; i < 200 && time === due; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      time = await readJobTime();
+    }
+    expect(time).toBeGreaterThan(Date.now() + 20_000);
   });
 
   it("run the next batch at once when a run in this one was deleted meanwhile", async () => {
