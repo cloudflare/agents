@@ -28,7 +28,7 @@
  */
 
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "..";
 import { MessageType } from "../types";
 
@@ -42,6 +42,25 @@ async function connectWS(path: string) {
   expect(ws).toBeDefined();
   ws.accept();
   return { ws };
+}
+
+/** Wait until `messages` holds one that matches: the event, not a time. */
+async function arrived<T>(
+  messages: T[],
+  match: (message: T) => boolean,
+  count = 1
+): Promise<void> {
+  await vi.waitFor(
+    () => {
+      expect(messages.filter(match).length).toBeGreaterThanOrEqual(count);
+    },
+    { timeout: 5000, interval: 10 }
+  );
+}
+
+/** Wait for the three frames a new connection gets (identity, state, MCP). */
+function initialFrames(messages: unknown[]): Promise<void> {
+  return arrived(messages, () => true, 3);
 }
 
 // Helper to wait for a WebSocket message
@@ -289,8 +308,7 @@ describe("state management", () => {
         messages.push(JSON.parse(e.data as string));
       });
 
-      // Wait for initial messages
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await initialFrames(messages);
 
       // Now update state from agent
       const agentStub = await getAgentByName(env.TestStateAgent, room);
@@ -300,9 +318,13 @@ describe("state management", () => {
         lastUpdated: "broadcast-test"
       };
       await agentStub.updateState(newState);
-
-      // Wait for broadcast
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await arrived(
+        messages,
+        (m) =>
+          (m as { type: string; state?: { count?: number } }).type ===
+            MessageType.CF_AGENT_STATE &&
+          (m as { state?: { count?: number } }).state?.count === 88
+      );
 
       // Find the broadcast message (should be after initial messages)
       const broadcastMsg = messages.find(
@@ -342,11 +364,14 @@ describe("state management", () => {
         })
       );
 
-      // Give time for update to process
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      // Verify state was updated
+      // Verify state was updated, once the update is processed
       const agentStub = await getAgentByName(env.TestStateAgent, room);
+      await vi.waitFor(
+        async () => {
+          expect(await agentStub.getState()).toEqual(clientState);
+        },
+        { timeout: 5000, interval: 10 }
+      );
       const state = await agentStub.getState();
 
       expect(state).toEqual(clientState);
@@ -433,8 +458,7 @@ describe("state management", () => {
         messages.push(JSON.parse(e.data as string));
       });
 
-      // Wait for initial messages (identity, state, mcp_servers)
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await initialFrames(messages);
 
       // Clear messages to only capture new ones
       const initialCount = messages.length;
@@ -453,17 +477,28 @@ describe("state management", () => {
         // Expected to throw
       }
 
-      // Wait a bit for any broadcast that might have happened
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // A valid update after it is broadcast in order on the same socket, so
+      // once its broadcast arrives, one for the rejected update would have too.
+      await agentStub.updateState({
+        count: 7,
+        items: ["marker"],
+        lastUpdated: "after-rejected"
+      });
+      await arrived(
+        messages,
+        (m) =>
+          m.type === MessageType.CF_AGENT_STATE &&
+          (m.state as { count?: number } | undefined)?.count === 7
+      );
 
-      // Check that no new state messages were broadcast
+      // If validateStateChange throws, state should NOT be broadcast
       const newMessages = messages.slice(initialCount);
       const stateMessages = newMessages.filter(
         (m) => m.type === MessageType.CF_AGENT_STATE
       );
-
-      // If validateStateChange throws, state should NOT be broadcast
-      expect(stateMessages.length).toBe(0);
+      expect(
+        stateMessages.map((m) => (m.state as { count?: number }).count)
+      ).toEqual([7]);
 
       ws.close();
     });
@@ -482,8 +517,7 @@ describe("state management", () => {
         messages.push(JSON.parse(e.data as string));
       });
 
-      // Wait for initial messages
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await initialFrames(messages);
 
       // Clear messages to only capture new ones
       const initialCount = messages.length;
@@ -497,11 +531,22 @@ describe("state management", () => {
         lastUpdated: "should-broadcast"
       });
 
-      // Wait for broadcast
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Then a second update: once its broadcast arrives, every broadcast
+      // for the first has arrived too.
+      await agentStub.updateState({
+        count: 7,
+        items: ["marker"],
+        lastUpdated: "after-valid"
+      });
+      await arrived(
+        messages,
+        (m) => m.type === MessageType.CF_AGENT_STATE && m.state?.count === 7
+      );
 
-      // Should have received a state broadcast
-      const newMessages = messages.slice(initialCount);
+      // Should have received exactly one broadcast for the first update
+      const newMessages = messages
+        .slice(initialCount)
+        .filter((m) => m.state?.count !== 7);
       const stateMessages = newMessages.filter(
         (m) => m.type === MessageType.CF_AGENT_STATE
       );
@@ -526,8 +571,7 @@ describe("state management", () => {
         messages.push(JSON.parse(e.data as string));
       });
 
-      // Wait for initial messages
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await initialFrames(messages);
 
       // Clear messages to only capture new ones
       const initialCount = messages.length;
@@ -542,9 +586,20 @@ describe("state management", () => {
         lastUpdated: "onStateChanged-throws"
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // A second update's broadcast arrives after every one for the first.
+      await agentStub.updateState({
+        count: 7,
+        items: ["marker"],
+        lastUpdated: "after-throwing-hook"
+      });
+      await arrived(
+        messages,
+        (m) => m.type === MessageType.CF_AGENT_STATE && m.state?.count === 7
+      );
 
-      const newMessages = messages.slice(initialCount);
+      const newMessages = messages
+        .slice(initialCount)
+        .filter((m) => m.state?.count !== 7);
       const stateMessages = newMessages.filter(
         (m) => m.type === MessageType.CF_AGENT_STATE
       );
@@ -552,10 +607,16 @@ describe("state management", () => {
       expect(stateMessages.length).toBe(1);
       expect(stateMessages[0].state?.count).toBe(-2);
 
-      // Error should have been routed through onError (best-effort)
-      const errors = await agentStub.getOnErrorCalls();
-      expect(errors.some((e) => e.includes("onStateChanged failed"))).toBe(
-        true
+      // Error should have been routed through onError (best-effort). The hook
+      // runs after the broadcast, in its own task, so wait for the error.
+      await vi.waitFor(
+        async () => {
+          const errors = await agentStub.getOnErrorCalls();
+          expect(errors.some((e) => e.includes("onStateChanged failed"))).toBe(
+            true
+          );
+        },
+        { timeout: 5000, interval: 10 }
       );
 
       ws.close();
@@ -604,14 +665,11 @@ describe("state management", () => {
         `/agents/test-throwing-state-agent/${room}`
       );
 
-      // Wait for initial messages
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // Collect messages going forward
       const messages: Array<{ type: string; state?: { count?: number } }> = [];
       ws.addEventListener("message", (e: MessageEvent) => {
         messages.push(JSON.parse(e.data as string));
       });
+      await initialFrames(messages);
 
       // Send valid state from the client
       ws.send(
@@ -621,7 +679,24 @@ describe("state management", () => {
         })
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Once the update is stored, a server update's broadcast on the same
+      // socket arrives after any error frame for the client's.
+      const agentStub = await getAgentByName(env.TestThrowingStateAgent, room);
+      await vi.waitFor(
+        async () => {
+          expect((await agentStub.getState())?.count).toBe(10);
+        },
+        { timeout: 5000, interval: 10 }
+      );
+      await agentStub.updateState({
+        count: 7,
+        items: ["marker"],
+        lastUpdated: "after-client"
+      });
+      await arrived(
+        messages,
+        (m) => m.type === MessageType.CF_AGENT_STATE && m.state?.count === 7
+      );
 
       // Should NOT have received an error
       const errorMessages = messages.filter(
@@ -668,8 +743,10 @@ describe("state management", () => {
         `/agents/test-persisted-state-agent/${room}`
       );
 
-      // Wait for initial messages
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Consume initial messages (identity, state, mcp_servers)
+      await waitForMessage(ws);
+      await waitForMessage(ws);
+      await waitForMessage(ws);
 
       const agentStub = await getAgentByName(env.TestPersistedStateAgent, room);
       await agentStub.clearPersistedCalls();
