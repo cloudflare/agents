@@ -20,3 +20,11 @@ export function storeAsReleased(
   if (version === undefined) storage.kv.delete(legacyKey);
   else storage.kv.put(legacyKey, version);
 }
+
+/** Capability `id`'s version in the one record, if it has one. */
+export function storedSchemaVersion(
+  storage: DurableObjectStorage,
+  id: string
+): number | undefined {
+  return storage.kv.get<Record<string, number>>(SCHEMA_VERSIONS_KEY)?.[id];
+}

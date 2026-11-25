@@ -1,3 +1,4 @@
+import { hasTable } from "./lifecycle/schema";
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   type AgentEmail
@@ -426,11 +427,11 @@ type AgentToolRecoveryInspection =
 /**
  * Schema version for the Agent's internal SQLite tables.
  * Bump this when adding new tables, columns, or migrations.
- * The constructor stores this under a namespaced KV key (the same convention
- * every capability uses for its own schema version) and checks it on wake to
- * skip DDL on established DOs.
+ * The constructor keeps it in the Lifecycle's one schema record, beside every
+ * capability's version, and checks it on wake to skip DDL on established DOs.
  */
 const CURRENT_SCHEMA_VERSION = 14;
+/** The key it had before the one record: folded in once, then deleted. */
 const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
 // Before the State capability owned `cf_agents_state`, Agent kept its schema
@@ -955,26 +956,38 @@ export class Agent<
     // Schema version gating: skip all DDL on established DOs whose schema
     // is already up-to-date. `cf_agents_state` belongs to the State
     // capability (state/index.ts), which creates and migrates it itself.
-    const schemaVersion = this._readSchemaVersion();
+    const schemaVersion = this.lifecycle.hostSchema.migrateSync({
+      version: CURRENT_SCHEMA_VERSION,
+      legacyKey: SCHEMA_VERSION_KEY,
+      legacyVersion: () => this._takeLegacySchemaVersionRow(),
+      steps: { [CURRENT_SCHEMA_VERSION]: () => this._createAgentTables() }
+    });
 
-    if (schemaVersion < CURRENT_SCHEMA_VERSION) {
-      ensureMcpServerTable(this.ctx.storage);
+    this._schemaInitialization = {
+      previousVersion: schemaVersion,
+      currentVersion: CURRENT_SCHEMA_VERSION,
+      migrated: schemaVersion < CURRENT_SCHEMA_VERSION
+    };
+  }
 
-      // Queue and schedule schema and migrations are owned by the Queue and
-      // Scheduler capabilities.
-      const addColumnIfNotExists = (sql: string) => {
-        try {
-          this.ctx.storage.sql.exec(sql);
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          if (!message.toLowerCase().includes("duplicate column")) {
-            throw error;
-          }
+  /** Every version's DDL; each statement is idempotent. */
+  private _createAgentTables(): void {
+    ensureMcpServerTable(this.ctx.storage);
+
+    // Queue and schedule schema and migrations are owned by the Queue and
+    // Scheduler capabilities.
+    const addColumnIfNotExists = (sql: string) => {
+      try {
+        this.ctx.storage.sql.exec(sql);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.toLowerCase().includes("duplicate column")) {
+          throw error;
         }
-      };
+      }
+    };
 
-      this.sql`
+    this.sql`
         CREATE TABLE IF NOT EXISTS cf_agent_tool_runs (
           run_id TEXT PRIMARY KEY,
           parent_tool_call_id TEXT,
@@ -994,113 +1007,92 @@ export class Agent<
         )
       `;
 
-      this.sql`
+    this.sql`
         CREATE INDEX IF NOT EXISTS idx_agent_tool_runs_parent_tool_call_id
         ON cf_agent_tool_runs(parent_tool_call_id, display_order)
       `;
 
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN output_json TEXT"
-      );
-      // #1630 follow-up: persist the typed interrupted cause so it survives a
-      // reconnect replay (otherwise live clients see `reason`/`childStillRunning`
-      // but reconnecting clients replay them as `undefined`).
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN interrupted_reason TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_still_running INTEGER"
-      );
-      // Detached ("background") runs (rfc-detached-agent-tools). `detached`
-      // marks a run dispatched without an awaiting parent turn;
-      // `detached_on_finish` is the parent METHOD NAME to call on terminal
-      // (durable, eviction-surviving — like a `schedule` callback);
-      // `detached_notify_source` is a caller-controlled chat metadata source for
-      // the `notify` sugar; `detached_max_budget_at` is the absolute give-up
-      // deadline. The four ledger columns implement a two-slot (finish /
-      // give-up) claim+lease so delivery is exactly-once on the happy path and
-      // at-least-once under failure — give-up and finish are INDEPENDENT slots
-      // so a premature give-up can never dedupe a child's real late completion
-      // away (the production incident in #1752).
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_finish TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_notify_source TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_max_budget_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_claimed_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_delivered_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_claimed_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_delivered_at INTEGER"
-      );
-      // Detached progress (rfc-detached-agent-tools §progress). The resetting
-      // no-progress window DURATION (not an absolute deadline — it floats with
-      // the child's latest signal) and the parent's last-observed signal time.
-      // The backbone reconcile reads the child's authoritative `progress.at`
-      // via `inspectAgentToolRun`; this cached value is a best-effort liveness
-      // hint observed off the warm tail so a still-warm parent does not have to
-      // inspect on every tick.
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_no_progress_budget_ms INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN last_progress_at INTEGER"
-      );
-      // Chat-host `detached: { onMilestones }` convenience (4b): JSON
-      // `{ names, mode }` — the milestone names that inject an idempotent chat
-      // notification when reached, and whether to "react" (model turn) or
-      // "narrate" (synthetic assistant line). Persisted so the cold backbone
-      // reconcile can deliver them after eviction, not only the warm tail.
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_milestones TEXT"
-      );
-      // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agent_tool_runs ADD COLUMN event_delivery TEXT"
-      );
-
-      // Mark schema as up-to-date
-      this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
-    }
-
-    this._schemaInitialization = {
-      previousVersion: schemaVersion,
-      currentVersion: CURRENT_SCHEMA_VERSION,
-      migrated: schemaVersion < CURRENT_SCHEMA_VERSION
-    };
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN output_json TEXT"
+    );
+    // #1630 follow-up: persist the typed interrupted cause so it survives a
+    // reconnect replay (otherwise live clients see `reason`/`childStillRunning`
+    // but reconnecting clients replay them as `undefined`).
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN interrupted_reason TEXT"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_still_running INTEGER"
+    );
+    // Detached ("background") runs (rfc-detached-agent-tools). `detached`
+    // marks a run dispatched without an awaiting parent turn;
+    // `detached_on_finish` is the parent METHOD NAME to call on terminal
+    // (durable, eviction-surviving — like a `schedule` callback);
+    // `detached_notify_source` is a caller-controlled chat metadata source for
+    // the `notify` sugar; `detached_max_budget_at` is the absolute give-up
+    // deadline. The four ledger columns implement a two-slot (finish /
+    // give-up) claim+lease so delivery is exactly-once on the happy path and
+    // at-least-once under failure — give-up and finish are INDEPENDENT slots
+    // so a premature give-up can never dedupe a child's real late completion
+    // away (the production incident in #1752).
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_finish TEXT"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_notify_source TEXT"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_max_budget_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_claimed_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_delivered_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_claimed_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_delivered_at INTEGER"
+    );
+    // Detached progress (rfc-detached-agent-tools §progress). The resetting
+    // no-progress window DURATION (not an absolute deadline — it floats with
+    // the child's latest signal) and the parent's last-observed signal time.
+    // The backbone reconcile reads the child's authoritative `progress.at`
+    // via `inspectAgentToolRun`; this cached value is a best-effort liveness
+    // hint observed off the warm tail so a still-warm parent does not have to
+    // inspect on every tick.
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_no_progress_budget_ms INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN last_progress_at INTEGER"
+    );
+    // Chat-host `detached: { onMilestones }` convenience (4b): JSON
+    // `{ names, mode }` — the milestone names that inject an idempotent chat
+    // notification when reached, and whether to "react" (model turn) or
+    // "narrate" (synthetic assistant line). Persisted so the cold backbone
+    // reconcile can deliver them after eviction, not only the warm tail.
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_milestones TEXT"
+    );
+    // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agent_tool_runs ADD COLUMN event_delivery TEXT"
+    );
   }
 
   /**
-   * Read the Agent's schema version from its KV key. A DO created before the
-   * State capability owned `cf_agents_state` has the version as a row in that
-   * table instead: read it once, move it to the key, and delete the row so the
-   * table is left with a single owner. Synchronous (`storage.kv`) because the
-   * constructor gates DDL on it.
+   * A DO created before the State capability owned `cf_agents_state` kept
+   * Agent's schema version as a row in that table: read it once and delete
+   * the row, so the table is left with a single owner.
    */
-  private _readSchemaVersion(): number {
-    const stored = this.ctx.storage.kv.get<number>(SCHEMA_VERSION_KEY);
-    if (stored !== undefined) return stored;
-
-    const hasStateTable =
-      this.ctx.storage.sql
-        .exec(
-          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_state'"
-        )
-        .toArray().length > 0;
-    if (!hasStateTable) return 0;
+  private _takeLegacySchemaVersionRow(): number | undefined {
+    if (!hasTable(this.ctx.storage.sql, "cf_agents_state")) return undefined;
 
     const rows = this.ctx.storage.sql
       .exec(
@@ -1108,10 +1100,9 @@ export class Agent<
         LEGACY_SCHEMA_VERSION_ROW_ID
       )
       .toArray() as { state: string | null }[];
-    if (rows.length === 0) return 0;
+    if (rows.length === 0) return undefined;
 
     const version = Number(rows[0].state) || 0;
-    this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, version);
     this.ctx.storage.sql.exec(
       "DELETE FROM cf_agents_state WHERE id = ?",
       LEGACY_SCHEMA_VERSION_ROW_ID

@@ -12,12 +12,6 @@
 export const SCHEMA_VERSIONS_KEY = "cf_agents:schema_versions";
 
 /**
- * @internal The Lifecycle's own entry (the job queue's columns). Empty, so
- * no capability id (never blank) can take it.
- */
-export const LIFECYCLE_SCHEMA_ID = "";
-
-/**
  * @internal A capability's schema: its current version and the step that
  * brings each version up from the one before. Steps must be idempotent: a
  * reset before the record is written runs them again.
@@ -31,17 +25,33 @@ export type LifecycleSchemaSteps<Step> = {
    * once, when the record has no entry for the id, and then deleted.
    */
   readonly legacyKey?: string;
+  /**
+   * A version kept somewhere older still, read only when neither the
+   * record nor `legacyKey` has one. It removes what it read.
+   */
+  readonly legacyVersion?: () => number | undefined;
 };
 
 /** @internal A capability's handle on the shared schema record. */
 export type LifecycleSchema = {
-  /** Run the missing steps, in order, in one transaction. */
-  readonly migrateSync: (schema: LifecycleSchemaSteps<() => void>) => void;
+  /**
+   * Run the missing steps, in order, in one transaction. Returns the
+   * version found before them.
+   */
+  readonly migrateSync: (schema: LifecycleSchemaSteps<() => void>) => number;
   /** Run the missing steps in order; for steps that await (job pushes). */
   readonly migrate: (
     schema: LifecycleSchemaSteps<() => void | Promise<void>>
-  ) => Promise<void>;
+  ) => Promise<number>;
 };
+
+/**
+ * @internal The Lifecycle's own entries. No capability kind is blank, so
+ * neither id can be taken: the job queue's columns, and the host's own
+ * tables (Agent's).
+ */
+export const LIFECYCLE_SCHEMA_ID = "";
+export const HOST_SCHEMA_ID = " ";
 
 /**
  * @internal Whether table `name` exists, without reading `sqlite_master`:
@@ -111,17 +121,23 @@ export class SchemaVersions {
     this.#dirty = false;
   }
 
-  #current(id: string, legacyKey: string | undefined): number {
+  #current(id: string, schema: LifecycleSchemaSteps<unknown>): number {
     const record = this.#record();
     const known = record[id];
     if (known !== undefined) return known;
-    if (legacyKey === undefined) return 0;
-    const legacy = this.#storage.kv.get<number>(legacyKey);
-    if (legacy === undefined) return 0;
-    record[id] = legacy;
+    const { legacyKey } = schema;
+    const legacy =
+      legacyKey === undefined
+        ? undefined
+        : this.#storage.kv.get<number>(legacyKey);
+    if (legacy !== undefined && legacyKey !== undefined) {
+      this.#folded.set(id, legacyKey);
+    }
+    const version = legacy ?? schema.legacyVersion?.();
+    if (version === undefined) return 0;
+    record[id] = version;
     this.#dirty = true;
-    this.#folded.set(id, legacyKey);
-    return legacy;
+    return version;
   }
 
   #set(id: string, version: number): void {
@@ -162,40 +178,40 @@ export class SchemaVersions {
     const begin = () => {
       if (!inStartup()) this.#reread();
     };
-    const missing = <Step>(schema: LifecycleSchemaSteps<Step>): Step[] => {
-      const current = this.#current(id, schema.legacyKey);
+    const missing = <Step>(
+      schema: LifecycleSchemaSteps<Step>,
+      current: number
+    ): Step[] => {
       const steps: Step[] = [];
       for (let next = current + 1; next <= schema.version; next++) {
         const step = schema.steps[next];
         if (step) steps.push(step);
       }
-      return current >= schema.version ? [] : steps;
+      return steps;
     };
     return Object.freeze({
       migrateSync: (schema) => {
         begin();
-        const current = this.#current(id, schema.legacyKey);
-        if (current >= schema.version) {
-          afterChange();
-          return;
+        const current = this.#current(id, schema);
+        if (current < schema.version) {
+          const steps = missing(schema, current);
+          this.#storage.transactionSync(() => {
+            for (const step of steps) step();
+          });
+          this.#set(id, schema.version);
         }
-        const steps = missing(schema);
-        this.#storage.transactionSync(() => {
-          for (const step of steps) step();
-        });
-        this.#set(id, schema.version);
         afterChange();
+        return current;
       },
       migrate: async (schema) => {
         begin();
-        const current = this.#current(id, schema.legacyKey);
-        if (current >= schema.version) {
-          afterChange();
-          return;
+        const current = this.#current(id, schema);
+        if (current < schema.version) {
+          for (const step of missing(schema, current)) await step();
+          this.#set(id, schema.version);
         }
-        for (const step of missing(schema)) await step();
-        this.#set(id, schema.version);
         afterChange();
+        return current;
       }
     });
   }

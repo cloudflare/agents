@@ -10,7 +10,12 @@ import {
 } from "./capability-runner";
 import { backoffDelay } from "../retries";
 import { abortWithoutAlarmRetry } from "./abort";
-import { LIFECYCLE_SCHEMA_ID, SchemaVersions } from "./schema";
+import {
+  HOST_SCHEMA_ID,
+  LIFECYCLE_SCHEMA_ID,
+  type LifecycleSchema,
+  SchemaVersions
+} from "./schema";
 import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
@@ -1391,6 +1396,19 @@ export class Lifecycle<
   get jobs(): LifecycleJobs {
     return this.#jobsForOwner(HOST_JOB_CAPABILITY);
   }
+
+  /**
+   * @internal The host's own schema version (Agent's tables), kept in the
+   * same record as every capability's.
+   */
+  get hostSchema(): LifecycleSchema {
+    return (this.#hostSchema ??= this.#schemaVersions.forCapability(
+      HOST_SCHEMA_ID,
+      () => this.#status === "starting"
+    ));
+  }
+
+  #hostSchema: LifecycleSchema | undefined;
 
   #jobsForOwner(owner: string): LifecycleJobs {
     const rearmAfter = async <T>(mutate: () => T): Promise<T> => {
