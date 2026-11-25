@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
@@ -1362,6 +1362,10 @@ describe("Client tools continuation", () => {
         })
       );
 
+      // The result arrives over the socket: wait for the turn it starts.
+      await vi.waitFor(async () => {
+        expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
+      });
       await agentStub.waitForIdleForTest();
 
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);

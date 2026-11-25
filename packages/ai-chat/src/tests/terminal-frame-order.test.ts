@@ -70,22 +70,34 @@ function expectAssistantTranscriptBeforeDone(frames: Frame[]) {
   expect(doneIndex).toBe(frames.length - 1);
 }
 
-/** Bodies of the replay frames `ws` receives for `requestId`. */
-function collectReplayBodies(ws: WebSocket, requestId: string): string[] {
-  const bodies: string[] = [];
-  ws.addEventListener("message", (e: MessageEvent) => {
-    const data = JSON.parse(e.data as string) as Record<string, unknown>;
-    if (
-      isUseChatResponseMessage(data) &&
-      data.id === requestId &&
-      data.replay &&
-      typeof data.body === "string" &&
-      data.body
-    ) {
-      bodies.push(data.body);
-    }
+/** Resolves on the first replay frame for `requestId` whose body has `text`. */
+function replayContaining(
+  ws: WebSocket,
+  requestId: string,
+  text: string,
+  timeout = 10_000
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`No replay of "${text}"`)),
+      timeout
+    );
+    const handler = (e: MessageEvent) => {
+      const data = JSON.parse(e.data as string) as Record<string, unknown>;
+      if (
+        isUseChatResponseMessage(data) &&
+        data.id === requestId &&
+        data.replay &&
+        typeof data.body === "string" &&
+        data.body.includes(text)
+      ) {
+        clearTimeout(timer);
+        ws.removeEventListener("message", handler);
+        resolve();
+      }
+    };
+    ws.addEventListener("message", handler);
   });
-  return bodies;
 }
 
 function sendChat(ws: WebSocket, body: Record<string, unknown>): string {
@@ -239,15 +251,16 @@ describe("AIChatAgent — terminal frame ordering", () => {
     );
     await settle();
     const frames = recordUntilDone(reconnected);
-    const replayed = collectReplayBodies(reconnected, requestId);
+    const replayed = replayContaining(reconnected, requestId, "chunk-0");
     reconnected.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
         id: requestId
       })
     );
-    await settle();
-    expect(replayed.some((body) => body.includes("chunk-0"))).toBe(true);
+    // The replay arrives while the persist is still held.
+    await replayed;
+    expect(await agent.isAssistantPersistBlocked()).toBe(true);
     await agent.releaseAssistantPersist();
 
     const recorded = await frames;
@@ -306,17 +319,20 @@ describe("AIChatAgent — terminal frame ordering", () => {
         }
       });
     });
-    const replayed = collectReplayBodies(reconnected, requestId);
+    const replayed = replayContaining(
+      reconnected,
+      requestId,
+      "partial before stall"
+    );
     reconnected.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
         id: requestId
       })
     );
-    await settle();
-    expect(replayed.some((body) => body.includes("partial before stall"))).toBe(
-      true
-    );
+    // The replay arrives while the persist is still held.
+    await replayed;
+    expect(await agent.isAssistantPersistBlockedForTest()).toBe(true);
     await agent.releaseAssistantPersistForTest();
 
     expect(await done).toMatchObject({ outcome: "recovering" });

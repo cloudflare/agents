@@ -1,3 +1,5 @@
+import { env } from "cloudflare:workers";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { MessageType, type OutgoingMessage } from "../types";
@@ -75,6 +77,10 @@ describe("resume ACK races", () => {
       `/agents/slow-stream-agent/${room}`
     );
     const ownerSeen = record(owner);
+    const agent = await getAgentByName(env.SlowStreamAgent, room);
+    // Each reply stops after its first chunk until the test releases it.
+    await agent.holdStreamForTest("req-a");
+    await agent.holdStreamForTest("req-b");
 
     // Reply A streams; reply B queues behind it.
     sendChatRequest(owner, "req-a", [user1], {
@@ -97,6 +103,7 @@ describe("resume ACK races", () => {
     await waitUntil(() => resuming(tabSeen, "req-a"));
 
     // Reply A finishes and reply B starts streaming.
+    await agent.releaseStreamForTest("req-a");
     await waitUntil(() => liveChunks(ownerSeen, "req-b").length > 0);
 
     // The tab asks to resume and is told to resume reply B.
@@ -113,6 +120,7 @@ describe("resume ACK races", () => {
       })
     );
     const before = liveChunks(ownerSeen, "req-b").length;
+    await agent.releaseStreamForTest("req-b");
     await waitUntil(() => liveChunks(ownerSeen, "req-b").length >= before + 2);
 
     // Until it ACKs reply B, the tab gets none of reply B's live chunks: it

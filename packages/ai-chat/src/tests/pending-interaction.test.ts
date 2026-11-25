@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { UIMessage as ChatMessage } from "ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
 import { connectChatWS } from "./test-utils";
@@ -184,6 +184,8 @@ describe("AIChatAgent pending interaction helpers", () => {
       "call_continuation",
       "testTool"
     );
+    // The continuation's stream stops after its first chunk until released.
+    await agentStub.holdStreamForTest();
 
     ws.send(
       JSON.stringify({
@@ -195,19 +197,22 @@ describe("AIChatAgent pending interaction helpers", () => {
       })
     );
 
-    await delay(20);
+    await vi.waitFor(async () => {
+      expect(await agentStub.isStreamHeldForTest()).toBe(true);
+    });
 
+    let resolvedWhileHeld = false;
     const waitPromise = agentStub.waitUntilStableForTest({
       timeout: 2000
     });
+    void waitPromise.then(() => {
+      resolvedWhileHeld = true;
+    });
+    // A round trip after the wait: the continuation is still held.
+    expect(await agentStub.isStreamHeldForTest()).toBe(true);
+    expect(resolvedWhileHeld).toBe(false);
 
-    await expect(
-      Promise.race([
-        waitPromise.then(() => "resolved"),
-        delay(100).then(() => "pending")
-      ])
-    ).resolves.toBe("pending");
-
+    await agentStub.releaseStreamForTest();
     await expect(waitPromise).resolves.toBe(true);
     expect(await agentStub.getStartedRequestIds()).toEqual([
       "req-prime-continuation",
