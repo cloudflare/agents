@@ -253,11 +253,17 @@ export function applyChunkToParts(
   chunk: StreamChunkData
 ): boolean {
   switch (chunk.type) {
+    // Provider metadata is kept as the AI SDK keeps it: from the start
+    // chunk, then merged from deltas and the end (Anthropic signs a thinking
+    // block on reasoning-end; OpenAI names a text item on text-start).
     case "text-start": {
       parts.push({
         type: "text",
         text: "",
-        state: "streaming"
+        state: "streaming",
+        ...(chunk.providerMetadata != null
+          ? { providerMetadata: chunk.providerMetadata }
+          : {})
       } as MessagePart);
       return true;
     }
@@ -266,12 +272,16 @@ export function applyChunkToParts(
       const lastTextPart = findLastPartByType(parts, "text");
       if (lastTextPart && lastTextPart.type === "text") {
         (lastTextPart as { text: string }).text += chunk.delta ?? "";
+        mergeProviderMetadata(lastTextPart, chunk.providerMetadata);
       } else {
         // No text-start received — create a new text part (stream resumption fallback)
         parts.push({
           type: "text",
           text: chunk.delta ?? "",
-          state: "streaming"
+          state: "streaming",
+          ...(chunk.providerMetadata != null
+            ? { providerMetadata: chunk.providerMetadata }
+            : {})
         } as MessagePart);
       }
       return true;
@@ -281,6 +291,7 @@ export function applyChunkToParts(
       const lastTextPart = findLastPartByType(parts, "text");
       if (lastTextPart && "state" in lastTextPart) {
         (lastTextPart as { state: string }).state = "done";
+        mergeProviderMetadata(lastTextPart, chunk.providerMetadata);
       }
       return true;
     }
@@ -289,7 +300,10 @@ export function applyChunkToParts(
       parts.push({
         type: "reasoning",
         text: "",
-        state: "streaming"
+        state: "streaming",
+        ...(chunk.providerMetadata != null
+          ? { providerMetadata: chunk.providerMetadata }
+          : {})
       } as MessagePart);
       return true;
     }

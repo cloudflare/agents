@@ -104,6 +104,44 @@ describe("StreamAccumulator", () => {
       });
     });
 
+    it("keeps providerMetadata from a part's start chunk, merged with its end", () => {
+      const a = acc();
+      a.applyChunk({
+        type: "reasoning-start",
+        id: "r",
+        providerMetadata: { anthropic: { redacted: false } }
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "reasoning-end",
+        id: "r",
+        providerMetadata: { anthropic2: { signature: "sig" } }
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "text-start",
+        id: "t",
+        providerMetadata: { openai: { itemId: "msg_1" } }
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "text-delta",
+        id: "t",
+        delta: "Hi"
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "text-end",
+        id: "t",
+        providerMetadata: { openai2: { done: true } }
+      } as StreamChunkData);
+
+      expect(
+        a.parts.map(
+          (part) => (part as Record<string, unknown>).providerMetadata
+        )
+      ).toEqual([
+        { anthropic: { redacted: false }, anthropic2: { signature: "sig" } },
+        { openai: { itemId: "msg_1" }, openai2: { done: true } }
+      ]);
+    });
+
     it("reasoning-delta preserves providerMetadata when streamed mid-block", () => {
       const a = acc();
       a.applyChunk({ type: "reasoning-start" } as StreamChunkData);
