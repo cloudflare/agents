@@ -206,6 +206,44 @@ describe("the schema versions record", () => {
       expect(storage.kv.get("cf_agents:mcp_schema_version")).toBe(undefined);
     });
   });
+
+  it("folds MCP's released key when the status columns come first, before startup", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      storage.kv.put("cf_agents:mcp_schema_version", 1);
+      ensureMcpServerTable(storage);
+      const owner = new Versioned("mcp");
+      install(owner);
+      // A cold registration, before the Lifecycle starts.
+      new McpServerStore(storage, owner.schema).isPendingStepUp("absent");
+
+      expect(storage.kv.get("cf_agents:mcp_schema_version")).toBe(undefined);
+      expect(storage.kv.get(SCHEMA_VERSIONS_KEY)).toMatchObject({ mcp: 2 });
+    });
+  });
+
+  it("checks no MCP column once the columns are recorded", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      ensureMcpServerTable(storage);
+      const owner = new Versioned("mcp");
+      const { lifecycle } = install(owner);
+      await lifecycle.start();
+      new McpServerStore(storage, owner.schema).isPendingStepUp("absent");
+
+      // A later wake: a new store reads the record from storage.
+      const queries: string[] = [];
+      const exec = storage.sql.exec.bind(storage.sql);
+      storage.sql.exec = ((query: string, ...bindings: SqlStorageValue[]) => {
+        queries.push(query);
+        return exec(query, ...bindings);
+      }) as typeof storage.sql.exec;
+      try {
+        new McpServerStore(storage, owner.schema).isPendingStepUp("absent");
+      } finally {
+        storage.sql.exec = exec;
+      }
+      expect(queries.filter((query) => query.includes("LIMIT 0"))).toEqual([]);
+    });
+  });
 });
 
 /** Migrates after startup; its step pushes the first job. */

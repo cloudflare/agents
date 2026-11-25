@@ -9,7 +9,8 @@ import {
   encodeMcpServerOptions,
   withMcpSession,
   type MCPServerRow,
-  type PersistedMcpServerOptions
+  type PersistedMcpServerOptions,
+  MCP_SCHEMA_VERSION_KEY
 } from "./storage";
 import { RPC_DO_PREFIX } from "../rpc";
 
@@ -299,6 +300,7 @@ export class McpServerStore {
     if (this.schema) {
       this.schema.migrateSync({
         version: STATUS_COLUMNS_VERSION,
+        legacyKey: MCP_SCHEMA_VERSION_KEY,
         steps: { [STATUS_COLUMNS_VERSION]: addColumns }
       });
     } else {

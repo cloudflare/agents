@@ -39,7 +39,8 @@ import { ServerStatus } from "./status";
 import {
   encodeMcpServerOptions,
   ensureMcpServerTable,
-  type MCPServerRow
+  type MCPServerRow,
+  MCP_SCHEMA_VERSION_KEY
 } from "./storage";
 import type {
   MCPClientElicitationHandlers,
@@ -52,7 +53,6 @@ import type {
   RegisterServerOptions
 } from "./types";
 
-const MCP_SCHEMA_VERSION_KEY = "cf_agents:mcp_schema_version";
 const CURRENT_MCP_SCHEMA_VERSION = 1;
 
 /**
