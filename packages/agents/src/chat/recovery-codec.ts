@@ -176,6 +176,9 @@ export class AISDKRecoveryCodec implements ChatRecoveryCodec {
  * - `tool-approval-request` waits for a user. The reply is stored when its
  *   stream ends, so until then this chunk is the only record that the
  *   approval was asked for.
+ * - `steering-message` is a user's message added to the running turn (AI SDK
+ *   steering). Clients see it at once; lost to an eviction, the user's words
+ *   would be missing from the recovered transcript.
  *
  * Both chat hosts ask this for every chunk they store.
  */
@@ -185,7 +188,8 @@ export function chunkMustBeStoredNow(type: string | undefined): boolean {
     type === "tool-approval-request" ||
     type === "tool-output-available" ||
     type === "tool-output-error" ||
-    type === "tool-output-denied"
+    type === "tool-output-denied" ||
+    type === "steering-message"
   );
 }
 
