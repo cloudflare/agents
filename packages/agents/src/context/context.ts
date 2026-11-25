@@ -309,10 +309,25 @@ export class Context {
     // Nothing recorded this turn: one record holds the new fingerprint
     // (and the notice), naming the snapshot as a change record does.
     const delivered = await this.#delivered(history);
-    if (!delivered.system || !delivered.base) return prepared;
+    if (!delivered.system || !delivered.base) {
+      // No blocks and no prompt from before: the empty prompt this turn was
+      // sent is the snapshot the fingerprint rides on.
+      await this.#put(at.id, {
+        system: [],
+        tools,
+        ...(notice && { toolNotice: notice })
+      });
+      return prepared;
+    }
+    // This record moves past the history it was given, so what the model
+    // wrote itself there counts as delivered, as on a change record.
+    const { own } = await this.#changes(delivered, history);
+    const values = new Map(delivered.values);
+    values.delete(CARRIED);
+    for (const [label, text] of own) values.set(label, text);
     await this.#put(at.id, {
       base: delivered.base,
-      delivered: [...delivered.values],
+      delivered: [...values],
       tools,
       ...(notice && { toolNotice: notice })
     });

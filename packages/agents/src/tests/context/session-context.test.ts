@@ -1319,6 +1319,50 @@ describe("Context", () => {
     });
   });
 
+  it("tells the model about changed tools in a session with no blocks", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const context = new Context(session, {
+        sql: storageSql(storage),
+        blocks: []
+      });
+      await session.appendMessage(user("u1", "hello"));
+      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      const second = await context.prepare({ tools: [] });
+      expect(second.system).toBe("");
+      const last = texts(
+        (await context.project(await session.getHistory())).at(-1)
+      );
+      expect(last.at(-1)).toContain("Removed: search.");
+    });
+  });
+
+  it("does not send the model its own write back after a turn that only changed tools", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "todo", whenChanged: "remind" }
+      ]);
+      await session.appendMessage(user("u1", "plan it"));
+      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await modelWrites(context, session, "a1", "todo", "1. draft");
+      // Only the tools change on this turn.
+      await session.appendMessage(user("u2", "next"));
+      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      await session.appendMessage(assistant("a2", "ok"));
+      await session.appendMessage(user("u3", "more"));
+      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      const sent = JSON.stringify(
+        await context.project(await session.getHistory())
+      );
+      // Only the tool call itself holds it.
+      expect(sent.split("1. draft").length - 1).toBe(1);
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>
