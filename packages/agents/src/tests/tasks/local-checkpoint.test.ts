@@ -468,6 +468,42 @@ describe("Tasks step writes are fenced in their own statement", () => {
 });
 
 describe("Tasks step cost", () => {
+  it("reads the checkpoint once per attempt, with the claim, however many keys it reads", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        const sql = state.storage.sql as unknown as {
+          exec: (query: string, ...rest: unknown[]) => unknown;
+        };
+        const exec = sql.exec.bind(sql);
+        const queries: string[] = [];
+        sql.exec = (query: string, ...rest: unknown[]) => {
+          queries.push(query);
+          return exec(query, ...rest);
+        };
+        try {
+          // Sets four keys and reads four back.
+          await instance.tasks.run("oddKeys" as never, undefined as never, {
+            runId: "odd",
+            start: "now"
+          });
+        } finally {
+          sql.exec = exec;
+        }
+        expect(instance.tasks.peek("odd")?.result).toEqual([
+          { i: 0 },
+          { i: 1 },
+          { i: 2 },
+          { i: 9 }
+        ]);
+        expect(queries.filter((q) => /SELECT checkpoint FROM/.test(q))).toEqual(
+          []
+        );
+      }
+    );
+  });
+
   it("reads no run row to journal a step", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
