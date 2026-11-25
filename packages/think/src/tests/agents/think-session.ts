@@ -13059,13 +13059,9 @@ export class ThinkRecoveryTestAgent extends Think {
     streamId: string,
     ageMs: number
   ): Promise<void> {
-    (
-      this as unknown as {
-        _resumableStream: {
-          insertChunkAt(id: string, body: string, ageMs: number): void;
-        };
-      }
-    )._resumableStream.insertChunkAt(streamId, '{"type":"text"}', ageMs);
+    this.streams
+      .__DO_NOT_USE_WILL_BREAK__sync()
+      .importChunk(streamId, '{"type":"text"}', Date.now() - ageMs);
   }
 
   /** Start a reply's stream (without ever finishing it). */
