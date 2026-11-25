@@ -82,4 +82,22 @@ describe("Tasks retry settlement", () => {
       });
     });
   });
+
+  it("is not taken by settle(), which ends a run", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      instance.tasks.register(retrying, async () =>
+        TaskSettlement.park("outcome")
+      );
+      await instance.tasks.run(retrying, undefined as never, {
+        runId: "s",
+        start: "now"
+      });
+      await expect(
+        instance.tasks.settle("s", TaskSettlement.retry(Date.now()))
+      ).rejects.toThrow("settle() does not take TaskSettlement.retry()");
+      expect(instance.tasks.peek("s")).toMatchObject({ waitReason: "park" });
+    });
+  });
 });

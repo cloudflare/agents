@@ -163,6 +163,42 @@ describe("deliveries", () => {
     );
   });
 
+  it("backs off, and does not give up, when a reset cut short an attempt that started inside the window", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const gaveUp: string[] = [];
+        registerDeliverySink<null>(tasksOf(instance), "late", {
+          deliver: () => {},
+          onGiveUp: (error) => {
+            gaveUp.push(error.message);
+          }
+        });
+        // Accepted 13 h ago; its first attempt was lost; no send failed.
+        await tasksOf(instance).importRun({
+          runId: "late",
+          definition: deliveryDefinition("late"),
+          status: "running",
+          attempt: 1,
+          input: null,
+          retain: false,
+          createdAt: Date.now() - 13 * 60 * 60 * 1000
+        });
+        await instance.tasks.onStart();
+        await instance.tasks.runDue(deliveryDefinition("late"));
+        expect(gaveUp).toEqual([]);
+        expect(runs(state.storage)).toMatchObject([
+          { run_id: "late", status: "pending", wait_reason: "retry" }
+        ]);
+        // The next attempt sends, and it lands.
+        await until(() => runs(state.storage).length === 0);
+        expect(gaveUp).toEqual([]);
+      }
+    );
+  });
+
   it("gives up, and reports it, after three attempts in a row never reported back", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

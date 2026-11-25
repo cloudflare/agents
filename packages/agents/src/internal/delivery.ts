@@ -179,13 +179,18 @@ async function attemptDelivery<Payload>(
   // Attempts counted (and committed) that never ended: the object reset
   // while they ran. They back off like a failure, without running the
   // sink, and give up after a few in a row; otherwise a sink that resets
-  // its object before its first I/O would run again on every start.
+  // its object before its first I/O would run again on every start. The
+  // time window is not checked here: a delivery gives up on time only when
+  // a send failed past it.
   const ended = step.checkpoint.get<number>(ENDED) ?? 0;
   if (step.attempt - 1 > ended) {
     const lost =
       (step.checkpoint.get<number>(LOST) ?? 0) + (step.attempt - 1 - ended);
     const now = Date.now();
-    if (lost >= MAX_LOST_ATTEMPTS || outOfTime(now)) {
+    if (
+      lost >= MAX_LOST_ATTEMPTS ||
+      step.attempt >= MAX_DELIVERY_ATTEMPTS - MAX_LOST_ATTEMPTS
+    ) {
       return giveUp(
         new Error(
           `${lost} attempt${lost === 1 ? "" : "s"} in a row never reported back`

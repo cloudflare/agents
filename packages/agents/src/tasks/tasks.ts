@@ -1513,6 +1513,10 @@ export class Tasks<
     outcome: TaskSettlement | TaskValue,
     options: { checkpoint?: Record<string, TaskJson> } = {}
   ): Promise<boolean> {
+    if (outcome instanceof TaskSettlement && outcome.kind === "retry") {
+      // Only a handler waits to retry; settle() ends a run.
+      throw new Error("settle() does not take TaskSettlement.retry()");
+    }
     await this.lifecycle.ready();
     if (this.#liveAttempt(runId)) return false;
     const row = this.#store.getRun(runId);
