@@ -500,8 +500,8 @@ export class Session {
 
   /**
    * @internal Sibling-package support, not a public API. The table Context
-   * keeps its blocks in for this Sessions instance: `cf_agents_context_blocks`
-   * for the default, the instance's suffix for a named one.
+   * keeps its blocks in for this Sessions instance: today's block table for
+   * the default, with the instance's suffix for a named one.
    */
   get internal_contextBlocksTable(): string {
     return this.#core.tables.contextBlocks;

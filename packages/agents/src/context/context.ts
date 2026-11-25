@@ -121,8 +121,8 @@ export interface ContextOptions {
   readonly blocks?: readonly ContextConfig[];
   /**
    * SQLite for blocks declared without a provider: one row per block in
-   * `cf_agents_context_blocks` (`cf_agents_context_blocks__n_<name>` for
-   * a session of a named Sessions), keyed by its label (suffixed with the
+   * `cf_agents_context_blocks` (the same table with the instance's suffix
+   * for a session of a named Sessions), keyed by its label (suffixed with the
    * session id outside the default session). Any object with a
    * tagged-template `sql`: an Agent, or `this.lifecycle` on a Durable
    * Object.
