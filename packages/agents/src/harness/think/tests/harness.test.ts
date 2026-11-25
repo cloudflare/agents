@@ -413,6 +413,81 @@ describe("ThinkHarness durability", () => {
     expect(await stub.streamRows()).toBe(0);
   });
 
+  it("streams into its own Streams instance, not the default tables", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("slow");
+    await stub.streamed();
+    expect(await stub.streamRows()).toBe(1);
+    expect(await stub.defaultStreamIds()).toEqual([]);
+    await stub.releaseSlow();
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+  });
+
+  for (const [when, forgetSchema] of [
+    ["after an upgrade", true],
+    ["after a rollback, with the harness's schema already recorded", false]
+  ] as const) {
+    it(`continues a model call whose stream is in the default tables, ${when}`, async () => {
+      const name = crypto.randomUUID();
+      let stub = fresh(name);
+      const receipt = await stub.submit("slow");
+      await stub.streamed();
+      stub = await crash(name);
+      await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+        instance.moveStreamsToDefault({ forgetSchema })
+      );
+      await evictDurableObject(stub);
+      stub = fresh(name);
+      await runDurableObjectAlarm(stub);
+      expect((await stub.wait(receipt.operationId)).status).toBe("done");
+      expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+      // The harness's stream moved; the host's own stayed.
+      expect(await stub.defaultStreamIds()).toEqual(["host-1"]);
+      expect(await stub.streamRows()).toBe(0);
+    });
+  }
+
+  it("replays a stream in the default tables to a client that joins before recovery runs", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("slow");
+    await stub.streamed();
+    stub = await crash(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.moveStreamsToDefault({ forgetSchema: false })
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    // Before the alarm recovers the call: what a reconnecting tab is sent.
+    expect(await stub.inFlightChunks()).toBeGreaterThan(0);
+    expect(await stub.defaultStreamIds()).toEqual(["host-1"]);
+    await runDurableObjectAlarm(stub);
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+  });
+
+  it("keeps the partial of an aborted call whose report is owed and whose stream is in the default tables", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("slow");
+    await stub.streamed();
+    stub = await crash(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) => {
+      instance.moveStreamsToDefault({ forgetSchema: false });
+      instance.abortWithReportOwed(receipt.operationId);
+    });
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    await runDurableObjectAlarm(stub);
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+$/);
+    expect(await stub.defaultStreamIds()).toEqual(["host-1"]);
+    expect(await stub.streamRows()).toBe(0);
+  });
+
   it("keeps output streamed just before an eviction, even short of a full segment", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);

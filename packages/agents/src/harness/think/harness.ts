@@ -24,6 +24,7 @@ import {
   isTaskSuspension
 } from "../../tasks/replay";
 import { Tasks } from "../../tasks/tasks";
+import { hasTable } from "../../lifecycle/schema";
 import type {
   TaskJson,
   TaskRecord,
@@ -515,11 +516,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   readonly #tasks: Tasks;
   /**
-   * In-flight model output. Only the harness reads it, so the harness owns
-   * it rather than asking the host to install a Streams capability. It
-   * shares the `cf_agents_streams` tables with any Streams the host has.
+   * In-flight model output, on a Streams instance the harness composes: its
+   * own tables, apart from any Streams the host has.
    */
-  readonly #streams = new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
+  readonly #streams: Streams;
+  /**
+   * The default Streams over the shared tables, bound only to move a
+   * stream an earlier version left there (`#adoptStream`).
+   */
+  #sharedStreams: Streams | undefined;
   /**
    * The transcripts. The harness writes every message, and its operations
    * point at them, so it owns the Sessions capability too; a second one
@@ -562,6 +567,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     this.sessions = new ThinkSessions(this);
     this.#tasks =
       options.tasks ?? this.compose(new Tasks({ name: this.composedName }));
+    this.#streams = this.compose(
+      new Streams({ name: this.composedName, maxChunkBytes: REPLAY_ITEM_BYTES })
+    );
     this.#tasks.register(
       OPERATION_DEFINITION,
       // SAFETY: every run of this definition was accepted by `enqueue` or
@@ -585,7 +593,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   override async onStart(): Promise<void> {
     this.#bindOwned();
     await this.#sessions.onStart();
-    await this.#streams.onStart();
     await this.lifecycle.schema.migrate({
       version: 1,
       steps: { 1: () => this.#carryReleased() }
@@ -2102,15 +2109,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** The Sessions handle for a session, configured on first use. */
   /**
-   * Give the Sessions and Streams the harness owns this capability's
-   * Lifecycle services. Done on first use, not only in `onStart`, because an
+   * Give the Sessions the harness owns this capability's Lifecycle
+   * services. Done on first use, not only in `onStart`, because an
    * RPC can read a transcript before startup (the read itself then waits
    * for startup).
    */
   #bindOwned(): void {
     if (this.#bound) return;
     bindLifecycleCapability(this.#sessions, this.lifecycle);
-    bindLifecycleCapability(this.#streams, this.lifecycle);
     this.#bound = true;
     // Writes made on a session's Sessions handle (from `configureSession`)
     // go around the harness; pass them on as events, so listeners and chat
@@ -2316,11 +2322,72 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
   }
 
-  /** Every chunk a stream holds, without waiting for more. */
+  /**
+   * Move stream `streamId` out of the default Streams tables into the
+   * harness's own, in one transaction: its row and its chunks as they are
+   * (times included), then deleted there. Through the default instance's
+   * synchronous operations only: it is never started here, so it records
+   * no schema under the harness's id.
+   *
+   * @returns Whether there was such a stream.
+   */
+  #adoptStream(streamId: string): boolean {
+    if (!hasTable(this.lifecycle.storage.sql, "cf_agents_streams")) {
+      return false;
+    }
+    if (!this.#sharedStreams) {
+      this.#sharedStreams = new Streams({ maxChunkBytes: REPLAY_ITEM_BYTES });
+      bindLifecycleCapability(this.#sharedStreams, this.lifecycle);
+    }
+    const from = this.#sharedStreams.__DO_NOT_USE_WILL_BREAK__sync();
+    const row = from.getStream(streamId);
+    if (!row) return false;
+    const to = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
+    this.lifecycle.storage.transactionSync(() => {
+      to.importStream({
+        streamId,
+        state: row.state,
+        tag: row.tag,
+        // SAFETY: stream metadata is JSON the harness wrote.
+        metadata:
+          row.metadata === null
+            ? undefined
+            : (JSON.parse(row.metadata) as Record<string, StreamJson>),
+        chunkCount: row.chunk_count,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        closedAt: row.closed_at
+      });
+      for (let seq = 0; ;) {
+        const rows = from.readChunks(streamId, seq, READ_PAGE);
+        for (const chunk of rows) {
+          // SAFETY: each stored chunk is a segment the harness wrote.
+          to.importChunk(
+            streamId,
+            JSON.parse(chunk.chunk) as StreamJson,
+            chunk.created_at
+          );
+        }
+        if (rows.length < READ_PAGE) break;
+        seq = (rows.at(-1)?.seq ?? seq) + 1;
+      }
+      from.deleteUnchecked(streamId);
+    });
+    return true;
+  }
+
+  /**
+   * Every chunk a run's stream holds, without waiting for more. A stream
+   * the harness's own instance lacks may be in the default Streams tables,
+   * where earlier versions kept it (and still do after a rollback): it is
+   * moved here first.
+   */
   #streamChunks(streamId: string | null | undefined): UIMessageChunk[] {
     if (streamId == null) return [];
     const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
-    if (!streams.getStream(streamId)) return [];
+    if (!streams.getStream(streamId) && !this.#adoptStream(streamId)) {
+      return [];
+    }
     const chunks: UIMessageChunk[] = [];
     let from = 0;
     for (;;) {

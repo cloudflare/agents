@@ -1001,6 +1001,88 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return (await session.wait(operationId)).status;
   }
 
+  /** How many chunks a client joining now is sent for the running call. */
+  async inFlightChunks(): Promise<number> {
+    return (await this.harness.session().inFlight())?.chunks.length ?? 0;
+  }
+
+  /** Ids of the streams in the default Streams tables. */
+  defaultStreamIds(): string[] {
+    const sql = this.ctx.storage.sql;
+    if (
+      sql
+        .exec("SELECT name FROM sqlite_master WHERE name = 'cf_agents_streams'")
+        .toArray().length === 0
+    ) {
+      return [];
+    }
+    return sql
+      .exec<{ stream_id: string }>(
+        "SELECT stream_id FROM cf_agents_streams ORDER BY stream_id"
+      )
+      .toArray()
+      .map((row) => row.stream_id);
+  }
+
+  /**
+   * Put the harness's in-flight streams where an earlier version kept
+   * them, in the default Streams tables, and forget the harness's schema
+   * version, as an object upgraded from that version has none.
+   */
+  moveStreamsToDefault(options: { forgetSchema: boolean }): void {
+    const sql = this.ctx.storage.sql;
+    // The default tables, created with the same schema as the harness's.
+    for (const { sql: create } of sql
+      .exec<{ sql: string }>(
+        `SELECT sql FROM sqlite_master WHERE name LIKE '%${HARNESS_SUFFIX}'
+           AND name LIKE '%stream%' AND sql IS NOT NULL`
+      )
+      .toArray()) {
+      sql.exec(
+        create
+          .replaceAll(HARNESS_SUFFIX, "")
+          .replace(
+            /^CREATE (TABLE|INDEX|UNIQUE INDEX) /,
+            "CREATE $1 IF NOT EXISTS "
+          )
+      );
+    }
+    sql.exec(
+      `INSERT INTO cf_agents_streams SELECT * FROM cf_agents_streams${HARNESS_SUFFIX}`
+    );
+    sql.exec(
+      `INSERT INTO cf_agents_stream_blocks SELECT * FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`
+    );
+    sql.exec(`DELETE FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`);
+    sql.exec(`DELETE FROM cf_agents_streams${HARNESS_SUFFIX}`);
+    // A stream of the host's own, which must stay where it is.
+    sql.exec(
+      `INSERT INTO cf_agents_streams (stream_id, state, chunk_count, created_at, updated_at)
+       VALUES ('host-1', 'completed', 0, 1, 1)`
+    );
+    if (options.forgetSchema) {
+      forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
+    }
+  }
+
+  /**
+   * Leave an operation's run aborted with its terminal report still owed,
+   * as a reset right after `abort()` settled it does.
+   */
+  abortWithReportOwed(operationId: string): void {
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_task_runs
+       SET status = 'aborted', cancel_requested = 1, cancel_reason = 'aborted',
+           generation = NULL, next_at = NULL, settled_at = ?, updated_at = ?,
+           notified = NULL
+       WHERE run_id = ?`,
+      now,
+      now,
+      JSON.stringify(["", operationId])
+    );
+  }
+
   releaseSlow(): void {
     this.#releaseSlow();
   }
@@ -1010,7 +1092,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     for (let i = 0; i < 300; i++) {
       const rows = this.ctx.storage.sql
         .exec<{ n: number }>(
-          "SELECT COUNT(*) AS n FROM cf_agents_stream_blocks"
+          `SELECT COUNT(*) AS n FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`
         )
         .one();
       if (rows.n > 0) return;
@@ -1021,7 +1103,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   streamRows(): number {
     return this.ctx.storage.sql
-      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM cf_agents_streams")
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM cf_agents_streams${HARNESS_SUFFIX}`
+      )
       .one().n;
   }
 
@@ -1397,6 +1481,9 @@ export class ThinkHarnessFacetRoot extends Agent<Cloudflare.Env> {
     return (await this.#child()).agentRuns();
   }
 }
+
+/** The table suffix of the instances the harness composes. */
+const HARNESS_SUFFIX = "__c_think_2dharness";
 
 /** The table prefix ThinkHarness keeps its records under in the shared store. */
 const SHARED_STORE_PREFIX = "cf_think_harness_store_";
