@@ -14,7 +14,7 @@ import { MessageType } from "../../types.ts";
 import { agentPathKey } from "../../dynamic-agents/identity.ts";
 import { declareSchedules } from "../../schedules/scheduler.ts";
 import { armFacetWake } from "../../lifecycle/durable-object-lifecycle.ts";
-import type { Tasks } from "../../tasks/tasks.ts";
+import { Tasks } from "../../tasks/tasks.ts";
 import { EventLogSubAgent } from "./event-log-sub-agent.ts";
 import type { TaskStep } from "../../tasks/types.ts";
 
@@ -93,6 +93,43 @@ export class CounterSubAgent extends Agent {
     return this.sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE checkpoint IS NOT NULL
     `[0].n;
+  }
+
+  /** A second, named Tasks beside the Agent's own. */
+  readonly imports = new Tasks({
+    name: "imports",
+    definitions: {
+      echo: async (input: { x: string }) => `imports:${input.x}`
+    }
+  });
+
+  constructor(...args: ConstructorParameters<typeof Agent>) {
+    super(...args);
+    this.lifecycle.use(this.imports);
+  }
+
+  /**
+   * The same run id and lane in the Agent's Tasks and in the named one,
+   * both queued from the alarm (a facet's comes through its root).
+   */
+  async runNamedTasksForTest(): Promise<Array<unknown>> {
+    await this.tasks.run("remember", undefined, {
+      runId: "same",
+      lane: "facet-lane",
+      start: "alarm"
+    });
+    await this.imports.run(
+      "echo",
+      { x: "1" },
+      { runId: "same", lane: "facet-lane", start: "alarm" }
+    );
+    const records = [
+      await this.tasks.wait("same", { timeoutMs: 5_000 }),
+      await this.imports.wait("same", { timeoutMs: 5_000 })
+    ];
+    return records.map((record) =>
+      record?.status === "completed" ? record.result : record?.status
+    );
   }
 
   /**
@@ -1806,6 +1843,11 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string[]> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.jobsDuringTerminalReportForTest();
+  }
+
+  async subAgentRunNamedTasks(subAgentName: string): Promise<Array<unknown>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runNamedTasksForTest();
   }
 
   async subAgentRunLane(
