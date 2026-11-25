@@ -571,7 +571,12 @@ describe("ThinkHarness durability", () => {
     stub = fresh(name);
     expect(text(await stub.prompt("hello"))).toBe("echo: hello");
     expect(await stub.storedOperations()).toBe(0);
-    // Nor the tool calls it had recorded for them.
+    // The tool calls it had recorded for them go with the session's next
+    // state write.
+    await stub.wait(
+      (await stub.submitAsClient([{ id: "u", role: "user", text: "hi" }], []))
+        .operationId
+    );
     expect(JSON.parse(await stub.storedSessionState())).toEqual({
       clientTools: []
     });

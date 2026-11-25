@@ -178,16 +178,11 @@ function parseSessionState(value: JsonValue | undefined): SessionState {
   };
 }
 
+/** A session's state as this version writes it: tool calls are steps now. */
 function sessionStateJson(state: SessionState): JsonValue {
-  const json: { [key: string]: JsonValue } = {
-    // SAFETY: a ClientToolSchema is plain JSON: a name, a description and
-    // a JSON Schema.
-    clientTools: state.clientTools as unknown as JsonValue
-  };
-  if (Object.keys(state.toolCalls).length > 0) {
-    json.toolCalls = { ...state.toolCalls };
-  }
-  return json;
+  // SAFETY: a ClientToolSchema is plain JSON: a name, a description and a
+  // JSON Schema.
+  return { clientTools: state.clientTools as unknown as JsonValue };
 }
 
 function parseOpenOperation(
@@ -315,22 +310,12 @@ export class OperationRecords {
   }
 
   /**
-   * Forget every settled operation, in SQL, without reading one. The first
-   * time there were some, also forget the tool calls a released version
-   * recorded for them in session state.
+   * Forget every settled operation, in SQL, without reading one. A tool
+   * call a released version recorded for one stays in its session's state,
+   * where nothing reads it, until the session's state is next written.
    */
   dropSettled(): void {
-    this.#store.transaction(() => {
-      if (this.#store.deleteSettled() === 0) return;
-      for (const session of this.#store.sessions()) {
-        if (Object.keys(parseSessionState(session.state).toolCalls).length) {
-          this.#updateState(session.id, (state) => ({
-            ...state,
-            toolCalls: {}
-          }));
-        }
-      }
-    });
+    this.#store.deleteSettled();
   }
 }
 
@@ -451,7 +436,11 @@ function importLegacyTables(
     for (const [id, state] of states) {
       // A session the legacy sessions table lacked is created here.
       store.createSession({ id });
-      store.setSessionState(id, sessionStateJson(state));
+      // With the tool calls it started, which carry-forward reads.
+      store.setSessionState(id, {
+        ...(sessionStateJson(state) as { [key: string]: JsonValue }),
+        toolCalls: { ...state.toolCalls }
+      });
     }
 
     if (present.has(LEGACY_OPERATIONS)) {
