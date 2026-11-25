@@ -74,6 +74,19 @@ async function settled(agent: {
   });
 }
 
+/**
+ * Wait until every frame the agent sent `ws` so far has reached `seen`: a
+ * resume request's reply echoes its probe id, and the socket delivers in
+ * order.
+ */
+async function socketBarrier(ws: WebSocket, seen: OutgoingMessage[]) {
+  const probeId = crypto.randomUUID();
+  send(ws, { type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST, probeId });
+  await waitUntil(() =>
+    seen.some((m) => (m as { probeId?: unknown }).probeId === probeId)
+  );
+}
+
 function sendChatRequest(
   ws: WebSocket,
   id: string,
@@ -712,12 +725,14 @@ describe("chat turn races", () => {
     await agent.waitForIdleForTest();
     const afterFirst = (await agent.getPersistedMessages()) as ChatMessage[];
 
-    // The app's persistMessages awaits before it stores the reply.
-    await agent.setPersistDelayForTest("assistant", 300);
+    // The app's persistMessages waits before it stores the reply.
+    await agent.holdPersistForTest("assistant");
     sendChatRequest(tab1, "req-2", [...afterFirst, user2]);
+    await waitUntil(async () => await agent.isPersistHeldForTest());
     // Tab 2 clears the chat while the reply waits to be stored.
-    await delay(150);
     await sendHandled(agent, tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
+    expect(await agent.isPersistHeldForTest()).toBe(true);
+    await agent.releasePersistForTest();
     await agent.waitForIdleForTest();
 
     expect(await agent.getPersistedMessages()).toEqual([]);
@@ -780,13 +795,15 @@ describe("chat turn races", () => {
     const { ws: tab2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const agent = await getAgentByName(env.TestChatAgent, room);
     await agent.storeNoteLaterFromPersistForTest(400);
-    await agent.setPersistDelayForTest("user", 200);
+    await agent.holdPersistForTest("user");
 
     sendChatRequest(tab1, "req-1", [user1]);
-    await delay(100);
+    await waitUntil(async () => await agent.isPersistHeldForTest());
     // The request is cleared before it is stored. The note the override
     // stores later is not part of that request.
     await sendHandled(agent, tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
+    expect(await agent.isPersistHeldForTest()).toBe(true);
+    await agent.releasePersistForTest();
     // The note is stored on a timer after the persist: wait for it.
     await waitUntil(async () =>
       ((await agent.getPersistedMessages()) as ChatMessage[]).some(
@@ -1275,6 +1292,8 @@ describe("chat turn races", () => {
     );
     // No armed continuation and idle: nothing more can start.
     await settled(agent);
+    // Every frame sent before the barrier's reply has reached `seen`.
+    await socketBarrier(ws, seen);
     expect(await agent.getChatMessageCallCountForTest()).toBe(2);
     expect(
       seen.filter((m) => isUseChatResponseMessage(m) && m.error === true)

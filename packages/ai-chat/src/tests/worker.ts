@@ -630,6 +630,23 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._persistDelayForTest = { role, ms };
   }
 
+  /** Holds the next `persistMessages` of a `role` message until released. */
+  private _persistHold: { role: "user" | "assistant"; gate: TestGate } | null =
+    null;
+
+  holdPersistForTest(role: "user" | "assistant"): void {
+    this._persistHold = { role, gate: new TestGate() };
+  }
+
+  isPersistHeldForTest(): boolean {
+    return this._persistHold?.gate.reached ?? false;
+  }
+
+  releasePersistForTest(): void {
+    this._persistHold?.gate.release();
+    this._persistHold = null;
+  }
+
   /** `saveMessages` with one more user message; returns the status. */
   async saveUserMessageForTest(text: string): Promise<string> {
     const result = await this.saveMessages([
@@ -675,6 +692,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
     const wait = this._persistDelayForTest;
     if (wait && messages.at(-1)?.role === wait.role) {
       await new Promise((resolve) => setTimeout(resolve, wait.ms));
+    }
+    const hold = this._persistHold;
+    if (hold && !hold.gate.reached && messages.at(-1)?.role === hold.role) {
+      await hold.gate.pass();
     }
     return super.persistMessages(messages, excludeBroadcastIds, options);
   }
