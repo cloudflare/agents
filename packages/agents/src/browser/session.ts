@@ -329,7 +329,7 @@ const NO_REQUEST_INTERCEPTION =
  *   so it could only hang its own tab, or answer a request it guessed the id
  *   of with a made-up response.
  */
-const REFUSED_COMMANDS = new Map([
+const REFUSED_COMMANDS: ReadonlyMap<string, string> = new Map([
   ["Fetch.enable", NO_REQUEST_INTERCEPTION],
   ["Network.setRequestInterception", NO_REQUEST_INTERCEPTION],
   ["Browser.close", MANAGED_BROWSER],

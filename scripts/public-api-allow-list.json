@@ -2067,6 +2067,8 @@
     "CdpEvent",
     "CdpEventFilter",
     "CdpEventHandler",
+    "CdpEventMethod",
+    "CdpEventParams",
     "CdpField",
     "CdpItems",
     "CdpSendOptions",

@@ -8,6 +8,8 @@ export {
   type CdpEvent,
   type CdpEventFilter,
   type CdpEventHandler,
+  type CdpEventMethod,
+  type CdpEventParams,
   type CdpWaitForOptions
 } from "./cdp-connection";
 

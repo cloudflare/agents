@@ -343,7 +343,7 @@ const spec = normalizeCdpSpec({
 });
 ```
 
-### Listening for CDP events (experimental)
+### Listening for CDP events
 
 A `CdpConnection`, from any of these or from `browser.connect()`, also delivers CDP events. `on()` returns a function that stops listening, and `waitFor()` resolves with the next matching event:
 
@@ -359,7 +359,10 @@ try {
 
     const stop = cdp.on(
       "Page.frameNavigated",
-      ({ params }) => console.log("navigated", params.frame),
+      ({ params }) => {
+        // params is typed: params.frame is a Frame.
+        if (!params.frame.parentId) console.log("navigated", params.frame.url);
+      },
       { sessionId }
     );
 
@@ -378,6 +381,8 @@ try {
   cdp.disconnect();
 }
 ```
+
+Events are typed from the [`devtools-protocol`](https://www.npmjs.com/package/devtools-protocol) package: a handler for `Page.frameNavigated` gets that event's `params`, and so do `waitFor()` and its `predicate`. Any other event name, such as Browser Run's own `Cloudflare.handoffComplete`, works too, with untyped `params`. A `CdpEventHandler` with no type argument handles any event, so one handler can listen for several.
 
 Without `sessionId`, a listener hears the event from every CDP session on the connection and from the browser itself. `sessionId: null` hears browser-level events only. Browser Run sends `Cloudflare.handoffComplete` once at browser level and once more in each attached session, so listen for it with `sessionId: null` to hear it once.
 

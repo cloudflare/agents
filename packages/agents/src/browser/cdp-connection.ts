@@ -1,3 +1,5 @@
+import type { ProtocolMapping } from "devtools-protocol/types/protocol-mapping.js";
+
 interface PendingCommand {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
@@ -23,23 +25,53 @@ export interface CdpAttachOptions {
 }
 
 /**
- * A CDP event: a message the browser sent on its own, with a `method` and
- * no `id`.
+ * A CDP event's name. The protocol's events, from the `devtools-protocol`
+ * package, autocomplete; any other name, such as Browser Run's
+ * `Cloudflare.handoffComplete`, is allowed too.
  */
-export interface CdpEvent {
-  /** The event's name, e.g. `"Page.frameNavigated"`. */
-  method: string;
-  /** The event's parameters; `{}` when the browser sent none. */
-  params: Record<string, unknown>;
-  /**
-   * The CDP session (from `Target.attachToTarget` with `flatten: true`) the
-   * event came from. Absent for browser-level events.
-   */
-  sessionId?: string;
-}
+export type CdpEventMethod =
+  | keyof ProtocolMapping.Events
+  | (string & Record<never, never>);
 
-/** Handles one {@link CdpEvent}. Runs synchronously; see {@link CdpConnection.on}. */
-export type CdpEventHandler = (event: CdpEvent) => void;
+/**
+ * The parameters of the event named `M`: the protocol's type for its own
+ * events, `{}` for one that has none, and a plain record for any other
+ * name.
+ */
+export type CdpEventParams<M extends string> =
+  M extends keyof ProtocolMapping.Events
+    ? ProtocolMapping.Events[M] extends [infer Params]
+      ? // Copied out of the protocol's interface, which has no index
+        // signature, so a typed event is also a plain `CdpEvent`.
+        { [K in keyof Params]: Params[K] }
+      : Record<string, never>
+    : Record<string, unknown>;
+
+/**
+ * A CDP event: a message the browser sent on its own, with a `method` and
+ * no `id`. `CdpEvent<"Page.frameNavigated">` has that event's typed
+ * `params`; plain `CdpEvent` is any event, with untyped `params`.
+ */
+export type CdpEvent<M extends string = string> = M extends string
+  ? {
+      /** The event's name, e.g. `"Page.frameNavigated"`. */
+      readonly method: M;
+      /** The event's parameters; `{}` when the browser sent none. */
+      readonly params: CdpEventParams<M>;
+      /**
+       * The CDP session (from `Target.attachToTarget` with `flatten: true`)
+       * the event came from. Absent for browser-level events.
+       */
+      readonly sessionId?: string;
+    }
+  : never;
+
+/**
+ * Handles one `M` event. Runs synchronously; see {@link CdpConnection.on}.
+ */
+export type CdpEventHandler<M extends string = string> = (
+  event: CdpEvent<M>
+) => void;
 
 /** Which CDP session's events a listener hears. */
 export interface CdpEventFilter {
@@ -48,17 +80,19 @@ export interface CdpEventFilter {
    * Pass a session id to hear only that session's, or `null` to hear only
    * browser-level events (the ones sent without a `sessionId`).
    */
-  sessionId?: string | null;
+  readonly sessionId?: string | null;
 }
 
-/** {@link CdpConnection.waitFor}'s options. */
-export interface CdpWaitForOptions extends CdpEventFilter {
+/** {@link CdpConnection.waitFor}'s options, waiting for an `M` event. */
+export interface CdpWaitForOptions<
+  M extends string = string
+> extends CdpEventFilter {
   /** Wait for the first matching event this returns `true` for. */
-  predicate?: (event: CdpEvent) => boolean;
+  readonly predicate?: (event: CdpEvent<M>) => boolean;
   /** How long to wait. Defaults to the connection's command timeout. */
-  timeoutMs?: number;
+  readonly timeoutMs?: number;
   /** Stop waiting when it aborts, rejecting with its reason. */
-  signal?: AbortSignal;
+  readonly signal?: AbortSignal;
 }
 
 interface CdpListener {
@@ -189,15 +223,21 @@ export class CdpConnection {
    * during it is first called for the next. Once the connection ends, even
    * from inside a handler, no handler is called again.
    *
-   * @experimental The API surface may change before stabilizing.
+   * The handler's event is typed for `method`: for `"Page.frameNavigated"`,
+   * `params.frame` is a `Frame`. Pass a name the protocol doesn't list and
+   * `params` is a plain record. A handler for any event, a
+   * {@link CdpEventHandler} with no type argument, fits every method.
    */
-  on(
-    method: string,
-    handler: CdpEventHandler,
+  on<M extends CdpEventMethod>(
+    method: M,
+    handler: CdpEventHandler<M>,
     filter: CdpEventFilter = {}
   ): () => void {
     const listener: CdpListener = {
-      handler,
+      // SAFETY: #deliver calls a listener only with events named `method`,
+      // so the handler gets the event it's typed for. The params are what
+      // the browser sent for that event, which the protocol types describe.
+      handler: handler as CdpEventHandler,
       sessionId: filter.sessionId,
       active: true
     };
@@ -233,9 +273,13 @@ export class CdpConnection {
    * awaits it, or that nothing ever awaits, isn't an unhandled rejection:
    * awaiting it still throws.
    *
-   * @experimental The API surface may change before stabilizing.
+   * The event, and `predicate`'s, are typed for `method`, as {@link on}'s
+   * handler is.
    */
-  waitFor(method: string, options: CdpWaitForOptions = {}): Promise<CdpEvent> {
+  waitFor<M extends CdpEventMethod>(
+    method: M,
+    options: CdpWaitForOptions<M> = {}
+  ): Promise<CdpEvent<M>> {
     const waiting = this.#waitFor(method, options);
     // The rejection is the caller's to see, when it awaits. Code that awaits
     // the command first loses the wait when the command fails, or when the
@@ -244,7 +288,10 @@ export class CdpConnection {
     return waiting;
   }
 
-  #waitFor(method: string, options: CdpWaitForOptions): Promise<CdpEvent> {
+  #waitFor<M extends CdpEventMethod>(
+    method: M,
+    options: CdpWaitForOptions<M>
+  ): Promise<CdpEvent<M>> {
     const { predicate, signal } = options;
     const timeoutMs = options.timeoutMs ?? this.#defaultTimeoutMs;
     if (this.#ended) {
@@ -253,7 +300,7 @@ export class CdpConnection {
       );
     }
     if (signal?.aborted) return Promise.reject(signal.reason);
-    return new Promise<CdpEvent>((resolve, reject) => {
+    return new Promise<CdpEvent<M>>((resolve, reject) => {
       const settle = (outcome: () => void) => {
         unsubscribe();
         clearTimeout(timeoutId);
