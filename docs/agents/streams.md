@@ -187,20 +187,18 @@ pay 42 to write and 3 to cut over.
 
 ## Chat runs on this
 
-`AIChatAgent` and `Think` store their in-flight turn output here:
-`ResumableStream` (from `agents/chat`) is a thin adapter over Streams that
-packs ~10 wire chunks into one stored segment for write economy, and ends
-every turn with the cutover: the assistant message, the stream's
-settlement and the deletion of its rows commit in one transaction. Nothing
-is swept on an alarm any more. A stream a crash left behind is either
-still `streaming` (recovery rebuilds the message from it) or reclaimed by
-the next stream start, together with in-flight rows abandoned for over an
-hour. Existing `cf_ai_chat_stream_*` tables migrate onto the capability
-automatically. The packing pattern is worth copying for any
-high-frequency producer: buffer what you already hold synchronously, append
-one packed chunk, and unpack on read — durability is unchanged (nothing is
-held across an await at settlement) and rows written drop by ~an order of
-magnitude versus per-token appends.
+`AIChatAgent` and `Think` store their in-flight turn output here, one
+stream per turn, and end every turn with the cutover: the assistant
+message, the stream's settlement and the deletion of its rows commit in one
+transaction. Nothing is swept on an alarm any more. A stream a crash left
+behind is either still `streaming` (recovery rebuilds the message from it)
+or reclaimed by the next stream start, together with in-flight rows
+abandoned for over an hour. Existing `cf_ai_chat_stream_*` tables migrate
+onto the capability automatically. Chat buffers a turn's chunks in memory
+and writes them ten at a time in one row write, into the turn's newest
+block while it stays under 256 KB, so a turn costs about one row per ten
+chunks to write and one row per 256 KB to delete. A crash loses at most
+the nine chunks still buffered.
 
 ## Current limits
 
