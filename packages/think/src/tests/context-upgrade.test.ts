@@ -163,4 +163,16 @@ describe("Think context upgrade", () => {
       }
     }
   });
+  it("rebuilds the prompt from the blocks at the turn after a compaction", async () => {
+    const agent = await getAgentByName(
+      env.ThinkUpgradeTestAgent,
+      crypto.randomUUID()
+    );
+    const { systems, last } = await agent.compactedTurnForTest();
+    expect(systems[1]).toBe(systems[0]);
+    expect(systems[2]).toBe(systems[0]);
+    expect(systems[3]).not.toBe(systems[0]);
+    expect(systems[3]).toContain("Today is Tuesday.");
+    expect(last.join("")).not.toContain("Today is Tuesday.");
+  });
 });

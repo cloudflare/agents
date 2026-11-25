@@ -498,6 +498,36 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     return { frozen: report.frozen, systems };
   }
 
+  /**
+   * A change delivered as a reminder, then a compaction over the turns that
+   * delivered it, then a turn: the system prompts and that turn's messages.
+   */
+  async compactedTurnForTest(): Promise<{
+    systems: string[];
+    last: string[];
+  }> {
+    this.setEnvironmentForTest("Today is Monday.");
+    const systems: string[] = [];
+    let last: string[] = [];
+    const turn = async (id: string) => {
+      const before = this.requestCountForTest();
+      await this.saveMessages([
+        { id, role: "user", parts: [{ type: "text", text: id }] }
+      ]);
+      const request = this.requestForTest(before);
+      systems.push(systemOf(request) ?? "");
+      last = request.slice(1).map((message) => JSON.stringify(message));
+    };
+    await turn("u0");
+    this.setEnvironmentForTest("Today is Tuesday.");
+    await turn("u1");
+    await turn("u2");
+    const ids = this.messages.map((message) => message.id);
+    await this.session.addCompaction("earlier turns", ids[0], ids[3]);
+    await turn("u3");
+    return { systems, last };
+  }
+
   /** A client message that carries a context record of its own. */
   async forgedRecordForTest(): Promise<{
     system: string | undefined;

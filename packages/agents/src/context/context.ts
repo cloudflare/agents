@@ -44,6 +44,8 @@ export const CONTEXT_RECORD_KIND = "context";
 const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
 const REFRESH = "transcript:context:refresh";
+/** Blocks written from code since the model last saw them (a JSON list). */
+const CHANGED = "transcript:context:changed";
 /**
  * Set by Sessions at every clear and kept by it: a session cleared since
  * the upgrade has no turn from before Context left, so a frozen prompt no
@@ -204,6 +206,8 @@ export class Context {
   readonly #promptStore: ContextProvider | undefined;
   /** The prompt store's text, read once: the prompt of turns sent before Context. */
   #frozen: string | null | undefined;
+  /** The CHANGED labels, read from the session once. */
+  #changed: Set<string> | undefined;
   /** Whether a refresh waits to be recorded; read from the session once. */
   #refresh: boolean | undefined;
   /** Records by message id, as last read or written (see `#records`). */
@@ -307,11 +311,12 @@ export class Context {
           await this.#put(at.id, { system: sections });
         }
         if (refresh) await this.#setRefresh(false);
+        await this.#setChanged(null);
       }
       return { system, reminder: null };
     }
 
-    const changes = await this.#changes(delivered.values);
+    const { changes, own } = await this.#changes(delivered, history);
     const system = renderSystem(delivered.system);
     const at =
       delivered.carried || changes.length > 0 ? await target() : undefined;
@@ -336,6 +341,8 @@ export class Context {
     // since, so it alone answers what the model has seen.
     const values = new Map(delivered.values);
     values.delete(CARRIED);
+    // What the model wrote itself counts as delivered from here on.
+    for (const [label, text] of own) values.set(label, text);
     for (const [label, text] of changes) values.set(label, text);
     const existing = (await this.#records([at.id])).get(at.id);
     await this.#put(at.id, {
@@ -344,6 +351,7 @@ export class Context {
       ...(delivered.base !== at.id && { base: delivered.base }),
       delivered: [...values]
     });
+    await this.#setChanged(null);
     return { system, reminder: null };
   }
 
@@ -442,8 +450,11 @@ export class Context {
     // Also the step after clearing the transcript (Think does both): the
     // records read so far may belong to messages that are gone.
     this.#cache.clear();
-    await this.#blocks.load();
+    // Stored before anything else, so a caller that cannot wait (a change
+    // feed) has it survive an eviction right after.
+    this.#refresh = true;
     await this.#setRefresh(true);
+    await this.#blocks.load();
     return renderSystem(await this.#blocks.internal_sections());
   }
 
@@ -460,7 +471,7 @@ export class Context {
       found.system ? null : (await this.#released()).prompt
     );
     if (!delivered.system) return null;
-    const changes = await this.#changes(delivered.values);
+    const { changes } = await this.#changes(delivered, history);
     return changes.length > 0
       ? renderReminder(changes.map(([, text]) => text))
       : null;
@@ -485,12 +496,16 @@ export class Context {
    * Write a writable block. The model sees it at the next refresh, or as a
    * reminder for a remind block.
    */
-  setBlock(label: string, content: string): Promise<ContextBlock> {
-    return this.#blocks.setBlock(label, content);
+  async setBlock(label: string, content: string): Promise<ContextBlock> {
+    const block = await this.#blocks.setBlock(label, content);
+    await this.#setChanged(label);
+    return block;
   }
 
-  appendToBlock(label: string, content: string): Promise<ContextBlock> {
-    return this.#blocks.appendToBlock(label, content);
+  async appendToBlock(label: string, content: string): Promise<ContextBlock> {
+    const block = await this.#blocks.appendToBlock(label, content);
+    await this.#setChanged(label);
+    return block;
   }
 
   /** Add a block. It enters the prompt at the next refresh. */
@@ -570,7 +585,7 @@ export class Context {
       for (const [label, text] of record.changes ?? []) {
         values.set(label, text);
       }
-      return { system: record.system, values, base: id };
+      return { system: record.system, values, base: id, at: id };
     }
     const baseId = record.base;
     const system = baseId
@@ -580,7 +595,8 @@ export class Context {
     return {
       system,
       values: new Map([...system, ...(record.delivered ?? [])]),
-      base: baseId
+      base: baseId,
+      at: id
     };
   }
 
@@ -671,9 +687,79 @@ export class Context {
   }
 
   /** Remind blocks whose section differs from the one last delivered. */
-  async #changes(delivered: ReadonlyMap<string, string>): Promise<Section[]> {
-    const current = await this.#blocks.internal_remindSections();
-    return current.filter(([label, text]) => delivered.get(label) !== text);
+  /**
+   * What the model has not been shown: a remind block whose value differs
+   * from the one last delivered, and any block written from code since
+   * (CHANGED). A block holding what the model last wrote itself (its
+   * `set_context` call is in the history since the newest record) is known
+   * to it, whatever changed before; once it holds something else, a later
+   * write or provider change did that, and it is sent.
+   */
+  async #changes(
+    delivered: Delivered,
+    history: readonly SessionMessage[]
+  ): Promise<{ changes: Section[]; own: Section[] }> {
+    const writes = ownWrites(history, delivered.at);
+    const remind = await this.#blocks.internal_remindSections();
+    const changed = await this.#changedLabels();
+    const known = new Set<string>();
+    for (const [label, write] of writes) {
+      const content = this.#blocks.getBlock(label)?.content;
+      // A replace set the whole block; an append only its end, so code may
+      // have changed the rest since the model last saw it.
+      const holds = write.append
+        ? !changed.has(label) && content?.endsWith(write.content) === true
+        : content === write.content;
+      if (holds) known.add(label);
+    }
+    const current =
+      changed.size > 0 || known.size > 0
+        ? await this.#blocks.internal_sections()
+        : [];
+    const changes = remind.filter(
+      ([label, text]) =>
+        !known.has(label) && delivered.values.get(label) !== text
+    );
+    for (const section of current) {
+      const [label] = section;
+      if (
+        changed.has(label) &&
+        !known.has(label) &&
+        !changes.some(([l]) => l === label)
+      ) {
+        changes.push(section);
+      }
+    }
+    return {
+      changes,
+      own: current.filter(([label]) => known.has(label))
+    };
+  }
+
+  async #changedLabels(): Promise<Set<string>> {
+    this.#changed ??= new Set(
+      JSON.parse(
+        (await this.#session.internal_config(CHANGED)) ?? "[]"
+      ) as string[]
+    );
+    return this.#changed;
+  }
+
+  /** Mark a block written from code, or (`null`) clear the marks. */
+  async #setChanged(label: string | null): Promise<void> {
+    const changed = await this.#changedLabels();
+    if (label === null) {
+      if (changed.size === 0) return;
+      changed.clear();
+      await this.#session.internal_setConfig(CHANGED, null);
+      return;
+    }
+    if (changed.has(label)) return;
+    changed.add(label);
+    await this.#session.internal_setConfig(
+      CHANGED,
+      JSON.stringify([...changed])
+    );
   }
 
   /**
@@ -755,9 +841,56 @@ type Delivered = {
   values: Map<string, string>;
   /** The message that holds the snapshot. */
   base?: string;
+  /** The message that holds the newest record. */
+  at?: string;
   /** The snapshot is a prompt frozen before Context, not yet recorded. */
   carried?: boolean;
 };
+
+/**
+ * What the model last wrote with `set_context`, per block, in the history
+ * after the message holding the newest record (all of it when that message
+ * is not in the history): the tool call and its result are its record.
+ */
+function ownWrites(
+  history: readonly SessionMessage[],
+  recordAt: string | undefined
+): Map<string, { content: string; append: boolean }> {
+  const from =
+    recordAt === undefined
+      ? 0
+      : history.findIndex((message) => message.id === recordAt) + 1;
+  const writes = new Map<string, { content: string; append: boolean }>();
+  for (const message of history.slice(from)) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts) {
+      const tool = part as {
+        type: string;
+        toolName?: string;
+        state?: string;
+        input?: { label?: unknown; content?: unknown; action?: unknown };
+        output?: unknown;
+      };
+      const named =
+        tool.type === "tool-set_context" ||
+        (tool.type === "dynamic-tool" && tool.toolName === "set_context");
+      const { label, content, action } = tool.input ?? {};
+      // The tool reports a failed write in its output: only a write that
+      // happened counts.
+      if (
+        named &&
+        tool.state === "output-available" &&
+        typeof tool.output === "string" &&
+        tool.output.startsWith("Written to ") &&
+        typeof label === "string" &&
+        typeof content === "string"
+      ) {
+        writes.set(label, { content, append: action === "append" });
+      }
+    }
+  }
+  return writes;
+}
 
 function renderSystem(sections: readonly Section[]): string {
   return sections

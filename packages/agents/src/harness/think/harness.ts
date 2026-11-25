@@ -1884,9 +1884,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           if ((this.#ownClears.get(session) ?? 0) > 0) return;
           this.#events.emit(session, { type: "reset" });
           return;
-        case "delete":
         case "compact":
         case "compaction":
+          // Any compaction, the harness's own or Sessions' automatic one:
+          // the prefix is gone and the summary hides the turns that wrote
+          // the blocks, so the next turn rebuilds the context from them.
+          // (Built here if this object has not used it yet.)
+          void this.#context(session)
+            ?.refreshSystemPrompt()
+            .catch((error: unknown) =>
+              console.warn("ThinkHarness could not refresh the context", error)
+            );
+          this.#events.emit(session, { type: "transcript" });
+          return;
+        case "delete":
           // No one message describes these: the active path changed.
           this.#events.emit(session, { type: "transcript" });
           return;

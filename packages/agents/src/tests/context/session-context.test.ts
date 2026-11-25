@@ -78,6 +78,39 @@ async function setup(
   return { session, context, setDate: (next) => (date = next) };
 }
 
+/** The model writes a block with set_context in an answer, as a turn does. */
+async function modelWrites(
+  context: Context,
+  session: Session,
+  answerId: string,
+  label: string,
+  content: string,
+  action: "replace" | "append" = "replace"
+): Promise<void> {
+  const tools = await context.tools();
+  const setContext = tools.set_context as unknown as {
+    execute(input: unknown, options: unknown): Promise<unknown>;
+  };
+  const input = { label, content, action };
+  const output = await setContext.execute(input, {
+    toolCallId: `call-${answerId}`,
+    messages: []
+  });
+  await session.appendMessage({
+    id: answerId,
+    role: "assistant",
+    parts: [
+      {
+        type: "tool-set_context",
+        toolCallId: `call-${answerId}`,
+        state: "output-available",
+        input,
+        output
+      }
+    ]
+  } as SessionMessage);
+}
+
 describe("Context", () => {
   it("records the first prompt on the user message and reuses it", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
@@ -202,6 +235,196 @@ describe("Context", () => {
         )
         .toArray();
       expect(rows[0]?.content).toBe("likes tea");
+    });
+  });
+
+  it("sends a block written from code once, after the next user message", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes", maxTokens: 100 }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      const first = await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      await context.setBlock("notes", "The user moved to Lisbon.");
+      await session.appendMessage(user("u2", "where am I?"));
+      const second = await context.build();
+      expect(second.system).toBe(first.system);
+      expect(texts(second.messages.at(-1))[1]).toContain("moved to Lisbon");
+      await session.appendMessage(assistant("a2", "Lisbon"));
+      await session.appendMessage(user("u3", "thanks"));
+      const third = await context.build();
+      expect(
+        JSON.stringify(third.messages).split("moved to Lisbon").length - 1
+      ).toBe(1);
+    });
+  });
+
+  it("does not send back a block the model wrote itself", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "todo", whenChanged: "remind" },
+        { label: "notes" }
+      ]);
+      await session.appendMessage(user("u1", "plan it"));
+      const first = await context.build();
+      await modelWrites(context, session, "a1", "todo", "1. draft");
+      await session.appendMessage(user("u2", "next"));
+      const second = await context.build();
+      expect(second.system).toBe(first.system);
+      // Only the tool call itself holds it.
+      expect(JSON.stringify(second.messages).split("1. draft").length - 1).toBe(
+        1
+      );
+      expect(context.getBlock("todo")?.content).toBe("1. draft");
+      // Still not, once a later change is recorded past the tool call.
+      await session.appendMessage(assistant("a2", "ok"));
+      await context.setBlock("notes", "x");
+      await session.appendMessage(user("u3", "more"));
+      await context.build();
+      await session.appendMessage(assistant("a3", "ok"));
+      await session.appendMessage(user("u4", "again"));
+      const fourth = await context.build();
+      expect(JSON.stringify(fourth.messages).split("1. draft").length - 1).toBe(
+        1
+      );
+    });
+  });
+
+  it("sends a block the model wrote on another branch to a branch without the write", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "todo", whenChanged: "remind" }
+      ]);
+      await session.appendMessage(user("u1", "plan it"));
+      await context.build();
+      await modelWrites(context, session, "a1", "todo", "1. draft");
+      // Regenerate a1: a sibling answer without the tool call.
+      await session.appendMessage(assistant("b1", "no plan"), {
+        parentId: "u1"
+      });
+      await session.appendMessage(user("u2", "next"));
+      const sent = JSON.stringify((await context.build()).messages);
+      expect(sent).not.toContain("tool-set_context");
+      expect(sent).toContain("1. draft");
+    });
+  });
+
+  it("sends a provider's change to a block the model wrote, once it differs", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      let todo = "";
+      const { session, context, setDate } = await setup(
+        storage,
+        (s) => install(s),
+        [
+          {
+            label: "todo",
+            whenChanged: "remind",
+            provider: {
+              get: async () => todo,
+              set: async (content: string) => {
+                todo = content;
+              }
+            }
+          }
+        ]
+      );
+      await session.appendMessage(user("u1", "plan it"));
+      await context.build();
+      await modelWrites(context, session, "a1", "todo", "draft");
+      // The app changes the plan behind the provider, not through Context,
+      // and another block changes on the same turn.
+      todo = "approved";
+      setDate("Tuesday");
+      await session.appendMessage(user("u2", "next"));
+      const last = (await context.build()).messages.at(-1);
+      expect(texts(last)[1]).toContain("approved");
+      expect(texts(last)[1]).toContain("Today is Tuesday.");
+    });
+  });
+
+  it("does not send back a block the model overwrote after code wrote it", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes" }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      const first = await context.build();
+      await context.setBlock("notes", "from code");
+      await modelWrites(context, session, "a1", "notes", "from the model");
+      await session.appendMessage(user("u2", "next"));
+      const second = await context.build();
+      expect(second.system).toBe(first.system);
+      expect(texts(second.messages.at(-1))).toHaveLength(1);
+    });
+  });
+
+  it("sends code's change to a block the model appended to", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes" }
+      ]);
+      await context.setBlock("notes", "Deploy to staging");
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+      await modelWrites(
+        context,
+        session,
+        "a1",
+        "notes",
+        "Run smoke tests",
+        "append"
+      );
+      await context.setBlock("notes", "Deploy to production\nRun smoke tests");
+      await session.appendMessage(user("u2", "next"));
+      const last = (await context.build()).messages.at(-1);
+      expect(texts(last)[1]).toContain("Deploy to production");
+    });
+  });
+
+  it("keeps the model's successful write when a later call fails", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "todo", whenChanged: "remind" }
+      ]);
+      await session.appendMessage(user("u1", "plan it"));
+      await context.build();
+      await modelWrites(context, session, "a1", "todo", "1. draft");
+      await session.appendMessage({
+        id: "a2",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-set_context",
+            toolCallId: "call-a2",
+            state: "output-available",
+            input: {
+              label: "todo",
+              content: "far too long",
+              action: "replace"
+            },
+            output: "Error: over the block's token limit"
+          }
+        ]
+      } as SessionMessage);
+      await session.appendMessage(user("u2", "next"));
+      const sent = JSON.stringify((await context.build()).messages);
+      expect(sent.split("1. draft").length - 1).toBe(1);
+    });
+  });
+
+  it("sends a block code set back to the value the prompt shows", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes" }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+      await modelWrites(context, session, "a1", "notes", "likes tea");
+      await context.setBlock("notes", "");
+      await session.appendMessage(user("u2", "next"));
+      const last = (await context.build()).messages.at(-1);
+      expect(texts(last)[1] ?? "").toContain("These context blocks changed");
     });
   });
 

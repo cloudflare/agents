@@ -789,6 +789,72 @@ describe("ThinkHarness context", () => {
     expect(next).toMatch(/\|user:now\?[^|]*Tuesday/);
   });
 
+  it("rebuilds the context from the blocks after a compaction", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("again", session);
+    await stub.prompt("more", session);
+    expect(await stub.compact(session)).toBe(true);
+    await stub.prompt("after", session);
+    const [first] = await stub.promptTexts();
+    const last = (await stub.promptTexts()).at(-1) ?? "";
+    const system = last.split("|")[0];
+    expect(system).not.toBe(first.split("|")[0]);
+    expect(system).toContain("Tuesday");
+    // In the prompt, not again as a reminder.
+    expect(last.slice(system.length)).not.toContain("Tuesday");
+  });
+
+  it("rebuilds the context after a compaction made on the Sessions handle", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("again", session);
+    await stub.prompt("more", session);
+    expect(await stub.compactOnHandle(session)).toBe(true);
+    await stub.prompt("after", session);
+    const last = (await stub.promptTexts()).at(-1) ?? "";
+    const system = last.split("|")[0];
+    expect(system).toContain("Tuesday");
+    expect(last.slice(system.length)).not.toContain("Tuesday");
+  });
+
+  it("rebuilds the context after a compaction that is the first thing after an eviction", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("again", session);
+    await stub.prompt("more", session);
+    stub = await crash(name);
+    expect(await stub.compact(session)).toBe(true);
+    await stub.prompt("after", session);
+    const last = (await stub.promptTexts()).at(-1) ?? "";
+    const system = last.split("|")[0];
+    expect(system).toContain("Tuesday");
+    expect(last.slice(system.length)).not.toContain("Tuesday");
+  });
+
+  it("rebuilds the context when the object is evicted right after a compaction", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("again", session);
+    await stub.prompt("more", session);
+    // Loading the blocks hangs: the eviction lands during it.
+    await stub.hangProvider(true);
+    expect(await stub.compactOnHandle(session)).toBe(true);
+    stub = await crash(name);
+    await stub.hangProvider(false);
+    await stub.prompt("after", session);
+    const last = (await stub.promptTexts()).at(-1) ?? "";
+    const system = last.split("|")[0];
+    expect(system).toContain("Tuesday");
+    expect(last.slice(system.length)).not.toContain("Tuesday");
+  });
+
   it("gives a fork the prompt its turns were sent with", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);
