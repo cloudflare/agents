@@ -804,7 +804,14 @@ describe("chat turn races", () => {
     await sendHandled(agent, tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
     expect(await agent.isPersistHeldForTest()).toBe(true);
     await agent.releasePersistForTest();
-    // The work the persist started stores its note now.
+    // The request's handler has returned, so its persist is over; only then
+    // does the work that persist started store its note.
+    await waitUntil(
+      async () =>
+        (await agent.handledMessageCountForTest(
+          MessageType.CF_AGENT_USE_CHAT_REQUEST
+        )) === 1
+    );
     await agent.storeLaterNoteForTest();
     await waitUntil(async () =>
       ((await agent.getPersistedMessages()) as ChatMessage[]).some(
