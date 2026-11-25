@@ -98,6 +98,43 @@ describe("KeepAlive capability", () => {
     });
   });
 
+  it("hands out holds in the order they were asked for while the heartbeat arms (F11)", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const { capability: keepAlive } = install(new KeepAlive());
+      // A Think turn is queued once its hold is open: a second hold that
+      // skips the arming the first waits on queues its turn first.
+      const order: string[] = [];
+      const holds = await Promise.all(
+        ["first", "second", "third"].map((name) =>
+          keepAlive.acquire().then((release) => {
+            order.push(name);
+            return release;
+          })
+        )
+      );
+      expect(order).toEqual(["first", "second", "third"]);
+      for (const release of holds) release();
+    });
+  });
+
+  it("does not count a second hold when the heartbeat it waited on could not be armed", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const { capability: keepAlive, lifecycle } = install(new KeepAlive());
+      await lifecycle.jobs.push({
+        id: "keep-alive:heartbeat",
+        fn: "mine",
+        time: Date.now() + 60_000
+      });
+      const [first, second] = await Promise.allSettled([
+        keepAlive.acquire(),
+        keepAlive.acquire()
+      ]);
+      expect(first.status).toBe("rejected");
+      expect(second.status).toBe("rejected");
+      expect(keepAlive.holds).toBe(0);
+    });
+  });
+
   it("does not collide with a host job named heartbeat", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const { capability: keepAlive, lifecycle } = install(new KeepAlive());

@@ -43,6 +43,8 @@ export type KeepAliveOptions = {
 export class KeepAlive extends LifecycleCapability {
   readonly #intervalMs: number;
   #holds = 0;
+  /** The heartbeat's arming, which the open holds share. */
+  #armed: Promise<unknown> = Promise.resolve();
 
   constructor(options: KeepAliveOptions = {}) {
     super("keep-alive");
@@ -80,16 +82,23 @@ export class KeepAlive extends LifecycleCapability {
       : undefined;
   }
 
-  /** Count a hold; a hold whose heartbeat could not be armed is not counted. */
+  /**
+   * Count a hold; a hold whose heartbeat could not be armed is not counted.
+   * Every hold waits for the heartbeat the first one arms, so holds open in
+   * the order they were asked for: in a sub-agent arming is a call to the
+   * root, and a Think turn queued under a later hold would run first (F11).
+   */
   async #open(): Promise<void> {
     this.#holds += 1;
-    if (this.#holds > 1) return;
-    try {
-      await this.lifecycle.jobs.push({
+    if (this.#holds === 1) {
+      this.#armed = this.lifecycle.jobs.push({
         id: HEARTBEAT_JOB_ID,
         fn: "heartbeat",
         time: Date.now() + this.#intervalMs
       });
+    }
+    try {
+      await this.#armed;
     } catch (error) {
       this.#holds -= 1;
       throw error;
