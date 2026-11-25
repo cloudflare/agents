@@ -5,6 +5,7 @@ import {
   hasTable,
   SCHEMA_VERSIONS_KEY
 } from "../../lifecycle/schema";
+import { Queue } from "../../queue";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 /** Migrates through two versions, recording each step it runs. */
@@ -95,6 +96,39 @@ describe("the schema versions record", () => {
       expect(hasColumn(storage.sql, "probe_table", "present")).toBe(true);
       expect(hasColumn(storage.sql, "probe_table", "absent")).toBe(false);
       expect(hasColumn(storage.sql, "missing_table", "present")).toBe(false);
+    });
+  });
+
+  it("folds Queue's released version key in, keeping what it had", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      // As the release left it: Queue at version 1 under its own key.
+      storage.kv.put("cf_agents:queue_schema_version", 1);
+      const { lifecycle } = install(new Queue());
+      await lifecycle.start();
+
+      expect(storage.kv.get("cf_agents:queue_schema_version")).toBe(undefined);
+      expect(storage.kv.get(SCHEMA_VERSIONS_KEY)).toMatchObject({ queue: 1 });
+    });
+  });
+
+  it("reads only the one record at a start with nothing to migrate", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      storage.kv.put(SCHEMA_VERSIONS_KEY, { queue: 1, lifecycle: 1 });
+      const read: string[] = [];
+      const get = storage.kv.get.bind(storage.kv);
+      storage.kv.get = ((key: string) => {
+        read.push(key);
+        return get(key);
+      }) as typeof storage.kv.get;
+      try {
+        const { lifecycle } = install(new Queue());
+        await lifecycle.start();
+      } finally {
+        storage.kv.get = get;
+      }
+      expect(read.filter((key) => key.includes("schema"))).toEqual([
+        SCHEMA_VERSIONS_KEY
+      ]);
     });
   });
 });
