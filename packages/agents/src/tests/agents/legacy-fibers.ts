@@ -1,3 +1,6 @@
+import { HOST_SCHEMA_ID } from "../../lifecycle/schema";
+import { storeAsReleased } from "../shared/schema-versions";
+
 /**
  * The fiber tables of a release before fibers ran on Tasks. Tests write
  * rows into them to stand in for an older release's interrupted fibers,
@@ -28,3 +31,11 @@ export const OPEN_FIBER_RUNS_SQL = `
     AND (status = 'running'
       OR (status = 'pending' AND coalesce(wait_reason, '') != 'park'))
 `;
+
+/**
+ * As a release before the one schema record left an Agent that had these
+ * tables: its version under its own key, so the fiber import is to run.
+ */
+export function storeAgentAsReleased(storage: DurableObjectStorage): void {
+  storeAsReleased(storage, HOST_SCHEMA_ID, "cf_agents:schema_version", 14);
+}

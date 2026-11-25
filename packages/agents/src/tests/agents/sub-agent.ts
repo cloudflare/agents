@@ -1,4 +1,8 @@
-import { createLegacyFiberTables, OPEN_FIBER_RUNS_SQL } from "./legacy-fibers";
+import {
+  createLegacyFiberTables,
+  OPEN_FIBER_RUNS_SQL,
+  storeAgentAsReleased
+} from "./legacy-fibers";
 import { importLegacyFibers } from "../../fiber-runs";
 import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
@@ -3007,6 +3011,7 @@ export class TestSubAgentParent extends Agent {
     selfPath: Array<{ className: string; name: string }>,
     runId: string
   ): void {
+    storeAgentAsReleased(this.ctx.storage);
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_facet_runs (
         owner_path TEXT NOT NULL,

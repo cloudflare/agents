@@ -2,8 +2,18 @@ import { Think } from "../../think";
 import type { FiberRecoveryContext } from "../../think";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
-function createLegacyFiberTableForTest(sql: SqlStorage): void {
-  sql.exec(`
+function createLegacyFiberTableForTest(storage: DurableObjectStorage): void {
+  // As a release before the one schema record left the Agent: its version
+  // under its own key, so the start's fiber import is still to run.
+  const record = storage.kv.get<Record<string, number>>(
+    "cf_agents:schema_versions"
+  );
+  if (record && " " in record) {
+    delete record[" "];
+    storage.kv.put("cf_agents:schema_versions", record);
+  }
+  storage.kv.put("cf_agents:schema_version", 14);
+  storage.sql.exec(`
     CREATE TABLE IF NOT EXISTS cf_agents_runs (
       id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, snapshot TEXT,
       created_at INTEGER NOT NULL, completed_at INTEGER, outcome TEXT,
@@ -93,7 +103,7 @@ export class ThinkFiberTestAgent extends Think {
     snapshot?: unknown
   ): Promise<void> {
     const id = `fiber-${Date.now()}`;
-    createLegacyFiberTableForTest(this.ctx.storage.sql);
+    createLegacyFiberTableForTest(this.ctx.storage);
 
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)

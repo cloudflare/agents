@@ -1,7 +1,11 @@
 import { Agent, getCurrentAgent } from "../../index.ts";
 import type { Tasks } from "../../tasks/tasks";
 import { importLegacyFibers } from "../../fiber-runs";
-import { createLegacyFiberTables, OPEN_FIBER_RUNS_SQL } from "./legacy-fibers";
+import {
+  createLegacyFiberTables,
+  OPEN_FIBER_RUNS_SQL,
+  storeAgentAsReleased
+} from "./legacy-fibers";
 import type {
   FiberInspection,
   FiberRecoveryContext,
@@ -765,6 +769,7 @@ export class TestRunFiberAgent extends Agent {
 
   private _legacyFiberTables(): void {
     createLegacyFiberTables(this.ctx.storage.sql);
+    storeAgentAsReleased(this.ctx.storage);
   }
 
   async waitFor(ms: number): Promise<void> {
@@ -825,6 +830,7 @@ export class TestRunFiberAgent extends Agent {
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${JSON.stringify({ step: 1 })}, ${Date.now()})
     `;
+    storeAgentAsReleased(this.ctx.storage);
   }
 
   /** Insert an unmanaged interrupted fiber row that already crashed recovery `crashes` times. */
@@ -975,6 +981,23 @@ export class TestRunFiberAgent extends Agent {
       UPDATE cf_agents_task_runs SET next_at = ${Date.now()}
       WHERE run_id = ${fiberId} AND status = 'running'
     `;
+  }
+
+  /** The schema-table reads of a fiber recovery pass. */
+  async schemaReadsDuringRecovery(): Promise<string[]> {
+    const sql = this.ctx.storage.sql;
+    const exec = sql.exec.bind(sql);
+    const reads: string[] = [];
+    sql.exec = ((query: string, ...bindings: SqlStorageValue[]) => {
+      if (/sqlite_master|pragma_table_info/i.test(query)) reads.push(query);
+      return exec(query, ...bindings);
+    }) as typeof sql.exec;
+    try {
+      await this.triggerRecoveryCheck();
+    } finally {
+      sql.exec = exec;
+    }
+    return reads;
   }
 
   async triggerRecoveryCheck(): Promise<void> {

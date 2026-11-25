@@ -134,7 +134,9 @@ const EXPECTED_SCHEMA_DDL = [
         )`
 ];
 
-const EXPECTED_SCHEMA_VERSION = 14;
+const EXPECTED_SCHEMA_VERSION = 15;
+/** Agent's version in the release, under its own key. */
+const RELEASED_SCHEMA_VERSION = 14;
 
 describe("schema DDL snapshot", () => {
   it("should match the expected DDL for the current schema version", async () => {
@@ -243,7 +245,7 @@ describe("schema version gating", () => {
       `released-key-${crypto.randomUUID()}`
     );
     await agent.getState();
-    await agent.storeReleasedSchemaVersion(EXPECTED_SCHEMA_VERSION);
+    await agent.storeReleasedSchemaVersion(RELEASED_SCHEMA_VERSION);
     expect(await agent.getSchemaVersion()).toBe(0);
 
     await agent.runSchemaMigration();
@@ -256,7 +258,7 @@ describe("schema version gating", () => {
     const agent = await getAgentByName(env.TestStateAgent, name);
     await agent.getState();
     // As the release left it, with tables in place and no record entry.
-    await agent.storeReleasedSchemaVersion(EXPECTED_SCHEMA_VERSION);
+    await agent.storeReleasedSchemaVersion(RELEASED_SCHEMA_VERSION);
     await evictDurableObject(agent);
 
     const woken = await getAgentByName(env.TestStateAgent, name);

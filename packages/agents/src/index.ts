@@ -430,7 +430,17 @@ type AgentToolRecoveryInspection =
  * The constructor keeps it in the Lifecycle's one schema record, beside every
  * capability's version, and checks it on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 14;
+const CURRENT_SCHEMA_VERSION = 15;
+
+/** The version the constructor's DDL brings the tables to. */
+const TABLES_SCHEMA_VERSION = 14;
+/**
+ * The host version after the tables: fiber rows from a release before
+ * fibers ran on Tasks have been carried forward (at start, after the
+ * constructor's DDL, because the import awaits Tasks).
+ */
+const FIBERS_IMPORTED_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION;
+
 /** The key it had before the one record: folded in once, then deleted. */
 const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
@@ -946,7 +956,7 @@ export class Agent<
   /**
    * Create all internal tables and run migrations if needed.
    * Called by the constructor on every wake. Idempotent — skips DDL when
-   * the stored schema version matches CURRENT_SCHEMA_VERSION.
+   * the stored schema version is TABLES_SCHEMA_VERSION or later.
    *
    * Protected so that test agents can re-run the real migration path
    * after manipulating DB state (since ctx.abort() is unavailable in
@@ -957,10 +967,10 @@ export class Agent<
     // is already up-to-date. `cf_agents_state` belongs to the State
     // capability (state/index.ts), which creates and migrates it itself.
     const schemaVersion = this.lifecycle.hostSchema.migrateSync({
-      version: CURRENT_SCHEMA_VERSION,
+      version: TABLES_SCHEMA_VERSION,
       legacyKey: SCHEMA_VERSION_KEY,
       legacyVersion: () => this._takeLegacySchemaVersionRow(),
-      steps: { [CURRENT_SCHEMA_VERSION]: () => this._createAgentTables() }
+      steps: { [TABLES_SCHEMA_VERSION]: () => this._createAgentTables() }
     });
 
     this._schemaInitialization = {
@@ -2502,12 +2512,21 @@ export class Agent<
    * dead isolate left, before onStart runs.
    */
   private async _recoverFibers(): Promise<void> {
-    await importLegacyFibers(
-      this.tasks,
-      this.ctx.storage,
-      this._isFacet,
-      this.lifecycle
-    );
+    // Recorded once as the host's next version, so a later start reads no
+    // table list. Only a release from before the record has these tables.
+    await this.lifecycle.hostSchema.migrate({
+      version: FIBERS_IMPORTED_SCHEMA_VERSION,
+      legacyKey: SCHEMA_VERSION_KEY,
+      steps: {
+        [FIBERS_IMPORTED_SCHEMA_VERSION]: () =>
+          importLegacyFibers(
+            this.tasks,
+            this.ctx.storage,
+            this._isFacet,
+            this.lifecycle
+          )
+      }
+    });
     const scanMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
     const startedAt = Date.now();
     const deadline = scanMs > 0 ? startedAt + scanMs : undefined;
