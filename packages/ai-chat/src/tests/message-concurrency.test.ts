@@ -593,10 +593,12 @@ describe("AIChatAgent messageConcurrency", () => {
       }
     );
     // The second was decided as an overlapping submit, so it debounces.
-    await waitUntil(
-      async () => (await agentStub.overlappingSubmitCountForTest()) === 1
-    );
-    await agentStub.releaseStreamForTest("req-missing-debounce-1");
+    // The first reply is released however the wait ends.
+    try {
+      await waitForOverlappingSubmits(agentStub, 1);
+    } finally {
+      await agentStub.releaseStreamForTest("req-missing-debounce-1");
+    }
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
@@ -651,10 +653,12 @@ describe("AIChatAgent messageConcurrency", () => {
       }
     );
     // The second was decided as an overlapping submit, so it debounces.
-    await waitUntil(
-      async () => (await agentStub.overlappingSubmitCountForTest()) === 1
-    );
-    await agentStub.releaseStreamForTest("req-invalid-debounce-1");
+    // The first reply is released however the wait ends.
+    try {
+      await waitForOverlappingSubmits(agentStub, 1);
+    } finally {
+      await agentStub.releaseStreamForTest("req-invalid-debounce-1");
+    }
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
