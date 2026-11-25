@@ -327,7 +327,6 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages1 = collectMessages(ws1);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-live");
@@ -337,8 +336,7 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // Broadcast live chunks while ws2 is pending resume (no ACK yet). The
       // first delta is stored at once, the second waits in the buffer: the
@@ -540,8 +538,13 @@ describe("Resumable Streaming", () => {
 
       // Clear history via WebSocket message
       ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
-
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(
+        async () =>
+          (await agentStub.handledMessageCountForTest(
+            MessageType.CF_AGENT_CHAT_CLEAR
+          )) === 1,
+        5000
+      );
 
       // Stream data should be cleared
       const chunksAfter = await agentStub.getStreamChunks(streamId);
@@ -835,17 +838,13 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      // Wait briefly for any onConnect push (which we'll also get)
-      await new Promise((r) => setTimeout(r, 50));
-
       // Send the client-initiated resume request
       ws2.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
         })
       );
-
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // Should have received CF_AGENT_STREAM_RESUMING (from request, not just onConnect)
       const resumeMsgs = messages2.filter(isStreamResumingMessage);
@@ -860,8 +859,6 @@ describe("Resumable Streaming", () => {
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       const messages = collectMessages(ws);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       // Send resume request when there's no active stream
       ws.send(
         JSON.stringify({
@@ -869,8 +866,18 @@ describe("Resumable Streaming", () => {
           probeId: "probe-idle-ai-chat"
         })
       );
-
-      await new Promise((r) => setTimeout(r, 500));
+      // The reply to the request is the last frame about it.
+      await waitFor(
+        () =>
+          messages.some(
+            (m) =>
+              typeof m === "object" &&
+              m !== null &&
+              (m as { type?: unknown }).type ===
+                MessageType.CF_AGENT_STREAM_RESUME_NONE
+          ),
+        5000
+      );
 
       // Should NOT get CF_AGENT_STREAM_RESUMING
       const resumeMsg = messages.find(isStreamResumingMessage);
@@ -1048,16 +1055,13 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       // Send resume request
       ws2.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
         })
       );
-
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // ACK the resuming notification
       const resumeMsg = messages2.find(isStreamResumingMessage);
@@ -1824,8 +1828,13 @@ describe("Resumable Streaming", () => {
           id: "req-double-ack"
         })
       );
-
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(
+        async () =>
+          (await agentStub.handledMessageCountForTest(
+            MessageType.CF_AGENT_STREAM_RESUME_ACK
+          )) === 2,
+        5000
+      );
 
       // Should still have exactly one assistant message (no duplicate)
       const persisted =
@@ -1857,15 +1866,18 @@ describe("Resumable Streaming", () => {
 
       // Clear all — should discard the buffer
       ws.send(JSON.stringify({ type: "cf_agent_chat_clear" }));
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(
+        async () =>
+          (await agentStub.handledMessageCountForTest(
+            "cf_agent_chat_clear"
+          )) === 1,
+        5000
+      );
 
       // Flush should be a no-op since buffer was cleared
       await agentStub.testFlushChunkBuffer();
       chunks = await agentStub.getStreamChunks(streamId);
       expect(chunks.length).toBe(0);
-
-      // Wait before close to let the agent settle
-      await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);
     });
   });
@@ -1894,9 +1906,6 @@ describe("Resumable Streaming", () => {
       // The old errored stream should be cleaned up
       const afterMetadata = await agentStub.getStreamMetadata("old-errored");
       expect(afterMetadata).toBeNull();
-
-      // Wait before close to let the agent settle
-      await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);
     });
 
@@ -1925,7 +1934,6 @@ describe("Resumable Streaming", () => {
       );
       expect(afterMetadata).toBeNull();
 
-      await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);
     });
   });
