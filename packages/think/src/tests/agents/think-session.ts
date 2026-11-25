@@ -944,9 +944,18 @@ function createEmptyStreamResult(): StreamableResult {
  * `_streamResult` and then abort mid-stream without racing the chunk
  * pipeline.
  */
+/** Holds a delayed-chunk stream after `after` chunks until it is opened. */
+type ChunkHoldForTest = {
+  after: number;
+  reached: boolean;
+  released: Promise<void>;
+  open: () => void;
+};
+
 function createDelayedMultiChunkMockModel(
   chunks: string[],
-  delayMs: number
+  delayMs: number,
+  hold?: ChunkHoldForTest | null
 ): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -963,7 +972,11 @@ function createDelayedMultiChunkMockModel(
         async start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
           controller.enqueue({ type: "text-start", id: `t-${callId}` });
-          for (const chunk of chunks) {
+          for (const [index, chunk] of chunks.entries()) {
+            if (hold && index === hold.after) {
+              hold.reached = true;
+              await hold.released;
+            }
             await new Promise((resolve) => setTimeout(resolve, delayMs));
             controller.enqueue({
               type: "text-delta",
@@ -9306,7 +9319,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     if (this._delayedChunks) {
       return createDelayedMultiChunkMockModel(
         this._delayedChunks.chunks,
-        this._delayedChunks.delayMs
+        this._delayedChunks.delayMs,
+        this._chunkHold
       );
     }
     return createMockModel(this._programmaticResponse);
@@ -9440,6 +9454,12 @@ export class ThinkProgrammaticTestAgent extends Think {
         setTimeout(resolve, this._submissionStatusDelayMs)
       );
     }
+    const hold = this._statusHookHold;
+    if (hold) {
+      this._statusHookHold = null;
+      hold.reached = true;
+      await hold.released;
+    }
     this._submissionLog.push(result);
     if (
       this._waitInSubmissionStatusHook &&
@@ -9456,6 +9476,33 @@ export class ThinkProgrammaticTestAgent extends Think {
         );
       }
     }
+  }
+
+  private _statusHookHold: {
+    reached: boolean;
+    released: Promise<void>;
+    open: () => void;
+  } | null = null;
+  private _heldStatusHook: { reached: boolean; open: () => void } | null = null;
+
+  /** Hold the next `onSubmissionStatus` call until released. */
+  async holdSubmissionStatusHookForTest(): Promise<void> {
+    let open = () => {};
+    const released = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    this._statusHookHold = { reached: false, released, open };
+    this._heldStatusHook = this._statusHookHold;
+  }
+
+  /** Whether the held `onSubmissionStatus` call is waiting. */
+  async isSubmissionStatusHookHeldForTest(): Promise<boolean> {
+    return this._heldStatusHook?.reached ?? false;
+  }
+
+  async releaseSubmissionStatusHookForTest(): Promise<void> {
+    this._heldStatusHook?.open();
+    this._heldStatusHook = null;
   }
 
   /** Call `waitForSubmission` from `onSubmissionStatus` on terminal statuses. */
@@ -9589,6 +9636,27 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async clearDelayedChunkResponse(): Promise<void> {
     this._delayedChunks = null;
+  }
+
+  private _chunkHold: ChunkHoldForTest | null = null;
+
+  /** Hold the next delayed-chunk streams after `after` chunks. */
+  async holdChunksAfterForTest(after: number): Promise<void> {
+    let open = () => {};
+    const released = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    this._chunkHold = { after, reached: false, released, open };
+  }
+
+  /** Whether a held stream has sent its chunks and is waiting. */
+  async isChunkStreamHeldForTest(): Promise<boolean> {
+    return this._chunkHold?.reached ?? false;
+  }
+
+  async releaseChunksForTest(): Promise<void> {
+    this._chunkHold?.open();
+    this._chunkHold = null;
   }
 
   async setInBandStreamErrorResponse(
