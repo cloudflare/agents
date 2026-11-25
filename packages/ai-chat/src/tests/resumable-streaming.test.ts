@@ -4,6 +4,7 @@ import { MessageType, type OutgoingMessage } from "../types";
 import {
   connectChatWS,
   isUseChatResponseMessage,
+  socketBarrier,
   waitUntilHandled
 } from "./test-utils";
 import { getAgentByName } from "agents";
@@ -455,6 +456,8 @@ describe("Resumable Streaming", () => {
       );
 
       // Should NOT receive chunks (only state/mcp messages)
+      // Every frame the ACK could have caused is in by the barrier's reply.
+      await socketBarrier(ws2, messages2);
       const chunkMsgs = messages2.filter(isUseChatResponseMessage);
       expect(chunkMsgs.length).toBe(0);
 

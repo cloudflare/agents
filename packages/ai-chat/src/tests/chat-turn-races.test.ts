@@ -4,7 +4,11 @@ import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import { MessageType, type OutgoingMessage } from "../types";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import {
+  connectChatWS,
+  isUseChatResponseMessage,
+  socketBarrier
+} from "./test-utils";
 
 // Two tabs on one chat: orderings of send, regenerate, clear and tool results
 // that a model check of the chat turn flow found. Each test runs one path's
@@ -72,19 +76,6 @@ async function settled(agent: {
     const state = await agent.getContinuationStateForTest();
     return !state.hasPending && !state.hasDeferred;
   });
-}
-
-/**
- * Wait until every frame the agent sent `ws` so far has reached `seen`: a
- * resume request's reply echoes its probe id, and the socket delivers in
- * order.
- */
-async function socketBarrier(ws: WebSocket, seen: OutgoingMessage[]) {
-  const probeId = crypto.randomUUID();
-  send(ws, { type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST, probeId });
-  await waitUntil(() =>
-    seen.some((m) => (m as { probeId?: unknown }).probeId === probeId)
-  );
 }
 
 function sendChatRequest(
