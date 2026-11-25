@@ -923,14 +923,16 @@ describe("Think durable submissions", () => {
       async () => expect(await agent.isChunkStreamHeldForTest()).toBe(true),
       { timeout: 5000, interval: 10 }
     );
+    // Deleted, reused and the reuse cancelled while the first turn's stream
+    // is still held, so its partial lands after the reuse exists.
     await agent.cancelSubmissionForTest(first.submissionId, "stop");
-    // The mock model ignores the abort; let it run on so the turn sees it.
-    await agent.releaseChunksForTest();
     await agent.deleteSubmissionForTest(first.submissionId);
     const second = await agent.testSubmitMessages("again", {
       submissionId: "sub-reused"
     });
     await agent.cancelSubmissionForTest(second.submissionId, "stop");
+    // The mock model ignores the abort; let it run on so the turn sees it.
+    await agent.releaseChunksForTest();
     await waitForSubmission(
       agent,
       second.submissionId,
@@ -1162,7 +1164,14 @@ describe("Think durable submissions", () => {
     // The terminal row is written and its hook is running.
     const cancel = agent.cancelSubmissionForTest("sub-wait-hook", "stop");
     await statusHookHeld(agent);
+    let waitSettled = false;
     const waiting = agent.waitForSubmissionForTest("sub-wait-hook");
+    void waiting.then(() => {
+      waitSettled = true;
+    });
+    // After a round trip to the agent, the wait still waits for the hook.
+    await agent.isSubmissionStatusHookHeldForTest();
+    expect(waitSettled).toBe(false);
     await agent.releaseSubmissionStatusHookForTest();
     await expect(waiting).resolves.toMatchObject({ status: "aborted" });
     const hookRan = (await agent.getSubmissionLog()).some(
@@ -1223,9 +1232,16 @@ describe("Think durable submissions", () => {
     const cancel = agent.cancelSubmissionForTest("sub-del-hook", "stop");
     // Deleted while its terminal hook runs.
     await statusHookHeld(agent);
+    let waitSettled = false;
+    void waiting.then(() => {
+      waitSettled = true;
+    });
     await expect(agent.deleteSubmissionForTest("sub-del-hook")).resolves.toBe(
       true
     );
+    // Deleted, but the hook still runs: the wait has not settled.
+    await agent.isSubmissionStatusHookHeldForTest();
+    expect(waitSettled).toBe(false);
     await agent.releaseSubmissionStatusHookForTest();
     await expect(waiting).resolves.toMatchObject({ status: "aborted" });
     const hookRan = (await agent.getSubmissionLog()).some(
