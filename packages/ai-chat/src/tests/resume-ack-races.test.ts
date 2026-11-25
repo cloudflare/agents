@@ -22,6 +22,18 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000) {
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
+async function waitUntilAsync(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 5000
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) return;
+    await delay(10);
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
 function record(ws: WebSocket): OutgoingMessage[] {
   const seen: OutgoingMessage[] = [];
   ws.addEventListener("message", (event: MessageEvent) => {
@@ -118,6 +130,13 @@ describe("resume ACK races", () => {
         type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
         id: "req-a"
       })
+    );
+    // Release B only once the server has handled the stale ACK.
+    await waitUntilAsync(
+      async () =>
+        (await agent.handledMessageCountForTest(
+          MessageType.CF_AGENT_STREAM_RESUME_ACK
+        )) === 1
     );
     const before = liveChunks(ownerSeen, "req-b").length;
     await agent.releaseStreamForTest("req-b");

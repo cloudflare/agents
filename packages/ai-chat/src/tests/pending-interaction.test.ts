@@ -177,6 +177,13 @@ describe("AIChatAgent pending interaction helpers", () => {
       chunkDelayMs: 40
     });
 
+    // The request travels over the socket: wait until its turn has started,
+    // so the hold below cannot catch it.
+    await vi.waitFor(async () => {
+      expect(await agentStub.getStartedRequestIds()).toEqual([
+        "req-prime-continuation"
+      ]);
+    });
     await agentStub.waitForIdleForTest();
 
     await agentStub.persistToolCallMessage(
