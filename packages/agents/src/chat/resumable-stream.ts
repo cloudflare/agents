@@ -202,19 +202,6 @@ export type SqlTaggedTemplate = {
   ): T[];
 };
 
-/** Host hooks for the chat stream adapter. */
-export type ResumableStreamOptions = {
-  /**
-   * Called with the durable part of the recovery progress marker (retired
-   * segments plus credits plus the seeded legacy counter) after it advances,
-   * outside any transaction. Hosts mirror it to the pre-derivation KV key so
-   * a build rolled back to the KV counter never reads a marker lower than
-   * an incident recorded under this one. Fires per stream retired and per
-   * credit, never per chunk.
-   */
-  onProgress?: (durableSegments: number) => void;
-};
-
 /**
  * The deletion hook each adapter holds on its Streams capability. One
  * adapter per capability: a host whose startup retried constructs the
@@ -261,15 +248,10 @@ export class ResumableStream {
 
   private readonly ops: StreamsSyncInternal;
 
-  constructor(
-    streams: Streams,
-    sql: SqlTaggedTemplate,
-    options: ResumableStreamOptions = {}
-  ) {
+  constructor(streams: Streams, sql: SqlTaggedTemplate) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
     this._sql = sql;
-    this._onProgress = options.onProgress;
     this._ensureProgressTable();
     // Every path that removes a chat row's log — this adapter's cutover,
     // reclaim and clear, and the capability's public `delete()` — folds the
@@ -305,17 +287,6 @@ export class ResumableStream {
   // written per stream retired.
 
   private readonly _sql: SqlTaggedTemplate;
-  private readonly _onProgress: ResumableStreamOptions["onProgress"];
-
-  /**
-   * Tell the host the durable part of the marker moved. Called after the
-   * write that moved it has left any transaction, never inside one: the
-   * host's mirror is an async KV put, which a synchronous transaction
-   * would reject.
-   */
-  private _notifyProgress(): void {
-    this._onProgress?.(this._retiredSegments());
-  }
 
   /**
    * One row: `retired` accumulates the segments of deleted streams and
@@ -393,15 +364,14 @@ export class ResumableStream {
    */
   creditProgress(): void {
     this._retire(1);
-    this._notifyProgress();
   }
 
   /**
    * Carry the KV counter forward: the marker must not read lower than the
    * high-water mark an in-flight incident already recorded, or a
    * progressing turn would look stuck until the log caught up. The counter
-   * is either the pre-derivation one or the hosts' mirror of this marker's
-   * durable part (`retired + legacy`, written by `onProgress`). Either way
+   * is either the pre-derivation one or the mirror of this marker's
+   * durable part that earlier versions wrote (`retired + legacy`). Either way
    * it already counts every segment retired here, so the seed raises
    * `legacy` only to `counter - retired`: the marker then reads at least
    * the counter, and a mirrored value folds in as a no-op instead of adding
@@ -432,7 +402,6 @@ export class ResumableStream {
   private _deleteRetiring(rows: readonly StreamRow[]): void {
     if (rows.length === 0) return;
     this.ops.deleteMany(rows.map((row) => row.stream_id));
-    this._notifyProgress();
   }
 
   /**
@@ -795,7 +764,6 @@ export class ResumableStream {
       commit,
       discard
     });
-    if (settled && discard) this._notifyProgress();
     // The stream was settled (or deleted) by another path first, so the
     // settle was a no-op and `persist` did not run: the message must still
     // land, just not atomically with a settlement that already happened.

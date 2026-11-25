@@ -672,6 +672,12 @@ describe("Resumable Streaming", () => {
       ws.close(1000);
     });
 
+    it("writes no KV progress mirror when a stream is retired or credited", async () => {
+      const room = crypto.randomUUID();
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      expect(await agentStub.probeProgressMirrorForTest()).toBeUndefined();
+    });
+
     it("packs a single flush of multiple chunks into one row", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

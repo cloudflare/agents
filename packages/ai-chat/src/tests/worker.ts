@@ -45,7 +45,8 @@ import {
   type ReplyFlushState,
   type ReplyStreams,
   type ToolPartUpdate,
-  REPLAY_CHUNK_BYTES
+  REPLAY_CHUNK_BYTES,
+  CHAT_RECOVERY_PROGRESS_KEY
 } from "agents/chat";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
@@ -1580,6 +1581,21 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   testFlushChunkBuffer(): void {
     this._resumableStream.flushBuffer();
+  }
+
+  /**
+   * Retire a stream (a cutover) and credit once, then read the KV key
+   * earlier versions mirrored the progress marker into.
+   */
+  async probeProgressMirrorForTest(): Promise<unknown> {
+    const stream = this._resumableStream;
+    const id = stream.start("req-mirror");
+    for (let i = 0; i < 10; i++) stream.storeChunk(id, `{"i":${i}}`);
+    stream.finish(id);
+    stream.cutover(id, () => {});
+    stream.creditProgress();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return this.ctx.storage.get(CHAT_RECOVERY_PROGRESS_KEY);
   }
 
   testCompleteStream(streamId: string): void {

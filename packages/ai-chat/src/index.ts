@@ -123,7 +123,6 @@ import {
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
   isTurnStopped,
-  CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
@@ -961,17 +960,7 @@ export class AIChatAgent<
           () => {
             this._resumableStream = new ResumableStream(
               this.streams,
-              this.sql.bind(this),
-              {
-                // Rollback insurance: a build still on the KV counter reads
-                // a marker no lower than one recorded under the derived
-                // marker. One put per stream retired, none per chunk.
-                onProgress: (durable) => {
-                  void this.ctx.storage
-                    .put(CHAT_RECOVERY_PROGRESS_KEY, durable)
-                    .catch(() => {});
-                }
-              }
+              this.sql.bind(this)
             );
           }
         );
