@@ -184,6 +184,12 @@ describe("ThinkHarness turns", () => {
     expect(text(await stub.prompt("after"))).toBe("echo: after");
   });
 
+  it("takes a client tool declaration that is not a list as none", async () => {
+    const stub = fresh();
+    expect(await stub.declareMalformedClientTools()).toBe("done");
+    expect(text(await stub.prompt("after"))).toBe("echo: after");
+  });
+
   it("leaves no alarm once the session is idle", async () => {
     const stub = fresh();
     await stub.prompt("hello");
@@ -558,6 +564,21 @@ describe("ThinkHarness durability", () => {
     );
   });
 
+  it("carries more sessions than one batch forward, with their client tools", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.seedStoreSessions(120)
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    const sessions = await stub.listSessions();
+    expect(sessions).toHaveLength(121);
+    expect(sessions.slice(0, 2).map((s) => s.id)).toEqual(["s-000", "s-001"]);
+    expect(await stub.clientToolsValue("s-119")).toBe('[{"name":"tool_119"}]');
+    expect(await stub.harnessTables()).toEqual([]);
+  });
+
   it("drops a released version's settled operations without reading them", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
@@ -731,6 +752,23 @@ describe("ThinkHarness's own Tasks", () => {
       cf_agents_task_runs__c_think_2dharness: 1
     });
     expect(await stub.ownRuns()).toBe(0);
+  });
+
+  it("empties a released version's store in a sub-agent instead of dropping it", async () => {
+    const name = crypto.randomUUID();
+    let root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    await root.childSeedReleasedStore();
+    await abortAllDurableObjects();
+    root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    await root.childRelease();
+    const result = root.childWait("left");
+    await runDurableObjectAlarm(root);
+    expect(text(await result)).toBe("tool said: released after 1 runs");
+    expect(await root.childStoreTables()).toEqual({
+      cf_think_harness_store_sessions: 0,
+      cf_think_harness_store_operations: 0,
+      cf_think_harness_store_log: 0
+    });
   });
 
   it("recovers an operation in a sub-agent, woken through the root", async () => {

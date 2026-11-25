@@ -597,21 +597,30 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * must be: a reset part way runs it again.
    */
   async #carryReleased(): Promise<void> {
-    const released = ReleasedRecords.open(this.lifecycle.storage);
+    const released = ReleasedRecords.open(
+      this.lifecycle.storage,
+      this.lifecycle.routes.source !== undefined
+    );
     if (!released) return;
     await this.#carryForward(released);
-    for (const session of released.sessions()) {
-      const handle = this.#handle(session.id);
-      await handle.internal_setConfig(
-        SESSION_KEY,
-        sessionValue(session.parent, session.createdAt)
-      );
-      if (session.clientTools.length > 0) {
+    for (let offset = 0; ; offset += CARRY_BATCH) {
+      const sessions = released.sessions(offset, CARRY_BATCH);
+      for (const session of sessions) {
+        // The Sessions handle, not `#handle`: carrying a session forward is
+        // not the host's first use of it, so `configureSession` waits.
+        const handle = this.#sessions.session(session.id);
         await handle.internal_setConfig(
-          CLIENT_TOOLS_KEY,
-          JSON.stringify(session.clientTools)
+          SESSION_KEY,
+          sessionValue(session.parent, session.createdAt)
         );
+        if (session.clientTools.length > 0) {
+          await handle.internal_setConfig(
+            CLIENT_TOOLS_KEY,
+            JSON.stringify(session.clientTools)
+          );
+        }
       }
+      if (sessions.length < CARRY_BATCH) break;
     }
     released.drop();
   }
@@ -2223,9 +2232,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     };
     const declared =
       await this.#handle(session).internal_config(CLIENT_TOOLS_KEY);
+    // A client's declaration that is not a list declares nothing.
+    const parsed: unknown = declared === null ? [] : JSON.parse(declared);
     const client = createToolsFromClientSchemas(
-      // SAFETY: written only from a ClientToolSchema[] by enqueue.
-      declared === null ? [] : (JSON.parse(declared) as ClientToolSchema[])
+      // SAFETY: the list a client declared, as `enqueue` stored it; before
+      // this value existed the harness store read it the same way.
+      Array.isArray(parsed) ? (parsed as ClientToolSchema[]) : []
     );
     // A client cannot replace a server tool: the server's definition, its
     // execute and its approval policy win on a name clash.

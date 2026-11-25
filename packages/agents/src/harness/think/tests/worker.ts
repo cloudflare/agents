@@ -12,6 +12,7 @@ import { Context } from "../../../context";
 import { Lifecycle } from "../../../lifecycle";
 import { forgetSchemaVersion } from "../../../lifecycle/durable-object-lifecycle";
 import { openHarnessStore, type JsonValue } from "../../store/store";
+import type { ClientToolSchema } from "../../../chat/client-tools";
 import { Streams } from "../../../streams/streams";
 import { Tasks } from "../../../tasks/tasks";
 import type { Session } from "../../../sessions/handle";
@@ -976,6 +977,30 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  /** A released version's store with `count` sessions, each with a tool. */
+  seedStoreSessions(count: number): void {
+    const store = openHarnessStore(this.ctx.storage, {
+      prefix: SHARED_STORE_PREFIX
+    });
+    for (let i = 0; i < count; i++) {
+      store.createSession({
+        id: `s-${String(i).padStart(3, "0")}`,
+        createdAt: 1_000 + i,
+        state: { clientTools: [{ name: `tool_${i}` }], toolCalls: {} }
+      });
+    }
+  }
+
+  /** Declare client tools that are not a list, as a broken client might. */
+  async declareMalformedClientTools(): Promise<string> {
+    const session = this.harness.session();
+    const { operationId } = await session.submit("first", {
+      // SAFETY: deliberately not a ClientToolSchema[].
+      clientTools: { name: "nope" } as unknown as ClientToolSchema[]
+    });
+    return (await session.wait(operationId)).status;
+  }
+
   releaseSlow(): void {
     this.#releaseSlow();
   }
@@ -1285,6 +1310,49 @@ export class ThinkHarnessFacetChild extends Agent<Cloudflare.Env> {
     return this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0;
   }
 
+  /** A released version's store, with one queued operation. */
+  seedReleasedStore(): void {
+    forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
+    const store = openHarnessStore(this.ctx.storage, {
+      prefix: SHARED_STORE_PREFIX
+    });
+    store.createSession({ id: "" });
+    store.enqueue({
+      session: "",
+      id: "left",
+      input: {
+        kind: "messages",
+        messages: [
+          {
+            id: "left-user",
+            role: "user",
+            parts: [{ type: "text", text: "hi" }]
+          }
+        ]
+      },
+      meta: { source: "server" }
+    });
+  }
+
+  /** The harness store's tables left here, with their row counts. */
+  storeTables(): Record<string, number> {
+    const sql = this.ctx.storage.sql;
+    const names = ["sessions", "operations", "log"]
+      .map((table) => `${SHARED_STORE_PREFIX}${table}`)
+      .filter(
+        (name) =>
+          sql
+            .exec("SELECT name FROM sqlite_master WHERE name = ?", name)
+            .toArray().length > 0
+      );
+    return Object.fromEntries(
+      names.map((name) => [
+        name,
+        sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${name}`).one().n
+      ])
+    );
+  }
+
   /** Runs of the Agent's own Tasks. */
   async agentRuns(): Promise<number> {
     return (await this.tasks.list()).length;
@@ -1315,6 +1383,14 @@ export class ThinkHarnessFacetRoot extends Agent<Cloudflare.Env> {
 
   async childGateRuns(): Promise<number> {
     return (await this.#child()).gateRuns();
+  }
+
+  async childSeedReleasedStore(): Promise<void> {
+    await (await this.#child()).seedReleasedStore();
+  }
+
+  async childStoreTables(): Promise<Record<string, number>> {
+    return (await this.#child()).storeTables();
   }
 
   async childAgentRuns(): Promise<number> {

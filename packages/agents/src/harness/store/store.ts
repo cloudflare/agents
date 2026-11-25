@@ -303,10 +303,18 @@ export class HarnessStore {
    *
    * @returns The sessions.
    */
-  sessions(): SessionRecord[] {
+  sessions(
+    page: { readonly limit: number; readonly offset: number } = {
+      limit: -1,
+      offset: 0
+    }
+  ): SessionRecord[] {
     return this.#storage.sql
       .exec<SessionRow>(
-        `SELECT * FROM ${this.#sessions} ORDER BY created_at, id`
+        `SELECT * FROM ${this.#sessions} ORDER BY created_at, id
+         LIMIT ? OFFSET ?`,
+        page.limit,
+        page.offset
       )
       .toArray()
       .map((row) => this.#sessionOf(row));

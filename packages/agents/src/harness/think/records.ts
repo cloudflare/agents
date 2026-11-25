@@ -216,12 +216,16 @@ const STORE_TABLES = ["sessions", "operations", "log"] as const;
 export class ReleasedRecords {
   readonly #storage: DurableObjectStorage;
   readonly #store: HarnessStore;
+  readonly #facet: boolean;
 
   /**
    * The records, or `undefined` when no table of a released version is
    * there. Run once per object, as a schema step.
    */
-  static open(storage: DurableObjectStorage): ReleasedRecords | undefined {
+  static open(
+    storage: DurableObjectStorage,
+    facet: boolean
+  ): ReleasedRecords | undefined {
     const present = new Set(
       [
         ...STORE_TABLES.map((table) => `${STORE_PREFIX}${table}`),
@@ -232,18 +236,37 @@ export class ReleasedRecords {
     );
     return present.size === 0
       ? undefined
-      : new ReleasedRecords(storage, present);
+      : new ReleasedRecords(storage, present, facet);
   }
 
-  private constructor(storage: DurableObjectStorage, present: Set<string>) {
+  private constructor(
+    storage: DurableObjectStorage,
+    present: Set<string>,
+    facet: boolean
+  ) {
     this.#storage = storage;
+    this.#facet = facet;
     this.#store = openHarnessStore(storage, { prefix: STORE_PREFIX });
-    importLegacyTables(storage, this.#store, present);
+    importLegacyTables(storage, this.#store, present, this.#discard);
   }
 
-  /** Every session, oldest first, with the client tools it declared. */
-  sessions(): ReleasedSession[] {
-    return this.#store.sessions().map((session) => ({
+  /**
+   * A table this is done with. A facet empties it rather than dropping it:
+   * a facet dropping indexed tables on its first start after an upgrade
+   * has reset its whole tree's storage (measured; only the root drops).
+   */
+  readonly #discard = (table: string): void => {
+    this.#storage.sql.exec(
+      this.#facet ? `DELETE FROM ${table}` : `DROP TABLE IF EXISTS ${table}`
+    );
+  };
+
+  /**
+   * Sessions, oldest first, with the client tools each declared: `limit`
+   * of them from `offset`.
+   */
+  sessions(offset: number, limit: number): ReleasedSession[] {
+    return this.#store.sessions({ offset, limit }).map((session) => ({
       id: session.id,
       parent: session.parent,
       createdAt: session.createdAt,
@@ -280,12 +303,11 @@ export class ReleasedRecords {
     });
   }
 
-  /** Drop the store's tables, settled operations and all, unread. */
+  /** Discard the store's tables, settled operations and all, unread. */
   drop(): void {
     this.#storage.transactionSync(() => {
-      for (const table of STORE_TABLES) {
-        this.#storage.sql.exec(`DROP TABLE IF EXISTS ${STORE_PREFIX}${table}`);
-      }
+      for (const table of STORE_TABLES)
+        this.#discard(`${STORE_PREFIX}${table}`);
     });
   }
 }
@@ -341,7 +363,8 @@ function parseJsonColumn(text: string): JsonValue {
 function importLegacyTables(
   storage: DurableObjectStorage,
   store: HarnessStore,
-  present: ReadonlySet<string>
+  present: ReadonlySet<string>,
+  discard: (table: string) => void
 ): void {
   const sql = storage.sql;
   if (
@@ -420,7 +443,7 @@ function importLegacyTables(
       LEGACY_OPERATIONS,
       LEGACY_TOOL_CALLS
     ]) {
-      sql.exec(`DROP TABLE IF EXISTS ${table}`);
+      if (present.has(table)) discard(table);
     }
   });
 }
