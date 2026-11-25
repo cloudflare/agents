@@ -133,10 +133,10 @@ const INSTANCE_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 
 /**
  * The shape of a name a composer derives ({@link LifecycleCapability.composedName}):
- * `@` and the composer's id. Only a composer may give it: see
- * {@link checkDerivedName}.
+ * `@` and the composer's id, which can hold any printable ASCII its kind
+ * does. Only a composer may give it: see {@link checkDerivedName}.
  */
-const DERIVED_NAME = /^@[a-z][a-z0-9-]*(?:\/@?[a-z][a-z0-9-]*)*$/;
+const DERIVED_NAME = /^@[\x21-\x7e]+$/;
 
 /** The capabilities each capability composes, in the order it composed them. */
 const composedBy = new WeakMap<LifecycleCapability, LifecycleCapability[]>();
@@ -291,9 +291,9 @@ export function capabilityStore(
 /**
  * @internal The storage-name suffix of a named instance. A chosen name
  * (`[a-z][a-z0-9-]*`) becomes `__n_<name>` with `-` as `_`. A derived name
- * (`@<composer id>`, which can hold `@`, `/` and `-`) becomes `__c_<name>`
- * with each of those escaped (`_a`, `_s`, `_h`), so no two names meet and
- * the result is a plain SQLite identifier.
+ * (`@<composer id>`) becomes `__c_<name>` with every character but
+ * `[a-z0-9]` written `_` and its two hex digits (`-` is `_2d`), so no two
+ * names meet and the result is a plain SQLite identifier.
  */
 export function instanceSuffix(instanceName: string): string {
   if (!instanceName.startsWith("@")) {
@@ -301,8 +301,9 @@ export function instanceSuffix(instanceName: string): string {
   }
   const escaped = instanceName
     .slice(1)
-    .replace(/[@/-]/g, (char) =>
-      char === "@" ? "_a" : char === "/" ? "_s" : "_h"
+    .replace(
+      /[^a-z0-9]/g,
+      (char) => `_${char.charCodeAt(0).toString(16).padStart(2, "0")}`
     );
   return `__c_${escaped}`;
 }

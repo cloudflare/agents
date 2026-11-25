@@ -156,6 +156,23 @@ describe("capability instances", () => {
     });
   });
 
+  it("composes under a composer whose kind has characters a name cannot", async () => {
+    class Report extends LifecycleCapability {
+      readonly notes: Notes;
+      constructor() {
+        super("report_v2");
+        this.notes = this.compose(new Notes(this.composedName));
+      }
+    }
+    await withCapabilityHarness(async ({ install }) => {
+      const report = new Report();
+      const { lifecycle } = install(report);
+      await lifecycle.start();
+      await report.notes.add("r", "t");
+      expect(report.notes.ids()).toEqual(["r"]);
+    });
+  });
+
   it("keeps a named instance's job pushed without an id its own", async () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const audit = new Notes("audit");
@@ -234,8 +251,8 @@ describe("capability instances", () => {
         .toArray()
         .map((row) => row.name);
       expect(tables).toEqual([
-        "cf_agents_notes__c_note_htaker_s_adesk",
-        "cf_agents_notes__c_note_htaker_sdesk"
+        "cf_agents_notes__c_note_2dtaker_2f_40desk",
+        "cf_agents_notes__c_note_2dtaker_2fdesk"
       ]);
     });
   });

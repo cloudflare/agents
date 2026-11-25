@@ -17,7 +17,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 const BASELINE = "scripts/instance-names-baseline.json";
 // A quoted string on one line, or a template literal over any number of
 // lines (SQL is often written that way), holding a storage name.
-const MARKER = /cf_agents_|cf_agents:|CREATE TABLE/;
+// A CREATE TABLE whose name comes from an expression (an instance prefix)
+// is not a literal name.
+const MARKER =
+  /cf_agents_|cf_agents:|CREATE TABLE(?: IF NOT EXISTS)?\s+(?!\$\{|"\$\{)/;
 const LITERAL =
   /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\[\s\S])*`/g;
 
