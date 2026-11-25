@@ -101,8 +101,18 @@ import type { TaskRecord } from "agents/internal";
 import type { TaskJson } from "agents/tasks";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
-function createLegacyFiberTableForTest(sql: SqlStorage): void {
-  sql.exec(`
+function createLegacyFiberTableForTest(storage: DurableObjectStorage): void {
+  // As a release before the one schema record left the Agent: its version
+  // under its own key, so the start's fiber import is still to run.
+  const record = storage.kv.get<Record<string, number>>(
+    "cf_agents:schema_versions"
+  );
+  if (record && " " in record) {
+    delete record[" "];
+    storage.kv.put("cf_agents:schema_versions", record);
+  }
+  storage.kv.put("cf_agents:schema_version", 14);
+  storage.sql.exec(`
     CREATE TABLE IF NOT EXISTS cf_agents_runs (
       id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, snapshot TEXT,
       created_at INTEGER NOT NULL, completed_at INTEGER, outcome TEXT,
@@ -299,7 +309,7 @@ async function insertInterruptedTurnForTest(
   const prefix = `${Think.CHAT_FIBER_NAME}:`;
   if (!name.startsWith(prefix)) {
     createLegacyFiberTableForTest(
-      (agent as unknown as { ctx: DurableObjectState }).ctx.storage.sql
+      (agent as unknown as { ctx: DurableObjectState }).ctx.storage
     );
 
     agent.sql`
@@ -13011,7 +13021,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
   /** Leave a chat turn's fiber row, as a version before Tasks did. */
   insertLegacyChatFiberForTest(requestId: string, snapshot?: unknown): void {
-    createLegacyFiberTableForTest(this.ctx.storage.sql);
+    createLegacyFiberTableForTest(this.ctx.storage);
 
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
