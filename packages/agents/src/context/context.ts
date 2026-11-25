@@ -446,11 +446,11 @@ export class Context {
     // Also the step after clearing the transcript (Think does both): the
     // records read so far may belong to messages that are gone.
     this.#cache.clear();
-    // Set before the first await, so a caller that cannot wait (a change
-    // feed) still has the next turn in this instance see it.
+    // Stored before anything else, so a caller that cannot wait (a change
+    // feed) has it survive an eviction right after.
     this.#refresh = true;
-    await this.#blocks.load();
     await this.#setRefresh(true);
+    await this.#blocks.load();
     return renderSystem(await this.#blocks.internal_sections());
   }
 

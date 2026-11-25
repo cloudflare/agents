@@ -79,7 +79,7 @@ this.context.removeBlock("project");
 await this.context.refreshSystemPrompt();
 ```
 
-A block written with `setBlock()` or `appendToBlock()` reaches the model once, after the next user message. Added and removed blocks enter or leave the prompt at the next rebuild: after a compaction, or a refresh.
+A block written with `setBlock()` or `appendToBlock()` reaches the model once, after the next user message, and stays there. If a request goes out before that message (a continuation of an answer, or a regenerated one), the value also rides on that request, so the model is not working from the old one; that copy is not kept. Added and removed blocks enter or leave the prompt at the next rebuild: after a compaction, or a refresh.
 
 ## What changed
 

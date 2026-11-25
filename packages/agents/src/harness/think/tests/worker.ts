@@ -32,6 +32,7 @@ const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
 const ENVIRONMENT_KEY = "test:environment";
 const CATALOGUE_KEY = "test:catalogue";
+const SLOW_KEY = "test:slow-provider";
 /** The session that has context blocks. */
 const CONTEXT_SESSION = "with-context";
 const BLOCK_KEY = "test:block";
@@ -233,8 +234,17 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               {
                 label: "catalogue",
                 provider: {
-                  get: async () =>
-                    this.ctx.storage.kv.get<string>(CATALOGUE_KEY) ?? "Hammers."
+                  get: async () => {
+                    // A provider that can be made slow, to cut a load short.
+                    const slow = this.ctx.storage.kv.get<number>(SLOW_KEY);
+                    if (slow) {
+                      await new Promise((resolve) => setTimeout(resolve, slow));
+                    }
+                    return (
+                      this.ctx.storage.kv.get<string>(CATALOGUE_KEY) ??
+                      "Hammers."
+                    );
+                  }
                 }
               },
               { label: "memory", description: "Learned facts" },
@@ -931,6 +941,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       { source: "client" }
     );
     await this.harness.session(CONTEXT_SESSION).wait(receipt.operationId);
+  }
+
+  slowProvider(ms: number): void {
+    this.ctx.storage.kv.put(SLOW_KEY, ms);
   }
 
   setCatalogue(value: string): void {
