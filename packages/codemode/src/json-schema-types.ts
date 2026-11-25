@@ -60,6 +60,163 @@ function applyNullable(result: string, schema: unknown): string {
 }
 
 /**
+ * Report whether a generated type has a `|` outside brackets, strings and
+ * comments. Such a type needs parentheses inside an intersection.
+ */
+function hasTopLevelUnion(type: string): boolean {
+  let depth = 0;
+  for (let i = 0; i < type.length; i++) {
+    const ch = type[i];
+    if (ch === '"') {
+      for (i++; i < type.length && type[i] !== '"'; i++) {
+        if (type[i] === "\\") i++;
+      }
+    } else if (ch === "/" && type[i + 1] === "*") {
+      const end = type.indexOf("*/", i + 2);
+      if (end === -1) return false;
+      i = end + 1;
+    } else if (ch === "{" || ch === "[" || ch === "(" || ch === "<") {
+      depth++;
+    } else if (ch === "}" || ch === "]" || ch === ")" || ch === ">") {
+      depth--;
+    } else if (ch === "|" && depth === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Convert the array keywords of a schema. Does not apply `nullable`.
+ */
+function arrayTypeString(
+  schema: JSONSchema7,
+  indent: string,
+  ctx: ConversionContext
+): string {
+  // Tuple support: prefixItems (JSON Schema 2020-12)
+  const prefixItems = (schema as Record<string, unknown>)
+    .prefixItems as JSONSchema7Definition[];
+  if (Array.isArray(prefixItems)) {
+    const types = prefixItems.map((s) =>
+      jsonSchemaToTypeString(s, indent, ctx)
+    );
+    return `[${types.join(", ")}]`;
+  }
+
+  // Tuple support: items as array (draft-07)
+  if (Array.isArray(schema.items)) {
+    const types = schema.items.map((s) =>
+      jsonSchemaToTypeString(s, indent, ctx)
+    );
+    return `[${types.join(", ")}]`;
+  }
+
+  if (schema.items) {
+    // Array<T>, not T[]: `[]` binds tighter than `|` and `&`, so a union or
+    // intersection item type would otherwise leak out of the array.
+    return `Array<${jsonSchemaToTypeString(schema.items, indent, ctx)}>`;
+  }
+  return "unknown[]";
+}
+
+/**
+ * Convert the object keywords of a schema. Does not apply `nullable`.
+ */
+function objectTypeString(
+  schema: JSONSchema7,
+  indent: string,
+  nextCtx: ConversionContext
+): string {
+  const props = schema.properties || {};
+  const required = new Set(schema.required || []);
+  const lines: string[] = [];
+
+  for (const [propName, propSchema] of Object.entries(props)) {
+    if (typeof propSchema === "boolean") {
+      const boolType = propSchema ? "unknown" : "never";
+      const optionalMark = required.has(propName) ? "" : "?";
+      lines.push(
+        `${indent}    ${quoteProp(propName)}${optionalMark}: ${boolType};`
+      );
+      continue;
+    }
+
+    const isRequired = required.has(propName);
+    const propType = jsonSchemaToTypeString(
+      propSchema,
+      indent + "    ",
+      nextCtx
+    );
+    const desc = propSchema.description;
+    const format = propSchema.format;
+
+    if (desc || format) {
+      const descText = desc
+        ? escapeJsDoc(desc.replace(/\r?\n/g, " "))
+        : undefined;
+      const formatTag = format ? `@format ${escapeJsDoc(format)}` : undefined;
+
+      if (descText && formatTag) {
+        lines.push(`${indent}    /**`);
+        lines.push(`${indent}     * ${descText}`);
+        lines.push(`${indent}     * ${formatTag}`);
+        lines.push(`${indent}     */`);
+      } else {
+        lines.push(`${indent}    /** ${descText ?? formatTag} */`);
+      }
+    }
+
+    const quotedName = quoteProp(propName);
+    const optionalMark = isRequired ? "" : "?";
+    lines.push(`${indent}    ${quotedName}${optionalMark}: ${propType};`);
+  }
+
+  // Handle additionalProperties
+  if (schema.additionalProperties) {
+    const valueType =
+      schema.additionalProperties === true
+        ? "unknown"
+        : jsonSchemaToTypeString(
+            schema.additionalProperties,
+            indent + "    ",
+            nextCtx
+          );
+    lines.push(`${indent}    [key: string]: ${valueType};`);
+  }
+
+  if (lines.length === 0) {
+    if (schema.additionalProperties === false) {
+      return "{}";
+    }
+    return "Record<string, unknown>";
+  }
+
+  return `{\n${lines.join("\n")}\n${indent}}`;
+}
+
+/**
+ * Convert a schema as if its `type` were the single type `type`.
+ * Does not apply `nullable`.
+ */
+function singleTypeString(
+  type: string | undefined,
+  schema: JSONSchema7,
+  indent: string,
+  ctx: ConversionContext
+): string {
+  if (type === "string") return "string";
+  if (type === "number" || type === "integer") return "number";
+  if (type === "boolean") return "boolean";
+  if (type === "null") return "null";
+  if (type === "array") return arrayTypeString(schema, indent, ctx);
+  if (type === "object" || schema.properties) {
+    return objectTypeString(schema, indent, ctx);
+  }
+  return "unknown";
+}
+
+/**
  * Convert a JSON Schema to a TypeScript type string.
  * This is a direct conversion without going through Zod.
  */
@@ -101,20 +258,25 @@ export function jsonSchemaToTypeString(
       const types = schema.anyOf.map((s) =>
         jsonSchemaToTypeString(s, indent, nextCtx)
       );
+      if (types.length === 0) return "never";
       return applyNullable(types.join(" | "), schema);
     }
     if (schema.oneOf) {
       const types = schema.oneOf.map((s) =>
         jsonSchemaToTypeString(s, indent, nextCtx)
       );
+      if (types.length === 0) return "never";
       return applyNullable(types.join(" | "), schema);
     }
 
     // Handle allOf (intersection types)
     if (schema.allOf) {
-      const types = schema.allOf.map((s) =>
-        jsonSchemaToTypeString(s, indent, nextCtx)
-      );
+      // `&` binds tighter than `|`, so a union member needs parentheses.
+      const types = schema.allOf.map((s) => {
+        const member = jsonSchemaToTypeString(s, indent, nextCtx);
+        return hasTopLevelUnion(member) ? `(${member})` : member;
+      });
+      if (types.length === 0) return "unknown";
       return applyNullable(types.join(" & "), schema);
     }
 
@@ -148,124 +310,22 @@ export function jsonSchemaToTypeString(
     // Handle type
     const type = schema.type;
 
-    if (type === "string") return applyNullable("string", schema);
-    if (type === "number" || type === "integer")
-      return applyNullable("number", schema);
-    if (type === "boolean") return applyNullable("boolean", schema);
-    if (type === "null") return "null";
-
-    if (type === "array") {
-      // Tuple support: prefixItems (JSON Schema 2020-12)
-      const prefixItems = (schema as Record<string, unknown>)
-        .prefixItems as JSONSchema7Definition[];
-      if (Array.isArray(prefixItems)) {
-        const types = prefixItems.map((s) =>
-          jsonSchemaToTypeString(s, indent, nextCtx)
-        );
-        return applyNullable(`[${types.join(", ")}]`, schema);
-      }
-
-      // Tuple support: items as array (draft-07)
-      if (Array.isArray(schema.items)) {
-        const types = schema.items.map((s) =>
-          jsonSchemaToTypeString(s, indent, nextCtx)
-        );
-        return applyNullable(`[${types.join(", ")}]`, schema);
-      }
-
-      if (schema.items) {
-        const itemType = jsonSchemaToTypeString(schema.items, indent, nextCtx);
-        return applyNullable(`${itemType}[]`, schema);
-      }
-      return applyNullable("unknown[]", schema);
-    }
-
-    if (type === "object" || schema.properties) {
-      const props = schema.properties || {};
-      const required = new Set(schema.required || []);
-      const lines: string[] = [];
-
-      for (const [propName, propSchema] of Object.entries(props)) {
-        if (typeof propSchema === "boolean") {
-          const boolType = propSchema ? "unknown" : "never";
-          const optionalMark = required.has(propName) ? "" : "?";
-          lines.push(
-            `${indent}    ${quoteProp(propName)}${optionalMark}: ${boolType};`
-          );
-          continue;
-        }
-
-        const isRequired = required.has(propName);
-        const propType = jsonSchemaToTypeString(
-          propSchema,
-          indent + "    ",
-          nextCtx
-        );
-        const desc = propSchema.description;
-        const format = propSchema.format;
-
-        if (desc || format) {
-          const descText = desc
-            ? escapeJsDoc(desc.replace(/\r?\n/g, " "))
-            : undefined;
-          const formatTag = format
-            ? `@format ${escapeJsDoc(format)}`
-            : undefined;
-
-          if (descText && formatTag) {
-            lines.push(`${indent}    /**`);
-            lines.push(`${indent}     * ${descText}`);
-            lines.push(`${indent}     * ${formatTag}`);
-            lines.push(`${indent}     */`);
-          } else {
-            lines.push(`${indent}    /** ${descText ?? formatTag} */`);
-          }
-        }
-
-        const quotedName = quoteProp(propName);
-        const optionalMark = isRequired ? "" : "?";
-        lines.push(`${indent}    ${quotedName}${optionalMark}: ${propType};`);
-      }
-
-      // Handle additionalProperties
-      if (schema.additionalProperties) {
-        const valueType =
-          schema.additionalProperties === true
-            ? "unknown"
-            : jsonSchemaToTypeString(
-                schema.additionalProperties,
-                indent + "    ",
-                nextCtx
-              );
-        lines.push(`${indent}    [key: string]: ${valueType};`);
-      }
-
-      if (lines.length === 0) {
-        if (schema.additionalProperties === false) {
-          return applyNullable("{}", schema);
-        }
-        return applyNullable("Record<string, unknown>", schema);
-      }
-
-      const result = `{\n${lines.join("\n")}\n${indent}}`;
-      return applyNullable(result, schema);
-    }
-
-    // Handle array of types (e.g., ["string", "null"])
+    // Array of types (e.g., ["string", "null"]). Each member reads the
+    // schema's own keywords, so ["array", "null"] keeps `items` and
+    // ["object", "null"] keeps `properties`.
     if (Array.isArray(type)) {
-      const types = type.map((t) => {
-        if (t === "string") return "string";
-        if (t === "number" || t === "integer") return "number";
-        if (t === "boolean") return "boolean";
-        if (t === "null") return "null";
-        if (t === "array") return "unknown[]";
-        if (t === "object") return "Record<string, unknown>";
-        return "unknown";
-      });
-      return applyNullable(types.join(" | "), schema);
+      const types = new Set(
+        type.map((t) => singleTypeString(t, schema, indent, nextCtx))
+      );
+      if (types.size === 0 || types.has("unknown")) return "unknown";
+      return applyNullable([...types].join(" | "), schema);
     }
 
-    return "unknown";
+    if (type === "null") return "null";
+    return applyNullable(
+      singleTypeString(type, schema, indent, nextCtx),
+      schema
+    );
   } finally {
     ctx.seen.delete(schema);
   }
