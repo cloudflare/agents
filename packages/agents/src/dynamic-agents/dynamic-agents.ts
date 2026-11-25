@@ -1,5 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { registerUnlistedSockets } from "./unlisted-sockets";
+import {
+  registerUnlistedSockets,
+  takeDeliveryReport
+} from "./unlisted-sockets";
 import {
   CF_EVENT_LOGS_KEY,
   ensureConnectionWrapped,
@@ -1012,13 +1015,13 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[],
     upstreamBridge?: DynamicAgentConnectionBridgeLike
-  ): Promise<void> {
+  ): Promise<number | void> {
     const activeBridge = upstreamBridge ?? this.activeBridge();
     const previousOperations = new Set([
       ...(this.#broadcastOperationTail ? [this.#broadcastOperationTail] : []),
       ...this.#connectionOperationTails.values()
     ]);
-    let pending: Promise<void>;
+    let pending: Promise<number | void>;
     if (activeBridge && previousOperations.size === 0) {
       try {
         pending = Promise.resolve(
@@ -1031,15 +1034,16 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       pending = Promise.all(previousOperations).then(async () => {
         // A stub, for the same order as the connection operations above.
         const root = this.rootStub();
-        await root._cf_broadcastToSubAgent(ownerPath, message, without);
+        return root._cf_broadcastToSubAgent(ownerPath, message, without);
       });
     }
-    const completion = pending.catch((error: unknown) => {
+    const delivered = pending.catch((error: unknown) => {
       console.error("[Agent] Sub-agent broadcast operation failed:", {
         operation: "broadcast",
         error
       });
     });
+    const completion = delivered.then(() => {});
 
     this.#broadcastOperationTail = completion;
     this.#host.ctx.waitUntil(completion);
@@ -1048,7 +1052,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         this.#broadcastOperationTail = undefined;
       }
     });
-    await completion;
+    return delivered;
   }
 
   #reportConnectionOperationFailure(
@@ -1067,8 +1071,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
+    // Taken before any await: the caller set it for this broadcast.
+    const report = takeDeliveryReport();
     if (this.#broadcastHasNoRecipients(without)) return;
-    await this.routeBroadcast(this.#host.selfPath, message, without);
+    const sentAt = await this.routeBroadcast(
+      this.#host.selfPath,
+      message,
+      without
+    );
+    if (typeof sentAt === "number") report?.(sentAt);
   }
 
   /**
@@ -1115,12 +1126,14 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void> {
+  ): Promise<number | void> {
     if (this.#host._isFacet) {
-      await this.routeBroadcast(ownerPath, message, without);
-      return;
+      return this.routeBroadcast(ownerPath, message, without);
     }
 
+    // When the root sent it, on its own clock: a socket accepted strictly
+    // before is one of these (`CF_SUB_AGENT_ACCEPTED_AT_KEY`).
+    const sentAt = Date.now();
     for (const connection of this.#host._webSockets.getConnections()) {
       if (without?.includes(connection.id)) continue;
       const targetPath = this.connectionTargetPath(connection);
@@ -1128,6 +1141,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       if (!this.isSameAgentPath(targetPath, ownerPath)) continue;
       connection.send(message);
     }
+    return sentAt;
   }
 
   async connectionMetas(

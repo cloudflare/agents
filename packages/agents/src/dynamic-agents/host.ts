@@ -51,7 +51,7 @@ export interface DynamicAgentHostPort {
     ownerPath: ReadonlyArray<AgentPathStep>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
-  ): Promise<void>;
+  ): Promise<number | void>;
   /** Ensure constructor-time async initialization has completed. */
   __unsafe_ensureInitialized(): Promise<void>;
   /**

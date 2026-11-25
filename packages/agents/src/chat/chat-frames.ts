@@ -12,6 +12,7 @@
  *   was away gets it when it resumes (`recent-terminals.ts`).
  */
 
+import { reportDelivery } from "../dynamic-agents/unlisted-sockets";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { withOriginMessageIds } from "./origin-message-ids";
 import {
@@ -122,6 +123,16 @@ export class EndedRequests {
     );
   }
 
+  /**
+   * The root sent the broadcast end of `requestId` at `sentAt` (its clock):
+   * later than this facet handed it over when the root sent it behind a
+   * socket's connect.
+   */
+  delivered(requestId: string, sentAt: number): void {
+    const broadcast = this.#broadcast.get(requestId);
+    if (broadcast) broadcast.at = sentAt;
+  }
+
   /** The end of `requestId` was broadcast to every socket but `without`. */
   broadcast(requestId: string, without: readonly string[]): void {
     this.#broadcast.delete(requestId);
@@ -213,6 +224,14 @@ export class ChatFrames {
       // with no listed recipient.
       if (listed || this.options.reachesUnlisted?.()) {
         this.ended.broadcast(ends, without);
+        // When the root sent it, if it went through the root: an accept
+        // before that, even after this call, got the frame.
+        reportDelivery(
+          (sentAt) => this.ended.delivered(ends, sentAt),
+          () => this.options.broadcast(JSON.stringify(ready), without)
+        );
+        this.#record(ready);
+        return;
       }
     }
     this.options.broadcast(JSON.stringify(ready), without);
