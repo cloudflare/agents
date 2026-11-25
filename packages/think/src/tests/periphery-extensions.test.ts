@@ -30,22 +30,22 @@ function fakeCore(
     }
   }
   for (const [name, { hooks, hook }] of hooksOf) {
-    const entrypoint = {
-      describe: async () => "[]",
-      manifest: async () => JSON.stringify({ hooks }),
-      execute: async () => "{}",
-      hook
+    // The extension runtime's entrypoint, answering hooks as a released
+    // extension's handler does.
+    const worker = {
+      describe: async () => ({ hooks }),
+      build: async () => ({ tools: [], prompt: [] }),
+      execute: async () => ({ ok: true as const, output: undefined }),
+      cancel: async () => {},
+      hook: async (hookName: string, snapshot: unknown) => {
+        const parsed = JSON.parse((await hook(hookName, snapshot)) || "{}");
+        if (parsed.error) throw new Error(parsed.error);
+        return parsed.result;
+      }
     };
     core.load(
       name,
-      Promise.resolve(
-        new ReleasedWorkerHandle(
-          { name, version: "1.0.0" },
-          entrypoint,
-          [],
-          hooks
-        )
-      )
+      ReleasedWorkerHandle.open({ name, version: "1.0.0" }, worker)
     );
   }
   return core;

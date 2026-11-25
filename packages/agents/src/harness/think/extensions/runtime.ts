@@ -6,25 +6,26 @@
  *
  * @internal Not exported from any entry point.
  */
-import { asSchema, type JSONSchema7 } from "ai";
+import type { JSONSchema7 } from "ai";
 import type { ThinkSessionId } from "../types";
-import { harnessHookRules } from "./hooks";
 import type {
   BuildContext,
   Draft,
   Drafts,
   ExtensionHandle,
   ExtensionHookHandler,
-  ExtensionHookName,
   ExtensionHooks,
   ExtensionTool,
   HookHandler,
+  HookMap,
+  HookRules,
   PromptDraft,
   PromptEntry,
   ThinkExtension,
   ToolCall,
   ToolDraft,
   ToolEntry,
+  SchemaOf,
   ToolOutcome,
   Transform,
   Validation
@@ -115,25 +116,21 @@ type Converted = {
 };
 
 /**
- * Load `extension` in this isolate: run it once, and return its handle.
+ * The runtime beside one extension, for the hooks of `M`. It imports
+ * nothing from the AI SDK, so the same code runs in a dynamic Worker.
  *
  * @internal
  */
-export async function loadInProcess(
-  name: string,
-  extension: ThinkExtension
-): Promise<ExtensionHandle> {
-  const runtime = new ExtensionRuntime(name);
-  await runtime.install(extension);
-  return runtime;
-}
-
-class ExtensionRuntime implements ExtensionHandle {
+export class ExtensionRuntime<
+  M extends HookMap = ExtensionHooks
+> implements ExtensionHandle<M> {
   readonly #name: string;
+  readonly #rules: HookRules<M>;
+  readonly #schemaOf: SchemaOf;
   readonly #toolTransforms: Transform<ToolDraft>[] = [];
   readonly #promptTransforms: Transform<PromptDraft>[] = [];
   readonly #hooks = new Map<
-    ExtensionHookName,
+    keyof M & string,
     HookHandler<unknown, unknown>[]
   >();
   /**
@@ -149,11 +146,13 @@ class ExtensionRuntime implements ExtensionHandle {
    */
   readonly #running = new Map<string, AbortController>();
 
-  constructor(name: string) {
+  constructor(name: string, rules: HookRules<M>, schemaOf: SchemaOf) {
     this.#name = name;
+    this.#rules = rules;
+    this.#schemaOf = schemaOf;
   }
 
-  async install(extension: ThinkExtension): Promise<void> {
+  async install(extension: ThinkExtension<M>): Promise<void> {
     let open = true;
     const registering = (what: string) => {
       if (!open) {
@@ -177,9 +176,9 @@ class ExtensionRuntime implements ExtensionHandle {
             this.#promptTransforms.push(change);
           }
         },
-        on: <H extends ExtensionHookName>(
+        on: <H extends keyof M & string>(
           hook: H,
-          handler: ExtensionHookHandler<H>
+          handler: ExtensionHookHandler<H, M>
         ) => {
           registering(`a ${hook} hook`);
           const runners = this.#hooks.get(hook) ?? [];
@@ -257,7 +256,7 @@ class ExtensionRuntime implements ExtensionHandle {
         ? tool.description({ context: undefined })
         : tool.description;
     if (description !== undefined) definition.description = description;
-    const schema = asSchema(tool.inputSchema);
+    const schema = this.#schemaOf(tool.inputSchema);
     const json = schema.jsonSchema;
     const isAsync = typeof (json as PromiseLike<unknown>).then === "function";
     const needsApproval = tool.needsApproval;
@@ -282,6 +281,21 @@ class ExtensionRuntime implements ExtensionHandle {
     return converted;
   }
 
+  /**
+   * A tool this extension set for `session`. A runtime that has not built
+   * for the session (it restarted since, as a Worker may on its own)
+   * builds its own tools again first.
+   */
+  async #toolFor(
+    session: ThinkSessionId,
+    name: string
+  ): Promise<ExtensionTool> {
+    if (!this.#kept.has(session)) {
+      await this.build({ tools: [], prompt: [] }, { session });
+    }
+    return this.#tool(session, name);
+  }
+
   #tool(session: ThinkSessionId, name: string): ExtensionTool {
     const tool = this.#kept.get(session)?.get(name);
     if (!tool) {
@@ -298,7 +312,7 @@ class ExtensionRuntime implements ExtensionHandle {
     call: ToolCall,
     onOutput: (output: unknown) => void | Promise<void>
   ): Promise<ToolOutcome> {
-    const execute = this.#tool(call.session, name).execute;
+    const execute = (await this.#toolFor(call.session, name)).execute;
     if (typeof execute !== "function") {
       return { ok: false, errorText: "The tool has no execute function" };
     }
@@ -335,8 +349,8 @@ class ExtensionRuntime implements ExtensionHandle {
     input: unknown,
     build: BuildContext
   ): Promise<Validation> {
-    const validate = asSchema(
-      this.#tool(build.session, name).inputSchema
+    const validate = this.#schemaOf(
+      (await this.#toolFor(build.session, name)).inputSchema
     ).validate;
     if (!validate) return { success: true, value: input };
     return validate(input);
@@ -347,7 +361,8 @@ class ExtensionRuntime implements ExtensionHandle {
     output: { toolCallId: string; input: unknown; output: unknown },
     build: BuildContext
   ): Promise<unknown> {
-    const toModelOutput = this.#tool(build.session, name).toModelOutput;
+    const toModelOutput = (await this.#toolFor(build.session, name))
+      .toModelOutput;
     if (!toModelOutput) {
       throw new Error(`Tool "${name}" has no toModelOutput`);
     }
@@ -359,7 +374,8 @@ class ExtensionRuntime implements ExtensionHandle {
     input: unknown,
     call: ToolCall
   ): Promise<boolean> {
-    const needsApproval = this.#tool(call.session, name).needsApproval;
+    const needsApproval = (await this.#toolFor(call.session, name))
+      .needsApproval;
     if (typeof needsApproval === "function") {
       return Boolean(
         await needsApproval(input, {
@@ -372,11 +388,11 @@ class ExtensionRuntime implements ExtensionHandle {
     return needsApproval === true;
   }
 
-  async hook<H extends ExtensionHookName>(
+  async hook<H extends keyof M & string>(
     name: H,
-    context: ExtensionHooks[H][0]
-  ): Promise<ExtensionHooks[H][1]> {
-    const rule = harnessHookRules[name];
+    context: M[H][0]
+  ): Promise<M[H][1]> {
+    const rule = this.#rules[name];
     // SAFETY: the handlers of hook `name` take and return its types.
     const handlers = (this.#hooks.get(name) ?? []) as unknown as Parameters<
       typeof rule

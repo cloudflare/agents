@@ -74,7 +74,7 @@ import {
 import { harnessHookRules } from "./extensions/hooks";
 import { ExtensionManager } from "./extensions/manager";
 import { contextExtension, optionsExtension, resolve } from "./extensions/own";
-import { loadInProcess } from "./extensions/runtime";
+import { loadInProcess } from "./extensions/in-process";
 import { ReleasedRecords, type OperationInput } from "./records";
 import {
   executeTool,

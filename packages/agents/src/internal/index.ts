@@ -83,6 +83,10 @@ export {
   type DeliverySink
 } from "./delivery";
 export { ExtensionManager, toolsOf } from "../harness/think/extensions/manager";
+export {
+  EXTENSION_WORKER_RUNTIME,
+  EXTENSION_WORKER_RUNTIME_VERSION
+} from "../harness/think/extensions/worker-runtime.generated";
 export type {
   Drafts,
   ExtensionHandle,
