@@ -214,6 +214,37 @@ describe("extensions: the build", () => {
     );
   });
 
+  it("leaves out an output schema with no JSON Schema, instead of failing the build", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tools = {
+      dated: tool({
+        description: "Has a date",
+        inputSchema: z.object({}),
+        outputSchema: z.object({ at: z.date() }),
+        execute: async () => ({ at: new Date(0) })
+      }),
+      big: tool({
+        description: "Has a bigint",
+        inputSchema: z.object({}),
+        outputSchema: z.object({ n: z.bigint() }),
+        execute: async () => ({ n: 1n })
+      })
+    };
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "options",
+      loadInProcess("options", optionsExtension({ tools }))
+    );
+    const built = await manager.build("");
+    warn.mockRestore();
+    expect(Object.keys(built.tools)).toEqual(["dated", "big"]);
+    expect(built.tools.dated?.outputSchema).toBeUndefined();
+    expect(built.tools.big?.outputSchema).toBeUndefined();
+    expect((await send(built.tools, undefined)).request).toBe(
+      (await send(tools, undefined)).request
+    );
+  });
+
   it("builds the same tools and prompt twice, and in order", async () => {
     const manager = new ExtensionManager(harnessHookRules);
     manager.load(

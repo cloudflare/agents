@@ -221,9 +221,12 @@ export class ExtensionRuntime<
         }
         if (converted.outputSchema) {
           pending.push(
-            converted.outputSchema.then((schema) => {
-              converted.entry.outputSchema = schema;
-            })
+            converted.outputSchema.then(
+              (schema) => {
+                converted.entry.outputSchema = schema;
+              },
+              (error: unknown) => this.#warnOutputSchema(toolName, error)
+            )
           );
         }
         return converted.entry;
@@ -277,10 +280,10 @@ export class ExtensionRuntime<
     const needsApproval = tool.needsApproval;
     // An output schema is data a hook may read (Think's `beforeTurn` sees
     // the tools whole); it is converted as the input schema is.
-    const output =
-      tool.outputSchema === undefined
-        ? undefined
-        : this.#schemaOf(tool.outputSchema).jsonSchema;
+    // Not every schema has a JSON Schema (a zod `date()` or `bigint()` has
+    // none), and nothing the model is sent needs this one, so a schema
+    // that cannot convert is left out rather than failing the build.
+    const output = this.#outputSchemaOf(tool.outputSchema);
     const outputIsAsync =
       output !== undefined &&
       typeof (output as PromiseLike<unknown>).then === "function";
@@ -308,6 +311,25 @@ export class ExtensionRuntime<
     };
     this.#converted.set(tool, converted);
     return converted;
+  }
+
+  #outputSchemaOf(
+    schema: unknown
+  ): JSONSchema7 | PromiseLike<JSONSchema7> | undefined {
+    if (schema === undefined) return undefined;
+    try {
+      return this.#schemaOf(schema).jsonSchema;
+    } catch (error) {
+      this.#warnOutputSchema(undefined, error);
+      return undefined;
+    }
+  }
+
+  #warnOutputSchema(tool: string | undefined, error: unknown): void {
+    console.warn(
+      `Extension "${this.#name}": ${tool ? `tool "${tool}"'s` : "a tool's"} output schema has no JSON Schema, so it is left out`,
+      error
+    );
   }
 
   /**
