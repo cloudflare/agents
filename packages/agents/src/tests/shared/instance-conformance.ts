@@ -147,7 +147,8 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
     keys: both.keys
       .map(keyName)
       .filter((key) => !alone.keys.map(keyName).includes(key)),
-    jobs: both.jobs.filter((job) => !alone.jobs.includes(job))
+    // Job ids can be random: compared within the run.
+    jobs: both.jobs.filter((job) => !before.jobs.includes(job))
   };
   // Values within the run: what the probe's smoke wrote or changed.
   const changedRows = both.rows.filter((row) => !before.rows.includes(row));
@@ -165,14 +166,16 @@ export async function checkInstanceConformance<C extends LifecycleCapability>(
   expect(misplaced, "stored by the probe instance outside its names").toEqual(
     []
   );
-  for (const field of ["tables", "indexes", "jobs"] as const) {
+  for (const field of ["tables", "indexes"] as const) {
     expect(
-      both[field].filter(
-        (value) => !(addedNames[field] as string[]).includes(value)
-      ),
+      both[field].filter((value) => !addedNames[field].includes(value)),
       `the default instance's ${field}, next to the probe`
     ).toEqual(alone[field]);
   }
+  expect(
+    both.jobs.filter((job) => !addedNames.jobs.includes(job)),
+    "the default instance's jobs, next to the probe"
+  ).toEqual(before.jobs);
   // The Lifecycle's own (the job queue, its bookkeeping keys) belongs to
   // no instance.
   const lifecycleOwn = (field: "tables" | "indexes" | "keys", name: string) =>
