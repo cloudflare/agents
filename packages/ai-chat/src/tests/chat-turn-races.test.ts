@@ -1473,14 +1473,12 @@ describe("chat turn races", () => {
       ] as ChatMessage["parts"]
     };
     await agent.persistMessages([user1, reply]);
-    await agent.setTestBody({ delayMs: 400 });
+    await agent.holdNextModelCallForTest();
 
     // The first result's continuation waits on the model. A second result
     // lands meanwhile, and then the user stops the continuation.
     send(ws, toolResult("call-1"));
-    await waitUntil(
-      async () => (await agent.getChatMessageCallCountForTest()) === 1
-    );
+    await waitUntil(async () => await agent.isModelCallHeldForTest());
     const continuationId = await agent.pendingContinuationRequestIdForTest();
     expect(continuationId).not.toBeNull();
     send(ws, toolResult("call-2"));
@@ -1488,10 +1486,13 @@ describe("chat turn races", () => {
       async () =>
         (await agent.getContinuationStateForTest()).hasDeferred === true
     );
+    // The cancel is handled while the model call is still held.
     await sendHandled(agent, ws, {
       type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
       id: continuationId
     });
+    expect(await agent.isModelCallHeldForTest()).toBe(true);
+    await agent.releaseModelCallForTest();
     // No armed continuation and idle: nothing more can start.
     await settled(agent);
 
