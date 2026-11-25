@@ -61,3 +61,7 @@ A Channel's `deliver()` returns `delivered`, `failed` (retryable or not) or `unc
 
 - Replacing a delivery's value while it is open (latest value per key): no call site replaces; each key is sent once.
 - Keeping failed deliveries for inspection: the released code kept none.
+
+## Not a delivery: Think's owed response hook
+
+A turn that persisted its assistant message owes `onChatResponse` until the hook has run. That is not sent anywhere and is on every turn's path, so it is not a delivery run (a run per turn would add a row insert and delete with their index entries, and firing it from an alarm next to a live turn breaks the hook's re-entrancy guard). It is one key, `owedHook`, in the chat turn's own run checkpoint (`currentTurnCheckpoint()` in `agents/chat/turn-task.ts`): set before the persist, cleared after the hook, and cleared with the checkpoint when the run settles. A reset in between leaves the run interrupted, and its recovery (`_settlePersistedChatTurn`) fires the hook once instead of running the turn again. A hook whose bookkeeping failed after the turn (`_fireLiveResponseHook`) outlives the run, so it goes to the `cf_think_pending_response_hook:` key the start replays, where 0.24 kept every owed hook.
