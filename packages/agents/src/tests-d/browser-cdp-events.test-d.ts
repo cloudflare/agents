@@ -13,17 +13,24 @@ cdp.on("Page.frameNavigated", (event) => {
   void event.params.frmae;
   // @ts-expect-error events are read-only: other handlers get the same one
   event.method = "Page.loadEventFired";
+  // Deeper down they are the protocol's types, so they pass where those
+  // are expected.
+  const frame: Protocol.Page.Frame = event.params.frame;
+  // @ts-expect-error and so are their params
+  event.params.frame = frame;
 });
 
 // An event the protocol sends without params gets `{}`.
 cdp.on("Page.frameResized", (event) => {
-  expectTypeOf(event.params).toEqualTypeOf<Record<string, never>>();
+  expectTypeOf(event.params).toEqualTypeOf<Readonly<Record<string, never>>>();
 });
 
 // Any other name is allowed, with untyped params.
 cdp.on("Cloudflare.handoffComplete", (event) => {
   expectTypeOf(event.method).toEqualTypeOf<"Cloudflare.handoffComplete">();
-  expectTypeOf(event.params).toEqualTypeOf<Record<string, unknown>>();
+  expectTypeOf(event.params).toEqualTypeOf<Readonly<Record<string, unknown>>>();
+  // @ts-expect-error read-only too
+  event.params.anything = 1;
 });
 
 // So is a name only known at runtime: any event.

@@ -36,16 +36,18 @@ export type CdpEventMethod =
 /**
  * The parameters of the event named `M`: the protocol's type for its own
  * events, `{}` for one that has none, and a plain record for any other
- * name.
+ * name. Every listener gets the same object, so its fields are read-only.
+ * Only the top level: deeper down they stay the protocol's types, so
+ * `params.frame` still passes where a `Protocol.Page.Frame` is expected.
  */
 export type CdpEventParams<M extends string> =
   M extends keyof ProtocolMapping.Events
     ? ProtocolMapping.Events[M] extends [infer Params]
       ? // Copied out of the protocol's interface, which has no index
         // signature, so a typed event is also a plain `CdpEvent`.
-        { [K in keyof Params]: Params[K] }
-      : Record<string, never>
-    : Record<string, unknown>;
+        { readonly [K in keyof Params]: Params[K] }
+      : Readonly<Record<string, never>>
+    : Readonly<Record<string, unknown>>;
 
 /**
  * A CDP event: a message the browser sent on its own, with a `method` and

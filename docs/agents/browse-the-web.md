@@ -386,7 +386,7 @@ Events are typed from the [`devtools-protocol`](https://www.npmjs.com/package/de
 
 Without `sessionId`, a listener hears the event from every CDP session on the connection and from the browser itself. `sessionId: null` hears browser-level events only. Browser Run sends `Cloudflare.handoffComplete` once at browser level and once more in each attached session, so listen for it with `sessionId: null` to hear it once.
 
-Handlers run synchronously as each event arrives, so code awaiting a command's reply has already seen the events sent before it. A handler that throws is logged and does not stop the others, and no handler runs once the connection ends. `waitFor()` rejects on timeout (by default the connection's command timeout), when its `signal` aborts, and when the connection closes. A wait that rejects before your code awaits it is not reported as an unhandled rejection, so a failed command beside it leaves nothing behind.
+Handlers run synchronously as each event arrives, so code awaiting a command's reply has already seen the events sent before it. A handler that throws is logged and does not stop the others, and no handler runs once the connection ends. Every handler gets the same event object, so its `params` are read-only. `waitFor()` rejects on timeout (by default the connection's command timeout), when its `signal` aborts, and when the connection closes. A wait that rejects before your code awaits it is not reported as an unhandled rejection, so a failed command beside it leaves nothing behind.
 
 ## Local development
 
