@@ -266,7 +266,7 @@ export class Context {
     // pending refresh is weighed, so a regeneration keeps it.
     let storeFailed = false;
     if (!delivered.system) {
-      const released = await this.#readReleased();
+      const released = await this.#released();
       storeFailed = released.failed;
       delivered = await this.#carriedForward(delivered, released.prompt);
     }
@@ -422,7 +422,7 @@ export class Context {
       const found = await this.#delivered(history);
       const delivered = await this.#carriedForward(
         found,
-        found.system ? null : await this.#released()
+        found.system ? null : (await this.#released()).prompt
       );
       if (delivered.system) return renderSystem(delivered.system);
     }
@@ -453,7 +453,7 @@ export class Context {
     const found = await this.#delivered(history);
     const delivered = await this.#carriedForward(
       found,
-      found.system ? null : await this.#released()
+      found.system ? null : (await this.#released()).prompt
     );
     if (!delivered.system) return null;
     const changes = await this.#changes(delivered.values);
@@ -603,12 +603,7 @@ export class Context {
    * before the upgrade), until the session is cleared. Read each time, so a
    * clear counts at once; only a turn with no record asks.
    */
-  async #released(): Promise<string | null> {
-    return (await this.#readReleased()).prompt;
-  }
-
-  /** As `#released`, and whether the store could not be read. */
-  async #readReleased(): Promise<{ prompt: string | null; failed: boolean }> {
+  async #released(): Promise<{ prompt: string | null; failed: boolean }> {
     if (!this.#promptStore) return { prompt: null, failed: false };
     // A store that fails never fails a turn: the turn is sent the blocks
     // and records them, as what it was sent. Only a prompt is kept, so after
