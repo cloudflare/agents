@@ -3377,6 +3377,9 @@ describe("resume coordination during pending continuation", () => {
       } as unknown as UIMessage
     ]);
 
+    // Park the continuation before its stream starts: the resume request
+    // must arrive while it is pending, whatever the machine's speed.
+    await agent.holdContinuationStartForTest();
     ws.send(
       JSON.stringify({
         type: MSG_TOOL_RESULT,
@@ -3386,19 +3389,19 @@ describe("resume coordination during pending continuation", () => {
         autoContinue: true
       })
     );
+    await waitUntil(() => agent.isContinuationStartHeldForTest(), 8000);
 
-    await delay(20);
-
-    const resumeResponse = waitForMessageOfType(ws, MSG_STREAM_RESUMING, 5000)
-      .then(() => "resuming" as const)
-      .catch(() => "timeout" as const);
-
+    // Held: the client is told a stream is pending, not that there is none.
+    const pending = waitForMessageOfType(ws, MSG_STREAM_PENDING, 3000);
+    const resuming = waitForMessageOfType(ws, MSG_STREAM_RESUMING, 10000);
     ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
+    await pending;
 
-    const result = await resumeResponse;
-    expect(result).toBe("resuming");
-
-    await waitForDone(ws, 10000);
+    // Once the continuation streams, the held request resumes it.
+    const done = waitForDone(ws, 10000);
+    await agent.releaseContinuationStartForTest();
+    expect(await resuming).toMatchObject({ type: MSG_STREAM_RESUMING });
+    await done;
     await closeWS(ws);
   });
 
