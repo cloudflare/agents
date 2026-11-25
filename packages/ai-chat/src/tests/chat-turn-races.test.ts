@@ -1486,13 +1486,17 @@ describe("chat turn races", () => {
       async () =>
         (await agent.getContinuationStateForTest()).hasDeferred === true
     );
-    // The cancel is handled while the model call is still held.
-    await sendHandled(agent, ws, {
-      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
-      id: continuationId
-    });
-    expect(await agent.isModelCallHeldForTest()).toBe(true);
-    await agent.releaseModelCallForTest();
+    // The cancel is handled while the model call is still held. The call
+    // is released however the checks end.
+    try {
+      await sendHandled(agent, ws, {
+        type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+        id: continuationId
+      });
+      expect(await agent.isModelCallHeldForTest()).toBe(true);
+    } finally {
+      await agent.releaseModelCallForTest();
+    }
     // No armed continuation and idle: nothing more can start.
     await settled(agent);
 
