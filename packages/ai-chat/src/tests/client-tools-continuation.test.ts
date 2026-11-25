@@ -1453,6 +1453,7 @@ describe("Client tools continuation", () => {
 
     await agentStub.clearCapturedContext();
 
+    const callsBefore = await agentStub.getChatMessageCallCountForTest();
     ws.send(
       JSON.stringify({
         type: "cf_agent_tool_result",
@@ -1464,6 +1465,12 @@ describe("Client tools continuation", () => {
     );
 
     await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    // The continuation has reached the model.
+    const deadline = Date.now() + 3000;
+    while ((await agentStub.getChatMessageCallCountForTest()) <= callsBefore) {
+      if (Date.now() > deadline) throw new Error("No continuation ran");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
 
     // Client tools should be undefined after chat clear
     const continuationClientTools = await agentStub.getCapturedClientTools();

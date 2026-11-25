@@ -121,6 +121,7 @@ describe("Client tools after reconnect", () => {
     await agentStub.clearCapturedContext();
 
     // Send tool result WITHOUT clientTools (old client behavior)
+    const callsBefore = await agentStub.getChatMessageCallCountForTest();
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -133,6 +134,12 @@ describe("Client tools after reconnect", () => {
     );
 
     await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 1);
+    // The continuation has reached the model.
+    const deadline = Date.now() + 3000;
+    while ((await agentStub.getChatMessageCallCountForTest()) <= callsBefore) {
+      if (Date.now() > deadline) throw new Error("No continuation ran");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
 
     // Continuation should still fire, just without client tools
     const capturedClientTools = await agentStub.getCapturedClientTools();

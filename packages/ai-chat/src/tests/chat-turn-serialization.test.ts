@@ -446,6 +446,8 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn stays active until the test releases its stream.
+    await agentStub.holdStreamForTest("req-pre-clear");
     sendChatRequest(ws, "req-pre-clear", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
@@ -474,10 +476,16 @@ describe("AIChatAgent chat turn serialization", () => {
     );
 
     await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    // The continuation is queued behind the active turn.
+    await waitUntil(async () => {
+      const state = await agentStub.getContinuationStateForTest();
+      return state.hasPending || state.hasDeferred;
+    });
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
     await clearBroadcast;
+    await agentStub.releaseStreamForTest("req-pre-clear");
 
     await agentStub.waitForIdleForTest();
 
