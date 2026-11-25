@@ -129,11 +129,6 @@ export interface ExtensionManagerOptions {
    * manager instance.
    */
   workerIdScope?: string;
-  /**
-   * @internal The agent's hook timeout in milliseconds, read on every call.
-   * Default 5000.
-   */
-  hookTimeoutMs?: () => number;
 }
 
 async function hashWorkerConfig(input: unknown): Promise<string> {
@@ -402,18 +397,26 @@ export class ReleasedWorkerHandle implements ExtensionHandle<ReleasedHooks> {
   }
 }
 
-/** Each manager's extension core. */
-const cores = new WeakMap<ExtensionManager, ExtensionCore<ReleasedHooks>>();
+/** Each manager's extension core, and the hook timeout it runs under. */
+const cores = new WeakMap<
+  ExtensionManager,
+  { core: ExtensionCore<ReleasedHooks>; timeoutMs: () => number }
+>();
 
 /**
- * The extension core behind `manager`, which runs its extensions' hooks.
+ * The extension core behind `manager`, which runs its extensions' hooks
+ * with the agent's `timeoutMs` per call. A manager the agent was given
+ * runs under the agent's timeout too.
  *
  * @internal
  */
 export function coreOf(
-  manager: ExtensionManager
+  manager: ExtensionManager,
+  timeoutMs: () => number
 ): ExtensionCore<ReleasedHooks> | undefined {
-  return cores.get(manager);
+  const entry = cores.get(manager);
+  if (entry) entry.timeoutMs = timeoutMs;
+  return entry?.core;
 }
 
 const DEFAULT_HOOK_TIMEOUT_MS = 5000;
@@ -441,9 +444,15 @@ export class ExtensionManager {
     this.#storage = options.storage ?? null;
     this.#createHostBinding = options.createHostBinding ?? null;
     this.#workerIdScope = options.workerIdScope ?? crypto.randomUUID();
-    const timeoutMs = options.hookTimeoutMs ?? (() => DEFAULT_HOOK_TIMEOUT_MS);
-    this.#core = new ExtensionCore(releasedHookRules(timeoutMs));
-    cores.set(this, this.#core);
+    const entry: {
+      core: ExtensionCore<ReleasedHooks>;
+      timeoutMs: () => number;
+    } = {
+      core: new ExtensionCore(releasedHookRules(() => entry.timeoutMs())),
+      timeoutMs: () => DEFAULT_HOOK_TIMEOUT_MS
+    };
+    this.#core = entry.core;
+    cores.set(this, entry);
   }
 
   /**

@@ -3666,8 +3666,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       agentClassName: this.constructor.name,
       agentId: this.ctx.id.toString(),
       exports: (this.ctx as unknown as { exports?: Record<string, unknown> })
-        .exports,
-      hookTimeoutMs: () => this.hookTimeout
+        .exports
     });
     await loadThinkExtensions(
       this.extensionManager,
@@ -4254,7 +4253,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /** Runs the extension hooks of each turn. */
   readonly #extensionHooks = new ThinkExtensionHooks(
-    () => this.extensionManager && coreOf(this.extensionManager)
+    () =>
+      this.extensionManager &&
+      coreOf(this.extensionManager, () => this.hookTimeout)
   );
 
   /**

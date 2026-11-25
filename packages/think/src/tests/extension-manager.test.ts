@@ -7,7 +7,7 @@
 import { asSchema } from "ai";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { ExtensionManager, sanitizeName } from "../extensions/manager";
+import { coreOf, ExtensionManager, sanitizeName } from "../extensions/manager";
 import type { ExtensionManifest } from "../extensions/types";
 
 // Simple extension source: a greet tool that returns a greeting
@@ -862,5 +862,43 @@ describe("ExtensionManager worker id scoping for host bindings", () => {
       );
     }
     expect(ids[1]).not.toBe(ids[0]);
+  });
+});
+
+describe("ExtensionManager hook timeout", () => {
+  it("runs a manager the agent was given under the agent's timeout", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Built as a subclass would build its own, with no timeout of its own.
+    const manager = new ExtensionManager({ loader: env.LOADER });
+    await manager.load(
+      makeManifest({ name: "slow-turn" }),
+      `{
+        hooks: {
+          beforeTurn: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            return { seed: 1 };
+          }
+        }
+      }`
+    );
+    const started = Date.now();
+    const config = await coreOf(manager, () => 20)?.hook("beforeTurn", {
+      snapshot: {
+        system: "",
+        toolNames: [],
+        messageCount: 0,
+        continuation: false,
+        modelId: "test"
+      },
+      config: { maxSteps: 2 }
+    });
+    const waited = Date.now() - started;
+    const timedOut = warn.mock.calls.some((call) =>
+      String(call[1]).includes("Hook timeout: slow-turn")
+    );
+    warn.mockRestore();
+    expect(config).toEqual({ maxSteps: 2 });
+    expect(timedOut).toBe(true);
+    expect(waited).toBeLessThan(1500);
   });
 });

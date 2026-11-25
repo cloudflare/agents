@@ -40,8 +40,6 @@ interface ThinkExtensionManagerOptions {
   readonly agentId: string;
   /** `ctx.exports` of the agent's Durable Object. */
   readonly exports: Record<string, unknown> | undefined;
-  /** The agent's hook timeout, read on every call. */
-  readonly hookTimeoutMs: () => number;
 }
 
 /**
@@ -59,7 +57,6 @@ export function createThinkExtensionManager(
   return new ExtensionManager({
     loader: options.loader,
     storage: options.storage,
-    hookTimeoutMs: options.hookTimeoutMs,
     ...(hasBridge
       ? {
           workerIdScope: `${agentClassName}:${agentId}`,

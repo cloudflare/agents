@@ -30,7 +30,7 @@ A transform is `(draft, build) => void | Promise<void>`, where `build` is `{ ses
 - the input schema as JSON Schema, the same object the AI SDK would send. It is converted once per tool object;
 - the name of the extension that set it (its owner), and flags for which functions the owner keeps: `execute`, input validation, `toModelOutput`, `needsApproval`.
 
-The harness turns each entry back into an AI SDK tool whose functions call the owner's handle. A tool whose `execute` is an async generator runs through an async generator that yields what the tool yields, when it yields it, so its preliminary outputs arrive as they did. Any other tool returns its one output, because the AI SDK streams whatever returns an async iterable. An output is captured when the tool yields it. A call whose signal is already aborted does not start, and a cancel reaches the call of that session only (call ids are unique only within one model reply). Validation runs the tool's own schema, so zod defaults and transforms apply as before. The AI SDK's `onInputStart`, `onInputDelta` and `onInputAvailable` callbacks are not called, and the runtime warns once per tool that has one.
+The harness turns each entry back into an AI SDK tool whose functions call the owner's handle. A tool whose `execute` is an async generator runs through an async generator that yields what the tool yields, when it yields it, so its preliminary outputs arrive as they did. Any other tool returns a promise: of its one output, or of its outputs when what it returned turns out to stream, as the tool itself would. The AI SDK streams whatever returns an async iterable, so a plain tool must not return one. An output is captured when the tool yields it. A call whose signal is already aborted does not start, and a cancel reaches the call of that session only (call ids are unique only within one model reply). Validation runs the tool's own schema, so zod defaults and transforms apply as before. The AI SDK's `onInputStart`, `onInputDelta` and `onInputAvailable` callbacks are not called, and the runtime warns once per tool that has one.
 
 **The handle** is all the harness holds of an extension: `describe`, `build`, `execute`, `cancel`, `validate`, `modelOutput`, `needsApproval`, `hook`. Every argument and result is structured-clone data. The exception is `execute`'s `onOutput`, which is a function, and Workers RPC passes a function as a stub. The rule for anything added to it: if it cannot be the same in the harness's isolate and across Workers RPC, it is not in the API. The conformance test in `tests/extensions.test.ts` runs one extension directly and through a handle that clones every argument and result, and expects the same entries, outcomes and hook decisions.
 
@@ -64,7 +64,7 @@ A context block's `type` in the manifest is ignored with a warning, once per man
 
 ## Guarantees
 
-Nothing is durable. The extensions add no row, key or job.
+The core stores nothing: it adds no row, key or job. One thing is durable, and it predates the core. `Think`'s public `ExtensionManager`, when given `storage`, keeps each extension loaded at run time as `ext:<name>` (manifest and source) in the object's storage, deletes it on `unload`, and `restore()` loads them again after a restart. Moving these records into the manager as a capability comes with run-time loading on ThinkHarness.
 
 In memory, per harness:
 

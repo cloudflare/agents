@@ -181,7 +181,7 @@ function toolOf<M extends HookMap>(
     }),
     ...(entry.execute && {
       execute: (input, options) => {
-        const outputs = execute(
+        const run = execute(
           owner,
           name,
           input,
@@ -189,26 +189,33 @@ function toolOf<M extends HookMap>(
           options.abortSignal
         );
         // The AI SDK streams whatever returns an async iterable, so a tool
-        // that does not stream returns its one output.
-        return entry.streams ? outputs : lastOf(outputs);
+        // declared as an async generator returns its outputs as they come.
+        // Any other tool returns its one result, or, when what it returned
+        // turns out to stream, a promise of the outputs, as the tool itself
+        // would have.
+        if (entry.streams) return run.outputs;
+        return run.streams.then((streams) =>
+          streams ? run.outputs : lastOf(run.outputs)
+        );
       }
     })
   } as Tool;
 }
 
-/**
- * Run a tool through its owner, as an async generator that yields what
- * the tool yields, when it yields it (or its one result), and throws the
- * owner's error text. So whoever runs it sees the same outputs as from
- * the tool itself. A call whose signal is already aborted never starts.
- */
 async function lastOf(outputs: AsyncIterable<unknown>): Promise<unknown> {
   let last: unknown;
   for await (const output of outputs) last = output;
   return last;
 }
 
-async function* execute<M extends HookMap>(
+/**
+ * Run a tool through its owner. `outputs` yields what the tool yields,
+ * when it yields it (or its one result), and throws the owner's error
+ * text, so whoever runs it sees the same outputs as from the tool itself.
+ * `streams` says, as soon as it is known, whether the tool streamed. A
+ * call whose signal is already aborted never starts.
+ */
+function execute<M extends HookMap>(
   owner: ExtensionHandle<M>,
   name: string,
   input: unknown,
@@ -218,38 +225,50 @@ async function* execute<M extends HookMap>(
     messages: ModelMessage[];
   },
   signal: AbortSignal | undefined
-): AsyncGenerator<unknown> {
+): { outputs: AsyncGenerator<unknown>; streams: Promise<boolean> } {
   signal?.throwIfAborted();
   const outputs: unknown[] = [];
   let streamed = false;
   let wake: (() => void) | undefined;
+  let knowStreams: (streams: boolean) => void = () => {};
+  const streams = new Promise<boolean>((resolve) => {
+    knowStreams = resolve;
+  });
   const onAbort = () => owner.cancel(call, signal?.reason);
   signal?.addEventListener("abort", onAbort, { once: true });
   let settled = false;
   const done = owner
     .execute(name, input, call, (output) => {
       streamed = true;
+      knowStreams(true);
       outputs.push(output);
       wake?.();
     })
     .finally(() => {
       settled = true;
+      knowStreams(streamed);
       wake?.();
     });
-  try {
-    for (;;) {
-      while (outputs.length > 0) yield outputs.shift();
-      if (settled) break;
-      await new Promise<void>((resolve) => {
-        wake = resolve;
-      });
-      wake = undefined;
+  // Settled through `outputs`; this only keeps a failure that nobody
+  // iterates from being reported as unhandled.
+  done.catch(() => {});
+  async function* drain(): AsyncGenerator<unknown> {
+    try {
+      for (;;) {
+        while (outputs.length > 0) yield outputs.shift();
+        if (settled) break;
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        wake = undefined;
+      }
+      const outcome = await done;
+      if (!outcome.ok) throw new Error(outcome.errorText);
+      // A streaming tool's last output was its result, already yielded.
+      if (!streamed) yield outcome.output;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
     }
-    const outcome = await done;
-    if (!outcome.ok) throw new Error(outcome.errorText);
-    // A streaming tool's last output was its result, already yielded.
-    if (!streamed) yield outcome.output;
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
   }
+  return { outputs: drain(), streams };
 }

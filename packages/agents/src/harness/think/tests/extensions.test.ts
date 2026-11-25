@@ -515,40 +515,59 @@ describe("extensions: conformance in process and across a boundary", () => {
   });
 
   it("passes on a streaming tool's outputs as the tool itself yields them", async () => {
-    const streaming = (fail: boolean) =>
-      tool({
-        description: "Streams",
-        inputSchema: z.object({}),
-        execute: async function* () {
-          yield "one";
-          yield "two";
-          if (fail) throw new Error("broke");
-          yield "three";
-        }
-      });
-    for (const fail of [false, true]) {
-      const original = streaming(fail);
-      const manager = new ExtensionManager(harnessHookRules);
-      manager.load(
-        "options",
-        loadInProcess("options", optionsExtension({ tools: { s: original } }))
-      );
-      const { tools } = await manager.build("");
-      const run = async (target: Tool) => {
-        const preliminary: unknown[] = [];
-        const outcome = await executeTool(
-          target,
-          {},
-          {
-            toolCallId: "c",
-            messages: [],
-            abortSignal: new AbortController().signal,
-            onPreliminary: (output) => preliminary.push(output)
+    async function* yields(fail: boolean) {
+      yield "one";
+      yield "two";
+      if (fail) throw new Error("broke");
+      yield "three";
+    }
+    const kinds = {
+      // Declared as an async generator.
+      generator: (fail: boolean) =>
+        tool({
+          description: "Streams",
+          inputSchema: z.object({}),
+          execute: async function* () {
+            yield* yields(fail);
           }
+        }),
+      // A plain function whose result turns out to stream.
+      returnsIterable: (fail: boolean) =>
+        tool({
+          description: "Streams",
+          inputSchema: z.object({}),
+          execute: () => yields(fail)
+        })
+    };
+    for (const make of Object.values(kinds)) {
+      for (const fail of [false, true]) {
+        const original = make(fail);
+        const manager = new ExtensionManager(harnessHookRules);
+        manager.load(
+          "options",
+          loadInProcess("options", optionsExtension({ tools: { s: original } }))
         );
-        return { outcome, preliminary };
-      };
-      expect(await run(tools.s as Tool)).toEqual(await run(original));
+        const { tools } = await manager.build("");
+        const run = async (target: Tool) => {
+          const preliminary: unknown[] = [];
+          const outcome = await executeTool(
+            target,
+            {},
+            {
+              toolCallId: "c",
+              messages: [],
+              abortSignal: new AbortController().signal,
+              onPreliminary: (output) => preliminary.push(output)
+            }
+          );
+          return { outcome, preliminary };
+        };
+        const through = await run(tools.s as Tool);
+        expect(through).toEqual(await run(original));
+        expect(through.preliminary).toEqual(
+          ["one", "two"].slice(0, fail ? 1 : 2)
+        );
+      }
     }
   });
 
