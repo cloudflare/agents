@@ -77,6 +77,7 @@ describe("Tasks local and checkpoint", () => {
   });
 
   it("gives an attempt after a reset no `local`, and the checkpoint the last one wrote", async () => {
+    const queries: string[] = [];
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
@@ -97,22 +98,20 @@ describe("Tasks local and checkpoint", () => {
           JSON.stringify({ note: { attempt: 1 } }),
           "reset-run"
         );
+        // Count the replayed attempt's statements from before its alarm is
+        // armed: its checkpoint comes with the claim, so it reads the
+        // stored note without a query of its own.
+        const sql = state.storage.sql as unknown as {
+          exec: (query: string, ...rest: unknown[]) => unknown;
+        };
+        const exec = sql.exec.bind(sql);
+        sql.exec = (query: string, ...rest: unknown[]) => {
+          queries.push(query);
+          return exec(query, ...rest);
+        };
         await instance.lifecycle.rearmAlarm();
       }
     );
-    // Count the replayed attempt's statements: its checkpoint comes with
-    // the claim, so it reads the stored note without a query of its own.
-    const queries: string[] = [];
-    await runInDurableObject(stub, async (_instance, state) => {
-      const sql = state.storage.sql as unknown as {
-        exec: (query: string, ...rest: unknown[]) => unknown;
-      };
-      const exec = sql.exec.bind(sql);
-      sql.exec = (query: string, ...rest: unknown[]) => {
-        queries.push(query);
-        return exec(query, ...rest);
-      };
-    });
     await runDurableObjectAlarm(stub);
     await runInDurableObject(
       stub,
@@ -126,7 +125,10 @@ describe("Tasks local and checkpoint", () => {
           { local: undefined, note: { attempt: 1 } }
         ]);
         expect(instance.rememberingAfter).toEqual([true]);
-        expect(queries.length).toBeGreaterThan(0);
+        // The replay's own claim was recorded.
+        expect(
+          queries.some((q) => /SET status = 'running', attempt/.test(q))
+        ).toBe(true);
         expect(queries.filter((q) => /SELECT checkpoint FROM/.test(q))).toEqual(
           []
         );
