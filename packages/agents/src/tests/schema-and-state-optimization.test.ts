@@ -251,6 +251,19 @@ describe("schema version gating", () => {
     expect(await agent.hasReleasedSchemaVersionKey()).toBe(false);
   });
 
+  it("folds the released key on a cold wake, in the constructor", async () => {
+    const name = `released-key-cold-${crypto.randomUUID()}`;
+    const agent = await getAgentByName(env.TestStateAgent, name);
+    await agent.getState();
+    // As the release left it, with tables in place and no record entry.
+    await agent.storeReleasedSchemaVersion(EXPECTED_SCHEMA_VERSION);
+    await evictDurableObject(agent);
+
+    const woken = await getAgentByName(env.TestStateAgent, name);
+    expect(await woken.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
+    expect(await woken.hasReleasedSchemaVersionKey()).toBe(false);
+  });
+
   it("should move a legacy schema-version row into the KV key", async () => {
     const name = `legacy-version-row-${crypto.randomUUID()}`;
     const agent = await getAgentByName(env.TestStateAgent, name);
