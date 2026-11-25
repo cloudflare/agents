@@ -241,7 +241,10 @@ describe("the schema versions record", () => {
       } finally {
         storage.sql.exec = exec;
       }
-      expect(queries.filter((query) => query.includes("LIMIT 0"))).toEqual([]);
+      // The lookup itself is the only statement: no column check of any kind.
+      expect(queries).toEqual([
+        "SELECT pending_step_up FROM cf_agents_mcp_servers WHERE id = ?"
+      ]);
     });
   });
 });
