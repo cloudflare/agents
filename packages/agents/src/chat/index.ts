@@ -86,6 +86,7 @@ export {
 } from "./resumable-stream";
 export {
   createChatTurnTaskDefinition,
+  currentTurnCheckpoint,
   type ChatTurnClosureEntry,
   type ChatTurnTaskHooks
 } from "./turn-task";

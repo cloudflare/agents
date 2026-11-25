@@ -13,6 +13,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { TaskJson, TaskStep } from "../tasks";
+import type { TaskCheckpoint } from "../tasks/types";
 import type { ChatRecoveryAttemptInput } from "./recovery-engine";
 import {
   journalableAttempt,
@@ -141,6 +142,19 @@ export function currentTurnAttempt():
   return turnAttempt.getStore();
 }
 
+/** The running chat turn's run checkpoint, for what the host keeps with it. */
+const turnCheckpoint = new AsyncLocalStorage<TaskCheckpoint>();
+
+/**
+ * The running chat turn's run checkpoint, or `undefined` outside a turn:
+ * state the host keeps with the turn (Think's owed response hook), cleared
+ * when the turn's run settles. Set inside the turn's model call, and inside
+ * the recovery of a replayed turn.
+ */
+export function currentTurnCheckpoint(): TaskCheckpoint | undefined {
+  return turnCheckpoint.getStore();
+}
+
 /** The checkpoint entry holding the app's latest `stash()` data. */
 const STASH = "stash";
 /**
@@ -241,17 +255,19 @@ export function createChatTurnTaskDefinition(
                   ? { [hooks.snapshotKey]: null, user: stash }
                   : null)));
           let scheduled: ChatRecoveryAttemptInput | undefined;
-          await hooks.recover({
-            requestId,
-            persisted,
-            createdAt: typeof beganAt === "number" ? beganAt : step.createdAt,
-            attempt: (next) => {
-              // A lane turn's attempt would hold the lane: the Task takes it.
-              if (lane || !journalableAttempt(next)) return false;
-              scheduled = next;
-              return true;
-            }
-          });
+          await turnCheckpoint.run(step.checkpoint, () =>
+            hooks.recover({
+              requestId,
+              persisted,
+              createdAt: typeof beganAt === "number" ? beganAt : step.createdAt,
+              attempt: (next) => {
+                // A lane turn's attempt would hold the lane: the Task takes it.
+                if (lane || !journalableAttempt(next)) return false;
+                scheduled = next;
+                return true;
+              }
+            })
+          );
           await hooks.storage.delete(legacyKey);
           // SAFETY: the attempt is the recovery engine's JSON payload.
           return (scheduled ?? null) as TaskJson;
@@ -276,16 +292,18 @@ export function createChatTurnTaskDefinition(
           const value = await hooks.keepAliveWhile(() =>
             entry.run((fn) =>
               turnAttempt.run(take, () =>
-                hooks.withStash(
-                  {
-                    id: nonce,
-                    signal,
-                    stash: (data) => {
-                      entry.onStash(data);
-                      keepStash(step, data);
-                    }
-                  },
-                  fn
+                turnCheckpoint.run(step.checkpoint, () =>
+                  hooks.withStash(
+                    {
+                      id: nonce,
+                      signal,
+                      stash: (data) => {
+                        entry.onStash(data);
+                        keepStash(step, data);
+                      }
+                    },
+                    fn
+                  )
                 )
               )
             )
@@ -351,23 +369,25 @@ async function runLaneTurn(
         begun = true;
         // A turn its model call starts runs as a run of its own.
         return laneRun.run(undefined, () =>
-          hooks.withStash(
-            {
-              id: input.nonce,
-              signal,
-              stash: (data) => {
-                turn.onStash(data);
-                keepStash(step, data);
+          turnCheckpoint.run(step.checkpoint, () =>
+            hooks.withStash(
+              {
+                id: input.nonce,
+                signal,
+                stash: (data) => {
+                  turn.onStash(data);
+                  keepStash(step, data);
+                }
+              },
+              async () => {
+                try {
+                  return await body();
+                } catch (error) {
+                  failed = { error };
+                  throw error;
+                }
               }
-            },
-            async () => {
-              try {
-                return await body();
-              } catch (error) {
-                failed = { error };
-                throw error;
-              }
-            }
+            )
           )
         );
       };
