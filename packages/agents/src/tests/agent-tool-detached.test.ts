@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../index";
 
@@ -102,6 +103,204 @@ describe("detached agent-tool delivery (#1752)", () => {
       (e) => e.runId === "run-gd" && e.hook === "onDetachedDone"
     );
     expect(giveUps).toHaveLength(1);
+  });
+
+  it("treats a given-up run as settled only when its child was torn down (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-settled-${crypto.randomUUID()}`
+    );
+
+    agent.seedDetachedRunForTest("run-torn-down");
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+    await agent.deliverGiveUpForTest("run-torn-down", false);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    // A backbone tick over the settled row does not re-arm itself.
+    await agent.detachedReconcileTickForTest();
+    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
+
+    // A child that may still be running can deliver a late finish.
+    agent.seedDetachedRunForTest("run-still-running");
+    await agent.deliverGiveUpForTest("run-still-running", true);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+  });
+
+  it("keeps retrying a late finish whose callback failed after a give-up (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-retry-${crypto.randomUUID()}`
+    );
+
+    agent.seedDetachedRunForTest(
+      "run-late-retry",
+      undefined,
+      undefined,
+      "onDetachedFinishFailsOnce"
+    );
+    // The child survives the give-up, then completes; its callback fails once.
+    await agent.deliverGiveUpForTest("run-late-retry", true);
+    await expect(
+      agent.deliverFinishCatchingForTest("run-late-retry", "completed", "late")
+    ).resolves.toBe("detached finish callback failed once");
+
+    // The finish is still undelivered, so the backbone must keep it.
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+    agent.expireDetachedFinishClaimForTest("run-late-retry");
+    await agent.deliverFinishForTest("run-late-retry", "completed", "late");
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    const delivered = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-late-retry" && e.hook === "onDetachedDone"
+    );
+    expect(delivered.map((e) => e.status)).toEqual([
+      "interrupted",
+      "completed"
+    ]);
+  });
+
+  it("delivers the real result when the child finishes before the give-up cancel lands (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-race-${crypto.randomUUID()}`
+    );
+
+    const result =
+      await agent.giveUpRacingChildCompletionForTest("run-giveup-race");
+    expect(result.status).toBe("completed");
+    expect(result.log).toEqual([
+      {
+        hook: "onAgentToolFinish",
+        runId: "run-giveup-race",
+        status: "completed"
+      },
+      { hook: "onDetachedDone", runId: "run-giveup-race", status: "completed" }
+    ]);
+    expect(result.outstanding).toBe(false);
+    expect(result.schedules).toBe(0);
+  });
+
+  it("delivers the child's own abort when it is stopped before the give-up cancel lands (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-stopped-${crypto.randomUUID()}`
+    );
+
+    const result = await agent.giveUpRacingChildCompletionForTest(
+      "run-giveup-stopped",
+      undefined,
+      "is stopped"
+    );
+    expect(result.status).toBe("aborted");
+    expect(result.log).toEqual([
+      {
+        hook: "onAgentToolFinish",
+        runId: "run-giveup-stopped",
+        status: "aborted"
+      },
+      {
+        hook: "onDetachedDone",
+        runId: "run-giveup-stopped",
+        status: "aborted"
+      }
+    ]);
+    expect(result.outstanding).toBe(false);
+    expect(result.schedules).toBe(0);
+  });
+
+  it("delivers a milestone only the post-cancel inspection reports (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-milestone-${crypto.randomUUID()}`
+    );
+
+    const result = await agent.giveUpRacingChildCompletionForTest(
+      "run-giveup-milestone",
+      "sources-gathered"
+    );
+    expect(result.status).toBe("completed");
+    expect(result.milestones).toEqual(["sources-gathered"]);
+    expect(result.outstanding).toBe(false);
+  });
+
+  it.each(["during-give-up", "after-give-up"] as const)(
+    "delivers a budget give-up once when the warm tail sees the child's aborted %s (#2768)",
+    async (tail) => {
+      const agent = await getAgentByName(
+        env.TestAgentToolReplayAgent,
+        `detached-giveup-warm-${tail}-${crypto.randomUUID()}`
+      );
+
+      const result = await agent.giveUpWithWarmTailForTest(
+        `run-warm-${tail}`,
+        tail
+      );
+      // The warm tail did read the child's `aborted`.
+      expect(result.inspected).toContain("fast:aborted");
+      // The same callbacks as a cold parent: the give-up, and no `aborted`
+      // finish for the cancel the give-up itself made.
+      expect(result.statuses).toEqual(["interrupted"]);
+      expect(result.outstanding).toBe(false);
+      expect(result.schedules).toBe(0);
+    }
+  );
+
+  it("retries a failed give-up callback instead of delivering the aborted it caused (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-retry-cold-${crypto.randomUUID()}`
+    );
+
+    const result = await agent.giveUpCallbackFailsOnceForTest(
+      "run-giveup-retry-cold"
+    );
+    expect(result.statuses).toEqual(["interrupted"]);
+    expect(result.outstanding).toBe(false);
+  });
+
+  it("settles an unconfirmed give-up once a later tick reads the child's abort (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-unconfirmed-${crypto.randomUUID()}`
+    );
+
+    // The give-up goes out, but the teardown is unconfirmed: keep polling.
+    const first = await agent.giveUpWithFailedPostCancelInspectionForTest(
+      "run-giveup-unconfirmed"
+    );
+    expect(first).toEqual({ outstanding: true, schedules: 1 });
+
+    // The re-armed backbone reads the child's abort: settled, not re-armed,
+    // and no second callback.
+    await agent.makeDetachedBackboneDueForTest();
+    expect(await runDurableObjectAlarm(agent)).toBe(true);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
+    const delivered = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-giveup-unconfirmed" && e.hook === "onDetachedDone"
+    );
+    expect(delivered.map((e) => e.status)).toEqual(["interrupted"]);
+  });
+
+  it("arms the backbone when a fast-path finish fails after polling stopped (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-fastpath-retry-${crypto.randomUUID()}`
+    );
+
+    const result =
+      await agent.fastPathFailsAfterGiveUpForTest("run-fastpath-retry");
+    expect(result.outstanding).toBe(true);
+    expect(result.schedules).toBe(1);
+
+    // The armed backbone's own alarm retries the claim once its lease expires.
+    agent.expireDetachedFinishClaimForTest("run-fastpath-retry");
+    await agent.makeDetachedBackboneDueForTest();
+    expect(await runDurableObjectAlarm(agent)).toBe(true);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
+    const delivered = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-fastpath-retry" && e.hook === "onDetachedDone"
+    );
+    expect(delivered.map((e) => e.status)).toEqual(["completed"]);
   });
 
   it("gives up a silent detached run once its no-progress window elapses (reason: no-progress)", async () => {

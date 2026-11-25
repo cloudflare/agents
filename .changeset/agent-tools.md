@@ -7,6 +7,7 @@
 Agent tools and sub-agents.
 
 - An agent-tool run whose child cannot stay up ends `error` instead of staying `running` (#3073).
+- A detached agent-tool run given up after its child was torn down now counts as settled, so it is no longer re-armed forever, while a late finish (including a failed-callback retry) is still delivered; `onFinish` gets the give-up once, not also an `aborted` for the cancel the give-up made (#2769). See [Detached (background) runs](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md#detached-background-runs).
 - An agent-tool run whose child's turn was cut off waits for the child's recovery (#3024), and runs started together run in order (#3144).
 - `Think.startAgentToolRun` takes an optional `signal`. See [Agent tools](https://developers.cloudflare.com/agents/api-reference/agent-tools/).
 - Starting or waking many sub-agents at once no longer stalls after about 14 (#3077).
