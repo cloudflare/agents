@@ -80,6 +80,28 @@ class TestGate {
   }
 }
 
+/**
+ * Records the type of each socket message once `agent` has handled it, so
+ * a test can wait for the server to have seen one it sent, instead of
+ * sleeping. Call from a field initializer: it wraps the handler the agent's
+ * constructor installed.
+ */
+function recordHandledMessages(agent: AIChatAgent): string[] {
+  const handled: string[] = [];
+  const handle = agent.onMessage;
+  agent.onMessage = async (connection: Connection, message: WSMessage) => {
+    await handle.call(agent, connection, message);
+    if (typeof message !== "string") return;
+    try {
+      const { type } = JSON.parse(message) as { type?: unknown };
+      if (typeof type === "string") handled.push(type);
+    } catch {
+      // Not JSON: nothing to record.
+    }
+  };
+  return handled;
+}
+
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
   return sql
     .exec<{ run_id: string }>(
@@ -539,6 +561,14 @@ export class TestChatAgent extends AIChatAgent<Env> {
     } finally {
       this._handlingResponse = false;
     }
+  }
+
+  private readonly _handledMessageTypes = recordHandledMessages(this);
+
+  /** How many socket messages of `type` the agent has handled. */
+  handledMessageCountForTest(type: string): number {
+    return this._handledMessageTypes.filter((handled) => handled === type)
+      .length;
   }
 
   /** Holds the next model call (inside onChatMessage) until released. */
@@ -1972,25 +2002,7 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
  * - `chunkDelayMs`: delay between chunks in ms (default: 50)
  */
 export class SlowStreamAgent extends AIChatAgent<Env> {
-  constructor(ctx: AgentContext, env: Env) {
-    super(ctx, env);
-    // Record each socket message once the agent has handled it, so a test
-    // can wait for the server to have seen one it sent.
-    const handle = this.onMessage;
-    this.onMessage = async (connection: Connection, message: WSMessage) => {
-      await handle(connection, message);
-      if (typeof message === "string") {
-        try {
-          const { type } = JSON.parse(message) as { type?: unknown };
-          if (typeof type === "string") this._handledMessageTypes.push(type);
-        } catch {
-          // Not JSON: nothing to record.
-        }
-      }
-    };
-  }
-
-  private _handledMessageTypes: string[] = [];
+  private readonly _handledMessageTypes = recordHandledMessages(this);
 
   /** How many socket messages of `type` the agent has handled. */
   handledMessageCountForTest(type: string): number {

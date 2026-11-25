@@ -50,8 +50,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-123");
@@ -80,8 +78,6 @@ describe("Resumable Streaming", () => {
     it("records the allocated assistant message id in stream metadata for a real turn (#1691 wiring)", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       // Drive a real turn whose response carries NO provider `start.messageId`
       // (the common case — and the #1691 scenario). We assert that `_reply`
@@ -160,8 +156,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-456");
@@ -197,8 +191,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-789");
@@ -223,8 +215,6 @@ describe("Resumable Streaming", () => {
     it("marks stream as error on failure", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -251,7 +241,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-resume");
@@ -262,7 +251,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Second connection - should receive resume notification
       const { ws: ws2 } = await connectChatWS(
@@ -270,7 +258,7 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
@@ -286,7 +274,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-ack");
@@ -301,7 +288,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // New connection
       const { ws: ws2 } = await connectChatWS(
@@ -309,7 +295,8 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 100));
+      // The server tells the new connection to resume before it ACKs.
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // Send ACK
       ws2.send(
@@ -340,7 +327,6 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages1 = collectMessages(ws1);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-live");
@@ -350,8 +336,7 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // Broadcast live chunks while ws2 is pending resume (no ACK yet). The
       // first delta is stored at once, the second waits in the buffer: the
@@ -431,7 +416,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-correct");
@@ -442,7 +426,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // New connection
       const { ws: ws2 } = await connectChatWS(
@@ -450,7 +433,8 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 100));
+      // The server tells the new connection to resume before it ACKs.
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // Send ACK with wrong ID
       ws2.send(
@@ -474,8 +458,6 @@ describe("Resumable Streaming", () => {
     it("restores stale streams instead of deleting them (lifecycle managed by fibers)", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -507,8 +489,6 @@ describe("Resumable Streaming", () => {
     it("restores fresh streams (under 5 minutes old)", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -542,8 +522,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // Create a stream with chunks
@@ -560,8 +538,13 @@ describe("Resumable Streaming", () => {
 
       // Clear history via WebSocket message
       ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
-
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(
+        async () =>
+          (await agentStub.handledMessageCountForTest(
+            MessageType.CF_AGENT_CHAT_CLEAR
+          )) === 1,
+        5000
+      );
 
       // Stream data should be cleared
       const chunksAfter = await agentStub.getStreamChunks(streamId);
@@ -581,8 +564,6 @@ describe("Resumable Streaming", () => {
     it("flushes chunks before starting a new stream", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -614,8 +595,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-flush");
@@ -637,8 +616,6 @@ describe("Resumable Streaming", () => {
     it("persists many chunks in order, packed into far fewer rows", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -682,8 +659,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-pack-one");
@@ -714,8 +689,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-single");
@@ -736,8 +709,6 @@ describe("Resumable Streaming", () => {
     it("splits a large chunk into its own row to respect the byte cap", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -777,8 +748,6 @@ describe("Resumable Streaming", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // Seed the table with legacy one-row-per-chunk records (unwrapped object
@@ -813,7 +782,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-done");
@@ -824,7 +792,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testCompleteStream(streamId);
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // New connection - no resume notification since stream is completed
       const { ws: ws2 } = await connectChatWS(
@@ -850,7 +817,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-client-resume");
@@ -865,7 +831,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Second connection: send CF_AGENT_STREAM_RESUME_REQUEST
       const { ws: ws2 } = await connectChatWS(
@@ -873,22 +838,23 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      // Wait briefly for any onConnect push (which we'll also get)
-      await new Promise((r) => setTimeout(r, 50));
-
-      // Send the client-initiated resume request
+      // Send the client-initiated resume request. Its reply echoes the
+      // probe id; the notice onConnect sends on its own does not.
       ws2.send(
         JSON.stringify({
-          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+          probeId: "probe-active-ai-chat"
         })
       );
-
-      await new Promise((r) => setTimeout(r, 100));
-
-      // Should have received CF_AGENT_STREAM_RESUMING (from request, not just onConnect)
-      const resumeMsgs = messages2.filter(isStreamResumingMessage);
-      // May get 2 (one from onConnect, one from request) or 1 if timing collapses them
-      expect(resumeMsgs.length).toBeGreaterThanOrEqual(1);
+      await waitFor(
+        () =>
+          messages2.some(
+            (m) =>
+              isStreamResumingMessage(m) &&
+              (m as { probeId?: unknown }).probeId === "probe-active-ai-chat"
+          ),
+        5000
+      );
 
       ws2.close(1000);
     });
@@ -898,8 +864,6 @@ describe("Resumable Streaming", () => {
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       const messages = collectMessages(ws);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       // Send resume request when there's no active stream
       ws.send(
         JSON.stringify({
@@ -907,8 +871,18 @@ describe("Resumable Streaming", () => {
           probeId: "probe-idle-ai-chat"
         })
       );
-
-      await new Promise((r) => setTimeout(r, 500));
+      // The reply to the request is the last frame about it.
+      await waitFor(
+        () =>
+          messages.some(
+            (m) =>
+              typeof m === "object" &&
+              m !== null &&
+              (m as { type?: unknown }).type ===
+                MessageType.CF_AGENT_STREAM_RESUME_NONE
+          ),
+        5000
+      );
 
       // Should NOT get CF_AGENT_STREAM_RESUMING
       const resumeMsg = messages.find(isStreamResumingMessage);
@@ -1063,7 +1037,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       // Start a stream and add chunks but do NOT complete it
@@ -1080,7 +1053,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Reconnect — active stream triggers resume
       const { ws: ws2 } = await connectChatWS(
@@ -1088,16 +1060,13 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 50));
-
       // Send resume request
       ws2.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
         })
       );
-
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // ACK the resuming notification
       const resumeMsg = messages2.find(isStreamResumingMessage);
@@ -1133,7 +1102,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       // Start a stream and add chunks but do NOT complete it
@@ -1149,7 +1117,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Reconnect — active stream triggers resume
       const { ws: ws2 } = await connectChatWS(
@@ -1157,7 +1124,7 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // ACK the resuming notification
       const resumeMsg = messages2.find(isStreamResumingMessage);
@@ -1198,7 +1165,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-replay-seq", {
@@ -1221,13 +1187,12 @@ describe("Resumable Streaming", () => {
       expect(liveSeqs).toEqual([0, 1, 2]);
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       const { ws: ws2 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
       ws2.send(
@@ -1262,7 +1227,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const first = await agentStub.testStartStream("req-restarted", {
@@ -1294,13 +1258,12 @@ describe("Resumable Streaming", () => {
       expect(liveSeqs).toEqual([2, 3]);
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       const { ws: ws2 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
       ws2.send(
@@ -1332,7 +1295,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       // Start a stream and add chunks
@@ -1348,7 +1310,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Simulate hibernation: reinitialize ResumableStream (isLive=false)
       await agentStub.testSimulateHibernationWake();
@@ -1362,7 +1323,7 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       // ACK the resuming notification
       const resumeMsg = messages2.find(isStreamResumingMessage);
@@ -1423,7 +1384,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       // Start a stream but add NO chunks
@@ -1431,7 +1391,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Simulate hibernation
       await agentStub.testSimulateHibernationWake();
@@ -1443,7 +1402,7 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
@@ -1479,7 +1438,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-tool-orphan");
@@ -1507,7 +1465,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Simulate hibernation
       await agentStub.testSimulateHibernationWake();
@@ -1517,7 +1474,7 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
@@ -1558,7 +1515,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1604,7 +1560,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Simulate hibernation — _resumableStream restores from SQLite,
       // but _isLive is false (no live LLM reader).
@@ -1615,7 +1570,7 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
@@ -1664,7 +1619,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1695,7 +1649,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       await agentStub.testSimulateHibernationWake();
 
@@ -1703,7 +1656,7 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
@@ -1740,7 +1693,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1786,7 +1738,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       await agentStub.testSimulateHibernationWake();
 
@@ -1794,7 +1745,7 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
@@ -1835,7 +1786,6 @@ describe("Resumable Streaming", () => {
       const { ws: ws1 } = await connectChatWS(
         `/agents/test-chat-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-double-ack");
@@ -1850,7 +1800,6 @@ describe("Resumable Streaming", () => {
       await agentStub.testFlushChunkBuffer();
 
       ws1.close();
-      await new Promise((r) => setTimeout(r, 50));
 
       // Simulate hibernation
       await agentStub.testSimulateHibernationWake();
@@ -1860,7 +1809,7 @@ describe("Resumable Streaming", () => {
         `/agents/test-chat-agent/${room}`
       );
       const messages2 = collectMessages(ws2);
-      await new Promise((r) => setTimeout(r, 50));
+      await waitFor(() => messages2.some(isStreamResumingMessage), 5000);
 
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
@@ -1884,8 +1833,13 @@ describe("Resumable Streaming", () => {
           id: "req-double-ack"
         })
       );
-
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(
+        async () =>
+          (await agentStub.handledMessageCountForTest(
+            MessageType.CF_AGENT_STREAM_RESUME_ACK
+          )) === 2,
+        5000
+      );
 
       // Should still have exactly one assistant message (no duplicate)
       const persisted =
@@ -1903,7 +1857,6 @@ describe("Resumable Streaming", () => {
     it("buffered chunks are not flushed to SQLite after clearAll", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1918,15 +1871,18 @@ describe("Resumable Streaming", () => {
 
       // Clear all — should discard the buffer
       ws.send(JSON.stringify({ type: "cf_agent_chat_clear" }));
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(
+        async () =>
+          (await agentStub.handledMessageCountForTest(
+            "cf_agent_chat_clear"
+          )) === 1,
+        5000
+      );
 
       // Flush should be a no-op since buffer was cleared
       await agentStub.testFlushChunkBuffer();
       chunks = await agentStub.getStreamChunks(streamId);
       expect(chunks.length).toBe(0);
-
-      // Wait before close to let the agent settle
-      await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);
     });
   });
@@ -1935,7 +1891,6 @@ describe("Resumable Streaming", () => {
     it("errored streams are cleaned up alongside completed streams", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1956,16 +1911,12 @@ describe("Resumable Streaming", () => {
       // The old errored stream should be cleaned up
       const afterMetadata = await agentStub.getStreamMetadata("old-errored");
       expect(afterMetadata).toBeNull();
-
-      // Wait before close to let the agent settle
-      await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);
     });
 
     it("abandoned streaming rows are cleaned up after the stale-in-flight window", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -1988,7 +1939,6 @@ describe("Resumable Streaming", () => {
       );
       expect(afterMetadata).toBeNull();
 
-      await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);
     });
   });
@@ -1997,7 +1947,6 @@ describe("Resumable Streaming", () => {
     it("never arms a cleanup alarm, before or after a turn", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
       const agentStub = await getAgentByName(env.TestChatAgent, room);
       expect(await agentStub.testCountStreamCleanupSchedules()).toBe(0);
 
@@ -2047,7 +1996,6 @@ describe("Resumable Streaming", () => {
       const { ws } = await connectChatWS(
         `/agents/overriding-persist-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
       const agentStub = await getAgentByName(env.OverridingPersistAgent, room);
 
       const done = new Promise<void>((resolve) => {
@@ -2096,7 +2044,6 @@ describe("Resumable Streaming", () => {
     it("reclaims finished streams of any age and abandoned in-flight rows past the stale window", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       await agentStub.testInsertOldErroredStream("done-recent", "req-1", 5_000);
@@ -2123,7 +2070,6 @@ describe("Resumable Streaming", () => {
     it("does not reclaim a long-running stream that is still emitting chunks", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       await agentStub.testInsertStaleStream(
