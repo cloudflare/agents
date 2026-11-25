@@ -1001,18 +1001,22 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return (await session.wait(operationId)).status;
   }
 
-  /** Rows in the default Streams tables (the harness writes none there). */
-  defaultStreamRows(): number {
+  /** Ids of the streams in the default Streams tables. */
+  defaultStreamIds(): string[] {
     const sql = this.ctx.storage.sql;
+    if (
+      sql
+        .exec("SELECT name FROM sqlite_master WHERE name = 'cf_agents_streams'")
+        .toArray().length === 0
+    ) {
+      return [];
+    }
     return sql
-      .exec<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE name = 'cf_agents_streams'"
+      .exec<{ stream_id: string }>(
+        "SELECT stream_id FROM cf_agents_streams ORDER BY stream_id"
       )
-      .toArray().length === 0
-      ? 0
-      : sql
-          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM cf_agents_streams")
-          .one().n;
+      .toArray()
+      .map((row) => row.stream_id);
   }
 
   /**
@@ -1046,6 +1050,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     );
     sql.exec(`DELETE FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`);
     sql.exec(`DELETE FROM cf_agents_streams${HARNESS_SUFFIX}`);
+    // A stream of the host's own, which must stay where it is.
+    sql.exec(
+      `INSERT INTO cf_agents_streams (stream_id, state, chunk_count, created_at, updated_at)
+       VALUES ('host-1', 'completed', 0, 1, 1)`
+    );
     if (options.forgetSchema) {
       forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
     }

@@ -418,7 +418,7 @@ describe("ThinkHarness durability", () => {
     const receipt = await stub.submit("slow");
     await stub.streamed();
     expect(await stub.streamRows()).toBe(1);
-    expect(await stub.defaultStreamRows()).toBe(0);
+    expect(await stub.defaultStreamIds()).toEqual([]);
     await stub.releaseSlow();
     expect((await stub.wait(receipt.operationId)).status).toBe("done");
   });
@@ -441,7 +441,8 @@ describe("ThinkHarness durability", () => {
       await runDurableObjectAlarm(stub);
       expect((await stub.wait(receipt.operationId)).status).toBe("done");
       expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
-      expect(await stub.defaultStreamRows()).toBe(0);
+      // The harness's stream moved; the host's own stayed.
+      expect(await stub.defaultStreamIds()).toEqual(["host-1"]);
       expect(await stub.streamRows()).toBe(0);
     });
   }
@@ -464,7 +465,7 @@ describe("ThinkHarness durability", () => {
       reason: "aborted"
     });
     expect((await stub.messages())[1]).toMatch(/^assistant: x+$/);
-    expect(await stub.defaultStreamRows()).toBe(0);
+    expect(await stub.defaultStreamIds()).toEqual(["host-1"]);
     expect(await stub.streamRows()).toBe(0);
   });
 
