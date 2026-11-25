@@ -256,6 +256,30 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(result.outstanding).toBe(false);
   });
 
+  it("settles an unconfirmed give-up once a later tick reads the child's abort (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-unconfirmed-${crypto.randomUUID()}`
+    );
+
+    // The give-up goes out, but the teardown is unconfirmed: keep polling.
+    const first = await agent.giveUpWithFailedPostCancelInspectionForTest(
+      "run-giveup-unconfirmed"
+    );
+    expect(first).toEqual({ outstanding: true, schedules: 1 });
+
+    // The re-armed backbone reads the child's abort: settled, not re-armed,
+    // and no second callback.
+    await agent.makeDetachedBackboneDueForTest();
+    expect(await runDurableObjectAlarm(agent)).toBe(true);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
+    const delivered = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-giveup-unconfirmed" && e.hook === "onDetachedDone"
+    );
+    expect(delivered.map((e) => e.status)).toEqual(["interrupted"]);
+  });
+
   it("arms the backbone when a fast-path finish fails after polling stopped (#2768)", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,

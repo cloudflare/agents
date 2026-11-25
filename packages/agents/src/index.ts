@@ -414,9 +414,10 @@ const DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
 // The reasons the backbone cancels a child with when it gives up on a run. The
 // child records the reason as its `aborted` run's error, which is how an abort
 // the give-up caused is told from one the child had for its own reasons.
-const DETACHED_BUDGET_CANCEL_REASON = "detached budget exceeded";
+const DETACHED_BUDGET_CANCEL_REASON =
+  "agent tool run given up by its parent: detached budget exceeded";
 const DETACHED_SILENT_CANCEL_REASON =
-  "detached run went silent past its no-progress window";
+  "agent tool run given up by its parent: detached run went silent past its no-progress window";
 // Conventional method name a chat agent (Think / AIChatAgent) implements to
 // receive `detached: { notify: true }` completions. Resolved by name so the
 // base Agent stays decoupled from the chat layer.
@@ -4473,6 +4474,20 @@ export class Agent<
         for (const milestone of inspection.milestones) {
           this._maybeDeliverDetachedMilestone(row, milestoneRunInfo, milestone);
         }
+      }
+
+      if (
+        inspection &&
+        this._isDetachedGiveUpAbort(inspection) &&
+        row.give_up_delivered_at !== null
+      ) {
+        // The give-up went out while its teardown was unconfirmed. The
+        // child's abort confirms it now: the run is settled, with no callback.
+        this.sql`
+          UPDATE cf_agent_tool_runs SET child_still_running = 0
+          WHERE run_id = ${runId}
+        `;
+        continue;
       }
 
       if (

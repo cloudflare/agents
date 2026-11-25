@@ -564,6 +564,48 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   /**
+   * A budget give-up whose cancel lands but whose post-cancel inspection
+   * fails, so the give-up goes out with the teardown unconfirmed. Runs that
+   * one tick; the test fires the backbone it re-armed.
+   */
+  async giveUpWithFailedPostCancelInspectionForTest(
+    runId: string
+  ): Promise<{ outstanding: boolean; schedules: number }> {
+    await this.seedRunningRunPastBudget(runId, "onDetachedDone");
+    const self = this as unknown as {
+      _asAgentToolChildAdapter(child: unknown): {
+        inspectAgentToolRun(runId: string): Promise<unknown>;
+      };
+    };
+    const original = self._asAgentToolChildAdapter.bind(this);
+    let inspections = 0;
+    self._asAgentToolChildAdapter = (resolved) => {
+      const adapter = original(resolved);
+      return new Proxy(adapter, {
+        get(target, key, receiver) {
+          if (key !== "inspectAgentToolRun") {
+            return Reflect.get(target, key, receiver);
+          }
+          return async (id: string) => {
+            // The tick's second inspection follows its cancel.
+            if (++inspections === 2) throw new Error("inspection failed");
+            return target.inspectAgentToolRun(id);
+          };
+        }
+      });
+    };
+    try {
+      await this._cfDetachedReconcileTick();
+    } finally {
+      self._asAgentToolChildAdapter = original;
+    }
+    return {
+      outstanding: this._agentTool._hasOutstandingDetachedRuns(),
+      schedules: (await this.detachedBackboneSchedulesForTest()).length
+    };
+  }
+
+  /**
    * A detached run past its budget whose child is still running, with the warm
    * fast path tailing it. The backbone tick cancels the child for the give-up,
    * which ends the warm tail on the child's `aborted`. `tail` picks when the
