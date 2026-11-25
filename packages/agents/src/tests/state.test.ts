@@ -607,10 +607,16 @@ describe("state management", () => {
       expect(stateMessages.length).toBe(1);
       expect(stateMessages[0].state?.count).toBe(-2);
 
-      // Error should have been routed through onError (best-effort)
-      const errors = await agentStub.getOnErrorCalls();
-      expect(errors.some((e) => e.includes("onStateChanged failed"))).toBe(
-        true
+      // Error should have been routed through onError (best-effort). The hook
+      // runs after the broadcast, in its own task, so wait for the error.
+      await vi.waitFor(
+        async () => {
+          const errors = await agentStub.getOnErrorCalls();
+          expect(errors.some((e) => e.includes("onStateChanged failed"))).toBe(
+            true
+          );
+        },
+        { timeout: 5000, interval: 10 }
       );
 
       ws.close();
