@@ -1,5 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
-import { deliverToSurfaces } from "../../experimental/channels/deliveries";
+import {
+  deliverToSurfaces,
+  posting,
+  reportingPosting
+} from "../../experimental/channels/deliveries";
 import {
   Channels,
   type AgentHarness,
@@ -18,6 +22,8 @@ import {
 } from "../../experimental/channels";
 import { WebChannel } from "../../experimental/channels/web";
 import { email } from "../../experimental/channels/email";
+import { chatSdkChannel } from "../../experimental/channels/chat-sdk";
+import type { Adapter } from "chat";
 import { Lifecycle } from "../../lifecycle";
 import { Streams } from "../../streams";
 import { Tasks } from "../../tasks";
@@ -40,7 +46,7 @@ export type HarnessCall =
  * test sends the session events a real harness would. Operations never
  * settle on their own.
  */
-class ScriptedHarness implements AgentHarness {
+export class ScriptedHarness implements AgentHarness {
   readonly calls: HarnessCall[] = [];
   reject = false;
   /** What a new watch starts from, per session. */
@@ -234,7 +240,12 @@ export type FakePost =
   /** The object resets after the provider saw the post. */
   | "reset"
   /** The object resets before the post left it. */
-  | "reset-before-send";
+  | "reset-before-send"
+  /**
+   * The object resets after a preview (a draft a later post replaces) left
+   * it, before the post.
+   */
+  | "reset-after-preview";
 
 /**
  * Channels whose `fake` Channel is a gateway Channel served inside the
@@ -245,8 +256,9 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new ScriptedHarness();
   readonly tasks = new Tasks();
 
-  readonly #fake: Channel = {
-    stream: async (surface, chunks): Promise<DeliveryResult> => {
+  // It says when it posts, so a reset after only a preview is retried.
+  readonly #fake: Channel = reportingPosting({
+    stream: async (surface, chunks, options): Promise<DeliveryResult> => {
       const id = this.ctx.id.toString();
       const [outcome = "ok", ...rest] = fakeScripts.get(id) ?? [];
       fakeScripts.set(id, rest);
@@ -265,6 +277,13 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
         // A Channel finalizes what it has: the response was interrupted.
         interrupted = true;
       }
+      if (outcome === "reset-after-preview") {
+        // The preview's call made the object's writes durable first.
+        await this.ctx.storage.sync();
+        this.ctx.abort("reset after a preview");
+        return new Promise<never>(() => {});
+      }
+      posting(options);
       if (interrupted && outcome === "ok") {
         this.ctx.storage.kv.put("posts", [
           ...this.getPosts(),
@@ -309,7 +328,7 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
           return new Promise<never>(() => {});
       }
     }
-  };
+  });
 
   readonly channels = Channels.forHarness(this.harness, {
     streams: new Streams({ maxChunkBytes: 1024 }),
@@ -331,6 +350,27 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
             return { status: "delivered" };
           }
         },
+        { tasks: this.tasks }
+      ),
+      // A Chat SDK adapter as a Channel, streaming through the adapter.
+      chat: deliverToSurfaces(
+        chatSdkChannel({
+          name: "fakechat",
+          path: "/webhooks/fakechat",
+          adapter: {
+            name: "fakechat",
+            initialize: async () => {},
+            stream: async (threadId: string, text: AsyncIterable<unknown>) => {
+              let streamed = "";
+              for await (const part of text) streamed += String(part);
+              this.ctx.storage.kv.put("chat", [
+                ...this.getChatPosts(),
+                { threadId, text: streamed }
+              ]);
+              return { id: "chat-1", threadId, raw: {} };
+            }
+          } as unknown as Adapter
+        }),
         { tasks: this.tasks }
       ),
       email: deliverToSurfaces(
@@ -389,6 +429,11 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
   /** What the thrower Channel delivered, after its first send threw. */
   getThrown(): string[] {
     return this.ctx.storage.kv.get<string[]>("thrower") ?? [];
+  }
+
+  /** What the Chat SDK adapter streamed, by thread. */
+  getChatPosts(): Array<{ threadId: string; text: string }> {
+    return this.ctx.storage.kv.get("chat") ?? [];
   }
 
   /** What the email Channel sent. */

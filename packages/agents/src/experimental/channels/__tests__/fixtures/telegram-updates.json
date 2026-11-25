@@ -1,0 +1,112 @@
+{
+  "directMessage": {
+    "update_id": 1001,
+    "message": {
+      "message_id": 11,
+      "date": 1767225600,
+      "chat": {
+        "id": 42,
+        "type": "private",
+        "first_name": "Alice"
+      },
+      "from": {
+        "id": 7,
+        "is_bot": false,
+        "first_name": "Alice",
+        "username": "alice"
+      },
+      "text": "hello"
+    }
+  },
+  "groupMention": {
+    "update_id": 1002,
+    "message": {
+      "message_id": 12,
+      "date": 1767225601,
+      "chat": {
+        "id": -100,
+        "type": "supergroup",
+        "title": "Team"
+      },
+      "from": {
+        "id": 8,
+        "is_bot": false,
+        "first_name": "Bob",
+        "username": "bob"
+      },
+      "text": "@probe_bot what is up",
+      "entities": [
+        {
+          "type": "mention",
+          "offset": 0,
+          "length": 10
+        }
+      ]
+    }
+  },
+  "fromBot": {
+    "update_id": 1003,
+    "message": {
+      "message_id": 13,
+      "date": 1767225602,
+      "chat": {
+        "id": 42,
+        "type": "private",
+        "first_name": "Alice"
+      },
+      "from": {
+        "id": 999,
+        "is_bot": true,
+        "first_name": "Probe",
+        "username": "probe_bot"
+      },
+      "text": "an answer"
+    }
+  },
+  "document": {
+    "update_id": 1004,
+    "message": {
+      "message_id": 14,
+      "date": 1767225603,
+      "chat": {
+        "id": 42,
+        "type": "private",
+        "first_name": "Alice"
+      },
+      "from": {
+        "id": 7,
+        "is_bot": false,
+        "first_name": "Alice",
+        "username": "alice"
+      },
+      "caption": "see attached",
+      "document": {
+        "file_id": "doc-1",
+        "file_unique_id": "u-doc-1",
+        "file_name": "notes.txt",
+        "mime_type": "text/plain",
+        "file_size": 12
+      }
+    }
+  },
+  "edited": {
+    "update_id": 1005,
+    "edited_message": {
+      "message_id": 11,
+      "date": 1767225600,
+      "edit_date": 1767225700,
+      "chat": {
+        "id": 42,
+        "type": "private",
+        "first_name": "Alice"
+      },
+      "from": {
+        "id": 7,
+        "is_bot": false,
+        "first_name": "Alice",
+        "username": "alice"
+      },
+      "text": "hello, edited"
+    }
+  }
+}
