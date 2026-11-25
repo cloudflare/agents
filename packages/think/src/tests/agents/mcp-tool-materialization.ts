@@ -1,5 +1,5 @@
 import { McpConnector, type McpConnectionLike } from "@cloudflare/codemode";
-import type { LanguageModel } from "ai";
+import { streamText, type LanguageModel } from "ai";
 import { Think } from "../../think";
 import type { TurnConfig, TurnContext } from "../../think";
 
@@ -23,7 +23,10 @@ const usage = {
   outputTokens: { total: 1, text: 1, reasoning: 0 }
 };
 
-function createTextModel(): LanguageModel {
+/** The tool definitions each model request carried, in order. */
+type RequestTools = { name?: string }[] | undefined;
+
+function createTextModel(requests: RequestTools[] = []): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -32,7 +35,8 @@ function createTextModel(): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream() {
+    doStream(options: { tools?: { name?: string }[] }) {
+      requests.push(options.tools);
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -79,15 +83,49 @@ export class ThinkMcpToolMaterializationAgent extends Think {
   override maxSteps = 1;
   override waitForMcpConnections = true;
 
+  readonly #requests: RequestTools[] = [];
+  #offerAll = false;
+
   override getModel(): LanguageModel {
-    return createTextModel();
+    return createTextModel(this.#requests);
   }
 
-  override beforeTurn(ctx: TurnContext): TurnConfig {
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
     this._mcpToolCountBeforeTurn = Object.keys(ctx.tools).filter((name) =>
       name.startsWith("tool_bulkserver_")
     ).length;
+    if (this.#offerAll) return;
     return { activeTools: [] };
+  }
+
+  /**
+   * The MCP tools' definitions as one turn sent them to the model, and as
+   * `streamText` sends `getAITools()` given directly: both as JSON, and the
+   * turn's tool names in order.
+   */
+  async mcpToolRequests(): Promise<{
+    turn: string;
+    direct: string;
+    order: (string | undefined)[];
+  }> {
+    await this._ensureBulkConnection();
+    this.#offerAll = true;
+    await this.runTurn({ mode: "wait", input: "hello" });
+    this.#offerAll = false;
+    const turn = this.#requests.at(-1) ?? [];
+    const directRequests: RequestTools[] = [];
+    await streamText({
+      model: createTextModel(directRequests),
+      tools: this.mcp.getAITools(),
+      prompt: "hello"
+    }).consumeStream();
+    const direct = directRequests[0] ?? [];
+    const names = new Set(direct.map((entry) => entry.name));
+    return {
+      turn: JSON.stringify(turn.filter((entry) => names.has(entry.name))),
+      direct: JSON.stringify(direct),
+      order: turn.map((entry) => entry.name)
+    };
   }
 
   private async _ensureBulkConnection(): Promise<void> {

@@ -42,6 +42,7 @@ import {
 import { Workspace } from "@cloudflare/computer";
 import { workspaceExtension } from "./extensions/workspace";
 import { fetchExtension } from "./extensions/fetch";
+import { mcpExtension } from "agents/internal";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
@@ -146,6 +147,12 @@ export class Think<
    */
   workspace!: ThinkWorkspace;
 
+  /** Offer the connected MCP servers' tools each turn, as on Think. */
+  includeMcpTools = true;
+
+  /** Wait for MCP connections before a turn's tools are built, as on Think. */
+  waitForMcpConnections: boolean | { timeout: number } = false;
+
   /** Think's opt-in fetch tools, as on Think: off unless set. */
   fetchTools: false | Omit<CreateFetchToolsOptions, "workspace" | "onEvent"> =
     false;
@@ -180,6 +187,17 @@ export class Think<
                 ) => void
               ).call(this, "tool:fetch", { ...event })
           )
+        },
+        // MCP tools come after the agent's own and the context's, as in
+        // Think.
+        {
+          name: "mcp",
+          after: true,
+          extension: mcpExtension({
+            manager: () => this.mcp,
+            include: () => this.includeMcpTools,
+            waitForConnections: () => this.waitForMcpConnections
+          })
         }
       ],
       // Think's reserved keys, so client writes are stripped the same way.

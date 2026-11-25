@@ -34,6 +34,8 @@ import type { ThinkExtension } from "./extensions/types";
 export type ThinkShippedExtension = {
   readonly name: string;
   readonly extension: ThinkExtension;
+  /** Load it after the harness's own instead of ahead of them. */
+  readonly after?: boolean;
 };
 
 /**
@@ -455,8 +457,9 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
   readonly tasks?: Tasks;
   /**
    * @internal Shipped extensions the host installs, in order, ahead of the
-   * harness's own (the context's tools, then these options): a tool of the
-   * same name in `tools` replaces one of theirs in place.
+   * harness's own (the context's tools, then these options), or after them
+   * when marked `after`. A later extension's tool of the same name replaces
+   * an earlier one's in place.
    */
   readonly extensions?: readonly ThinkShippedExtension[];
 };

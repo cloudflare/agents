@@ -549,7 +549,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   constructor(options: ThinkHarnessOptions<TOOLS>) {
     super("think-harness");
     this.#options = options;
-    for (const { name, extension } of options.extensions ?? []) {
+    const shipped = options.extensions ?? [];
+    for (const { name, extension } of shipped.filter((e) => !e.after)) {
       this.#extensions.load(name, loadInProcess(name, extension));
     }
     this.#extensions.load(
@@ -563,6 +564,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       "options",
       loadInProcess("options", optionsExtension(options))
     );
+    for (const { name, extension } of shipped.filter((e) => e.after)) {
+      this.#extensions.load(name, loadInProcess(name, extension));
+    }
     this.#sessions = new Sessions({
       ...(options.reservedMetadataKeys && {
         reservedMetadataKeys: options.reservedMetadataKeys
