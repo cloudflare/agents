@@ -75,13 +75,13 @@ The core stores nothing: it adds no row, key or job. One thing is durable, and i
 In memory, per harness:
 
 - the manager: one entry per loaded extension;
-- each runtime: the tools it set in its latest build for each session built in this isolate (replaced by that session's next build), the same bound as the harness's per-session context map; converted entries in a `WeakMap` keyed by tool object; the calls running now, removed when each ends.
+- each runtime: for each session built in this isolate, the latest tool it set under each name. A later build adds and replaces, and never drops a name, so a turn's tools stay callable after another build (a watch, the next turn) leaves one out. Bounded by the tool names it ever set for the session; converted entries in a `WeakMap` keyed by tool object; the calls running now, removed when each ends.
 
 ## Tradeoffs
 
 - A build resolves the `tools` and `system` options where the harness used to resolve only the tools, so a per-session `system` function runs on those builds too. It is expected to be cheap and pure.
 - A tool's description given as a function is resolved once per tool object, not once per request.
-- A tool call runs on the owner's tools from the session's latest build. Until builds are pinned per turn, a `tools` function that returns different tools between two builds of one turn runs the newer one.
+- A turn's build is pinned per attempt, but a tool's functions are looked up by name, so a `tools` function that returns a different function under the same name between two builds runs the newer one.
 
 ## Measured
 

@@ -1056,6 +1056,21 @@ describe("ThinkHarness context", () => {
     expect(await stub.lastPromptText()).not.toContain("Skill: plumbing");
   });
 
+  it("drops a remind section the extension no longer sets from the live context's next prompt", async () => {
+    const stub = fresh();
+    await stub.setRemindSection("Skill: plumbing.");
+    await stub.prompt("hello", session);
+    await stub.clearRemindSection();
+    // The section is dropped at the next build; a refresh then records a
+    // prompt without it, on the same context.
+    await stub.prompt("again", session);
+    await stub.refreshContext(session);
+    await stub.prompt("after refresh", session);
+    const prompts = await stub.promptTexts();
+    expect(prompts[0]?.split("|")[0]).toContain("Skill: plumbing.");
+    expect(prompts.at(-1)?.split("|")[0]).not.toContain("Skill: plumbing");
+  });
+
   it("leaves out a remind section whose label the context already has, instead of failing the turn", async () => {
     const stub = fresh();
     // "soul" is one of the fixture context's own blocks.
