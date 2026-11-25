@@ -235,6 +235,7 @@ import {
   toolApprovalUpdate,
   pausedExecutionUpdate,
   ChatRequestContext,
+  frameText,
   dispatchChatProtocol,
   rejectionMessage,
   releaseChatConnection,
@@ -6971,13 +6972,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // list first, before the replay starts, so it knows which messages
         // are queued and draws them after the reply.
         if (this._turns.queuedMessageIds().size > 0) {
-          connection.send(
-            JSON.stringify({
-              type: MSG_CHAT_MESSAGES,
-              connect: true,
-              ...this._turns.connectView(this.messages)
-            })
-          );
+          sendFrame(connection, {
+            type: MSG_CHAT_MESSAGES,
+            connect: true,
+            ...this._turns.connectView(this.messages)
+          });
         }
         this._resumeHandshake().notifyStreamResuming(connection);
       } else {
@@ -6988,7 +6987,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         // just submitted while it waits for the stream to begin.
         this._turns.preStream.park(connection);
         for (const message of await this._buildIdleConnectMessages()) {
-          connection.send(JSON.stringify(message));
+          sendFrame(connection, message);
         }
       }
       return _onConnect(connection, ctx);
@@ -7217,9 +7216,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       concurrency: this.messageConcurrency,
       onDropped: () => {
         if (connection) {
-          connection.send(
-            JSON.stringify(this._frames.messagesFrame(this.messages))
-          );
+          sendFrame(connection, this._frames.messagesFrame(this.messages));
         }
         this._completeSkippedRequest(connection, requestId);
       },
@@ -11319,4 +11316,13 @@ for (const method of [
   Think.prototype.rejectExecution
 ]) {
   callable()(method, undefined as unknown as ClassMethodDecoratorContext);
+}
+
+/** Send a chat frame to one tab, unless it is over the WebSocket message limit (`frameText` logs that). */
+function sendFrame(
+  connection: Connection,
+  frame: { readonly type?: unknown; readonly [key: string]: unknown }
+): void {
+  const text = frameText(frame);
+  if (text !== undefined) connection.send(text);
 }

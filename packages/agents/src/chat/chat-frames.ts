@@ -13,6 +13,8 @@
  */
 
 import { reportDelivery } from "../dynamic-agents/unlisted-sockets";
+import { WEBSOCKET_MESSAGE_BYTES } from "../internal/platform-limits";
+import { fitsOutboundFrame } from "../websockets/frame-limit";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { withOriginMessageIds } from "./origin-message-ids";
 import {
@@ -226,15 +228,19 @@ export class ChatFrames {
         this.ended.broadcast(ends, without);
         // When the root sent it, if it went through the root: an accept
         // before that, even after this call, got the frame.
+        const text = frameText(ready);
+        if (text === undefined) return;
         reportDelivery(
           (sentAt) => this.ended.delivered(ends, sentAt),
-          () => this.options.broadcast(JSON.stringify(ready), without)
+          () => this.options.broadcast(text, without)
         );
         this.#record(ready);
         return;
       }
     }
-    this.options.broadcast(JSON.stringify(ready), without);
+    const text = frameText(ready);
+    if (text === undefined) return;
+    this.options.broadcast(text, without);
     this.#record(ready);
   }
 
@@ -258,8 +264,10 @@ export class ChatFrames {
     messages: ReadonlyArray<TMessage>,
     exclude: readonly string[] = []
   ): void {
+    const text = frameText(this.messagesFrame(messages));
+    if (text === undefined) return;
     this.options.broadcast(
-      JSON.stringify(this.messagesFrame(messages)),
+      text,
       this.options.listsReachResumingTabs
         ? [...exclude]
         : [...exclude, ...this.options.resuming]
@@ -269,13 +277,15 @@ export class ChatFrames {
   /** Send `frame` to one tab. A closed socket is ignored. */
   send(connection: ChatFrameConnection, frame: ChatFrame): void {
     const ready = this.#prepare(frame);
+    const text = frameText(ready);
+    if (text === undefined) return;
     const ends = endedRequestOf(ready);
     if (ends !== undefined) {
       if (this.ended.has(connection, ends)) return;
       this.ended.note(connection, ends);
     }
     try {
-      connection.send(JSON.stringify(ready));
+      connection.send(text);
     } catch {
       // The connection closed before the server could answer.
     }
@@ -340,4 +350,24 @@ export class ChatFrames {
       recordRecentChatTerminal(this.options.kv, frame);
     }
   }
+}
+
+/**
+ * A chat frame's JSON, or `undefined` when it is over the SDK's WebSocket
+ * message limit (`WEBSOCKET_MESSAGE_BYTES`, 1 KiB under what production
+ * delivers). Production drops a larger message without telling either side,
+ * so such a frame is not sent and the drop is logged instead. Only the
+ * message list can get that large: it carries the transcript.
+ *
+ * @internal
+ */
+export function frameText(frame: {
+  readonly type?: unknown;
+}): string | undefined {
+  const text = JSON.stringify(frame);
+  if (fitsOutboundFrame(text)) return text;
+  console.error(
+    `[agents/chat] Not sending a ${String(frame.type)} frame of ${text.length} characters: it is over the ${WEBSOCKET_MESSAGE_BYTES}-byte limit for one WebSocket message, so the client keeps the list it has. The transcript is too large to send whole; in Think and AIChatAgent, a lower hydrationByteBudget keeps it under the limit.`
+  );
+  return undefined;
 }

@@ -17,6 +17,7 @@ import {
   STREAM_RESUME_NONE_REASONS
 } from "../../chat/protocol";
 import type { ClientToolSchema } from "../../chat/client-tools";
+import { frameText } from "../../chat/chat-frames";
 import type {
   WebSocketHandlers,
   WebSocketMessage
@@ -64,10 +65,15 @@ type Framing = {
   started: boolean;
 };
 
-function send(connection: Connection, frame: object): void {
+function send(
+  connection: Connection,
+  frame: { readonly type: string; readonly [key: string]: unknown }
+): void {
   if (connection.readyState !== OPEN) return;
+  const text = frameText(frame);
+  if (text === undefined) return;
   try {
-    connection.send(JSON.stringify(frame));
+    connection.send(text);
   } catch {
     // The socket closed between the state check and the send.
   }

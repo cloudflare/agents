@@ -12,3 +12,4 @@ Stored chat messages and tool calls.
 - Stored parts keep `providerMetadata` and `toolMetadata` (#3143).
 - A repeated tool result is a no-op, and an approval given before a tool's final input keeps that input (#2981).
 - `AIChatAgent` retention (`maxPersistedMessages`) no longer reads the whole transcript on every persist.
+- A chat message list frame over the WebSocket message limit is no longer sent, which production drops without a word; it is logged instead.

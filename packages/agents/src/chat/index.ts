@@ -42,7 +42,8 @@ export {
   ChatFrames,
   type ChatFrame,
   type ChatFrameConnection,
-  type ChatFramesOptions
+  type ChatFramesOptions,
+  frameText
 } from "./chat-frames";
 
 /** @internal Host helpers for `AIChatAgent` and `Think`. Not a public API. */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ChatFrames, type ChatFramesOptions } from "../chat-frames";
 import { recentChatTerminal } from "../recent-terminals";
+import { WEBSOCKET_MESSAGE_BYTES } from "../../internal/platform-limits";
 
 const RESPONSE = "cf_agent_use_chat_response";
 const MESSAGES = "cf_agent_chat_messages";
@@ -36,6 +37,31 @@ function setup(overrides: Partial<ChatFramesOptions> = {}) {
 }
 
 describe("ChatFrames", () => {
+  it("does not send a message list over the WebSocket message limit, and logs it", () => {
+    const { frames, sent } = setup();
+    const errors: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      const big = [{ id: "m", text: "x".repeat(WEBSOCKET_MESSAGE_BYTES) }];
+      frames.broadcastMessages(big);
+      const sentTo: string[] = [];
+      frames.send(
+        { id: "t1", send: (text: string) => sentTo.push(text) },
+        frames.messagesFrame(big)
+      );
+      expect(sent).toEqual([]);
+      expect(sentTo).toEqual([]);
+      expect(errors).toHaveLength(2);
+      expect(String(errors[0])).toContain(MESSAGES);
+      // A list that fits still goes out.
+      frames.broadcastMessages([{ id: "m", text: "small" }]);
+      expect(sent).toHaveLength(1);
+    } finally {
+      console.error = original;
+    }
+  });
+
   it("names the origin messages on a terminal frame only", () => {
     const { frames, sent } = setup();
     frames.requestOrigins.set("r1", ["u1"]);
