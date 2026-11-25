@@ -2757,36 +2757,6 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return [...this._chatResponseResults];
   }
 
-  /**
-   * #1575: drive `ResumableStream.replayErroredChunksByRequestId` against a
-   * controllable connection so the return-value contract is testable in
-   * isolation: `failAfter` sends succeed, then the connection simulates a
-   * post-close send (the only error `sendIfOpen` swallows). Returns the
-   * method's boolean and how many frames actually went out.
-   */
-  replayErroredChunksByRequestIdForTest(
-    requestId: string,
-    failAfter: number
-  ): { returned: boolean; sent: number } {
-    let sent = 0;
-    const fakeConnection = {
-      send(_message: string) {
-        if (sent >= failAfter) {
-          throw new TypeError("WebSocket send() after close");
-        }
-        sent++;
-      }
-    };
-    const rs = this["_resumableStream"];
-    const returned = rs.replayErroredChunksByRequestId(
-      fakeConnection as unknown as Parameters<
-        typeof rs.replayErroredChunksByRequestId
-      >[0],
-      requestId
-    );
-    return { returned, sent };
-  }
-
   async persistToolCallMessage(
     messageId: string,
     toolCallId: string,

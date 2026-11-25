@@ -47,7 +47,11 @@ function makeConnection(id: string, sink: SentFrame[]): Connection {
   return {
     id,
     send: (message: string) => {
-      sink.push(JSON.parse(message) as SentFrame);
+      const frame = JSON.parse(message) as SentFrame;
+      if (frame.body === DROPPED_CHUNK) {
+        throw new TypeError("WebSocket send() after close");
+      }
+      sink.push(frame);
     }
   } as unknown as Connection;
 }
@@ -59,6 +63,8 @@ interface FakeStreamState {
   /** Orphaned stream id `replayChunks` returns ("" = not orphaned). */
   orphanedStreamId: string;
   replayCompletedReturn: boolean;
+  /** Chunk bodies the completed stream holds. */
+  completedChunks?: string[];
   replayErroredReturn: boolean;
   originMessageIds?: string[];
   outcome?: ChatTurnOutcome;
@@ -68,6 +74,24 @@ interface FakeStreamState {
     replayChunks: string[];
     replayErrored: string[];
     replayPending: string[];
+    replayCompleted: string[];
+  };
+}
+
+/** A chunk body the test connections refuse, as a closed socket does. */
+const DROPPED_CHUNK = "dropped-chunk";
+
+function settledRow(tag: string, state: "completed" | "errored") {
+  return {
+    stream_id: `${state}-${tag}`,
+    state,
+    tag,
+    metadata: JSON.stringify({ cfChat: 1 }),
+    chunk_count: 0,
+    created_at: 0,
+    updated_at: 0,
+    closed_at: 0,
+    error_message: null
   };
 }
 
@@ -82,7 +106,12 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
     orphanedStreamId: "",
     replayCompletedReturn: false,
     replayErroredReturn: true,
-    calls: { replayChunks: [], replayErrored: [], replayPending: [] },
+    calls: {
+      replayChunks: [],
+      replayErrored: [],
+      replayPending: [],
+      replayCompleted: []
+    },
     ...over
   };
   const resumableStream = {
@@ -97,7 +126,6 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
       state.calls.replayChunks.push(requestId);
       return state.orphanedStreamId;
     },
-    replayCompletedChunksByRequestId: () => state.replayCompletedReturn,
     getOriginMessageIds: () => state.originMessageIds,
     latestStreamInfoForRequest: (requestId: string) => {
       const status = state.streams?.[requestId];
@@ -106,13 +134,43 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
         : null;
     },
     getOutcome: () => state.outcome,
-    replayErroredChunksByRequestId: (_c: Connection, requestId: string) => {
-      state.calls.replayErrored.push(requestId);
-      return state.replayErroredReturn;
-    },
     replayClosedStreamChunks: (_c: Connection, requestId: string) => {
       state.calls.replayPending.push(requestId);
       return true;
+    },
+    // The settled replays read these rows: a completed stream with no
+    // chunks when `replayCompletedReturn`, and an errored stream whose one
+    // chunk cannot be sent (`DROPPED_CHUNK`) unless `replayErroredReturn`.
+    streamOps: {
+      flush: () => {},
+      rowsByTag: (tag: string, rowState?: string) => {
+        if (rowState === "completed") {
+          state.calls.replayCompleted.push(tag);
+          return state.replayCompletedReturn
+            ? [settledRow(tag, "completed")]
+            : [];
+        }
+        if (rowState === "errored") {
+          state.calls.replayErrored.push(tag);
+          return state.replayErroredReturn ? [] : [settledRow(tag, "errored")];
+        }
+        return [];
+      },
+      readChunks: (streamId: string, fromSeq: number) => {
+        if (fromSeq !== 0) return [];
+        if (streamId.startsWith("errored-")) {
+          return [
+            { seq: 0, chunk: JSON.stringify(DROPPED_CHUNK), created_at: 0 }
+          ];
+        }
+        // Only the completed stream's own rows hold its chunks.
+        if (!streamId.startsWith("completed-")) return [];
+        return (state.completedChunks ?? []).map((body, seq) => ({
+          seq,
+          chunk: JSON.stringify(body),
+          created_at: 0
+        }));
+      }
     }
   } as unknown as ResumableStream;
   return { state, resumableStream };
@@ -580,13 +638,18 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({
       active: false,
-      replayCompletedReturn: true
+      replayCompletedReturn: true,
+      completedChunks: ["stored-chunk"]
     });
     const handshake = new ResumeHandshake(makeHost({ resumableStream }));
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-done");
 
-    expect(frames).toEqual([]);
+    // The stored chunk, the replay's own terminal frame, and nothing after.
+    expect(frames).toEqual([
+      expect.objectContaining({ body: "stored-chunk", replay: true, seq: 0 }),
+      replayDoneFrame("req-done", RESPONSE_TYPE)
+    ]);
   });
 
   it("ACK with nothing left to replay emits a clean replay-done close", async () => {
@@ -772,19 +835,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         createdAt: 0,
         cutOff: true
       });
-      let replayed = false;
-      (
-        resumableStream as unknown as {
-          replayCompletedChunksByRequestId: () => boolean;
-        }
-      ).replayCompletedChunksByRequestId = () => (replayed = true);
       const handshake = new ResumeHandshake({
         ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
       });
 
       await handshake.handleResumeAck(makeConnection("c1", frames), "req-cut");
-      expect(replayed).toBe(false);
+      expect(state.calls.replayCompleted).toEqual([]);
       expect(state.calls.replayChunks).toEqual([]);
       expect(frames.at(-1)).toMatchObject({
         id: "req-cut",

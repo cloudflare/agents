@@ -28,6 +28,7 @@ import {
 import type { ContinuationState } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
 import type { ResumableStream } from "./resumable-stream";
+import { replayCompletedChunks, replayErroredChunks } from "./stream-rows";
 import type { ChatRecentTerminal } from "./recent-terminals";
 import { endedRequestOf, type EndedRequests } from "./chat-frames";
 
@@ -433,7 +434,7 @@ export class ResumeHandshake {
       // the app kept it, and must not come back if it did not. Only its
       // recorded end is sent.
     } else if (
-      resumableStream.replayCompletedChunksByRequestId(connection, requestId)
+      replayCompletedChunks(resumableStream.streamOps, connection, requestId)
     ) {
       // A stream that closed into recovery ends on "recovering", which is
       // not an end for the tab. A stop since then recorded the request's
@@ -555,7 +556,8 @@ export class ResumeHandshake {
     // mid-replay, skip the terminal frame; the record is retained, so the next
     // reconnect retries the whole sequence.
     if (
-      !resumableStream.replayErroredChunksByRequestId(
+      !replayErroredChunks(
+        resumableStream.streamOps,
         connection,
         pending.requestId
       )

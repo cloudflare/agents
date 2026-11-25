@@ -3,6 +3,10 @@ import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Connection } from "../../index";
 import { ResumableStream } from "../../chat/resumable-stream";
+import {
+  replayCompletedChunks,
+  replayErroredChunks
+} from "../../chat/stream-rows";
 import type { StreamBenchObject } from "../capabilities/streams-bench";
 
 function createAdapter(
@@ -110,7 +114,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
 
       const frames: Record<string, unknown>[] = [];
       expect(
-        stream.replayCompletedChunksByRequestId(
+        replayCompletedChunks(
+          instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
           collectingConnection(frames),
           "req-done"
         )
@@ -155,7 +160,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
       stream.cutover(id, () => {});
 
       expect(
-        stream.replayCompletedChunksByRequestId(
+        replayCompletedChunks(
+          instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
           collectingConnection([]),
           "req-cut"
         )
@@ -171,7 +177,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
       const stream = createAdapter(instance, ctx.storage.sql);
       const outcomeOf = (requestId: string) => {
         const frames: Record<string, unknown>[] = [];
-        stream.replayCompletedChunksByRequestId(
+        replayCompletedChunks(
+          instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
           collectingConnection(frames),
           requestId
         );
@@ -210,7 +217,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
       expect(live.at(-1)).toMatchObject({ done: true, outcome: "aborted" });
 
       const later: Record<string, unknown>[] = [];
-      restored.replayCompletedChunksByRequestId(
+      replayCompletedChunks(
+        instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
         collectingConnection(later),
         "req-orphan-outcome"
       );
@@ -306,7 +314,8 @@ describe("ResumableStream originating message ids (#2280)", () => {
       stream.complete(id);
       expect(stream.getOriginMessageIds("req-plain")).toBeUndefined();
       const frames: Record<string, unknown>[] = [];
-      stream.replayCompletedChunksByRequestId(
+      replayCompletedChunks(
+        instance.streams.__DO_NOT_USE_WILL_BREAK__sync(),
         collectingConnection(frames),
         "req-plain"
       );
@@ -338,6 +347,55 @@ describe("ResumableStream parent message id", () => {
       const id = stream.start("req-leaf");
       expect(stream.getStreamParentMessageId(id)).toBeNull();
       expect(stream.getStreamParentMessageId("missing")).toBeNull();
+    });
+  });
+});
+
+describe("replayErroredChunks (#1575)", () => {
+  /** Sends succeed `failAfter` times, then fail as a closed socket does. */
+  function droppingConnection(failAfter: number) {
+    const sent: string[] = [];
+    const connection = {
+      id: "c1",
+      send: (message: string) => {
+        if (sent.length >= failAfter) {
+          throw new TypeError("WebSocket send() after close");
+        }
+        sent.push(message);
+      }
+    } as unknown as Connection;
+    return { connection, sent };
+  }
+
+  it("tells the caller whether to send the terminal frame", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const id = stream.start("req-err");
+      for (let i = 0; i < 3; i++) {
+        stream.storeChunk(id, JSON.stringify({ type: "text-delta", i }));
+      }
+      stream.markError(id);
+      const ops = instance.streams.__DO_NOT_USE_WILL_BREAK__sync();
+
+      // No errored stream: nothing to replay, the terminal frame follows.
+      const none = droppingConnection(99);
+      expect(replayErroredChunks(ops, none.connection, "no-such-req")).toBe(
+        true
+      );
+      expect(none.sent).toHaveLength(0);
+
+      // Every chunk replays: the terminal frame follows.
+      const full = droppingConnection(99);
+      expect(replayErroredChunks(ops, full.connection, "req-err")).toBe(true);
+      expect(full.sent).toHaveLength(3);
+
+      // The socket closes mid-replay: stop, and skip the terminal frame.
+      const dropped = droppingConnection(1);
+      expect(replayErroredChunks(ops, dropped.connection, "req-err")).toBe(
+        false
+      );
+      expect(dropped.sent).toHaveLength(1);
     });
   });
 });
