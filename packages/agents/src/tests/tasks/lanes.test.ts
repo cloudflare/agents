@@ -242,9 +242,8 @@ describe("Tasks lanes", () => {
             { label: "a" },
             { runId: "a", lane: "l" }
           );
-          await until(
-            async () => (await instance.tasks.get("a"))?.status === "completed"
-          );
+          // Resolves after the terminal report, so after the settle's read.
+          await instance.tasks.wait("a", { timeoutMs: 5_000 });
         } finally {
           sql.exec = exec;
         }
