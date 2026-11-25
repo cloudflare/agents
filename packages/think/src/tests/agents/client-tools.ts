@@ -1323,6 +1323,18 @@ export class ThinkClientToolsAgent extends Think {
   /** The type of every socket message this agent has finished handling. */
   private readonly _handledMessageTypes: string[] = [];
 
+  /**
+   * Whether a client tool result or approval is queued or being applied. The
+   * chat protocol starts the apply without awaiting it, so a handled message
+   * can still have its apply to come.
+   */
+  hasPendingInteractionForTest(): boolean {
+    return (
+      (this["_turns"] as unknown as { pendingInteraction: unknown })
+        .pendingInteraction !== null
+    );
+  }
+
   /** How many socket messages of `type` the agent has finished handling. */
   handledMessageCountForTest(type: string): number {
     return this._handledMessageTypes.filter((handled) => handled === type)

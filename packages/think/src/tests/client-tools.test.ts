@@ -194,34 +194,41 @@ function makeToolMessage(
 
 /**
  * Wait until the agent has finished handling `count` socket messages of
- * `type`: the event a test waits for after it sends one, not a time.
+ * `type`, and any tool result or approval they queued has been applied (the
+ * chat protocol starts that apply without awaiting it): the event a test
+ * waits for after it sends one, not a time.
  */
 async function handled(
-  agent: { handledMessageCountForTest(type: string): Promise<number> },
+  agent: {
+    handledMessageCountForTest(type: string): Promise<number>;
+    hasPendingInteractionForTest(): Promise<boolean>;
+  },
   type: string,
   count = 1
 ): Promise<void> {
-  await vi.waitFor(
-    async () => {
-      expect(
-        await agent.handledMessageCountForTest(type)
-      ).toBeGreaterThanOrEqual(count);
-    },
-    { timeout: 5000, interval: 10 }
+  await waitUntil(
+    async () =>
+      (await agent.handledMessageCountForTest(type)) >= count &&
+      !(await agent.hasPendingInteractionForTest()),
+    5000,
+    10
   );
 }
 
 /**
- * Wait until no turn runs and no continuation waits: the state a test reads
+ * Wait until no interaction is being applied, no turn runs and no
+ * continuation waits: the state a test reads
  * after a reply's done frame, once the turn has also finished its writes.
  * A reply that waits on a client tool counts as settled.
  */
 async function settled(agent: {
   isChatTurnActiveForTest(): Promise<boolean>;
   pendingContinuationRequestIdForTest(): Promise<string | null>;
+  hasPendingInteractionForTest(): Promise<boolean>;
 }): Promise<void> {
   await waitUntil(
     async () =>
+      !(await agent.hasPendingInteractionForTest()) &&
       !(await agent.isChatTurnActiveForTest()) &&
       (await agent.pendingContinuationRequestIdForTest()) === null,
     8000
@@ -235,6 +242,7 @@ async function settled(agent: {
  */
 async function batchParked(agent: {
   isChatTurnActiveForTest(): Promise<boolean>;
+  hasPendingInteractionForTest(): Promise<boolean>;
   getContinuationBarrierState(): Promise<{
     hasPending: boolean;
     barrierActive: boolean;
@@ -247,6 +255,7 @@ async function batchParked(agent: {
       barrier.hasPending &&
       !barrier.barrierActive &&
       !barrier.timerArmed &&
+      !(await agent.hasPendingInteractionForTest()) &&
       !(await agent.isChatTurnActiveForTest())
     );
   }, 8000);
