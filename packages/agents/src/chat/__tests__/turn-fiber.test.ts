@@ -2,7 +2,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createChatFiberSnapshot } from "../recovery";
 import { ChatTurnFibers, type ChatTurnFiberHost } from "../turn-fiber";
-import type { ChatTurnClosureEntry } from "../turn-task";
+import {
+  createChatTurnTaskDefinition,
+  type ChatLaneEntry,
+  type ChatTurnClosureEntry
+} from "../turn-task";
+import type { TaskStep } from "../../tasks";
 
 const snapshot = (requestId: string) =>
   createChatFiberSnapshot({
@@ -40,6 +45,50 @@ describe("ChatTurnFibers", () => {
         body(async () => void log.push(`takeReply:${continuation}`))
     };
     fibers = new ChatTurnFibers(host);
+  });
+
+  it("runs a lane turn's model call as its own run when the lane run cannot keep its snapshot", async () => {
+    let reply: unknown;
+    const entry: ChatLaneEntry = {
+      lane: true,
+      run: (inside) =>
+        inside(async () => {
+          reply = await fibers.run(
+            { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+            async () => "reply"
+          );
+        }),
+      dropped: () => {}
+    };
+    const step = {
+      local: entry,
+      createdAt: 1,
+      checkpoint: {
+        get: () => undefined,
+        set: () => {
+          throw new Error("SQLITE_TOOBIG");
+        }
+      },
+      do: async (
+        _name: string,
+        _config: unknown,
+        fn: (attempt: { signal: AbortSignal }) => Promise<unknown>
+      ) => fn({ signal: new AbortController().signal })
+    } as unknown as TaskStep;
+    await createChatTurnTaskDefinition({
+      storage: {} as DurableObjectStorage,
+      snapshotKey: "__snapshot",
+      keepAliveWhile: (fn) => fn(),
+      withStash: (_context, fn) => fn(),
+      recover: async () => {},
+      attempts: {
+        _chatRecoveryContinue: async () => {},
+        _chatRecoveryRetry: async () => {}
+      }
+    })({ requestId: "r1", continuation: false, nonce: "n0", lane: true }, step);
+    // The model call ran in a run of its own, which keeps the snapshot.
+    expect(log).toEqual(["task:r1:false:nonce-1"]);
+    expect(reply).toBe("reply");
   });
 
   it("runs a turn as a Task closure in the caller's context and returns its value", async () => {

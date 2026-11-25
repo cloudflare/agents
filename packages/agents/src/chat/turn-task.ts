@@ -221,7 +221,13 @@ export function createChatTurnTaskDefinition(
           const { [BEGAN_AT]: beganAt, ...laneEnvelope } = laneKept ?? {};
           const persisted =
             (laneKept
-              ? { ...laneEnvelope, user: stash ?? null }
+              ? {
+                  // A snapshot that could not be kept is null, so the
+                  // app's data is not read as one.
+                  [hooks.snapshotKey]: null,
+                  ...laneEnvelope,
+                  user: stash ?? null
+                }
               : (kept ?? undefined)) ??
             (envelope &&
             typeof envelope === "object" &&

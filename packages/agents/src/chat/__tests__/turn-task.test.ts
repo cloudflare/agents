@@ -83,6 +83,26 @@ describe("createChatTurnTaskDefinition", () => {
     expect(checkpoint.size).toBe(0);
   });
 
+  it("recovers a lane turn whose snapshot could not be kept with the app's data alone", async () => {
+    const recover = vi.fn(async () => {});
+    const { step, checkpoint } = fakeStep(undefined);
+    checkpoint.set("snapshot", JSON.stringify({ __cfBeganAt: 5 }));
+    checkpoint.set("stash", JSON.stringify({ step: 1 }));
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      storage: { delete: async () => false } as unknown as DurableObjectStorage,
+      recover
+    })({ requestId: "r1", continuation: false, nonce: "n1", lane: true }, step);
+    const { persisted } = (
+      recover.mock.calls[0] as unknown as [{ persisted: unknown }]
+    )[0];
+    expect(persisted).toEqual({ __snapshot: null, user: { step: 1 } });
+    expect(unwrapChatFiberSnapshot("__snapshot", persisted)).toEqual({
+      snapshot: null,
+      user: { step: 1 }
+    });
+  });
+
   it("ages a recovered lane turn from when its model call began, not from when it was queued", async () => {
     const recover = vi.fn(async () => {});
     const { step, checkpoint } = fakeStep(undefined);
