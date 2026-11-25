@@ -10823,8 +10823,14 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
-    // Every reply's stream starts here (`pumpReply`).
-    const streams = this["_replyStreams"];
+    // Every reply's stream starts here (`pumpReply`). Only this Think has
+    // reply streams; on the harness-backed Think (`pnpm test:harness`) the
+    // agent still constructs, and only the tests that read the recorded
+    // continuations fail there.
+    const streams = this["_replyStreams"] as
+      | ThinkProgrammaticTestAgent["_replyStreams"]
+      | undefined;
+    if (!streams) return;
     const start = streams.start.bind(streams);
     streams.start = (requestId, options) => {
       this._streamStartContinuations.push(options?.continuation ?? false);
