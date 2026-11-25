@@ -18,7 +18,7 @@ async function waitUntilHandled(
   type: string,
   count: number
 ) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 3000;
   while ((await agent.handledMessageCountForTest(type)) < count) {
     if (Date.now() > deadline) {
       throw new Error(`${type} was not handled ${count} time(s)`);
@@ -1491,7 +1491,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     );
 
     await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
-    expect(await agentStub.waitUntilStableForTest({ timeout: 5000 })).toBe(
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
       true
     );
 
@@ -1615,7 +1615,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
     );
 
     await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
-    expect(await agentStub.waitUntilStableForTest({ timeout: 5000 })).toBe(
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
       true
     );
 
@@ -1753,7 +1753,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
     );
 
     await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
-    expect(await agentStub.waitUntilStableForTest({ timeout: 5000 })).toBe(
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
       true
     );
 
@@ -1822,7 +1822,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
     );
 
     await waitUntilHandled(agentStub, "cf_agent_tool_approval", 1);
-    expect(await agentStub.waitUntilStableForTest({ timeout: 5000 })).toBe(
+    expect(await agentStub.waitUntilStableForTest({ timeout: 3000 })).toBe(
       true
     );
 
