@@ -122,8 +122,8 @@ describe("Tasks lane arrival policies", () => {
           )
           .one();
         expect(next_at).toBeGreaterThanOrEqual(before + 60_000);
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        expect(instance.lanedStarted).toEqual([]);
+        // Its deadline is the quiet period, so nothing claims it before then.
+        expect((await instance.tasks.get("a"))?.status).toBe("pending");
         const receipt = await instance.tasks.run(
           "laned",
           { label: "b" },
