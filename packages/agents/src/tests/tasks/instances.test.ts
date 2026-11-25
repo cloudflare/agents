@@ -3,6 +3,7 @@ import { Tasks } from "../../tasks";
 import type { TaskStep } from "../../tasks";
 import { withCapabilityHarness } from "../shared/capability-harness";
 import { describeInstanceConformance } from "../shared/instance-conformance";
+import { forgetSchemaVersion } from "../../lifecycle/durable-object-lifecycle";
 
 /** Each instance's step idempotency keys, by tag. */
 const stepKeys: string[] = [];
@@ -66,7 +67,50 @@ describe("Tasks instances", () => {
         "cf_agents_task_runs_lane",
         "cf_agents_task_steps"
       ]);
-      expect(storage.kv.get("cf_agents:tasks_schema_version")).toBe(4);
+      expect(
+        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
+          ?.tasks
+      ).toBe(4);
+    });
+  });
+
+  it("moves each instance's own schema key into its entry of the one record, keeping its runs", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      const first = install(tasks("default"));
+      const firstProbe = tasks("probe", "probe");
+      first.lifecycle.use(firstProbe);
+      await first.lifecycle.start();
+      await first.capability.run(
+        "echo",
+        { x: "1" },
+        { runId: "r", start: "alarm" }
+      );
+      await firstProbe.run("echo", { x: "2" }, { runId: "r", start: "alarm" });
+      // As a released version left them: each instance's own key at 4, no
+      // entry in the record.
+      forgetSchemaVersion(first.lifecycle, "tasks");
+      forgetSchemaVersion(first.lifecycle, "tasks/probe");
+      storage.kv.put("cf_agents:tasks_schema_version", 4);
+      storage.kv.put("cf_agents:tasks/probe:tasks_schema_version", 4);
+
+      const plain = tasks("default");
+      const probe = tasks("probe", "probe");
+      const again = install(plain);
+      again.lifecycle.use(probe);
+      await again.lifecycle.start();
+      const record = storage.kv.get<Record<string, number>>(
+        "cf_agents:schema_versions"
+      );
+      expect(record?.tasks).toBe(4);
+      expect(record?.["tasks/probe"]).toBe(4);
+      expect(storage.kv.get("cf_agents:tasks_schema_version")).toBeUndefined();
+      expect(
+        storage.kv.get("cf_agents:tasks/probe:tasks_schema_version")
+      ).toBeUndefined();
+      await plain.runDue("echo");
+      await probe.runDue("echo");
+      expect(await plain.get("r")).toMatchObject({ result: "default:1" });
+      expect(await probe.get("r")).toMatchObject({ result: "probe:2" });
     });
   });
 
