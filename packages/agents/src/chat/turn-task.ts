@@ -379,13 +379,18 @@ export function createChatTurnTaskDefinition(
       // A lane turn replayed after a reset recovers holding the lane, so the
       // requests its isolate left behind it wait for it (ChatOrder), as
       // their records did; the attempt's own turns run in place.
-      await (lane ? laneAttempt.run(true, run) : run());
+      await (lane ? runAsLaneRecoveryAttempt(run) : run());
     }
   };
 }
 
 /** Set while a lane run runs its turn's recovery attempt. */
 const laneAttempt = new AsyncLocalStorage<boolean>();
+
+/** Run `fn` as a lane run's recovery attempt ({@link inLaneRecoveryAttempt}). */
+export function runAsLaneRecoveryAttempt<T>(fn: () => Promise<T>): Promise<T> {
+  return laneAttempt.run(true, fn);
+}
 
 /**
  * Whether the caller runs in a lane run's recovery attempt: a turn it

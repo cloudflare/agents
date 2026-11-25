@@ -39,6 +39,8 @@ export class MemoryWorld {
   readonly runs = new Map<string, MemoryRun>();
   /** Requests whose model call began: their run is recovery's. */
   readonly began = new Set<string>();
+  /** List the lane's runs newest first, as a tie in the listing can. */
+  listReversed = false;
   /** Continuation records' keys. */
   readonly keys = new Map<string, unknown>();
   seq = 0;
@@ -150,8 +152,13 @@ export function memoryLane(world = new MemoryWorld()) {
           const run = world.runs.get(runId);
           return run && { runId, metadata: run.metadata };
         },
-        peekList: () =>
-          open().map((run) => ({ runId: run.runId, metadata: run.metadata })),
+        peekList: () => {
+          const runs = open().map((run) => ({
+            runId: run.runId,
+            metadata: run.metadata
+          }));
+          return world.listReversed ? runs.reverse() : runs;
+        },
         inputOf: (runId: string) => world.runs.get(runId)?.input,
         patchMetadata: (
           runId: string,

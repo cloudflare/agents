@@ -51,6 +51,24 @@ describe("TurnLane", () => {
     expect(order).toEqual(["r1", "r2"]);
   });
 
+  it("counts a turn running in place as queued work", async () => {
+    const queue = new TurnLane(memoryLaneRun());
+    let release = () => {};
+    queue.reserveInline("r1");
+    const running = queue.enqueue(
+      "r1",
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    // A request deciding under `drop` now sees work in the lane.
+    expect(queue.queuedCount()).toBe(1);
+    release();
+    await running;
+    expect(queue.queuedCount()).toBe(0);
+  });
+
   it("moves on when a reserved turn is released without work", async () => {
     const queue = new TurnLane(memoryLaneRun());
     const reserved = queue.reserve("r1");

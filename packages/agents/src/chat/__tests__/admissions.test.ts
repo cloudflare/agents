@@ -60,6 +60,10 @@ function isolate(
     fiber?: boolean;
     /** Awaited in a request's `persist`: what lands while it waits. */
     duringPersist?: (requestId: string) => Promise<void>;
+    /** Awaited after a request's turn, as a host's response hooks are. */
+    afterTurn?: (turns: ChatTurns) => Promise<void>;
+    /** What an earlier release left (`ChatTurnsAdmissionOptions.released`). */
+    released?: () => { records: ChatAdmissionRecord[]; drop(): void };
   } = {}
 ) {
   const lane = memoryLane(world);
@@ -96,6 +100,7 @@ function isolate(
       const done = turns.queue.enqueue(requestId, turn, { generation });
       onQueued();
       const result = await done;
+      await options.afterTurn?.(turns);
       return result.status === "stale" ? "stale" : "completed";
     },
     run: async () => {
@@ -122,7 +127,7 @@ function isolate(
     admissions: {
       storage: memoryStorage(world.keys).storage,
       recoveryPending: async () => false,
-      released: () => ({ records: [], drop: () => {} }),
+      released: options.released ?? (() => ({ records: [], drop: () => {} })),
       replayRequest: (record) => {
         replayed.push(record);
         return request(record.requestId);
@@ -439,6 +444,73 @@ describe("durable admission", () => {
     expect(b.ids()).toContain("u-r2");
   });
 
+  it("a replayed request's follow-up turn runs: the lane moves on after its turn", async () => {
+    const db = new MemoryWorld();
+    const a = await queueBehindRunningTurn(db, ["r2"]);
+    let followed = false;
+    const b = isolate(db, {
+      // A response hook that queues a turn of its own and waits for it.
+      afterTurn: async (turns) => {
+        await turns.queue.enqueue("follow", async () => {
+          followed = true;
+        });
+      }
+    });
+    b.copyTranscript(a);
+    await b.resume();
+    await flush();
+    b.finish("r2");
+    await flush();
+    expect(followed).toBe(true);
+  });
+
+  it("carries an earlier release's records over before it drops their table", async () => {
+    const db = new MemoryWorld();
+    let waitingAtDrop: string[] = [];
+    const record: ChatAdmissionRecord = {
+      requestId: "old",
+      seq: 1,
+      messageIds: ["u-old"],
+      messages: [{ id: "u-old", role: "user" }],
+      afterUserId: null,
+      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      payload: { requestId: "old" },
+      stopped: false,
+      createdAt: 1
+    };
+    const b = isolate(db, {
+      released: () => ({
+        records: [record],
+        drop: () => {
+          waitingAtDrop = db.waiting();
+        }
+      })
+    });
+    await b.resume();
+    await flush();
+    // The replacement was on the lane before the old rows went.
+    expect(waitingAtDrop).toEqual(["old"]);
+    expect(b.started).toEqual(["old"]);
+  });
+
+  it("replays in admission order when the lane's listing ties", async () => {
+    const db = new MemoryWorld();
+    const first = isolate(db, { concurrency: "latest" });
+    void first.send("r1");
+    await tick();
+    void first.send("r2");
+    void first.send("r3");
+    await tick();
+    // Runs accepted in one millisecond list in no set order.
+    db.listReversed = true;
+    const b = isolate(db, { concurrency: "latest" });
+    b.copyTranscript(first);
+    await b.resume();
+    await flush();
+    expect(b.ended.get("r2")).toBe("skipped");
+    expect(b.started).toEqual(["r3"]);
+  });
+
   it("a replay whose conversation moved on stores its question and ends skipped", async () => {
     const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
@@ -655,6 +727,18 @@ describe("takeReleasedChatAdmissions", () => {
     expect(takeReleasedChatAdmissions(sql(db)).records).toHaveLength(2);
     released.drop();
     expect(takeReleasedChatAdmissions(sql(db)).records).toEqual([]);
+  });
+
+  it("reads the oldest table, with no messages column", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(`create table cf_agents_chat_admissions (
+      request_id text primary key, seq integer, message_ids text,
+      decision text, payload text, stopped integer, created_at integer)`);
+    db.prepare(
+      "insert into cf_agents_chat_admissions values (?, ?, ?, ?, ?, ?, ?)"
+    ).run("r1", 1, '["u1"]', null, null, 0, 1);
+    const { records } = takeReleasedChatAdmissions(sql(db));
+    expect(records).toMatchObject([{ requestId: "r1", messages: [] }]);
   });
 
   it("reads nothing on an object with no table", () => {

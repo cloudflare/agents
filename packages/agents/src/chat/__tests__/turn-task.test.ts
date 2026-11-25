@@ -104,6 +104,61 @@ describe("createChatTurnTaskDefinition", () => {
     });
   });
 
+  it("marks a lane turn whose model call ran as a run of its own, and does not replay or recover it", async () => {
+    const recover = vi.fn(async () => {});
+    const replay = vi.fn(async () => {});
+    const entry: ChatLaneEntry = {
+      lane: true,
+      run: (inside) =>
+        inside(async () => {
+          currentChatRun()?.(
+            { requestId: "r1", envelope: { big: true }, onStash: () => {} },
+            async () => "reply"
+          );
+        }),
+      dropped: () => {}
+    };
+    const { step, checkpoint } = fakeStep(entry);
+    const set = step.checkpoint.set;
+    let refused = false;
+    step.checkpoint.set = (key, value) => {
+      // The envelope is too large for the row; the small marker is not.
+      if (!refused && key === "snapshot") {
+        refused = true;
+        throw new Error("SQLITE_TOOBIG");
+      }
+      set(key, value);
+    };
+    const input = {
+      requestId: "r1",
+      continuation: false,
+      nonce: "n1",
+      lane: true as const,
+      admission: {
+        messages: [],
+        afterUserId: null,
+        decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+        payload: null
+      }
+    };
+    const definition = createChatTurnTaskDefinition({
+      ...hooks,
+      storage: { delete: async () => false } as unknown as DurableObjectStorage,
+      recover,
+      replay
+    });
+    await definition(input, step);
+    expect(JSON.parse(checkpoint.get("snapshot")!)).toMatchObject({
+      __cfElsewhere: true
+    });
+    // The isolate dies; the run replays with no live closure.
+    const { step: again, checkpoint: kept } = fakeStep(undefined);
+    kept.set("snapshot", checkpoint.get("snapshot")!);
+    await definition(input, again);
+    expect(replay).not.toHaveBeenCalled();
+    expect(recover).not.toHaveBeenCalled();
+  });
+
   it("ages a recovered lane turn from when its model call began, not from when it was queued", async () => {
     const recover = vi.fn(async () => {});
     const { step, checkpoint } = fakeStep(undefined);
