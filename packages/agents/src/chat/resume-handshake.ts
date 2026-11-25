@@ -422,7 +422,7 @@ export class ResumeHandshake {
         // Recorded while the rows still hold the ids: the next stream's
         // start deletes them, and a tab that comes back then still learns
         // how the request ended.
-        const messageIds = resumableStream.getOriginMessageIds(requestId);
+        const messageIds = replyStreams.getOriginMessageIds(requestId);
         this.host.recordTerminal?.({
           id: requestId,
           body: "",

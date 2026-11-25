@@ -13,7 +13,7 @@
  * Recovery model for a text-only pi turn (`stream_continuation`): a SIGKILL
  * mid-stream interrupts the fiber before `message_end` commits the assistant
  * message. The streamed deltas, however, were buffered durably (per-event) into
- * `ResumableStream` via {@link PiRecoveryCodec}. On wake the engine reconstructs
+ * `ReplyStreams` via {@link PiRecoveryCodec}. On wake the engine reconstructs
  * that partial through the codec, PRESERVES it (`persistOrphanedStream` commits
  * it as a partial assistant entry), classifies a `continue`, and re-runs the
  * turn through pi's real `continue()` priming the model with only the REMAINING
@@ -30,7 +30,7 @@
 import { Agent, type FiberContext, type FiberRecoveryContext } from "agents";
 import {
   ChatRecoveryEngine,
-  ResumableStream,
+  ReplyStreams,
   createChatStreams,
   bumpChatRecoveryProgress,
   createChatFiberSnapshot,
@@ -135,7 +135,7 @@ export class PiAgent extends Agent<Env> {
 
   readonly streams: Streams = createChatStreams();
 
-  private readonly _resumableStream: ResumableStream;
+  private readonly _replyStreams: ReplyStreams;
   private readonly _codec = new PiRecoveryCodec();
   private readonly _faux: FauxPiModel;
   private readonly _pi: PiCore;
@@ -166,10 +166,13 @@ export class PiAgent extends Agent<Env> {
       )
     `;
 
-    this._resumableStream = new ResumableStream(
-      this.streams,
-      this.sql.bind(this)
-    );
+    this._replyStreams = new ReplyStreams({
+      streamStarted() {},
+      streamEnded() {},
+      originMessageIds: () => undefined,
+      transaction: (fn) => this.ctx.storage.transactionSync(fn)
+    });
+    this._replyStreams.open(this.streams, this.sql.bind(this));
     this._faux = createFauxPiModel({
       tokensPerSecond: STREAM_TOKENS_PER_SECOND
     });
@@ -265,10 +268,10 @@ export class PiAgent extends Agent<Env> {
    * Phase-5 API-ergonomics findings is now collapsed).
    */
   private _resolveStreamId(requestId: string): string {
-    const meta = this._resumableStream
+    const meta = this._replyStreams
       .getAllStreamMetadata()
       .find((row) => row.request_id === requestId);
-    return meta?.id ?? this._resumableStream.activeStreamId ?? "";
+    return meta?.id ?? this._replyStreams.activeStreamId ?? "";
   }
 
   /** Set/clear the live "recovering…" status (#1620), building the shared
@@ -299,7 +302,7 @@ export class PiAgent extends Agent<Env> {
    */
   private _persistOrphanedPartial(streamId: string): void {
     if (this._lastEntry()?.partial) return;
-    const bodies = this._resumableStream
+    const bodies = this._replyStreams
       .getStreamChunks(streamId)
       .map((chunk) => chunk.body);
     const { text, message } = this._codec.decodePartial(bodies);
@@ -379,11 +382,11 @@ export class PiAgent extends Agent<Env> {
 
     const body = this._codec.encodeEvent(event);
     if (body && this._currentStreamId) {
-      this._resumableStream.storeChunk(this._currentStreamId, body);
+      this._replyStreams.storeChunk(this._currentStreamId, body);
       // Fixture: flush every delta so the partial is reliably durable the
       // instant a SIGKILL lands (the engine reconstructs + continues from it).
       // A batching buffer would otherwise drop the last <10 chunks on crash.
-      this._resumableStream.flushBuffer();
+      this._replyStreams.flushBuffer();
       // Each durably-flushed streaming event is reconnect-immune forward
       // progress for the no-progress recovery budget.
       await bumpChatRecoveryProgress(this.ctx.storage);
@@ -411,7 +414,7 @@ export class PiAgent extends Agent<Env> {
         // only — a preserved partial is excluded so the user stays the leaf and
         // pi generates the continuation suffix).
         this._pi.state.messages = this._piMessages();
-        const streamId = this._resumableStream.start(requestId, {
+        const streamId = this._replyStreams.start(requestId, {
           continuation: this._continuationTargetId !== null
         });
         this._currentStreamId = streamId;
@@ -420,7 +423,7 @@ export class PiAgent extends Agent<Env> {
         } finally {
           this._currentStreamId = null;
         }
-        this._resumableStream.complete(streamId);
+        this._replyStreams.complete(streamId);
       },
       {
         initialSnapshot: wrapChatFiberSnapshot(
@@ -587,7 +590,7 @@ export class PiAgent extends Agent<Env> {
         this._persistOrphanedPartial(streamId);
       },
       completeRecoveredStream: (streamId) => {
-        this._resumableStream.complete(streamId);
+        this._replyStreams.complete(streamId);
       }
     };
   }
@@ -662,12 +665,12 @@ export class PiAgent extends Agent<Env> {
         return {
           streamId,
           streamStillActive:
-            streamId !== "" && streamId === this._resumableStream.activeStreamId
+            streamId !== "" && streamId === this._replyStreams.activeStreamId
         };
       },
       getPartialStreamText: (streamId): RecoveryPartial =>
         this._codec.toRecoveryPartial(
-          this._resumableStream
+          this._replyStreams
             .getStreamChunks(streamId)
             .map((chunk) => chunk.body)
         ),
@@ -678,9 +681,9 @@ export class PiAgent extends Agent<Env> {
     };
   }
 
-  /** Stream-buffer cleanup alarm target (scheduled by ResumableStream cleanup). */
+  /** Stream-buffer cleanup alarm target (scheduled by ReplyStreams cleanup). */
   async _cleanupStreamBuffers(): Promise<void> {
-    this._resumableStream.reclaim();
+    this._replyStreams.reclaim();
   }
 
   // ── Inspection surface (server stub RPC → e2e assertions) ───────────────────

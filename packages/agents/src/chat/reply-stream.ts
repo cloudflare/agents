@@ -2,8 +2,7 @@
  * The resumable stream a chat reply writes, as both chat hosts use it.
  *
  * Chat's in-flight output lives in the `agents/streams` capability's chunk
- * log (`cf_agents_streams` / `cf_agents_stream_blocks`), one stream per
- * turn, tagged with the turn's request id so replay-by-request rides the
+ * log, one stream per turn, tagged with the turn's request id so replay-by-request rides the
  * capability's indexed lookup. This class writes it: chunks batched into
  * blocks (one row per 10 chunks), the stream's lifecycle mapped onto
  * Streams settlement, the cutover that stores the reply and deletes the

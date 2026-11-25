@@ -1,5 +1,5 @@
 import { Agent } from "../../index";
-import { createChatStreams, type ReplyStreams } from "../../chat";
+import { createChatStreams } from "../../chat";
 import { openChatLog } from "../shared/chat-log";
 
 /** Test Agent retained for ReplyStreams legacy migration coverage. */

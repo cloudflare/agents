@@ -21,7 +21,7 @@
  * Recovery model (mirrors pi's `stream_continuation`): a SIGKILL mid-stream
  * interrupts the fiber before the turn commits its assistant message. The
  * streamed `TEXT_MESSAGE_CONTENT` deltas were buffered durably (per-chunk) into
- * `ResumableStream`. On wake the engine reconstructs that partial through the
+ * `ReplyStreams`. On wake the engine reconstructs that partial through the
  * codec, preserves it, classifies a `continue`, and re-runs the turn priming the
  * faux model with only the REMAINING suffix — which merges onto the survived
  * prefix to land the same full reply. A deterministic faux model keeps the e2e's
@@ -43,7 +43,7 @@ import type { ModelMessage } from "@tanstack/ai";
 import {
   ChatRecoveryEngine,
   ContinuationState,
-  ResumableStream,
+  ReplyStreams,
   createChatStreams,
   ResumeHandshake,
   buildChatRecoveringFrame,
@@ -158,7 +158,7 @@ export class TanStackAgent extends Agent<Env> {
 
   readonly streams: Streams = createChatStreams();
 
-  private readonly _resumableStream: ResumableStream;
+  private readonly _replyStreams: ReplyStreams;
   private readonly _codec = tanStackRecoveryCodec;
   /** Per-isolate throttle for crediting progress from streaming-content deltas
    *  (the shared `agents/chat` rule). */
@@ -195,10 +195,13 @@ export class TanStackAgent extends Agent<Env> {
       )
     `;
 
-    this._resumableStream = new ResumableStream(
-      this.streams,
-      this.sql.bind(this)
-    );
+    this._replyStreams = new ReplyStreams({
+      streamStarted() {},
+      streamEnded() {},
+      originMessageIds: () => undefined,
+      transaction: (fn) => this.ctx.storage.transactionSync(fn)
+    });
+    this._replyStreams.open(this.streams, this.sql.bind(this));
     this._faux = new FauxTanStackModel(STREAM_TOKENS_PER_SECOND);
     this._transcript = this._loadTranscript();
   }
@@ -284,7 +287,7 @@ export class TanStackAgent extends Agent<Env> {
    */
   private async _persistOrphanedPartial(streamId: string): Promise<void> {
     if (this._lastEntry()?.partial) return;
-    const bodies = this._resumableStream
+    const bodies = this._replyStreams
       .getStreamChunks(streamId)
       .map((chunk) => chunk.body);
     const { text, hasSettledToolResults } =
@@ -400,7 +403,7 @@ export class TanStackAgent extends Agent<Env> {
       async (_fiber: FiberContext) => {
         const isContinuation = this._continuationTargetId !== null;
         const messageId = crypto.randomUUID();
-        const streamId = this._resumableStream.start(requestId, {
+        const streamId = this._replyStreams.start(requestId, {
           continuation: isContinuation,
           messageId
         });
@@ -417,11 +420,11 @@ export class TanStackAgent extends Agent<Env> {
             systemPrompt: usingWorkersAi ? WORKERS_AI_SYSTEM_PROMPT : undefined
           })) {
             const body = JSON.stringify(chunk);
-            this._resumableStream.storeChunk(streamId, body);
+            this._replyStreams.storeChunk(streamId, body);
             // Fixture: flush every chunk so the partial is reliably durable the
             // instant a SIGKILL lands. A batching buffer would otherwise drop
             // the last <10 chunks on crash.
-            this._resumableStream.flushBuffer();
+            this._replyStreams.flushBuffer();
             if (chunk.type === EventType.TEXT_MESSAGE_CONTENT) {
               producedText += chunk.delta;
             }
@@ -447,7 +450,7 @@ export class TanStackAgent extends Agent<Env> {
         }
 
         this._broadcastChunk(requestId, "", true);
-        this._resumableStream.complete(streamId);
+        this._replyStreams.complete(streamId);
         this._pendingResumeConnections.clear();
         await this._commitAssistant(producedText);
       },
@@ -651,7 +654,7 @@ export class TanStackAgent extends Agent<Env> {
     connection: Connection,
     ctx: ConnectionContext
   ): Promise<void> {
-    if (this._resumableStream.hasActiveStream()) {
+    if (this._replyStreams.hasActiveStream()) {
       // Proactively notify a connecting client about a resumable stream.
       this._resumeHandshake().notifyStreamResuming(connection);
     } else {
@@ -727,7 +730,7 @@ export class TanStackAgent extends Agent<Env> {
   private _resumeHandshakeHost(): ResumeHandshakeHost {
     return {
       responseMessageType: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-      resumableStream: this._resumableStream,
+      replyStreams: this._replyStreams,
       continuation: this._continuation,
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => pendingChatTerminal(this.ctx.storage),
@@ -785,7 +788,7 @@ export class TanStackAgent extends Agent<Env> {
         await this._persistOrphanedPartial(streamId);
       },
       completeRecoveredStream: (streamId) => {
-        this._resumableStream.complete(streamId);
+        this._replyStreams.complete(streamId);
       }
     };
   }
@@ -797,10 +800,10 @@ export class TanStackAgent extends Agent<Env> {
   }
 
   private _resolveStreamId(requestId: string): string {
-    const meta = this._resumableStream
+    const meta = this._replyStreams
       .getAllStreamMetadata()
       .find((row) => row.request_id === requestId);
-    return meta?.id ?? this._resumableStream.activeStreamId ?? "";
+    return meta?.id ?? this._replyStreams.activeStreamId ?? "";
   }
 
   /** Set/clear the live "recovering…" status (#1620), building the shared
@@ -881,12 +884,12 @@ export class TanStackAgent extends Agent<Env> {
         return {
           streamId,
           streamStillActive:
-            streamId !== "" && streamId === this._resumableStream.activeStreamId
+            streamId !== "" && streamId === this._replyStreams.activeStreamId
         };
       },
       getPartialStreamText: (streamId): RecoveryPartial =>
         this._codec.toRecoveryPartial(
-          this._resumableStream
+          this._replyStreams
             .getStreamChunks(streamId)
             .map((chunk) => chunk.body)
         ),
@@ -897,9 +900,9 @@ export class TanStackAgent extends Agent<Env> {
     };
   }
 
-  /** Stream-buffer cleanup alarm target (scheduled by ResumableStream cleanup). */
+  /** Stream-buffer cleanup alarm target (scheduled by ReplyStreams cleanup). */
   async _cleanupStreamBuffers(): Promise<void> {
-    this._resumableStream.reclaim();
+    this._replyStreams.reclaim();
   }
 
   // ── Inspection surface (server HTTP → e2e assertions) ───────────────────────
@@ -927,10 +930,10 @@ export class TanStackAgent extends Agent<Env> {
     // real-provider e2e wait until content has actually streamed (past the
     // model's time-to-first-token) before SIGKILLing, so the survived partial is
     // non-empty and recovery takes the `continue` path.
-    const activeStreamId = this._resumableStream.activeStreamId;
+    const activeStreamId = this._replyStreams.activeStreamId;
     const bufferedChars = activeStreamId
       ? this._codec.toRecoveryPartial(
-          this._resumableStream
+          this._replyStreams
             .getStreamChunks(activeStreamId)
             .map((chunk) => chunk.body)
         ).text.length

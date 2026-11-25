@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { ReplyStreams } from "../../chat";
 import { openChatLog } from "../shared/chat-log";
 import type { SqlTaggedTemplate } from "../../chat";
 import { Streams } from "../../streams";
