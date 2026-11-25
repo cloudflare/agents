@@ -14,11 +14,15 @@ import { JobDriver, type JobDeferral, type JobDispatch } from "./job-driver";
 import {
   HOST_JOB_CAPABILITY,
   JobQueue,
+  type LifecycleJob,
   type LifecycleJobs,
   type LifecycleJobPushOptions
 } from "./job-queue";
 import {
   bindLifecycleCapability,
+  capabilityInstallOrder,
+  checkDerivedName,
+  instanceSuffix,
   lifecycleCapabilityId,
   LifecycleCapability,
   type LifecycleHostContextScope,
@@ -266,6 +270,36 @@ export function armFacetWake(
  * @internal At the root: drop the wake jobs of a facet path and every path
  * below it, when that sub-tree is deleted.
  */
+/** What a Lifecycle holds, by capability id. */
+export type LifecycleInstances = {
+  /** Installed capability ids, in install order. */
+  readonly installed: readonly string[];
+  /**
+   * With `stored`: ids that hold data here but are not installed: owners
+   * of queued jobs, and named instances' tables (`__n_` / `__c_`).
+   */
+  readonly stored?: readonly string[];
+};
+
+const instanceListers = new WeakMap<
+  object,
+  (stored: boolean) => LifecycleInstances
+>();
+
+/**
+ * @internal The capability instances of `lifecycle`. `stored` also reads
+ * what is kept for instances nobody installed; it scans the schema and the
+ * job queue, so never call it on a hot path.
+ */
+export function lifecycleInstances(
+  lifecycle: object,
+  options: { stored?: boolean } = {}
+): LifecycleInstances {
+  const list = instanceListers.get(lifecycle);
+  if (!list) throw new Error("Not a Lifecycle");
+  return list(options.stored ?? false);
+}
+
 export function forgetFacetWakes(
   lifecycle: object,
   key: string
@@ -323,6 +357,52 @@ export type LifecycleOptions = {
  * `DurableObject`, then call {@link Lifecycle.installHandlers}
  * from that class's constructor.
  */
+/**
+ * A named instance's jobs handle: every job id it sees is its own, and is
+ * stored as `<id>:<job id>`, since a job id is unique in the queue whoever
+ * owns it.
+ */
+function namedInstanceJobs(
+  jobs: LifecycleJobs,
+  capabilityId: string
+): LifecycleJobs {
+  const prefix = `${capabilityId}:`;
+  const stored = (id: string) => `${prefix}${id}`;
+  return Object.freeze({
+    // A job with no id gets one here, so it is stored under the prefix too.
+    push: async (options: LifecycleJobPushOptions) =>
+      ownJob(
+        await jobs.push({
+          ...options,
+          id: stored(options.id ?? crypto.randomUUID())
+        }),
+        prefix
+      ),
+    cancel: (id: string) => jobs.cancel(stored(id)),
+    reschedule: (id: string, time: number) => jobs.reschedule(stored(id), time),
+    get: (id: string) => {
+      const job = jobs.get(stored(id));
+      return job && ownJob(job, prefix);
+    },
+    list: () => jobs.list().map((job) => ownJob(job, prefix)),
+    rearm: () => jobs.rearm()
+  });
+}
+
+/** A stored job as its named instance sees it: its id without the prefix. */
+function ownJob(job: LifecycleJob, prefix: string): LifecycleJob {
+  return job.id.startsWith(prefix)
+    ? { ...job, id: job.id.slice(prefix.length) }
+    : job;
+}
+
+/** A named instance's event payload carries its name. */
+function withInstance(payload: unknown, instance: string): unknown {
+  return payload !== null && typeof payload === "object"
+    ? { ...(payload as object), instance }
+    : { value: payload, instance };
+}
+
 /** The dispatch hooks a catch-all can monopolize; uniqueness is per hook. */
 const CATCH_ALL_HOOKS = ["onRequest", "onWebSocketUpgrade"] as const;
 
@@ -378,6 +458,7 @@ export class Lifecycle<
     this.#parentClassName = this.#host.constructor.name;
     this.#jobQueue = new JobQueue(this.#ctx.storage);
     facetWakeForgetters.set(this, (key) => this.#forgetFacetWakes(key));
+    instanceListers.set(this, (stored) => this.#instances(stored));
     facetWakeArmers.set(this, (address, time) =>
       this.#holdFacetWake(address, time, 0)
     );
@@ -485,6 +566,23 @@ export class Lifecycle<
     if (this.#capabilitiesLocked) {
       throw new Error("Lifecycle capabilities must be added before startup");
     }
+    // What it composes is installed first, in order, then the capability.
+    const order =
+      capability instanceof LifecycleCapability
+        ? capabilityInstallOrder(capability)
+        : [capability];
+    // The capability given here was not reached through a composer; what
+    // it composes was.
+    if (capability instanceof LifecycleCapability) {
+      checkDerivedName(capability, false);
+    }
+    for (const each of order) {
+      this.#useOne(each as DurableObjectCapability<Props>);
+    }
+    return this;
+  }
+
+  #useOne(capability: DurableObjectCapability<Props>): void {
     const capabilityId = lifecycleCapabilityId(capability);
     if (
       capabilityId &&
@@ -492,8 +590,12 @@ export class Lifecycle<
         (candidate) => lifecycleCapabilityId(candidate) === capabilityId
       )
     ) {
+      const instance = capability as LifecycleCapability;
+      const className = capability.constructor.name;
       throw new Error(
-        `Lifecycle capability ${JSON.stringify(capabilityId)} is already installed`
+        instance.instanceName === undefined
+          ? `The default ${className} is already installed. Give this one a name: new ${className}({ name: "…" })`
+          : `${className} instance ${JSON.stringify(instance.instanceName)} is already installed. Give this one another name: new ${className}({ name: "…" })`
       );
     }
 
@@ -526,13 +628,64 @@ export class Lifecycle<
     if (capability instanceof LifecycleCapability) {
       bindLifecycleCapability(
         capability,
-        this.#servicesForCapability(capability.capabilityId)
+        this.#servicesForCapability(
+          capability.capabilityId,
+          capability.instanceName
+        )
       );
     }
-    return this;
   }
 
-  #servicesForCapability(capabilityId: string): LifecycleServices {
+  #instances(stored: boolean): LifecycleInstances {
+    const installed = this.#capabilities
+      .map((capability) => lifecycleCapabilityId(capability))
+      .filter((id): id is string => id !== undefined);
+    if (!stored) return { installed };
+    const known = new Set(installed);
+    const found = new Set<string>();
+    if (this.#jobQueue.hasJobs()) {
+      for (const { capability } of this.#ctx.storage.sql
+        .exec<{ capability: string }>(
+          "SELECT DISTINCT capability FROM cf_agents_jobs"
+        )
+        .toArray()) {
+        if (capability === HOST_JOB_CAPABILITY) continue;
+        if (capability.startsWith(`${FACET_WAKE}:`)) continue;
+        if (!known.has(capability)) found.add(capability);
+      }
+    }
+    // A named instance's tables end with its suffix; tables whose suffix no
+    // installed instance has are listed by name.
+    // A table name does not say its kind, only its instance's suffix: a
+    // table is listed when no installed instance has that suffix.
+    const suffixes = new Set(
+      this.#capabilities.flatMap((capability) =>
+        capability instanceof LifecycleCapability &&
+        capability.instanceName !== undefined
+          ? [instanceSuffix(capability.instanceName)]
+          : []
+      )
+    );
+    for (const { name } of this.#ctx.storage.sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_agents_%'"
+      )
+      .toArray()) {
+      const at = name.search(/__[nc]_/);
+      if (at === -1) continue;
+      if (!suffixes.has(name.slice(at))) found.add(name);
+    }
+    return { installed, stored: [...found] };
+  }
+
+  #servicesForCapability(
+    capabilityId: string,
+    instanceName?: string
+  ): LifecycleServices {
+    // A named instance's job ids, socket tags and event payloads carry its
+    // id; the default instance's are today's, untouched.
+    const named = instanceName !== undefined;
+    const tag = (value: string) => (named ? `${capabilityId}:${value}` : value);
     const lifecycle = this;
     const envelope = (payload: unknown): LifecycleRouteEnvelope => ({
       capability: capabilityId,
@@ -547,12 +700,17 @@ export class Lifecycle<
       storage: this.#ctx.storage,
       sockets: Object.freeze({
         accept: (ws: WebSocket, tags: string[]) =>
-          this.#ctx.acceptWebSocket(ws, tags),
-        get: (tag?: string) => this.#ctx.getWebSockets(tag)
+          this.#ctx.acceptWebSocket(ws, named ? tags.map(tag) : tags),
+        get: (value?: string) =>
+          this.#ctx.getWebSockets(
+            value === undefined || !named ? value : tag(value)
+          )
       }),
       ready: () => this.#readyForCapabilityOperation(),
       status: () => this.#status,
-      jobs: this.#jobsForOwner(capabilityId),
+      jobs: named
+        ? namedInstanceJobs(this.#jobsForOwner(capabilityId), capabilityId)
+        : this.#jobsForOwner(capabilityId),
       trackAlarmWork: (work: Promise<unknown>) =>
         this.#jobDriver.trackAlarmWork(work),
       runInHostContext: async (
@@ -561,7 +719,15 @@ export class Lifecycle<
       ) => this.#runInHostBoundary(fn, scope),
       events: Object.freeze({
         emit: (type: string, payload: unknown) =>
-          this.#emitCapabilityEvent({ source: capabilityId, type, payload })
+          this.#emitCapabilityEvent({
+            // The kind's event, on the kind's channel; the payload says
+            // which instance.
+            source: named
+              ? capabilityId.slice(0, -(instanceName.length + 1))
+              : capabilityId,
+            type,
+            payload: named ? withInstance(payload, instanceName) : payload
+          })
       }),
       routes: Object.freeze({
         get source() {
@@ -1403,6 +1569,24 @@ export class Lifecycle<
     }
   }
 
+  /** Owners reported missing in this isolate. */
+  readonly #reportedMissing = new Set<string>();
+
+  /**
+   * A stored job's owner is not installed: the instance itself is missing
+   * (a deploy removed or renamed it). Its rows are kept. Reported once per
+   * owner per isolate, which is once per start.
+   */
+  #reportMissingCapability(owner: string): void {
+    if (this.#reportedMissing.has(owner)) return;
+    this.#reportedMissing.add(owner);
+    this.#emitCapabilityEvent({
+      source: "lifecycle",
+      type: "capability_missing",
+      payload: { capability: owner }
+    });
+  }
+
   /** Alarm invocations running on this instance. */
   #alarmsRunning = 0;
 
@@ -1424,13 +1608,27 @@ export class Lifecycle<
       };
     }
     const capability = await this.#capabilityRunner.findById(owner);
+    if (!capability) this.#reportMissingCapability(owner);
     if (!capability?.onJob) return undefined;
+    // A named instance sees its job ids without the prefix they are stored
+    // under.
+    const prefix =
+      capability instanceof LifecycleCapability &&
+      capability.instanceName !== undefined
+        ? `${capability.capabilityId}:`
+        : undefined;
+    const own = <C extends { job: LifecycleJob }>(context: C): C =>
+      prefix === undefined
+        ? context
+        : { ...context, job: ownJob(context.job, prefix) };
     return {
       onJob: async (context) =>
-        runWithoutCurrentAgent(() => capability.onJob!(context)),
+        runWithoutCurrentAgent(() => capability.onJob!(own(context))),
       onJobError: capability.onJobError
         ? async (context, error) =>
-            runWithoutCurrentAgent(() => capability.onJobError!(context, error))
+            runWithoutCurrentAgent(() =>
+              capability.onJobError!(own(context), error)
+            )
         : undefined
     };
   }

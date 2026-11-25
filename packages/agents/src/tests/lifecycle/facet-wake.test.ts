@@ -414,4 +414,23 @@ describe("facet wake", () => {
 
     expect(await agent.middleUnsettled("m", "reused")).toBeUndefined();
   });
+
+  it("keeps two instances of one capability apart in a facet, woken through one root wake", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "same-id", 0);
+    await agent.middleAuditPush("m", "same-id", 0);
+
+    // The root holds one wake for the facet, whatever its instances.
+    const wakes = (await agent.rootJobs()).filter((job) =>
+      job.id.startsWith("facet:")
+    );
+    expect(wakes).toHaveLength(1);
+    await runDurableObjectAlarm(agent);
+    await vi.waitFor(async () => {
+      expect((await agent.middleRan("m")).sort()).toEqual([
+        "audit:same-id",
+        "same-id"
+      ]);
+    });
+  });
 });

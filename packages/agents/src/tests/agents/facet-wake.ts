@@ -10,8 +10,16 @@ import {
  * a facet's job ran and in which facet.
  */
 class WakeProbe extends LifecycleCapability {
-  constructor(private readonly host: Agent) {
-    super("facet-wake-probe");
+  constructor(
+    private readonly host: Agent,
+    name?: string
+  ) {
+    super("facet-wake-probe", name);
+  }
+
+  /** How a run of `id` is recorded: a named instance's carry its name. */
+  #runId(id: string): string {
+    return this.instanceName === undefined ? id : `${this.instanceName}:${id}`;
   }
 
   onStart(): void {
@@ -39,7 +47,7 @@ class WakeProbe extends LifecycleCapability {
         void work.then(() => {
           this.#handedOffDone.add(job.id);
           this.host
-            .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${job.id}, ${Date.now()})`;
+            .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${this.#runId(job.id)}, ${Date.now()})`;
         });
       }
       if (this.#handedOffDone.has(job.id)) return undefined;
@@ -57,7 +65,7 @@ class WakeProbe extends LifecycleCapability {
       await new Promise((resolve) => setTimeout(resolve, 6_500));
     }
     this.host
-      .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${job.id}, ${Date.now()})`;
+      .sql`INSERT INTO facet_wake_runs (id, at) VALUES (${this.#runId(job.id)}, ${Date.now()})`;
     if (job.id.startsWith("fail")) throw new Error("facet job failed");
   }
 
@@ -120,10 +128,17 @@ abstract class WakeAgent extends Agent<Cloudflare.Env> {
   }
 
   readonly probe = new WakeProbe(this);
+  /** A second instance of the same kind, named. */
+  readonly auditProbe = new WakeProbe(this, "audit");
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
-    this.lifecycle.use(this.probe);
+    this.lifecycle.use(this.probe).use(this.auditProbe);
+  }
+
+  async pushAuditJob(id: string, delayMs: number): Promise<string[]> {
+    await this.auditProbe.push(id, delayMs);
+    return this.auditProbe.list();
   }
 
   async pushJob(id: string, delayMs: number): Promise<string[]> {
@@ -227,6 +242,13 @@ export class FacetWakeRoot extends WakeAgent {
 
   async middlePush(name: string, id: string, delayMs: number) {
     return (await this.subAgent(FacetWakeMiddle, name)).pushJob(id, delayMs);
+  }
+
+  async middleAuditPush(name: string, id: string, delayMs: number) {
+    return (await this.subAgent(FacetWakeMiddle, name)).pushAuditJob(
+      id,
+      delayMs
+    );
   }
 
   async middleRan(name: string): Promise<string[]> {
