@@ -318,6 +318,49 @@ function toToolPart(
   );
 }
 
+/** Convert a transcript message into an AI SDK UI message, with copied parts. */
+export function toUIMessage(message: TranscriptMessage): UIMessage {
+  return {
+    id: message.id,
+    role: message.role,
+    parts: message.parts.map(toUIPart),
+    ...(message.metadata && { metadata: message.metadata })
+  };
+}
+
+function toUIPart(part: MessagePart): UIPart {
+  switch (part.type) {
+    case "data": {
+      const { name, ...rest } = part;
+      return { ...rest, type: `data-${name}` };
+    }
+    case "tool": {
+      const {
+        type: _type,
+        toolName,
+        dynamic,
+        owner: _owner,
+        providerMetadata,
+        ...rest
+      } = part;
+      const call = {
+        ...rest,
+        ...(providerMetadata && { callProviderMetadata: providerMetadata })
+      };
+      // SAFETY: the state and its fields were produced together by
+      // toToolPart, or by an agent following the same ToolState rules.
+      return (
+        dynamic
+          ? { ...call, type: "dynamic-tool", toolName }
+          : { ...call, type: `tool-${toolName}` }
+      ) as UIPart;
+    }
+    default:
+      // SAFETY: the remaining parts match their AI SDK shapes field for field.
+      return { ...part } as UIPart;
+  }
+}
+
 /** A tool result or approval response, as an inbound event carries it. */
 export type ToolCallAnswer =
   | Pick<

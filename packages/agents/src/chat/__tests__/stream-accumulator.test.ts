@@ -142,6 +142,49 @@ describe("StreamAccumulator", () => {
       ]);
     });
 
+    it("routes deltas of overlapping parts by their chunk id", () => {
+      const a = acc();
+      for (const chunk of [
+        { type: "text-start", id: "a" },
+        { type: "text-start", id: "b" },
+        { type: "text-delta", id: "a", delta: "first" },
+        { type: "text-delta", id: "b", delta: "second" },
+        { type: "text-end", id: "a", providerMetadata: { p: { a: 1 } } },
+        { type: "text-end", id: "b" }
+      ]) {
+        a.applyChunk(chunk as StreamChunkData);
+      }
+      expect(a.parts).toEqual([
+        {
+          type: "text",
+          text: "first",
+          state: "done",
+          providerMetadata: { p: { a: 1 } }
+        },
+        { type: "text", text: "second", state: "done" }
+      ]);
+    });
+
+    it("keeps a streamed file's filename and providerMetadata", () => {
+      const a = acc();
+      a.applyChunk({
+        type: "file",
+        mediaType: "image/png",
+        url: "data:image/png;base64,AA==",
+        filename: "chart.png",
+        providerMetadata: { google: { id: "f1" } }
+      } as StreamChunkData);
+      expect(a.parts).toEqual([
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: "data:image/png;base64,AA==",
+          filename: "chart.png",
+          providerMetadata: { google: { id: "f1" } }
+        }
+      ]);
+    });
+
     it("reasoning-delta preserves providerMetadata when streamed mid-block", () => {
       const a = acc();
       a.applyChunk({ type: "reasoning-start" } as StreamChunkData);

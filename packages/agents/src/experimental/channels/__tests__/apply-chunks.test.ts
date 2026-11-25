@@ -16,4 +16,117 @@ describe("applyChunks", () => {
       { type: "text", text: "Hi" }
     ]);
   });
+
+  it("keeps a client tool call's owner through its answer", () => {
+    const asked = applyChunks({ id: "m1", role: "assistant", parts: [] }, [
+      {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "getLocation",
+        owner: "alice"
+      },
+      {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "getLocation",
+        input: {},
+        owner: "alice"
+      }
+    ]);
+    expect(asked.parts).toEqual([
+      {
+        type: "tool",
+        toolCallId: "c1",
+        toolName: "getLocation",
+        state: "input-available",
+        input: {},
+        owner: "alice"
+      }
+    ]);
+    // A later response continues the same message with the output.
+    const answered = applyChunks(asked, [
+      { type: "tool-output-available", toolCallId: "c1", output: "Lisbon" },
+      { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "You are in Lisbon" },
+      { type: "text-end", id: "t" }
+    ]);
+    expect(answered.parts).toEqual([
+      {
+        type: "tool",
+        toolCallId: "c1",
+        toolName: "getLocation",
+        state: "output-available",
+        input: {},
+        output: "Lisbon",
+        owner: "alice"
+      },
+      { type: "text", text: "You are in Lisbon" }
+    ]);
+    // The message it extended is untouched.
+    expect(asked.parts[0]).toMatchObject({ state: "input-available" });
+  });
+
+  it("does not add or reopen a replayed tool call", () => {
+    const call = { toolCallId: "c1", toolName: "search" };
+    const message = applyChunks({ id: "m1", role: "assistant", parts: [] }, [
+      { type: "tool-input-start", ...call },
+      { type: "tool-input-available", ...call, input: { q: "x" } },
+      { type: "tool-output-available", toolCallId: "c1", output: "found" },
+      // A provider replaying the earlier call in a continuation.
+      { type: "tool-input-start", ...call }
+    ]);
+    expect(message.parts).toEqual([
+      {
+        type: "tool",
+        ...call,
+        state: "output-available",
+        input: { q: "x" },
+        output: "found"
+      }
+    ]);
+  });
+
+  it("clears preliminary when a final output arrives without it", () => {
+    const message = applyChunks({ id: "m1", role: "assistant", parts: [] }, [
+      {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "count",
+        input: {}
+      },
+      {
+        type: "tool-output-available",
+        toolCallId: "c1",
+        output: 1,
+        preliminary: true
+      },
+      { type: "tool-output-available", toolCallId: "c1", output: 2 }
+    ]);
+    expect(message.parts[0]).toEqual({
+      type: "tool",
+      toolCallId: "c1",
+      toolName: "count",
+      state: "output-available",
+      input: {},
+      output: 2
+    });
+  });
+
+  it("keeps a pending approval when the call's input arrives late", () => {
+    const message = applyChunks({ id: "m1", role: "assistant", parts: [] }, [
+      { type: "tool-input-start", toolCallId: "c1", toolName: "deploy" },
+      { type: "tool-approval-request", toolCallId: "c1", approvalId: "a1" },
+      {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "deploy",
+        input: { env: "prod" }
+      }
+    ]);
+    expect(message.parts[0]).toMatchObject({
+      state: "approval-requested",
+      approval: { id: "a1" },
+      input: { env: "prod" }
+    });
+  });
 });
