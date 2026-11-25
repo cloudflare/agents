@@ -1184,7 +1184,10 @@ export class Tasks<
     const noWakeYet =
       lane === null
         ? startMode === "attached"
-        : queued || (startMode === "warm" && options.local !== undefined);
+        : queued ||
+          (startMode === "warm" &&
+            debounceMs === 0 &&
+            options.local !== undefined);
     if (!noWakeYet) {
       try {
         await this.#syncWake(runId);
