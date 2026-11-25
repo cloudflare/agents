@@ -203,6 +203,97 @@ describe("jsonSchemaToType", () => {
     expect(result).toBe("type Rows = Array<Array<string | null>>");
   });
 
+  it("keeps item types when type is an array of types", () => {
+    expect(
+      jsonSchemaToType(
+        { type: ["array", "null"], items: { type: "string" } },
+        "Tags"
+      )
+    ).toBe("type Tags = Array<string> | null");
+    expect(
+      jsonSchemaToType(
+        { type: ["string", "array"], items: { type: ["number", "null"] } },
+        "Value"
+      )
+    ).toBe("type Value = string | Array<number | null>");
+  });
+
+  it("keeps properties when type is an array of types", () => {
+    const result = jsonSchemaToType(
+      {
+        type: ["object", "null"],
+        properties: { id: { type: "string" } },
+        required: ["id"]
+      },
+      "User"
+    );
+
+    expect(result).toBe(
+      ["type User = {", "    id: string;", "} | null"].join("\n")
+    );
+  });
+
+  it("converts a type array with one entry, duplicates or no entries", () => {
+    expect(jsonSchemaToType({ type: ["string"] }, "A")).toBe("type A = string");
+    expect(jsonSchemaToType({ type: ["number", "integer"] }, "B")).toBe(
+      "type B = number"
+    );
+    expect(jsonSchemaToType({ type: [] }, "C")).toBe("type C = unknown");
+  });
+
+  it("parenthesises union members of an intersection", () => {
+    const result = jsonSchemaToType(
+      {
+        allOf: [
+          { anyOf: [{ type: "string" }, { type: "number" }] },
+          { enum: ["a", "b"] },
+          { type: ["boolean", "null"] },
+          { const: "x|y" },
+          { type: "array", items: { enum: ["a", "b"] } }
+        ]
+      },
+      "Mixed"
+    );
+
+    expect(result).toBe(
+      'type Mixed = (string | number) & ("a" | "b") & (boolean | null) & "x|y" & Array<"a" | "b">'
+    );
+  });
+
+  it("does not mistake a | in an object member for a union", () => {
+    const result = jsonSchemaToType(
+      {
+        allOf: [
+          {
+            type: "object",
+            properties: {
+              kind: { enum: ["a", "b"], description: 'Either "a" | "b"' }
+            }
+          },
+          { type: "object", properties: { id: { type: "string" } } }
+        ]
+      },
+      "Both"
+    );
+
+    expect(result).toBe(
+      [
+        "type Both = {",
+        '    /** Either "a" | "b" */',
+        '    kind?: "a" | "b";',
+        "} & {",
+        "    id?: string;",
+        "}"
+      ].join("\n")
+    );
+  });
+
+  it("converts empty anyOf, oneOf and allOf", () => {
+    expect(jsonSchemaToType({ anyOf: [] }, "A")).toBe("type A = never");
+    expect(jsonSchemaToType({ oneOf: [] }, "B")).toBe("type B = never");
+    expect(jsonSchemaToType({ allOf: [] }, "C")).toBe("type C = unknown");
+  });
+
   it("converts a bare string schema", () => {
     expect(jsonSchemaToType({ type: "string" }, "NameInput")).toBe(
       "type NameInput = string"
