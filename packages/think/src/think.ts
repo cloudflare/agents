@@ -250,6 +250,7 @@ import {
   keepStoredReplies,
   reconcileMessages,
   CHAT_RECOVERY_TASK_NAME,
+  broadcastReachesUnlistedSockets,
   listActiveChatRecoveryIncidents,
   type ChatRecoveryAttemptInput,
   type ChatRecoveryTaskHooks,
@@ -2326,6 +2327,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private readonly _frames = new ChatFrames({
     broadcast: (message, without) => this.broadcast(message, without),
     connections: () => this.getConnections(),
+    reachesUnlisted: () => broadcastReachesUnlistedSockets(this),
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>

@@ -48,6 +48,8 @@ export type DynamicAgentConnectionMeta = {
   tags: string[];
   state: unknown;
   requestHeaders?: [string, string][];
+  /** When the root accepted the socket (ms), see `CF_SUB_AGENT_ACCEPTED_AT_KEY`. */
+  acceptedAt?: number;
 };
 
 export type DynamicAgentConnectionBridgeLike = {

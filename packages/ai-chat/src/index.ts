@@ -98,6 +98,7 @@ import type { Streams } from "agents/streams";
 import { Sessions, type Session } from "agents/sessions";
 import {
   CHAT_RECOVERY_TASK_NAME,
+  broadcastReachesUnlistedSockets,
   type ChatRecoveryAttemptInput,
   type ChatRecoveryTaskHooks,
   chatRecoveryProgressReader,
@@ -577,6 +578,7 @@ export class AIChatAgent<
   private readonly _frames = new ChatFrames({
     broadcast: (message, without) => this.broadcast(message, without),
     connections: () => this.getConnections(),
+    reachesUnlisted: () => broadcastReachesUnlistedSockets(this),
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>

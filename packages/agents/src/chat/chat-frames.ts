@@ -51,6 +51,12 @@ export interface ChatFramesOptions {
    * a deployment).
    */
   connections(): Iterable<{ readonly id: string }>;
+  /**
+   * Whether a broadcast now also reaches sockets {@link connections} does
+   * not list (a sub-agent during its start, whose broadcast the root sends
+   * to every socket it accepted for it).
+   */
+  reachesUnlisted?(): boolean;
   /** Where recent terminal frames are recorded. */
   kv: RecentTerminalsKv;
   /** Connections that were told a stream resumes and have not acked yet. */
@@ -86,9 +92,47 @@ export class EndedRequests {
   /** By request: the sockets it was sent to. */
   readonly #ended = new Map<string, WeakSet<object>>();
 
-  /** Whether `connection` was sent the end of `requestId`. */
+  /**
+   * By request: when its end was broadcast, and the ids it left out. A
+   * facet broadcasting during its start reaches, through the root, sockets
+   * it does not know yet, so no object is noted for them.
+   */
+  readonly #broadcast = new Map<string, { at: number; without: Set<string> }>();
+
+  /**
+   * Whether `connection` was sent the end of `requestId`: noted for it, or
+   * broadcast after (strictly) the root accepted it (a sub-agent's socket, whose
+   * `acceptedAt` the root stamps) and not left out.
+   */
   has(connection: object, requestId: string): boolean {
-    return this.#ended.get(requestId)?.has(connection) ?? false;
+    if (this.#ended.get(requestId)?.has(connection)) return true;
+    const broadcast = this.#broadcast.get(requestId);
+    const { acceptedAt, id } = connection as {
+      acceptedAt?: unknown;
+      id?: unknown;
+    };
+    return (
+      broadcast !== undefined &&
+      typeof acceptedAt === "number" &&
+      // Strictly before: `Date.now()` advances only at I/O, so an accept
+      // in the broadcast's millisecond may have come after it. A miss here
+      // costs a duplicate end; a wrong hit would cost the tab its end.
+      acceptedAt < broadcast.at &&
+      !(typeof id === "string" && broadcast.without.has(id))
+    );
+  }
+
+  /** The end of `requestId` was broadcast to every socket but `without`. */
+  broadcast(requestId: string, without: readonly string[]): void {
+    this.#broadcast.delete(requestId);
+    this.#broadcast.set(requestId, {
+      at: Date.now(),
+      without: new Set(without)
+    });
+    if (this.#broadcast.size > EndedRequests.MAX) {
+      const oldest = this.#broadcast.keys().next().value;
+      if (oldest !== undefined) this.#broadcast.delete(oldest);
+    }
   }
 
   /** `connection` was sent the end of `requestId`. */
@@ -152,10 +196,23 @@ export class ChatFrames {
     if (ends !== undefined) {
       // A socket is told a request's end once.
       const left = new Set(without);
+      let listed = false;
       for (const connection of this.options.connections()) {
         if (left.has(connection.id)) continue;
-        if (this.ended.has(connection, ends)) without.push(connection.id);
-        else this.ended.note(connection, ends);
+        if (this.ended.has(connection, ends)) {
+          without.push(connection.id);
+        } else {
+          this.ended.note(connection, ends);
+          listed = true;
+        }
+      }
+      // A broadcast that goes out reaches, through the root, sockets it
+      // accepted that nobody here lists yet. One goes out when a listed
+      // socket not told yet gets it, or when the host says it reaches unlisted ones (a
+      // starting sub-agent); a sub-agent that knows its sockets skips one
+      // with no listed recipient.
+      if (listed || this.options.reachesUnlisted?.()) {
+        this.ended.broadcast(ends, without);
       }
     }
     this.options.broadcast(JSON.stringify(ready), without);

@@ -33,6 +33,7 @@ import {
 import {
   CF_SUB_AGENT_OUTER_URL_KEY,
   CF_SUB_AGENT_TAGS_KEY,
+  CF_SUB_AGENT_ACCEPTED_AT_KEY,
   SUB_AGENT_OUTER_URL_HEADER,
   rejectSubAgentWebSocket
 } from "./dynamic-agents/dynamic-agents";
@@ -454,7 +455,8 @@ const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
 registerInternalConnectionKeys(
   CF_VOICE_IN_CALL_KEY,
   CF_SUB_AGENT_OUTER_URL_KEY,
-  CF_SUB_AGENT_TAGS_KEY
+  CF_SUB_AGENT_TAGS_KEY,
+  CF_SUB_AGENT_ACCEPTED_AT_KEY
 );
 
 /**
