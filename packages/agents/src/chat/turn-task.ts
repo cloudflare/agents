@@ -13,6 +13,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { TaskJson, TaskStep } from "../tasks";
+import { TaskSettlement } from "../tasks/settlement";
 import type { TaskCheckpoint } from "../tasks/types";
 import type { ChatAdmissionInput, ChatAdmissionRecord } from "./admissions";
 import type { ChatRecoveryAttemptInput } from "./recovery-engine";
@@ -128,6 +129,11 @@ export type ChatTurnTaskHooks = {
    * before its turn started (`ChatTurns.replayInRun`).
    */
   replay(runId: string, record: ChatAdmissionRecord): Promise<void>;
+  /**
+   * Keep the parked run `runId` at the head of the chat lane until `reply`
+   * ends, then end it (`ChatTurns.parkUntil`).
+   */
+  parkUntil(runId: string, reply: Promise<void>): void;
 };
 
 /** The Tasks lane the chat turns of an agent run on, one at a time. */
@@ -199,7 +205,7 @@ function legacySnapshotKey(nonce: string): string {
  */
 export function createChatTurnTaskDefinition(
   hooks: ChatTurnTaskHooks
-): (input: unknown, step: TaskStep) => Promise<void> {
+): (input: unknown, step: TaskStep) => Promise<void | TaskSettlement> {
   return async (input, step) => {
     const { requestId, nonce, envelope, lane, admission } =
       input as ChatTurnTaskInput;
@@ -376,20 +382,65 @@ export function createChatTurnTaskDefinition(
           // Task did.
           delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
         });
+      if (!lane) {
+        await run();
+        return;
+      }
       // A lane turn replayed after a reset recovers holding the lane, so the
       // requests its isolate left behind it wait for it (ChatOrder), as
-      // their records did; the attempt's own turns run in place.
-      await (lane ? runAsLaneRecoveryAttempt(run) : run());
+      // their records did; the attempt's own turns run in place. The run
+      // stays parked at the lane's head until the recovered reply ends: an
+      // attempt awaiting it would hold the job loop the reply needs.
+      const { reply } = await runHoldingLane(run);
+      if (reply) {
+        hooks.parkUntil(step.id, reply);
+        return TaskSettlement.park("recovered reply");
+      }
     }
   };
 }
 
-/** Set while a lane run runs its turn's recovery attempt. */
-const laneAttempt = new AsyncLocalStorage<boolean>();
+type LaneAttempt = { reply?: Promise<void> };
 
-/** Run `fn` as a lane run's recovery attempt ({@link inLaneRecoveryAttempt}). */
-export function runAsLaneRecoveryAttempt<T>(fn: () => Promise<T>): Promise<T> {
-  return laneAttempt.run(true, fn);
+/** Set while the app's `onStart` runs. */
+const appStart = new AsyncLocalStorage<true>();
+
+/**
+ * @internal Run the app's `onStart`: a turn it queues runs in place, not behind the
+ * requests an earlier isolate left, which replay only once it is done.
+ */
+export function runAppStart<T>(fn: () => Promise<T>): Promise<T> {
+  return appStart.run(true, fn);
+}
+
+/** Set while a lane run runs its turn's recovery attempt. */
+const laneAttempt = new AsyncLocalStorage<LaneAttempt>();
+
+/**
+ * Run `fn` as a lane run's recovery attempt ({@link inLaneRecoveryAttempt}).
+ * @returns The recovered reply it handed off ({@link holdLaneForReply}),
+ * which the lane waits for.
+ */
+export async function runHoldingLane(
+  fn: () => Promise<void>
+): Promise<LaneAttempt> {
+  const held: LaneAttempt = {};
+  await laneAttempt.run(held, fn);
+  return held;
+}
+
+/**
+ * In a lane run's recovery attempt, keep the lane until `reply` ends.
+ * @returns False outside one.
+ */
+export function holdLaneForReply(reply: Promise<unknown>): boolean {
+  const held = laneAttempt.getStore();
+  if (!held) return false;
+  held.reply = reply.then(
+    () => {},
+    () => {}
+  );
+  return true;
 }
 
 /**
@@ -397,7 +448,12 @@ export function runAsLaneRecoveryAttempt<T>(fn: () => Promise<T>): Promise<T> {
  * queues runs in place, not behind the run that holds the lane.
  */
 export function inLaneRecoveryAttempt(): boolean {
-  return laneAttempt.getStore() === true;
+  return laneAttempt.getStore() !== undefined;
+}
+
+/** Whether a turn queued now runs in place (a recovery attempt's, or `onStart`'s). */
+export function runsInPlace(): boolean {
+  return inLaneRecoveryAttempt() || appStart.getStore() === true;
 }
 
 /**

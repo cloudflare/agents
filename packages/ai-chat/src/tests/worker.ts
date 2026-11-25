@@ -5914,6 +5914,19 @@ export class AsyncStartAdmissionAgent extends SlowStreamAgent {
   override async onStart(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 300));
     this._ready = true;
+    // Opted in by a test: onStart waits for a turn of its own.
+    if (this.ctx.storage.kv.get("onStartTurn") === true) {
+      this.ctx.storage.kv.delete("onStartTurn");
+      await this.saveMessages((messages) => [
+        ...messages,
+        { id: "on-start", role: "user", parts: [{ type: "text", text: "hi" }] }
+      ]);
+    }
+  }
+
+  /** The next start's onStart waits for a turn of its own. */
+  turnInNextOnStartForTest(): void {
+    this.ctx.storage.kv.put("onStartTurn", true);
   }
 
   override async onChatMessage(

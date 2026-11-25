@@ -161,7 +161,9 @@ export function memoryLane(world = new MemoryWorld()) {
           const run = world.runs.get(runId);
           return run && { runId, metadata: run.metadata };
         },
-        peekList: () => {
+        peekList: (options: { parked?: boolean }) => {
+          // Nothing here parks.
+          if (options.parked) return [];
           const runs = open().map((run) => ({
             runId: run.runId,
             metadata: run.metadata
@@ -181,10 +183,12 @@ export function memoryLane(world = new MemoryWorld()) {
             ...patch
           };
           return true;
-        }
+        },
+        // Nothing here parks: an earlier isolate's park has ended.
+        settle: async (runId: string) => world.runs.delete(runId)
       }) as unknown as Pick<
         Tasks,
-        "run" | "peek" | "peekList" | "inputOf" | "patchMetadata"
+        "run" | "peek" | "peekList" | "inputOf" | "patchMetadata" | "settle"
       >,
     /** Run what earlier isolates left, replaying through `turns`. */
     wake(turns: {

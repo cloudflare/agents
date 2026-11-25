@@ -20,6 +20,7 @@ type AdmissionStub = {
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
   seedQueuedRequestForTest(requestId: string): Promise<void>;
+  turnInNextOnStartForTest(): Promise<void>;
   getTranscriptsSeenForTest(): Promise<string[][]>;
   ageAdmissionsForTest(ms: number): Promise<void>;
 };
@@ -348,6 +349,28 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const messages = await restarted.getPersistedMessages();
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
+  }, 40_000);
+
+  it("an onStart that waits for its own turn is not held behind a replay", async () => {
+    const room = crypto.randomUUID();
+    const binding = "AsyncStartAdmissionAgent";
+    const stub = await agent(binding, room);
+    await stub.seedQueuedRequestForTest("r9");
+    await stub.turnInNextOnStartForTest();
+    await reset(binding, room);
+    const restarted = await agent(binding, room);
+    // The onStart turn runs first; the replay runs once onStart is done.
+    const messages = await waitFor(
+      () => restarted.getPersistedMessages(),
+      (m) => m.filter((x) => x.role === "assistant").length === 2,
+      15_000
+    );
+    expect(
+      messages
+        .filter((m) => m.role === "user")
+        .map((m) => m.id)
+        .sort()
+    ).toEqual(["on-start", "u-r9"]);
   }, 40_000);
 
   it("a request replayed after a reset runs once the app's onStart is done", async () => {

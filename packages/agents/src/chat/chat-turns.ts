@@ -188,7 +188,7 @@ export interface ChatTurnsOptions {
   lane: {
     tasks(): Pick<
       Tasks,
-      "run" | "peek" | "peekList" | "inputOf" | "patchMetadata"
+      "run" | "peek" | "peekList" | "inputOf" | "patchMetadata" | "settle"
     >;
     definition: string;
   };
@@ -416,6 +416,8 @@ export class ChatTurns<
   readonly #restoredDecisions = new Map<string, SubmitConcurrencyDecision>();
   /** Where queued turns are runs. */
   readonly #lane: ChatTurnsOptions["lane"];
+  /** Lane runs this isolate keeps parked until their reply ends. */
+  readonly #parked = new Set<string>();
   /** The host's request for a record, to replay it inside its run. */
   readonly #replayRequest:
     | ((record: ChatAdmissionRecord) => ClientChatRequest<unknown> | null)
@@ -818,6 +820,7 @@ export class ChatTurns<
    * request's record is its lane run, which runs again by itself.
    */
   async resumeAdmissions(): Promise<void> {
+    await this.#endOrphanedParks();
     const admissions = this.admissions;
     if (!admissions) return;
     if (this.#released) {
@@ -844,6 +847,46 @@ export class ChatTurns<
         );
       }
     });
+  }
+
+  /**
+   * Keep the parked lane run `runId` at the lane's head until `reply` (its
+   * recovered reply) ends, then complete it.
+   */
+  parkUntil(runId: string, reply: Promise<void>): void {
+    this.#parked.add(runId);
+    const tasks = this.#lane.tasks();
+    void reply
+      .then(async () => {
+        // The attempt that parks it may not have ended yet.
+        while (!(await tasks.settle(runId, null))) {
+          if (tasks.peek(runId)?.status !== "running") return;
+          await new Promise((wait) => setTimeout(wait, 10));
+        }
+      })
+      .catch((error) => console.error("[chat] parked run not ended:", error))
+      .finally(() => this.#parked.delete(runId));
+  }
+
+  /** End parks an earlier isolate left: their replies ended with it. */
+  async #endOrphanedParks(): Promise<void> {
+    const tasks = this.#lane.tasks();
+    let parked: ReturnType<typeof tasks.peekList>;
+    try {
+      parked = tasks.peekList({
+        definition: this.#lane.definition,
+        lane: CHAT_TURN_LANE,
+        status: ["pending"],
+        parked: true,
+        results: false
+      });
+    } catch {
+      // Tasks has not started.
+      return;
+    }
+    for (const run of parked) {
+      if (!this.#parked.has(run.runId)) await tasks.settle(run.runId, null);
+    }
   }
 
   /**

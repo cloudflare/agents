@@ -105,6 +105,7 @@ import {
   chatRecoveryStorageAdapter,
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
+  runAppStart,
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
@@ -831,6 +832,7 @@ export class AIChatAgent<
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn),
         replay: (runId, record) => this._turns.replayInRun(runId, record),
+        parkUntil: (runId, reply) => this._turns.parkUntil(runId, reply),
         attempts
       })
     );
@@ -1001,7 +1003,7 @@ export class AIChatAgent<
           });
         }
       );
-      const started = await _onStart(props);
+      const started = await runAppStart(async () => _onStart(props));
       // Requests an earlier isolate accepted and never started run again,
       // once the app has started and no interrupted turn waits for recovery.
       this._appStartedForAdmissions = true;

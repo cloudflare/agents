@@ -287,7 +287,7 @@ export async function chatRecoveryNames(input: {
 
 /**
  * Request ids of chat-turn runs that have not settled: Task runs of the
- * turn definition (a turn queued on the chat lane once its model call
+ * turn definition (not one parked while its recovered reply streams) (a turn queued on the chat lane once its model call
  * began), and legacy fibers (facets). A table that does not exist
  * yet holds none.
  */
@@ -301,6 +301,7 @@ export function interruptedTurnRequestIds(
       .exec(
         `select input, metadata from cf_agents_task_runs
          where definition = ? and status in ('pending', 'running')
+           and coalesce(wait_reason, '') != 'park'
            and (lane is null or json_type(checkpoint, '$.snapshot') is not null)`,
         turnName
       )

@@ -257,6 +257,7 @@ import {
   chatRecoveryStorageAdapter,
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
+  runAppStart,
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
@@ -1770,7 +1771,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         "Submissions of the retired table were not moved on this wake; the " +
           "next successful wake moves them."
       );
-      await _onStart(props);
+      await runAppStart(async () => _onStart(props));
 
       // 9. Declarative scheduled tasks are code-defined and should reconcile
       // before draining any recovered programmatic work they may enqueue.
@@ -2978,6 +2979,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn),
         replay: (runId, record) => this._turns.replayInRun(runId, record),
+        parkUntil: (runId, reply) => this._turns.parkUntil(runId, reply),
         attempts
       })
     );

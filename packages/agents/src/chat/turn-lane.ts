@@ -16,7 +16,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { inLaneRecoveryAttempt, type ChatLaneEntry } from "./turn-task";
+import { runsInPlace, type ChatLaneEntry } from "./turn-task";
 
 export type TurnResult<T> =
   | { status: "completed"; value: T }
@@ -87,8 +87,9 @@ export class TurnLane {
     fn: () => Promise<T>,
     options?: EnqueueOptions
   ): Promise<TurnResult<T>> {
-    // A lane run's recovery attempt holds the lane: its turns run in place.
-    if (inLaneRecoveryAttempt()) {
+    // A lane run's recovery attempt holds the lane, and the app's onStart
+    // comes before what an earlier isolate left: their turns run in place.
+    if (runsInPlace()) {
       this.reserveInline(requestId);
     }
     // A request that took its place earlier runs there.

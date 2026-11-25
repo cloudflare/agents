@@ -89,6 +89,7 @@ export { storedAsFacet } from "../dynamic-agents/facet-flag";
 export {
   createChatTurnTaskDefinition,
   currentTurnCheckpoint,
+  runAppStart,
   type ChatTurnClosureEntry,
   type ChatTurnTaskHooks
 } from "./turn-task";
