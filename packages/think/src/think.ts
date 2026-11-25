@@ -11091,11 +11091,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this.ctx.storage,
       isGone,
       (id, claim, progress) =>
-        sendDelivery(this.tasks, RECOVERED_REPLY_SINK, id, claim, {
-          sentAt: Date.now(),
-          attempts: 0,
-          progress
-        })
+        progress.outcome === undefined
+          ? // Still recovering: held at once (its first attempt parks
+            // inline), so a release that comes before any alarm finds it.
+            sendDelivery(this.tasks, RECOVERED_REPLY_SINK, id, claim)
+          : sendDelivery(this.tasks, RECOVERED_REPLY_SINK, id, claim, {
+              sentAt: Date.now(),
+              attempts: 0,
+              progress
+            })
     );
     const prefix = recoveredReplyId("");
     for (const held of this.tasks.peekList({

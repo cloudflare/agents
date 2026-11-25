@@ -535,6 +535,39 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return this._untilRecoveredReplyDelivered(incidentId);
   }
 
+  /**
+   * A reply the released version kept unsettled while its incident still
+   * recovers, moved on start, then released by recovery before any alarm
+   * ran: it must be held at once so the release finds it.
+   */
+  async releaseMigratedRecoveringReplyForTest(text: string): Promise<{
+    heldAfterStart: boolean;
+    delivered: boolean;
+  }> {
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    await this.ctx.storage.put(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`,
+      { incidentId, status: "scheduled" }
+    );
+    await this._seedLegacyRecoveredReply(incidentId, {});
+    await this._replayRecoveredReplies();
+    const heldAfterStart =
+      this.tasks.peek(recoveredReplyId(incidentId))?.waitReason === "park";
+    await (
+      this as unknown as {
+        _releaseMessengerRecovery(
+          incidentId: string,
+          outcome: "completed" | "interrupted",
+          text?: string
+        ): Promise<void>;
+      }
+    )._releaseMessengerRecovery(incidentId, "completed", text);
+    return {
+      heldAfterStart,
+      delivered: await this._untilRecoveredReplyDelivered(incidentId)
+    };
+  }
+
   async getAdapterCalls(): Promise<Array<{ kind: string; content: string }>> {
     this._ensureTable();
     return this.sql<{ kind: string; content: string }>`

@@ -1373,6 +1373,20 @@ describe("think messengers core", () => {
       expect(await agent.getAdapterCalls()).toEqual([]);
     });
 
+    it("holds a migrated reply whose incident still recovers, so recovery's release delivers it", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `orphan-release-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agent.releaseMigratedRecoveringReplyForTest("recovered answer")
+      ).toEqual({ heldAfterStart: true, delivered: true });
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["recovered answer"]);
+    });
+
     it("apologizes on start for a pending reply whose incident is gone", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,

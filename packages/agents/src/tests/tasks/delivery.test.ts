@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   deliveryDefinition,
   registerDeliverySink,
+  releaseDelivery,
   sendDelivery
 } from "../../internal/delivery";
 import type { Tasks } from "../../tasks/tasks";
@@ -264,5 +265,40 @@ describe("deliveries", () => {
       expect(gaveUp).toEqual(["Delivery l gave up after 197 attempts: down"]);
       expect(instance.tasks.peek("l")).toBeUndefined();
     });
+  });
+
+  it("starts a held delivery's give-up window when it is released", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const gaveUp: string[] = [];
+        registerDeliverySink<null>(tasksOf(instance), "held", {
+          deliver: (_payload, attempt) => {
+            if (attempt.checkpoint.get("go") === undefined) return "hold";
+            throw new Error("down");
+          },
+          onGiveUp: (error) => {
+            gaveUp.push(error.message);
+          }
+        });
+        await sendDelivery(tasksOf(instance), "held", "h", null);
+        // Held for 13 h before recovery released it.
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET created_at = ? WHERE run_id = 'h'",
+          Date.now() - 13 * 60 * 60 * 1000
+        );
+        expect(await releaseDelivery(tasksOf(instance), "h", { go: 1 })).toBe(
+          true
+        );
+        await tasksOf(instance).runDue(deliveryDefinition("held"));
+        // Its first failed send backs off instead of giving up.
+        expect(gaveUp).toEqual([]);
+        expect(runs(state.storage)).toMatchObject([
+          { run_id: "h", status: "pending", wait_reason: "retry" }
+        ]);
+      }
+    );
   });
 });

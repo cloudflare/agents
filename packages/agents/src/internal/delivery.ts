@@ -92,6 +92,8 @@ const MAX_LOST_ATTEMPTS = 3;
  */
 const ENDED = "__delivery:ended";
 const LOST = "__delivery:lost";
+/** When a held delivery was released: its give-up window starts there. */
+const RELEASED_AT = "__delivery:releasedAt";
 
 /** The framework definition of one sink's deliveries. */
 export function deliveryDefinition(sink: string): string {
@@ -179,8 +181,9 @@ export async function releaseDelivery(
   // `settle` also takes a run a reset left running; a release must not
   // rewrite the progress of one that is no longer held.
   if (tasks.peek(id)?.waitReason !== "park") return false;
-  return tasks.settle(id, TaskSettlement.retry(Date.now()), {
-    checkpoint: progress
+  const now = Date.now();
+  return tasks.settle(id, TaskSettlement.retry(now), {
+    checkpoint: { ...progress, [RELEASED_AT]: now }
   });
 }
 
@@ -216,8 +219,11 @@ async function attemptDelivery<Payload>(
           maxMs: MAX_DELAY_MS
         })
     );
+  // A held delivery's window starts when it was released, not while it
+  // waited for what to send.
   const outOfTime = (now: number) =>
-    now - step.createdAt >= GIVE_UP_AFTER_MS ||
+    now - (step.checkpoint.get<number>(RELEASED_AT) ?? step.createdAt) >=
+      GIVE_UP_AFTER_MS ||
     step.attempt >= MAX_DELIVERY_ATTEMPTS - MAX_LOST_ATTEMPTS;
 
   // Attempts counted (and committed) that never ended: the object reset
