@@ -1,8 +1,8 @@
 {
-  "total": 1541,
-  "passed": 520,
-  "needThink": 1256,
-  "needThinkPassed": 235,
+  "total": 1547,
+  "passed": 522,
+  "needThink": 1255,
+  "needThinkPassed": 230,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -109,12 +109,12 @@
       "passed": 6
     },
     "extension-manager.test.ts": {
-      "total": 41,
-      "passed": 41
+      "total": 45,
+      "passed": 42
     },
     "fetch-tools.test.ts": {
-      "total": 51,
-      "passed": 50
+      "total": 52,
+      "passed": 51
     },
     "fiber.test.ts": {
       "total": 7,
@@ -205,7 +205,7 @@
       "passed": 0
     },
     "run-turn-recovery.test.ts": {
-      "total": 10,
+      "total": 11,
       "passed": 1
     },
     "run-turn.test.ts": {
@@ -398,11 +398,13 @@
     "extension-manager.test.ts > ExtensionManager > unload > should return false for unknown extension",
     "extension-manager.test.ts > ExtensionManager > unload > should unload an extension",
     "extension-manager.test.ts > ExtensionManager hook timeout > runs a manager the agent was given under the agent's timeout",
+    "extension-manager.test.ts > ExtensionManager network hosts with an app's own host binding > keeps the agent's network, since the binding may not serve fetch",
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > changes the id when the context labels change",
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > gives different agents different ids for the same host extension",
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > never reuses a host extension id without a scope",
     "extension-manager.test.ts > ExtensionManager worker id stability > reuses the same worker id across managers for identical extensions",
     "fetch-tools.test.ts > Think — fetchTools integration > does not register fetch tools by default",
+    "fetch-tools.test.ts > Think — fetchTools integration > sends the workspace and fetch tools as they are given directly, in that order, byte for byte",
     "fetch-tools.test.ts > createFetchTools — config > generates one fetch_<name> tool per binding with a sanitized name",
     "fetch-tools.test.ts > createFetchTools — config > registers fetch_url only when a public allowlist is set",
     "fetch-tools.test.ts > createFetchTools — config > throws when neither allowlist nor bindings are configured",

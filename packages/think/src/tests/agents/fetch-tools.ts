@@ -4,7 +4,8 @@
  * and that the capability prompt advertises it, while staying absent when
  * unconfigured. `beforeTurn` captures the assembled tools/system prompt.
  */
-import type { LanguageModel } from "ai";
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
+import { streamText, type LanguageModel } from "ai";
 import { Think } from "../../think";
 import { createFetchTools, type FetchResult } from "../../tools/fetch";
 import { WorkspaceFiles } from "../../workspace-files";
@@ -37,7 +38,22 @@ class CollectingCallback implements StreamCallback {
   }
 }
 
-function createTextModel(): LanguageModel {
+/** The tool definitions each model request carried, in order. */
+type RequestTools = { name?: string }[] | undefined;
+
+/** A tool result as a later model request carries it. */
+type SeenResult = { role: string; content?: unknown };
+
+/**
+ * A model that answers "ok", or, while `call` is set and the request has no
+ * tool result yet, asks for that one tool call. Every request's messages go
+ * to `seen`.
+ */
+function createTextModel(
+  requests: RequestTools[] = [],
+  call?: () => { toolName: string; input: unknown } | undefined,
+  seen: SeenResult[][] = []
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -46,10 +62,29 @@ function createTextModel(): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream() {
+    doStream(options: { tools?: { name?: string }[]; prompt?: SeenResult[] }) {
+      requests.push(options.tools);
+      seen.push(options.prompt ?? []);
+      const wanted = call?.();
+      const answered = options.prompt?.some((m) => m.role === "tool");
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
+          if (wanted && !answered) {
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "fetch-1",
+              toolName: wanted.toolName,
+              input: JSON.stringify(wanted.input)
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+            controller.close();
+            return;
+          }
           controller.enqueue({ type: "text-start", id: "t" });
           controller.enqueue({ type: "text-delta", id: "t", delta: "ok" });
           controller.enqueue({ type: "text-end", id: "t" });
@@ -70,9 +105,65 @@ export class ThinkFetchToolsTestAgent extends Think {
   override maxSteps = 1;
   private _lastToolNames: string[] = [];
   private _lastSystem = "";
+  readonly #requests: RequestTools[] = [];
+  readonly #seen: SeenResult[][] = [];
+  #call: { toolName: string; input: unknown } | undefined;
 
   override getModel(): LanguageModel {
-    return createTextModel();
+    return createTextModel(this.#requests, () => this.#call, this.#seen);
+  }
+
+  /**
+   * Have the model call `fetch_docs` on a binding that answers `body`, in
+   * a turn: the tool result the next model request carries, as JSON.
+   */
+  async fetchThroughModel(body: string): Promise<string> {
+    // A service binding that serves only the one path, and says which it
+    // was asked for: a wrong path gets a 404.
+    const binding = {
+      fetch: async (input: string | Request) => {
+        const { pathname } = new URL(
+          typeof input === "string" ? input : input.url
+        );
+        return pathname === "/v1/docs/body"
+          ? new Response(`${pathname}: ${body}`, {
+              headers: { "content-type": "text/plain" }
+            })
+          : new Response("not found", { status: 404 });
+      }
+    } as unknown as Fetcher;
+    this.fetchTools = {
+      bindings: { docs: { binding, allowlist: ["/v1/docs/**"] } }
+    };
+    this.maxSteps = 2;
+    this.#call = { toolName: "fetch_docs", input: { path: "/v1/docs/body" } };
+    await this.chat("fetch it", new CollectingCallback());
+    this.#call = undefined;
+    const next = this.#seen.at(-1) ?? [];
+    return JSON.stringify(next.filter((message) => message.role === "tool"));
+  }
+
+  /**
+   * The tool definitions one turn sent to the model with fetch on, and the
+   * same tools given straight to `streamText` (the workspace's, then the
+   * fetch tools, as Think merges them): both as JSON.
+   */
+  async fetchToolRequests(): Promise<{ turn: string; direct: string }> {
+    this.fetchTools = { allowlist: ["https://developers.cloudflare.com/**"] };
+    await this.chat("hello", new CollectingCallback());
+    const directRequests: RequestTools[] = [];
+    await streamText({
+      model: createTextModel(directRequests),
+      tools: {
+        ...createAITools({ workspace: this.workspace }),
+        ...createFetchTools({ ...this.fetchTools, workspace: this.workspace })
+      },
+      prompt: "hello"
+    }).consumeStream();
+    return {
+      turn: JSON.stringify(this.#requests.at(-1) ?? []),
+      direct: JSON.stringify(directRequests[0] ?? [])
+    };
   }
 
   override getSystemPrompt(): string {

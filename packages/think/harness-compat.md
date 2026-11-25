@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**235 of the 1256 tests that construct Think pass (18%).** Across the whole suite, 520 of 1541.
+**230 of the 1255 tests that construct Think pass (18%).** Across the whole suite, 522 of 1547.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -43,8 +43,8 @@ supported by the harness-backed Think yet".
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
 | `execute-hitl.test.ts`                 | 0 / 16   | 0%   |
 | `execute-tool.test.ts`                 | 6 / 6    | 100% |
-| `extension-manager.test.ts`            | 41 / 41  | 100% |
-| `fetch-tools.test.ts`                  | 50 / 51  | 98%  |
+| `extension-manager.test.ts`            | 42 / 45  | 93%  |
+| `fetch-tools.test.ts`                  | 51 / 52  | 98%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
 | `hooks.test.ts`                        | 38 / 149 | 25%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
@@ -67,7 +67,7 @@ supported by the harness-backed Think yet".
 | `prompt-cache.test.ts`                 | 4 / 10   | 40%  |
 | `queued-order.test.ts`                 | 0 / 5    | 0%   |
 | `rpc-chat-turns.test.ts`               | 0 / 5    | 0%   |
-| `run-turn-recovery.test.ts`            | 1 / 10   | 10%  |
+| `run-turn-recovery.test.ts`            | 1 / 11   | 9%   |
 | `run-turn.test.ts`                     | 13 / 35  | 37%  |
 | `scheduled-tasks.test.ts`              | 6 / 9    | 66%  |
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |

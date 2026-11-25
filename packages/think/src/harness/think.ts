@@ -41,6 +41,8 @@ import {
 } from "../scheduled-tasks";
 import { Workspace } from "@cloudflare/computer";
 import { workspaceExtension } from "./extensions/workspace";
+import { fetchExtension } from "./extensions/fetch";
+import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
 import { Think as LegacyThink } from "../think";
@@ -144,6 +146,10 @@ export class Think<
    */
   workspace!: ThinkWorkspace;
 
+  /** Think's opt-in fetch tools, as on Think: off unless set. */
+  fetchTools: false | Omit<CreateFetchToolsOptions, "workspace" | "onEvent"> =
+    false;
+
   #messages: UIMessage[] = [];
   #context: Context | undefined;
   #handle: Session | undefined;
@@ -155,11 +161,25 @@ export class Think<
     this.harness = new ThinkHarness({
       // The Agent's own Tasks, which Think's runs already use.
       tasks: this.tasks,
-      // In Think's tool order: the workspace's tools come first.
+      // In Think's tool order: the workspace's tools, then fetch.
       extensions: [
         {
           name: "workspace",
           extension: workspaceExtension(() => this.workspace)
+        },
+        {
+          name: "fetch",
+          extension: fetchExtension(
+            () => this.fetchTools,
+            () => this.workspace,
+            (event) =>
+              (
+                this._emit as unknown as (
+                  type: string,
+                  payload: Record<string, unknown>
+                ) => void
+              ).call(this, "tool:fetch", { ...event })
+          )
         }
       ],
       // Think's reserved keys, so client writes are stripped the same way.
