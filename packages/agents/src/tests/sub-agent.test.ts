@@ -1578,6 +1578,13 @@ describe("SubAgent", () => {
     ]);
   });
 
+  it("runs a named Tasks in a facet apart from the facet's own Tasks", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentRunNamedTasks("named-tasks-child")
+    ).resolves.toEqual(["kept", "imports:1"]);
+  });
+
   it("runs a Task in a facet with its local and checkpoint, and clears the checkpoint on settle", async () => {
     const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
     await expect(
