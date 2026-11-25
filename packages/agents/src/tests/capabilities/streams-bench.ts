@@ -1,7 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { ResumableStream, createChatStreams } from "../../chat";
-import { importLegacyChatStreams } from "../../chat/legacy-chat-streams";
 
 /**
  * Storage-ops benchmark harness for the chat-on-Streams replatform: measures
@@ -488,17 +487,10 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
           ...values
         )
       ] as T[];
-    importLegacyChatStreams(
-      tagged,
-      this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
-      facet
-    );
-    // A second start finds nothing left to import.
-    importLegacyChatStreams(
-      tagged,
-      this.streams.__DO_NOT_USE_WILL_BREAK__sync(),
-      facet
-    );
+    // The import runs as each start constructs the adapter; a second start
+    // finds nothing left to import.
+    const adapter = new ResumableStream(this.streams, tagged, () => facet);
+    new ResumableStream(this.streams, tagged, () => facet);
     const tables = sql
       .exec<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_ai_chat_stream_%'"
@@ -507,7 +499,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
       .map((row) => row.name)
       .sort();
     return {
-      chunks: [...this.#adapter().storedChunks("legacy-stream")].length,
+      chunks: [...adapter.storedChunks("legacy-stream")].length,
       tables
     };
   }

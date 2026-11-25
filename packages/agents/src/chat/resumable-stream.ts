@@ -252,8 +252,8 @@ export class ResumableStream {
   constructor(
     streams: Streams,
     sql: SqlTaggedTemplate,
-    /** A facet empties the legacy chat tables instead of dropping them. */
-    facet = false
+    /** Whether this is a facet, which empties the legacy chat tables. */
+    isFacet: () => boolean = () => false
   ) {
     this.ops = streams.__DO_NOT_USE_WILL_BREAK__sync();
     this.ops.ensureTables();
@@ -274,7 +274,7 @@ export class ResumableStream {
         this._rememberDeleted(row, chat);
       })
     );
-    importLegacyChatStreams(sql, this.ops, facet);
+    importLegacyChatStreams(sql, this.ops, isFacet);
     // Restore any active stream from a previous session
     this.restore();
   }

@@ -20,6 +20,8 @@ import { connectChatWS } from "./test-utils";
 
 type ParentStub = DurableObjectStub & {
   resetChildForTest(childName: string): Promise<void>;
+  seedChildLegacyChatTablesForTest(childName: string): Promise<void>;
+  childLegacyChatTablesForTest(childName: string): Promise<string[]>;
   runChild(
     input: {
       prompt: string;
@@ -362,6 +364,21 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
+  it("a chat sub-agent empties the old chat stream tables at its next start instead of dropping them", async () => {
+    // A facet that drops old indexed tables at its first start after an
+    // upgrade can reset its tree's storage on a deployment. The facet is
+    // known only from storage this early: its Agent start has not restored
+    // its parent path yet when the stream adapter is built.
+    const parent = await getParent();
+    const childName = `legacy-${crypto.randomUUID()}`;
+    await parent.seedChildLegacyChatTablesForTest(childName);
+    await parent.resetChildForTest(childName);
+    expect(await parent.childLegacyChatTablesForTest(childName)).toEqual([
+      "cf_ai_chat_stream_chunks",
+      "cf_ai_chat_stream_metadata"
+    ]);
+  });
+
   it("returns an error, and settles its row, when the start call fails and the child has no such run", async () => {
     const parent = await getAgentByName(
       env.AIChatAgentToolParent,

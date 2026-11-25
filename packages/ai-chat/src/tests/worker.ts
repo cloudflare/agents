@@ -6117,6 +6117,39 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     this.ctx.abort("test: forced reset");
   }
 
+  /** Create the pre-capability chat stream tables with one stream in them. */
+  seedLegacyChatTablesForTest(): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE cf_ai_chat_stream_metadata (id TEXT PRIMARY KEY, request_id TEXT, status TEXT, created_at INTEGER, completed_at INTEGER)"
+    );
+    sql.exec(
+      "CREATE TABLE cf_ai_chat_stream_chunks (id TEXT PRIMARY KEY, stream_id TEXT, body TEXT, chunk_index INTEGER, created_at INTEGER)"
+    );
+    sql.exec(
+      "CREATE INDEX idx_legacy_chat_chunks ON cf_ai_chat_stream_chunks(stream_id, chunk_index)"
+    );
+    sql.exec(
+      "INSERT INTO cf_ai_chat_stream_metadata VALUES ('legacy-stream', 'legacy-req', 'completed', ?, ?)",
+      Date.now(),
+      Date.now()
+    );
+    sql.exec(
+      "INSERT INTO cf_ai_chat_stream_chunks VALUES ('c1', 'legacy-stream', '{\"type\":\"text\"}', 0, ?)",
+      Date.now()
+    );
+  }
+
+  /** The pre-capability chat stream tables that still exist. */
+  legacyChatTablesForTest(): string[] {
+    return this.ctx.storage.sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_ai_chat_stream_%' ORDER BY name"
+      )
+      .toArray()
+      .map((row) => row.name);
+  }
+
   /**
    * Seed one active incident and its routed recovery Task run, mirrored as
    * one wake job on the root's queue, and wait for its natural first
@@ -7643,6 +7676,16 @@ type AgentToolFinishForTest = {
 };
 
 export class AIChatAgentToolParent extends Agent<Env> {
+  async seedChildLegacyChatTablesForTest(childName: string): Promise<void> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    await child.seedLegacyChatTablesForTest();
+  }
+
+  async childLegacyChatTablesForTest(childName: string): Promise<string[]> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    return child.legacyChatTablesForTest();
+  }
+
   /** Reset one sub-agent's isolate, as its root's reset does. */
   async resetChildForTest(childName: string): Promise<void> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);

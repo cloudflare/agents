@@ -30,7 +30,7 @@ function exists(read: () => unknown): boolean {
 export function importLegacyChatStreams(
   sql: SqlTaggedTemplate,
   ops: StreamsSyncInternal,
-  facet = false
+  isFacet: () => boolean = () => false
 ): void {
   const hasMetadata = exists(
     () => sql`SELECT 1 FROM cf_ai_chat_stream_metadata LIMIT 0`
@@ -39,6 +39,8 @@ export function importLegacyChatStreams(
     () => sql`SELECT 1 FROM cf_ai_chat_stream_chunks LIMIT 0`
   );
   if (!hasMetadata && !hasChunks) return;
+  // Asked only once a table is found: a start with none reads nothing more.
+  const facet = isFacet();
   if (
     facet &&
     (!hasMetadata ||

@@ -58,6 +58,8 @@ import type {
   StoredDynamicAgentConnection
 } from "./types";
 
+/** The storage key a parent sets on a facet it creates. */
+const FACET_FLAG_KEY = "cf_agents_is_facet";
 /**
  * Internal key used to remember the outer `/sub/...` URL for a
  * WebSocket accepted by the parent on behalf of a child facet.
@@ -1791,12 +1793,12 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // One read for all four keys: every agent's start does this, a root's
     // included.
     const stored = await this.#host.ctx.storage.get([
-      "cf_agents_is_facet",
+      FACET_FLAG_KEY,
       "cf_agents_facet_name",
       ROOT_JURISDICTION_KEY,
       "cf_agents_parent_path"
     ]);
-    if (stored.get("cf_agents_is_facet")) this.#host._isFacet = true;
+    if (stored.get(FACET_FLAG_KEY)) this.#host._isFacet = true;
 
     const storedFacetName = stored.get("cf_agents_facet_name");
     if (typeof storedFacetName === "string") {
@@ -2035,7 +2037,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     this.#host._parentPath = parentPath as AgentPathStep[];
     // Persist the agent-specific facet keys in parallel.
     await Promise.all([
-      this.#host.ctx.storage.put("cf_agents_is_facet", true),
+      this.#host.ctx.storage.put(FACET_FLAG_KEY, true),
       this.#host.ctx.storage.put("cf_agents_facet_name", name),
       this.#host.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
@@ -2046,4 +2048,13 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // bridge, so neither touches the parent's own WebSocket handles (#1679).
     await this.#host.__unsafe_ensureInitialized();
   }
+}
+
+/**
+ * @internal Whether this Durable Object was set up as a facet, read from
+ * the flag its parent stored. Readable before the Agent's own start has
+ * restored its facet context.
+ */
+export function storedAsFacet(kv: { get(key: string): unknown }): boolean {
+  return kv.get(FACET_FLAG_KEY) === true;
 }

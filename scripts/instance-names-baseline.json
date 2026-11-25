@@ -5,7 +5,7 @@
   "packages/agents/src/context/context.ts": 2,
   "packages/agents/src/context/search.ts": 6,
   "packages/agents/src/context/sqlite-provider.ts": 3,
-  "packages/agents/src/dynamic-agents/dynamic-agents.ts": 10,
+  "packages/agents/src/dynamic-agents/dynamic-agents.ts": 8,
   "packages/agents/src/dynamic-agents/registry.ts": 9,
   "packages/agents/src/fiber-runs.ts": 11,
   "packages/agents/src/fiber-types.ts": 2,
