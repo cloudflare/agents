@@ -1192,9 +1192,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           steps: turn.steps
         },
         message,
-        // A call to a tool this build does not have is the harness's to
-        // answer: a client would never run it.
-        (name) => isServerTool(tools, name) || !Object.hasOwn(tools, name),
+        (name, part) => answersHere(tools, name, part),
         maxSteps
       );
       let next: Turn | OperationOutcome;
@@ -1331,9 +1329,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           nextAction(
             { streamId: undefined, pendingModel: true, steps: 0 },
             answered,
-            // As in the step loop: a call to a tool this build does not
-            // have is the harness's to answer.
-            (name) => isServerTool(tools, name) || !Object.hasOwn(tools, name),
+            (name, part) => answersHere(tools, name, part),
             Number.POSITIVE_INFINITY
           )._tag !== "await-input";
         await this.#commit(run, session, undefined, (put) => {
@@ -2587,6 +2583,24 @@ const CONTEXT_OVERFLOW_PATTERN =
   /prompt is too long|context[_ ]length[_ ]exceeded|maximum context length|exceeds the maximum number of tokens|input token count|reduce the length of|input is too long|too many (?:input )?tokens|context window/i;
 
 /** A tool's own recovery field, or the default. */
+/**
+ * Whether the harness answers this call: a server tool's, or a call still
+ * waiting to run whose tool this build does not have (removed while the
+ * call was cut off), which is answered as no longer available. An approved
+ * call to a tool the build does not have waits, as in Think: it may be a
+ * client's tool the client did not declare again with the answer.
+ */
+function answersHere(
+  tools: ToolSet,
+  name: string,
+  part: ToolCallPart
+): boolean {
+  return (
+    isServerTool(tools, name) ||
+    (!Object.hasOwn(tools, name) && part.state === "input-available")
+  );
+}
+
 function toolRecovery(tool: object): ToolRecovery {
   return "recovery" in tool && tool.recovery === "rerun" ? "rerun" : "report";
 }
