@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Tasks } from "../../tasks";
 import type { TaskStep } from "../../tasks";
 import { withCapabilityHarness } from "../shared/capability-harness";
@@ -23,28 +23,35 @@ function tasks(tag: string, name?: string) {
 const count = (storage: DurableObjectStorage, table: string) =>
   storage.sql.exec<{ n: number }>(`SELECT count(*) AS n FROM ${table}`).one().n;
 
+/** One run to the end and one left queued (so the instance holds a job). */
+async function smoke(instance: ReturnType<typeof tasks>) {
+  await instance.run(
+    "echo",
+    { x: "1" },
+    {
+      runId: "invoice-1",
+      lane: "chat:x",
+      idempotencyKey: "k",
+      retain: true
+    }
+  );
+  await instance.wait("invoice-1", { timeoutMs: 5_000 });
+  await instance.run("echo", { x: "2" }, { runId: "later", start: "alarm" });
+}
+
 describe("Tasks instances", () => {
   describeInstanceConformance({
     kind: "tasks",
     make: (name) => tasks(name ?? "default", name),
     smoke: async (instance) => {
-      await instance.run(
-        "echo",
-        { x: "1" },
-        {
-          runId: "invoice-1",
-          lane: "chat:x",
-          idempotencyKey: "k",
-          retain: true
-        }
-      );
-      await instance.wait("invoice-1", { timeoutMs: 5_000 });
-      // One left pending, so the instance holds a job.
-      await instance.run(
-        "echo",
-        { x: "2" },
-        { runId: "later", start: "alarm" }
-      );
+      // The check compares stored values across separate objects: the same
+      // clock for each smoke keeps the default's timestamps comparable.
+      const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+      try {
+        await smoke(instance);
+      } finally {
+        now.mockRestore();
+      }
     }
   });
 
