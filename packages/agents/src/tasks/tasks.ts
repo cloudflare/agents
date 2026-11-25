@@ -23,7 +23,8 @@ import type {
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
-import { RUN_LIST_COLUMNS, SqlName, TaskStore } from "./store";
+import { SqlName } from "../sql-name";
+import { RUN_LIST_COLUMNS, TaskStore } from "./store";
 import type { TaskTables } from "./store";
 import { createTaskStepEngine } from "./engine-port";
 import { parseTaskDuration } from "./duration";

@@ -1578,6 +1578,13 @@ describe("SubAgent", () => {
     ]);
   });
 
+  it("keeps a named Streams in a facet apart from the facet's own Streams", async () => {
+    const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await expect(
+      agent.subAgentWriteNamedStreams("named-streams-child")
+    ).resolves.toEqual([["default"], ["audit"]]);
+  });
+
   it("runs a named Tasks in a facet apart from the facet's own Tasks", async () => {
     const agent = await getAgentByName(env.TestSubAgentParent, uniqueName());
     await expect(

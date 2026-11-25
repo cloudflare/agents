@@ -33,7 +33,7 @@
   "packages/agents/src/sessions/core.ts": 8,
   "packages/agents/src/sessions/sessions.ts": 1,
   "packages/agents/src/state/index.ts": 9,
-  "packages/agents/src/streams/streams.ts": 39,
+  "packages/agents/src/streams/streams.ts": 12,
   "packages/agents/src/streams/types.ts": 2,
   "packages/agents/src/tasks/serialization.ts": 1,
   "packages/agents/src/tasks/store.ts": 12,
