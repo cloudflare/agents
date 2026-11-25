@@ -86,9 +86,44 @@ export class EndedRequests {
   /** By request: the sockets it was sent to. */
   readonly #ended = new Map<string, WeakSet<object>>();
 
-  /** Whether `connection` was sent the end of `requestId`. */
+  /**
+   * By request: when its end was broadcast, and the ids it left out. A
+   * facet broadcasting during its start reaches, through the root, sockets
+   * it does not know yet, so no object is noted for them.
+   */
+  readonly #broadcast = new Map<string, { at: number; without: Set<string> }>();
+
+  /**
+   * Whether `connection` was sent the end of `requestId`: noted for it, or
+   * broadcast after the root accepted it (a sub-agent's socket, whose
+   * `acceptedAt` the root stamps) and not left out.
+   */
   has(connection: object, requestId: string): boolean {
-    return this.#ended.get(requestId)?.has(connection) ?? false;
+    if (this.#ended.get(requestId)?.has(connection)) return true;
+    const broadcast = this.#broadcast.get(requestId);
+    const { acceptedAt, id } = connection as {
+      acceptedAt?: unknown;
+      id?: unknown;
+    };
+    return (
+      broadcast !== undefined &&
+      typeof acceptedAt === "number" &&
+      acceptedAt <= broadcast.at &&
+      !(typeof id === "string" && broadcast.without.has(id))
+    );
+  }
+
+  /** The end of `requestId` was broadcast to every socket but `without`. */
+  broadcast(requestId: string, without: readonly string[]): void {
+    this.#broadcast.delete(requestId);
+    this.#broadcast.set(requestId, {
+      at: Date.now(),
+      without: new Set(without)
+    });
+    if (this.#broadcast.size > EndedRequests.MAX) {
+      const oldest = this.#broadcast.keys().next().value;
+      if (oldest !== undefined) this.#broadcast.delete(oldest);
+    }
   }
 
   /** `connection` was sent the end of `requestId`. */
@@ -157,6 +192,7 @@ export class ChatFrames {
         if (this.ended.has(connection, ends)) without.push(connection.id);
         else this.ended.note(connection, ends);
       }
+      this.ended.broadcast(ends, without);
     }
     this.options.broadcast(JSON.stringify(ready), without);
     this.#record(ready);

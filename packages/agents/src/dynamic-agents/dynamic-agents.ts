@@ -66,6 +66,24 @@ import type {
 export const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
 export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
 /**
+ * When the root accepted a socket for a sub-agent (ms). A facet compares it
+ * with when it broadcast a frame during its start, before it knew its
+ * sockets, to tell whether the socket got that frame.
+ * Storage-frozen — never rename.
+ */
+export const CF_SUB_AGENT_ACCEPTED_AT_KEY = "_cf_subAgentAcceptedAt";
+
+/** When the root accepted `connection`, if it was routed to a sub-agent. */
+export function connectionAcceptedAt(
+  connection: Connection
+): number | undefined {
+  const raw = getConnectionRawState(connection);
+  const flag = raw?.[CF_SUB_AGENT_ACCEPTED_AT_KEY];
+  if (typeof flag === "number") return flag;
+  const own = (connection as { acceptedAt?: unknown }).acceptedAt;
+  return typeof own === "number" ? own : undefined;
+}
+/**
  * Set on a socket closed because its sub-agent was deleted. Its late
  * message/close events are dropped, so they can't reach a same-name
  * replacement created after the delete. Storage-frozen — never rename.
@@ -1196,7 +1214,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       id: connection.id,
       uri: target.uri,
       tags,
-      state: this.getForwardedState(connection)
+      state: this.getForwardedState(connection),
+      acceptedAt: connectionAcceptedAt(connection)
     };
   }
 
@@ -1333,6 +1352,18 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     request: Request,
     options: { gate: boolean }
   ): Promise<boolean> {
+    // The root stamps when it accepted the socket, before it wakes the
+    // sub-agent, whose start may broadcast to it.
+    if (
+      !this.#host._isFacet &&
+      connectionAcceptedAt(connection) === undefined
+    ) {
+      this.#host._unsafe_setConnectionFlag(
+        connection,
+        CF_SUB_AGENT_ACCEPTED_AT_KEY,
+        Date.now()
+      );
+    }
     const routed = await this.#resolveConnection(connection, {
       create: true,
       request,
@@ -1491,6 +1522,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         uri: childUri.toString(),
         tags,
         state: this.getForwardedState(connection),
+        acceptedAt: connectionAcceptedAt(connection),
         // The outer URL belongs to the root-owned socket. A child that saw
         // it would resolve its own connection from the top of the chain,
         // so a third hop routes back to the second one, recursively.
@@ -1620,6 +1652,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
             tags: string[];
           }
         ).tags = meta.tags;
+        if (meta.acceptedAt !== undefined) {
+          (stored.connection as unknown as { acceptedAt?: number }).acceptedAt =
+            meta.acceptedAt;
+        }
         return stored.connection;
       }
     } else {
@@ -1640,6 +1676,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       id: meta.id,
       uri: meta.uri,
       tags: meta.tags,
+      acceptedAt: meta.acceptedAt,
       get state() {
         return getStored().meta.state;
       },
@@ -1688,7 +1725,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         id: connection.id,
         uri: connection.uri,
         tags: [...connection.tags],
-        state: this.getRawConnectionState(connection)
+        state: this.getRawConnectionState(connection),
+        acceptedAt: connectionAcceptedAt(connection)
       },
       connection: stored?.connection ?? connection
     });
