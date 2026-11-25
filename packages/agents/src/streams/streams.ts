@@ -322,17 +322,18 @@ export class Streams extends LifecycleCapability {
   // ── Lifecycle capability hooks ───────────────────────────────────────────
 
   /** Migrate stream storage during Lifecycle startup. */
-  onStart(): void {
-    this.lifecycle.schema.migrateSync({
-      version: CURRENT_STREAM_SCHEMA_VERSION,
-      legacyKey: this.#schemaVersionKey,
-      steps: { 2: () => this.#ensureTables() }
-    });
+  async onStart(): Promise<void> {
+    // Streams keeps its own version key, not the Lifecycle's one record:
+    // ThinkHarness binds a Streams to its own services, and a record entry
+    // would land under the harness's id and take its schema version.
+    const storage = this.lifecycle.storage;
+    const version = (await storage.get<number>(this.#schemaVersionKey)) ?? 0;
+    if (version < CURRENT_STREAM_SCHEMA_VERSION) {
+      this.#ensureTables();
+      await storage.put(this.#schemaVersionKey, CURRENT_STREAM_SCHEMA_VERSION);
+    }
     // Schema v1's chunk table only ever belonged to the default instance.
-    // Probed on every start (a `LIMIT 0` read of no rows), not inferred
-    // from the record: a Streams bound by another capability (ThinkHarness)
-    // shares these tables but records its version under that capability.
-    if (this.instanceName === undefined) {
+    if (version >= 1 && this.instanceName === undefined) {
       this.#legacyChunkTable = this.#hasLegacyChunkTable();
     }
   }

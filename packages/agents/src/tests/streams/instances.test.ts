@@ -71,13 +71,7 @@ describe("Streams instances", () => {
         "cf_agents_streams",
         "idx_cf_agents_streams_tag"
       ]);
-      expect(
-        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
-          ?.streams
-      ).toBe(2);
-      expect(
-        storage.kv.get("cf_agents:streams_schema_version")
-      ).toBeUndefined();
+      expect(storage.kv.get("cf_agents:streams_schema_version")).toBe(2);
     });
   });
 
@@ -227,9 +221,7 @@ describe("Streams instances", () => {
       resumed.close();
       expect(await collect(plain.read("live"))).toHaveLength(2);
       expect(
-        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")?.[
-          "streams/audit"
-        ]
+        storage.kv.get("cf_agents:streams/audit:streams_schema_version")
       ).toBe(2);
     });
   });
@@ -286,7 +278,7 @@ describe("Streams instances", () => {
     });
   });
 
-  it("starts on the one schema record: no sqlite_master read, one LIMIT 0 probe for v1 chunks", async () => {
+  it("starts with no sqlite_master read, and probes for v1 chunks only on an object that had a schema", async () => {
     const queries = async (
       storage: DurableObjectStorage,
       fn: () => Promise<void>
@@ -308,52 +300,18 @@ describe("Streams instances", () => {
     await withCapabilityHarness(async ({ install, storage }) => {
       const { lifecycle } = install(new Streams());
       const fresh = await queries(storage, () => lifecycle.start());
-      expect(fresh.filter((q) => /sqlite_master/.test(q))).toEqual([]);
-      expect(fresh.filter((q) => /stream_chunks/.test(q))).toEqual([
-        "SELECT 1 FROM [cf_agents_stream_chunks] LIMIT 0"
-      ]);
+      expect(
+        fresh.filter((q) => /sqlite_master|stream_chunks/.test(q))
+      ).toEqual([]);
     });
     await withCapabilityHarness(async ({ install, storage }) => {
-      // An object the release left at schema 2, under its own key.
       await storage.put("cf_agents:streams_schema_version", 2);
       const { lifecycle } = install(new Streams());
       const started = await queries(storage, () => lifecycle.start());
       expect(started.filter((q) => /sqlite_master/.test(q))).toEqual([]);
-      expect(
-        storage.kv.get("cf_agents:streams_schema_version")
-      ).toBeUndefined();
-      expect(
-        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
-          ?.streams
-      ).toBe(2);
-    });
-  });
-
-  it("finds v1 chunks when another capability recorded the shared tables' version", async () => {
-    await withCapabilityHarness(async ({ install, storage }) => {
-      // A harness-bound Streams migrated these tables under its own id and
-      // retired the old key: the record has no "streams" entry, and the v1
-      // table still holds an untouched stream.
-      const sql = storage.sql;
-      sql.exec(`CREATE TABLE cf_agents_streams (
-        stream_id TEXT PRIMARY KEY, state TEXT NOT NULL, tag TEXT, metadata TEXT,
-        error_message TEXT, chunk_count INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER)`);
-      sql.exec(`CREATE TABLE cf_agents_stream_chunks (
-        stream_id TEXT NOT NULL, seq INTEGER NOT NULL, chunk TEXT NOT NULL,
-        created_at INTEGER NOT NULL, PRIMARY KEY (stream_id, seq)) WITHOUT ROWID`);
-      sql.exec(
-        `INSERT INTO cf_agents_streams (stream_id, state, chunk_count, created_at, updated_at, closed_at)
-         VALUES ('old', 'completed', 1, 1, 1, 1)`
-      );
-      sql.exec(
-        `INSERT INTO cf_agents_stream_chunks VALUES ('old', 0, '"a"', 1)`
-      );
-      storage.kv.put("cf_agents:schema_versions", { "think-harness": 2 });
-
-      const { lifecycle, capability } = install(new Streams());
-      await lifecycle.start();
-      expect(await collect(capability.read("old"))).toEqual(["a"]);
+      expect(started.filter((q) => /stream_chunks/.test(q))).toEqual([
+        "SELECT 1 FROM [cf_agents_stream_chunks] LIMIT 0"
+      ]);
     });
   });
 });
