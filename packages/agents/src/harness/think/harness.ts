@@ -1327,7 +1327,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           nextAction(
             { streamId: undefined, pendingModel: true, steps: 0 },
             answered,
-            (name) => isServerTool(tools, name),
+            // As in the step loop: a call to a tool this build does not
+            // have is the harness's to answer.
+            (name) => isServerTool(tools, name) || !Object.hasOwn(tools, name),
             Number.POSITIVE_INFINITY
           )._tag !== "await-input";
         await this.#commit(run, session, undefined, (put) => {

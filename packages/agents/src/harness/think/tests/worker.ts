@@ -37,6 +37,7 @@ const ENVIRONMENT_KEY = "test:environment";
 const REMIND_SECTION_KEY = "test:remind-section";
 const REMIND_LABEL_KEY = "test:remind-label";
 const NO_GATE_SAFE_KEY = "test:no-gate-safe";
+const NO_DANGEROUS_KEY = "test:no-dangerous";
 const CATALOGUE_KEY = "test:catalogue";
 const HANG_KEY = "test:hang-provider";
 /** The session that has context blocks. */
@@ -198,16 +199,19 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           recovery: "rerun" as const
         }
       }),
-      dangerous: tool({
-        description: "Needs approval",
-        inputSchema: z.object({}),
-        needsApproval: true,
-        execute: async () => {
-          const runs =
-            (this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0) + 1;
-          this.ctx.storage.kv.put(DANGEROUS_RUNS_KEY, runs);
-          return "did the dangerous thing";
-        }
+      // Gone from the tools once a test removes it.
+      ...(!this.ctx.storage.kv.get<boolean>(NO_DANGEROUS_KEY) && {
+        dangerous: tool({
+          description: "Needs approval",
+          inputSchema: z.object({}),
+          needsApproval: true,
+          execute: async () => {
+            const runs =
+              (this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0) + 1;
+            this.ctx.storage.kv.put(DANGEROUS_RUNS_KEY, runs);
+            return "did the dangerous thing";
+          }
+        })
       }),
       ask: tool({
         description: "Runs on the client",
@@ -1208,6 +1212,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   setRemindSection(value: string): void {
     this.ctx.storage.kv.put(REMIND_SECTION_KEY, value);
+  }
+
+  removeDangerous(): void {
+    this.ctx.storage.kv.put(NO_DANGEROUS_KEY, true);
   }
 
   removeGateSafe(): void {

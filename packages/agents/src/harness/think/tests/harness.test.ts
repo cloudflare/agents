@@ -228,6 +228,24 @@ describe("ThinkHarness hooks", () => {
 });
 
 describe("ThinkHarness approvals and client tools", () => {
+  it("answers an approval of a tool removed meanwhile as no longer available", async () => {
+    const stub = fresh();
+    await stub.prompt("approve");
+    const [call] = await stub.lastToolCalls();
+    await stub.removeDangerous();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "done",
+      text: 'tool said: error: Tool "dangerous" is no longer available.'
+    });
+    expect(await stub.dangerousRuns()).toBe(0);
+  });
+
   it("waits for an approval, then runs the tool and continues the same message", async () => {
     const stub = fresh();
     const first = await stub.prompt("approve");

@@ -135,8 +135,8 @@ export class ExtensionRuntime<
     HookHandler<unknown, unknown>[]
   >();
   /**
-   * The tools this extension set in its latest build for each session,
-   * replaced by the next. One entry per session built in this isolate.
+   * The tools this extension set for each session, the latest of each
+   * name. One entry per session built in this isolate.
    */
   readonly #kept = new Map<ThinkSessionId, Map<string, ExtensionTool>>();
   /** Converted once per tool object. */
@@ -230,7 +230,13 @@ export class ExtensionRuntime<
     for (const change of this.#toolTransforms) await change(tools, build);
     for (const change of this.#promptTransforms) await change(prompt, build);
     await Promise.all(pending);
-    this.#kept.set(build.session, kept);
+    // Tools an earlier build set stay callable: a turn runs on the build it
+    // started with even when another build (a watch, the next turn) has
+    // dropped one. Bounded by the tool names this extension ever set for
+    // the session.
+    const known = this.#kept.get(build.session);
+    if (known) for (const [toolName, tool] of kept) known.set(toolName, tool);
+    else this.#kept.set(build.session, kept);
     return { tools: [...tools.entries], prompt: [...prompt.entries] };
   }
 
