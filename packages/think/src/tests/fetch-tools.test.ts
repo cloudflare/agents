@@ -575,6 +575,17 @@ describe("Think — fetchTools integration", () => {
     }>;
   }
 
+  it("sends the workspace and fetch tools as they are given directly, in that order, byte for byte", async () => {
+    const a = (await agent(
+      `fetch-bytes-${crypto.randomUUID()}`
+    )) as unknown as {
+      fetchToolRequests(): Promise<{ turn: string; direct: string }>;
+    };
+    const { turn, direct } = await a.fetchToolRequests();
+    expect(direct).toContain('"fetch_url"');
+    expect(turn).toBe(direct);
+  });
+
   it("does not register fetch tools by default", async () => {
     const a = await agent(`fetch-off-${crypto.randomUUID()}`);
     const { toolNames } = await a.captureTurn();

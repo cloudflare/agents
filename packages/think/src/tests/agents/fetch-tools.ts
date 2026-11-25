@@ -4,7 +4,8 @@
  * and that the capability prompt advertises it, while staying absent when
  * unconfigured. `beforeTurn` captures the assembled tools/system prompt.
  */
-import type { LanguageModel } from "ai";
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
+import { streamText, type LanguageModel } from "ai";
 import { Think } from "../../think";
 import { createFetchTools, type FetchResult } from "../../tools/fetch";
 import { WorkspaceFiles } from "../../workspace-files";
@@ -37,7 +38,10 @@ class CollectingCallback implements StreamCallback {
   }
 }
 
-function createTextModel(): LanguageModel {
+/** The tool definitions each model request carried, in order. */
+type RequestTools = { name?: string }[] | undefined;
+
+function createTextModel(requests: RequestTools[] = []): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -46,7 +50,8 @@ function createTextModel(): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream() {
+    doStream(options: { tools?: { name?: string }[] }) {
+      requests.push(options.tools);
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -70,9 +75,33 @@ export class ThinkFetchToolsTestAgent extends Think {
   override maxSteps = 1;
   private _lastToolNames: string[] = [];
   private _lastSystem = "";
+  readonly #requests: RequestTools[] = [];
 
   override getModel(): LanguageModel {
-    return createTextModel();
+    return createTextModel(this.#requests);
+  }
+
+  /**
+   * The tool definitions one turn sent to the model with fetch on, and the
+   * same tools given straight to `streamText` (the workspace's, then the
+   * fetch tools, as Think merges them): both as JSON.
+   */
+  async fetchToolRequests(): Promise<{ turn: string; direct: string }> {
+    this.fetchTools = { allowlist: ["https://developers.cloudflare.com/**"] };
+    await this.chat("hello", new CollectingCallback());
+    const directRequests: RequestTools[] = [];
+    await streamText({
+      model: createTextModel(directRequests),
+      tools: {
+        ...createAITools({ workspace: this.workspace }),
+        ...createFetchTools({ ...this.fetchTools, workspace: this.workspace })
+      },
+      prompt: "hello"
+    }).consumeStream();
+    return {
+      turn: JSON.stringify(this.#requests.at(-1) ?? []),
+      direct: JSON.stringify(directRequests[0] ?? [])
+    };
   }
 
   override getSystemPrompt(): string {
