@@ -3,11 +3,12 @@ import {
   jsonSchema,
   streamText,
   tool,
+  type Tool,
   type ToolSet,
   type UIMessage
 } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ExtensionManager } from "../extensions/manager";
 import { optionsExtension } from "../extensions/own";
@@ -17,7 +18,7 @@ import type {
   ThinkExtension,
   ToolCall
 } from "../extensions/types";
-import { modelTools } from "../tools";
+import { executeTool, modelTools } from "../tools";
 
 const usage = {
   inputTokens: {
@@ -145,13 +146,13 @@ function acrossBoundary(handle: ExtensionHandle): ExtensionHandle {
     describe: async () => clone(await handle.describe()),
     build: async (drafts, build) =>
       clone(await handle.build(clone(drafts), clone(build))),
-    execute: async (name, input, call, onPreliminary) =>
+    execute: async (name, input, call, onOutput) =>
       clone(
         await handle.execute(clone(name), clone(input), clone(call), (o) =>
-          onPreliminary(clone(o))
+          onOutput(clone(o))
         )
       ),
-    cancel: (callId, reason) => handle.cancel(callId, clone(reason)),
+    cancel: (call, reason) => handle.cancel(clone(call), clone(reason)),
     validate: async (name, input, build) =>
       clone(await handle.validate(name, clone(input), clone(build))),
     modelOutput: async (name, output, build) =>
@@ -321,15 +322,17 @@ describe("extensions: conformance in process and across a boundary", () => {
       ["approve", { amount: 3 }],
       ["fail", {}]
     ] as const) {
-      const preliminary: unknown[] = [];
+      const outputs: unknown[] = [];
       executed.push({
         outcome: await direct.execute(
           name,
           input,
           { ...call("c"), session: "s" },
-          (o) => preliminary.push(o)
+          (o) => {
+            outputs.push(o);
+          }
         ),
-        preliminary
+        outputs
       });
     }
     const hookContext = {
@@ -404,13 +407,13 @@ describe("extensions: conformance in process and across a boundary", () => {
     expect(inProcess.executed).toEqual([
       {
         outcome: { ok: true, output: { word: "dog", found: true } },
-        preliminary: []
+        outputs: []
       },
       {
         outcome: { ok: true, output: "approved 3" },
-        preliminary: ["checking"]
+        outputs: ["checking", "approved 3"]
       },
-      { outcome: { ok: false, errorText: "it failed" }, preliminary: [] }
+      { outcome: { ok: false, errorText: "it failed" }, outputs: [] }
     ]);
     expect(inProcess.validate).toEqual({
       success: true,
@@ -426,32 +429,157 @@ describe("extensions: conformance in process and across a boundary", () => {
     expect(inProcess.recovery).toEqual([undefined, "abandon"]);
   });
 
-  it("aborts a running call's signal when it is cancelled", async () => {
-    let started: () => void = () => {};
-    const running = new Promise<void>((resolve) => {
-      started = resolve;
-    });
+  it("cancels the call of one session, not another's with the same id", async () => {
+    const started: string[] = [];
     const handle = await loadInProcess("slow", (ctx) =>
-      ctx.tools.transform((tools) =>
+      ctx.tools.transform((tools, { session }) =>
         tools.set("wait", {
           ...tool({
             description: "Waits for its signal",
             inputSchema: z.object({}),
             execute: (_input, { abortSignal }) =>
               new Promise<string>((_resolve, reject) => {
-                started();
+                started.push(session);
                 abortSignal?.addEventListener("abort", () =>
-                  reject(new Error(String(abortSignal.reason)))
+                  reject(new Error(`${session}: ${String(abortSignal.reason)}`))
                 );
               })
           })
         })
       )
     );
-    await handle.build({ tools: [], prompt: [] }, { session: "" });
-    const outcome = handle.execute("wait", {}, call("w"), () => {});
-    await running;
-    handle.cancel("w", "stopped");
-    expect(await outcome).toEqual({ ok: false, errorText: "stopped" });
+    for (const session of ["a", "b"]) {
+      await handle.build({ tools: [], prompt: [] }, { session });
+    }
+    const a = handle.execute(
+      "wait",
+      {},
+      { ...call("w"), session: "a" },
+      () => {}
+    );
+    const b = handle.execute(
+      "wait",
+      {},
+      { ...call("w"), session: "b" },
+      () => {}
+    );
+    await vi.waitFor(() => expect(started).toEqual(["a", "b"]));
+    handle.cancel({ id: "w", session: "a" }, "stopped");
+    expect(await a).toEqual({ ok: false, errorText: "a: stopped" });
+    let bSettled = false;
+    void b.then(() => {
+      bSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(bSettled).toBe(false);
+    handle.cancel({ id: "w", session: "b" }, "stopped");
+    expect(await b).toEqual({ ok: false, errorText: "b: stopped" });
+  });
+
+  it("does not start a tool whose call is already aborted", async () => {
+    let ran = false;
+    const manager = new ExtensionManager();
+    manager.load(
+      "options",
+      loadInProcess(
+        "options",
+        optionsExtension({
+          tools: {
+            act: tool({
+              description: "Acts",
+              inputSchema: z.object({}),
+              execute: async () => {
+                ran = true;
+                return "acted";
+              }
+            })
+          }
+        })
+      )
+    );
+    const { tools } = await manager.build("");
+    const stop = new AbortController();
+    stop.abort(new Error("turn stopped"));
+    const outcome = await executeTool(
+      tools.act as Tool,
+      {},
+      {
+        toolCallId: "c",
+        messages: [],
+        abortSignal: stop.signal,
+        onPreliminary: () => {}
+      }
+    );
+    expect(outcome).toEqual({ ok: false, errorText: "turn stopped" });
+    expect(ran).toBe(false);
+  });
+
+  it("passes on a streaming tool's outputs as the tool itself yields them", async () => {
+    const streaming = (fail: boolean) =>
+      tool({
+        description: "Streams",
+        inputSchema: z.object({}),
+        execute: async function* () {
+          yield "one";
+          yield "two";
+          if (fail) throw new Error("broke");
+          yield "three";
+        }
+      });
+    for (const fail of [false, true]) {
+      const original = streaming(fail);
+      const manager = new ExtensionManager();
+      manager.load(
+        "options",
+        loadInProcess("options", optionsExtension({ tools: { s: original } }))
+      );
+      const { tools } = await manager.build("");
+      const run = async (target: Tool) => {
+        const preliminary: unknown[] = [];
+        const outcome = await executeTool(
+          target,
+          {},
+          {
+            toolCallId: "c",
+            messages: [],
+            abortSignal: new AbortController().signal,
+            onPreliminary: (output) => preliminary.push(output)
+          }
+        );
+        return { outcome, preliminary };
+      };
+      expect(await run(tools.s as Tool)).toEqual(await run(original));
+    }
+  });
+
+  it("calls the options' hooks as methods of the hooks object", async () => {
+    const hooks = {
+      label: "mine",
+      seen: [] as string[],
+      beforeToolCall(this: { label: string; seen: string[] }) {
+        this.seen.push(this.label);
+        return undefined;
+      },
+      classifyError(this: { label: string }) {
+        return this.label === "mine" ? ("retry" as const) : ("fail" as const);
+      }
+    };
+    const manager = new ExtensionManager();
+    manager.load(
+      "options",
+      loadInProcess("options", optionsExtension({ hooks }))
+    );
+    await manager.hook("beforeToolCall", {
+      session: "",
+      operationId: "op",
+      toolCallId: "c",
+      toolName: "x",
+      input: {},
+      attempt: 1
+    });
+    expect(hooks.seen).toEqual(["mine"]);
+    expect(await manager.hook("classifyError", { error: new Error("x") })).toBe(
+      "retry"
+    );
   });
 });

@@ -75,26 +75,31 @@ export function optionsExtension(
       const text = await resolve(options.system, session);
       if (text !== undefined) prompt.set("system", { text });
     });
+    // Each is called as a method of the hooks object, as the harness
+    // called them before, so a hook that uses `this` still sees it.
     const hooks: ThinkHarnessHooks = options.hooks ?? {};
-    const {
-      beforeToolCall,
-      afterToolCall,
-      onStepFinish,
-      onTurnEnd,
-      onError,
-      classifyError,
-      onRecovery
-    } = hooks;
-    if (beforeToolCall) ctx.on("beforeToolCall", beforeToolCall);
-    if (afterToolCall) ctx.on("afterToolCall", afterToolCall);
-    if (onStepFinish) ctx.on("onStepFinish", onStepFinish);
-    if (onTurnEnd) ctx.on("onTurnEnd", onTurnEnd);
-    if (onError) {
-      ctx.on("onError", ({ error, ...context }) => onError(error, context));
+    if (hooks.beforeToolCall) {
+      ctx.on("beforeToolCall", (call) => hooks.beforeToolCall?.(call));
     }
-    if (classifyError) {
-      ctx.on("classifyError", ({ error }) => classifyError(error));
+    if (hooks.afterToolCall) {
+      ctx.on("afterToolCall", (result) => hooks.afterToolCall?.(result));
     }
-    if (onRecovery) ctx.on("onRecovery", onRecovery);
+    if (hooks.onStepFinish) {
+      ctx.on("onStepFinish", (step) => hooks.onStepFinish?.(step));
+    }
+    if (hooks.onTurnEnd) {
+      ctx.on("onTurnEnd", (end) => hooks.onTurnEnd?.(end));
+    }
+    if (hooks.onError) {
+      ctx.on("onError", ({ error, ...context }) =>
+        hooks.onError?.(error, context)
+      );
+    }
+    if (hooks.classifyError) {
+      ctx.on("classifyError", ({ error }) => hooks.classifyError?.(error));
+    }
+    if (hooks.onRecovery) {
+      ctx.on("onRecovery", (recovery) => hooks.onRecovery?.(recovery));
+    }
   };
 }

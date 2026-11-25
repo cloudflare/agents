@@ -152,9 +152,10 @@ function toolOf(
 }
 
 /**
- * Run a tool through its owner. Every output arrives through this
- * generator: those before the last are preliminary, as with a streaming
- * tool, and an error is thrown with the owner's text.
+ * Run a tool through its owner, as an async generator that yields what
+ * the tool yields, when it yields it (or its one result), and throws the
+ * owner's error text. So whoever runs it sees the same outputs as from
+ * the tool itself. A call whose signal is already aborted never starts.
  */
 async function* execute(
   owner: ExtensionHandle,
@@ -167,24 +168,26 @@ async function* execute(
   },
   signal: AbortSignal | undefined
 ): AsyncGenerator<unknown> {
-  const preliminary: unknown[] = [];
+  signal?.throwIfAborted();
+  const outputs: unknown[] = [];
+  let streamed = false;
   let wake: (() => void) | undefined;
-  const onAbort = () => owner.cancel(call.id, signal?.reason);
+  const onAbort = () => owner.cancel(call, signal?.reason);
   signal?.addEventListener("abort", onAbort, { once: true });
   let settled = false;
   const done = owner
     .execute(name, input, call, (output) => {
-      preliminary.push(output);
+      streamed = true;
+      outputs.push(output);
       wake?.();
     })
     .finally(() => {
       settled = true;
       wake?.();
     });
-  if (signal?.aborted) onAbort();
   try {
     for (;;) {
-      while (preliminary.length > 0) yield preliminary.shift();
+      while (outputs.length > 0) yield outputs.shift();
       if (settled) break;
       await new Promise<void>((resolve) => {
         wake = resolve;
@@ -193,7 +196,8 @@ async function* execute(
     }
     const outcome = await done;
     if (!outcome.ok) throw new Error(outcome.errorText);
-    yield outcome.output;
+    // A streaming tool's last output was its result, already yielded.
+    if (!streamed) yield outcome.output;
   } finally {
     signal?.removeEventListener("abort", onAbort);
   }

@@ -96,6 +96,10 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   );
 }
 
+function runningKey(call: Pick<ToolCall, "id" | "session">): string {
+  return JSON.stringify([call.session, call.id]);
+}
+
 /** A tool's entry, with its JSON Schema still to come if it is async. */
 type Converted = {
   readonly entry: { -readonly [K in keyof ToolEntry]: ToolEntry[K] };
@@ -128,7 +132,10 @@ class ExtensionRuntime implements ExtensionHandle {
   readonly #kept = new Map<ThinkSessionId, Map<string, ExtensionTool>>();
   /** Converted once per tool object. */
   readonly #converted = new WeakMap<ExtensionTool, Converted>();
-  /** Calls running now, by call id, to cancel. */
+  /**
+   * Calls running now, to cancel, by session and call id: a provider's
+   * call ids are unique only within one model reply.
+   */
   readonly #running = new Map<string, AbortController>();
 
   constructor(name: string) {
@@ -271,14 +278,15 @@ class ExtensionRuntime implements ExtensionHandle {
     name: string,
     input: unknown,
     call: ToolCall,
-    onPreliminary: (output: unknown) => void
+    onOutput: (output: unknown) => void | Promise<void>
   ): Promise<ToolOutcome> {
     const execute = this.#tool(call.session, name).execute;
     if (typeof execute !== "function") {
       return { ok: false, errorText: "The tool has no execute function" };
     }
     const controller = new AbortController();
-    this.#running.set(call.id, controller);
+    const key = runningKey(call);
+    this.#running.set(key, controller);
     try {
       const result: unknown = await execute(input, {
         toolCallId: call.id,
@@ -287,26 +295,21 @@ class ExtensionRuntime implements ExtensionHandle {
         context: undefined
       });
       if (!isAsyncIterable(result)) return { ok: true, output: result };
-      // A streaming tool's outputs before its last are preliminary.
       let last: unknown;
-      let seen = false;
       for await (const output of result) {
-        if (seen) onPreliminary(last);
+        await onOutput(output);
         last = output;
-        seen = true;
       }
       return { ok: true, output: last };
     } catch (error) {
       return { ok: false, errorText: errorText(error) };
     } finally {
-      if (this.#running.get(call.id) === controller) {
-        this.#running.delete(call.id);
-      }
+      if (this.#running.get(key) === controller) this.#running.delete(key);
     }
   }
 
-  cancel(callId: string, reason?: unknown): void {
-    this.#running.get(callId)?.abort(reason);
+  cancel(call: Pick<ToolCall, "id" | "session">, reason?: unknown): void {
+    this.#running.get(runningKey(call))?.abort(reason);
   }
 
   async validate(

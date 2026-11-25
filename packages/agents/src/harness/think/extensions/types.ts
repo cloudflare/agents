@@ -160,8 +160,8 @@ export type Validation =
 
 /**
  * A loaded extension, as the harness reaches it. A loader returns one;
- * every argument and result is structured-clone data or, for
- * `onPreliminary`, a function, which Workers RPC passes as a stub.
+ * every argument and result is structured-clone data or, for `onOutput`,
+ * a function, which Workers RPC passes as a stub.
  *
  * @internal
  */
@@ -169,14 +169,18 @@ export interface ExtensionHandle {
   describe(): Promise<{ readonly hooks: readonly ExtensionHookName[] }>;
   /** Run this extension's transforms over what the ones before it built. */
   build(drafts: Drafts, build: BuildContext): Promise<Drafts>;
+  /**
+   * Run a tool. A streaming tool's outputs go to `onOutput` as it yields
+   * them, awaited in order, and its last is also the outcome's.
+   */
   execute(
     tool: string,
     input: unknown,
     call: ToolCall,
-    onPreliminary: (output: unknown) => void
+    onOutput: (output: unknown) => void | Promise<void>
   ): Promise<ToolOutcome>;
   /** Abort a running call's `abortSignal`, with `reason`. */
-  cancel(callId: string, reason?: unknown): void;
+  cancel(call: Pick<ToolCall, "id" | "session">, reason?: unknown): void;
   validate(
     tool: string,
     input: unknown,

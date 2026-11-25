@@ -30,9 +30,9 @@ A transform is `(draft, build) => void | Promise<void>`, where `build` is `{ ses
 - the input schema as JSON Schema, the same object the AI SDK would send. It is converted once per tool object;
 - the name of the extension that set it (its owner), and flags for which functions the owner keeps: `execute`, input validation, `toModelOutput`, `needsApproval`.
 
-The harness turns each entry back into an AI SDK tool whose functions call the owner's handle. `execute` runs through an async generator, so a streaming tool's preliminary outputs still arrive before its result. Validation runs the tool's own schema, so zod defaults and transforms apply as before. The AI SDK's `onInputStart`, `onInputDelta` and `onInputAvailable` callbacks are not called, and the runtime warns once per tool that has one.
+The harness turns each entry back into an AI SDK tool whose functions call the owner's handle. `execute` runs through an async generator that yields what the tool yields, when it yields it, so a streaming tool's preliminary outputs arrive as they did. A call whose signal is already aborted does not start, and a cancel reaches the call of that session only (call ids are unique only within one model reply). Validation runs the tool's own schema, so zod defaults and transforms apply as before. The AI SDK's `onInputStart`, `onInputDelta` and `onInputAvailable` callbacks are not called, and the runtime warns once per tool that has one.
 
-**The handle** is all the harness holds of an extension: `describe`, `build`, `execute`, `cancel`, `validate`, `modelOutput`, `needsApproval`, `hook`. Every argument and result is structured-clone data. The exception is `execute`'s `onPreliminary`, which is a function, and Workers RPC passes a function as a stub. The rule for anything added to it: if it cannot be the same in the harness's isolate and across Workers RPC, it is not in the API. The conformance test in `tests/extensions.test.ts` runs one extension directly and through a handle that clones every argument and result, and expects the same entries, outcomes and hook decisions.
+**The handle** is all the harness holds of an extension: `describe`, `build`, `execute`, `cancel`, `validate`, `modelOutput`, `needsApproval`, `hook`. Every argument and result is structured-clone data. The exception is `execute`'s `onOutput`, which is a function, and Workers RPC passes a function as a stub. The rule for anything added to it: if it cannot be the same in the harness's isolate and across Workers RPC, it is not in the API. The conformance test in `tests/extensions.test.ts` runs one extension directly and through a handle that clones every argument and result, and expects the same entries, outcomes and hook decisions.
 
 **Hooks** run in load order:
 
@@ -43,7 +43,7 @@ The harness turns each entry back into an AI SDK tool whose functions call the o
 | `onRecovery`                                            | the first `abandon` wins                                                                |
 | `afterToolCall`, `onStepFinish`, `onTurnEnd`, `onError` | every handler runs                                                                      |
 
-A handler that throws ends the dispatch with its error, which keeps each ThinkHarness option's contract (a throwing `beforeToolCall` ends the operation `unanswered`).
+A handler that throws ends the dispatch with its error, which keeps each ThinkHarness option's contract (a throwing `beforeToolCall` ends the operation `unanswered`). The options' hooks are called as methods of the `hooks` object, as before.
 
 **ThinkHarness's own parts** are the first two extensions it loads, in process: `context` (the session context's `set_context` and `search_context`), then `options` (the `tools` and `system` options and the hooks above). Client tools are merged after the build, as before: they have no server function. `model`, `onChunk`, `toolApproval` and `beforeTurn` stay options the harness calls itself, because they hand over live objects: a model, every streamed chunk, a configuration that may hold a model.
 
