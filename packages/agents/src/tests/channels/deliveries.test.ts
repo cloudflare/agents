@@ -136,6 +136,20 @@ describe("deliverToSurfaces", () => {
     ]);
   }, 40_000);
 
+  it("posts once more when the object reset after only a preview went out", async () => {
+    const name = crypto.randomUUID();
+    const stub = () => env.ChannelsDeliveryObject.getByName(name);
+    await answer(stub(), ["reset-after-preview"]).catch(() => {});
+    await until(
+      () => stub().openDeliveries(),
+      (n) => n === 0,
+      30_000
+    );
+    expect((await stub().getPosts()).map((p) => [p.text, p.outcome])).toEqual([
+      ["Hello", "ok"]
+    ]);
+  }, 40_000);
+
   it("delivers the response as one email to an email surface, through the email Channel", async () => {
     const stub = fresh();
     await answer(stub, [], async () => ({

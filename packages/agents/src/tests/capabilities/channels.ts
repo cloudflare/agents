@@ -1,5 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
-import { deliverToSurfaces } from "../../experimental/channels/deliveries";
+import {
+  deliverToSurfaces,
+  posting,
+  reportingPosting
+} from "../../experimental/channels/deliveries";
 import {
   Channels,
   type AgentHarness,
@@ -236,7 +240,12 @@ export type FakePost =
   /** The object resets after the provider saw the post. */
   | "reset"
   /** The object resets before the post left it. */
-  | "reset-before-send";
+  | "reset-before-send"
+  /**
+   * The object resets after a preview (a draft a later post replaces) left
+   * it, before the post.
+   */
+  | "reset-after-preview";
 
 /**
  * Channels whose `fake` Channel is a gateway Channel served inside the
@@ -247,8 +256,9 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new ScriptedHarness();
   readonly tasks = new Tasks();
 
-  readonly #fake: Channel = {
-    stream: async (surface, chunks): Promise<DeliveryResult> => {
+  // It says when it posts, so a reset after only a preview is retried.
+  readonly #fake: Channel = reportingPosting({
+    stream: async (surface, chunks, options): Promise<DeliveryResult> => {
       const id = this.ctx.id.toString();
       const [outcome = "ok", ...rest] = fakeScripts.get(id) ?? [];
       fakeScripts.set(id, rest);
@@ -267,6 +277,13 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
         // A Channel finalizes what it has: the response was interrupted.
         interrupted = true;
       }
+      if (outcome === "reset-after-preview") {
+        // The preview's call made the object's writes durable first.
+        await this.ctx.storage.sync();
+        this.ctx.abort("reset after a preview");
+        return new Promise<never>(() => {});
+      }
+      posting(options);
       if (interrupted && outcome === "ok") {
         this.ctx.storage.kv.put("posts", [
           ...this.getPosts(),
@@ -311,7 +328,7 @@ export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
           return new Promise<never>(() => {});
       }
     }
-  };
+  });
 
   readonly channels = Channels.forHarness(this.harness, {
     streams: new Streams({ maxChunkBytes: 1024 }),

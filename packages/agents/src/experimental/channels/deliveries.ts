@@ -1,7 +1,7 @@
 import { registerDeliverySink, sendDelivery } from "../../internal/delivery";
 import { NonRetryableError } from "../../tasks/errors";
 import type { Tasks } from "../../tasks/tasks";
-import type { Channel, DeliveryResult } from "./channel";
+import type { Channel, ChannelStreamOptions, DeliveryResult } from "./channel";
 import type {
   ChannelsHost,
   ConversationChannel,
@@ -132,8 +132,49 @@ export function deliverToSurfaces(
   };
 }
 
+/** Channels that say themselves when a stream puts something in front of the reader. */
+const reportsPosting = new WeakSet<Channel>();
+/** The mark for one attempt, keyed by the options that attempt passes. */
+const postingMarks = new WeakMap<object, () => void>();
+
+/**
+ * Declare that `channel`'s `stream` calls {@link posting} before it posts
+ * anything a reader sees, so an attempt cut short before then is retried
+ * rather than taken as possibly posted. Previews that a later post replaces
+ * (Telegram's drafts) are not posts.
+ *
+ * @internal
+ */
+export function reportingPosting<C extends Channel>(channel: C): C {
+  reportsPosting.add(channel);
+  return channel;
+}
+
+/**
+ * Run `mark` when the {@link reportingPosting} Channel streaming with
+ * `options` says it is about to post.
+ *
+ * @internal
+ */
+export function onPosting(
+  options: ChannelStreamOptions,
+  mark: () => void
+): void {
+  postingMarks.set(options, mark);
+}
+
+/**
+ * Called by a {@link reportingPosting} Channel just before a provider call
+ * that may put text in front of the reader.
+ *
+ * @internal
+ */
+export function posting(options: ChannelStreamOptions): void {
+  postingMarks.get(options)?.();
+}
+
 /** Sent for a response interrupted before it produced any text. */
-const INTERRUPTED_NOTICE =
+export const INTERRUPTED_NOTICE =
   "The answer was interrupted before it could be written. Please ask again.";
 
 /** How long one attempt may take: the answer's whole generation. */
@@ -158,12 +199,29 @@ async function post(
   sending: () => void
 ): Promise<DeliveryResult | undefined> {
   const chunks = readResponse(host, conversationId, responseId);
-  const options = { delivery: { deliveryId: responseId } };
+  const options: ChannelStreamOptions = {
+    delivery: { deliveryId: responseId }
+  };
   if (channel.stream) {
-    sending();
+    let marked = false;
+    const mark = () => {
+      marked = true;
+      sending();
+    };
+    const reports = reportsPosting.has(channel);
+    if (reports) onPosting(options, mark);
+    else mark();
     try {
       return await channel.stream(surface, chunks, options);
     } catch (error) {
+      if (!marked) {
+        // It said it had posted nothing yet.
+        return {
+          status: "failed",
+          retryable: true,
+          error: { code: "CHANNEL_STREAM_THREW", message: String(error) }
+        };
+      }
       // A Channel should finalize and say what reached the reader; one that
       // threw mid-stream may have posted part of it.
       return {

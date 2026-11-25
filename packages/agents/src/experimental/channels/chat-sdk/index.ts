@@ -18,7 +18,8 @@ import type {
 } from "../ingress";
 import { matchesPath } from "../ingress";
 import type { ResponseChunk } from "../protocol";
-import { collectText, createTextCollector } from "../stream";
+import { INTERRUPTED_NOTICE, posting, reportingPosting } from "../deliveries";
+import { createTextCollector } from "../stream";
 import type { ChannelMessageSurface } from "../surface";
 
 /** Where a Chat SDK thread is: the adapter's encoded thread id. */
@@ -139,7 +140,7 @@ export function chatSdkChannel(
     }
   };
 
-  return {
+  return reportingPosting({
     ...(options.participant && { participant: options.participant }),
     ...(options.route && { route: options.route }),
     ...(options.participant && {
@@ -167,42 +168,82 @@ export function chatSdkChannel(
         () => false
       );
     },
-    async stream(surface, chunks) {
-      const collectAndPost = async (): Promise<DeliveryResult> => {
-        const collected = await collectText(chunks);
-        const result = await send(
-          surface,
-          (threadId) =>
-            adapter.postMessage(threadId, { markdown: collected.text }),
-          () => false
-        );
-        return collected.interrupted && result.status === "delivered"
-          ? interruptedAnswer(result.reference)
-          : result;
-      };
-      const stream = adapter.stream;
-      if (!stream) return collectAndPost();
+    async stream(surface, chunks, options) {
       const text = textOf(chunks);
-      let fallback = false;
+      const stream = adapter.stream;
+      let posted = false;
       const result = await send(
         surface,
         async (threadId) => {
-          const sent = await stream.call(adapter, threadId, text.deltas);
-          // An adapter that will not stream to this thread (Telegram groups)
-          // returns null before it reads any text: post it instead.
-          if (sent === null && !text.started()) fallback = true;
-          return sent;
+          if (stream) {
+            // What an adapter shows while it streams is taken as previews
+            // (Telegram's drafts) until it returns: a stream cut short is
+            // streamed again in full. An adapter that posts as it streams
+            // may then show a cut-off copy above the answer.
+            const sent = await stream.call(adapter, threadId, text.deltas);
+            // An adapter that will not stream to this thread (Telegram
+            // groups) returns null before it reads any text.
+            if (sent !== null || text.started()) {
+              posted = true;
+              return sent;
+            }
+          }
+          return postAndEdit(threadId, text, () => {
+            posting(options);
+            return () => (posted = true);
+          });
         },
-        () => text.started()
+        () => posted
       );
-      if (fallback) return collectAndPost();
-      // The answer broke off: the adapter posted what there was.
-      return text.interrupted() && result.status === "delivered"
+      // The answer broke off after text went out: what there was is posted.
+      return posted && text.interrupted() && result.status === "delivered"
         ? interruptedAnswer(result.reference)
         : result;
     }
-  };
+  });
+
+  /**
+   * Post the first text as it arrives and edit the message as the rest
+   * does, so a post starts with the answer, as a streamed one does. A
+   * response with no text posts nothing, or the notice if it broke off.
+   */
+  async function postAndEdit(
+    threadId: string,
+    text: ReturnType<typeof textOf>,
+    beforePost: () => () => void
+  ): Promise<{ id: string } | null> {
+    let markdown = "";
+    let shown = "";
+    let shownAt = 0;
+    let sent: { id: string } | undefined;
+    for await (const delta of text.deltas) {
+      markdown += delta;
+      if (!sent) {
+        const afterPost = beforePost();
+        sent = await adapter.postMessage(threadId, { markdown });
+        afterPost();
+      } else if (Date.now() - shownAt < EDIT_INTERVAL_MS) {
+        continue;
+      } else {
+        await adapter.editMessage(threadId, sent.id, { markdown });
+      }
+      shown = markdown;
+      shownAt = Date.now();
+    }
+    if (!sent) {
+      if (!text.interrupted()) return null;
+      beforePost();
+      return adapter.postMessage(threadId, { markdown: INTERRUPTED_NOTICE });
+    }
+    if (shown !== markdown) {
+      await adapter.editMessage(threadId, sent.id, { markdown });
+    }
+    return sent;
+  }
 }
+
+/** The least time between two edits of a posted answer. */
+const EDIT_INTERVAL_MS = 1000;
 
 function interruptedAnswer(reference: string | undefined): DeliveryResult {
   return {

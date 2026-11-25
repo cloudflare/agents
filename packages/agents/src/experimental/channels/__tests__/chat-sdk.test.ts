@@ -219,7 +219,7 @@ describe("Chat SDK Channel", () => {
     ).resolves.toMatchObject({ status: "uncertain" });
   });
 
-  it("collects and posts for an adapter that cannot stream", async () => {
+  it("posts for an adapter that cannot stream", async () => {
     const adapter = fakeAdapter();
     await expect(
       channelFor(adapter).stream!(

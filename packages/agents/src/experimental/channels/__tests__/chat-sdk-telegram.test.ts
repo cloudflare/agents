@@ -3,6 +3,7 @@ import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { chatSdkChannel } from "../chat-sdk";
+import { INTERRUPTED_NOTICE, onPosting } from "../deliveries";
 import type { ResponseChunk } from "../protocol";
 import updates from "./fixtures/telegram-updates.json";
 
@@ -16,6 +17,10 @@ const TOKEN = "123:secret";
 const SECRET = "webhook-secret";
 const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
 let nextMessageId = 500;
+/** Resolved by the next call the adapter makes to the Bot API. */
+let onCall: ((method: string) => void) | undefined;
+/** Bot API methods answered once with a rate limit before they succeed. */
+const rateLimitOnce = new Set<string>();
 
 const server = setupServer(
   http.post(
@@ -27,6 +32,18 @@ const server = setupServer(
         unknown
       >;
       calls.push({ method, body });
+      onCall?.(method);
+      if (rateLimitOnce.delete(method)) {
+        return HttpResponse.json(
+          {
+            ok: false,
+            error_code: 429,
+            description: "Too Many Requests: retry after 1",
+            parameters: { retry_after: 1 }
+          },
+          { status: 429 }
+        );
+      }
       if (method === "getMe") {
         return HttpResponse.json({
           ok: true,
@@ -57,6 +74,8 @@ const server = setupServer(
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => {
   calls.length = 0;
+  rateLimitOnce.clear();
+  onCall = undefined;
 });
 afterAll(() => server.close());
 
@@ -225,9 +244,64 @@ describe("Chat SDK Channel over the Telegram adapter (recorded webhooks)", () =>
     };
     const delivered = await c.stream!(surface, chunks("Hel", "lo"), {});
     expect(delivered).toMatchObject({ status: "delivered" });
-    const posts = sends().filter((call) => !call.method.endsWith("Draft"));
-    expect(posts).toHaveLength(1);
-    expect(posts[0]).toMatchObject({ chat: "-100", text: "Hello" });
+    expect(sends()).toEqual([
+      { method: "sendRichMessage", chat: "-100", text: "Hel" },
+      { method: "editMessageText", chat: "-100", text: "Hello" }
+    ]);
+  });
+
+  it("posts a group reply's first text before the answer ends", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.groupMention));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => (finish = resolve));
+    const queue: ResponseChunk[] = [
+      { type: "text-start", id: "a" },
+      { type: "text-delta", id: "a", delta: "Hel" }
+    ];
+    const open = new ReadableStream<ResponseChunk>({
+      async pull(controller) {
+        const next = queue.shift();
+        if (next) return controller.enqueue(next);
+        await finished;
+        controller.enqueue({ type: "text-delta", id: "a", delta: "lo" });
+        controller.enqueue({ type: "text-end", id: "a" });
+        controller.close();
+      }
+    });
+    const firstPost = new Promise<string>((resolve) => {
+      onCall = (method) => {
+        if (method === "sendRichMessage") resolve(method);
+      };
+    });
+    const delivered = c.stream!(surface, open, {});
+    await expect(firstPost).resolves.toBe("sendRichMessage");
+    finish();
+    await expect(delivered).resolves.toMatchObject({ status: "delivered" });
+    onCall = undefined;
+    expect(sends().at(-1)).toMatchObject({ text: "Hello" });
+  });
+
+  it("posts the notice to a group when the answer broke off before any text", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.groupMention));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    const delivered = await c.stream!(surface, answer([], true), {});
+    expect(delivered).toMatchObject({ status: "delivered" });
+    expect(sends()).toEqual([
+      {
+        method: "sendRichMessage",
+        chat: "-100",
+        text: INTERRUPTED_NOTICE
+      }
+    ]);
   });
 
   it("posts what an interrupted answer had, once, and says it is incomplete", async () => {
@@ -253,5 +327,74 @@ describe("Chat SDK Channel over the Telegram adapter (recorded webhooks)", () =>
     expect(edit?.events[0]?.event.eventId).not.toBe(
       original?.events[0]?.event.eventId
     );
+  });
+
+  it("retries a private reply whose final post was rate limited after its drafts", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.directMessage));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    rateLimitOnce.add("sendRichMessage");
+    const first = await c.stream!(surface, chunks("Hel", "lo"), {});
+    expect(first).toMatchObject({ status: "failed", retryable: true });
+    const second = await c.stream!(surface, chunks("Hel", "lo"), {});
+    expect(second).toMatchObject({ status: "delivered" });
+    // Only drafts went out before the rate limit: one answer in the chat.
+    expect(
+      calls.filter(({ method }) => method === "sendRichMessage")
+    ).toHaveLength(2);
+  });
+
+  it("does not take a private reply's drafts as posted", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.directMessage));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    const options = {};
+    const marks: string[] = [];
+    onPosting(options, () => marks.push("posting"));
+    onCall = (method) => marks.push(method);
+    await expect(
+      c.stream!(surface, chunks("Hel", "lo"), options)
+    ).resolves.toMatchObject({ status: "delivered" });
+    // A reset during the drafts finds no mark, so the reply is sent again.
+    expect(marks).not.toContain("posting");
+    expect(marks.at(-1)).toBe("sendRichMessage");
+  });
+
+  it("marks a group reply as posting just before its first post", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.groupMention));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    const options = {};
+    const marks: string[] = [];
+    onPosting(options, () => marks.push("posting"));
+    onCall = (method) => marks.push(method);
+    await c.stream!(surface, chunks("Hel", "lo"), options);
+    expect(marks.filter((mark) => mark !== "getMe")).toEqual([
+      "posting",
+      "sendRichMessage",
+      "editMessageText"
+    ]);
+  });
+
+  it("retries a group reply whose first post was rate limited", async () => {
+    const c = channel();
+    const result = await c.ingress!.receive(webhook(updates.groupMention));
+    const surface = {
+      ...result!.events[0]!.event.replySurface!,
+      channelKey: "telegram"
+    };
+    rateLimitOnce.add("sendRichMessage");
+    await expect(
+      c.stream!(surface, chunks("Hello"), {})
+    ).resolves.toMatchObject({ status: "failed", retryable: true });
   });
 });
