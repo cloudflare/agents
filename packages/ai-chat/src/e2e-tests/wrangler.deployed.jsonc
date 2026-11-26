@@ -7,6 +7,10 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
+    // A redeploy must reset the busy object at once: in the default deferred
+    // mode a Durable Object that is running a turn keeps the old code (up to
+    // 300 s), so the turn is never interrupted within the test's wait.
+    "code_update_strategy": { "mode": "immediate" },
     "bindings": [
       {
         "name": "ChatRecoveryTestAgent",

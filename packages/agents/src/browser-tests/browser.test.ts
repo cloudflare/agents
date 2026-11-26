@@ -15,13 +15,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Kill whatever listens on `port`. Only the listener: `lsof -ti tcp:<port>`
+ * alone also lists every process with a connection to it, which includes
+ * this vitest worker once a test has fetched from the port, and killing that
+ * makes vitest report "Worker exited unexpectedly" after every test passed.
+ */
 function killProcessOnPort(port: number): void {
   try {
-    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
+    const output = execSync(
+      `lsof -ti tcp:${port} -sTCP:LISTEN 2>/dev/null || true`
+    )
       .toString()
       .trim();
     if (output) {
       for (const pid of output.split("\n").filter(Boolean)) {
+        if (Number(pid) === process.pid) continue;
         try {
           process.kill(Number(pid), "SIGKILL");
         } catch {
