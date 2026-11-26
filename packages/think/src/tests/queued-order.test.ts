@@ -29,6 +29,7 @@ type AdmissionStub = {
     Array<{ requestId: string; stopped: boolean }>
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
+  isIdleForTest(): Promise<boolean>;
   getModelRequestsForTest(): Promise<
     Array<Array<{ role: string; text: string }>>
   >;
@@ -192,8 +193,26 @@ describe("a message queued behind a running turn", () => {
       "assistant",
       "user"
     ]);
-    // The tab that sent it is never left drawing it as queued.
-    await delay(300);
+    // The tab that sent it is never left drawing it as queued. Once the
+    // agent has nothing left to run, a resume request on tab B is a barrier:
+    // its answer comes after every frame sent to the tab before it, so the
+    // last message list is final when it is read.
+    const idle = await waitFor(
+      () => stub.isIdleForTest(),
+      (yes) => yes,
+      10_000
+    );
+    expect(idle).toBe(true);
+    const barrier = seenB.length;
+    tabB.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+    await waitFor(
+      async () =>
+        seenB
+          .slice(barrier)
+          .some((f) => f.type === "cf_agent_stream_resume_none"),
+      (yes) => yes,
+      5000
+    );
     const lists = seenB.filter((f) => f.type === "cf_agent_chat_messages");
     expect(lists.at(-1)?.queuedMessageIds).toBeUndefined();
     tabA.close();
@@ -218,7 +237,13 @@ describe("a message queued behind a running turn", () => {
         (ok) => ok
       );
       send(tabA, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-      await delay(100);
+      // r2 waits in the queue: its admission record exists.
+      const admitted = await waitFor(
+        async () => (await agent(binding, room)).getAdmissionsForTest(),
+        (records) => records.some((r) => r.requestId === "r2"),
+        5000
+      );
+      expect(admitted.some((r) => r.requestId === "r2")).toBe(true);
       if (end === "stopped") {
         tabA.send(JSON.stringify({ type: MSG_CHAT_CANCEL, id: "r2" }));
       } else {
