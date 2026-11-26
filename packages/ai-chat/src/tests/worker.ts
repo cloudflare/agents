@@ -152,6 +152,13 @@ function continuationStateForTest(
   };
 }
 
+/** How many turns `agent`'s queue holds, the running one included. */
+function queuedTurnCountForTest(agent: AIChatAgent): number {
+  return (
+    agent as unknown as { _turns: { queue: { queuedCount(): number } } }
+  )._turns.queue.queuedCount();
+}
+
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
   return sql
     .exec<{ run_id: string }>(
@@ -624,6 +631,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
   /** When the agent received the socket message with this id. */
   receivedAtForTest(id: string): number | null {
     return messageReceivedAtForTest(this, id);
+  }
+
+  /** How many turns the queue holds, the running one included. */
+  queuedTurnCountForTest(): number {
+    return queuedTurnCountForTest(this);
   }
 
   /** Holds the next model call (inside onChatMessage) until released. */
@@ -2383,11 +2395,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
   /** How many turns the queue holds, the running one included. */
   queuedTurnCountForTest(): number {
-    return (
-      this as unknown as {
-        _turns: { queue: { queuedCount(): number } };
-      }
-    )._turns.queue.queuedCount();
+    return queuedTurnCountForTest(this);
   }
 
   holdStreamForTest(requestId = "next"): void {
