@@ -28,6 +28,8 @@ export type Run = {
   /** A tab opened after everything settled: what a returning client sees. */
   lateTab: Frame[];
   extra: Record<string, unknown>;
+  /** The scenario's own expectations that did not hold. */
+  checks: string[];
 };
 
 type Step = Record<string, unknown>;
@@ -86,6 +88,23 @@ function tabSettled(tab: Tab): boolean {
   return !handedOff && tab.sent.every((id) => done.has(id));
 }
 
+/**
+ * The model call after the first `step` call waited at least `minMs` (the
+ * delay the provider asked for). Nothing to check when no call followed.
+ */
+function waitedAfter(run: Run, step: string, minMs: number): Run {
+  const calls = run.state.calls.filter((c) => c.step);
+  const i = calls.findIndex((c) => c.step === step);
+  const next = i >= 0 ? calls[i + 1] : undefined;
+  // Workers clocks move in steps: allow 10%.
+  if (next && next.at - calls[i].at < minMs * 0.9) {
+    run.checks.push(
+      `the call after ${step} came ${next.at - calls[i].at} ms later, not the ${minMs} ms asked for`
+    );
+  }
+  return run;
+}
+
 /** A response frame of request `id` whose text reached `marker`. */
 function chunkOf(id: string | undefined, marker: string) {
   return (f: Frame) =>
@@ -129,7 +148,8 @@ async function finish(
     state: s,
     tabs: tabs.map((t) => ({ sent: t.sent, frames: t.frames })),
     lateTab: late.frames,
-    extra
+    extra,
+    checks: []
   };
 }
 
@@ -315,7 +335,11 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     const id = tab.request(rid("req"), [user("hello")], {
       clientTools: CLIENT_TOOLS
     });
-    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+    return waitedAfter(
+      await finish(cls, room, [tab], { reqId: id.slice(0, 14) }),
+      "status-429",
+      7000
+    );
   },
   async rl429RetryAfterMs(cls: Cls) {
     const { room, tab } = await setup(cls, {
@@ -327,7 +351,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
-    return finish(cls, room, [tab]);
+    return waitedAfter(await finish(cls, room, [tab]), "status-429", 5500);
   },
   async rl429Transient(cls: Cls) {
     const { room, tab } = await setup(cls, {
@@ -339,7 +363,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
-    return finish(cls, room, [tab]);
+    return waitedAfter(await finish(cls, room, [tab]), "status-429", 7000);
   },
   async rl429SdkRetries(cls: Cls) {
     // default AI SDK maxRetries (2): it retries twice itself, then throws RetryError
@@ -367,7 +391,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("weather")], { clientTools: CLIENT_TOOLS });
-    return finish(cls, room, [tab]);
+    return waitedAfter(await finish(cls, room, [tab]), "status-429", 6000);
   },
 
   // ── 3. context overflow (Think) ──

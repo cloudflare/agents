@@ -9,6 +9,7 @@ import type { TestProject } from "vitest/node";
 declare module "vitest" {
   export interface ProvidedContext {
     faultsUrl: string;
+    faultsKey: string;
   }
 }
 
@@ -34,13 +35,12 @@ function wrangler(args: string[]): string {
  * A new workers.dev name answers from the Worker on some requests before
  * others: wait for ten answers in a row from the Worker itself.
  */
-async function waitLive(url: string) {
+async function waitLive(url: string, key: string) {
   let inARow = 0;
   for (let i = 0; i < 120 && inARow < 10; i++) {
     try {
-      const res = await fetch(url);
-      // The Worker answers unknown paths with its own 404.
-      inARow = (await res.text()) === "Not found" ? inARow + 1 : 0;
+      const res = await fetch(`${url}/ready?key=${key}`);
+      inARow = (await res.text()) === "ready" ? inARow + 1 : 0;
     } catch {
       inARow = 0;
     }
@@ -53,15 +53,39 @@ export default async function setup(project: TestProject) {
   const given = process.env.FAULTS_URL;
   if (given) {
     project.provide("faultsUrl", given);
+    project.provide("faultsKey", process.env.FAULTS_KEY ?? "");
     return;
   }
   const name = `nightly-faults-${Date.now().toString(36)}`;
-  const out = wrangler(["deploy", "--config", CONFIG, "--name", name]);
-  const url = out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
-  if (!url) throw new Error(`no workers.dev URL in the deploy output:\n${out}`);
-  await waitLive(url);
-  project.provide("faultsUrl", url);
-  return () => {
-    wrangler(["delete", "--name", name, "--force"]);
-  };
+  // The Worker answers only requests that carry this key.
+  const key = crypto.randomUUID();
+  const remove = () => wrangler(["delete", "--name", name, "--force"]);
+  try {
+    const out = wrangler([
+      "deploy",
+      "--config",
+      CONFIG,
+      "--name",
+      name,
+      "--var",
+      `PROBE_KEY:${key}`
+    ]);
+    const url = out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
+    if (!url)
+      throw new Error(
+        `no workers.dev URL in the deploy output:\n${out.slice(-1500)}`
+      );
+    await waitLive(url, key);
+    project.provide("faultsUrl", url);
+    project.provide("faultsKey", key);
+  } catch (e) {
+    // Vitest only runs the teardown when setup returns it: delete here.
+    try {
+      remove();
+    } catch {
+      // never deployed
+    }
+    throw e;
+  }
+  return remove;
 }

@@ -15,8 +15,8 @@ An `AIChatAgent` and a `Think` agent on a scripted fake model, put through about
 ```sh
 cd nightly
 pnpm run faults                                   # deploy, run every scenario on both agents, delete
-FAULTS_ONLY=stall,recThrows pnpm run faults       # a subset
-FAULTS_URL=https://<worker>.workers.dev pnpm run faults   # against a Worker you deployed
+FAULTS_ONLY=stall,rl429RetryAfter pnpm run faults  # a subset (an unknown name is an error)
+FAULTS_URL=https://<worker>.workers.dev FAULTS_KEY=<its PROBE_KEY> pnpm run faults   # against a Worker you deployed
 ```
 
 Each scenario's full outcome (the stored transcript, events, model calls and every frame the tabs saw) is written to `faults/results/<agent>-<scenario>.json`.

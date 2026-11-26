@@ -36,6 +36,8 @@ import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { z } from "zod";
 
 type Env = {
+  /** Every request must carry it (`x-probe-key` or `?key=`): the suite sets it at deploy. */
+  PROBE_KEY: string;
   ProbeChat: DurableObjectNamespace<ProbeChat>;
   ProbeThink: DurableObjectNamespace<ProbeThink>;
 };
@@ -155,6 +157,7 @@ function eventSummary(event: ObservabilityEvent): Record<string, unknown> {
     (event as { payload?: Record<string, unknown> }).payload ?? {};
   const keep: Record<string, unknown> = {};
   for (const key of [
+    "incidentId",
     "status",
     "reason",
     "outcome",
@@ -1014,6 +1017,12 @@ function describeError(error: unknown): string {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const key =
+      request.headers.get("x-probe-key") ?? url.searchParams.get("key");
+    if (!env.PROBE_KEY || key !== env.PROBE_KEY) {
+      return new Response("Not found", { status: 404 });
+    }
+    if (url.pathname === "/ready") return new Response("ready");
     const m = url.pathname.match(/^\/ctl\/(chat|think)\/([^/]+)\/(\w+)$/);
     if (m) {
       const [, cls, room, method] = m;

@@ -12,6 +12,13 @@ export function baseUrl(): string {
   return url.replace(/\/$/, "");
 }
 
+/** The key the Worker requires on every request (`PROBE_KEY`). */
+export function probeKey(): string {
+  const key = process.env.FAULTS_KEY;
+  if (!key) throw new Error("FAULTS_KEY is not set");
+  return key;
+}
+
 export const MT = {
   MESSAGES: "cf_agent_chat_messages",
   REQUEST: "cf_agent_use_chat_request",
@@ -56,6 +63,7 @@ export type Frame = {
 };
 
 export type ProbeEvent = {
+  incidentId?: string;
   at: number;
   type: string;
   status?: string;
@@ -101,7 +109,10 @@ export async function ctl(
   try {
     const res = await fetch(`${baseUrl()}/ctl/${cls}/${room}/${method}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-probe-key": probeKey()
+      },
       body: JSON.stringify(args),
       signal: AbortSignal.timeout(120_000)
     });
@@ -144,7 +155,7 @@ export class Tab {
 
   async open(): Promise<this> {
     const ws = new WebSocket(
-      `${baseUrl().replace(/^http/, "ws")}/agents/${AGENT_PATH[this.cls]}/${this.room}`
+      `${baseUrl().replace(/^http/, "ws")}/agents/${AGENT_PATH[this.cls]}/${this.room}?key=${probeKey()}`
     );
     this.ws = ws;
     await new Promise<void>((resolve, reject) => {
@@ -257,19 +268,31 @@ export async function state(cls: Cls, room: string): Promise<ProbeState> {
   return r.value as ProbeState;
 }
 
-/** Recovery events by kind: how many began and how many ended. */
+const RECOVERY_ENDS = new Set([
+  "chat:recovery:completed",
+  "chat:recovery:exhausted",
+  "chat:recovery:skipped",
+  "chat:recovery:failed"
+]);
+
+/**
+ * Recoveries that began and have not ended exactly once, by incident:
+ * `open` never ended, `twice` ended more than once.
+ */
 export function recoveryBalance(events: ProbeEvent[]): {
-  detected: number;
-  ended: number;
+  open: string[];
+  twice: string[];
 } {
-  const count = (t: string) => events.filter((e) => e.type === t).length;
+  const detected = new Set<string>();
+  const ends = new Map<string, number>();
+  for (const e of events) {
+    const id = e.incidentId ?? "?";
+    if (e.type === "chat:recovery:detected") detected.add(id);
+    else if (RECOVERY_ENDS.has(e.type)) ends.set(id, (ends.get(id) ?? 0) + 1);
+  }
   return {
-    detected: count("chat:recovery:detected"),
-    ended:
-      count("chat:recovery:completed") +
-      count("chat:recovery:exhausted") +
-      count("chat:recovery:skipped") +
-      count("chat:recovery:failed")
+    open: [...detected].filter((id) => !ends.has(id)),
+    twice: [...ends].filter(([, n]) => n > 1).map(([id]) => id)
   };
 }
 
@@ -293,11 +316,11 @@ export async function settle(
       s.calls.length,
       s.events.length
     ]);
-    const { detected, ended } = recoveryBalance(s.events);
+    const { open } = recoveryBalance(s.events);
     if (sig !== last) {
       last = sig;
       lastChange = Date.now();
-    } else if (Date.now() - lastChange >= quietMs && ended >= detected) {
+    } else if (Date.now() - lastChange >= quietMs && open.length === 0) {
       return { ...s, unsettled: false };
     }
     await sleep(700);

@@ -13,10 +13,14 @@ const RESULTS = path.join(import.meta.dirname, "results");
 
 beforeAll(() => {
   process.env.FAULTS_URL = inject("faultsUrl");
+  process.env.FAULTS_KEY = inject("faultsKey");
   mkdirSync(RESULTS, { recursive: true });
 });
 
 const only = process.env.FAULTS_ONLY?.split(",");
+const unknown = only?.filter((name) => !(name in SCENARIOS)) ?? [];
+if (unknown.length)
+  throw new Error(`FAULTS_ONLY names no scenario: ${unknown.join(", ")}`);
 
 for (const cls of ["chat", "think"] as Cls[]) {
   describe.concurrent(cls, () => {
