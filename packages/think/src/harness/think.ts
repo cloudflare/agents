@@ -1098,9 +1098,24 @@ export class Think<
   async waitForSubmission(
     submissionId: string
   ): Promise<ThinkSubmissionInspection | null> {
-    if (!(await this.harness.session().inspect(submissionId))) return null;
-    await this.harness.session().wait(submissionId);
-    return this.inspectSubmission(submissionId);
+    if (this.#submissionStatuses.reporting(submissionId)) {
+      // As on Think: the submission settles only after the hook returns.
+      throw new Error(
+        "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
+      );
+    }
+    const before = await this.harness.inspection(
+      this.harness.session().id,
+      submissionId
+    );
+    if (!before) return null;
+    const result = await this.harness.session().wait(submissionId);
+    // Read again for its times; deleted meanwhile (the app's terminal hook
+    // may delete it), the wait's result still says how it ended.
+    return (
+      (await this.inspectSubmission(submissionId)) ??
+      submissionInspection({ ...before, ...result })
+    );
   }
 
   // ── Programmatic chat ─────────────────────────────────────────────
@@ -1151,7 +1166,10 @@ export class Think<
       outcome: "cancelled",
       submissionId,
       previousStatus: before.status,
-      messagesApplied: before.status === "running",
+      messagesApplied: await this.harness.messagesPlaced(
+        this.harness.session().id,
+        submissionId
+      ),
       submission: after
     };
   }

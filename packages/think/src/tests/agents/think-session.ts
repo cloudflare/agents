@@ -9563,7 +9563,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     const hold = this._statusHookHold;
-    if (hold) {
+    if (hold && (hold.status === undefined || hold.status === result.status)) {
       this._statusHookHold = null;
       hold.reached = true;
       await hold.released;
@@ -9571,7 +9571,10 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._submissionLog.push(result);
     if (this._cancelInSubmissionStatusHook && result.status === "running") {
       this._cancelInSubmissionStatusHook = false;
-      await this.cancelSubmission(result.submissionId, "from the hook");
+      this._hookCancelResult = await this.cancelSubmission(
+        result.submissionId,
+        "from the hook"
+      );
     }
     if (
       this._waitInSubmissionStatusHook &&
@@ -9594,16 +9597,26 @@ export class ThinkProgrammaticTestAgent extends Think {
     reached: boolean;
     released: Promise<void>;
     open: () => void;
+    /** Only a hook for this status is held; any when unset. */
+    status?: ThinkSubmissionInspection["status"];
   } | null = null;
+  private _hookCancelResult: unknown = null;
+
+  /** What the hook's own cancelSubmission returned. */
+  async hookCancelResultForTest(): Promise<unknown> {
+    return this._hookCancelResult;
+  }
   private _heldStatusHook: { reached: boolean; open: () => void } | null = null;
 
   /** Hold the next `onSubmissionStatus` call until released. */
-  async holdSubmissionStatusHookForTest(): Promise<void> {
+  async holdSubmissionStatusHookForTest(
+    status?: ThinkSubmissionInspection["status"]
+  ): Promise<void> {
     let open = () => {};
     const released = new Promise<void>((resolve) => {
       open = resolve;
     });
-    this._statusHookHold = { reached: false, released, open };
+    this._statusHookHold = { reached: false, released, open, status };
     this._heldStatusHook = this._statusHookHold;
   }
 
