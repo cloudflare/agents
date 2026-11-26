@@ -44,6 +44,21 @@ describe("legacy chat stream import", () => {
     });
   });
 
+  it("lets a released host construct ResumableStream over an earlier version's tables", async () => {
+    // ai-chat 0.12.x and Think 0.24.x pass `{ onProgress }` where the facet
+    // check now goes, and call markError and start with origin ids.
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      // The carried total (5 + 2) plus the stream's one stored unit.
+      expect(await instance.probeReleasedHostAdapter()).toEqual({
+        marker: 8,
+        legacyTables: [],
+        originIds: ["u1"],
+        errored: "error"
+      });
+    });
+  });
+
   it("makes no counters table until something is counted", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {

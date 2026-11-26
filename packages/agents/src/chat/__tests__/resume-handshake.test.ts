@@ -97,7 +97,7 @@ function settledRow(tag: string, state: "completed" | "errored") {
 
 function makeStream(over: Partial<FakeStreamState> = {}): {
   state: FakeStreamState;
-  replyStreams: ReplyStreams;
+  resumableStream: ReplyStreams;
 } {
   const state: FakeStreamState = {
     active: false,
@@ -114,7 +114,7 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
     },
     ...over
   };
-  const replyStreams = {
+  const resumableStream = {
     hasActiveStream: () => state.active,
     get activeRequestId() {
       return state.activeRequestId;
@@ -173,11 +173,11 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
       }
     }
   } as unknown as ReplyStreams;
-  return { state, replyStreams };
+  return { state, resumableStream };
 }
 
 function makeHost(opts: {
-  replyStreams: ReplyStreams;
+  resumableStream: ReplyStreams;
   continuation?: ContinuationState<Connection>;
   preStream?: PreStreamTurns<Connection>;
   pendingTerminal?: PendingChatTerminal | null;
@@ -191,7 +191,7 @@ function makeHost(opts: {
       holdsTerminalFrames: (id: string) => opts.heldTerminalRequestIds!.has(id)
     }),
     responseMessageType: RESPONSE_TYPE,
-    replyStreams: opts.replyStreams,
+    resumableStream: opts.resumableStream,
     continuation: opts.continuation ?? new ContinuationState<Connection>(),
     preStream: opts.preStream,
     pendingResumeConnections:
@@ -211,13 +211,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("notify emits STREAM_RESUMING and parks the connection as pending", () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1"
     });
     const pendingResumeConnections = new Set<string>();
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, pendingResumeConnections })
+      makeHost({ resumableStream, pendingResumeConnections })
     );
 
     handshake.notifyStreamResuming(makeConnection("c1", frames));
@@ -228,10 +228,10 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("notify is a no-op with no active stream", () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({ active: false });
+    const { resumableStream } = makeStream({ active: false });
     const pendingResumeConnections = new Set<string>();
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, pendingResumeConnections })
+      makeHost({ resumableStream, pendingResumeConnections })
     );
 
     handshake.notifyStreamResuming(makeConnection("c1", frames));
@@ -244,11 +244,11 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("#1733: REQUEST while active re-sends the SAME STREAM_RESUMING (no dedupe)", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1"
     });
-    const handshake = new ResumeHandshake(makeHost({ replyStreams }));
+    const handshake = new ResumeHandshake(makeHost({ resumableStream }));
     const conn = makeConnection("c1", frames);
 
     // Proactive notify has no probe id; the explicit response echoes its
@@ -264,13 +264,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("#2703: a REQUEST after the ACK does not park the connection again", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1"
     });
     const pendingResumeConnections = new Set<string>();
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, pendingResumeConnections })
+      makeHost({ resumableStream, pendingResumeConnections })
     );
     const conn = makeConnection("c1", frames);
 
@@ -290,13 +290,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("#2703: a connection that closed and reconnects with the same id is parked again until it ACKs", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1"
     });
     const pendingResumeConnections = new Set<string>();
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, pendingResumeConnections })
+      makeHost({ resumableStream, pendingResumeConnections })
     );
     const conn = makeConnection("c1", frames);
 
@@ -313,7 +313,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("REQUEST while a DIFFERENT connection owns the active continuation → RESUME_NONE", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1"
     });
@@ -321,7 +321,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     continuation.activeRequestId = "req-1";
     continuation.activeConnectionId = "other";
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, continuation })
+      makeHost({ resumableStream, continuation })
     );
 
     await handshake.handleResumeRequest(
@@ -339,7 +339,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("REQUEST with no active stream but a matching pending continuation parks + keeps waiting (#1784)", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({ active: false });
+    const { resumableStream } = makeStream({ active: false });
     const continuation = new ContinuationState<Connection>();
     // `connectionId` is read by the driver's pending check; `requestId` is
     // echoed into the keep-waiting frame.
@@ -348,7 +348,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       requestId: "cont-1"
     } as ContinuationState<Connection>["pending"];
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, continuation })
+      makeHost({ resumableStream, continuation })
     );
     const conn = makeConnection("c1", frames);
 
@@ -362,10 +362,10 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("REQUEST with no active stream but a pending TERMINAL → STREAM_RESUMING for the terminal (#1645)", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({ active: false });
+    const { resumableStream } = makeStream({ active: false });
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         pendingTerminal: { requestId: "req-term", body: "boom" }
       })
     );
@@ -377,8 +377,8 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("REQUEST with nothing to resume → correlated idle RESUME_NONE", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({ active: false });
-    const handshake = new ResumeHandshake(makeHost({ replyStreams }));
+    const { resumableStream } = makeStream({ active: false });
+    const handshake = new ResumeHandshake(makeHost({ resumableStream }));
 
     await handshake.handleResumeRequest(
       makeConnection("c1", frames),
@@ -392,11 +392,11 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("REQUEST with no active stream but a pre-stream turn in flight parks + keeps waiting (#1784)", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({ active: false });
+    const { resumableStream } = makeStream({ active: false });
     const preStream = new PreStreamTurns<Connection>();
     preStream.begin("req-pre");
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, preStream })
+      makeHost({ resumableStream, preStream })
     );
     const conn = makeConnection("c1", frames);
 
@@ -408,10 +408,10 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("REQUEST with an idle pre-stream tracker → RESUME_NONE (nothing in flight)", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({ active: false });
+    const { resumableStream } = makeStream({ active: false });
     const preStream = new PreStreamTurns<Connection>();
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, preStream })
+      makeHost({ resumableStream, preStream })
     );
 
     await handshake.handleResumeRequest(makeConnection("c1", frames));
@@ -422,7 +422,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("active continuation owned by an ABSENT connection can be resumed by a new one (#1784)", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1"
     });
@@ -431,7 +431,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     continuation.activeConnectionId = "old-owner";
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         continuation,
         // "old-owner" is NOT present → the new connection may take over.
         presentConnectionIds: new Set<string>(["c1"])
@@ -445,7 +445,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("active continuation owned by a PRESENT connection is NOT hijacked → RESUME_NONE", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1"
     });
@@ -454,7 +454,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     continuation.activeConnectionId = "old-owner";
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         continuation,
         presentConnectionIds: new Set<string>(["old-owner", "c1"])
       })
@@ -472,14 +472,14 @@ describe("ResumeHandshake (driver → golden frames)", () => {
   it("ACK for the active stream replays chunks and persists an orphaned stream", async () => {
     const frames: SentFrame[] = [];
     const persistCalls: string[] = [];
-    const { state, replyStreams } = makeStream({
+    const { state, resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1",
       orphanedStreamId: "stream-9"
     });
     const pendingResumeConnections = new Set<string>(["c1"]);
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, pendingResumeConnections, persistCalls })
+      makeHost({ resumableStream, pendingResumeConnections, persistCalls })
     );
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-1");
@@ -495,13 +495,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
   it("ACK for the active stream that is NOT orphaned does not persist", async () => {
     const frames: SentFrame[] = [];
     const persistCalls: string[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1",
       orphanedStreamId: ""
     });
     const handshake = new ResumeHandshake(
-      makeHost({ replyStreams, persistCalls })
+      makeHost({ resumableStream, persistCalls })
     );
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-1");
@@ -511,11 +511,11 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK for a DIFFERENT active request id is ignored (no frame, no replay)", async () => {
     const frames: SentFrame[] = [];
-    const { state, replyStreams } = makeStream({
+    const { state, resumableStream } = makeStream({
       active: true,
       activeRequestId: "req-1"
     });
-    const handshake = new ResumeHandshake(makeHost({ replyStreams }));
+    const handshake = new ResumeHandshake(makeHost({ resumableStream }));
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "stale-req");
 
@@ -525,13 +525,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK with a pending terminal replays errored content then the terminal error frame (#1575)", async () => {
     const frames: SentFrame[] = [];
-    const { state, replyStreams } = makeStream({
+    const { state, resumableStream } = makeStream({
       active: false,
       replayErroredReturn: true
     });
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         pendingTerminal: { requestId: "req-term", body: "boom" }
       })
     );
@@ -546,13 +546,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK with a pending terminal echoes its originating message ids (#2280)", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: false,
       originMessageIds: ["stream-msg"]
     });
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         pendingTerminal: {
           requestId: "req-term",
           body: "boom",
@@ -573,13 +573,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK falls back to the stream's originating message ids (#2280)", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: false,
       originMessageIds: ["msg-s"]
     });
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         pendingTerminal: { requestId: "req-term", body: "boom" }
       })
     );
@@ -598,13 +598,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK with a pending terminal whose replay connection dropped skips the terminal frame", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: false,
       replayErroredReturn: false
     });
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         pendingTerminal: { requestId: "req-term", body: "boom" }
       })
     );
@@ -618,13 +618,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK for a pending terminal with a DIFFERENT request id falls through to replay-done", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: false,
       replayCompletedReturn: false
     });
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         pendingTerminal: { requestId: "req-term", body: "boom" }
       })
     );
@@ -636,12 +636,12 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK with completed chunks to replay emits no extra close frame", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: false,
       replayCompletedReturn: true,
       completedChunks: ["stored-chunk"]
     });
-    const handshake = new ResumeHandshake(makeHost({ replyStreams }));
+    const handshake = new ResumeHandshake(makeHost({ resumableStream }));
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-done");
 
@@ -654,11 +654,11 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK with nothing left to replay emits a clean replay-done close", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: false,
       replayCompletedReturn: false
     });
-    const handshake = new ResumeHandshake(makeHost({ replyStreams }));
+    const handshake = new ResumeHandshake(makeHost({ resumableStream }));
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-done");
 
@@ -667,12 +667,12 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK with nothing left to replay echoes the stream's outcome", async () => {
     const frames: SentFrame[] = [];
-    const { replyStreams } = makeStream({
+    const { resumableStream } = makeStream({
       active: false,
       replayCompletedReturn: false,
       outcome: "aborted"
     });
-    const handshake = new ResumeHandshake(makeHost({ replyStreams }));
+    const handshake = new ResumeHandshake(makeHost({ resumableStream }));
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-done");
 
@@ -683,13 +683,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
   it("ACK while the host holds the request's terminal frames sends no early done", async () => {
     const frames: SentFrame[] = [];
-    const { state, replyStreams } = makeStream({
+    const { state, resumableStream } = makeStream({
       active: false,
       replayCompletedReturn: false
     });
     const handshake = new ResumeHandshake(
       makeHost({
-        replyStreams,
+        resumableStream,
         heldTerminalRequestIds: new Set(["req-persisting"])
       })
     );
@@ -723,9 +723,9 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         messageIds: ["u1"]
       });
       const frames: SentFrame[] = [];
-      const { replyStreams } = makeStream();
+      const { resumableStream } = makeStream();
       const handshake = new ResumeHandshake({
-        ...makeHost({ replyStreams }),
+        ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
       });
       const conn = makeConnection("c1", frames);
@@ -754,12 +754,12 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         outcome: "aborted"
       });
       const frames: SentFrame[] = [];
-      const { replyStreams } = makeStream({
+      const { resumableStream } = makeStream({
         replayCompletedReturn: true,
         outcome: "recovering"
       });
       const handshake = new ResumeHandshake({
-        ...makeHost({ replyStreams }),
+        ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
       });
 
@@ -783,13 +783,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         outcome: "aborted"
       });
       const frames: SentFrame[] = [];
-      const { replyStreams } = makeStream({
+      const { resumableStream } = makeStream({
         active: true,
         activeRequestId: "req-cont",
         activeStreamId: "s-cont"
       });
       const handshake = new ResumeHandshake({
-        ...makeHost({ replyStreams }),
+        ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
       });
 
@@ -822,11 +822,11 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         outcome: "aborted"
       });
       const frames: SentFrame[] = [];
-      const { state, replyStreams } = makeStream({
+      const { state, resumableStream } = makeStream({
         replayCompletedReturn: true
       });
       (
-        replyStreams as unknown as {
+        resumableStream as unknown as {
           latestStreamInfoForRequest: (id: string) => unknown;
         }
       ).latestStreamInfoForRequest = () => ({
@@ -836,7 +836,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         cutOff: true
       });
       const handshake = new ResumeHandshake({
-        ...makeHost({ replyStreams }),
+        ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
       });
 
@@ -859,14 +859,14 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         outcome: "aborted"
       });
       const frames: SentFrame[] = [];
-      const { replyStreams } = makeStream({
+      const { resumableStream } = makeStream({
         active: true,
         activeRequestId: "req-cont",
         activeStreamId: "s-cont"
       });
       const ended = new EndedRequests();
       const handshake = new ResumeHandshake({
-        ...makeHost({ replyStreams }),
+        ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids),
         ended
       });
@@ -896,10 +896,10 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         body: "",
         outcome: "completed"
       });
-      const { replyStreams } = makeStream();
+      const { resumableStream } = makeStream();
       const ended = new EndedRequests();
       const handshake = new ResumeHandshake({
-        ...makeHost({ replyStreams }),
+        ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids),
         ended
       });
@@ -931,9 +931,9 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         outcome: "aborted"
       });
       const frames: SentFrame[] = [];
-      const { replyStreams } = makeStream();
+      const { resumableStream } = makeStream();
       const handshake = new ResumeHandshake({
-        ...makeHost({ replyStreams }),
+        ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
       });
       // A fresh tab that only knows the id stops it: told directly.
@@ -950,7 +950,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       recordRecentChatTerminal(kv, { id: "req-live", done: true });
       recordRecentChatTerminal(kv, { id: "req-held", done: true });
       const frames: SentFrame[] = [];
-      const { replyStreams } = makeStream({
+      const { resumableStream } = makeStream({
         active: true,
         activeRequestId: "req-live",
         // A closed stream alone (an attempt retried after compaction) is
@@ -960,7 +960,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       });
       const handshake = new ResumeHandshake({
         ...makeHost({
-          replyStreams,
+          resumableStream,
           heldTerminalRequestIds: new Set(["req-held"])
         }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
@@ -977,9 +977,9 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       const kv = kvStore();
       recordRecentChatTerminal(kv, { id: "req-other", done: true });
       const frames: SentFrame[] = [];
-      const { replyStreams } = makeStream();
+      const { resumableStream } = makeStream();
       const handshake = new ResumeHandshake({
-        ...makeHost({ replyStreams }),
+        ...makeHost({ resumableStream }),
         recentTerminal: (ids) => recentChatTerminal(kv, ids)
       });
 

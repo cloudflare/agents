@@ -1246,7 +1246,7 @@ export class AIChatAgent<
   private _resumeHandshake(): ResumeHandshake {
     return (this._resumeHandshakeInstance ??= new ResumeHandshake({
       responseMessageType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-      replyStreams: this._replyStreams,
+      resumableStream: this._replyStreams,
       continuation: this._continuation,
       preStream: this._preStream,
       pendingResumeConnections: this._pendingResumeConnections,

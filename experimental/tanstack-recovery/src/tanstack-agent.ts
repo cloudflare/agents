@@ -730,7 +730,7 @@ export class TanStackAgent extends Agent<Env> {
   private _resumeHandshakeHost(): ResumeHandshakeHost {
     return {
       responseMessageType: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-      replyStreams: this._replyStreams,
+      resumableStream: this._replyStreams,
       continuation: this._continuation,
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => pendingChatTerminal(this.ctx.storage),

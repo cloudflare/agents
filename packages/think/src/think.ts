@@ -11306,7 +11306,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _resumeHandshake(): ResumeHandshake {
     return (this._resumeHandshakeInstance ??= new ResumeHandshake({
       responseMessageType: MSG_CHAT_RESPONSE,
-      replyStreams: this._replyStreams,
+      resumableStream: this._replyStreams,
       continuation: this._turns.continuation,
       preStream: this._turns.preStream,
       pendingResumeConnections: this._pendingResumeConnections,
