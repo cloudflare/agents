@@ -25,6 +25,21 @@ function chatRequest(id: string, text: string) {
   });
 }
 
+function chatRequestWith(id: string, messageId: string, text: string) {
+  return JSON.stringify({
+    type: "cf_agent_use_chat_request",
+    id,
+    init: {
+      method: "POST",
+      body: JSON.stringify({
+        messages: [
+          { id: messageId, role: "user", parts: [{ type: "text", text }] }
+        ]
+      })
+    }
+  });
+}
+
 describe("chat functions over a minimal host", () => {
   it("a chat request frame stores the question and runs a turn that stores the reply", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
@@ -417,6 +432,55 @@ describe("chat functions over a minimal host", () => {
       expect([...parkedIn(instance.streams, "s1").keys()]).toEqual(["tab-d"]);
       release();
       await done;
+      instance.host.respond = respond;
+    });
+  });
+
+  it("under latest, a message that arrives while one waits skips the waiting turn and answers both", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      // The first turn runs until the test lets it end.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let running!: () => void;
+      const started = new Promise<void>((resolve) => (running = resolve));
+      const respond = instance.host.respond;
+      let first = true;
+      instance.host.respond = async (call) => {
+        if (first) {
+          first = false;
+          running();
+          await released;
+        }
+        return respond(call);
+      };
+      const lane = { ...instance.lane, arrival: "latest" as const };
+      const one = instance.resultFor("r1");
+      await chatDispatch(instance.deps, lane, tab, chatRequest("r1", "one"));
+      await started;
+      await chatDispatch(
+        instance.deps,
+        lane,
+        tab,
+        chatRequestWith("r2", "u2", "two")
+      );
+      await chatDispatch(
+        instance.deps,
+        lane,
+        tab,
+        chatRequestWith("r3", "u3", "three")
+      );
+      release();
+      await one;
+      expect(await instance.resultFor("r3")).toMatchObject({
+        status: "completed"
+      });
+      // r2 never called the model; r3's call saw both questions.
+      expect(instance.calls.map((c) => c.requestId)).toEqual(["r1", "r3"]);
+      const last = instance.calls[1].messages.map((m) => m.id);
+      expect(last).toContain("u2");
+      expect(last).toContain("u3");
       instance.host.respond = respond;
     });
   });

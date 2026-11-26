@@ -33,32 +33,57 @@ import {
 export interface ChatLane {
   readonly definition: string;
   readonly lane: string;
+  /** How a new message that arrives while turns wait or run joins them. */
+  readonly arrival?: ChatArrival;
 }
 
 /**
  * Start a chat turn: store the messages it brings, then start its run on the
  * lane. Returns the run id, which is the turn's request id.
  */
+/**
+ * How a turn that arrives while others wait or run joins the lane (a host's
+ * `messageConcurrency`): `"queue"` waits its turn; `"latest"` and `"merge"`
+ * skip the waiting turns that arrived the same way, and answer their
+ * questions too (each question is stored when it arrives); `"drop"` is not
+ * started at all; `{ debounceMs }` is `"latest"` that also waits for quiet.
+ */
+export type ChatArrival =
+  | "queue"
+  | "latest"
+  | "merge"
+  | "drop"
+  | { readonly debounceMs: number };
+
 export async function submitTurn(
   deps: ChatDeps,
   lane: ChatLane,
   input: ChatTurnInput & { messages?: readonly UIMessage[] },
-  options: { requestId?: string; idempotencyKey?: string } = {}
-): Promise<{ requestId: string }> {
+  options: {
+    requestId?: string;
+    idempotencyKey?: string;
+    arrival?: ChatArrival;
+  } = {}
+): Promise<{ requestId: string; dropped?: true }> {
   const session = deps.sessions.session(deps.session ?? "");
   for (const message of input.messages ?? []) {
     await session.upsertMessage(message as never);
   }
   const { messages: _messages, ...run } = input;
+  const arrival = options.arrival ?? "queue";
   const receipt = await deps.tasks.run(lane.definition, run as never, {
     lane: lane.lane,
     retain: false,
+    policy: arrival === "merge" ? "latest" : arrival,
     ...(options.requestId !== undefined && { runId: options.requestId }),
     ...(options.idempotencyKey !== undefined && {
       idempotencyKey: options.idempotencyKey
     })
   });
-  return { requestId: receipt.runId };
+  return {
+    requestId: receipt.runId,
+    ...((receipt as { dropped?: boolean }).dropped && { dropped: true })
+  };
 }
 
 /** Stop the turn `requestId`, waiting or running. */
@@ -372,7 +397,11 @@ export async function chatDispatch(
           ...(request.clientTools && { clientTools: request.clientTools }),
           body: request.body
         },
-        { requestId: request.requestId }
+        {
+          requestId: request.requestId,
+          ...(request.trigger === "submit-message" &&
+            lane.arrival && { arrival: lane.arrival })
+        }
       );
       return true;
     }
