@@ -12,6 +12,7 @@ import type { Connection } from "agents";
 import type { UIMessage } from "ai";
 import {
   chatTurnStreamId,
+  parkedIn,
   type ChatDeps,
   type ChatTurnInput
 } from "./chat-host";
@@ -41,7 +42,7 @@ export async function submitTurn(
   deps: ChatDeps,
   lane: ChatLane,
   input: ChatTurnInput & { messages?: readonly UIMessage[] },
-  options: { requestId?: string } = {}
+  options: { requestId?: string; idempotencyKey?: string } = {}
 ): Promise<{ requestId: string }> {
   const session = deps.sessions.session(deps.session ?? "");
   for (const message of input.messages ?? []) {
@@ -51,7 +52,10 @@ export async function submitTurn(
   const receipt = await deps.tasks.run(lane.definition, run as never, {
     lane: lane.lane,
     retain: false,
-    ...(options.requestId !== undefined && { runId: options.requestId })
+    ...(options.requestId !== undefined && { runId: options.requestId }),
+    ...(options.idempotencyKey !== undefined && {
+      idempotencyKey: options.idempotencyKey
+    })
   });
   return { requestId: receipt.runId };
 }
@@ -86,6 +90,15 @@ export type ToolAnswer =
       approvalId?: string;
     };
 
+/** Tool answers being applied now, by chat, in this isolate. */
+const answering = new WeakMap<object, Map<string, number>>();
+
+function answeringIn(deps: ChatDeps): Map<string, number> {
+  let counts = answering.get(deps.streams);
+  if (!counts) answering.set(deps.streams, (counts = new Map()));
+  return counts;
+}
+
 /**
  * Store a client's tool answer in the message that holds the call. With
  * `autoContinue`, a turn continues the reply once its last call is
@@ -96,6 +109,24 @@ export async function answerTool(
   lane: ChatLane,
   answer: ToolAnswer,
   options: { autoContinue?: boolean } = {}
+): Promise<boolean> {
+  const counts = answeringIn(deps);
+  const key = deps.session ?? "";
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+  try {
+    return await applyAnswer(deps, lane, answer, options);
+  } finally {
+    const left = (counts.get(key) ?? 1) - 1;
+    if (left > 0) counts.set(key, left);
+    else counts.delete(key);
+  }
+}
+
+async function applyAnswer(
+  deps: ChatDeps,
+  lane: ChatLane,
+  answer: ToolAnswer,
+  options: { autoContinue?: boolean }
 ): Promise<boolean> {
   const update: ToolPartUpdate =
     answer.kind === "result"
@@ -111,7 +142,17 @@ export async function answerTool(
           answer.approvalId
         );
   const session = deps.sessions.session(deps.session ?? "");
-  const history = (await session.getHistory()) as unknown as UIMessage[];
+  // The call is almost always in the latest reply: read the whole path only
+  // when it is not there.
+  const leaf = (await session.getLatestLeaf()) as unknown as UIMessage | null;
+  const history =
+    leaf &&
+    applyToolUpdate(
+      leaf.parts as unknown as Array<Record<string, unknown>>,
+      update
+    )
+      ? [leaf]
+      : ((await session.getHistory()) as unknown as UIMessage[]);
   for (let i = history.length - 1; i >= 0; i--) {
     const message = history[i];
     const applied = applyToolUpdate(
@@ -125,12 +166,28 @@ export async function answerTool(
       parts: applied.parts as unknown as UIMessage["parts"]
     };
     await session.upsertMessage(next as never);
+    // One continuation per answered batch, however many answers race to
+    // complete it.
     if (options.autoContinue && !waitsOnAnswer(next)) {
-      await submitTurn(deps, lane, { trigger: "tool-answer" });
+      await submitTurn(
+        deps,
+        lane,
+        { trigger: "tool-answer" },
+        { idempotencyKey: `continue:${next.id}:${answeredCalls(next)}` }
+      );
     }
     return true;
   }
   return false;
+}
+
+/** The answered tool calls of a message, as a stable key. */
+function answeredCalls(message: UIMessage): string {
+  return message.parts
+    .map((part) => (part as { toolCallId?: unknown }).toolCallId)
+    .filter((id): id is string => typeof id === "string")
+    .sort()
+    .join(",");
 }
 
 /** Whether a message still holds a tool call no answer settled. */
@@ -171,20 +228,45 @@ export async function resumeChat(
   probeId?: string
 ): Promise<void> {
   const requestId = await streamingTurn(deps, lane);
+  if (requestId) {
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
+        id: requestId,
+        ...(probeId && { probeId })
+      })
+    );
+    return;
+  }
+  // A turn is accepted and has not streamed yet, or a tool answer is being
+  // applied: the tab keeps waiting (#1784), and is offered the stream when
+  // it starts or told there is none when the turn ends without one.
+  const [waiting] = deps.tasks.peekList({
+    definition: lane.definition,
+    lane: lane.lane,
+    status: ["pending", "running"],
+    results: false,
+    order: "oldest"
+  });
+  if (waiting || (answeringIn(deps).get(deps.session ?? "") ?? 0) > 0) {
+    parkedIn(deps.streams, deps.session ?? "").set(connection.id, connection);
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.STREAM_PENDING,
+        ...(waiting && { id: waiting.runId }),
+        ...(probeId && { probeId })
+      })
+    );
+    return;
+  }
   sendIfOpen(
     connection,
-    JSON.stringify(
-      requestId
-        ? {
-            type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
-            id: requestId,
-            ...(probeId && { probeId })
-          }
-        : {
-            type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
-            ...(probeId && { probeId })
-          }
-    )
+    JSON.stringify({
+      type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
+      ...(probeId && { probeId })
+    })
   );
 }
 
@@ -240,7 +322,18 @@ export async function chatDispatch(
   switch (event.type) {
     case "chat-request": {
       const request = parseChatRequest(event.id, event.init.body);
-      if (!("messages" in request)) return true;
+      if (!("messages" in request)) {
+        // A request that cannot run ends at once, with the reason.
+        const text = frameText({
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+          id: event.id,
+          body: `Ignoring chat request ${event.id}: ${request.reason}`,
+          done: true,
+          error: true
+        } as { type: string });
+        if (text !== undefined) sendIfOpen(connection, text);
+        return true;
+      }
       const question = [...request.messages]
         .reverse()
         .find((m) => m.role === "user");
@@ -261,6 +354,20 @@ export async function chatDispatch(
     case "cancel":
       await cancelTurn(deps, event.id);
       return true;
+    case "cancel-continuation": {
+      // A stop from a tab that waits for a tool continuation: the
+      // continuation turns of the lane stop, waiting or running.
+      for (const run of deps.tasks.peekList({
+        definition: lane.definition,
+        lane: lane.lane,
+        status: ["pending", "running"],
+        results: false
+      })) {
+        const input = deps.tasks.inputOf<ChatTurnInput>(run.runId);
+        if (input?.trigger === "tool-answer") await cancelTurn(deps, run.runId);
+      }
+      return true;
+    }
     case "clear":
       await clearChat(deps, lane);
       return true;
@@ -299,6 +406,8 @@ export async function chatDispatch(
     case "stream-resume-ack":
       await replayTurn(deps, connection, event.id);
       return true;
+    // A tab pushing its whole transcript is the host's to handle (or
+    // ignore): the core stores messages only with a turn.
     default:
       return false;
   }

@@ -16,6 +16,7 @@ import type { Tasks } from "../tasks/tasks";
 import type { TaskStep, TaskValue } from "../tasks/types";
 import type { StreamWriter } from "../streams/types";
 import type { WebSockets } from "../websockets/websockets";
+import type { Connection } from "agents";
 import type { ClientToolSchema } from "./client-tools";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
 import { chatRecoveryBackoffSeconds } from "./recovery-engine";
@@ -142,6 +143,21 @@ export interface ChatHost {
 
 /** The reason a chat clear cancels its turns with. */
 export const CHAT_CLEARED = "chat cleared";
+
+/** Tabs waiting for a turn's stream to start, by chat, in this isolate. */
+const parkedTabs = new WeakMap<Streams, Map<string, Map<string, Connection>>>();
+
+/** @internal The tabs waiting for the next stream of chat `session`. */
+export function parkedIn(
+  streams: Streams,
+  session: string
+): Map<string, Connection> {
+  let chats = parkedTabs.get(streams);
+  if (!chats) parkedTabs.set(streams, (chats = new Map()));
+  let tabs = chats.get(session);
+  if (!tabs) chats.set(session, (tabs = new Map()));
+  return tabs;
+}
 
 /** The run's checkpoint key holding the reply a continuation extends. */
 const BASE_CHECKPOINT = "chat:base";
@@ -447,7 +463,25 @@ export function chatTurnDefinition(
       run.trigger === "regenerate-message" && run.questionId !== undefined
         ? { parentId: run.questionId }
         : {};
+    // Tabs that asked to resume before this turn streamed.
+    const parked = parkedIn(deps.streams, sessionId);
+    const offerStream = () => {
+      const frame = JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
+        id: requestId
+      });
+      for (const tab of parked.values()) sendIfOpen(tab, frame);
+      parked.clear();
+    };
     const report = async (result: ChatTurnResult) => {
+      // A tab still waiting learns there is no stream to resume.
+      if (parked.size > 0) {
+        const none = JSON.stringify({
+          type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE
+        });
+        for (const tab of parked.values()) sendIfOpen(tab, none);
+        parked.clear();
+      }
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
           body: result.error ?? "",
@@ -709,6 +743,7 @@ export function chatTurnDefinition(
           transform(chunk, controller) {
             // Every reply has an id: a continuation keeps the reply's, a new
             // reply keeps the model's or gets one from the run.
+            if (!started) offerStream();
             if (!started && chunk.type !== "start") {
               started = true;
               const start = {
