@@ -90,12 +90,19 @@ function tabSettled(tab: Tab): boolean {
 
 /**
  * The model call after the first `step` call waited at least `minMs` (the
- * delay the provider asked for). Nothing to check when no call followed.
+ * delay the provider asked for). When `retried`, that call must exist:
+ * Think retries a classified 429; AIChatAgent ends the request.
  */
-function waitedAfter(run: Run, step: string, minMs: number): Run {
+function waitedAfter(
+  run: Run,
+  step: string,
+  minMs: number,
+  retried: boolean
+): Run {
   const calls = run.state.calls.filter((c) => c.step);
   const i = calls.findIndex((c) => c.step === step);
   const next = i >= 0 ? calls[i + 1] : undefined;
+  if (retried && !next) run.checks.push(`no model call after ${step}`);
   // Workers clocks move in steps: allow 10%.
   if (next && next.at - calls[i].at < minMs * 0.9) {
     run.checks.push(
@@ -118,11 +125,13 @@ async function finish(
   extra: Record<string, unknown> = {},
   settleOpts?: { quietMs?: number; maxMs?: number }
 ): Promise<Run> {
-  const s = await settle(cls, room, settleOpts);
+  const settled = await settle(cls, room, settleOpts);
   // The frames that end the tabs' requests may still be on the wire; the
   // invariants judge what has not arrived within the bound.
   const deadline = Date.now() + 10_000;
   while (!tabs.every(tabSettled) && Date.now() < deadline) await sleep(200);
+  // Read the room again, so the state is not older than those frames.
+  const s = { ...(await state(cls, room)), unsettled: settled.unsettled };
   const late = await openTab(cls, room);
   late.send({ type: MT.RESUME_REQUEST });
   const offer = await late
@@ -338,7 +347,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     return waitedAfter(
       await finish(cls, room, [tab], { reqId: id.slice(0, 14) }),
       "status-429",
-      7000
+      7000,
+      cls === "think"
     );
   },
   async rl429RetryAfterMs(cls: Cls) {
@@ -351,7 +361,12 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
-    return waitedAfter(await finish(cls, room, [tab]), "status-429", 5500);
+    return waitedAfter(
+      await finish(cls, room, [tab]),
+      "status-429",
+      5500,
+      cls === "think"
+    );
   },
   async rl429Transient(cls: Cls) {
     const { room, tab } = await setup(cls, {
@@ -363,7 +378,12 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
-    return waitedAfter(await finish(cls, room, [tab]), "status-429", 7000);
+    return waitedAfter(
+      await finish(cls, room, [tab]),
+      "status-429",
+      7000,
+      cls === "think"
+    );
   },
   async rl429SdkRetries(cls: Cls) {
     // default AI SDK maxRetries (2): it retries twice itself, then throws RetryError
@@ -391,7 +411,12 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("weather")], { clientTools: CLIENT_TOOLS });
-    return waitedAfter(await finish(cls, room, [tab]), "status-429", 6000);
+    return waitedAfter(
+      await finish(cls, room, [tab]),
+      "status-429",
+      6000,
+      cls === "think"
+    );
   },
 
   // ── 3. context overflow (Think) ──

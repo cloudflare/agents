@@ -51,8 +51,11 @@ function tabViolations(
     const own = chains.findIndex((c) => c.origin === id || c.current === id);
     if (f.outcome === "recovering") {
       if (own >= 0) continue;
-      if (tab.sent.includes(id)) chains.push({ origin: id, current: id });
-      else if (chains.length) chains[0].current = id;
+      // A continuation the server started after the request ended (a tool
+      // result's) begins a chain of its own.
+      if (tab.sent.includes(id) || !chains.length) {
+        chains.push({ origin: id, current: id });
+      } else chains[0].current = id;
       continue;
     }
     ends.set(id, (ends.get(id) ?? 0) + 1);
@@ -109,7 +112,11 @@ export function violations(run: Run): string[] {
   else if (
     offer.type === MT.RESUMING &&
     !run.lateTab.some(
-      (f) => f.type === MT.RESPONSE && f.id === offer.id && f.done
+      (f) =>
+        f.type === MT.RESPONSE &&
+        f.id === offer.id &&
+        f.done &&
+        f.outcome !== "recovering"
     )
   ) {
     out.push(

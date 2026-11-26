@@ -155,7 +155,7 @@ export class Tab {
 
   async open(): Promise<this> {
     const ws = new WebSocket(
-      `${baseUrl().replace(/^http/, "ws")}/agents/${AGENT_PATH[this.cls]}/${this.room}?key=${probeKey()}`
+      `${baseUrl().replace(/^http/, "ws")}/agents/${AGENT_PATH[this.cls]}/${this.room}?key=${encodeURIComponent(probeKey())}`
     );
     this.ws = ws;
     await new Promise<void>((resolve, reject) => {
