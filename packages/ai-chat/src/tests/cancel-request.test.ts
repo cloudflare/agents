@@ -159,7 +159,8 @@ describe("Cancel request", () => {
               (m) =>
                 isUseChatResponseMessage(m) &&
                 m.id === requestId &&
-                !!m.body &&
+                typeof m.body === "string" &&
+                m.body.includes('"text-delta"') &&
                 !m.done
             )
           ).toBe(true)
