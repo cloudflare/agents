@@ -120,7 +120,7 @@ describe("deliveries", () => {
         });
         // Accepted as sendDelivery accepts it, but its first attempt is
         // left to the wake, as after a reset that came before it ran.
-        await instance.tasks.run(
+        await tasksOf(instance).run(
           deliveryDefinition("seeded-wake"),
           {},
           {
