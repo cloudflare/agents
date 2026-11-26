@@ -1623,6 +1623,8 @@ export class ChatTurns<
         // interleave and fire twice.
         this.barrierActive = false;
         if (!this.continuation.pending) return;
+        // A continuation claimed its turn during the drain: hold for it.
+        if (this.continuation.running) return;
         if (this.host.isReplyStreaming()) return;
         if (hasIncompleteToolBatch(this.host.messages())) return;
         this.cancelCoalesce();

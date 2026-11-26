@@ -650,15 +650,16 @@ export function settleContinuationTurn<
   if (continuation.pending?.requestId === requestId) {
     // It had nothing to claim.
     releasePending(parts);
-    return;
+  } else if (continuation.running?.requestId === requestId) {
+    // Its stream never started.
+    continuation.running = null;
+    continuation.sendResumeNone();
+    parts.released?.(requestId);
+    continuation.awaitPending();
   }
-  if (continuation.running?.requestId !== requestId) return;
-  // Its stream never started.
-  continuation.running = null;
-  continuation.sendResumeNone();
-  parts.released?.(requestId);
-  continuation.awaitPending();
-  // A result that arrived while it ran was held for it: run its barrier.
+  // A result that arrived while it ran was held for it. Its reply may have
+  // ended without a finalize that re-arms (recovery gave up, say), so run
+  // its barrier now, however this turn ended.
   parts.rearmForBatch();
 }
 

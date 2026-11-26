@@ -732,6 +732,24 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
   });
 
+  it("runs the next result after a continuation whose reply ended with no finalize", async () => {
+    // Recovery gave up on the reply: it ends without the finalize that
+    // re-arms a held result.
+    const second = makeConnection("c2");
+    host.model = async (continuation) => {
+      if (continuation.requestId !== "cont-1") return;
+      await result("a1", second);
+      await fire();
+      turns.streamStarted("cont-1", () => {});
+    };
+    await result("a1");
+    await fire();
+    await drain();
+    await fire();
+    await drain();
+    expect(host.ran).toEqual(["cont-1", "cont-2"]);
+  });
+
   it("runs the next result after a continuation that failed before it streamed", async () => {
     const second = makeConnection("c2");
     host.model = async (continuation) => {
