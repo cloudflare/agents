@@ -1130,6 +1130,28 @@ describe("Think — error handling", () => {
     expect(result.finalText).toBe(result.textBeforeCancel);
   });
 
+  it("frees the lane at once for a stop that lands before the cut-off turn's run starts its backoff", async () => {
+    const agent = await freshAgent(
+      `transient-cancel-window-${crypto.randomUUID()}`
+    );
+    const result = await agent.testStopAsBackoffStartsForTest();
+
+    // The stop landed before the run was recorded as sleeping.
+    expect(result).toEqual({ backingOffAtStop: 0 });
+    // The backoff is held for 60 s and nothing here ends it: only the stop
+    // ending the run empties the lane.
+    await vi.waitFor(
+      async () => {
+        expect(await agent.openChatTurnRunsForTest()).toBe(0);
+      },
+      { timeout: 10_000, interval: 20 }
+    );
+    // The stop is the recovery's outcome.
+    expect(await agent.recoveryOutcomesForTest()).toEqual([
+      { status: "skipped", reason: "user_cancelled" }
+    ]);
+  }, 30_000);
+
   it("stops a recovery the user cancels while its continuation streams", async () => {
     const agent = await freshAgent(
       `transient-cancel-run-${crypto.randomUUID()}`

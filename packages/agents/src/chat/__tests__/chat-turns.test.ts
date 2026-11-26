@@ -1518,6 +1518,76 @@ describe("ChatTurns request context", () => {
   });
 });
 
+describe("a stop while a turn's run starts its recovery's backoff", () => {
+  function setup() {
+    const cancelled: string[] = [];
+    const lane = memoryLane();
+    const tasks = lane.tasks();
+    const turns = new ChatTurns(new FakeHost(), {
+      defaultDebounceMs: 750,
+      lane: {
+        ...lane,
+        tasks: () =>
+          ({
+            ...tasks,
+            // No run is recorded as sleeping yet.
+            peekList: () => [],
+            cancel: async (runId: string) => {
+              cancelled.push(runId);
+              return true;
+            }
+          }) as unknown as ReturnType<typeof lane.tasks>
+      }
+    });
+    return { turns, cancelled };
+  }
+
+  it("ends the run that started waiting, before Tasks records it as sleeping", async () => {
+    const { turns, cancelled } = setup();
+    turns.backingOff("run-1", "r1", true);
+    turns.backingOff("run-2", "r2", true);
+
+    await turns.cancel("r1");
+    expect(cancelled).toEqual(["run-1"]);
+    // Ended once: a second stop finds nothing.
+    await turns.cancel("r1");
+    expect(cancelled).toEqual(["run-1"]);
+  });
+
+  it("ends a run that starts waiting after the stop already landed", async () => {
+    // The stop lands after the turn's result and before its run gets as
+    // far as the backoff: nothing is waiting yet.
+    const { turns, cancelled } = setup();
+    await turns.cancel("r1");
+    expect(cancelled).toEqual([]);
+
+    turns.backingOff("run-1", "r1", true);
+    turns.backingOff("run-2", "r2", true);
+    expect(cancelled).toEqual(["run-1"]);
+    // It was not kept as waiting: a second stop ends nothing more.
+    await turns.cancel("r1");
+    expect(cancelled).toEqual(["run-1"]);
+  });
+
+  it("leaves a run whose wait is over, and one the runtime aborts", async () => {
+    const { turns, cancelled } = setup();
+    turns.backingOff("run-1", "r1", true);
+    turns.backingOff("run-1", "r1", false);
+    await turns.cancel("r1");
+    expect(cancelled).toEqual([]);
+
+    // The stall watchdog's abort is not a stop: recovery follows it.
+    turns.backingOff("run-3", "r3", true);
+    const stalled = new Error("stalled");
+    let aborted: Promise<void> | undefined;
+    turns.runtimeAbort(() => {
+      aborted = turns.cancel("r3", stalled);
+    }, stalled);
+    await aborted;
+    expect(cancelled).toEqual([]);
+  });
+});
+
 describe("ChatTurns.startAttemptRun", () => {
   type RunCall = {
     definition: string;

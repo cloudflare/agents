@@ -4939,6 +4939,75 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * A turn is cut off by a failure whose `retry-after` holds the recovery's
+   * backoff for 60 s, and the user stops it as soon as the turn's result is
+   * back: its run has not been recorded as waiting out the backoff yet.
+   *
+   * @returns `backingOffAtStop`: how many chat-turn runs were recorded as
+   *   sleeping when the stop was issued (0 when the stop landed in that
+   *   window).
+   */
+  async testStopAsBackoffStartsForTest(): Promise<{
+    backingOffAtStop: number;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    if (this._errorConfig) {
+      this._errorConfig.error = Object.assign(
+        new Error("Service Unavailable"),
+        {
+          name: "AI_APICallError",
+          statusCode: 503,
+          isRetryable: true,
+          responseHeaders: { "retry-after": "60" }
+        }
+      );
+    }
+    try {
+      await this.testChat("trigger transient error");
+      const [scheduled] = await this._recoveryIncidentsForTest();
+      const backingOffAtStop =
+        this.sql<{ count: number }>`
+          SELECT COUNT(*) AS count FROM cf_agents_task_runs
+          WHERE definition = '__cf_internal_chat_turn'
+            AND status = 'pending' AND wait_reason = 'sleep'
+        `[0]?.count ?? 0;
+      this.cancelChat(
+        scheduled?.recoveryRootRequestId ?? scheduled?.requestId ?? ""
+      );
+      return { backingOffAtStop };
+    } finally {
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /** Each recovery incident's status and reason. */
+  async recoveryOutcomesForTest(): Promise<
+    Array<{ status: string; reason?: string }>
+  > {
+    return (await this._recoveryIncidentsForTest()).map((incident) => ({
+      status: incident.status,
+      reason: incident.reason
+    }));
+  }
+
+  /** How many chat-turn runs of turns (not attempt runs) are still open. */
+  openChatTurnRunsForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_chat_turn'
+          AND json_extract(metadata, '$.callback') IS NULL
+          AND status IN ('pending', 'running')
+      `[0]?.count ?? 0
+    );
+  }
+
+  /**
    * A turn is cut off and its recovery scheduled. The recovery continuation
    * runs and streams slowly; the user stops the turn by the request id they
    * know (the original one) while it streams.
