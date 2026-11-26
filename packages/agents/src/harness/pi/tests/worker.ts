@@ -1007,11 +1007,11 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       replay: "safe",
       async execute(_args, api, context) {
         const answer = await api.readSignal(Approval, "approval", context);
-        if (answer !== undefined && "value" in answer) {
+        if (answer?.kind === "value") {
           return { output: [{ type: "text", text: answer.value.text }] };
         }
         await storage.put(PARKED_TASK_KEY, api.taskId);
-        return { sleep: { signals: [Approval.key("approval")] } };
+        return { kind: "sleep", signals: [Approval.key("approval")] };
       }
     };
     // Waits for approval, then for the gate: a call woken by a signal that
@@ -1023,9 +1023,9 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       replay: "safe",
       async execute(_args, api, context) {
         const answer = await api.readSignal(Approval, "approval", context);
-        if (answer === undefined || !("value" in answer)) {
+        if (answer?.kind !== "value") {
           await storage.put(PARKED_TASK_KEY, api.taskId);
-          return { sleep: { signals: [Approval.key("approval")] } };
+          return { kind: "sleep", signals: [Approval.key("approval")] };
         }
         const runs = ((await storage.get<number>(GATE_RUNS_KEY)) ?? 0) + 1;
         await storage.put(GATE_RUNS_KEY, runs);
@@ -1060,10 +1060,9 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         }
         await storage.put(PARKED_TASK_KEY, api.taskId);
         return {
-          sleep: {
-            until: api.now() + 1_500,
-            signals: [Approval.key("approval")]
-          }
+          kind: "sleep",
+          until: api.now() + 1_500,
+          signals: [Approval.key("approval")]
         };
       }
     };
@@ -1081,7 +1080,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
           "answered",
           context
         );
-        if (state !== undefined && "value" in state) {
+        if (state?.kind === "value") {
           const settled = state.value;
           if (settled.status !== "done" || settled.type === "write") {
             return {
@@ -1120,7 +1119,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
           context
         );
         await storage.put(PARKED_TASK_KEY, api.taskId);
-        return { sleep: { signals: [SubmissionSettled.key("answered")] } };
+        return { kind: "sleep", signals: [SubmissionSettled.key("answered")] };
       }
     };
     // Holds `multiply 77` until the test delivers the `gate` signal.

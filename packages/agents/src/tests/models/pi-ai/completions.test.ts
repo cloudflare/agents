@@ -1,4 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { describe, expect, it } from "vitest";
 import { createAI, CLOUDFLARE_DIAGNOSTIC } from "../../../models/pi-ai";
 import {
@@ -10,6 +11,7 @@ import {
   field,
   groqModel,
   jsonResponse,
+  openrouterModel,
   sseResponse,
   userContext,
   workersAITextStream,
@@ -199,11 +201,9 @@ describe("pi-ai: Workers AI chat completions", () => {
     const binding = fakeBinding(() => sseResponse(workersAITextStream()));
     const ai = createAI({ binding: asAi(binding) });
     await collectEvents(
-      ai.streamSimple(
-        ai(groqModel("llama-3.1-8b-instant")),
-        userContext("hi"),
-        { sessionId: "s" }
-      )
+      ai.streamSimple(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"), {
+        sessionId: "s"
+      })
     );
     expect(binding.native[0]?.headers).not.toHaveProperty("x-session-affinity");
   });
@@ -422,7 +422,7 @@ describe("pi-ai: Workers AI chat completions", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const { events, message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
     expect(events.map((e) => e.type)).toEqual(["error"]);
     expect(message.stopReason).toBe("error");
@@ -489,7 +489,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const message = await ai.complete(
-      ai(groqModel("llama-3.1-8b-instant")),
+      ai(groqModel("openai/gpt-oss-20b")),
       userContext("hi")
     );
     expect(message.usage.input).toBe(6);
@@ -512,7 +512,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
           }
         ],
         id: "chatcmpl-r",
-        model: "llama-3.1-8b-instant",
+        model: "openai/gpt-oss-20b",
         object: "chat.completion",
         usage: {
           completion_tokens: 40,
@@ -524,7 +524,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const message = await ai.complete(
-      ai(groqModel("llama-3.1-8b-instant")),
+      ai(groqModel("openai/gpt-oss-20b")),
       userContext("hi")
     );
     expect((message.usage as { reasoning?: number }).reasoning).toBe(32);
@@ -544,7 +544,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
           }
         ],
         id: "chatcmpl-c",
-        model: "llama-3.1-8b-instant",
+        model: "openai/gpt-oss-20b",
         object: "chat.completion",
         usage: {
           cached_tokens: 80,
@@ -556,7 +556,7 @@ describe("pi-ai: vendor usage on the chat-completions wire", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const message = await ai.complete(
-      ai(groqModel("llama-3.1-8b-instant")),
+      ai(groqModel("openai/gpt-oss-20b")),
       userContext("hi")
     );
     expect(message.usage.cacheRead).toBe(80);
@@ -573,7 +573,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     return JSON.stringify({
       choices: [{ delta, finish_reason: finishReason, index: 0 }],
       id: "chatcmpl-vendor",
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
       object: "chat.completion.chunk"
     });
   }
@@ -591,7 +591,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     );
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
 
     // The signature names the field, so pi replays the thinking under it.
@@ -611,7 +611,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     );
     const ai = createAI({ binding: asAi(binding) });
     const { events, message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
 
     expect(events.at(-1)?.type).toBe("error");
@@ -621,13 +621,178 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     expect(message.content[0]).toEqual({ text: "The answer is", type: "text" });
   });
 
+  it("words an error finish reason as pi-ai does, so pi's retry can match it", async () => {
+    // OpenRouter-style vendors end a stream with `finish_reason: "error"` when
+    // their provider fails mid-stream; pi-ai's retry classifier matches its
+    // own wording, "Provider finish_reason: error".
+    const binding = fakeBinding(() =>
+      sseResponse([
+        vendorChunk({ content: "The answer is", role: "assistant" }),
+        vendorChunk({}, "error"),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
+    );
+
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toBe("Provider finish_reason: error");
+    expect(isRetryableAssistantError(message)).toBe(true);
+  });
+
+  it("records OpenRouter's native finish reason as pi-ai does", async () => {
+    // OpenRouter sends the upstream provider's own reason beside the
+    // normalized one, and pi-ai records both; the message keeps pi-ai's
+    // prefix, so its retry classifier still matches.
+    const nativeChunk = (finishReason: string | null, native?: string) =>
+      JSON.stringify({
+        choices: [
+          {
+            delta: {},
+            finish_reason: finishReason,
+            index: 0,
+            ...(native !== undefined && { native_finish_reason: native })
+          }
+        ],
+        id: "gen-openrouter",
+        object: "chat.completion.chunk"
+      });
+    const binding = fakeBinding(() =>
+      sseResponse([
+        vendorChunk({ content: "The answer is", role: "assistant" }),
+        nativeChunk("error", "MALFORMED_FUNCTION_CALL"),
+        nativeChunk("error"),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(
+        ai(openrouterModel("meta-llama/llama-3.3-70b-instruct")),
+        userContext("hi")
+      )
+    );
+
+    expect(message.stopReason).toBe("error");
+    expect(message.rawStopReason).toBe("error.MALFORMED_FUNCTION_CALL");
+    expect(message.errorMessage).toBe(
+      "Provider finish_reason: error (native_finish_reason: MALFORMED_FUNCTION_CALL)"
+    );
+    expect(isRetryableAssistantError(message)).toBe(true);
+  });
+
+  describe("an OpenRouter stop with no visible output", () => {
+    // OpenRouter reports an upstream failure it does not recognize as "stop";
+    // pi-ai retries such a stop when nothing visible came before it.
+    async function openRouterStop(
+      deltas: Record<string, unknown>[],
+      native: string
+    ) {
+      const binding = fakeBinding(() =>
+        sseResponse([
+          ...deltas.map((delta) => vendorChunk(delta)),
+          JSON.stringify({
+            choices: [
+              {
+                delta: {},
+                finish_reason: "stop",
+                index: 0,
+                native_finish_reason: native
+              }
+            ],
+            id: "gen-openrouter",
+            object: "chat.completion.chunk"
+          }),
+          "[DONE]"
+        ])
+      );
+      const ai = createAI({ binding: asAi(binding) });
+      const { message } = await collectEvents(
+        ai.stream(
+          ai(openrouterModel("meta-llama/llama-3.3-70b-instruct")),
+          userContext("hi")
+        )
+      );
+      return message;
+    }
+
+    it("is a retryable error after reasoning only and a failing native reason", async () => {
+      const message = await openRouterStop(
+        [{ reasoning: "Let me think.", role: "assistant" }],
+        "MALFORMED_RESPONSE"
+      );
+      expect(message.stopReason).toBe("error");
+      expect(message.rawStopReason).toBe("stop.MALFORMED_RESPONSE");
+      expect(message.errorMessage).toBe(
+        "OpenRouter returned an empty response (native_finish_reason: MALFORMED_RESPONSE)"
+      );
+      expect(isRetryableAssistantError(message)).toBe(true);
+    });
+
+    it("counts whitespace as no output, and Gemini's OTHER as a failure", async () => {
+      const message = await openRouterStop(
+        [{ content: "  ", role: "assistant" }],
+        "OTHER"
+      );
+      expect(message.stopReason).toBe("error");
+      expect(isRetryableAssistantError(message)).toBe(true);
+    });
+
+    it("stays a stop when the native reason is a clean stop, in any case", async () => {
+      for (const native of ["end_turn", "End_Turn"]) {
+        const message = await openRouterStop([], native);
+        expect(message.stopReason).toBe("stop");
+        expect(message.rawStopReason).toBe(`stop.${native}`);
+        expect(message.errorMessage).toBeUndefined();
+      }
+    });
+
+    it("stays a stop when text came before a failing native reason", async () => {
+      const message = await openRouterStop(
+        [{ content: "Done.", role: "assistant" }],
+        "MALFORMED_RESPONSE"
+      );
+      expect(message.stopReason).toBe("stop");
+      expect(message.rawStopReason).toBe("stop.MALFORMED_RESPONSE");
+    });
+  });
+
+  it("records the raw finish reason and ignores native_finish_reason off OpenRouter", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse([
+        JSON.stringify({
+          choices: [
+            {
+              delta: { content: "hi", role: "assistant" },
+              finish_reason: "stop",
+              index: 0,
+              native_finish_reason: "MALFORMED_RESPONSE"
+            }
+          ],
+          id: "chatcmpl-vendor",
+          object: "chat.completion.chunk"
+        }),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
+    );
+
+    expect(message.stopReason).toBe("stop");
+    expect(message.rawStopReason).toBe("stop");
+  });
+
   it("completes a stream that ends with [DONE] and no finish reason", async () => {
     const binding = fakeBinding(() =>
       sseResponse([vendorChunk({ content: "hi", role: "assistant" }), "[DONE]"])
     );
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
     expect(message.stopReason).toBe("stop");
   });
@@ -643,7 +808,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     );
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("hi"))
     );
     expect(message.content[0]).toMatchObject({
       thinking: "once",
@@ -702,11 +867,11 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
 
   it("keeps parallel tool calls apart in a vendor's JSON body", async () => {
     const binding = fakeBinding(() =>
-      jsonResponse(parallelToolJson("llama-3.1-8b-instant"))
+      jsonResponse(parallelToolJson("openai/gpt-oss-20b"))
     );
     const ai = createAI({ binding: asAi(binding) });
     const { events, message } = await collectEvents(
-      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("weather?"))
+      ai.stream(ai(groqModel("openai/gpt-oss-20b")), userContext("weather?"))
     );
 
     expect(message.stopReason).toBe("toolUse");
@@ -757,7 +922,7 @@ describe("pi-ai: cached input on the chat-completions wire", () => {
         }
       ],
       id: "chatcmpl-cache",
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
       object: "chat.completion",
       usage
     };
@@ -778,7 +943,7 @@ describe("pi-ai: cached input on the chat-completions wire", () => {
     const ai = createAI({ binding: asAi(binding) });
     // The prices are the model's own — a model object brings its metadata.
     const priced: Model<Api> = {
-      ...groqModel("llama-3.1-8b-instant"),
+      ...groqModel("openai/gpt-oss-20b"),
       cost: { cacheRead: 0.0028, cacheWrite: 0, input: 0.14, output: 0.28 }
     };
     const message = await ai.complete(ai(priced), userContext("hi"));
@@ -806,7 +971,7 @@ describe("pi-ai: cached input on the chat-completions wire", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const message = await ai.complete(
-      ai(groqModel("llama-3.1-8b-instant")),
+      ai(groqModel("openai/gpt-oss-20b")),
       userContext("hi")
     );
 
@@ -821,7 +986,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
   /** A vendor chat-completions model, with the compat profile under test. */
   function vendorModel(overrides: Partial<Model<Api>> = {}): Model<Api> {
     return {
-      ...groqModel("llama-3.1-8b-instant"),
+      ...groqModel("openai/gpt-oss-20b"),
       reasoning: true,
       ...overrides
     };
@@ -832,7 +997,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
     const ai = createAI({ binding: asAi(binding) });
     const { message } = await collectEvents(
       ai.stream(
-        ai(groqModel("llama-3.1-8b-instant"), {
+        ai(groqModel("openai/gpt-oss-20b"), {
           chatTemplateKwargs: { enable_thinking: false },
           reasoningEffort: null
         }),

@@ -9,6 +9,7 @@ import type {
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { groqProvider } from "@earendil-works/pi-ai/providers/groq";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 
 /** One recorded `binding.run(model, input, options)` call. */
 export interface RunCall {
@@ -208,6 +209,15 @@ export function groqModel(id: string): Model<Api> {
     .getModels()
     .find((entry) => entry.id === id);
   if (model === undefined) throw new Error(`No such Groq model: ${id}`);
+  return model;
+}
+
+/** An OpenRouter model, which also speaks chat completions. */
+export function openrouterModel(id: string): Model<Api> {
+  const model = openrouterProvider()
+    .getModels()
+    .find((entry) => entry.id === id);
+  if (model === undefined) throw new Error(`No such OpenRouter model: ${id}`);
   return model;
 }
 
