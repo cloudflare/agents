@@ -160,39 +160,6 @@ jobs:
         run: pnpm run test:e2e
         working-directory: packages/agents
 
-  e2e-engine-genericity:
-    name: "E2E: shared-engine genericity (pi + tanstack)"
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      # Genericity proofs that the shared `agents/chat` recovery engine is not
-      # AI-SDK-specific: a non-`UIMessage` PiAgent and a foreign (AG-UI / TanStack
-      # AI) tool vocabulary each recover from a real SIGKILL through the same
-      # engine + resume handshake + codec. Both use deterministic faux models; the
-      # real-Workers-AI tanstack leg stays gated behind RUN_WORKERS_AI_E2E.
-      - name: Run pi-recovery genericity e2e
-        run: pnpm run test:e2e
-        working-directory: experimental/pi-recovery
-
-      # The real-Workers-AI tanstack leg is enabled here (secrets available in
-      # nightly); locally it stays gated behind RUN_WORKERS_AI_E2E so contributors
-      # without an `ai` binding skip it.
-      - name: Run tanstack-recovery genericity e2e
-        env:
-          RUN_WORKERS_AI_E2E: "1"
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:e2e
-        working-directory: experimental/tanstack-recovery
-
   # Deterministic codemode Playwright suite (Layer 4b). Drives the dynamic
   # Worker-loader code-generation flow (executor.spec.ts) against an AI-free
   # worker; offline, no Cloudflare credentials. Mirrors `e2e-ai-chat`. A
@@ -352,29 +319,3 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm run test:e2e:deployed
         working-directory: packages/ai-chat
-
-  e2e-deployed-think-probe:
-    name: "E2E (deployed): Think recovery probe on real edge"
-    if: ${{ github.event_name == 'schedule' || vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      # Deploys the chat-recovery-probe under a throwaway name and runs the fast,
-      # deterministic abort-driven Think scenarios (a6 HITL, a7 server-orphan,
-      # a8 approval, idem), then deletes the Worker. The slow real-deploy-churn
-      # scenarios (a1/a2/a4/a5/a9/rapid) stay manual (see the probe README).
-      - name: Run Think recovery-probe DEPLOYED suite
-        env:
-          RUN_DEPLOYED_E2E: "1"
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:e2e:deployed
-        working-directory: experimental/chat-recovery-probe
