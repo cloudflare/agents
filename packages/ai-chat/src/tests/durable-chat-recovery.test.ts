@@ -3967,11 +3967,15 @@ describe("platform-transient reader errors (#1964)", () => {
         }
       })
     );
-    // The question is admitted (its lane run exists) or already answered.
+    // The question is admitted (its lane run is open beside the parked
+    // turn's) or already answered.
     for (let i = 0; i < 400; i++) {
-      if (answered || (await agentStub.openChatTurnRunsForTest()) > 0) break;
+      if (answered || (await agentStub.openChatTurnRunsForTest()) >= 2) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    expect(answered || (await agentStub.openChatTurnRunsForTest()) >= 2).toBe(
+      true
+    );
     // The platform recovers: the deferred replacement runs again.
     await agentStub.runOpenRecoveryTaskRunsForTest();
     await done;
