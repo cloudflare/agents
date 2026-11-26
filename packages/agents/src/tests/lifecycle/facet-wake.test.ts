@@ -422,6 +422,19 @@ describe("facet wake", () => {
     expect(await agent.middleUnsettled("m", "reused")).toBeUndefined();
   });
 
+  it("writes no attempt-count delete for a cancelled facet job that has none", async () => {
+    const agent = await root();
+    await agent.middlePush("m", "never-driven", 60_000);
+    await agent.middleCountKvDeletes("m");
+    expect(await agent.middleCancel("m", "never-driven")).toBe(true);
+    // A KV delete is billed as a write, and no attempt was ever counted.
+    expect(
+      (await agent.middleKvDeletes("m")).filter((key) =>
+        key.startsWith("cf_agents:facet_unsettled:")
+      )
+    ).toEqual([]);
+  });
+
   it("keeps two instances of one capability apart in a facet, woken through one root wake", async () => {
     const agent = await root();
     await agent.middlePush("m", "same-id", 0);
