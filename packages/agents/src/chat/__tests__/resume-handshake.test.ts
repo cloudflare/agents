@@ -764,6 +764,57 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       });
     });
 
+    it("tells the tab how every request it waits on ended, each once", async () => {
+      const kv = kvStore();
+      // Two requests the tab waits on both ended while it was away.
+      recordRecentChatTerminal(kv, {
+        id: "req-a",
+        done: true,
+        body: "",
+        outcome: "completed"
+      });
+      recordRecentChatTerminal(kv, {
+        id: "req-b",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended: new EndedRequests()
+      });
+      const conn = makeConnection("c1", frames);
+
+      await handshake.handleResumeRequest(conn, "probe-1", ["req-a", "req-b"]);
+      // The older one's end is sent at once; the newest is announced and
+      // replayed after the ACK, as for a single request.
+      expect(frames).toEqual([
+        {
+          body: "",
+          done: true,
+          id: "req-a",
+          type: RESPONSE_TYPE,
+          replay: true,
+          outcome: "completed"
+        },
+        streamResumingFrame("req-b", "probe-1")
+      ]);
+      await handshake.handleResumeAck(conn, "req-b");
+      expect(frames[2]).toMatchObject({
+        id: "req-b",
+        done: true,
+        replay: true,
+        outcome: "aborted"
+      });
+
+      // A second resume from the same tab is not told req-a's end again.
+      await handshake.handleResumeRequest(conn, "probe-2", ["req-a", "req-b"]);
+      expect(frames.filter((f) => f.id === "req-a" && f.done)).toHaveLength(1);
+    });
+
     it("follows a stream that closed into recovery with the end a stop recorded since", async () => {
       const kv = kvStore();
       recordRecentChatTerminal(kv, {

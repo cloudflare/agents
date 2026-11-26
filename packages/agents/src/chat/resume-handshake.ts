@@ -480,7 +480,10 @@ export class ResumeHandshake {
     }
   }
 
-  /** See {@link handleResumeRequest}: announce a request that ended. */
+  /**
+   * See {@link handleResumeRequest}: tell the tab how the requests it waits
+   * on ended. The newest is announced, and its end follows the ACK.
+   */
   private _replayRecentTerminalOnResume(
     connection: Connection,
     requestIds: readonly string[],
@@ -488,6 +491,11 @@ export class ResumeHandshake {
   ): boolean {
     const ended = this.host.recentTerminal?.(requestIds);
     if (!ended) return false;
+    // The others that ended get their end at once, each once; the newest is
+    // announced and replayed after the ACK.
+    for (const requestId of requestIds) {
+      if (requestId !== ended.requestId) this.sendEnded(connection, requestId);
+    }
     sendIfOpen(
       connection,
       JSON.stringify({
