@@ -8,7 +8,10 @@ on:
       - "release/**"
 
 concurrency:
-  group: ${{ github.workflow }}
+  # One group per branch: a pending run is replaced by the next push to the
+  # same branch, so a push to main must not replace a pending maintenance
+  # release.
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
