@@ -6595,7 +6595,7 @@ export class ThinkAgentToolParent extends Agent {
       // loaded machine cannot run it out, and far below the stuck child's
       // 60 s, which serially would still take all of it.
       await this.reconcileAgentToolRunsForTest({
-        totalRecoveryTimeoutMs: 300,
+        totalRecoveryTimeoutMs: 2000,
         reattachTimeoutMs: 4000
       });
     } finally {
@@ -11168,10 +11168,12 @@ export class ThinkProgrammaticTestAgent extends Think {
     await this.holdChunksAfterForTest(afterChunks);
     const hold = this._chunkHold;
     const controller = new AbortController();
+    let ended = false;
     void (async () => {
-      while (hold && !hold.reached) {
+      while (hold && !hold.reached && !ended) {
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
+      if (ended) return;
       controller.abort(new Error("mid-stream abort"));
       await this.releaseChunksForTest();
     })();
@@ -11185,6 +11187,12 @@ export class ThinkProgrammaticTestAgent extends Think {
       ],
       { signal: controller.signal }
     );
+    ended = true;
+    // The turn must have reached the hold: otherwise nothing was aborted.
+    if (!hold?.reached) {
+      await this.releaseChunksForTest();
+      throw new Error("the stream ended before it reached the hold");
+    }
     const lastResponse =
       this._responseLog.length > 0
         ? this._responseLog[this._responseLog.length - 1]

@@ -3216,7 +3216,8 @@ describe("Think — saveMessages with external AbortSignal", () => {
 
     await agent.testSaveMessagesWithSignal("Pre-abort 1", { preAbort: true });
     await agent.testSaveMessagesWithSignal("Pre-abort 2", { preAbort: true });
-    await agent.testSaveMessagesAbortMidStream("Mid abort", 1);
+    const mid = await agent.testSaveMessagesAbortMidStream("Mid abort", 1);
+    expect(mid.result.status).toBe("aborted");
 
     const count = await agent.getAbortControllerCount();
     expect(count).toBe(0);
