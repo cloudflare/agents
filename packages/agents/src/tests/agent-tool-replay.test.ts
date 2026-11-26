@@ -102,6 +102,136 @@ describe("agent-tool live/replay sequencing", () => {
   });
 });
 
+describe("agent-tool runs from a released version", () => {
+  it("carries settled awaited rows into task runs, and leaves detached rows", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `carry-forward-${crypto.randomUUID()}`
+    );
+    const { reissued, replayKinds, tableRows, childStarts } =
+      await agent.carryForwardSettledReleasedRowsForTest();
+
+    // A re-issue of a hard terminal returns the stored result; the child is
+    // not run again.
+    expect(childStarts).toBe(0);
+    expect(reissued["released-completed"]).toEqual({
+      status: "completed",
+      summary: "done"
+    });
+    expect(reissued["released-error"]).toEqual({
+      status: "error",
+      error: "child failed"
+    });
+    // `interrupted` stays soft: a re-issue re-attaches and collects the
+    // child's real result.
+    expect(reissued["released-interrupted"]).toEqual({
+      status: "completed",
+      summary: "finished later"
+    });
+    // Replay still shows every carried run with its terminal.
+    expect(replayKinds["released-completed"]).toEqual(["started", "finished"]);
+    expect(replayKinds["released-error"]).toEqual(["started", "error"]);
+    expect(replayKinds["released-interrupted"]).toEqual([
+      "started",
+      "interrupted"
+    ]);
+    // Only the detached row is left in the old table.
+    expect(tableRows).toEqual([{ run_id: "released-detached", detached: 1 }]);
+  });
+});
+
+describe("agent-tool results the run's record cannot hold", () => {
+  it("hands a result too large for the record to the caller, and reads it back from the child on a re-issue", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `large-output-${crypto.randomUUID()}`
+    );
+    const { callerBytes, recordHasOutput, reissueBytes } =
+      await agent.runWithLargeOutputForTest("run-large");
+    expect(callerBytes).toBeGreaterThan(1_200_000);
+    expect(recordHasOutput).toBe(false);
+    expect(reissueBytes).toBe(callerBytes);
+  });
+
+  it("keeps a released row too large for the record on the table, and carries the rows after it", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `carry-oversized-${crypto.randomUUID()}`
+    );
+    const { carried, tableRows, reissueBytes } =
+      await agent.carryOversizedReleasedRowForTest();
+    // The large row stays on the table; the open row after it is carried.
+    expect(carried).toEqual({
+      "released-big": null,
+      "released-open-after": "running"
+    });
+    expect(tableRows).toBe(1);
+    // Read from the row, with the child gone.
+    expect(reissueBytes).toBeGreaterThan(1_200_000);
+  });
+
+  it("gives a caller that joins a recovered run its large output", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `join-large-${crypto.randomUUID()}`
+    );
+    const { status, bytes, recordHasOutput } =
+      await agent.joinRecoveredRunWithLargeOutputForTest("run-join-large");
+    expect(status).toBe("completed");
+    expect(recordHasOutput).toBe(false);
+    expect(bytes).toBeGreaterThan(1_200_000);
+  });
+
+  it("reads the output of a carried row that has none from the child", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `carried-no-output-${crypto.randomUUID()}`
+    );
+    expect(
+      await agent.reissueCarriedRowWithoutOutputForTest("run-no-output")
+    ).toEqual({ status: "completed", output: { answer: 42 } });
+  });
+});
+
+describe("a recovered agent-tool run and the alarm that runs it", () => {
+  it("asks a stuck child and waits for its next check, instead of holding the alarm on the child's tail", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `recovered-stuck-${crypto.randomUUID()}`
+    );
+    const { elapsedMs, status, waitReason } =
+      await agent.checkRecoveredRunWithStuckChildForTest("run-stuck");
+    expect(status).toBe("pending");
+    expect(waitReason).toBe("retry");
+    // Well under the 3 s no-progress budget the old re-attach waited out.
+    expect(elapsedMs).toBeLessThan(2_000);
+  });
+});
+
+describe("a recovered agent-tool run following a running child", () => {
+  it("counts a child's progress reports as progress, though it stores no chunk", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `recovered-progress-${crypto.randomUUID()}`
+    );
+    expect(
+      await agent.recoveredChildReportsProgressForTest("run-progress")
+    ).toBe("pending");
+  });
+
+  it("forwards what a running child stores, also from a new stream after the child's recovery, and credits the parent's progress", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `recovered-streams-${crypto.randomUUID()}`
+    );
+    expect(await agent.recoveredChildStreamsForTest("run-streams")).toEqual({
+      whileRunning: ["d"],
+      afterNewStream: ["e", "f"],
+      credits: 2
+    });
+  });
+});
+
 describe("agent-tool connect-time replay", () => {
   it("reads milestones without asking the child to reconcile its run", async () => {
     const agent = await getAgentByName(

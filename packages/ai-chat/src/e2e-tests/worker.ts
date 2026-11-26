@@ -575,11 +575,21 @@ export class ChatRecoveryHelperParent extends Agent<Env> {
 
   @callable()
   getAgentToolRuns(): AgentToolRunStatus[] {
-    return this.sql<AgentToolRunStatus>`
-      SELECT run_id as runId, status, error_message as error
-      FROM cf_agent_tool_runs
-      ORDER BY started_at ASC
-    `;
+    return (
+      this as unknown as {
+        _listAgentToolRuns(): Array<{
+          run_id: string;
+          status: string;
+          error_message: string | null;
+        }>;
+      }
+    )
+      ._listAgentToolRuns()
+      .map((row) => ({
+        runId: row.run_id,
+        status: row.status,
+        error: row.error_message
+      }));
   }
 }
 

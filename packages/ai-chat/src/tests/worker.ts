@@ -525,6 +525,40 @@ function storeStreamChunk(
   return streams.store(streamId, chunk, body, state);
 }
 
+/**
+ * Run a parent's awaited agent-tool runs' checks until each has settled:
+ * a re-attached run asks its child again on its next check, made due here
+ * instead of waiting for its wake. Paced, so the re-attach budgets (real
+ * time) still pass.
+ */
+async function runAgentToolChecksForTest(agent: unknown): Promise<void> {
+  const self = agent as {
+    tasks: {
+      runDue(definition: string): Promise<unknown>;
+      peekList(options: {
+        definition: string;
+        status: string[];
+      }): Array<{ runId: string }>;
+      wait(runId: string): Promise<unknown>;
+    };
+    sql: (strings: TemplateStringsArray, ...values: unknown[]) => unknown;
+  };
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    await self.tasks.runDue("__cf_agent_tool");
+    const open = self.tasks.peekList({
+      definition: "__cf_agent_tool",
+      status: ["pending", "running"]
+    });
+    if (open.length === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    self.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now() - 1}
+      WHERE definition = '__cf_agent_tool' AND status = 'pending'
+    `;
+  }
+}
+
 export class TestChatAgent extends AIChatAgent<Env> {
   /**
    * Stand in for a child restarted mid-run (#2298): a persisted in-flight
@@ -8656,12 +8690,9 @@ export class AIChatAgentToolParent extends Agent<Env> {
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    const row = this.sql<{ status: string }>`
-      SELECT status FROM cf_agent_tool_runs WHERE run_id = ${runId}
-    `[0];
     return {
       result: { status: result.status, error: result.error },
-      parentRow: row?.status ?? null,
+      parentRow: this.getParentAgentToolStatusForTest(runId),
       child: inspection
         ? { status: inspection.status, error: inspection.error }
         : null
@@ -8988,44 +9019,32 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return this.waitForTerminalInspectionForTest(child, runId);
   }
 
+  /**
+   * What a restart does with the parent rows a released version left: carry
+   * them into their tasks (startup), then run the interrupted attempts (here
+   * at once, instead of from their wake) and wait for each to settle.
+   * `options` stand in for the agent's re-attach budget meanwhile.
+   */
   private async reconcileAgentToolRunsForTest(options?: {
-    deferFinishHooks?: boolean;
-    childInspectionTimeoutMs?: number;
     reattachTimeoutMs?: number;
-  }): Promise<Array<() => Promise<void>>> {
-    return (
-      this as unknown as {
-        _reconcileAgentToolRuns(options?: {
-          deferFinishHooks?: boolean;
-          childInspectionTimeoutMs?: number;
-          reattachTimeoutMs?: number;
-        }): Promise<Array<() => Promise<void>>>;
-      }
-    )._reconcileAgentToolRuns(options);
-  }
-
-  private async scheduleAgentToolRunRecoveryForTest(options?: {
-    childInspectionTimeoutMs?: number;
+    afterStartup?: () => void;
   }): Promise<void> {
-    await (
-      this as unknown as {
-        _scheduleAgentToolRunRecovery(options?: {
-          childInspectionTimeoutMs?: number;
-        }): Promise<void>;
-      }
-    )._scheduleAgentToolRunRecovery(options);
-  }
-
-  private async runDeferredAgentToolFinishHooksForTest(
-    hooks: Array<() => Promise<void>>
-  ): Promise<void> {
-    await (
-      this as unknown as {
-        _runDeferredAgentToolFinishHooks(
-          hooks: Array<() => Promise<void>>
-        ): Promise<void>;
-      }
-    )._runDeferredAgentToolFinishHooks(hooks);
+    const self = this as unknown as {
+      _resolvedOptions: { agentToolReattachNoProgressTimeoutMs: number };
+      _carryForwardAgentToolRuns(): Promise<void>;
+    };
+    const before = self._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
+    if (options?.reattachTimeoutMs !== undefined) {
+      self._resolvedOptions.agentToolReattachNoProgressTimeoutMs =
+        options.reattachTimeoutMs;
+    }
+    try {
+      await self._carryForwardAgentToolRuns();
+      options?.afterStartup?.();
+      await runAgentToolChecksForTest(this);
+    } finally {
+      self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = before;
+    }
   }
 
   async reconcileCompletedChildForTest(
@@ -9163,7 +9182,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     this.events = [];
     this.finishes = [];
     const startedAt = Date.now();
-    await this.reconcileAgentToolRunsForTest({ childInspectionTimeoutMs: 10 });
+    await this.reconcileAgentToolRunsForTest();
     return {
       events: this.events,
       finishes: this.finishes,
@@ -9188,9 +9207,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
     this.events = [];
     this.finishes = [];
-    await this.scheduleAgentToolRunRecoveryForTest({
-      childInspectionTimeoutMs: 10
-    });
+    await this.reconcileAgentToolRunsForTest();
     return {
       events: this.events,
       finishes: this.finishes,
@@ -9214,12 +9231,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
     this.events = [];
     this.finishes = [];
-    const first = this.scheduleAgentToolRunRecoveryForTest({
-      childInspectionTimeoutMs: 10
-    });
-    const second = this.scheduleAgentToolRunRecoveryForTest({
-      childInspectionTimeoutMs: 10
-    });
+    const first = this.reconcileAgentToolRunsForTest();
+    const second = this.reconcileAgentToolRunsForTest();
     await Promise.all([first, second]);
     return {
       events: this.events,
@@ -9229,10 +9242,13 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }
 
   getParentAgentToolStatusForTest(runId: string): string | null {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_agent_tool_runs WHERE run_id = ${runId} LIMIT 1
-    `;
-    return rows[0]?.status ?? null;
+    return (
+      (
+        this as unknown as {
+          _readAgentToolRun(runId: string): { status: string } | null;
+        }
+      )._readAgentToolRun(runId)?.status ?? null
+    );
   }
 
   async reconcileCompletedChildWithDeferredFinishForTest(
@@ -9249,12 +9265,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
     this.finishes = [];
     this.lifecycleOrder = [];
 
-    const hooks = await this.reconcileAgentToolRunsForTest({
-      deferFinishHooks: true
+    // The recovered attempt runs from its wake, after startup.
+    let finishesBeforeDrain = -1;
+    await this.reconcileAgentToolRunsForTest({
+      afterStartup: () => {
+        finishesBeforeDrain = this.finishes.length;
+        this.lifecycleOrder.push("after-on-start");
+      }
     });
-    const finishesBeforeDrain = this.finishes.length;
-    this.lifecycleOrder.push("after-on-start");
-    await this.runDeferredAgentToolFinishHooksForTest(hooks);
 
     return {
       events: this.events,
@@ -9270,31 +9288,33 @@ export class AIChatAgentToolParent extends Agent<Env> {
   ): Promise<{
     events: AgentToolEventMessage[];
     finishes: AgentToolFinishForTest[];
-    deferredHookCount: number;
     lifecycleOrder: string[];
+    statusAfterFailedStart: string | null;
+    finishesAfterFailedStart: number;
   }> {
     await this.prepareCompletedChildForRecoveryTest(input, runId);
     this.events = [];
     this.finishes = [];
     this.lifecycleOrder = [];
 
-    const hooks = await this.reconcileAgentToolRunsForTest({
-      deferFinishHooks: true
-    });
-
-    try {
-      this.lifecycleOrder.push("on-start-error");
-      throw new Error("test startup failure");
-    } catch {
-      // Mirrors the Agent startup contract: recovered finish hooks are only
-      // drained after successful user startup.
-    }
+    // Startup carried the row into its task, then the user's onStart
+    // threw. The job driver dispatches no job of an object whose start
+    // failed, so the run's wake does not run: nothing settles, no hook.
+    await (
+      this as unknown as { _carryForwardAgentToolRuns(): Promise<void> }
+    )._carryForwardAgentToolRuns();
+    this.lifecycleOrder.push("on-start-error");
+    const statusAfterFailedStart = this.getParentAgentToolStatusForTest(runId);
+    const finishesAfterFailedStart = this.finishes.length;
+    // The next start that succeeds runs the wake.
+    await this.reconcileAgentToolRunsForTest();
 
     return {
       events: this.events,
       finishes: this.finishes,
-      deferredHookCount: hooks.length,
-      lifecycleOrder: this.lifecycleOrder
+      lifecycleOrder: this.lifecycleOrder,
+      statusAfterFailedStart,
+      finishesAfterFailedStart
     };
   }
 
@@ -9353,10 +9373,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     this.finishes = [];
     this.lifecycleOrder = [];
     this.finishRunIdsToThrow = new Set([firstRunId]);
-    const hooks = await this.reconcileAgentToolRunsForTest({
-      deferFinishHooks: true
-    });
-    await this.runDeferredAgentToolFinishHooksForTest(hooks);
+    await this.reconcileAgentToolRunsForTest();
     this.finishRunIdsToThrow.clear();
 
     return { finishes: this.finishes, lifecycleOrder: this.lifecycleOrder };

@@ -136,8 +136,9 @@ type ParentStub = DurableObjectStub & {
   ): Promise<{
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
-    deferredHookCount: number;
     lifecycleOrder: string[];
+    statusAfterFailedStart: string | null;
+    finishesAfterFailedStart: number;
   }>;
   reconcileCompletedChildWithReplayFailureForTest(
     input: {
@@ -1209,7 +1210,8 @@ describe("AIChatAgent as an agent-tool child", () => {
     const { events, finishes, elapsedMs, status } =
       await parent.reconcileStuckChildWithTimeoutForTest(runId);
 
-    expect(elapsedMs).toBeLessThan(1000);
+    // The parent asks an unreachable child for at most 2 s.
+    expect(elapsedMs).toBeLessThan(4000);
     expect(status).toBe("interrupted");
     expect(finishes).toEqual([
       {
@@ -1293,19 +1295,25 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(lifecycleOrder).toEqual(["after-on-start", `finish:${runId}`]);
   });
 
-  it("skips recovered finish hooks when startup fails after internal recovery", async () => {
+  it("runs a recovered run's finish hook only after a start that succeeds", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
 
-    const { events, finishes, deferredHookCount, lifecycleOrder } =
-      await parent.reconcileCompletedChildWithFailedStartupForTest(
-        { prompt: "failed startup child" },
-        runId
-      );
+    const {
+      events,
+      finishes,
+      lifecycleOrder,
+      statusAfterFailedStart,
+      finishesAfterFailedStart
+    } = await parent.reconcileCompletedChildWithFailedStartupForTest(
+      { prompt: "failed startup child" },
+      runId
+    );
 
-    expect(deferredHookCount).toBe(1);
-    expect(finishes).toHaveLength(0);
-    expect(lifecycleOrder).toEqual(["on-start-error"]);
+    expect(statusAfterFailedStart).toBe("running");
+    expect(finishesAfterFailedStart).toBe(0);
+    expect(finishes).toHaveLength(1);
+    expect(lifecycleOrder).toEqual(["on-start-error", `finish:${runId}`]);
     expect(events.at(-1)).toMatchObject({
       event: {
         kind: "finished",
