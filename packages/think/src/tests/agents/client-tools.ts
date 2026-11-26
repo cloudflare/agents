@@ -1373,6 +1373,12 @@ export class ThinkClientToolsAgent extends Think {
       .length;
   }
 
+  /** How many chat turns wait in the queue (pending runs on the chat lane). */
+  async queuedChatTurnsForTest(): Promise<number> {
+    const definition = (this.constructor as typeof Think).CHAT_FIBER_NAME;
+    return (await this.tasks.list({ definition, status: "pending" })).length;
+  }
+
   /** How many socket messages of `type` the agent has finished handling. */
   handledMessageCountForTest(type: string): number {
     return this._handledMessageTypes.filter((handled) => handled === type)

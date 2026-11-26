@@ -261,6 +261,18 @@ async function batchParked(agent: {
   }, 8000);
 }
 
+/** Wait until `count` chat turns wait in the agent's queue. */
+async function queued(
+  agent: { queuedChatTurnsForTest(): Promise<number> },
+  count = 1
+): Promise<void> {
+  await waitUntil(
+    async () => (await agent.queuedChatTurnsForTest()) >= count,
+    5000,
+    10
+  );
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -5060,10 +5072,10 @@ describe("Think — custom body via WebSocket", () => {
       })
     );
     await donePromise;
-    await delay(200);
 
-    // Verify turn completed
+    // Verify turn completed, once its writes are done
     const agent = await freshAgent(room);
+    await settled(agent);
     const messages = (await agent.getMessages()) as UIMessage[];
     expect(messages.length).toBeGreaterThanOrEqual(2);
 
@@ -5415,7 +5427,8 @@ describe("Think — messageConcurrency", () => {
 
     const done1 = waitForDone(ws, 10000);
     sendChatRequest(ws, [makeUserMessage("First")]);
-    await delay(10);
+    // The second overlaps the first: it arrives while the first turn runs.
+    await waitForActiveTurn(agent);
     sendChatRequest(ws, [makeUserMessage("Second")]);
 
     await done1;
@@ -5517,7 +5530,7 @@ describe("Think — messageConcurrency", () => {
     // The second request queues behind the first; the user stops it there.
     const request2 = sendChatRequest(ws, [makeUserMessage("Second")]);
     const done2 = waitForDoneId(ws, request2, 10000);
-    await delay(100);
+    await queued(agent);
     ws.send(
       JSON.stringify({ type: "cf_agent_chat_request_cancel", id: request2 })
     );
@@ -5559,7 +5572,7 @@ describe("Think — messageConcurrency", () => {
       clientTools: [{ name: "second_tool", description: "From request 2" }]
     });
     const done2 = waitForDoneId(ws, request2, 10000);
-    await delay(100);
+    await queued(agent);
     expect(
       (await agent.getCapturedClientTools())?.map((tool) => tool.name)
     ).toEqual(["first_tool"]);
@@ -5600,7 +5613,7 @@ describe("Think — messageConcurrency", () => {
       marker: "second"
     });
     const done2 = waitForDoneId(ws, request2, 10000);
-    await delay(100);
+    await queued(agent);
 
     // Called while the stored body is still the first request's. The turn
     // runs after the second request and reads the stored body then.
