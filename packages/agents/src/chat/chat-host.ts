@@ -139,6 +139,9 @@ export interface ChatHost {
   readonly options?: ChatOptions;
 }
 
+/** The run's checkpoint key holding the id of the reply it stored. */
+const REPLY_CHECKPOINT = "chat:reply";
+
 /** The default number of attempts of an interrupted turn. */
 const DEFAULT_MAX_ATTEMPTS = 3;
 
@@ -377,6 +380,53 @@ export function chatTurnDefinition(
       await host.hooks?.onResponse?.(result);
       return result;
     };
+    /**
+     * The cutover: the reply is stored, the stream settled and its rows
+     * dropped, and the run marked as having stored it, in one transaction,
+     * so a crash leaves the live stream or the stored reply, never neither,
+     * and a replay after it does not answer again.
+     */
+    const storeReply = async (
+      out: StreamWriter,
+      message: UIMessage | undefined
+    ): Promise<string | undefined> => {
+      if (!message || message.parts.length === 0) {
+        out.close({ discard: true });
+        return undefined;
+      }
+      const stored = host.hooks?.sanitizeForPersistence?.(message) ?? message;
+      const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
+      let after: (() => Promise<void>) | undefined;
+      try {
+        out.close({
+          discard: true,
+          commit: () => {
+            after = sync.upsert(stored as never).after;
+            step.checkpoint.set(REPLY_CHECKPOINT, stored.id);
+          }
+        });
+      } catch (error) {
+        sync.abandon();
+        throw error;
+      }
+      // Settled by another path first: the reply still lands.
+      if (after) await after();
+      else {
+        await session.upsertMessage(stored as never);
+        step.checkpoint.set(REPLY_CHECKPOINT, stored.id);
+      }
+      return stored.id;
+    };
+    // The chunks this attempt stored, to rebuild what it streamed if it
+    // is stopped.
+    const seen: UIMessageChunk[] = [];
+    const streamOf = (chunks: readonly UIMessageChunk[]) =>
+      new ReadableStream<UIMessageChunk>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.close();
+        }
+      });
     const recovery = host.options?.recovery;
     const maxAttempts =
       recovery === false ? 1 : (recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
@@ -389,6 +439,12 @@ export function chatTurnDefinition(
 
     // An earlier attempt of this run was cut off: what it streamed is the
     // reply this attempt continues.
+    // This run already stored its reply (a reset came after the cutover,
+    // before the run returned): it is done.
+    const storedReply = step.checkpoint.get<string>(REPLY_CHECKPOINT);
+    if (storedReply !== undefined) {
+      return report({ requestId, status: "completed", messageId: storedReply });
+    }
     const earlier = await deps.streams.status(streamId);
     if (earlier && earlier.state !== "streaming") {
       return report({
@@ -402,7 +458,10 @@ export function chatTurnDefinition(
       const built = await messageOf(
         new ReadableStream({
           start(controller) {
-            for (const chunk of stored) controller.enqueue(chunk);
+            // An error the model sent is not part of the reply.
+            for (const chunk of stored) {
+              if (chunk.type !== "error") controller.enqueue(chunk);
+            }
             controller.close();
           }
         })
@@ -498,7 +557,11 @@ export function chatTurnDefinition(
                 ? ({ ...chunk, messageId: continuing.id } as UIMessageChunk)
                 : chunk;
             const next = host.hooks?.transformChunk?.(own, parts) ?? own;
-            out.append(next as never);
+            // An in-band error is stored only if it ends the turn.
+            if (next.type !== "error") {
+              out.append(next as never);
+              seen.push(next);
+            }
             send({
               body: JSON.stringify(next),
               done: false,
@@ -515,8 +578,16 @@ export function chatTurnDefinition(
         break;
       } catch (error) {
         if (step.signal.aborted) {
-          out.error("aborted");
-          return report({ requestId, status: "aborted" });
+          // A stopped turn keeps what it streamed, as a stored reply.
+          const kept = await storeReply(
+            out,
+            await messageOf(streamOf(seen), continuing).catch(() => continuing)
+          );
+          return report({
+            requestId,
+            status: "aborted",
+            ...(kept && { messageId: kept })
+          });
         }
         const verdict =
           error instanceof StreamStalledError
@@ -543,35 +614,14 @@ export function chatTurnDefinition(
       }
     }
 
-    // The cutover: the reply is stored and the stream settled and its rows
-    // dropped in one transaction, so a crash leaves the live stream or the
-    // stored reply, never neither.
-    if (reply && reply.parts.length > 0) {
-      const stored = host.hooks?.sanitizeForPersistence?.(reply) ?? reply;
-      reply = stored;
-      const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
-      let after: (() => Promise<void>) | undefined;
-      try {
-        writer.close({
-          discard: true,
-          commit: () => {
-            after = sync.upsert(stored as never).after;
-          }
-        });
-      } catch (error) {
-        sync.abandon();
-        throw error;
-      }
-      // Settled by another path first: the reply still lands.
-      if (after) await after();
-      else await session.upsertMessage(stored as never);
-    } else {
-      writer.close({ discard: true });
-    }
+    const storedId =
+      reply && reply.parts.length > 0
+        ? await storeReply(writer as StreamWriter, reply)
+        : (writer?.close({ discard: true }), undefined);
     return report({
       requestId,
       status: "completed",
-      ...(reply && reply.parts.length > 0 && { messageId: reply.id })
+      ...(storedId && { messageId: storedId })
     });
   };
 }

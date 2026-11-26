@@ -7,13 +7,22 @@ import { TaskSettlement } from "../../tasks/settlement";
 import type { ChatHost } from "../../chat/chat-host";
 
 /** A later attempt of run `id`, as Tasks hands it after a reset. */
-function laterAttempt(id: string, attempt = 2): TaskStep {
+function laterAttempt(
+  id: string,
+  attempt = 2,
+  signal: AbortSignal = new AbortController().signal,
+  checkpoint = new Map<string, unknown>()
+): TaskStep {
   return {
     id,
     attempt,
+    checkpoint: {
+      get: (key: string) => checkpoint.get(key),
+      set: (key: string, value: unknown) => void checkpoint.set(key, value)
+    },
     createdAt: 0,
     sleep: async () => {},
-    signal: new AbortController().signal,
+    signal,
     local: undefined,
     interrupted: null,
     do: async (_name: string, fn: () => unknown) => fn()
@@ -375,6 +384,120 @@ describe("chatTurnDefinition", () => {
       );
       expect(text).toContain("From SSE");
       expect(text).toContain("Plain words");
+    });
+  });
+
+  it("a replay after the cutover does not answer again", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const checkpoint = new Map<string, unknown>();
+      const signal = new AbortController().signal;
+      const run = definitionOf(instance, instance.host);
+      await run(
+        { trigger: "server" },
+        laterAttempt("run-7", 1, signal, checkpoint)
+      );
+      // A reset after the cutover, before the run returned: it runs again.
+      const again = await run(
+        { trigger: "server" },
+        laterAttempt("run-7", 2, signal, checkpoint)
+      );
+      expect(instance.calls).toHaveLength(1);
+      const replies = (
+        await instance.sessions.session("s1").getHistory()
+      ).filter((m) => m.role === "assistant");
+      expect(replies).toHaveLength(1);
+      expect(again).toMatchObject({
+        status: "completed",
+        messageId: replies[0].id
+      });
+    });
+  });
+
+  it("continues after a transient in-band error, which is not stored in the reply", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let calls = 0;
+      const host: ChatHost = {
+        respond: async () => {
+          calls++;
+          const chunks =
+            calls === 1
+              ? [
+                  { type: "start", messageId: "a1" },
+                  { type: "text-start", id: "t1" },
+                  { type: "text-delta", id: "t1", delta: "Hel" },
+                  { type: "error", errorText: "overloaded" }
+                ]
+              : [
+                  { type: "text-start", id: "t2" },
+                  { type: "text-delta", id: "t2", delta: "lo" },
+                  { type: "text-end", id: "t2" }
+                ];
+          return new ReadableStream({
+            start(controller) {
+              for (const chunk of chunks) controller.enqueue(chunk as never);
+              controller.close();
+            }
+          });
+        },
+        hooks: { classifyError: () => "transient" }
+      };
+      const first = await definitionOf(instance, host)(
+        { trigger: "server" },
+        laterAttempt("run-8", 1)
+      );
+      expect(first).toBeInstanceOf(TaskSettlement);
+      const second = await definitionOf(instance, host)(
+        { trigger: "server" },
+        laterAttempt("run-8", 2)
+      );
+      expect(second).toMatchObject({ status: "completed", messageId: "a1" });
+      const text = JSON.stringify(
+        await instance.sessions.session("s1").getHistory()
+      );
+      expect(text).toContain("Hel");
+      expect(text).toContain("lo");
+      expect(text).not.toContain("overloaded");
+    });
+  });
+
+  it("a stopped turn keeps what it streamed", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const stop = new AbortController();
+      let passed!: () => void;
+      const deltaPassed = new Promise<void>((resolve) => (passed = resolve));
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            async start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({ type: "text-start", id: "t1" });
+              controller.enqueue({
+                type: "text-delta",
+                id: "t1",
+                delta: "Part"
+              });
+              // The user stops once the delta was stored.
+              await deltaPassed;
+              stop.abort();
+              controller.error(new Error("stopped"));
+            }
+          }),
+        hooks: {
+          transformChunk: (chunk) => {
+            if (chunk.type === "text-delta") passed();
+            return chunk;
+          }
+        }
+      })({ trigger: "server" }, laterAttempt("run-9", 1, stop.signal));
+      expect(result).toMatchObject({ status: "aborted", messageId: "a1" });
+      const history = await instance.sessions.session("s1").getHistory();
+      expect(JSON.stringify(history)).toContain("Part");
     });
   });
 });
