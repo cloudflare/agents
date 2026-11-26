@@ -211,8 +211,10 @@ describe("ThinkHarness turns", () => {
       { id: "sub-2", status: "running" },
       { id: "sub-1", status: "done" }
     ]);
-    // An open submission is not deleted.
+    // An open submission is not deleted, nor an operation that is not one.
     expect(await stub.deleteSubmission("sub-2")).toBe(false);
+    expect(await stub.deleteSubmission("op-plain")).toBe(false);
+    expect(await stub.inspect("op-plain")).toBeDefined();
     await stub.release();
     await stub.wait(gate.operationId);
     // A reset keeps submissions, as Think keeps its own.
@@ -221,8 +223,6 @@ describe("ThinkHarness turns", () => {
       "sub-2",
       "sub-1"
     ]);
-    // Only submissions are deleted here, and only settled ones.
-    expect(await stub.deleteSubmission("op-plain")).toBe(false);
     expect(await stub.deleteSubmission("sub-1")).toBe(true);
     expect(await stub.submissionList()).toEqual([
       { id: "sub-2", status: "done" }

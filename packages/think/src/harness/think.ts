@@ -996,30 +996,37 @@ export class Think<
     ).filter(isTerminalSubmissionStatus);
     if (wanted.length === 0) return 0;
     const session = this.harness.session().id;
-    // Oldest first, as Think deletes; matched on Think's status, so a run
-    // the harness counts as completed but which ended unanswered is not
-    // taken for a completed submission.
-    const listed = await this.harness.submissions(session, {
-      status: taskStatusesFor(wanted),
-      order: "oldest",
-      limit: Math.min(Math.max(options?.limit ?? 100, 1), 500)
-    });
+    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
     const matches: readonly ThinkSubmissionStatus[] = wanted;
+    const matching = (submission: ThinkSubmissionInspection) =>
+      matches.includes(submission.status) &&
+      (!options?.completedBefore ||
+        (submission.completedAt !== undefined &&
+          submission.completedAt < options.completedBefore.getTime()));
+    // Oldest accepted first (Think deletes oldest settled first; the two
+    // differ only for a submission that settled before an older one).
+    // Matched on Think's status, so a run the harness counts as completed
+    // but which ended unanswered is not taken for a completed submission.
+    // Records that do not match stay at the front of the list, so a page
+    // with too few matches is read again twice as long, until `limit` are
+    // deleted or the list ends: each record is read at most about twice.
     let deleted = 0;
-    for (const submission of listed.map(submissionInspection)) {
-      if (!matches.includes(submission.status)) continue;
-      if (
-        options?.completedBefore &&
-        (submission.completedAt === undefined ||
-          submission.completedAt >= options.completedBefore.getTime())
-      ) {
-        continue;
+    for (let page = limit; deleted < limit; page *= 2) {
+      const listed = await this.harness.submissions(session, {
+        status: taskStatusesFor(wanted),
+        order: "oldest",
+        limit: page
+      });
+      for (const submission of listed.map(submissionInspection)) {
+        if (deleted >= limit) break;
+        if (!matching(submission)) continue;
+        if (
+          await this.harness.deleteSubmission(session, submission.submissionId)
+        ) {
+          deleted++;
+        }
       }
-      if (
-        await this.harness.deleteSubmission(session, submission.submissionId)
-      ) {
-        deleted++;
-      }
+      if (listed.length < page) break;
     }
     return deleted;
   }
