@@ -1389,6 +1389,11 @@ describe("Resumable Streaming", () => {
       const textPart = assistantMsg!.parts.find((p) => p.type === "text");
       expect(textPart).toBeDefined();
       expect(textPart!.text).toContain("partial response");
+      // The end the replay told this tab is recorded, so a tab that comes
+      // back after the next turn's start deleted the rows still learns it.
+      expect(
+        await agentStub.recentTerminalForTest("req-orphaned")
+      ).toMatchObject({ requestId: "req-orphaned", outcome: "aborted" });
 
       ws2.close(1000);
     });

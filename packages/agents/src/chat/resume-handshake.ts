@@ -90,6 +90,12 @@ export interface ResumeHandshakeHost {
    */
   recentTerminal?(requestIds: readonly string[]): ChatRecentTerminal | null;
   /**
+   * Record a terminal frame the handshake sent one tab itself (an orphaned
+   * stream's end), as `ChatFrames` records the ones it sends. Optional,
+   * paired with {@link recentTerminal}.
+   */
+  recordTerminal?(frame: Record<string, unknown>): void;
+  /**
    * Which tabs were sent which request's end (the host's
    * `ChatFrames.ended`), so the handshake tells a tab each end once.
    */
@@ -413,6 +419,17 @@ export class ResumeHandshake {
       // no live reader), reconstruct the partial assistant message from stored
       // chunks and persist it so it survives further page refreshes.
       if (orphanedStreamId) {
+        // Recorded while the rows still hold the ids: the next stream's
+        // start deletes them, and a tab that comes back then still learns
+        // how the request ended.
+        const messageIds = resumableStream.getOriginMessageIds(requestId);
+        this.host.recordTerminal?.({
+          id: requestId,
+          body: "",
+          done: true,
+          outcome: "aborted",
+          ...(messageIds && { messageIds })
+        });
         await this.host.persistOrphanedStream(orphanedStreamId);
       }
     } else if (resumableStream.hasActiveStream()) {
