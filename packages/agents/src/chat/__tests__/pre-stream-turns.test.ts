@@ -27,11 +27,11 @@ describe("PreStreamTurns (#1784)", () => {
     expect(pre.awaitingConnections.size).toBe(0);
   });
 
-  it("begin marks in flight and exposes the latest request id", () => {
+  it("begin marks in flight and exposes the request id", () => {
     const pre = new PreStreamTurns();
     pre.begin("req-1");
     expect(pre.hasInFlight()).toBe(true);
-    expect(pre.latestRequestId).toBe("req-1");
+    expect(pre.firstRequestId).toBe("req-1");
   });
 
   it("park enrolls a connection and sends STREAM_PENDING with the request id", () => {
@@ -43,6 +43,24 @@ describe("PreStreamTurns (#1784)", () => {
     expect(pre.park(conn)).toBe(true);
     expect(pre.awaitingConnections.get("c1")).toBe(conn);
     expect(frames).toEqual([{ type: "cf_agent_stream_pending", id: "req-1" }]);
+  });
+
+  it("park names the oldest accepted request, which runs first, not a newer queued one", () => {
+    const frames: SentFrame[] = [];
+    const pre = new PreStreamTurns();
+    pre.begin("req-1");
+    pre.begin("req-2");
+
+    const conn = makeConnection("c1", frames);
+    pre.park(conn);
+    expect(frames).toEqual([{ type: "cf_agent_stream_pending", id: "req-1" }]);
+    // Once the first settles, the next in line is named.
+    pre.settle("req-1");
+    pre.park(makeConnection("c2", frames));
+    expect(frames.at(-1)).toEqual({
+      type: "cf_agent_stream_pending",
+      id: "req-2"
+    });
   });
 
   it("flushOnStreamStart notifies each parked connection then clears the map (keeps accepted)", () => {
@@ -85,7 +103,7 @@ describe("PreStreamTurns (#1784)", () => {
     expect(pre.hasInFlight()).toBe(true);
     expect(pre.settle("b")).toBe(true);
     expect(pre.hasInFlight()).toBe(false);
-    expect(pre.latestRequestId).toBeNull();
+    expect(pre.firstRequestId).toBeNull();
   });
 
   it("settling an unknown id is safe and reports idle when nothing else is in flight", () => {
@@ -151,7 +169,7 @@ describe("PreStreamTurns (#1784)", () => {
   it("park without a known request id omits the id from the keep-waiting frame", () => {
     const frames: SentFrame[] = [];
     const pre = new PreStreamTurns();
-    // settle the only id so latestRequestId is null but force in-flight via a
+    // settle the only id so firstRequestId is null but force in-flight via a
     // second begin with an empty-ish id path: emulate by beginning then parking.
     pre.begin("");
     const conn = makeConnection("c1", frames);
@@ -170,7 +188,7 @@ describe("PreStreamTurns (#1784)", () => {
 
     expect(pre.hasInFlight()).toBe(false);
     expect(pre.awaitingConnections.size).toBe(0);
-    expect(pre.latestRequestId).toBeNull();
+    expect(pre.firstRequestId).toBeNull();
     expect(c1.send).not.toHaveBeenCalled();
   });
 });
