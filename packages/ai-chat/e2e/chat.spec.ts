@@ -1523,7 +1523,7 @@ test.describe("Large tool output e2e", () => {
     expect(userMsg).toBeTruthy();
   });
 
-  test("3MB message: does not crash, degrades gracefully with compaction", async ({
+  test("9MB tool output: stored whole across rows, and the chat goes on", async ({
     page,
     baseURL
   }) => {
@@ -1560,16 +1560,16 @@ test.describe("Large tool output e2e", () => {
       `
     );
 
-    // Now send a message set that includes a 3MB assistant message
-    // (simulating what would happen if a tool returned a huge result)
-    // We send it via CF_AGENT_CHAT_MESSAGES which goes through persistMessages
-    const threeMBText = "X".repeat(3_000_000);
+    // Now send a message set with a 9MB tool output, over one SQLite row's
+    // ~8 MiB cap (simulating a tool that returned a huge result). It goes
+    // through CF_AGENT_CHAT_MESSAGES, the setMessages path.
+    const hugeOutput = "X".repeat(9_000_000);
 
     await connectAndRun(
       page,
       agentPath(room),
       `
-      // Send the 3MB message via CF_AGENT_CHAT_MESSAGES (setMessages path)
+      // Send the 9MB message via CF_AGENT_CHAT_MESSAGES (setMessages path)
       ws.send(JSON.stringify({
         type: "cf_agent_chat_messages",
         messages: [
@@ -1588,7 +1588,7 @@ test.describe("Large tool output e2e", () => {
                 toolCallId: "call_3mb",
                 state: "output-available",
                 input: { query: "SELECT * FROM everything" },
-                output: "${threeMBText}"
+                output: "${hugeOutput}"
               }
             ]
           }
@@ -1616,21 +1616,13 @@ test.describe("Large tool output e2e", () => {
     );
     expect(hugeMsg).toBeTruthy();
 
-    // The tool output should be compacted (not the original 3MB)
+    // Sessions splits a message over the row budget across continuation
+    // rows: the output comes back whole, not truncated.
     const toolPart = hugeMsg.parts.find(
       (p: { toolCallId?: string }) => p.toolCallId === "call_3mb"
     );
     expect(toolPart).toBeTruthy();
-    const output = toolPart.output as string;
-
-    // Should carry the structured-truncation marker (agents/chat row-size
-    // compaction replaces the oversized output with a `... [truncated N chars]`
-    // notice rather than persisting the full payload).
-    expect(output).toContain("[truncated");
-    expect(output).toContain("chars]");
-
-    // Should be much smaller than 3MB
-    expect(output.length).toBeLessThan(10_000);
+    expect(toolPart.output).toBe(hugeOutput);
 
     // The text part should be preserved (it was small)
     const textPart = hugeMsg.parts.find(
@@ -1638,9 +1630,6 @@ test.describe("Large tool output e2e", () => {
     );
     expect(textPart).toBeTruthy();
     expect(textPart.text).toBe("Here are the results:");
-
-    // Metadata should indicate compaction happened.
-    expect(hugeMsg.metadata?.compactedToolOutputs).toContain("call_3mb");
 
     // The conversation should still work -- send another message
     const followUp = await connectAndRun(
