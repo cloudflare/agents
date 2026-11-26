@@ -4,15 +4,17 @@ import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { turnSignal } from "../turn-stop";
 import type { UIMessage } from "ai";
-import { AutoContinuationController } from "../auto-continuation-controller";
 import {
   ChatTurns,
   type ChatTurnMessage,
   type ChatTurnsHost
 } from "../chat-turns";
-import type { ContinuationConnection } from "../continuation-state";
+import {
+  CONTINUATION_COALESCE_MS,
+  type ContinuationConnection
+} from "../continuation-state";
 
-const COALESCE = AutoContinuationController.COALESCE_MS;
+const COALESCE = CONTINUATION_COALESCE_MS;
 
 function makeConnection(id: string): ContinuationConnection & {
   sent: string[];
@@ -333,12 +335,12 @@ describe("ChatTurns", () => {
         ]
       }
     ];
-    turns.autoContinuation.rearmForBatch();
+    turns.rearmContinuation();
     await vi.advanceTimersByTimeAsync(COALESCE);
     expect(host.fired).toBe(0);
 
     host.transcript = [user("u1"), toolReply("a1", "output-available")];
-    turns.autoContinuation.rearmForBatch();
+    turns.rearmContinuation();
     await vi.advanceTimersByTimeAsync(COALESCE);
     expect(host.fired).toBe(1);
   });
@@ -414,7 +416,7 @@ describe("ChatTurns", () => {
     expect(turns.aborts.size).toBe(0);
     expect(turns.pendingInteraction).toBeNull();
     expect(turns.continuation.pending).toBeNull();
-    expect(turns.autoContinuation.isArmed()).toBe(false);
+    expect(turns.continuationArmed()).toBe(false);
     expect(turns.preStream.hasInFlight()).toBe(false);
     expect(parked.sent.at(-1)).toContain("cf_agent_stream_resume_none");
 

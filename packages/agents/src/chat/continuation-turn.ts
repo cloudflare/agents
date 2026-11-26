@@ -1,7 +1,7 @@
 /**
  * The auto-continuation turn, from the moment it fires to the moment it
  * settles. A client tool result or approval schedules a continuation
- * (`AutoContinuationController`). What happens next is the same in
+ * (`ChatTurns`' barrier). What happens next is the same in
  * `@cloudflare/ai-chat` and `@cloudflare/think`, and lives here:
  *
  * - {@link runContinuationTurn}: create the abort signal, enqueue the turn,
@@ -38,7 +38,6 @@
  */
 
 import { isDurableObjectResetError } from "../retries";
-import type { AutoContinuationController } from "./auto-continuation-controller";
 import { continuationWaitsOnClient } from "./before-turn";
 import {
   continuationTargetIsLatest,
@@ -58,7 +57,10 @@ export interface ContinuationTurnParts<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
   readonly continuation: ContinuationState<TConnection>;
-  readonly autoContinuation: AutoContinuationController<TConnection>;
+  /** Re-run the barrier for a pending continuation that has not fired. */
+  rearmForBatch(): void;
+  /** Make the deferred follow-up the pending continuation, through the barrier. */
+  activateDeferred(): void;
   readonly aborts: TurnAborts;
   /** The stored transcript, oldest first. */
   messages(): ReadonlyArray<{
@@ -555,7 +557,7 @@ export function continuationStreamEnded<
 export function replyFinalized<TConnection extends ContinuationConnection>(
   parts: ContinuationTurnParts<TConnection>
 ): void {
-  parts.autoContinuation.rearmForBatch();
+  parts.rearmForBatch();
 }
 
 /**
@@ -673,7 +675,7 @@ export function settleContinuationTurn<
       continuation.clearDeferred();
     }
   }
-  parts.autoContinuation.activateDeferredAndReschedule();
+  parts.activateDeferred();
 }
 
 /**

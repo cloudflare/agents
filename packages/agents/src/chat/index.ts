@@ -172,6 +172,7 @@ export {
 
 export {
   ContinuationState,
+  CONTINUATION_COALESCE_MS,
   addContinuationTarget,
   continuationTargetIsLatest,
   type ContinuationConnection,
@@ -189,17 +190,18 @@ export {
 export { PreStreamTurns } from "./pre-stream-turns";
 
 /**
- * @internal Shared auto-continuation barrier (the tool-result → auto-continue
- * flow, #1649 / #1650) — sibling-package support for `@cloudflare/ai-chat` and
- * `@cloudflare/think`, not a public API. See `auto-continuation-controller.ts`.
+ * @internal @deprecated `ChatTurns` runs the barrier itself. Kept only for
+ * released `@cloudflare/ai-chat` 0.12.3 and `@cloudflare/think` 0.24.0.
  */
 export {
   AutoContinuationController,
-  type AutoContinuationHost,
-  type ContinuationSource,
-  type ContinuationSpec,
-  type ToolInteractionOutcome
+  type AutoContinuationHost
 } from "./auto-continuation-controller";
+export type {
+  ContinuationSource,
+  ContinuationSpec,
+  ToolInteractionOutcome
+} from "./continuation-state";
 
 /**
  * @internal The auto-continuation turn's lifecycle, from fire to settle.

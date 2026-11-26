@@ -23,50 +23,23 @@
  *
  * @internal Sibling-package support for `@cloudflare/ai-chat` and
  * `@cloudflare/think`, not a public API.
+ *
+ * @deprecated `ChatTurns` runs the barrier itself now. Kept, unchanged, only
+ * because released `@cloudflare/ai-chat` 0.12.3 and `@cloudflare/think`
+ * 0.24.0 import it (`node-tests/released-imports.test.ts`).
  */
 
 import {
+  CONTINUATION_COALESCE_MS,
   addContinuationTarget,
   type ContinuationConnection,
-  type ContinuationState
+  type ContinuationSource,
+  type ContinuationSpec,
+  type ContinuationState,
+  type ToolInteractionOutcome
 } from "./continuation-state";
 
-/**
- * The data a host supplies to schedule (or re-target) a pending/deferred
- * auto-continuation. The tools and body the continuation turn runs with are
- * not part of it: the turn reads the stored request context when it starts
- * (`ChatTurns.lastClientTools`), so there is one copy of them.
- */
-export interface ContinuationSpec<
-  TConnection extends ContinuationConnection = ContinuationConnection
-> {
-  connection: TConnection;
-  errorPrefix: string;
-  /**
-   * The message the result or approval is stored in: the assistant message
-   * whose tool part it settled. The continuation runs only while that
-   * message is the latest.
-   */
-  targetMessageId: string;
-}
-
-/**
- * A {@link ContinuationSpec} before its target is known. The target comes
- * from applying the result ({@link ToolInteractionOutcome}).
- */
-export type ContinuationSource<
-  TConnection extends ContinuationConnection = ContinuationConnection
-> = Omit<ContinuationSpec<TConnection>, "targetMessageId">;
-
-/**
- * What applying a client tool result or approval did to its tool part:
- * settled it (in the message `messageId`), found it already settled, or
- * found no such part.
- */
-export type ToolInteractionOutcome =
-  | { status: "changed"; messageId: string }
-  | { status: "unchanged" }
-  | { status: "missing" };
+export type { ContinuationSource, ContinuationSpec, ToolInteractionOutcome };
 
 /**
  * Host substrate the controller parameterizes over. Implemented by the agent
@@ -122,7 +95,7 @@ export class AutoContinuationController<
    * Small debounce window to batch adjacent client-side tool results/approvals
    * into a single server continuation barrier check (#1650).
    */
-  static readonly COALESCE_MS = 50;
+  static readonly COALESCE_MS = CONTINUATION_COALESCE_MS;
 
   /**
    * Coalesce/debounce timer for the event-driven barrier (#1650). Each tool

@@ -2024,15 +2024,15 @@ export class ThinkClientToolsAgent extends Think {
   async holdCoalesceTimerForTest(): Promise<void> {
     const held = { requested: false };
     this._coalesceArmHeld = held;
-    this["_turns"].autoContinuation.armTimer = () => {
+    this["_turns"].armCoalesce = () => {
       held.requested = true;
     };
   }
 
   async releaseCoalesceTimerForTest(): Promise<void> {
-    const controller = this["_turns"].autoContinuation;
-    delete (controller as { armTimer?: unknown }).armTimer;
-    if (this._coalesceArmHeld?.requested) controller.armTimer();
+    const turns = this["_turns"];
+    delete (turns as { armCoalesce?: unknown }).armCoalesce;
+    if (this._coalesceArmHeld?.requested) turns.armCoalesce();
     this._coalesceArmHeld = null;
   }
 
@@ -2062,15 +2062,13 @@ export class ThinkClientToolsAgent extends Think {
   }> {
     const internal = this["_turns"] as unknown as {
       continuation: { pending: unknown };
-      autoContinuation: {
-        _timer: ReturnType<typeof setTimeout> | null;
-        _barrierActive: boolean;
-      };
+      coalesceTimer: ReturnType<typeof setTimeout> | null;
+      barrierActive: boolean;
     };
     return {
       hasPending: internal.continuation.pending != null,
-      barrierActive: internal.autoContinuation._barrierActive,
-      timerArmed: internal.autoContinuation._timer != null
+      barrierActive: internal.barrierActive,
+      timerArmed: internal.coalesceTimer != null
     };
   }
 
@@ -2086,12 +2084,12 @@ export class ThinkClientToolsAgent extends Think {
   async evictInMemoryContinuationState(): Promise<void> {
     const internal = this["_turns"] as unknown as {
       continuation: { pending: unknown };
-      autoContinuation: { reset(): void };
+      resetContinuationBarrier(): void;
       pendingInteraction: Promise<boolean> | null;
       interactionTail: Promise<void>;
     };
-    // reset() cancels the coalesce timer and clears the double-fire guard.
-    internal.autoContinuation.reset();
+    // Cancels the coalesce timer and clears the double-fire guard.
+    internal.resetContinuationBarrier();
     internal.continuation.pending = null;
     internal.pendingInteraction = null;
     internal.interactionTail = Promise.resolve();
@@ -2120,7 +2118,8 @@ export class ThinkClientToolsAgent extends Think {
         pending: Record<string, unknown> | null;
         awaitingConnections: Map<string, unknown>;
       };
-      autoContinuation: { fireWhenStable(): void; reset(): void };
+      fireContinuationWhenStable(): void;
+      resetContinuationBarrier(): void;
       pendingInteraction: Promise<boolean> | null;
       interactionTail: Promise<void>;
       hasPendingDecision(): boolean;
@@ -2150,7 +2149,7 @@ export class ThinkClientToolsAgent extends Think {
     });
     internal.pendingInteraction = new Promise<boolean>(() => {});
     internal.interactionTail = drainGate;
-    internal.autoContinuation.fireWhenStable();
+    internal.fireContinuationWhenStable();
 
     try {
       const hasArmedContinuation = internal.hasPendingDecision();
@@ -2165,7 +2164,7 @@ export class ThinkClientToolsAgent extends Think {
       internal.pendingInteraction = null;
       releaseDrain();
       internal.interactionTail = Promise.resolve();
-      internal.autoContinuation.reset();
+      internal.resetContinuationBarrier();
     }
   }
 

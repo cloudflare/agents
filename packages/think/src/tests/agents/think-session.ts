@@ -4962,14 +4962,12 @@ export class ThinkTestAgent extends Think {
           pending: Record<string, unknown> | null;
           awaitingConnections: Map<string, unknown>;
         };
-        autoContinuation: {
-          _timer: ReturnType<typeof setTimeout> | null;
-          cancelTimer(): void;
-        };
+        coalesceTimer: ReturnType<typeof setTimeout> | null;
+        cancelCoalesce(): void;
       };
     };
     // Seed a pending auto-continuation with `pastCoalesce: false` so the buggy
-    // re-arm path (`autoContinuation.rearmForBatch`) would reset the
+    // re-arm path (`ChatTurns.rearmContinuation`) would reset the
     // coalesce timer in the recovery `finally`.
     internal._turns.continuation.pending = {
       connection: undefined,
@@ -4989,7 +4987,7 @@ export class ThinkTestAgent extends Think {
       // Read synchronously: no `await` has yielded since the recovery `finally`
       // ran, so an erroneously armed 50ms timer cannot have fired yet.
       const coalesceTimerArmedAfterStall =
-        internal._turns.autoContinuation._timer !== null;
+        internal._turns.coalesceTimer !== null;
       const streamingAssistantCleared = internal._turns.liveReply === null;
       const scheduledContinues = recoveryWorkCountForTest(
         this,
@@ -5004,7 +5002,7 @@ export class ThinkTestAgent extends Think {
     } finally {
       // Tear down the seeded pending + any armed timer so nothing leaks into a
       // later turn (and the seeded undefined connection never gets used).
-      internal._turns.autoContinuation.cancelTimer();
+      internal._turns.cancelCoalesce();
       internal._turns.continuation.pending = null;
       internal._turns.continuation.awaitingConnections.clear();
       this._stallAfterChunks = null;

@@ -197,3 +197,46 @@ export function continuationTargetIsLatest(
   const last = messages.at(-1)?.id;
   return last !== undefined && pending.targetMessageIds.includes(last);
 }
+
+/**
+ * The window that batches adjacent client tool results and approvals into
+ * one continuation barrier check (#1650), in milliseconds.
+ */
+export const CONTINUATION_COALESCE_MS = 50;
+
+/**
+ * The data a host supplies to schedule (or re-target) a pending/deferred
+ * auto-continuation. The tools and body the continuation turn runs with are
+ * not part of it: the turn reads the stored request context when it starts
+ * (`ChatTurns.lastClientTools`), so there is one copy of them.
+ */
+export interface ContinuationSpec<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> {
+  connection: TConnection;
+  errorPrefix: string;
+  /**
+   * The message the result or approval is stored in: the assistant message
+   * whose tool part it settled. The continuation runs only while that
+   * message is the latest.
+   */
+  targetMessageId: string;
+}
+
+/**
+ * A {@link ContinuationSpec} before its target is known. The target comes
+ * from applying the result ({@link ToolInteractionOutcome}).
+ */
+export type ContinuationSource<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> = Omit<ContinuationSpec<TConnection>, "targetMessageId">;
+
+/**
+ * What applying a client tool result or approval did to its tool part:
+ * settled it (in the message `messageId`), found it already settled, or
+ * found no such part.
+ */
+export type ToolInteractionOutcome =
+  | { status: "changed"; messageId: string }
+  | { status: "unchanged" }
+  | { status: "missing" };

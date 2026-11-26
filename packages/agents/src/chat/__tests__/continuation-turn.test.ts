@@ -10,7 +10,6 @@ import {
 import { turnSignal } from "../turn-stop";
 import { memoryLane, memoryStorage } from "./memory-lane";
 import { CHAT_CONTINUATION_KEY_PREFIX } from "../admissions";
-import { AutoContinuationController } from "../auto-continuation-controller";
 import {
   ChatTurns,
   type ChatTurnMessage,
@@ -20,7 +19,10 @@ import type {
   ContinuationConnection,
   ContinuationPending
 } from "../continuation-state";
-import { ContinuationState } from "../continuation-state";
+import {
+  CONTINUATION_COALESCE_MS,
+  ContinuationState
+} from "../continuation-state";
 import {
   continuationStreamStarted,
   runContinuationTurn,
@@ -31,7 +33,7 @@ import {
 import { CHAT_MESSAGE_TYPES } from "../protocol";
 import { ChatStreamStalledError } from "../stall-watchdog";
 
-const COALESCE = AutoContinuationController.COALESCE_MS;
+const COALESCE = CONTINUATION_COALESCE_MS;
 const RESUME_NONE = JSON.stringify({
   type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE
 });
@@ -1621,7 +1623,8 @@ describe("what a continuation turn runs", () => {
     const state = new ContinuationState<TestConnection>();
     const parts = {
       continuation: state,
-      autoContinuation: turns.autoContinuation,
+      rearmForBatch: () => turns.rearmContinuation(),
+      activateDeferred: () => {},
       aborts: turns.aborts,
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
@@ -1640,7 +1643,8 @@ describe("what a continuation turn runs", () => {
   it("a continuation turn leaves no record behind", async () => {
     const parts = {
       continuation: turns.continuation,
-      autoContinuation: turns.autoContinuation,
+      rearmForBatch: () => turns.rearmContinuation(),
+      activateDeferred: () => {},
       aborts: turns.aborts,
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
@@ -1655,7 +1659,7 @@ describe("what a continuation turn runs", () => {
       expect(parts.streamed.get(continuation.requestId)).toBe(true);
     };
     await result("a1");
-    turns.autoContinuation.cancelTimer();
+    turns.cancelCoalesce();
     await runContinuationTurn(parts, host.turn());
 
     expect(host.ran).toEqual(["cont-1"]);
@@ -1666,7 +1670,8 @@ describe("what a continuation turn runs", () => {
   it("a connection-less continuation leaves no record behind, run or dropped", async () => {
     const parts = {
       continuation: turns.continuation,
-      autoContinuation: turns.autoContinuation,
+      rearmForBatch: () => turns.rearmContinuation(),
+      activateDeferred: () => {},
       aborts: turns.aborts,
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
