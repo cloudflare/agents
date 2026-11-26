@@ -695,6 +695,17 @@ describe("ChatTurns", () => {
       expect(host.stops).toEqual([{ requestId: "r1", reason: "user stop" }]);
     });
 
+    it("a copy of the runtime's reason inside its abort is still the runtime's", () => {
+      const signal = turnSignal(turns.aborts, "r1");
+      const stalled = new ChatStreamStalledError("stalled");
+      turns.runtimeAbort(
+        () => void turns.cancel("r1", new ChatStreamStalledError("wrapped")),
+        stalled
+      );
+      expect(turns.isStopped(signal)).toBe(false);
+      expect(host.stops).toEqual([]);
+    });
+
     it("a host whose stop bookkeeping fails still stopped the turn", async () => {
       const signal = turnSignal(turns.aborts, "r1");
       host.stopped = () => {

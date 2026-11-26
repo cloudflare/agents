@@ -1763,7 +1763,7 @@ export class ChatTurns<
     this.admissions?.stop(requestId);
     // Inside the runtime's abort, a cancel with another reason (a user's
     // stop that a subclass's `abortRequest` issues) is still a stop.
-    const runtime = this.#runtimeReasons.includes(reason);
+    const runtime = this.#isRuntimeReason(reason);
     this.#noteStopped(this.aborts.get(requestId)?.signal, runtime);
     this.#stop(
       () => {
@@ -1823,7 +1823,7 @@ export class ChatTurns<
    */
   stopAll(reason?: unknown): Promise<void> {
     this.admissions?.stopAll();
-    const runtime = this.#runtimeReasons.includes(reason);
+    const runtime = this.#isRuntimeReason(reason);
     for (const { signal } of this.aborts.values()) {
       this.#noteStopped(signal, runtime);
     }
@@ -1914,6 +1914,21 @@ export class ChatTurns<
   #abortAll(reason?: unknown): void {
     for (const controller of this.aborts.values()) controller.abort(reason);
     this.aborts.clear();
+  }
+
+  /**
+   * Whether `reason` is that of a runtime abort running now: the same
+   * object, or one of its class (an `abortRequest` override may pass on a
+   * copy of the watchdog's error).
+   */
+  #isRuntimeReason(reason: unknown): boolean {
+    return this.#runtimeReasons.some(
+      (own) =>
+        own === reason ||
+        (own instanceof Error &&
+          reason instanceof Error &&
+          reason.constructor === own.constructor)
+    );
   }
 
   /**
