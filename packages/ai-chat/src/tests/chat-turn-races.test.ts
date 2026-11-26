@@ -1113,6 +1113,12 @@ describe("chat turn races", () => {
     );
     // No armed continuation and idle: nothing more can start.
     await settled(agent);
+    // The fallback turn's result is delivered after it leaves the queue.
+    await waitUntil(async () =>
+      (await agent.responseHookReportForTest()).statuses.includes(
+        "turn:completed"
+      )
+    );
 
     const report = await agent.responseHookReportForTest();
     // The fallback turn's own result is delivered after the hook that
@@ -1147,15 +1153,19 @@ describe("chat turn races", () => {
       ] as ChatMessage["parts"]
     };
     await agent.persistMessages([user1, reply]);
-    await agent.setTestBody({ delayMs: 300, failContinuations: true });
+    await agent.setTestBody({ failContinuations: true });
+    await agent.holdNextModelCallForTest();
+    onTestFinished(() => agent.releaseModelCallForTest());
 
     // The second result lands while the first one's continuation waits on
     // the model. Both continuations fail.
     send(ws, toolResult("call-1"));
-    await waitUntil(
-      async () => (await agent.getChatMessageCallCountForTest()) === 1
-    );
+    await waitUntil(async () => await agent.isModelCallHeldForTest());
     send(ws, toolResult("call-2"));
+    await waitUntil(
+      async () => (await agent.getContinuationStateForTest()).hasNext === true
+    );
+    await agent.releaseModelCallForTest();
     await waitUntil(
       async () => (await agent.getChatMessageCallCountForTest()) === 2
     );
@@ -1165,6 +1175,8 @@ describe("chat turn races", () => {
     // A resent result changes nothing, so it starts nothing.
     await sendHandled(agent, ws, toolResult("call-2"));
     await agent.waitForIdleForTest();
+    // Every frame sent so far, both error frames included, is in `seen`.
+    await socketBarrier(ws, seen);
 
     expect(await agent.getChatMessageCallCountForTest()).toBe(2);
     const errorFrames = seen.filter(
