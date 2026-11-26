@@ -880,16 +880,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     options: {
       status?: readonly TaskStatus[];
       order?: "oldest" | "newest";
-      /** Only submissions after this one in `order` (a page's last). */
-      after?: string;
+      /**
+       * Only submissions after this one in `order`: a page's last, as the
+       * page returned it, so it holds even after that one is deleted.
+       */
+      after?: { readonly operationId: string; readonly createdAt: number };
       limit: number;
     }
   ): Promise<ThinkOperationInspection[]> {
     await this.lifecycle.ready();
-    const after =
-      options.after === undefined
-        ? undefined
-        : this.#tasks.peek(runIdOf(session, options.after));
+    const after = options.after;
     return this.#tasks
       .peekList({
         definition: SUBMISSION_DEFINITION,
@@ -897,7 +897,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         ...(options.status && { status: options.status }),
         order: options.order ?? "newest",
         ...(after && {
-          after: { createdAt: after.createdAt, runId: after.runId }
+          after: {
+            createdAt: after.createdAt,
+            runId: runIdOf(session, after.operationId)
+          }
         }),
         limit: options.limit
       })

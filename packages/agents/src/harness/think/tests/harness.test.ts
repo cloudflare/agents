@@ -174,6 +174,26 @@ describe("ThinkHarness turns", () => {
     expect(await stub.inspect("op-2")).toBeUndefined();
   });
 
+  it("pages submissions after a page's last one, even once it is deleted", async () => {
+    const stub = fresh();
+    for (const id of ["x", "a", "b"]) {
+      await stub.wait(
+        (await stub.submit(id, { operationId: id, submission: true }))
+          .operationId
+      );
+    }
+    const first = await stub.submissionPage(2);
+    expect(first.map((s) => s.id)).toEqual(["x", "a"]);
+    // The page ended in one that is then deleted; the next page still
+    // starts after it, not from the front again.
+    expect(await stub.deleteSubmission("a")).toBe(true);
+    const next = await stub.submissionPage(2, {
+      operationId: "a",
+      createdAt: first[1].createdAt
+    });
+    expect(next.map((s) => s.id)).toEqual(["b"]);
+  });
+
   it("treats an empty idempotency key as none, as Think does", async () => {
     const stub = fresh();
     const first = await stub.submit("one", { idempotencyKey: "" });

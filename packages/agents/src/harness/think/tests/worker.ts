@@ -1213,6 +1213,19 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return listed.map((s) => ({ id: s.operationId, status: s.status }));
   }
 
+  /** One page of the root session's submissions, oldest first, by id. */
+  async submissionPage(
+    limit: number,
+    after?: { operationId: string; createdAt: number }
+  ): Promise<{ id: string; createdAt: number }[]> {
+    const listed = await this.harness.submissions(this.harness.session().id, {
+      order: "oldest",
+      limit,
+      ...(after && { after })
+    });
+    return listed.map((s) => ({ id: s.operationId, createdAt: s.createdAt }));
+  }
+
   deleteSubmission(operationId: string): Promise<boolean> {
     return this.harness.deleteSubmission(
       this.harness.session().id,

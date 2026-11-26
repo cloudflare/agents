@@ -1011,7 +1011,8 @@ export class Think<
     // long run of submissions that do not match is passed over, never
     // read twice, and no more than a page is in memory.
     let deleted = 0;
-    let after: string | undefined;
+    // The last record read, as it was read: it may be deleted by then.
+    let after: { operationId: string; createdAt: number } | undefined;
     while (deleted < limit) {
       const listed = await this.harness.submissions(session, {
         status: taskStatusesFor(wanted),
@@ -1029,7 +1030,8 @@ export class Think<
         }
       }
       if (listed.length < limit) break;
-      after = listed[listed.length - 1].operationId;
+      const last = listed[listed.length - 1];
+      after = { operationId: last.operationId, createdAt: last.createdAt };
     }
     return deleted;
   }
