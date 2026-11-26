@@ -194,6 +194,14 @@ describe("ThinkHarness turns", () => {
       createdAt: first[1].createdAt
     });
     expect(next.map((s) => s.id)).toEqual(["s3"]);
+    // The cursor is by time first: an id before every other, at a time
+    // after the newest, leaves nothing to read.
+    expect(
+      await stub.submissionPage(2, {
+        operationId: "s0",
+        createdAt: next[0].createdAt + 1
+      })
+    ).toEqual([]);
   });
 
   it("treats an empty idempotency key as none, as Think does", async () => {
