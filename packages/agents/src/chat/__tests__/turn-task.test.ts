@@ -210,6 +210,42 @@ describe("createChatTurnTaskDefinition", () => {
     warn.mockRestore();
   });
 
+  it("keeps the run of a recovery attempt's turn open until the attempt recorded its outcome", async () => {
+    const resolve = vi.fn();
+    const holds: number[] = [];
+    let recorded!: () => void;
+    const entry: ChatTurnClosureEntry = {
+      onStash: () => {},
+      run: (inside) => inside(async () => "reply"),
+      settle: { resolve, reject: () => {} },
+      hold: () => {
+        // Asked only once the caller has the turn's result.
+        holds.push(resolve.mock.calls.length);
+        return new Promise<void>((done) => {
+          recorded = done;
+        });
+      }
+    };
+    const { step } = fakeStep(entry);
+    let ended = false;
+    const run = createChatTurnTaskDefinition(hooks)(
+      { requestId: "r1", continuation: true, nonce: "n1" },
+      step
+    ).then(() => {
+      ended = true;
+    });
+    // The attempt has the turn's result, and the run is still open.
+    await vi.waitFor(() => expect(resolve).toHaveBeenCalledWith("reply"));
+    await new Promise((turn) => setTimeout(turn, 0));
+    expect(ended).toBe(false);
+
+    expect(holds).toEqual([1]);
+
+    recorded();
+    await run;
+    expect(ended).toBe(true);
+  });
+
   it("keeps only the app's stash data in the checkpoint", async () => {
     const stashed: unknown[] = [];
     const entry: ChatTurnClosureEntry = {

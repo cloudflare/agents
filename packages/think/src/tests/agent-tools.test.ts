@@ -437,6 +437,31 @@ describe("Think agent tools", () => {
     expect(outcome.parentRow).toBe("completed");
   }, 30_000);
 
+  it("ends a run whose child reset after its recovered turn ended, before the recovery recorded it", async () => {
+    const parent = await getAgentByName(
+      env.ThinkAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runThinkChildThroughResetAtOutcomeForTest(): Promise<{
+          child: { status: string; error?: string } | null;
+          incidents: Array<{ status: string; reason?: string }>;
+          assistantMessages: number;
+          resetAtOutcome: boolean;
+        }>;
+      }
+    ).runThinkChildThroughResetAtOutcomeForTest();
+    // The recovered turn's run was still open at the reset: its replay
+    // found the reply already streamed to its end and settled the
+    // recovery. Nothing is left scheduled with nothing to run it.
+    expect(outcome.resetAtOutcome).toBe(true);
+    expect(outcome.incidents).toEqual([]);
+    expect(outcome.child).toEqual({ status: "completed", error: undefined });
+    // The reply was not asked for again.
+    expect(outcome.assistantMessages).toBe(1);
+  }, 40_000);
+
   it("preserves explicit agent-tool cancellation as aborted", async () => {
     const agent = await freshAgent();
     const runId = crypto.randomUUID();

@@ -849,7 +849,8 @@ export class AIChatAgent<
     turnBody: (continuation, body, requestId) =>
       this._chatRecoveryEngine().turnBody(continuation, body, requestId),
     turnAccepted: (requestId) => this._turns.turnAccepted(requestId),
-    inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt
+    inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt,
+    recoveryAttemptEnded: () => this._chatRecoveryEngine().attemptEnded
   });
 
   /**
@@ -3311,7 +3312,8 @@ export class AIChatAgent<
           this._recordChatTerminal(requestId, errorText),
         endRequest: (requestId, outcome) =>
           this._frames.endUnstarted(null, requestId, outcome),
-        reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
+        reconcileAgentToolChildRuns: (endedRequestId) =>
+          this._agentToolRuns.reconcileOwn(endedRequestId),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
         latestMessage: () => this.messages.at(-1),

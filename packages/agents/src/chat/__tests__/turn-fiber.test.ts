@@ -376,6 +376,48 @@ describe("ChatTurnFibers", () => {
     expect(log).not.toContain("engine:failed");
   });
 
+  it("gives a recovery attempt its turn's result while the turn's run holds for the attempt to end", async () => {
+    let attemptEnds!: () => void;
+    const attemptEnded = new Promise<void>((resolve) => {
+      attemptEnds = resolve;
+    });
+    host.inRecoveryAttempt = () => true;
+    host.recoveryAttemptEnded = () => attemptEnded;
+    // The run, as the turn's Task: it settles the caller, then holds.
+    let runEnded = false;
+    host.runTask = async (_input, closure) => {
+      closure.settle.resolve(await closure.run((fn) => fn()));
+      await closure.hold?.();
+      runEnded = true;
+    };
+
+    // The attempt has the result though the run has not ended: it could
+    // not end the attempt otherwise.
+    await expect(
+      fibers.run(
+        { requestId: "r1", continuation: true, snapshot: snapshot("r1") },
+        async () => "reply"
+      )
+    ).resolves.toBe("reply");
+    expect(runEnded).toBe(false);
+
+    attemptEnds();
+    await vi.waitFor(() => expect(runEnded).toBe(true));
+  });
+
+  it("asks no run to hold for a turn outside a recovery attempt", async () => {
+    let asked: unknown = "not run";
+    host.runTask = async (_input, closure) => {
+      closure.settle.resolve(await closure.run((fn) => fn()));
+      asked = closure.hold;
+    };
+    await fibers.run(
+      { requestId: "r1", continuation: false, snapshot: snapshot("r1") },
+      async () => "reply"
+    );
+    expect(asked).toBeUndefined();
+  });
+
   it("fails the Task of a recovery attempt's turn the isolate's memory reset ended", async () => {
     host.inRecoveryAttempt = () => true;
     await expect(

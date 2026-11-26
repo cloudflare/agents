@@ -76,6 +76,12 @@ export interface ChatTurnFiberHost {
    * Optional: a host without one never runs a turn for an attempt.
    */
   inRecoveryAttempt?(): boolean;
+  /**
+   * For a caller that is a recovery attempt: settles when that attempt has
+   * ended (`ChatRecoveryEngine.attemptEnded`). Optional, as
+   * {@link inRecoveryAttempt}.
+   */
+  recoveryAttemptEnded?(): Promise<void> | undefined;
 }
 
 /** One turn to run as a fiber. */
@@ -231,7 +237,14 @@ export class ChatTurnFibers {
     // request, a caller's result capture), whichever attempt claims it: the
     // caller's, or the alarm's when that claims the run first.
     const inCaller = AsyncLocalStorage.snapshot();
-    await this.host.runTask(
+    // For a recovery attempt's turn, the run stays open until the attempt,
+    // this caller, has recorded the turn's outcome.
+    const attemptEnded = this.host.recoveryAttemptEnded?.();
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      held = resolve;
+    });
+    const started = this.host.runTask(
       {
         requestId,
         continuation,
@@ -246,9 +259,18 @@ export class ChatTurnFibers {
           turn.onAccepted?.(requestId);
           return inCaller(() => inside(body));
         },
-        settle: { resolve: resolveOutcome, reject: rejectOutcome }
+        settle: { resolve: resolveOutcome, reject: rejectOutcome },
+        ...(attemptEnded && {
+          hold: () => {
+            held();
+            return attemptEnded;
+          }
+        })
       }
     );
+    // Until the run ended, or holds for this caller: the caller then has
+    // the outcome, and the run ends after it.
+    await Promise.race([started, holding]);
     return (await outcome) as T;
   }
 }

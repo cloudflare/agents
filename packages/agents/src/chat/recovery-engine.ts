@@ -345,8 +345,13 @@ export interface ChatRecoveryTurnBindings {
    * waits on the request learns only that recovery is over.
    */
   endRequest?(requestId: string, outcome: "skipped" | "aborted"): void;
-  /** Close agent-tool child runs a recovered turn settled. */
-  reconcileAgentToolChildRuns(): Promise<void>;
+  /**
+   * Close agent-tool child runs a recovered turn settled.
+   *
+   * @param endedRequestId - The turn an attempt just ended. Its run may
+   *   still be closing, and is not a turn that waits for recovery.
+   */
+  reconcileAgentToolChildRuns(endedRequestId?: string): Promise<void>;
   /** Keep a detached recovered turn inside the current alarm's domain. */
   trackAlarmWork(turn: Promise<void>): void;
   /**
@@ -1665,8 +1670,23 @@ export class ChatRecoveryEngine {
       turnRequestId?: string;
       /** The schedule whose turn the attempt started. */
       turnDelivery?: number;
+      /** Settles when the attempt ends. */
+      ended: Promise<void>;
     }
   >();
+
+  /**
+   * For code that runs inside a recovery attempt: settles when that attempt
+   * has ended, its turn's outcome recorded. The run of the attempt's turn
+   * stays open until then (`ChatTurnClosureEntry.hold`).
+   * `undefined` outside an attempt.
+   */
+  get attemptEnded(): Promise<void> | undefined {
+    const incidentId = this.adapter.turns?.attemptScope.getStore()?.incidentId;
+    return incidentId
+      ? this.#runningAttempts.get(incidentId)?.ended
+      : undefined;
+  }
 
   /**
    * Register a running recovery attempt. `superseded` aborts when another
@@ -1680,11 +1700,22 @@ export class ChatRecoveryEngine {
   beginAttempt(incidentId: string | undefined): {
     superseded: AbortSignal;
     stopped: AbortSignal;
-    end(): void;
+    /** @returns The request id of the turn the attempt started, if any. */
+    end(): string | undefined;
   } {
-    const attempt = {
+    let ended!: () => void;
+    const attempt: {
+      superseded: AbortController;
+      stopped: AbortController;
+      turnRequestId?: string;
+      turnDelivery?: number;
+      ended: Promise<void>;
+    } = {
       superseded: new AbortController(),
-      stopped: new AbortController()
+      stopped: new AbortController(),
+      ended: new Promise<void>((resolve) => {
+        ended = resolve;
+      })
     };
     if (incidentId) this.#runningAttempts.set(incidentId, attempt);
     return {
@@ -1694,6 +1725,8 @@ export class ChatRecoveryEngine {
         if (incidentId && this.#runningAttempts.get(incidentId) === attempt) {
           this.#runningAttempts.delete(incidentId);
         }
+        ended();
+        return attempt.turnRequestId;
       }
     };
   }

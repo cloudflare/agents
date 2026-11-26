@@ -39,6 +39,13 @@ export type ChatTurnClosureEntry = {
     resolve(value: unknown): void;
     reject(error: unknown): void;
   };
+  /**
+   * For the turn of a recovery attempt, called once its caller is settled:
+   * the returned promise settles once the attempt has recorded the turn's
+   * outcome. The run stays open until then, so a reset before that write
+   * replays the run, which settles the recovery. Never rejects.
+   */
+  hold?(): Promise<void>;
 };
 
 /**
@@ -396,6 +403,11 @@ export function createChatTurnTaskDefinition(
           // run; the lane that waits for the reply waits for that too.
           if (scheduled && !lane) continueHeldLane(step.id, requestId);
           entry.settle.resolve(value);
+          // The attempt that started this turn records its outcome only
+          // now, in memory. Were the run to end first, a reset in between
+          // would leave a recovery nothing runs again. A turn cut off
+          // again kept its next attempt in this run: that is its outcome.
+          if (!scheduled) await entry.hold?.();
         } catch (error) {
           entry.settle.reject(error);
           throw error;

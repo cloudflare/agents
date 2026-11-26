@@ -762,12 +762,12 @@ export class AgentToolRuns {
    * written only while it is still open: a cancel that landed meanwhile
    * stands.
    */
-  async reconcileStale(runId: string): Promise<void> {
+  async reconcileStale(runId: string, endedRequestId?: string): Promise<void> {
     const stale = this.host.store.read(runId);
     if (!stale || !this.isStale(stale)) return;
     // Incidents still being worked mean the turn may yet finish; a
     // completed recovery deletes its incident.
-    const recovery = await this.#recoveryOf(stale);
+    const recovery = await this.#recoveryOf(stale, endedRequestId);
     if (recovery === "in-progress") return;
     // Read again: a recovered turn may have been bound meanwhile. A cancel
     // that landed meanwhile settled the row, and the write below is a
@@ -1060,7 +1060,8 @@ export class AgentToolRuns {
    * turn itself.
    */
   async #recoveryOf(
-    run: AgentToolRunRecord
+    run: AgentToolRunRecord,
+    endedRequestId?: string
   ): Promise<"in-progress" | "cancelled" | "failed" | undefined> {
     // A row that never bound a request has neither, and matches nothing.
     const ids = new Set([run.requestId, run.rootRequestId]);
@@ -1097,7 +1098,11 @@ export class AgentToolRuns {
     // that opened it is still settling.
     if (
       !matched &&
-      this.host.store.openTurnRequestIds().some((id) => ids.has(id))
+      this.host.store
+        .openTurnRequestIds()
+        // The run of a recovered turn whose attempt just recorded its
+        // outcome is still closing: it does not wait for recovery.
+        .some((id) => id !== endedRequestId && ids.has(id))
     ) {
       return "in-progress";
     }
@@ -1166,11 +1171,11 @@ export class AgentToolRuns {
    * a no-progress window (#1630). Best-effort: a parent inspect still
    * reconciles lazily.
    */
-  async reconcileOwn(): Promise<void> {
+  async reconcileOwn(endedRequestId?: string): Promise<void> {
     // A run that is live here is not stale, and is left alone.
     for (const runId of this.host.store.listOpen()) {
       try {
-        await this.reconcileStale(runId);
+        await this.reconcileStale(runId, endedRequestId);
       } catch {
         // A parent inspect reconciles it.
       }

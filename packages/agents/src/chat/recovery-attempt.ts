@@ -211,6 +211,7 @@ export async function runRecoveredTurn<
   engine: ChatRecoveryEngine,
   host: RecoveredTurnHost<TData, TResult>
 ): Promise<void> {
+  let endedRequestId: string | undefined;
   try {
     if (await engine.isRecoveryCancelled(host.data?.incidentId)) {
       await host.onStopped?.();
@@ -230,7 +231,7 @@ export async function runRecoveredTurn<
     // Inside the attempt's scope. Only what runs here, the turn the attempt
     // starts included, is this attempt's. A turn some other request starts
     // while the attempt waits for the chat to settle is not.
-    await engine.runInAttemptScope(
+    endedRequestId = await engine.runInAttemptScope(
       {
         incidentId: host.data?.incidentId,
         rootRequestId:
@@ -254,7 +255,7 @@ export async function runRecoveredTurn<
     // A failure here must not replace what the attempt threw: a platform
     // transient has to reach the caller as one, to be deferred.
     try {
-      await engine.turns.reconcileAgentToolChildRuns();
+      await engine.turns.reconcileAgentToolChildRuns(endedRequestId);
     } catch (error) {
       console.error(
         `${engine.turns.label} failed to reconcile agent-tool child runs after a recovery attempt`,
@@ -273,7 +274,7 @@ async function runAdmittedAttempt<
 >(
   engine: ChatRecoveryEngine,
   host: RecoveredTurnHost<TData, TResult>
-): Promise<void> {
+): Promise<string | undefined> {
   const { callback, data } = host;
   const incidentId = data?.incidentId;
   const turns = engine.turns;
@@ -284,6 +285,7 @@ async function runAdmittedAttempt<
   // a client stopped the incident by an id `stop` is not registered under.
   const attempt = engine.beginAttempt(incidentId);
   const stopped = (): boolean => stop.signal.aborted || attempt.stopped.aborted;
+  let turnRequestId: string | undefined;
   const recordStop = async (): Promise<void> => {
     await engine.recordRecoveryStop(incidentId);
     // The stop names the request the tab waits on, whose last frame said
@@ -491,8 +493,10 @@ async function runAdmittedAttempt<
     await handleRecoveryAttemptError(engine, { callback, data, error });
   } finally {
     stop.end();
-    attempt.end();
+    // The turn's run, held open until here, may end now.
+    turnRequestId = attempt.end();
   }
+  return turnRequestId;
 }
 
 /**

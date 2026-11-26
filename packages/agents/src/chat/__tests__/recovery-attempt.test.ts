@@ -105,8 +105,8 @@ function setup(scenario: Scenario = {}) {
       await scenario.duringWait?.(harness);
       return scenario.ready ?? true;
     },
-    reconcileAgentToolChildRuns: async () => {
-      log.push("reconcile");
+    reconcileAgentToolChildRuns: async (endedRequestId) => {
+      log.push(endedRequestId ? `reconcile:${endedRequestId}` : "reconcile");
     },
     trackAlarmWork: () => {},
     attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
@@ -1360,6 +1360,42 @@ describe("what an attempt records, and in what order", () => {
     const seen = statusWhen(t, "onSkipped");
     await t.run();
     expect(seen).toEqual(["skipped"]);
+  });
+
+  it("tells its turn's run that it ended only once the outcome is recorded", async () => {
+    // The run of the attempt's turn stays open until then: a reset before
+    // the outcome is written must find a run to replay.
+    let ended: Promise<void> | undefined;
+    const seen: Array<{ incident: string; log: string[] }> = [];
+    const t = setup({
+      duringTurn: async ({ engine }) => {
+        // The turn, in its own run, as the host's fiber wrapper starts it.
+        await engine.turnBody(true, async () => {}, "turn-req")();
+        ended = engine.attemptEnded;
+        void ended?.then(() => {
+          // A completed recovery deletes its incident.
+          seen.push({
+            incident: t.incident()?.status ?? "deleted",
+            log: [...t.log]
+          });
+        });
+      }
+    });
+    expect(t.engine.attemptEnded).toBeUndefined();
+    await t.run();
+    await ended;
+
+    expect(ended).toBeInstanceOf(Promise);
+    // Recorded before the run was told, and the reconcile after it is told
+    // which turn just ended.
+    expect(seen).toEqual([
+      {
+        incident: "deleted",
+        log: expect.arrayContaining(["before-outcome", "after-outcome"])
+      }
+    ]);
+    expect(seen[0].log).not.toContain("reconcile:turn-req");
+    expect(t.log).toContain("reconcile:turn-req");
   });
 
   it("marks a superseded incident before it tells the attempt running here", async () => {

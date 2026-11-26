@@ -6677,6 +6677,51 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     this.ctx.abort("test: forced reset");
   }
 
+  /** Differs after each reset of this agent's isolate. */
+  private readonly _isolateForTest = crypto.randomUUID();
+
+  async isolateForTest(): Promise<string> {
+    return this._isolateForTest;
+  }
+
+  /**
+   * Reset this agent's isolate at the moment a recovery attempt is about to
+   * record that its turn completed: the recovered turn has ended, and its
+   * outcome is not written yet.
+   *
+   * @returns The isolate that was armed.
+   */
+  async resetBeforeRecoveryOutcomeForTest(): Promise<string> {
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      updateIncident(id: unknown, status: string, ...rest: unknown[]): unknown;
+    };
+    const update = engine.updateIncident.bind(engine);
+    engine.updateIncident = (id, status, ...rest) => {
+      if (status !== "completed") return update(id, status, ...rest);
+      this.ctx.abort("test: forced reset");
+      throw new Error("test: forced reset");
+    };
+    return this._isolateForTest;
+  }
+
+  /** Each recovery incident's status, and how many replies are stored. */
+  async recoveryStateForTest(): Promise<{
+    incidents: string[];
+    assistantMessages: number;
+  }> {
+    const incidents = await this.ctx.storage.list<{ status: string }>({
+      prefix: "cf:chat-recovery:incident:"
+    });
+    return {
+      incidents: [...incidents.values()].map((incident) => incident.status),
+      assistantMessages: this.messages.filter(
+        (message) => message.role === "assistant"
+      ).length
+    };
+  }
+
   /** Create the pre-capability chat stream tables with one stream in them. */
   /** Old request-context rows, as an earlier release kept them, and no session value. */
   async seedLegacyRequestContextForTest(): Promise<void> {
@@ -8962,6 +9007,71 @@ export class AIChatAgentToolParent extends Agent<Env> {
       child: inspection
         ? { status: inspection.status, error: inspection.error }
         : null
+    };
+  }
+
+  /**
+   * The child's run is cut off by a reset, and a second reset lands after
+   * its recovered turn ended, before the recovery recorded that.
+   */
+  async runChildThroughResetAtOutcomeForTest(): Promise<{
+    child: { status: string; error?: string } | null;
+    incidents: string[];
+    assistantMessages: number;
+    resetAtOutcome: boolean;
+  }> {
+    const runId = crypto.randomUUID();
+    const running = this.runAgentTool(AIChatAgentToolChild, {
+      runId,
+      parentToolCallId: "test-tool-call",
+      input: { prompt: "work through two resets", chunkDelayMs: 100 },
+      inputPreview: "work through two resets"
+    });
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const streaming = Date.now() + 5000;
+    while (
+      (await child.getAgentToolChunks(runId)).length === 0 &&
+      Date.now() < streaming
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await child.resetIsolateForTest().catch(() => {});
+    // The new isolate recovers the turn after a backoff: the second reset
+    // is armed before that.
+    const armed = await (
+      await this.subAgent(AIChatAgentToolChild, runId)
+    ).resetBeforeRecoveryOutcomeForTest();
+    await running;
+    const deadline = Date.now() + 15_000;
+    let inspection: { status: string; error?: string } | null = null;
+    let state = { incidents: [] as string[], assistantMessages: 0 };
+    let resetAtOutcome = false;
+    while (Date.now() < deadline) {
+      try {
+        const fresh = await this.subAgent(AIChatAgentToolChild, runId);
+        inspection = await fresh.inspectAgentToolRun(runId);
+        state = await fresh.recoveryStateForTest();
+        // The armed isolate is gone: the second reset happened.
+        resetAtOutcome = (await fresh.isolateForTest()) !== armed;
+        if (
+          resetAtOutcome &&
+          inspection &&
+          inspection.status !== "running" &&
+          inspection.status !== "starting"
+        ) {
+          break;
+        }
+      } catch {
+        // The isolate is resetting.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return {
+      child: inspection
+        ? { status: inspection.status, error: inspection.error }
+        : null,
+      ...state,
+      resetAtOutcome
     };
   }
 
