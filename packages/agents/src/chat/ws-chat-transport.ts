@@ -229,7 +229,10 @@ export class WebSocketChatTransport<
     return requestId === null ? {} : { requestIds: [requestId] };
   }
 
-  /** Accepted turn discovered by a resume probe, before a stream is attached. */
+  /**
+   * Accepted turn discovered by a resume probe, before a stream is attached.
+   * @internal
+   */
   get pendingServerTurnId(): string | null {
     return this._pendingServerTurnId;
   }
