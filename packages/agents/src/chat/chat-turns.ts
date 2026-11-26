@@ -66,6 +66,7 @@ import {
 import {
   continuationStreamEnded,
   continuationStreamStarted,
+  dropPendingContinuation,
   dropWaitingContinuations,
   replyFinalized,
   runContinuationTurn,
@@ -1764,6 +1765,9 @@ export class ChatTurns<
     // Inside the runtime's abort, a cancel with another reason (a user's
     // stop that a subclass's `abortRequest` issues) is still a stop.
     const runtime = this.#isRuntimeReason(reason);
+    // The continuation waiting under this id has no turn until it fires:
+    // the stop drops it.
+    if (!runtime) dropPendingContinuation(this.#continuationParts, requestId);
     this.#noteStopped(this.aborts.get(requestId)?.signal, runtime);
     this.#stop(
       () => {
