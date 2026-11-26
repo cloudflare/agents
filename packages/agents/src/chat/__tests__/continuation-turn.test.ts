@@ -738,9 +738,14 @@ describe("the continuation turn", () => {
     const second = makeConnection("c2");
     host.model = async (continuation) => {
       if (continuation.requestId !== "cont-1") return;
+      turns.streamStarted("cont-1", () => {});
+      host.replyStreaming = true;
+      // Held by the live reply's stream gate.
       await result("a1", second);
       await fire();
-      turns.streamStarted("cont-1", () => {});
+      expect(turns.aborts.has("cont-2")).toBe(false);
+      // The reply ends with no finalize.
+      host.replyStreaming = false;
     };
     await result("a1");
     await fire();

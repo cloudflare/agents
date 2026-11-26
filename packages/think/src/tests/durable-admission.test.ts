@@ -373,6 +373,65 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
 });
 
 describe("a client tool call a reset cut off", () => {
+  it("an answer then a reset: the restored continuation's tab gets its done frame", async () => {
+    const binding = "ThinkAdmissionTestAgent";
+    const once = async (gap: number) => {
+      const room = crypto.randomUUID();
+      const ws = await connect(binding, room);
+      const sent = record(ws);
+      send(ws, "r1", [user("u1", "one")], {
+        clientToolThenEnd: true,
+        clientTools: [{ name: "client_action", description: "A client tool" }]
+      });
+      await waitFor(
+        async () => sent,
+        (frames) => doneFrame(frames, "r1") !== undefined
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "tc-client-1",
+          toolName: "client_action",
+          output: "done",
+          autoContinue: true
+        })
+      );
+      // Around the coalesce window: fired or not when the reset lands.
+      await delay(gap);
+      await reset(binding, room);
+
+      const tab = await connect(binding, room);
+      const frames = record(tab);
+      tab.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+      const restarted = await agent(binding, room);
+      await waitFor(
+        () => restarted.getMessagesForTest(),
+        (m) => JSON.stringify(m).includes("Continuation after tool")
+      );
+      const done = (list: Array<Record<string, unknown>>) =>
+        list.some(
+          (frame) =>
+            frame.type === MSG_CHAT_RESPONSE &&
+            frame.done === true &&
+            frame.id !== "r1"
+        );
+      const streamed = (list: Array<Record<string, unknown>>) =>
+        list.some(
+          (frame) =>
+            frame.type === MSG_CHAT_RESPONSE &&
+            frame.id !== "r1" &&
+            frame.done !== true
+        );
+      const seen = await waitFor(async () => frames, done, 10_000);
+      // A tab that got the stream gets its end.
+      return !streamed(seen) || done(seen);
+    };
+    const results = await Promise.all(
+      Array.from({ length: 16 }, (_, i) => once(i * 6))
+    );
+    expect(results.every(Boolean)).toBe(true);
+  }, 120_000);
+
   it("continues with the client's answer, without waiting out recovery", async () => {
     const binding = "ThinkAdmissionTestAgent";
     const room = crypto.randomUUID();
