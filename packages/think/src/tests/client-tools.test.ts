@@ -4692,11 +4692,11 @@ describe("Think — stop means stop for continuations", () => {
     });
     onTestFinished(unsubscribe);
     const agent = await freshAgent(room);
-    // The reply streams for about 10 s, so it is still streaming, and the
-    // continuation still held by the stream gate, when the stop lands. With
-    // a 1 s reply a slow RPC let the reply end and the continuation start
-    // first (std race 5): a stop after that can't undo its turn.
-    await agent.setSlowClientToolStreamMode(true, 25, 400);
+    await agent.setSlowClientToolStreamMode(true, 25, 40);
+    // The reply stays open after its tool call until the stop has landed, so
+    // the continuation is still held by the stream gate when it does (std
+    // race 5: a late stop used to land after the continuation had started).
+    await agent.holdSlowClientToolStreamForTest();
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
