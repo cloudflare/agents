@@ -411,6 +411,8 @@ const AGENT_TOOL_REATTACH_POLL_MAX_MS = 5_000;
 // a crash mid-handler) may re-claim it. Guards against a double-fire on the
 // happy path while guaranteeing at-least-once delivery under failure.
 const DETACHED_DELIVERY_LEASE_MS = 60_000;
+// How long the reconcile tick waits for one delivery before it goes on.
+const DETACHED_TICK_DELIVERY_WAIT_MS = 5_000;
 // Escalating cadence for the self-scheduling detached reconcile backbone. The
 // warm fast path makes the first entries near-moot; these bound worst-case
 // post-eviction latency while keeping steady-state alarm cost low. The schedule
@@ -761,6 +763,8 @@ export class Agent<
    * `maxConcurrentAgentTools`. Each leaves when its call returns.
    */
   private readonly _agentToolRunsStarting = new Set<string>();
+  /** @internal Tick deliveries waiting in this isolate, by slot and run. */
+  private readonly _detachedDeliveriesInFlight = new Set<string>();
   /** @internal Serializes detached-backbone arming against concurrent dispatch. */
   private _detachedBackboneArming: Promise<void> = Promise.resolve();
   /** @internal Edge-trigger latch for the live-detached-count warning. */
@@ -4912,6 +4916,46 @@ export class Agent<
   }
 
   /**
+   * Deliver from the reconcile tick, waiting for it at most 5 s. A chat host
+   * serializes a delivery behind its chat lane, and the lane's next turn may
+   * need a wake job that runs after this tick in the same alarm: the tick
+   * waiting on it would hold the alarm for good. Past the bound the delivery
+   * goes on by itself; its claim and lease still deliver it at least once,
+   * and the tick counts it as outstanding until it is.
+   */
+  private async _deliverDetachedFromTick<Output>(
+    runId: string,
+    kind: "finish" | "give_up",
+    result: RunAgentToolResult<Output>,
+    options?: { sequence?: number; serialize?: boolean },
+    completedAt?: number
+  ): Promise<void> {
+    // One in flight per slot in this isolate, so a lease that runs out
+    // while it waits for the lane does not queue it twice.
+    const key = `${kind}:${runId}`;
+    if (this._detachedDeliveriesInFlight.has(key)) return;
+    this._detachedDeliveriesInFlight.add(key);
+    const delivery = this._deliverDetachedTerminal(
+      runId,
+      kind,
+      result,
+      options,
+      completedAt
+    )
+      .catch((error: unknown) => this._safeRunOnError(error))
+      .finally(() => this._detachedDeliveriesInFlight.delete(key));
+    this.ctx.waitUntil(delivery);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      delivery,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, DETACHED_TICK_DELIVERY_WAIT_MS);
+      })
+    ]);
+    clearTimeout(timer);
+  }
+
+  /**
    * Durable backbone for detached runs. Runs on a self-rescheduling alarm:
    * collects any detached run that has reached terminal but was not yet
    * delivered (e.g. the parent was evicted before the fast path landed), gives
@@ -4988,7 +5032,7 @@ export class Agent<
           row.agent_type,
           inspection
         );
-        await this._deliverDetachedTerminal(
+        await this._deliverDetachedFromTick(
           runId,
           "finish",
           result,
@@ -5075,7 +5119,7 @@ export class Agent<
           ) &&
           !this._isDetachedGiveUpAbort(afterCancel)
         ) {
-          await this._deliverDetachedTerminal(
+          await this._deliverDetachedFromTick(
             runId,
             "finish",
             this._terminalResultFromInspection(row.agent_type, afterCancel),
@@ -5084,7 +5128,7 @@ export class Agent<
           );
           continue;
         }
-        await this._deliverDetachedTerminal(
+        await this._deliverDetachedFromTick(
           runId,
           "give_up",
           {

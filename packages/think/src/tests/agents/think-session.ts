@@ -3106,6 +3106,65 @@ export class ThinkTestAgent extends Think {
     return { turn, callback };
   }
 
+  /** Detached deliveries to `onDetachedTestDoneForTest`, by run. */
+  private _detachedTestDeliveries: string[] = [];
+
+  async onDetachedTestDoneForTest(run: { runId: string }): Promise<void> {
+    this._detachedTestDeliveries.push(run.runId);
+  }
+
+  /**
+   * A detached run whose child has finished, collected by the reconcile
+   * tick while a chat turn holds the chat lane. The delivery is serialized
+   * behind the lane: the tick must not wait on it for good. Returns how
+   * long the tick took, and the deliveries before and after the turn ends.
+   */
+  async reconcileDetachedWhileLaneBusyForTest(): Promise<{
+    elapsedMs: number;
+    deliveredBefore: number;
+    deliveredAfter: number;
+  }> {
+    const runId = crypto.randomUUID();
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.startAgentToolRun("detached work", { runId });
+    const ready = Date.now() + 10_000;
+    while (Date.now() < ready) {
+      const inspection = await child.inspectAgentToolRun(runId);
+      if (inspection?.status === "completed") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, agent_type, status, display_order, started_at, detached,
+        detached_on_finish, detached_max_budget_at
+      ) VALUES (
+        ${runId}, 'ThinkTestAgent', 'running', 0, ${Date.now()}, 1,
+        'onDetachedTestDoneForTest', ${Date.now() + 3_600_000}
+      )
+    `;
+    const { turn } = await this._holdActiveRpcTurnForTest();
+    const startedAt = Date.now();
+    await (
+      this as unknown as { _cfDetachedReconcileTick(): Promise<void> }
+    )._cfDetachedReconcileTick();
+    const elapsedMs = Date.now() - startedAt;
+    const deliveredBefore = this._detachedTestDeliveries.length;
+    await this.releaseBeforeStepForTest();
+    await turn;
+    const delivered = Date.now() + 10_000;
+    while (
+      this._detachedTestDeliveries.length === 0 &&
+      Date.now() < delivered
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return {
+      elapsedMs,
+      deliveredBefore,
+      deliveredAfter: this._detachedTestDeliveries.length
+    };
+  }
+
   /**
    * An RPC `chat()` waits in the queue behind a running turn. The caller
    * cancels it, or the chat is cleared, before its turn starts.
