@@ -275,7 +275,8 @@ export interface TaskRunOptions {
   /**
    * @internal Checkpoint entries the run starts with, written with its row,
    * so they are durable before any attempt runs. Cleared at settle like
-   * the rest of the checkpoint.
+   * the rest of the checkpoint. Ignored on a join: the existing run's
+   * checkpoint stands.
    */
   checkpoint?: Record<string, TaskJson>;
 
