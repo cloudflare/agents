@@ -319,4 +319,25 @@ describe("Streams instances", () => {
       ]);
     });
   });
+
+  it("folds a named instance's released version key into the record", async () => {
+    await withCapabilityHarness(async ({ install, storage }) => {
+      storage.kv.put("cf_agents:streams/audit:streams_schema_version", 2);
+      const plain = new Streams();
+      const audit = new Streams({ name: "audit" });
+      const { lifecycle } = install(plain);
+      lifecycle.use(audit);
+      await lifecycle.start();
+
+      expect(
+        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")?.[
+          "streams/audit"
+        ]
+      ).toBe(2);
+      // A named instance never had v1 chunks: its key goes at once.
+      expect(
+        storage.kv.get("cf_agents:streams/audit:streams_schema_version")
+      ).toBe(undefined);
+    });
+  });
 });

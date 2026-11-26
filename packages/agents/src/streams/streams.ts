@@ -338,14 +338,23 @@ export class Streams extends LifecycleCapability {
 
   /** Migrate stream storage during Lifecycle startup. */
   async onStart(): Promise<void> {
+    // Probed at most once per start: for the key, then for the fold.
+    let legacyTable: boolean | undefined;
+    const hasLegacyTable = () =>
+      (legacyTable ??=
+        this.instanceName === undefined && this.#hasLegacyChunkTable());
     const version = this.lifecycle.schema.migrateSync({
       version: CURRENT_STREAM_SCHEMA_VERSION,
       legacyKey: this.#schemaVersionKey,
+      // A released version reads v1 chunks only while this key says v1 or
+      // later: it stays until the chunk table is gone, so a rollback still
+      // reads them.
+      keepLegacyKey: hasLegacyTable,
       steps: { [CURRENT_STREAM_SCHEMA_VERSION]: () => this.#ensureTables() }
     });
     // Schema v1's chunk table only ever belonged to the default instance.
     if (version >= 1 && this.instanceName === undefined) {
-      this.#legacyChunkTable = this.#hasLegacyChunkTable();
+      this.#legacyChunkTable = hasLegacyTable();
     }
   }
 
@@ -1546,6 +1555,8 @@ export class Streams extends LifecycleCapability {
     if (remaining > 0) return;
     this.#sqlWrite("DROP TABLE cf_agents_stream_chunks", []);
     this.#legacyChunkTable = false;
+    // Nothing a released version reads is left: its version key goes too.
+    this.lifecycle.storage.kv.delete(this.#schemaVersionKey);
   }
 
   #rowToStatus(row: StreamRow): StreamStatus {
