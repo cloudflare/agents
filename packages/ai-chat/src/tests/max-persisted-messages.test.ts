@@ -8,7 +8,6 @@ describe("maxPersistedMessages", () => {
   it("does not limit messages when maxPersistedMessages is undefined", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -30,7 +29,6 @@ describe("maxPersistedMessages", () => {
   it("deletes oldest messages when count exceeds limit", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -62,7 +60,6 @@ describe("maxPersistedMessages", () => {
   it("keeps all messages when count is under the limit", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -85,7 +82,6 @@ describe("maxPersistedMessages", () => {
   it("enforces limit across multiple persist calls", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -164,7 +160,6 @@ describe("maxPersistedMessages", () => {
   it("deletes more than 100 excess messages via batched IN deletes", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -199,7 +194,6 @@ describe("maxPersistedMessages", () => {
   it("can be disabled by setting to null", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 

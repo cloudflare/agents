@@ -132,8 +132,6 @@ describe("Chat Agent Persistence", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
     const initialMessages: ChatMessage[] = [
       { id: "init1", role: "user", parts: [{ type: "text", text: "First" }] },
       {

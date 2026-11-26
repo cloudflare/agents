@@ -19,7 +19,6 @@ describe("Server-initiated streaming integration", () => {
     const { ws: observer } = await connectChatWS(
       `/agents/response-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const chunks: unknown[] = [];
     let doneReceived = false;
@@ -75,7 +74,6 @@ describe("Server-initiated streaming integration", () => {
     const { ws: client2 } = await connectChatWS(
       `/agents/response-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     // Client 2 is the observer — track what it receives
     const client2Chunks: unknown[] = [];
@@ -150,7 +148,6 @@ describe("Server-initiated streaming integration", () => {
     const { ws: observer } = await connectChatWS(
       `/agents/response-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
 

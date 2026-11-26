@@ -88,7 +88,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("queues a second websocket request behind the active turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
     const doneIds: string[] = [];
@@ -151,7 +150,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("queues saveMessages behind the active turn and waitForIdle covers both turns", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -196,19 +194,20 @@ describe("AIChatAgent chat turn serialization", () => {
   it("waitForIdle covers tool-result continuations queued during an active turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
     // The active turn waits on the model and writes no reply, so the tool
     // call message stays the latest one and its continuation still applies.
+    // The model's response is held until the test releases it.
+    await agentStub.holdNextResponseForTest();
+    onTestFinished(() => agentStub.releaseResponseForTest());
     sendChatRequest(ws, "req-tool-turn", [firstUserMessage], {
       format: "sse",
-      responseDelayMs: 400,
       chunkCount: 0
     });
 
-    await delay(80);
+    await waitUntil(async () => await agentStub.isResponseHeldForTest());
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
 
     await agentStub.persistToolCallMessage(
@@ -229,14 +228,16 @@ describe("AIChatAgent chat turn serialization", () => {
 
     await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
 
+    let idleWhileHeld = false;
     const idlePromise = agentStub.waitForIdleForTest();
-
-    await expect(
-      Promise.race([
-        idlePromise.then(() => "idle"),
-        delay(100).then(() => "pending")
-      ])
-    ).resolves.toBe("pending");
+    void idlePromise.then(() => {
+      idleWhileHeld = true;
+    });
+    // A round trip after the wait: the active turn is still held, so the
+    // agent cannot be idle.
+    expect(await agentStub.isResponseHeldForTest()).toBe(true);
+    expect(idleWhileHeld).toBe(false);
+    await agentStub.releaseResponseForTest();
 
     await idlePromise;
 
@@ -251,7 +252,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("coalesces rapid auto-continued tool results into a single continuation turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -311,7 +311,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("processes rapid auto-continued tool results when no turn is active", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -372,7 +371,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("queues a follow-up continuation when a tool result arrives after coalesce but before stream start", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -442,7 +440,6 @@ describe("AIChatAgent chat turn serialization", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     const { ws: observerWs } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -503,10 +500,12 @@ describe("AIChatAgent chat turn serialization", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     const { ws: observerWs } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn stays active until the test releases its stream.
+    await agentStub.holdStreamForTest("req-save-clear");
+    onTestFinished(() => agentStub.releaseStreamForTest("req-save-clear"));
     sendChatRequest(ws, "req-save-clear", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
@@ -514,18 +513,23 @@ describe("AIChatAgent chat turn serialization", () => {
       chunkDelayMs: 40
     });
 
-    await delay(80);
+    await waitUntil(
+      async () => await agentStub.isStreamHeldForTest("req-save-clear")
+    );
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
 
     const savePromise = agentStub.saveSyntheticUserMessage(
       "This should be skipped"
     );
-
-    await delay(20);
+    // The save waits in the queue behind the held turn.
+    await waitUntil(
+      async () => (await agentStub.queuedTurnCountForTest()) === 2
+    );
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
     await clearBroadcast;
+    await agentStub.releaseStreamForTest("req-save-clear");
 
     await savePromise;
     await agentStub.waitForIdleForTest();

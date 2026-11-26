@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { MessageType } from "../types";
 import { connectChatWS, waitForChatClearBroadcast } from "./test-utils";
 
@@ -41,7 +41,6 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
   it("queues saveMessages behind an active websocket turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -158,20 +157,25 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     const { ws: observerWs } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The first turn stays active until the test releases its stream.
+    await agentStub.holdStreamForTest("req-programmatic-clear-1");
+    onTestFinished(() =>
+      agentStub.releaseStreamForTest("req-programmatic-clear-1")
+    );
     sendChatRequest(ws, "req-programmatic-clear-1", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
       chunkCount: 20,
       chunkDelayMs: 80
     });
-
-    // Wait for the first request to be well underway before enqueuing
-    // (stream runs for 20×80ms = 1600ms, so 200ms is ~12% in)
-    await delay(200);
+    await vi.waitFor(async () => {
+      expect(
+        await agentStub.isStreamHeldForTest("req-programmatic-clear-1")
+      ).toBe(true);
+    });
 
     const queuedPromise = agentStub.enqueueSyntheticUserMessage("Skipped", {
       body: {
@@ -181,12 +185,15 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
       }
     });
 
-    // Give the enqueue RPC time to be processed before sending clear
-    await delay(100);
+    // The programmatic turn waits in the queue behind the held one.
+    await vi.waitFor(async () => {
+      expect(await agentStub.queuedTurnCountForTest()).toBe(2);
+    });
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
     await clearBroadcast;
+    await agentStub.releaseStreamForTest("req-programmatic-clear-1");
 
     const queuedResult = await queuedPromise;
     await agentStub.waitForIdleForTest();
@@ -205,7 +212,6 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     const { ws: observerWs } = await connectSlowStream(room);
-    await delay(50);
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
     const running = agentStub.enqueueSyntheticUserMessage("Cut off", {

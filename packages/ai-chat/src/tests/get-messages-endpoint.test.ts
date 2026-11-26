@@ -11,7 +11,6 @@ describe("GET /get-messages endpoint", () => {
 
     // First, establish a WebSocket to create the DO instance
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
     ws.close(1000);
 
     const res = await exports.default.fetch(
@@ -26,7 +25,6 @@ describe("GET /get-messages endpoint", () => {
   it("returns persisted messages in chronological order", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -68,7 +66,6 @@ describe("GET /get-messages endpoint", () => {
   it("streams a transcript with offloaded payloads as the same JSON array", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -140,7 +137,6 @@ describe("onRequest override patterns", () => {
     const room = crypto.randomUUID();
 
     const { ws } = await connectChatWS(`/agents/agent-with-super-call/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.AgentWithSuperCall, room);
     const messages: ChatMessage[] = [
@@ -165,7 +161,6 @@ describe("onRequest override patterns", () => {
     const { ws } = await connectChatWS(
       `/agents/agent-without-super-call/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.AgentWithoutSuperCall, room);
     const messages: ChatMessage[] = [
@@ -194,7 +189,6 @@ describe("onRequest override patterns", () => {
     const { ws } = await connectChatWS(
       `/agents/agent-without-super-call/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
     ws.close(1000);
 
     const res = await exports.default.fetch(

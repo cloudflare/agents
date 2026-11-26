@@ -12,7 +12,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("persists new messages and skips unchanged ones on second call", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -51,7 +50,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("persists modified messages when content changes", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -85,7 +83,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("writes nothing when persisting an unchanged transcript", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -128,7 +125,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("re-accepts a cleared message id", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -174,7 +170,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("messages under the row budget pass through unchanged", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -210,7 +205,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("splits an oversized tool output across rows and reads it back byte-for-byte", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -249,7 +243,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("stores an oversized user text part losslessly", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -279,7 +272,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("splits multi-byte Unicode on byte boundaries, not character counts", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -320,7 +312,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("normal chunks are stored", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -340,7 +331,6 @@ describe("Oversized rows and incremental persistence", () => {
     it("oversized chunks are skipped without crash", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      await new Promise((r) => setTimeout(r, 50));
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 

@@ -10,7 +10,6 @@ describe("Clear History", () => {
     const room = crypto.randomUUID();
     const { ws: ws1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const { ws: ws2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -81,7 +80,6 @@ describe("Clear History", () => {
   it("resets abort controllers when clearing history", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     // Start a request
     const userMessage: ChatMessage = {

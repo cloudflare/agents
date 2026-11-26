@@ -14,7 +14,6 @@ describe("Merge Incoming With Server State", () => {
   it("preserves server-side tool outputs when client sends messages without them", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -78,7 +77,6 @@ describe("Merge Incoming With Server State", () => {
   it("preserves server-side tool outputs when client sends approval-responded state", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -145,7 +143,6 @@ describe("Merge Incoming With Server State", () => {
   it("preserves server-side tool outputs when client sends approval-requested state", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -211,7 +208,6 @@ describe("Merge Incoming With Server State", () => {
   it("passes through messages unchanged when server has no tool outputs", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -240,7 +236,6 @@ describe("Merge Incoming With Server State", () => {
   it("reuses server assistant IDs for plain text messages to avoid duplicates", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -291,7 +286,6 @@ describe("Merge Incoming With Server State", () => {
   it("matches repeated assistant text messages in order", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -354,7 +348,6 @@ describe("Merge Incoming With Server State", () => {
   it("does not reconcile when assistant content differs at the same position", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -397,7 +390,6 @@ describe("Merge Incoming With Server State", () => {
   it("skips tool-bearing assistant messages during reconciliation without breaking cursor", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 

@@ -633,7 +633,6 @@ describe("onChatResponse fires outside turn lock", () => {
     const { ws } = await connectChatWS(
       `/agents/response-save-messages-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.ResponseSaveMessagesAgent, room);
 
@@ -678,7 +677,6 @@ describe("onChatResponse fires outside turn lock", () => {
     const { ws } = await connectChatWS(
       `/agents/response-save-messages-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.ResponseSaveMessagesAgent, room);
 
@@ -733,7 +731,6 @@ describe("onChatResponse fires outside turn lock", () => {
     const { ws } = await connectChatWS(
       `/agents/response-save-messages-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.ResponseSaveMessagesAgent, room);
 

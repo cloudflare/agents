@@ -1,8 +1,13 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import {
+  connectChatWS,
+  isUseChatResponseMessage,
+  socketBarrier,
+  waitUntilHandled
+} from "./test-utils";
 import { getAgentByName } from "agents";
 
 /**
@@ -89,7 +94,6 @@ describe("Cancel request", () => {
   it("ends a cancelled request aborted when onChatMessage fails with the abort's reason", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
     const requestId = "req-cancel-before-response";
     const collecting = collectMessages(ws);
 
@@ -120,10 +124,9 @@ describe("Cancel request", () => {
     ["before its response", { failOnAbort: "before-response" }]
   ])(
     "sends the stopping tab one terminal frame for a request stopped %s",
-    async (_when, body) => {
+    async (when, body) => {
       const room = crypto.randomUUID();
       const { ws } = await connectSlowStream(room);
-      await new Promise((r) => setTimeout(r, 50));
       const requestId = "req-one-terminal";
       const terminals: unknown[] = [];
       ws.addEventListener("message", (e: MessageEvent) => {
@@ -137,11 +140,42 @@ describe("Cancel request", () => {
         }
       });
 
+      const seen: unknown[] = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        seen.push(JSON.parse(e.data as string));
+      });
+      const agent = await getAgentByName(env.SlowStreamAgent, room);
+
       sendChatRequest(ws, requestId, [userMessage], body);
-      await new Promise((r) => setTimeout(r, 300));
+      // The request's turn has started before the stop is sent; mid-stream,
+      // its text has reached the tab too.
+      await vi.waitFor(async () => {
+        expect(await agent.getStartedRequestIds()).toContain(requestId);
+      });
+      if (when === "mid-stream") {
+        await vi.waitFor(() =>
+          expect(
+            seen.some(
+              (m) =>
+                isUseChatResponseMessage(m) &&
+                m.id === requestId &&
+                typeof m.body === "string" &&
+                m.body.includes('"text-delta"') &&
+                !m.done
+            )
+          ).toBe(true)
+        );
+      }
       sendCancel(ws, requestId);
-      // Long enough for anything sent after the stop's own work to arrive.
-      await new Promise((r) => setTimeout(r, 1000));
+      // The stop's handler has finished, so all it sends is sent ...
+      await waitUntilHandled(
+        agent,
+        MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+        1
+      );
+      await vi.waitFor(() => expect(terminals.length).toBeGreaterThan(0));
+      // ... and by the barrier's reply it has arrived.
+      await socketBarrier(ws, seen);
 
       expect(terminals).toHaveLength(1);
       expect(terminals[0]).toMatchObject({ outcome: "aborted" });
@@ -152,7 +186,6 @@ describe("Cancel request", () => {
   it("cancel during plaintext streaming sends done and stops chunks", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const requestId = "req-cancel-plain";
 
@@ -198,7 +231,6 @@ describe("Cancel request", () => {
   it("cancel during SSE streaming sends done and stops chunks", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const requestId = "req-cancel-sse";
 
@@ -235,7 +267,6 @@ describe("Cancel request", () => {
   it("abort controller is cleaned up after cancel", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -265,7 +296,6 @@ describe("Cancel request", () => {
   it("cancel with abortSignal wired to stream stops faster", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const requestId = "req-cancel-with-signal";
     const collecting = collectMessages(ws);
@@ -300,7 +330,6 @@ describe("Cancel request", () => {
   it("completing a full stream without cancel produces no abort-related issues", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const requestId = "req-no-cancel";
     const collecting = collectMessages(ws);

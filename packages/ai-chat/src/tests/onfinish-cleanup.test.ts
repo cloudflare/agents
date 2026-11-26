@@ -99,7 +99,6 @@ describe("onFinish cleanup (framework-managed)", () => {
   it("cancellation still works after cleanup is moved to _reply", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     // Send a request and immediately cancel it
     ws.send(

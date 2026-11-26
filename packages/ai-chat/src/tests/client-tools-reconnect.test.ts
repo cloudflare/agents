@@ -117,7 +117,6 @@ describe("Client tools after reconnect", () => {
     ]);
 
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((resolve) => setTimeout(resolve, 200));
     await agentStub.clearCapturedContext();
 
     // Send tool result WITHOUT clientTools (old client behavior)
