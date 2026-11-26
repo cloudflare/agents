@@ -2873,27 +2873,43 @@ export class Agent<
 
   async _cf_sendToSubAgentConnection(
     connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
+    message: string | ArrayBuffer | ArrayBufferView,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.sendToConnection(connectionId, message);
+    await this._dynamicAgents.sendToConnection(
+      connectionId,
+      message,
+      ownerPath
+    );
   }
 
   async _cf_sendManyToSubAgentConnection(
     connectionId: string,
-    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.sendManyToConnection(connectionId, messages);
+    await this._dynamicAgents.sendManyToConnection(
+      connectionId,
+      messages,
+      ownerPath
+    );
   }
 
   async _cf_closeSubAgentConnection(
     connectionId: string,
     code?: number,
-    reason?: string
+    reason?: string,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
-    await this._dynamicAgents.closeConnection(connectionId, code, reason);
+    await this._dynamicAgents.closeConnection(
+      connectionId,
+      code,
+      reason,
+      ownerPath
+    );
   }
 
   async _cf_closeSubAgentConnectionsForPrefix(
@@ -2907,19 +2923,25 @@ export class Agent<
 
   async _cf_setSubAgentConnectionState(
     connectionId: string,
-    state: unknown
+    state: unknown,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<unknown> {
     await this.__unsafe_ensureInitialized();
-    return this._dynamicAgents.setConnectionState(connectionId, state);
+    return this._dynamicAgents.setConnectionState(
+      connectionId,
+      state,
+      ownerPath
+    );
   }
 
   async _cf_setSubAgentConnectionFlag(
     connectionId: string,
     key: string,
-    value: unknown
+    value: unknown,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
-    this._dynamicAgents.setConnectionFlag(connectionId, key, value);
+    this._dynamicAgents.setConnectionFlag(connectionId, key, value, ownerPath);
   }
 
   protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {

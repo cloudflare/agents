@@ -172,25 +172,30 @@ export type RootFacetRpcSurface = {
   ): Promise<DynamicAgentConnectionMeta[]>;
   _cf_sendToSubAgentConnection(
     connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
+    message: string | ArrayBuffer | ArrayBufferView,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
   _cf_sendManyToSubAgentConnection(
     connectionId: string,
-    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
   _cf_closeSubAgentConnection(
     connectionId: string,
     code?: number,
-    reason?: string
+    reason?: string,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
   _cf_setSubAgentConnectionState(
     connectionId: string,
-    state: unknown
+    state: unknown,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<unknown>;
   _cf_setSubAgentConnectionFlag(
     connectionId: string,
     key: string,
-    value: unknown
+    value: unknown,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
   _cf_closeSubAgentConnectionsForPrefix(
     prefix: ReadonlyArray<AgentPathStep>,

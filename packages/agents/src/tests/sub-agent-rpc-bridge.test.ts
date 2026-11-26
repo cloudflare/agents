@@ -305,9 +305,54 @@ describe("facet connection operations after frame completion (issue #2055)", () 
       ]);
       expectSuccessfulResult(response, "scheduled");
       await expect(delivered).resolves.toBe(message);
+
+      // Once the root has handled the old socket's close, the sub-agent
+      // still has the client: its broadcast reaches the new socket.
+      const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+      old.close();
+      await vi.waitFor(async () => {
+        expect(await parentStub.subAgentClosesHandledForTest()).toBe(1);
+      });
+      const broadcast = waitForTextMessage(ws, "after-old-close");
+      await parentStub.broadcastFromSubAgentDetached(child, [
+        "after-old-close"
+      ]);
+      await expect(broadcast).resolves.toBe("after-old-close");
     } finally {
       ws.close();
       old.close();
+    }
+  });
+
+  it("keeps a sub-agent's sends off another sub-agent's socket with the same id", async () => {
+    // A client picks its `_pk`, so two sub-agents can each have a socket
+    // with the same id: each one's frames are its own.
+    const parent = uniqueName();
+    const pk = crypto.randomUUID();
+    const other = await connectWS(parent, uniqueName(), pk);
+    const ws = await connectWS(parent, uniqueName(), pk);
+    const leaked: string[] = [];
+    other.addEventListener("message", (event: MessageEvent) => {
+      if (event.data === "only-mine") leaked.push(event.data as string);
+    });
+    try {
+      const delivered = waitForTextMessage(ws, "only-mine");
+      expectSuccessfulResult(
+        await callRPC(ws, "sendConnectionMessageAfterDelay", ["only-mine"]),
+        "scheduled"
+      );
+      await expect(delivered).resolves.toBe("only-mine");
+      // Sent after the other socket would have got it: the same root call.
+      const after = waitForTextMessage(other, "after");
+      expectSuccessfulResult(
+        await callRPC(other, "sendConnectionMessageAfterDelay", ["after"]),
+        "scheduled"
+      );
+      await after;
+      expect(leaked).toEqual([]);
+    } finally {
+      ws.close();
+      other.close();
     }
   });
 

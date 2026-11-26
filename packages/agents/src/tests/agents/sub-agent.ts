@@ -22,6 +22,7 @@ import { Tasks } from "../../tasks/tasks.ts";
 import { Streams } from "../../streams/streams.ts";
 import { EventLogSubAgent } from "./event-log-sub-agent.ts";
 import type { TaskStep } from "../../tasks/types.ts";
+import type { AgentPathStep } from "../../sub-routing.ts";
 import { registerDeliverySink, sendDelivery } from "../../internal/delivery.ts";
 
 const STALE_FRAME_PROBE = "stale-frame-probe";
@@ -1665,6 +1666,29 @@ export class TestSubAgentParent extends Agent {
     };
   }
 
+  private _subAgentClosesHandled = 0;
+
+  /** Sub-agent socket closes the root has finished handling. */
+  subAgentClosesHandledForTest(): number {
+    return this._subAgentClosesHandled;
+  }
+
+  constructor(...args: ConstructorParameters<typeof Agent>) {
+    super(...args);
+    // SAFETY: the fixture counts the root's handling of sub-agent closes.
+    const host = this as unknown as {
+      _cf_forwardSubAgentWebSocketClose(...args: unknown[]): Promise<boolean>;
+    };
+    const forward = host._cf_forwardSubAgentWebSocketClose.bind(this);
+    host._cf_forwardSubAgentWebSocketClose = async (...args: unknown[]) => {
+      try {
+        return await forward(...args);
+      } finally {
+        this._subAgentClosesHandled += 1;
+      }
+    };
+  }
+
   private _fiberWakeRouteFailuresRemaining = 0;
   private _rootResolutionFailuresRemaining = 0;
   private _nextRootResolutionDelayMs = 0;
@@ -1784,18 +1808,24 @@ export class TestSubAgentParent extends Agent {
 
   override async _cf_sendToSubAgentConnection(
     connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
+    message: string | ArrayBuffer | ArrayBufferView,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     this._subAgentConnectionSendCalls += 1;
-    await super._cf_sendToSubAgentConnection(connectionId, message);
+    await super._cf_sendToSubAgentConnection(connectionId, message, ownerPath);
   }
 
   override async _cf_sendManyToSubAgentConnection(
     connectionId: string,
-    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     this._subAgentConnectionSendCalls += 1;
-    await super._cf_sendManyToSubAgentConnection(connectionId, messages);
+    await super._cf_sendManyToSubAgentConnection(
+      connectionId,
+      messages,
+      ownerPath
+    );
   }
 
   async broadcastFromSubAgentDetached(
