@@ -815,8 +815,12 @@ export class ChatTurns<
           return;
         }
         // The runs it superseded never run. Those an earlier isolate left
-        // have no request here to say so.
-        admissions?.endRuns(receipt.superseded ?? []);
+        // have no request here to say so: they end `skipped` here, so a tab
+        // that resumes by their request id learns it.
+        for (const record of admissions?.endRuns(receipt.superseded ?? []) ??
+          []) {
+          this.#replayRequest?.(record)?.onSkipped();
+        }
         admissions?.hold(requestId, receipt.runId, held, supersedes(strategy));
       }
       // Inside the try, so a failure here is reported and settled like any

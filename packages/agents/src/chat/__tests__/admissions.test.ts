@@ -233,7 +233,8 @@ describe("durable admission", () => {
     await b.resume();
     await flush();
     expect(b.started).toEqual(["r4"]);
-    expect(b.replayed).toEqual([]);
+    // r3, which r4 superseded, never runs: it only ends `skipped`.
+    expect(b.ended.get("r3")).toBe("skipped");
     // The questions of the requests it superseded are kept, before its own.
     expect(b.asked.get("r4")).toEqual(["u-r1", "u-r2", "u-r3", "u-r4"]);
   });
@@ -597,6 +598,8 @@ describe("durable admission", () => {
     expect(b.started).toEqual(["r3"]);
     // r2's question is kept, and answered with r3's.
     expect(b.asked.get("r3")).toEqual(["u-r1", "u-r2", "u-r3"]);
+    // No request of r2's is here to end it: it ends `skipped` all the same.
+    expect(b.ended.get("r2")).toBe("skipped");
   });
 
   it("a clear ends the waiting requests' runs, so the next request does not wait out their quiet period", async () => {

@@ -367,7 +367,13 @@ export class ChatAdmissions {
    */
   readonly #held = new Map<
     string,
-    { runId: string | null; messages: HeldChatMessage[]; supersedable: boolean }
+    {
+      runId: string | null;
+      messages: HeldChatMessage[];
+      supersedable: boolean;
+      /** A request an earlier isolate left: what its replay would run. */
+      seeded?: ChatAdmissionRecord;
+    }
   >();
   /** Stops of requests no run was known for, by request id. */
   readonly #stoppedUnseen = new Set<string>();
@@ -422,7 +428,18 @@ export class ChatAdmissions {
       this.#held.set(requestId, {
         runId,
         messages: admission.messages,
-        supersedable: supersedes(admission.strategy ?? null)
+        supersedable: supersedes(admission.strategy ?? null),
+        seeded: {
+          requestId,
+          seq: admission.order ?? 0,
+          messageIds: admission.messages.map((message) => message.id),
+          messages: admission.messages,
+          afterUserId: admission.afterUserId,
+          strategy: admission.strategy ?? null,
+          payload: admission.payload,
+          stopped: false,
+          createdAt: Date.now()
+        }
       });
     }
   }
@@ -515,15 +532,23 @@ export class ChatAdmissions {
     return this.#held.size > 0;
   }
 
-  /** The runs `runIds` were superseded: their requests wait no more. */
-  endRuns(runIds: readonly string[]): void {
-    if (runIds.length === 0) return;
+  /**
+   * The runs `runIds` were superseded: their requests wait no more.
+   *
+   * @returns The records of those an earlier isolate left: no request here
+   *   ends them.
+   */
+  endRuns(runIds: readonly string[]): ChatAdmissionRecord[] {
+    const seeded: ChatAdmissionRecord[] = [];
+    if (runIds.length === 0) return seeded;
     const ended = new Set(runIds);
     for (const [requestId, held] of this.#held) {
       if (held.runId !== null && ended.has(held.runId)) {
         this.#held.delete(requestId);
+        if (held.seeded) seeded.push(held.seeded);
       }
     }
+    return seeded;
   }
 
   /** A request's turn started, or it ended: it waits no more. */
