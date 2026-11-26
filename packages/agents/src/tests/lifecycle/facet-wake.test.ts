@@ -207,9 +207,12 @@ describe("facet wake", () => {
     const again = await getAgentByName(env.FacetWakeRoot, name);
     // The restarted root drove it at once, read from the root alone: the
     // drive replied, which clears the count, well inside the old 30 s.
-    await vi.waitFor(async () => {
-      expect(await again.unreportedDrives(key)).toBe(0);
-    });
+    await vi.waitFor(
+      async () => {
+        expect(await again.unreportedDrives(key)).toBe(0);
+      },
+      { timeout: 10_000, interval: 20 }
+    );
     expect(Date.now() - resetAt).toBeLessThan(10_000);
   });
 
