@@ -88,10 +88,6 @@ function setup(scenario: Scenario = {}) {
         ...("recoveryKind" in event && { recoveryKind: event.recoveryKind })
       });
     },
-    scheduleRecovery: (callback, data, reason, delaySeconds) => {
-      scheduled.push({ callback, data, reason, delaySeconds });
-      return Promise.resolve();
-    },
     setRecovering: () => Promise.resolve(),
     exhaustChatRecovery: (incident, _config, partial) => {
       log.push("give-up");
@@ -107,6 +103,10 @@ function setup(scenario: Scenario = {}) {
     }),
     turns: {
       label: "[test]",
+      startAttemptRun: ({ callback, data, delaySeconds }, reason) => {
+        scheduled.push({ callback, data, reason, delaySeconds });
+        return Promise.resolve();
+      },
       beginRecoveryAttempt: () => ({
         signal: new AbortController().signal,
         continuationWaiting: () => false,

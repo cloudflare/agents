@@ -85,6 +85,10 @@ function setup(scenario: Scenario = {}) {
   // The host's turn machinery, as its adapter binds it.
   const turns: ChatRecoveryTurnBindings = {
     label: "[test]",
+    startAttemptRun: (_attempt, reason) => {
+      scheduled.push(reason);
+      return Promise.resolve();
+    },
     beginRecoveryAttempt: () => {
       log.push("begin");
       controller = new AbortController();
@@ -137,10 +141,6 @@ function setup(scenario: Scenario = {}) {
     },
     emitRecoveryEvent: (event) => {
       events.push(event.type);
-    },
-    scheduleRecovery: (_callback, _data, reason) => {
-      scheduled.push(reason);
-      return Promise.resolve();
     },
     setRecovering: () => Promise.resolve(),
     onShouldKeepRecoveringError: () => {},
@@ -1272,12 +1272,16 @@ describe("a recovery callback delivered more than once", () => {
   it("hands each schedule its number in the callback's payload", async () => {
     const t = setup({ incident: { scheduleCount: 4 } });
     const payloads: unknown[] = [];
-    const adapter = (
+    const { turns } = (
       t.engine as unknown as {
-        adapter: { scheduleRecovery: (...args: unknown[]) => Promise<void> };
+        adapter: {
+          turns: {
+            startAttemptRun: (attempt: { data: unknown }) => Promise<void>;
+          };
+        };
       }
     ).adapter;
-    adapter.scheduleRecovery = (_callback, data) => {
+    turns.startAttemptRun = ({ data }) => {
       payloads.push(data);
       return Promise.resolve();
     };
