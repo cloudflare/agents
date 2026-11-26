@@ -2781,7 +2781,9 @@ function toolFingerprint(
           id: "id" in tool ? tool.id : undefined,
           args: "args" in tool ? tool.args : undefined,
           providerOptions: tool.providerOptions,
-          strict: "strict" in tool ? tool.strict : undefined
+          strict: "strict" in tool ? tool.strict : undefined,
+          inputExamples:
+            "inputExamples" in tool ? tool.inputExamples : undefined
         });
         const digest = await crypto.subtle.digest(
           "SHA-256",

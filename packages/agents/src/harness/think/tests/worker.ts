@@ -34,6 +34,7 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
+const LATE_EXAMPLES_KEY = "test:late-examples";
 const ENVIRONMENT_KEY = "test:environment";
 const REMIND_SECTION_KEY = "test:remind-section";
 const REMIND_LABEL_KEY = "test:remind-label";
@@ -226,7 +227,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         ...(this.ctx.storage.kv.get<boolean>(LATE_TOOL_KEY) && {
           late: tool({
             description: "Runs on the client, added later",
-            inputSchema: z.object({})
+            inputSchema: z.object({}),
+            // Examples only once a test adds them.
+            ...(this.ctx.storage.kv.get<boolean>(LATE_EXAMPLES_KEY) && {
+              inputExamples: [{ input: {} }]
+            })
           })
         })
       };
@@ -544,6 +549,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       from: { participantId }
     });
     return session.wait(operationId);
+  }
+
+  addLateExamples(): void {
+    this.ctx.storage.kv.put(LATE_EXAMPLES_KEY, true);
   }
 
   addLateTool(): void {

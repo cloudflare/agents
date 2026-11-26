@@ -1217,6 +1217,37 @@ describe("ThinkHarness context", () => {
     expect(third.endsWith("|user:thanks")).toBe(true);
   });
 
+  it("counts a tool's input examples in its definition", async () => {
+    const stub = fresh();
+    await stub.addLateTool();
+    await stub.prompt("hello", session);
+    await stub.addLateExamples();
+    await stub.prompt("again", session);
+    const [, second] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Changed: late\./);
+  });
+
+  it("tells the model once when a client declares a tool between turns", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    // A client tool arrives with the submission, not from the options.
+    const receipt = await stub.submit("again", {
+      session,
+      clientTools: [
+        {
+          name: "pick_color",
+          description: "Ask the user for a color",
+          parameters: { type: "object", properties: {} }
+        }
+      ]
+    });
+    await stub.wait(receipt.operationId);
+    const [, second] = await stub.promptTexts();
+    expect(second).toMatch(
+      /\|user:again[^|]*The tools you can call changed[^|]*Added: pick_color\./
+    );
+  });
+
   it("delivers a changed remind block once and keeps every request a prefix of the next", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);
