@@ -38,7 +38,23 @@ import {
 export interface ChatLane {
   readonly definition: string;
   readonly lane: string;
+  /** How a new message that arrives while turns wait or run joins them. */
+  readonly arrival?: ChatArrival;
 }
+
+/**
+ * How a turn that arrives while others wait or run joins the lane (a host's
+ * `messageConcurrency`): `"queue"` waits its turn; `"latest"` and `"merge"`
+ * skip the waiting turns that arrived the same way, and answer their
+ * questions too (the arriving turn carries their messages); `"drop"` is not
+ * started at all; `{ debounceMs }` is `"latest"` that also waits for quiet.
+ */
+export type ChatArrival =
+  | "queue"
+  | "latest"
+  | "merge"
+  | "drop"
+  | { readonly debounceMs: number };
 
 /**
  * Start a chat turn: store the messages it brings, then start its run on the
@@ -48,13 +64,42 @@ export async function submitTurn(
   deps: ChatDeps,
   lane: ChatLane,
   input: ChatTurnInput,
-  options: { requestId?: string; idempotencyKey?: string } = {}
-): Promise<{ requestId: string }> {
+  options: {
+    requestId?: string;
+    idempotencyKey?: string;
+    arrival?: ChatArrival;
+  } = {}
+): Promise<{ requestId: string; dropped?: true }> {
   const session = deps.sessions.session(input.session ?? deps.session ?? "");
   // The turn stores the request's messages when it starts (after the
   // replies queued before it); it carries only those the transcript does not
   // already hold as they are, since a tab sends its whole list.
   const fresh: UIMessage[] = [];
+  const arrival = options.arrival ?? "queue";
+  // A turn that replaces the waiting ones answers their questions too: it
+  // carries their messages, which they would have stored when they started.
+  if (arrival !== "queue" && arrival !== "drop") {
+    for (const waiting of deps.tasks.peekList({
+      definition: lane.definition,
+      lane: lane.lane,
+      status: ["pending"],
+      results: false,
+      order: "oldest"
+    })) {
+      if (
+        waiting.waitReason !== "overlap" &&
+        waiting.waitReason !== "debounce"
+      ) {
+        continue;
+      }
+      for (const message of deps.tasks.inputOf<ChatTurnInput>(waiting.runId)
+        ?.messages ?? []) {
+        if (!(input.messages ?? []).some((m) => m.id === message.id)) {
+          fresh.push(message);
+        }
+      }
+    }
+  }
   for (const message of input.messages ?? []) {
     const stored = await session.getMessage(message.id);
     if (!stored || JSON.stringify(stored) !== JSON.stringify(message)) {
@@ -101,12 +146,16 @@ export async function submitTurn(
   const receipt = await deps.tasks.run(lane.definition, run as never, {
     lane: lane.lane,
     retain: false,
+    policy: arrival === "merge" ? "latest" : arrival,
     ...(options.requestId !== undefined && { runId: options.requestId }),
     ...(options.idempotencyKey !== undefined && {
       idempotencyKey: options.idempotencyKey
     })
   });
-  return { requestId: receipt.runId };
+  return {
+    requestId: receipt.runId,
+    ...((receipt as { dropped?: boolean }).dropped && { dropped: true })
+  };
 }
 
 /** Stop the turn `requestId`, waiting or running. */
@@ -444,7 +493,11 @@ export async function chatDispatch(
           ...(request.clientTools && { clientTools: request.clientTools }),
           body: request.body
         },
-        { requestId: request.requestId }
+        {
+          requestId: request.requestId,
+          ...(request.trigger === "submit-message" &&
+            lane.arrival && { arrival: lane.arrival })
+        }
       );
       return true;
     }
