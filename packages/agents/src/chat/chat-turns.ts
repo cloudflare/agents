@@ -1764,6 +1764,12 @@ export class ChatTurns<
     // Inside the runtime's abort, a cancel with another reason (a user's
     // stop that a subclass's `abortRequest` issues) is still a stop.
     const runtime = this.#isRuntimeReason(reason);
+    // The continuation waiting under this id has no controller until it
+    // fires: made now, so its turn finds it stopped and never calls the
+    // model.
+    if (this.continuation.pending?.requestId === requestId) {
+      turnSignal(this.aborts, requestId);
+    }
     this.#noteStopped(this.aborts.get(requestId)?.signal, runtime);
     this.#stop(
       () => {

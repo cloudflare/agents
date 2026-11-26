@@ -4333,7 +4333,6 @@ describe("Think — the continuation turn", () => {
     await waitUntil(
       async () => (await agent.pendingContinuationRequestIdForTest()) !== null
     );
-    await delay(200);
     const continuationId = await agent.pendingContinuationRequestIdForTest();
     expect(continuationId).not.toBeNull();
 
