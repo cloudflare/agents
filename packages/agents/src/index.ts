@@ -209,6 +209,7 @@ import type {
 } from "./fiber-types";
 import type { QueueItem } from "./queue/types";
 export type { QueueItem } from "./queue/types";
+import { MAX_SERIALIZED_BYTES } from "./tasks/serialization";
 import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
 import type {
   TaskCallbacks,
@@ -444,6 +445,13 @@ type AgentToolTaskLocal = {
   input: unknown;
   signal?: AbortSignal;
   meta: AgentToolTaskMeta;
+  /**
+   * A re-issue of a run that ended `interrupted`: the child already has the
+   * run, so the attempt re-attaches within the budgets instead of starting.
+   */
+  reissue?: true;
+  /** A result too large for the run's record, handed to the caller here. */
+  fullResult?: RunAgentToolResult;
 };
 
 /**
@@ -3571,6 +3579,11 @@ export class Agent<
       // re-attaches to the child instead of letting the model re-run work
       // the child already did (#1630).
       const settled = this._agentToolTaskResult<Output>(task);
+      if (settled?.status === "completed" && settled.output === undefined) {
+        // A result kept without its output (too large for the record, or
+        // carried from a version that did not store it): the child holds it.
+        return (await this._agentToolOutputFromChild(settled)) ?? settled;
+      }
       if (settled && settled.status !== "interrupted") return settled;
       if (settled) {
         const meta = this._agentToolTaskMeta(task);
@@ -3579,7 +3592,8 @@ export class Agent<
           return this._startAgentToolTask<Output>(runId, meta, {
             input: options.input,
             signal: options.signal,
-            meta
+            meta,
+            reissue: true
           });
         }
       }
@@ -3771,7 +3785,31 @@ export class Agent<
       start: "now",
       local
     });
-    return this._waitAgentToolTask<Output>(runId);
+    const result = await this._waitAgentToolTask<Output>(runId);
+    // SAFETY: the attempt set it from this run's own result.
+    return (local.fullResult as RunAgentToolResult<Output>) ?? result;
+  }
+
+  /**
+   * The output of a completed run whose record does not hold it, read from
+   * the child; `undefined` when the child cannot say.
+   */
+  private async _agentToolOutputFromChild<Output>(
+    settled: RunAgentToolResult<Output>
+  ): Promise<RunAgentToolResult<Output> | undefined> {
+    try {
+      const adapter = this._asAgentToolChildAdapter<unknown, Output>(
+        await this._cf_resolveSubAgent(settled.agentType, settled.runId)
+      );
+      const inspection = await adapter.inspectAgentToolRun(settled.runId);
+      if (inspection?.status !== "completed") return undefined;
+      return this._terminalResultFromInspection<Output>(
+        settled.agentType,
+        inspection
+      );
+    } catch {
+      return undefined;
+    }
   }
 
   /** The result of an awaited run's task, once its terminal report returned. */
@@ -3861,9 +3899,10 @@ export class Agent<
     let result: RunAgentToolResult;
     let sequence = 1;
     try {
-      const followed = local
-        ? await this._followLiveAgentToolRun(meta, runId, local.input, signal)
-        : await this._reattachAgentToolRun(meta, runId, signal);
+      const followed =
+        local && !local.reissue
+          ? await this._followLiveAgentToolRun(meta, runId, local.input, signal)
+          : await this._reattachAgentToolRun(meta, runId, signal);
       result = followed.result;
       sequence = followed.sequence;
     } catch (error) {
@@ -3877,8 +3916,26 @@ export class Agent<
       for (const remove of listeners) remove();
     }
     this._broadcastAgentToolTerminal(meta.parentToolCallId, sequence, result);
+    return this._agentToolResultForRecord(result, local);
+  }
+
+  /**
+   * The value a run's record keeps. An output too large for a Task value is
+   * left on the child, which keeps it: the caller in this isolate gets the
+   * whole result through `local`, and a later re-issue reads it back.
+   */
+  private _agentToolResultForRecord(
+    result: RunAgentToolResult,
+    local?: AgentToolTaskLocal
+  ): TaskJson {
     // SAFETY: a `RunAgentToolResult` is JSON (its output came over RPC).
-    return result as unknown as TaskJson;
+    const value = result as unknown as TaskJson;
+    if (result.output === undefined) return value;
+    const bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    if (bytes <= MAX_SERIALIZED_BYTES) return value;
+    if (local) local.fullResult = result;
+    const { output: _output, ...rest } = result;
+    return rest as unknown as TaskJson;
   }
 
   /** The terminal report of an awaited run: `onAgentToolFinish`, once settled. */
@@ -4037,7 +4094,8 @@ export class Agent<
       ) {
         // The child still has the run open: it is recovering the turn. Wait
         // for it the way a recovered parent does, within the same budgets.
-        return this._reattachUntilGivenUp(adapter, meta, runId, sequence);
+        // Awaited here, so the abort relay above stays on until it ends.
+        return await this._reattachUntilGivenUp(adapter, meta, runId, sequence);
       }
 
       const inspection = inspected ?? childStart;
@@ -4099,6 +4157,30 @@ export class Agent<
       };
     }
     const { adapter, inspection } = reached;
+    const onAbort = () => {
+      void adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await this._reattachReached(
+        meta,
+        runId,
+        signal,
+        adapter,
+        inspection
+      );
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  private async _reattachReached(
+    meta: AgentToolTaskMeta,
+    runId: string,
+    signal: AbortSignal,
+    adapter: AgentToolChildAdapter,
+    inspection: AgentToolRunInspection | null
+  ): Promise<{ result: RunAgentToolResult; sequence: number }> {
     if (signal.aborted) {
       await adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
       return {
@@ -5103,23 +5185,32 @@ export class Agent<
         startedAt: row.started_at
       };
       const open = row.status === "starting" || row.status === "running";
-      // `importRun` writes a run once, so a reset between it and the delete
-      // carries nothing twice.
-      await this.tasks.importRun({
-        runId: row.run_id,
-        definition: AGENT_TOOL_TASK,
-        status: open ? "running" : "completed",
-        attempt: open ? 1 : 0,
-        metadata: meta,
-        ...(open
-          ? {}
-          : {
-              result: this._resultFromAgentToolRow(row) as unknown as TaskJson
-            }),
-        retain: true,
-        createdAt: row.started_at,
-        ...(open ? {} : { settledAt: row.completed_at ?? row.started_at })
-      });
+      try {
+        // `importRun` writes a run once, so a reset between it and the
+        // delete carries nothing twice.
+        await this.tasks.importRun({
+          runId: row.run_id,
+          definition: AGENT_TOOL_TASK,
+          status: open ? "running" : "completed",
+          attempt: open ? 1 : 0,
+          metadata: meta,
+          ...(open
+            ? {}
+            : {
+                result: this._agentToolResultForRecord(
+                  this._resultFromAgentToolRow(row)
+                )
+              }),
+          retain: true,
+          createdAt: row.started_at,
+          ...(open ? {} : { settledAt: row.completed_at ?? row.started_at })
+        });
+      } catch (error) {
+        // A row that cannot be carried stays where it is, readable as
+        // before, and does not stop the others or the start.
+        await this._safeRunOnError(error);
+        continue;
+      }
       this.sql`DELETE FROM cf_agent_tool_runs WHERE run_id = ${row.run_id}`;
     }
   }

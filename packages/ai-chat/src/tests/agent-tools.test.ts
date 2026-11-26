@@ -137,6 +137,8 @@ type ParentStub = DurableObjectStub & {
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
     lifecycleOrder: string[];
+    statusAfterFailedStart: string | null;
+    finishesAfterFailedStart: number;
   }>;
   reconcileCompletedChildWithReplayFailureForTest(
     input: {
@@ -1293,18 +1295,23 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(lifecycleOrder).toEqual(["after-on-start", `finish:${runId}`]);
   });
 
-  it("settles a recovered run and fires its finish hook once even when startup failed", async () => {
+  it("runs a recovered run's finish hook only after a start that succeeds", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
 
-    const { events, finishes, lifecycleOrder } =
-      await parent.reconcileCompletedChildWithFailedStartupForTest(
-        { prompt: "failed startup child" },
-        runId
-      );
+    const {
+      events,
+      finishes,
+      lifecycleOrder,
+      statusAfterFailedStart,
+      finishesAfterFailedStart
+    } = await parent.reconcileCompletedChildWithFailedStartupForTest(
+      { prompt: "failed startup child" },
+      runId
+    );
 
-    // The run is a task: its attempt runs from its wake whatever the user's
-    // onStart did, and its terminal report fires the hook.
+    expect(statusAfterFailedStart).toBe("running");
+    expect(finishesAfterFailedStart).toBe(0);
     expect(finishes).toHaveLength(1);
     expect(lifecycleOrder).toEqual(["on-start-error", `finish:${runId}`]);
     expect(events.at(-1)).toMatchObject({

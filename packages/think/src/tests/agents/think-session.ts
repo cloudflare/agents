@@ -6286,6 +6286,112 @@ export class ThinkAgentToolParent extends Agent {
     };
   }
 
+  /**
+   * A run a released version left `interrupted` while its child is still
+   * running and silent. A re-issue re-attaches within the re-attach budget
+   * (here 200 ms) and ends `interrupted` again, instead of waiting on the
+   * child for good.
+   */
+  async reissueInterruptedSilentThinkChildForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{ status: string; reason?: string; elapsedMs: number }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.setBeforeStepAsyncDelay(60_000);
+    const started = await child.startAgentToolRun("silent child", { runId });
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, error_message, interrupted_reason,
+        child_still_running, display_metadata, display_order, started_at,
+        completed_at
+      ) VALUES (
+        ${runId}, 'think-tool-call', 'ThinkTestAgent',
+        ${JSON.stringify("silent child")}, 1, 'interrupted', 'gave up',
+        'no-progress', 1, ${JSON.stringify({ name: "think child" })}, 0,
+        ${started.startedAt}, ${Date.now()}
+      )
+    `;
+    await carryForwardAgentToolRunsForTest(this);
+    const resolved = (
+      this as unknown as {
+        _resolvedOptions: { agentToolReattachNoProgressTimeoutMs: number };
+      }
+    )._resolvedOptions;
+    const before = resolved.agentToolReattachNoProgressTimeoutMs;
+    resolved.agentToolReattachNoProgressTimeoutMs = 200;
+    const startedAt = Date.now();
+    try {
+      const result = await this.runAgentTool(ThinkTestAgent, {
+        runId,
+        parentToolCallId: "think-tool-call",
+        input: "silent child",
+        inputPreview: "silent child"
+      });
+      return {
+        status: result.status,
+        ...(result.reason !== undefined ? { reason: result.reason } : {}),
+        elapsedMs: Date.now() - startedAt
+      };
+    } finally {
+      resolved.agentToolReattachNoProgressTimeoutMs = before;
+      await child.cancelAgentToolRun(runId, "test cleanup");
+    }
+  }
+
+  /**
+   * The child's isolate resets mid-run, and the caller's signal aborts once
+   * the parent has started re-attaching to the child's recovered turn.
+   * Returns the parent's result and the child's run status.
+   */
+  async abortWhileReattachingThinkChildForTest(): Promise<{
+    result: string;
+    child: string | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.useSlowModelForTest(
+      ["one ", "two ", "three ", "four ", "five ", "six "],
+      200
+    );
+    const controller = new AbortController();
+    const self = this as unknown as {
+      _reattachAgentToolRunToTerminal(...args: unknown[]): Promise<unknown>;
+    };
+    const original = self._reattachAgentToolRunToTerminal.bind(this);
+    self._reattachAgentToolRunToTerminal = (...args: unknown[]) => {
+      // The parent is following the child's recovered turn: stop it once
+      // this call has returned to its caller.
+      setTimeout(() => controller.abort("stopped by the user"), 0);
+      return original(...args);
+    };
+    try {
+      const running = this.runAgentTool(ThinkTestAgent, {
+        runId,
+        parentToolCallId: "think-tool-call",
+        input: "abort while re-attaching",
+        inputPreview: "abort while re-attaching",
+        signal: controller.signal
+      });
+      const streaming = Date.now() + 5000;
+      while (
+        (await child.getAgentToolChunks(runId)).length === 0 &&
+        Date.now() < streaming
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await child.resetIsolateForTest().catch(() => {});
+      const result = await running;
+      const fresh = await this.subAgent(ThinkTestAgent, runId);
+      const inspection = await this.waitForTerminalInspectionForTest(
+        fresh,
+        runId
+      ).catch(() => null);
+      return { result: result.status, child: inspection?.status ?? null };
+    } finally {
+      self._reattachAgentToolRunToTerminal = original;
+    }
+  }
+
   private insertRecoverableParentRunForTest(
     runId: string,
     agentType: string,
@@ -6553,11 +6659,9 @@ export class ThinkAgentToolParent extends Agent {
 
   /**
    * Two still-running children where the FIRST (by `started_at`) is hung and
-   * the second completes quickly. Re-attaches must run in parallel, each with
-   * its own budget, so the slow child can't starve the fast one against the
-   * shared inspect deadline (#1630). With the buggy serial design the slow
-   * child's re-attach burns the total-recovery deadline and the fast child is
-   * abandoned `interrupted` before it's ever re-attached.
+   * the second completes quickly. Each recovered run follows its own child
+   * with its own budget, so the hung child ends `interrupted` and the fast
+   * one `completed`, whatever order their attempts run in (#1630).
    */
   async reconcileParallelThinkChildrenForTest(): Promise<{
     stuckStatus: string | null;

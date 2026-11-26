@@ -140,6 +140,30 @@ describe("agent-tool runs from a released version", () => {
   });
 });
 
+describe("agent-tool results the run's record cannot hold", () => {
+  it("hands a result too large for the record to the caller, and reads it back from the child on a re-issue", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `large-output-${crypto.randomUUID()}`
+    );
+    const { callerBytes, recordHasOutput, reissueBytes } =
+      await agent.runWithLargeOutputForTest("run-large");
+    expect(callerBytes).toBeGreaterThan(1_200_000);
+    expect(recordHasOutput).toBe(false);
+    expect(reissueBytes).toBe(callerBytes);
+  });
+
+  it("reads the output of a carried row that has none from the child", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `carried-no-output-${crypto.randomUUID()}`
+    );
+    expect(
+      await agent.reissueCarriedRowWithoutOutputForTest("run-no-output")
+    ).toEqual({ status: "completed", output: { answer: 42 } });
+  });
+});
+
 describe("agent-tool connect-time replay", () => {
   it("reads milestones without asking the child to reconcile its run", async () => {
     const agent = await getAgentByName(

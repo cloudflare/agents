@@ -19,6 +19,8 @@ type StubRunInput = {
   /** JSON-encoded UI message chunk bodies, emitted in order. */
   chunkBodies: string[];
   summary?: string;
+  /** The run's structured output, reported by inspection once completed. */
+  output?: unknown;
   /**
    * Milestones the live tail emits (broadcast-only, never stored as chunks)
    * just before the stored chunk at `beforeChunk`; inspection reports them.
@@ -1042,6 +1044,65 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   /**
+   * An awaited run whose output is too large for a Task value: what the
+   * caller gets, what the record keeps, and what a re-issue returns.
+   */
+  async runWithLargeOutputForTest(runId: string): Promise<{
+    callerBytes: number;
+    recordHasOutput: boolean;
+    reissueBytes: number;
+  }> {
+    const output = { blob: "x".repeat(1_200_000) };
+    const first = await this.runAgentTool(TestAgentToolStubChild, {
+      runId,
+      input: { chunkBodies: [], summary: "big", output }
+    });
+    const record = this.tasks.peek(runId)?.result as
+      | { output?: unknown }
+      | undefined;
+    const again = await this.runAgentTool(TestAgentToolStubChild, {
+      runId,
+      input: { chunkBodies: [], summary: "must not run" }
+    });
+    const size = (value: unknown) =>
+      value === undefined ? 0 : JSON.stringify(value).length;
+    return {
+      callerBytes: size(first.output),
+      recordHasOutput: record?.output !== undefined,
+      reissueBytes: size(again.output)
+    };
+  }
+
+  /**
+   * A completed row a released version kept without its output, while the
+   * child still has it: what a re-issue after the carry-forward returns.
+   */
+  async reissueCarriedRowWithoutOutputForTest(
+    runId: string
+  ): Promise<{ status: string; output: unknown }> {
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    await child.startAgentToolRun(
+      { chunkBodies: [], summary: "done", output: { answer: 42 } },
+      { runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, agent_type, status, summary, display_order, started_at,
+        completed_at, detached
+      ) VALUES (
+        ${runId}, 'TestAgentToolStubChild', 'completed', 'done', 0,
+        ${Date.now()}, ${Date.now()}, 0
+      )
+    `;
+    await this._agentTool._carryForwardAgentToolRuns();
+    const result = await this.runAgentTool(TestAgentToolStubChild, {
+      runId,
+      input: { chunkBodies: [], summary: "must not run" }
+    });
+    return { status: result.status, output: result.output };
+  }
+
+  /**
    * A child still running when the parent restarts: a connected client has
    * already seen the stored chunks, then parent recovery re-attaches and
    * forwards the chunks the child produces afterwards.
@@ -1111,7 +1172,8 @@ export class TestAgentToolStubChild extends Agent {
         milestones_json TEXT,
         unstored_json TEXT,
         pending_json TEXT,
-        inspect_delay_ms INTEGER
+        inspect_delay_ms INTEGER,
+        output_json TEXT
       )
     `;
   }
@@ -1173,11 +1235,13 @@ export class TestAgentToolStubChild extends Agent {
     this.sql`
       INSERT OR REPLACE INTO cf_test_stub_runs
         (run_id, status, summary, error, started_at, completed_at,
-         milestones_json, unstored_json, pending_json, inspect_delay_ms)
+         milestones_json, unstored_json, pending_json, inspect_delay_ms,
+         output_json)
       VALUES
         (${options.runId}, ${status}, ${summary}, ${null}, ${startedAt},
          ${completedAt}, ${milestonesJson}, ${unstoredJson}, ${pendingJson},
-         ${input?.inspectDelayMs ?? null})
+         ${input?.inspectDelayMs ?? null},
+         ${input?.output === undefined ? null : JSON.stringify(input.output)})
     `;
     return {
       runId: options.runId,
@@ -1234,8 +1298,10 @@ export class TestAgentToolStubChild extends Agent {
       started_at: number;
       completed_at: number | null;
       inspect_delay_ms: number | null;
+      output_json: string | null;
     }>`
-      SELECT status, summary, error, started_at, completed_at, inspect_delay_ms
+      SELECT status, summary, error, started_at, completed_at, inspect_delay_ms,
+             output_json
       FROM cf_test_stub_runs WHERE run_id = ${runId}
     `;
     const row = rows[0];
@@ -1254,6 +1320,9 @@ export class TestAgentToolStubChild extends Agent {
       status: row.status as AgentToolRunInspection["status"],
       summary: row.summary ?? undefined,
       error: row.error ?? undefined,
+      ...(row.status === "completed" && row.output_json !== null
+        ? { output: JSON.parse(row.output_json) }
+        : {}),
       startedAt: row.started_at,
       completedAt: row.completed_at ?? undefined,
       ...(milestones.length > 0 ? { milestones } : {})

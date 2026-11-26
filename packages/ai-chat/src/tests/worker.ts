@@ -9261,23 +9261,32 @@ export class AIChatAgentToolParent extends Agent<Env> {
     events: AgentToolEventMessage[];
     finishes: AgentToolFinishForTest[];
     lifecycleOrder: string[];
+    statusAfterFailedStart: string | null;
+    finishesAfterFailedStart: number;
   }> {
     await this.prepareCompletedChildForRecoveryTest(input, runId);
     this.events = [];
     this.finishes = [];
     this.lifecycleOrder = [];
 
-    await this.reconcileAgentToolRunsForTest({
-      afterStartup: () => {
-        // The user's onStart failed after the rows were carried forward.
-        this.lifecycleOrder.push("on-start-error");
-      }
-    });
+    // Startup carried the row into its task, then the user's onStart
+    // threw. The job driver dispatches no job of an object whose start
+    // failed, so the run's wake does not run: nothing settles, no hook.
+    await (
+      this as unknown as { _carryForwardAgentToolRuns(): Promise<void> }
+    )._carryForwardAgentToolRuns();
+    this.lifecycleOrder.push("on-start-error");
+    const statusAfterFailedStart = this.getParentAgentToolStatusForTest(runId);
+    const finishesAfterFailedStart = this.finishes.length;
+    // The next start that succeeds runs the wake.
+    await this.reconcileAgentToolRunsForTest();
 
     return {
       events: this.events,
       finishes: this.finishes,
-      lifecycleOrder: this.lifecycleOrder
+      lifecycleOrder: this.lifecycleOrder,
+      statusAfterFailedStart,
+      finishesAfterFailedStart
     };
   }
 

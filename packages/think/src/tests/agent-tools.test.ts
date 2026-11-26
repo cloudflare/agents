@@ -208,6 +208,15 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     stuckStatus: string | null;
     fastStatus: string | null;
   }>;
+  reissueInterruptedSilentThinkChildForTest(runId?: string): Promise<{
+    status: string;
+    reason?: string;
+    elapsedMs: number;
+  }>;
+  abortWhileReattachingThinkChildForTest(): Promise<{
+    result: string;
+    child: string | null;
+  }>;
   reissueInterruptedThinkChildForTest(
     input: string,
     runId?: string
@@ -1280,14 +1289,14 @@ describe("Think agent tools", () => {
     });
   });
 
-  it("re-attaches still-running children in parallel so a hung child can't starve a sibling (#1630)", async () => {
+  it("a hung child does not make a sibling recovered with it end interrupted (#1630)", async () => {
     const parent = await freshParent();
 
     const { stuckStatus, fastStatus } =
       await parent.reconcileParallelThinkChildrenForTest();
 
-    // The fast child completes during its own re-attach budget even though the
-    // (earlier-started) stuck child is still burning its budget in parallel.
+    // Each recovered run follows its own child: the stuck one gives up on its
+    // own budget and does not take the fast one down with it.
     expect(fastStatus).toBe("completed");
     expect(stuckStatus).toBe("interrupted");
   });
@@ -1308,6 +1317,23 @@ describe("Think agent tools", () => {
     expect(reissueStatus).toBe("completed");
     expect(status).toBe("completed");
   });
+
+  it("re-issues an interrupted run within the re-attach budget while its child is silent", async () => {
+    const parent = await freshParent();
+    const { status, reason, elapsedMs } =
+      await parent.reissueInterruptedSilentThinkChildForTest();
+    expect(status).toBe("interrupted");
+    expect(reason).toBe("no-progress");
+    expect(elapsedMs).toBeLessThan(10_000);
+  }, 30_000);
+
+  it("cancels the child when the caller stops while the parent re-attaches", async () => {
+    const parent = await freshParent();
+    const { result, child } =
+      await parent.abortWhileReattachingThinkChildForTest();
+    expect(result).toBe("aborted");
+    expect(child).toBe("aborted");
+  }, 30_000);
 
   it("bounds Think recovery when child facet startup never completes", async () => {
     const parent = await freshParent();
