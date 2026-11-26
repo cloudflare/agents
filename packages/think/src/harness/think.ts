@@ -466,7 +466,14 @@ export class Think<
         }
       }
     });
-    this.harness.observe((_session, event) => {
+    this.harness.observe((session, event) => {
+      if (event.type === "prefix-changed") {
+        this._emit("chat:prefix:changed", {
+          session,
+          requestId: event.operationId,
+          causes: event.causes
+        });
+      }
       if (event.type === "run-end") {
         this.#running = undefined;
         this.#extensionTurn = undefined;

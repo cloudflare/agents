@@ -262,7 +262,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
-      beforeTurn: async ({ toolSet, session }) => {
+      beforeTurn: async ({ toolSet, session, system: built }) => {
         // As an extension's `sendMessage` from this hook does.
         if (this.ctx.storage.kv.get<boolean>(NOTE_IN_BEFORE_TURN_KEY)) {
           await this.#handles.get(session)?.appendMessage({
@@ -279,7 +279,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         const activeTools = this.ctx.storage.kv.get<string[]>(ACTIVE_TOOLS_KEY);
         if (!system && !activeTools) return undefined;
         return {
-          ...(system && { system }),
+          // "+text" extends the built prompt, as a profile hook does.
+          ...(system && {
+            system: system.startsWith("+")
+              ? `${built}\n\n${system.slice(1)}`
+              : system
+          }),
           ...(activeTools && { activeTools })
         };
       },
@@ -577,6 +582,29 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   noteInBeforeTurn(): void {
     this.ctx.storage.kv.put(NOTE_IN_BEFORE_TURN_KEY, true);
+  }
+
+  /** Each `prefix-changed` event, in order: its session and causes. */
+  readonly #prefixChanges: { session: string; causes: unknown }[] = [];
+  readonly unobservePrefix = this.harness.observe((session, event) => {
+    if (event.type === "prefix-changed") {
+      this.#prefixChanges.push({ session, causes: event.causes });
+    }
+  });
+
+  prefixChanges(): { session: string; causes: unknown }[] {
+    return this.#prefixChanges;
+  }
+
+  /** Edit a message on the Sessions handle, around the harness. */
+  async editMessage(session: string, id: string, text: string): Promise<void> {
+    const handle = this.#handles.get(session);
+    const message = (await handle?.getHistory())?.find((m) => m.id === id);
+    if (!handle || !message) throw new Error(`no message ${id}`);
+    await handle.updateMessage({
+      ...message,
+      parts: [{ type: "text", text }]
+    });
   }
 
   addLateTool(): void {

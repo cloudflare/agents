@@ -1282,6 +1282,78 @@ describe("ThinkHarness context", () => {
     expect(third.endsWith("|user:thanks")).toBe(true);
   });
 
+  it("reports a changed prefix once, with why, and nothing while it holds", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.prompt("again", session);
+    expect(await stub.prefixChanges()).toEqual([]);
+
+    await stub.addLateTool();
+    await stub.prompt("tools", session);
+    // A changed remind block goes after the new message: the prefix holds.
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("reminded", session);
+    // A refresh puts it in a new snapshot of the system prompt.
+    await stub.refreshContext(session);
+    await stub.prompt("refreshed", session);
+    await stub.prompt("steady", session);
+    expect(await stub.prefixChanges()).toEqual([
+      {
+        session,
+        causes: [{ kind: "tools", added: ["late"], removed: [], changed: [] }]
+      },
+      { session, causes: [{ kind: "system" }] }
+    ]);
+  });
+
+  it("reports a beforeTurn system prompt that changes between turns", async () => {
+    const stub = fresh();
+    await stub.setSystem("Fixed.");
+    await stub.prompt("hello", session);
+    await stub.prompt("same", session);
+    await stub.setSystem("Fixed, then changed.");
+    await stub.prompt("changed", session);
+    expect(await stub.prefixChanges()).toEqual([
+      { session, causes: [{ kind: "system" }] }
+    ]);
+  });
+
+  it("reports no refresh a beforeTurn system prompt replaces", async () => {
+    const stub = fresh();
+    await stub.setSystem("Fixed.");
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.refreshContext(session);
+    await stub.prompt("refreshed", session);
+    expect(await stub.prefixChanges()).toEqual([]);
+  });
+
+  it("reports a refresh a beforeTurn system prompt extends", async () => {
+    const stub = fresh();
+    await stub.setSystem("+Profile: Ana.");
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.refreshContext(session);
+    await stub.prompt("refreshed", session);
+    expect(await stub.prefixChanges()).toEqual([
+      { session, causes: [{ kind: "system" }] }
+    ]);
+  });
+
+  it("reports history rewritten around the harness as the next call's cause", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    const [first] = await stub.messageIds(session);
+    await stub.editMessage(session, first, "hello, edited");
+    await stub.prompt("again", session);
+    await stub.compact(session);
+    await stub.prompt("compacted", session);
+    expect(await stub.prefixChanges()).toEqual([
+      { session, causes: [{ kind: "messages", operation: "edit" }] },
+      { session, causes: [{ kind: "messages", operation: "compaction" }] }
+    ]);
+  });
+
   it("counts a tool's input examples in its definition", async () => {
     const stub = fresh();
     await stub.addLateTool();
@@ -1407,8 +1479,12 @@ describe("ThinkHarness context", () => {
     await stub.prompt("hello", session);
     await stub.addLateTool();
     await stub.prompt("again", session);
-    const [, second] = await stub.promptTexts();
+    await stub.prompt("thanks", session);
+    const [, second, third] = await stub.promptTexts();
     expect(second).toMatch(/\|user:again[^|]*Added: late\./);
+    // Recorded there: the next request keeps it in place and adds no other.
+    expect(third).toMatch(/\|user:again[^|]*Added: late\./);
+    expect(third.split("Added: late.")).toHaveLength(3); // echoed once
   });
 
   it("sends a call recovered after an eviction as its first attempt; a change since waits", async () => {

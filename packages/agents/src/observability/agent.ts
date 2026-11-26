@@ -399,6 +399,31 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "chat:prefix:changed",
+      {
+        /** The session whose model call it is. */
+        session: string;
+        requestId: string;
+        /**
+         * Why what the call sends before its new message differs from the
+         * session's previous call, so a provider's prompt cache of it is
+         * lost: the tools sent (`tools`, with the names added, removed and
+         * changed), the system prompt sent (`system`), or history
+         * rewritten (`messages`: compacted, edited or deleted).
+         */
+        causes: readonly (
+          | {
+              kind: "tools";
+              added: readonly string[];
+              removed: readonly string[];
+              changed: readonly string[];
+            }
+          | { kind: "system" }
+          | { kind: "messages"; operation: "compaction" | "edit" | "delete" }
+        )[];
+      }
+    >
+  | BaseEvent<
       "agent_tool:recovery:begin",
       { runCount: number; totalTimeoutMs?: number }
     >

@@ -74,6 +74,7 @@ import {
   SessionEvents,
   Watcher,
   type ThinkHarnessListener,
+  type PrefixChangeCause,
   type ThinkSessionEvent,
   type ThinkSessionListener
 } from "./events";
@@ -543,6 +544,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly sessions: ThinkSessions;
   readonly #options: ThinkHarnessOptions<TOOLS>;
   readonly #events = new SessionEvents();
+  /**
+   * Per session, how history was rewritten since its last model call, for
+   * that call's `prefix-changed` event. The next call removes the entry;
+   * each holds at most three operations.
+   */
+  readonly #rewrites = new Map<
+    ThinkSessionId,
+    Set<"compaction" | "edit" | "delete">
+  >();
   readonly #live = new Map<ThinkSessionId, LiveRun>();
   readonly #configured = new Set<ThinkSessionId>();
   /** Each session's context, from the `context` option, built on first use. */
@@ -1609,7 +1619,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // from an answered message) rides on this request alone.
     const context = this.#context(session);
     let contextSystem = "";
-    let recordTools: PreparedTurn["recordTools"] | undefined;
+    let recordSent: PreparedTurn["recordSent"] | undefined;
     let blockReminder: string | null = null;
     let request = history;
     let optionsSystem = prompt.system;
@@ -1621,7 +1631,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         retry: start.interruptions > 0
       });
       contextSystem = prepared.system;
-      recordTools = prepared.recordTools;
+      recordSent = prepared.recordSent;
       blockReminder = prepared.reminder;
       request = withReminder(
         asUIMessages(await context.project(history)),
@@ -1649,21 +1659,39 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
     const offered = modelTools(tools, config.activeTools);
-    if (context && recordTools) {
-      // The tools this request sends, now that `beforeTurn` chose which: a
-      // change from the last turn's reaches the model once, as a notice
-      // after the user message. The blocks were prepared above.
-      const tooled = await recordTools(
-        await toolFingerprint(tools, Object.keys(offered))
+    const effectiveSystem = config.system ?? system;
+    const causes: PrefixChangeCause[] = [];
+    if (context && recordSent) {
+      // What this request sends, now that `beforeTurn` chose it: a change
+      // in the tools from the last turn's reaches the model once, as a
+      // notice after the user message. The blocks were prepared above.
+      const tooled = await recordSent(
+        await toolFingerprint(tools, Object.keys(offered)),
+        await textHash(effectiveSystem ?? "")
       );
       if (tooled.changed) {
         request = withReminder(
           asUIMessages(await context.project(history)),
           [blockReminder, tooled.reminder].filter(Boolean).join("\n\n") || null
         );
+        causes.push({ kind: "tools", ...tooled.changed });
+      }
+      if (tooled.system) causes.push({ kind: "system" });
+    }
+    const rewrites = this.#rewrites.get(session);
+    if (rewrites) {
+      this.#rewrites.delete(session);
+      for (const operation of rewrites) {
+        causes.push({ kind: "messages", operation });
       }
     }
-    const effectiveSystem = config.system ?? system;
+    if (causes.length > 0) {
+      this.#events.emit(session, {
+        type: "prefix-changed",
+        operationId,
+        causes
+      });
+    }
     const messages: ModelMessage[] =
       config.messages ??
       (await convertToModelMessages(request, {
@@ -2406,6 +2434,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         case "update":
         case "import":
           if (this.#takeOwn(session, change.message.id)) return;
+          // A message changed outside a turn: what earlier requests sent.
+          if (change.type === "update") this.#rewrote(session, "edit");
           this.#events.emit(session, {
             type: "message",
             message: asUIMessage(change.message)
@@ -2426,14 +2456,28 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             .catch((error: unknown) =>
               console.warn("ThinkHarness could not refresh the context", error)
             );
+          this.#rewrote(session, "compaction");
           this.#events.emit(session, { type: "transcript" });
           return;
         case "delete":
+          this.#rewrote(session, "delete");
           // No one message describes these: the active path changed.
           this.#events.emit(session, { type: "transcript" });
           return;
       }
     });
+  }
+
+  #rewrote(
+    session: ThinkSessionId,
+    operation: "compaction" | "edit" | "delete"
+  ): void {
+    let rewrites = this.#rewrites.get(session);
+    if (!rewrites) {
+      rewrites = new Set();
+      this.#rewrites.set(session, rewrites);
+    }
+    rewrites.add(operation);
   }
 
   /** Note messages the harness is about to write; returns the release. */
@@ -2876,6 +2920,17 @@ function toolFingerprint(
   );
 }
 
+/** The first 8 bytes of a text's SHA-256, as hex. */
+async function textHash(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text)
+  );
+  return [...new Uint8Array(digest).slice(0, 8)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function toolHash(tool: ToolSet[string] | undefined): Promise<string> {
   if (!tool) return Promise.resolve("");
   let made = toolHashes.get(tool);
@@ -2892,13 +2947,7 @@ function toolHash(tool: ToolSet[string] | undefined): Promise<string> {
         strict: "strict" in tool ? tool.strict : undefined,
         inputExamples: "inputExamples" in tool ? tool.inputExamples : undefined
       });
-      const digest = await crypto.subtle.digest(
-        "SHA-256",
-        new TextEncoder().encode(definition)
-      );
-      return [...new Uint8Array(digest).slice(0, 8)]
-        .map((byte) => byte.toString(16).padStart(2, "0"))
-        .join("");
+      return textHash(definition);
     })();
     toolHashes.set(tool, made);
   }
@@ -2971,6 +3020,9 @@ function toSessionEvents(
     case "transcript":
       // The shared interface has no "re-read" event; a watch sees the
       // change in its next state.
+      return [];
+    case "prefix-changed":
+      // Observability, not part of the conversation.
       return [];
   }
 }
