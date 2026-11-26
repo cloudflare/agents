@@ -29,6 +29,7 @@ type AdmissionStub = {
     Array<{ requestId: string; stopped: boolean }>
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
+  isIdleForTest(): Promise<boolean>;
   getModelRequestsForTest(): Promise<
     Array<Array<{ role: string; text: string }>>
   >;
@@ -192,16 +193,28 @@ describe("a message queued behind a running turn", () => {
       "assistant",
       "user"
     ]);
-    // The tab that sent it is never left drawing it as queued: its last
-    // message list, once the final one has arrived, holds no queued ids.
-    const lastList = () =>
-      seenB.filter((f) => f.type === "cf_agent_chat_messages").at(-1);
+    // The tab that sent it is never left drawing it as queued. Once the
+    // agent has nothing left to run, a resume request on tab B is a barrier:
+    // its answer comes after every frame sent to the tab before it, so the
+    // last message list is final when it is read.
+    const idle = await waitFor(
+      () => stub.isIdleForTest(),
+      (yes) => yes,
+      10_000
+    );
+    expect(idle).toBe(true);
+    const barrier = seenB.length;
+    tabB.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
     await waitFor(
-      async () => lastList(),
-      (list) => list !== undefined && list.queuedMessageIds === undefined,
+      async () =>
+        seenB
+          .slice(barrier)
+          .some((f) => f.type === "cf_agent_stream_resume_none"),
+      (yes) => yes,
       5000
     );
-    expect(lastList()?.queuedMessageIds).toBeUndefined();
+    const lists = seenB.filter((f) => f.type === "cf_agent_chat_messages");
+    expect(lists.at(-1)?.queuedMessageIds).toBeUndefined();
     tabA.close();
     tabB.close();
     tabC.close();
