@@ -205,7 +205,7 @@ describe("a message queued behind a running turn", () => {
     expect(idle).toBe(true);
     const barrier = seenB.length;
     tabB.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
-    await waitFor(
+    const answered = await waitFor(
       async () =>
         seenB
           .slice(barrier)
@@ -213,6 +213,7 @@ describe("a message queued behind a running turn", () => {
       (yes) => yes,
       5000
     );
+    expect(answered).toBe(true);
     const lists = seenB.filter((f) => f.type === "cf_agent_chat_messages");
     expect(lists.at(-1)?.queuedMessageIds).toBeUndefined();
     tabA.close();
