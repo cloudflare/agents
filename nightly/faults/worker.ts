@@ -38,6 +38,8 @@ import { z } from "zod";
 type Env = {
   /** Every request must carry it (`x-probe-key` or `?key=`): the suite sets it at deploy. */
   PROBE_KEY: string;
+  /** What `/ready` names, so a suite can tell which deploy is serving. */
+  BUILD: string;
   ProbeChat: DurableObjectNamespace<ProbeChat>;
   ProbeThink: DurableObjectNamespace<ProbeThink>;
 };
@@ -1022,7 +1024,7 @@ export default {
     if (!env.PROBE_KEY || key !== env.PROBE_KEY) {
       return new Response("Not found", { status: 404 });
     }
-    if (url.pathname === "/ready") return new Response("ready");
+    if (url.pathname === "/ready") return new Response(`ready:${env.BUILD}`);
     const m = url.pathname.match(/^\/ctl\/(chat|think)\/([^/]+)\/(\w+)$/);
     if (m) {
       const [, cls, room, method] = m;

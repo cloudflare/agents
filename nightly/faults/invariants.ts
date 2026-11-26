@@ -4,7 +4,7 @@
 // `run.checks`.
 
 import type { UIMessage } from "ai";
-import { MT, recoveryBalance, type Frame } from "./lib";
+import { MT, recoveryBalance, type Frame } from "../shared/probe";
 import type { Run } from "./scenarios";
 
 function isEmptyAssistant(m: UIMessage): boolean {

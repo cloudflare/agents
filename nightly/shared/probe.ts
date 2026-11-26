@@ -1,21 +1,22 @@
-// Driver helpers: a WebSocket chat tab, the control calls, and the shapes
-// the invariants and the report read.
+// What the nightly suites drive their probe Workers with: a WebSocket chat
+// tab, the control calls, and the shapes the checks read. The suite's global
+// setup sets PROBE_URL and PROBE_KEY.
 
 import type { UIMessage } from "ai";
 
-export type Cls = "chat" | "think";
+export type Cls = "chat" | "think" | "agent";
 
-/** The deployed fault Worker, set by the suite's global setup. */
+/** The deployed probe Worker. */
 export function baseUrl(): string {
-  const url = process.env.FAULTS_URL;
-  if (!url) throw new Error("FAULTS_URL is not set");
+  const url = process.env.PROBE_URL;
+  if (!url) throw new Error("PROBE_URL is not set");
   return url.replace(/\/$/, "");
 }
 
 /** The key the Worker requires on every request (`PROBE_KEY`). */
 export function probeKey(): string {
-  const key = process.env.FAULTS_KEY;
-  if (!key) throw new Error("FAULTS_KEY is not set");
+  const key = process.env.PROBE_KEY;
+  if (!key) throw new Error("PROBE_KEY is not set");
   return key;
 }
 
@@ -30,6 +31,7 @@ export const MT = {
   RESUME_REQUEST: "cf_agent_stream_resume_request",
   RESUME_NONE: "cf_agent_stream_resume_none",
   TOOL_RESULT: "cf_agent_tool_result",
+  TOOL_APPROVAL: "cf_agent_tool_approval",
   RECOVERING: "cf_agent_chat_recovering"
 } as const;
 
@@ -132,7 +134,8 @@ export async function ctl(
 
 const AGENT_PATH: Record<Cls, string> = {
   chat: "probe-chat",
-  think: "probe-think"
+  think: "probe-think",
+  agent: "probe-agent"
 };
 
 type Waiter = {
