@@ -1,6 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
-import { ResumableStream, createChatStreams } from "../../chat";
+import {
+  ResumableStream,
+  createChatStreams,
+  type ReplyStreams
+} from "../../chat";
+import { openChatLog } from "../shared/chat-log";
 
 /**
  * Storage-ops benchmark harness for the chat-on-Streams replatform: measures
@@ -25,8 +30,8 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return JSON.stringify({ type: "text-delta", delta: `${index}:${filler}` });
   }
 
-  #adapter(): ResumableStream {
-    return new ResumableStream(
+  #adapter(): ReplyStreams {
+    return openChatLog(
       this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,
@@ -189,7 +194,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * The replatformed path: real `ResumableStream` over the real Streams
+   * The replatformed path: real `ReplyStreams` over the real Streams
    * capability — packed segments through the read-fenced append (one chunk
    * INSERT per segment; the stream row is written only at open and settle).
    */
@@ -199,7 +204,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     chunkBytes: number
   ): Promise<{ rowsWritten: number; ms: number }> {
     await this.lifecycle.start();
-    const adapter = new ResumableStream(
+    const adapter = openChatLog(
       this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,
@@ -247,7 +252,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     sql.exec(`CREATE TABLE IF NOT EXISTS bench_legacy_chunks (
       id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, body TEXT NOT NULL,
       chunk_index INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
-    // The index the legacy ResumableStream shipped, so sweep reads are
+    // The index the legacy ReplyStreams shipped, so sweep reads are
     // measured against the real pre-replatform access path.
     sql.exec(`CREATE INDEX IF NOT EXISTS bench_legacy_chunks_stream_id
       ON bench_legacy_chunks(stream_id, chunk_index)`);
@@ -489,8 +494,8 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
       ] as T[];
     // The import runs as each start constructs the adapter; a second start
     // finds nothing left to import.
-    const adapter = new ResumableStream(this.streams, tagged, () => facet);
-    new ResumableStream(this.streams, tagged, () => facet);
+    const adapter = openChatLog(this.streams, tagged, () => facet);
+    openChatLog(this.streams, tagged, () => facet);
     const tables = sql
       .exec<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_ai_chat_stream_%'"
@@ -533,6 +538,81 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return { marker: adapter.progressMarker(), tables, rowsLeft };
   }
 
+  /**
+   * Construct `ResumableStream` as released hosts do (ai-chat 0.12.x and
+   * Think 0.24.x pass `{ onProgress }`), over the tables an earlier version
+   * left, and drive one stream the way they do.
+   */
+  async probeReleasedHostAdapter(): Promise<{
+    marker: number;
+    legacyTables: string[];
+    legacyRows: number;
+    originIds: string[] | undefined;
+    errored: string | undefined;
+    afterCutover: { ids: string[] | undefined; outcome: string | undefined };
+  }> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE cf_agents_chat_progress (key TEXT PRIMARY KEY, retired INTEGER NOT NULL, legacy INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID"
+    );
+    sql.exec("INSERT INTO cf_agents_chat_progress VALUES ('chat', 5, 2)");
+    sql.exec(
+      "CREATE TABLE cf_ai_chat_stream_metadata (id TEXT PRIMARY KEY, request_id TEXT, status TEXT, created_at INTEGER, completed_at INTEGER)"
+    );
+    sql.exec(
+      "CREATE TABLE cf_ai_chat_stream_chunks (id TEXT PRIMARY KEY, stream_id TEXT, body TEXT, chunk_index INTEGER, created_at INTEGER)"
+    );
+    const tagged = <T = Record<string, unknown>>(
+      strings: TemplateStringsArray,
+      ...values: (string | number | boolean | null)[]
+    ): T[] =>
+      [
+        ...sql.exec(
+          strings.reduce(
+            (q, part, i) => q + part + (i < values.length ? "?" : ""),
+            ""
+          ),
+          ...values
+        )
+      ] as T[];
+    const stream = new ResumableStream(this.streams, tagged, {
+      onProgress: () => {}
+    });
+    const id = stream.start("req-released", { originMessageIds: ["u1"] });
+    stream.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "x" }));
+    const originIds = stream.getOriginMessageIds("req-released");
+    stream.markError(id);
+    const errored = stream.latestStreamInfoForRequest("req-released")?.status;
+    const marker = stream.progressMarker();
+    // A stopped reply's cutover deletes its rows; a late resume still reads
+    // how it ended.
+    const cut = stream.start("req-cut", { originMessageIds: ["u2"] });
+    stream.finish(cut, "aborted");
+    stream.cutover(cut, () => {});
+    const legacyTables = sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND (name = 'cf_agents_chat_progress' OR name LIKE 'cf_ai_chat_stream_%') ORDER BY name"
+      )
+      .toArray()
+      .map((row) => row.name);
+    let legacyRows = 0;
+    for (const table of legacyTables) {
+      legacyRows += sql.exec(`SELECT 1 FROM ${table}`).toArray().length;
+    }
+    return {
+      marker,
+      legacyTables,
+      legacyRows,
+      originIds,
+      errored,
+      afterCutover: {
+        ids: stream.getOriginMessageIds("req-cut"),
+        outcome: stream.getOutcome("req-cut")
+      }
+    };
+  }
+
   /** Whether a start with no counting yet made the counters table. */
   async probeCountersTableAfterStart(): Promise<boolean> {
     await this.lifecycle.start();
@@ -546,9 +626,9 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
-  #facetAdapter(facet: boolean): ResumableStream {
+  #facetAdapter(facet: boolean): ReplyStreams {
     const sql = this.ctx.storage.sql;
-    return new ResumableStream(
+    return openChatLog(
       this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,

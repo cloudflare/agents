@@ -205,7 +205,6 @@ import {
   sanitizeMessage,
   CHAT_MESSAGE_TYPES,
   ChatFrames,
-  ResumableStream,
   createChatStreams,
   addContinuationTarget,
   ChatTurns,
@@ -783,7 +782,7 @@ type ChatRecoveryContinueData = {
 // both consumers round-trip the same record across the deploy that ships them.
 
 // The monotonic forward-progress marker the recovery budget keys off is
-// derived from the stream log (`ResumableStream.progressMarker`): durably
+// derived from the stream log (`ReplyStreams.progressMarker`): durably
 // flushed segments, folded into a retired total as their rows are deleted.
 // Nothing is written per chunk. The pre-derivation KV counter
 // (`CHAT_RECOVERY_PROGRESS_KEY`) is read once per isolate and seeded into the
@@ -1755,10 +1754,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         "startup",
         { "cloudflare.agents.component": "think" },
         async () => {
-          this._resumableStream = new ResumableStream(
-            this.streams,
-            this.sql.bind(this),
-            () => storedAsFacet(this.ctx.storage.kv)
+          this._replyStreams.open(this.streams, this.sql.bind(this), () =>
+            storedAsFacet(this.ctx.storage.kv)
           );
           this._restoreRequestContext();
           this._setupProtocolHandlers();
@@ -2185,7 +2182,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           });
       },
       clientAnswerableToolNames: () => this._clientAnswerableToolNames(),
-      hasActiveStream: () => this._resumableStream.hasActiveStream(),
+      hasActiveStream: () => this._replyStreams.hasActiveStream(),
       generateRequestId: () => crypto.randomUUID(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
       abortRequest: (requestId, reason) => this.abortRequest(requestId, reason),
@@ -2312,7 +2309,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
   private readonly _turnQueue = this._turns.queue;
   /**
-   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * The Streams capability backing `_replyStreams`: chat's in-flight
    * output lives in the shared durable chunk log, readable by any
    * `streams.read()` consumer on this Durable Object.
    */
@@ -2322,7 +2319,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   /** What an approve or reject's continuation produced, read by its caller. */
   private readonly _decisionOutputs = new Map<string, unknown>();
 
-  protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   /** Where every chat frame to tabs goes out (the shared `ChatFrames`). */
   private readonly _frames = new ChatFrames({
@@ -2332,7 +2328,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>
-      this._resumableStream.getOriginMessageIds(requestId),
+      this._replyStreams.getOriginMessageIds(requestId),
     recoveryOriginIds: () => this._chatRecoveryEngine().activeOriginMessageIds,
     clientView: (messages) => this._turns.clientView(messages),
     listsReachResumingTabs: true
@@ -2388,9 +2384,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
-  /** The stream every reply writes (`pumpReply`). */
-  private readonly _replyStreams = new ReplyStreams({
-    resumable: () => this._resumableStream,
+  /**
+   * The stream every reply writes (`pumpReply`): chunk buffering,
+   * persistence and replay.
+   * @internal Protected for testing purposes.
+   */
+  protected readonly _replyStreams: ReplyStreams = new ReplyStreams({
     streamStarted: (requestId) =>
       this._turns.streamStarted(requestId, (c) =>
         this._resumeHandshake().notifyStreamResuming(c)
@@ -2429,7 +2428,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       requestIndex: "idx_agent_tool_child_runs_request_id",
       turnDefinition: (this.constructor as typeof Think).CHAT_FIBER_NAME
     }),
-    streams: () => this._resumableStream,
+    streams: () => this._replyStreams,
     storage: () => this.ctx.storage,
     responseType: MSG_CHAT_RESPONSE,
     resetError: "Agent tool run was skipped before the child could finish.",
@@ -5939,7 +5938,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (this._recoveryOwnedSubmissions.delete(submissionId)) {
         return submissionDetached();
       }
-      const streamId = this._resumableStream
+      const streamId = this._replyStreams
         .getAllStreamMetadata()
         .find((metadata) => metadata.request_id === result.requestId)?.id;
       const streamError = this._programmaticStreamErrors.get(result.requestId);
@@ -6023,7 +6022,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // discarded its partial for a retry, so its completed stream is NOT an
     // answer — without recovery a retry stamp falls through to interruption.
     const terminalStream = row.request_id
-      ? this._resumableStream.latestStreamInfoForRequest(row.request_id)
+      ? this._replyStreams.latestStreamInfoForRequest(row.request_id)
       : null;
     const errored =
       row.result_status === "error" || terminalStream?.status === "error";
@@ -6195,7 +6194,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
 
     return (
-      this._resumableStream.latestActiveStreamInfoForRequest(requestId) !== null
+      this._replyStreams.latestActiveStreamInfoForRequest(requestId) !== null
     );
   }
 
@@ -6220,7 +6219,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       return true;
     }
 
-    const streamInfo = this._resumableStream.latestActiveStreamInfoForRequest(
+    const streamInfo = this._replyStreams.latestActiveStreamInfoForRequest(
       row.request_id
     );
     return streamInfo ? streamInfo.createdAt >= cutoff : false;
@@ -6999,7 +6998,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         return _onConnect(connection, ctx);
       }
 
-      if (this._resumableStream.hasActiveStream()) {
+      if (this._replyStreams.hasActiveStream()) {
         // A stream is still in flight. The resume flow is the
         // authoritative source of state: `notifyStreamResuming` tells
         // the client to send `STREAM_RESUME_ACK`, after which the
@@ -7556,7 +7555,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private async _handleClear(connection?: Connection) {
     this.resetTurnState();
 
-    this._resumableStream.clearAll();
+    this._replyStreams.clearAll();
     this._pendingResumeConnections.clear();
     this._turns.clearRequestContext();
     await this._clearHistory();
@@ -8086,7 +8085,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   ): Promise<string | undefined> {
     const toPersist = this._strippedForPersist(msg);
     if (toPersist === null) return undefined;
-    if (this._resumableStream.pendingCutoverId !== streamId) {
+    if (this._replyStreams.pendingCutoverId !== streamId) {
       // The stream was settled by another path (a stall, an error): plain persist.
       await this._upsertMessageInHistory(toPersist, parentId);
       if (submission) {
@@ -8097,7 +8096,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
     let after: (() => Promise<void>) | undefined;
     try {
-      this._resumableStream.cutover(
+      this._replyStreams.cutover(
         streamId,
         () => {
           after = sync.upsert(toPersist as SessionMessage, {
@@ -9462,7 +9461,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * genuinely advanced could read as "no progress" between attempts and exhaust
    * its budget prematurely (#1628). It then became a KV counter bumped per
    * credited chunk. It is now derived from the stream log the chunks were
-   * already flushed to (`ResumableStream.progressMarker`): the log only grows
+   * already flushed to (`ReplyStreams.progressMarker`): the log only grows
    * when new content lands durably, a reconnect replay or a recovery
    * re-persist reads it without appending (#1637), and compaction rewrites
    * the transcript, not the log. Nothing is written per chunk.
@@ -9473,7 +9472,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   private readonly _chatRecoveryProgressMarker = chatRecoveryProgressReader(
     this.ctx.storage,
-    () => this._resumableStream
+    () => this._replyStreams
   );
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
@@ -9493,7 +9492,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    */
   protected override async _onAgentToolStreamProgress(): Promise<void> {
     if (this._agentToolStreamProgress.shouldCredit(Date.now())) {
-      this._resumableStream.creditProgress();
+      this._replyStreams.creditProgress();
     }
   }
 
@@ -10023,7 +10022,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     let streamId = "";
     let streamStatus: "streaming" | "completed" | "error" | undefined;
     if (requestId) {
-      const info = this._resumableStream.latestStreamInfoForRequest(requestId);
+      const info = this._replyStreams.latestStreamInfoForRequest(requestId);
       if (info) {
         streamId = info.id;
         // A stream that was closed with no producer left (a tab reconnected
@@ -10036,14 +10035,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             : info.status;
       }
     }
-    if (!streamId && this._resumableStream.hasActiveStream()) {
-      streamId = this._resumableStream.activeStreamId ?? "";
+    if (!streamId && this._replyStreams.hasActiveStream()) {
+      streamId = this._replyStreams.activeStreamId ?? "";
       streamStatus = "streaming";
     }
     const streamStillActive = Boolean(
       streamId &&
-      this._resumableStream.hasActiveStream() &&
-      this._resumableStream.activeStreamId === streamId
+      this._replyStreams.hasActiveStream() &&
+      this._replyStreams.activeStreamId === streamId
     );
     return { streamId, streamStillActive, streamStatus };
   }
@@ -10508,7 +10507,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
     if (!outcome) return;
     const streamId = requestId
-      ? this._resumableStream.latestStreamInfoForRequest(requestId)?.id
+      ? this._replyStreams.latestStreamInfoForRequest(requestId)?.id
       : undefined;
     // A parked run is released once: competing startup and
     // detached-finalizer paths cannot both end it.
@@ -10612,7 +10611,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     hasSettledToolResults: boolean;
   } {
     return aiSdkRecoveryCodec.toRecoveryPartial(
-      this._resumableStream.getStreamChunks(streamId).map((chunk) => chunk.body)
+      this._replyStreams.getStreamChunks(streamId).map((chunk) => chunk.body)
     );
   }
 
@@ -11299,7 +11298,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /**
    * The shared resume-handshake driver (Tier-2). Lazily built; the
-   * `ResumableStream` / `ContinuationState` / pending set are stable after
+   * `ReplyStreams` / `ContinuationState` / pending set are stable after
    * `onStart`, so a single instance threads them for the agent's lifetime. The
    * idle-connect payload (transcript + recovering, `_buildIdleConnectMessages`)
    * stays host-owned and is NOT part of the driver.
@@ -11307,7 +11306,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _resumeHandshake(): ResumeHandshake {
     return (this._resumeHandshakeInstance ??= new ResumeHandshake({
       responseMessageType: MSG_CHAT_RESPONSE,
-      resumableStream: this._resumableStream,
+      resumableStream: this._replyStreams,
       continuation: this._turns.continuation,
       preStream: this._turns.preStream,
       pendingResumeConnections: this._pendingResumeConnections,
@@ -11340,7 +11339,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     });
     if (persistedId === undefined) return;
     const requestId =
-      this._resumableStream.getStreamMetadata(streamId)?.request_id;
+      this._replyStreams.getStreamMetadata(streamId)?.request_id;
     if (requestId) this._recordSubmissionMessage(requestId, persistedId);
     this._frames.broadcastMessages(this.messages);
   }

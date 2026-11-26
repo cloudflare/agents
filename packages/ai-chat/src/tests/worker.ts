@@ -37,7 +37,6 @@ import type {
 } from "../";
 import {
   CHAT_RECOVERY_TASK_NAME,
-  ResumableStream,
   chatRecoveryTaskRunOptions,
   recentChatTerminal,
   toolResultUpdate,
@@ -1437,7 +1436,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   getLatestStreamStatusForTest(): string | null {
-    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
+    return this._replyStreams.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {
@@ -1707,7 +1706,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testFlushChunkBuffer(): void {
-    this._resumableStream.flushBuffer();
+    this._replyStreams.flushBuffer();
   }
 
   /**
@@ -1715,7 +1714,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * earlier versions mirrored the progress marker into.
    */
   async probeProgressMirrorForTest(): Promise<unknown> {
-    const stream = this._resumableStream;
+    const stream = this._replyStreams;
     const id = stream.start("req-mirror");
     for (let i = 0; i < 10; i++) stream.storeChunk(id, `{"i":${i}}`);
     stream.finish(id);
@@ -1734,19 +1733,19 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   getActiveStreamId(): string | null {
-    return this._resumableStream.activeStreamId;
+    return this._replyStreams.activeStreamId;
   }
 
   getActiveRequestId(): string | null {
-    return this._resumableStream.activeRequestId;
+    return this._replyStreams.activeRequestId;
   }
 
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    // Delegate to ResumableStream so tests see the same unpacked, per-chunk
+    // Delegate to ReplyStreams so tests see the same unpacked, per-chunk
     // view that production consumers get (packed segment rows are expanded).
-    return this._resumableStream.getStreamChunks(streamId);
+    return this._replyStreams.getStreamChunks(streamId);
   }
 
   /** Rows a stream's chunks are stored in. */
@@ -1801,7 +1800,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
-    return this._resumableStream.getStreamMetadata(streamId);
+    return this._replyStreams.getStreamMetadata(streamId);
   }
 
   /**
@@ -1840,9 +1839,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
       { type: "text-start", id: "t" },
       { type: "text-delta", id: "t", delta: "After" }
     ]) {
-      this._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+      this._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
     }
-    this._resumableStream.flushBuffer();
+    this._replyStreams.flushBuffer();
     await self._persistOrphanedStream(streamId);
     await self._persistOrphanedStream(streamId);
     const reply = this.messages.find((m) => m.id === "a1");
@@ -1853,7 +1852,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   /** Record every stream started from now on, for {@link getStartedStreamMetadata}. */
   captureStreamStarts(): void {
-    const stream = this._resumableStream;
+    const stream = this._replyStreams;
     const start = stream.start.bind(stream);
     stream.start = (requestId, options) => {
       const streamId = start(requestId, options);
@@ -1878,7 +1877,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     created_at: number;
     message_id: string | null;
   }> {
-    return this._resumableStream.getAllStreamMetadata();
+    return this._replyStreams.getAllStreamMetadata();
   }
 
   testInsertStaleStream(
@@ -1922,12 +1921,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testRestoreActiveStream(): void {
-    this._resumableStream.restore();
+    this._replyStreams.restore();
   }
 
   /** Reclaim leftover chat streams now, as the next stream start would. */
   testReclaimStreams(nowMs?: number): number {
-    return this._resumableStream.reclaim(nowMs);
+    return this._replyStreams.reclaim(nowMs);
   }
 
   /** Number of pending stream-cleanup schedules (always 0: none are armed). */
@@ -1938,8 +1937,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * Simulate DO hibernation wake by reinitializing the ResumableStream.
-   * The new instance calls restore() which reads from SQLite and sets
+   * Simulate DO hibernation wake by reopening the reply stream log.
+   * Opening calls restore() which reads from SQLite and sets
    * _activeStreamId, but _isLive remains false (no live LLM reader).
    * This mimics the DO constructor running after eviction.
    */
@@ -1949,10 +1948,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testSimulateHibernationWake(): void {
-    this._resumableStream = new ResumableStream(
-      this.streams,
-      this.sql.bind(this)
-    );
+    this._replyStreams.open(this.streams, this.sql.bind(this));
     // A woken isolate builds its resume handshake again, around the new
     // stream. SAFETY: a test resets the host's private lazy instance.
     (
@@ -3519,7 +3515,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     beforeCall: number;
     afterCall: number;
   }> {
-    const streamId = this._resumableStream.start("req-tool-call-durability");
+    const streamId = this._replyStreams.start("req-tool-call-durability");
     const store = (chunk: Record<string, unknown>) =>
       storeStreamChunk(this, streamId, JSON.stringify(chunk));
     const rawCount = (): number =>
@@ -3716,14 +3712,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     afterPersist: number;
   }> {
     const self = this as unknown as {
-      _resumableStream: { start(id: string): string };
+      _replyStreams: { start(id: string): string };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      this._resumableStream.progressMarker();
+      this._replyStreams.progressMarker();
 
     const start = await read();
-    const streamId = self._resumableStream.start("req-progress-immunity");
+    const streamId = self._replyStreams.start("req-progress-immunity");
     await storeStreamChunk(
       this,
       streamId,
@@ -4637,7 +4633,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       const status = await this.driveStallingTurnForTest({ timeoutMs: 100 });
       await new Promise((resolve) => setTimeout(resolve, 50));
       // oxlint-disable-next-line typescript/no-explicit-any -- private field
-      const stream = (this as any)._resumableStream;
+      const stream = (this as any)._replyStreams;
       return {
         outcomes,
         streamOpen:
@@ -4807,7 +4803,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const followUp = this._followUpRequestId;
     const row = this["_agentToolRuns"].store.read(runId);
     const followUpStream = followUp
-      ? this._resumableStream.latestStreamInfoForRequest(followUp)?.id
+      ? this._replyStreams.latestStreamInfoForRequest(followUp)?.id
       : undefined;
     return {
       status: inspection?.status,
@@ -5081,12 +5077,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async bumpRecoveryProgressForTest(): Promise<void> {
     // One explicit credit — the same unit a flushed segment or a forwarded
     // child chunk adds to the derived marker.
-    this._resumableStream.creditProgress();
+    this._replyStreams.creditProgress();
   }
 
   /** The recovery progress marker as the engine would read it now. */
   async readProgressMarkerForTest(): Promise<number> {
-    return this._resumableStream.progressMarker();
+    return this._replyStreams.progressMarker();
   }
 
   /** Simulate a parent re-attach that forwards `chunks` of a child's stream by
@@ -5110,7 +5106,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     };
     self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
-      this._resumableStream.progressMarker();
+      this._replyStreams.progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -5138,7 +5134,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   getPartialText(streamId?: string) {
-    const id = streamId ?? this._resumableStream.activeStreamId ?? undefined;
+    const id = streamId ?? this._replyStreams.activeStreamId ?? undefined;
     if (!id) return { text: "", parts: [] };
     return (
       this as unknown as {
@@ -5587,15 +5583,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   async triggerInterruptedStreamCheck(): Promise<void> {
-    if (
-      !this._resumableStream.hasActiveStream() ||
-      this._resumableStream.isLive
-    ) {
+    if (!this._replyStreams.hasActiveStream() || this._replyStreams.isLive) {
       return;
     }
 
-    const streamId = this._resumableStream.activeStreamId!;
-    const requestId = this._resumableStream.activeRequestId ?? "";
+    const streamId = this._replyStreams.activeStreamId!;
+    const requestId = this._replyStreams.activeRequestId ?? "";
 
     const partial = this.getPartialText(streamId);
 
@@ -5626,7 +5619,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await this._persistOrphanedStream(streamId);
     }
 
-    this._resumableStream.complete(streamId);
+    this._replyStreams.complete(streamId);
 
     if (options.continue !== false) {
       const targetId = this.messages
@@ -5738,7 +5731,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
                 ${body}, ${createdAt}, ${createdAt})
       `;
     }
-    this._resumableStream.restore();
+    this._replyStreams.restore();
   }
 
   getActiveFibers(): Array<{ id: string; name: string }> {
@@ -6380,8 +6373,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     return {
       tables,
       rowsLeft,
-      importedChunks:
-        this._resumableStream.getStreamChunks("legacy-stream").length
+      importedChunks: this._replyStreams.getStreamChunks("legacy-stream").length
     };
   }
 
@@ -7080,7 +7072,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
       if (requestId) {
         const streamId =
-          this._resumableStream.latestStreamInfoForRequest(requestId)?.id;
+          this._replyStreams.latestStreamInfoForRequest(requestId)?.id;
         if (streamId) return { requestId, streamId };
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -7163,7 +7155,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "cold-realign-run";
     const requestId = "cold-realign-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     const backlog = [
       JSON.stringify({ type: "text-start" }),
       JSON.stringify({ type: "text-delta", delta: "a" }),
@@ -7172,7 +7164,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     for (const body of backlog) {
       await storeStreamChunk(this, streamId, body);
     }
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7258,7 +7250,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   async progressDuringDrainForTest(): Promise<string[]> {
     const runId = "progress-drain-run";
     const requestId = "progress-drain-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7290,7 +7282,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     }
     broadcast(progress("before-attach"));
     await storeStreamChunk(this, streamId, stored[2]);
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(progress("during-drain"));
@@ -7334,7 +7326,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   > {
     const runId = "skipped-chunk-run";
     const requestId = "skipped-chunk-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7360,7 +7352,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     await send(delta("a"));
     await send(oversized);
     await storeStreamChunk(this, streamId, delta("c"));
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(delta("c"));
@@ -7416,14 +7408,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "inspect-pending-run";
     const requestId = "inspect-pending-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of backlog) {
       await storeStreamChunk(this, streamId, body);
     }
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7639,13 +7631,13 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "starve-run";
     const requestId = "starve-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     await storeStreamChunk(
       this,
       streamId,
       JSON.stringify({ type: "text-start" })
     );
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})

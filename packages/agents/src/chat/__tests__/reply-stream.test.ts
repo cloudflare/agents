@@ -2,21 +2,32 @@ import type { UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
 import type { OrphanPersistStore } from "../orphan-store";
 import { ReplyStreams } from "../reply-stream";
-import type { ResumableStream } from "../resumable-stream";
-
-/** The reads `persistOrphan` makes of an orphaned stream. */
+/**
+ * A log whose reads of the orphaned stream `persistOrphan` makes return
+ * `bodies` and `meta`, with no storage behind it.
+ */
 function orphanedStream(
   bodies: Array<Record<string, unknown>>,
   meta: { messageId: string; basePartCount: number | null }
-): ResumableStream {
-  return {
+): ReplyStreams {
+  const streams = new ReplyStreams({
+    streamStarted() {},
+    streamEnded() {},
+    originMessageIds: () => undefined,
+    transaction: (fn) => fn()
+  });
+  return Object.assign(streams, {
     flushBuffer() {},
-    getStreamChunks: () => bodies.map((b) => ({ body: JSON.stringify(b) })),
+    getStreamChunks: () =>
+      bodies.map((b, chunk_index) => ({
+        body: JSON.stringify(b),
+        chunk_index
+      })),
     getStreamMessageId: () => meta.messageId,
     getStreamBasePartCount: () => meta.basePartCount,
     getStreamParentMessageId: () => null,
     getStreamIsContinuation: () => false
-  } as unknown as ResumableStream;
+  });
 }
 
 function memoryStore(initial: UIMessage[]) {
@@ -44,13 +55,7 @@ describe("ReplyStreams.persistOrphan", () => {
       ],
       { messageId: "reply", basePartCount: 1 }
     );
-    const streams = new ReplyStreams({
-      resumable: () => stream,
-      streamStarted() {},
-      streamEnded() {},
-      originMessageIds: () => undefined,
-      transaction: (fn) => fn()
-    });
+    const streams = stream;
     const { store, messages } = memoryStore([
       {
         id: "reply",
@@ -115,13 +120,7 @@ describe("ReplyStreams.persistOrphan", () => {
       ],
       { messageId: "reply", basePartCount: null }
     );
-    const streams = new ReplyStreams({
-      resumable: () => stream,
-      streamStarted() {},
-      streamEnded() {},
-      originMessageIds: () => undefined,
-      transaction: (fn) => fn()
-    });
+    const streams = stream;
     const { store, messages } = memoryStore([]);
     const options = { store, settle: (m: UIMessage) => m };
 
@@ -150,13 +149,7 @@ describe("ReplyStreams.persistOrphan", () => {
       ],
       { messageId: "reply", basePartCount: null }
     );
-    const streams = new ReplyStreams({
-      resumable: () => stream,
-      streamStarted() {},
-      streamEnded() {},
-      originMessageIds: () => undefined,
-      transaction: (fn) => fn()
-    });
+    const streams = stream;
     const { store, messages } = memoryStore([
       {
         id: "reply",
@@ -188,13 +181,7 @@ describe("ReplyStreams.persistOrphan", () => {
       ],
       { messageId: "reply", basePartCount: null }
     );
-    const streams = new ReplyStreams({
-      resumable: () => stream,
-      streamStarted() {},
-      streamEnded() {},
-      originMessageIds: () => undefined,
-      transaction: (fn) => fn()
-    });
+    const streams = stream;
     const { store, messages } = memoryStore([
       {
         id: "reply",
@@ -228,13 +215,7 @@ describe("ReplyStreams.persistOrphan", () => {
       ],
       { messageId: "reply", basePartCount: null }
     );
-    const streams = new ReplyStreams({
-      resumable: () => stream,
-      streamStarted() {},
-      streamEnded() {},
-      originMessageIds: () => undefined,
-      transaction: (fn) => fn()
-    });
+    const streams = stream;
     const { store, messages } = memoryStore([
       {
         id: "reply",
@@ -265,13 +246,7 @@ describe("ReplyStreams.persistOrphan", () => {
       ],
       { messageId: "reply", basePartCount: null }
     );
-    const streams = new ReplyStreams({
-      resumable: () => stream,
-      streamStarted() {},
-      streamEnded() {},
-      originMessageIds: () => undefined,
-      transaction: (fn) => fn()
-    });
+    const streams = stream;
     const { store, messages } = memoryStore([
       {
         id: "reply",

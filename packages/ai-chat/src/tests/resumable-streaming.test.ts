@@ -1328,7 +1328,7 @@ describe("Resumable Streaming", () => {
 
       ws1.close();
 
-      // Simulate hibernation: reinitialize ResumableStream (isLive=false)
+      // Simulate hibernation: reopen the reply stream log (isLive=false)
       await agentStub.testSimulateHibernationWake();
 
       // Verify stream was restored from SQLite but is not live
@@ -1583,7 +1583,7 @@ describe("Resumable Streaming", () => {
 
       ws1.close();
 
-      // Simulate hibernation — _resumableStream restores from SQLite,
+      // Simulate hibernation — _replyStreams restores from SQLite,
       // but _isLive is false (no live LLM reader).
       await agentStub.testSimulateHibernationWake();
 

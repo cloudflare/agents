@@ -83,11 +83,8 @@ export {
   type TransitionResult as BroadcastTransitionResult
 } from "./broadcast-state";
 
-export {
-  ResumableStream,
-  createChatStreams,
-  type SqlTaggedTemplate
-} from "./resumable-stream";
+export { createChatStreams, type SqlTaggedTemplate } from "./reply-stream";
+export { ResumableStream } from "./resumable-stream";
 export { storedAsFacet } from "../dynamic-agents/facet-flag";
 export {
   createChatTurnTaskDefinition,

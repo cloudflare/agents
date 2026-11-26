@@ -384,7 +384,7 @@ describe("Think chat recovery e2e", () => {
     await sendChatMessage("Tell me a long story");
 
     // 3. Wait for a few chunks to stream
-    // ResumableStream flushes chunks in batches. Wait long enough for the
+    // ReplyStreams flushes chunks in batches. Wait long enough for the
     // slow mock model to cross the flush threshold before killing workerd, so
     // recovery sees a non-empty partial response instead of only a fiber row.
     await sleep(6000);

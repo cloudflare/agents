@@ -2,7 +2,8 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Connection } from "../../index";
-import { ResumableStream } from "../../chat/resumable-stream";
+import type { ReplyStreams } from "../../chat";
+import { openChatLog } from "../shared/chat-log";
 import {
   replayCompletedChunks,
   replayErroredChunks
@@ -11,20 +12,23 @@ import type { StreamBenchObject } from "../capabilities/streams-bench";
 
 function createAdapter(
   instance: StreamBenchObject,
-  sql: SqlStorage
-): ResumableStream {
-  return new ResumableStream(
+  sql: SqlStorage,
+  origins: Record<string, string[]> = {}
+): ReplyStreams {
+  return openChatLog(
     instance.streams,
     <T>(
       strings: TemplateStringsArray,
       ...values: (string | number | boolean | null)[]
     ): T[] =>
-      // SAFETY: ResumableStream owns the SQL schema and each query's row type.
-      [...sql.exec(strings.join("?"), ...values)] as T[]
+      // SAFETY: ReplyStreams owns the SQL schema and each query's row type.
+      [...sql.exec(strings.join("?"), ...values)] as T[],
+    () => false,
+    origins
   );
 }
 
-describe("ResumableStream settlement", () => {
+describe("ReplyStreams settlement", () => {
   it("keeps the cutover retryable when persist throws", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
@@ -54,7 +58,7 @@ describe("ResumableStream settlement", () => {
       const id = stream.start("finalize-request");
       stream.finish(id);
       // SAFETY: the test injects one settlement failure through the real ops
-      // seam; ResumableStream owns no other path to the settle write.
+      // seam; ReplyStreams owns no other path to the settle write.
       const internals = stream as unknown as {
         ops: { settle: (...args: unknown[]) => boolean };
       };
@@ -90,7 +94,7 @@ describe("ResumableStream settlement", () => {
   });
 });
 
-describe("ResumableStream originating message ids (#2280)", () => {
+describe("ReplyStreams originating message ids (#2280)", () => {
   function collectingConnection(frames: Record<string, unknown>[]) {
     return {
       id: "c1",
@@ -103,8 +107,10 @@ describe("ResumableStream originating message ids (#2280)", () => {
   it("echoes them on the replayed terminal of a completed stream", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
-      const stream = createAdapter(instance, ctx.storage.sql);
-      const id = stream.start("req-done", { originMessageIds: ["m1", "m2"] });
+      const stream = createAdapter(instance, ctx.storage.sql, {
+        "req-done": ["m1", "m2"]
+      });
+      const id = stream.start("req-done");
       stream.storeChunk(
         id,
         JSON.stringify({ type: "text-delta", delta: "hi" })
@@ -132,8 +138,10 @@ describe("ResumableStream originating message ids (#2280)", () => {
   it("echoes them on the terminal of an orphaned stream", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
-      const first = createAdapter(instance, ctx.storage.sql);
-      const id = first.start("req-orphan", { originMessageIds: ["m3"] });
+      const first = createAdapter(instance, ctx.storage.sql, {
+        "req-orphan": ["m3"]
+      });
+      const id = first.start("req-orphan");
       first.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "x" }));
       first.flushBuffer();
 
@@ -231,7 +239,7 @@ describe("ResumableStream originating message ids (#2280)", () => {
             JSON.stringify({ type: "text-delta", delta: "partial" })
           );
           if (close === "recovering") stream.complete(id, "recovering");
-          else stream.markError(id);
+          else stream.error(id);
 
           const frames: Record<string, unknown>[] = [];
           stream.replayClosedStreamChunks(
@@ -285,7 +293,7 @@ describe("ResumableStream originating message ids (#2280)", () => {
   });
 });
 
-describe("ResumableStream parent message id", () => {
+describe("ReplyStreams parent message id", () => {
   it("keeps a branching stream's parent across a restore", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
@@ -336,7 +344,7 @@ describe("replayErroredChunks (#1575)", () => {
       for (let i = 0; i < 3; i++) {
         stream.storeChunk(id, JSON.stringify({ type: "text-delta", i }));
       }
-      stream.markError(id);
+      stream.error(id);
       const ops = instance.streams.__DO_NOT_USE_WILL_BREAK__sync();
 
       // No errored stream: nothing to replay, the terminal frame follows.

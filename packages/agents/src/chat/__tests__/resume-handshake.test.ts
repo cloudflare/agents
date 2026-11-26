@@ -12,7 +12,7 @@ import {
 } from "../resume-handshake";
 import { EndedRequests } from "../chat-frames";
 import { ContinuationState } from "../continuation-state";
-import type { ResumableStream } from "../resumable-stream";
+import type { ReplyStreams } from "../reply-stream";
 import { PreStreamTurns } from "../pre-stream-turns";
 import { STREAM_RESUME_NONE_REASONS } from "../protocol";
 import type { ChatTurnOutcome } from "../wire-types";
@@ -35,7 +35,7 @@ import {
  * `@cloudflare/think` route through this one driver, so covering every branch
  * here once is the strongest guard for think (whose native browser reconnect is
  * not exercised by an e2e). The chunk-content replay (`replayChunks` etc.) is
- * `ResumableStream`'s job and tested there; here we script those calls and only
+ * `ReplyStreams`'s job and tested there; here we script those calls and only
  * assert the driver's OWN handshake frames.
  */
 
@@ -97,7 +97,7 @@ function settledRow(tag: string, state: "completed" | "errored") {
 
 function makeStream(over: Partial<FakeStreamState> = {}): {
   state: FakeStreamState;
-  resumableStream: ResumableStream;
+  resumableStream: ReplyStreams;
 } {
   const state: FakeStreamState = {
     active: false,
@@ -172,12 +172,12 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
         }));
       }
     }
-  } as unknown as ResumableStream;
+  } as unknown as ReplyStreams;
   return { state, resumableStream };
 }
 
 function makeHost(opts: {
-  resumableStream: ResumableStream;
+  resumableStream: ReplyStreams;
   continuation?: ContinuationState<Connection>;
   preStream?: PreStreamTurns<Connection>;
   pendingTerminal?: PendingChatTerminal | null;
@@ -484,7 +484,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-1");
 
-    // The driver emits no control frame here (chunk replay is ResumableStream's
+    // The driver emits no control frame here (chunk replay is ReplyStreams's
     // job); it clears the pending set and persists the orphaned partial.
     expect(frames).toEqual([]);
     expect(state.calls.replayChunks).toEqual(["req-1"]);

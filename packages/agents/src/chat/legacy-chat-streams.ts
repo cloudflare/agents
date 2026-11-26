@@ -1,6 +1,6 @@
 import type { StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamState } from "../streams/types";
-import type { ChatStreamMetadata, SqlTaggedTemplate } from "./resumable-stream";
+import type { ChatStreamMetadata, SqlTaggedTemplate } from "./reply-stream";
 
 /** Whether the read succeeds: a `LIMIT 0` read of a missing table throws. */
 function exists(read: () => unknown): boolean {

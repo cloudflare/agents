@@ -92,7 +92,7 @@ describe("chat recovering-status broadcast e2e (#1620)", () => {
     await sendChatMessage(agentUrl, "Tell me something interesting");
 
     // Wait long enough for the slow mock model (20 deltas @ 500ms) to flush a
-    // non-empty partial to its durable buffer (ResumableStream flushes in
+    // non-empty partial to its durable buffer (ReplyStreams flushes in
     // batches of 10), so recovery takes the CONTINUE path and schedules a
     // continuation that re-runs the (slow) turn — keeping the "recovering"
     // window open long enough to observe deterministically.

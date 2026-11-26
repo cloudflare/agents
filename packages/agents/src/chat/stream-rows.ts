@@ -11,7 +11,7 @@ import type { Connection } from "agents";
 import type { StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
-import type { ChatStreamMetadata } from "./resumable-stream";
+import type { ChatStreamMetadata } from "./reply-stream";
 
 /**
  * Stored chunks per page when replaying a stream's chunk log. Bounds

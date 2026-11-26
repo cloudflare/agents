@@ -27,7 +27,7 @@ import {
 } from "./protocol";
 import type { ContinuationState } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
-import type { ResumableStream } from "./resumable-stream";
+import type { ReplyStreams } from "./reply-stream";
 import { replayCompletedChunks, replayErroredChunks } from "./stream-rows";
 import type { ChatRecentTerminal } from "./recent-terminals";
 import { endedRequestOf, type EndedRequests } from "./chat-frames";
@@ -48,7 +48,8 @@ export interface PendingChatTerminal {
 export interface ResumeHandshakeHost {
   /** The host's use-chat-response message-type constant (wire string). */
   readonly responseMessageType: string;
-  readonly resumableStream: ResumableStream;
+  /** The host's stream log. Named as released hosts pass it. */
+  readonly resumableStream: ReplyStreams;
   readonly continuation: ContinuationState<Connection>;
   /**
    * Accepted-but-not-yet-streamed turns (#1784). Optional: experimental
@@ -105,7 +106,7 @@ export interface ResumeHandshakeHost {
 /**
  * Drives the server side of the stream-resume protocol over a
  * {@link ResumeHandshakeHost}. Construct once per agent (the host wires its
- * `ResumableStream` / `ContinuationState` / pending set in) and call the three
+ * `ReplyStreams` / `ContinuationState` / pending set in) and call the three
  * public methods from the host's existing onConnect / onMessage wiring, so
  * handler registration timing stays host-owned.
  */
