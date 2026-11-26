@@ -62,7 +62,9 @@ function collectMessages(
   ws: WebSocket,
   count: number,
   predicate: (data: string) => boolean = isEchoPong,
-  timeout = 2000
+  // A bound, not a wait: it resolves as soon as `count` messages arrive.
+  // Under the 10 s test timeout, so a missing reply reports the count.
+  timeout = 8000
 ): Promise<string[]> {
   return new Promise((resolve) => {
     const messages: string[] = [];
