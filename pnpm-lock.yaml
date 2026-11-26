@@ -4794,6 +4794,9 @@ importers:
       cron-schedule:
         specifier: ^6.0.0
         version: 6.0.0
+      devtools-protocol:
+        specifier: 0.0.1752859
+        version: 0.0.1752859
       mimetext:
         specifier: ^3.0.28
         version: 3.0.28
@@ -10945,6 +10948,9 @@ packages:
 
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
+
+  devtools-protocol@0.0.1752859:
+    resolution: {integrity: sha512-3W50vDp/n5eDCw6ibWNwGgzslPVoUp5/y4JZgf2e1X4nrEJCaa3tig9LcL50ZkMdVwtMWKKGGKt7cp8FO3DR8g==}
 
   diff3@0.0.3:
     resolution: {integrity: sha512-iSq8ngPOt0K53A6eVr4d5Kn6GNrM2nQZtC740pzIriHtn4pOQ2lyzEXQMBeVcWERN0ye7fhBsk9PbLLQOnUx/g==}
@@ -22407,6 +22413,8 @@ snapshots:
   devlop@1.1.0:
     dependencies:
       dequal: 2.0.3
+
+  devtools-protocol@0.0.1752859: {}
 
   diff3@0.0.3: {}
 
