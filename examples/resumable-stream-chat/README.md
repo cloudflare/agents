@@ -2,7 +2,7 @@
 
 A real-time AI streaming chat that **automatically resumes** when you disconnect and reconnect. Built with Cloudflare Agents and Durable Objects.
 
-This example demonstrates client reconnect recovery. Durable Object eviction recovery is also enabled automatically, but this example does not force an eviction while a model call is in flight. For that scenario, see `experimental/forever-chat`.
+This example demonstrates client reconnect recovery. Durable Object eviction recovery is also enabled automatically, but this example does not force an eviction while a model call is in flight. For that scenario, see [`deploy-churn`](../deploy-churn).
 
 ## What this demonstrates
 
