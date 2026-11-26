@@ -288,6 +288,11 @@ export function chatTurnDefinition(
     }
 
     const messages = (await session.getHistory()) as unknown as UIMessage[];
+    // A tool answer continues the reply that asked for it.
+    if (!partial && run.trigger === "tool-answer") {
+      const last = messages.at(-1);
+      if (last?.role === "assistant") partial = last;
+    }
     const call: ChatModelCall = {
       session: sessionId,
       requestId,

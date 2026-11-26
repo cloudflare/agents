@@ -160,4 +160,40 @@ describe("chatTurnDefinition", () => {
       ).toBeNull();
     });
   });
+
+  it("a tool-answer turn continues the reply that asked for the tool", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Where am I?" }]
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: { city: "Lisbon" }
+          }
+        ]
+      } as never);
+
+      await runTurn(instance, { trigger: "tool-answer" });
+      expect(instance.calls[0]).toMatchObject({
+        mode: "continue",
+        replyId: "a1"
+      });
+      const history = await session.getHistory();
+      expect(history.map((m) => m.id)).toEqual(["u1", "a1"]);
+      expect(JSON.stringify(history[1])).toContain("Lisbon");
+      expect(JSON.stringify(history[1])).toContain("Hello");
+    });
+  });
 });
