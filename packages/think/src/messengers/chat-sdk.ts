@@ -256,11 +256,7 @@ export interface MessengerThinkHost extends MessengerThinkTarget {
    * Durably accept one messenger reply as a delivery and answer it inline
    * while this isolate lives. The same id joins a reply still running.
    */
-  _sendMessengerReply(
-    id: string,
-    payload: MessengerReplyPayload,
-    live: LiveMessengerReply
-  ): Promise<void>;
+  _sendMessengerReply(id: string, live: LiveMessengerReply): Promise<void>;
   subAgent<T extends Agent>(
     agentClass: SubAgentClass<T>,
     name: string
@@ -606,14 +602,11 @@ export class ThinkMessengerRuntime {
     // Durable acceptance plus inline execution, as one delivery. A
     // duplicate webhook joins a reply still running; a reply a reset cut
     // off is answered again or apologized for on wake, by its stage.
-    await this.host._sendMessengerReply(
-      idempotencyKeyForEvent(event),
-      { event: snapshotEvent, thread: thread.toJSON() },
-      {
-        answer: (record) =>
-          this.answer(definition, event, thread, record, snapshotEvent)
-      }
-    );
+    await this.host._sendMessengerReply(idempotencyKeyForEvent(event), {
+      payload: { event: snapshotEvent, thread: thread.toJSON() },
+      answer: (record) =>
+        this.answer(definition, event, thread, record, snapshotEvent)
+    });
   }
 
   private async answer(

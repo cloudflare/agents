@@ -376,9 +376,15 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         }
       };
       if (options?.giveUp) {
+        // What the delivery module hands its hook: the attempts' checkpoint,
+        // where the reply was kept.
         await messengerReplySink(() => runtime).onGiveUp?.(
           new Error("gave up"),
-          payload
+          {},
+          {
+            get: <T>(key: string) =>
+              (key === "reply" ? payload : undefined) as T | undefined
+          }
         );
         return null;
       }
@@ -672,19 +678,25 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     let answered = 0;
     const id = `repeat-${crypto.randomUUID()}`;
     const send = () =>
-      sendMessengerReply(
-        this.tasks,
-        id,
-        { event: {} as MessengerEvent, thread: null },
-        {
-          answer: async () => {
-            answered++;
-          }
+      sendMessengerReply(this.tasks, id, {
+        payload: { event: {} as MessengerEvent, thread: null },
+        answer: async () => {
+          answered++;
         }
-      );
+      });
     await send();
     await send();
     return answered;
+  }
+
+  /** Whether any kept reply run's row still holds `text`. */
+  async replyRowsHoldForTest(text: string): Promise<boolean> {
+    const rows = this.sql<Record<string, unknown>>`
+      SELECT * FROM cf_agents_task_runs
+      WHERE definition = '__cf_delivery:messenger-reply'
+    `;
+    if (rows.length === 0) throw new Error("no reply run kept");
+    return JSON.stringify(rows).includes(text);
   }
 
   /** Messenger reply runs not yet settled. */

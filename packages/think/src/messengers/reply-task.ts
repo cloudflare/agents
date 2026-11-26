@@ -27,6 +27,14 @@ const MESSENGER_REPLY_SINK = "messenger-reply";
 /** The checkpoint key of how far a reply got. */
 const STAGE = "stage";
 
+/**
+ * The checkpoint key of the reply's event and thread. In the checkpoint,
+ * not the run's input: the run is kept once answered (a repeat is a
+ * repeat), and its checkpoint, unlike its input, is cleared then, so the
+ * message's text is not kept with it.
+ */
+const REPLY = "reply";
+
 /** A reply's own attempt takes as long as its answer: one day at most. */
 const REPLY_ATTEMPT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
@@ -43,6 +51,7 @@ export type RecordReplyStage = (stage: "streaming" | "completed") => void;
 
 /** The reply the webhook that received its message waits on. @internal */
 export type LiveMessengerReply = {
+  payload: MessengerReplyPayload;
   answer(record: RecordReplyStage): Promise<void>;
 };
 
@@ -97,19 +106,26 @@ export async function recoverMessengerReply(
  */
 export function messengerReplySink(
   runtime: () => MessengerReplyRuntime | undefined
-): DeliverySink<MessengerReplyPayload> {
+): DeliverySink<Record<string, never>> {
   return {
     attemptTimeoutMs: REPLY_ATTEMPT_TIMEOUT_MS,
-    async deliver(payload, attempt) {
+    async deliver(_input, attempt) {
       const messengers = runtime();
       if (!messengers) throw new Error("Messenger runtime is unavailable");
       const record: RecordReplyStage = (stage) =>
         attempt.checkpoint.set(STAGE, stage);
       const live = attempt.local as LiveMessengerReply | undefined;
       if (live) {
+        // Kept before any delivery work: a reset mid-answer recovers from it.
+        attempt.checkpoint.set(REPLY, live.payload as unknown as TaskJson);
         await live.answer(record);
         return;
       }
+      const payload = attempt.checkpoint.get<MessengerReplyPayload & TaskJson>(
+        REPLY
+      );
+      // Nothing to recover: the reset came before the reply was kept.
+      if (!payload) return;
       await recoverMessengerReply(
         messengers,
         payload,
@@ -117,10 +133,11 @@ export function messengerReplySink(
         record
       );
     },
-    onGiveUp(error, payload) {
+    onGiveUp(error, _input, progress) {
       console.error("[Think] A messenger reply was given up", error);
       // Nothing else will answer what queued behind it.
-      runtime()?.drainAfterRecovery(payload);
+      const payload = progress.get<MessengerReplyPayload & TaskJson>(REPLY);
+      if (payload) runtime()?.drainAfterRecovery(payload);
     }
   };
 }
@@ -153,17 +170,25 @@ export function registerMessengerReplies(
     // A completed reply posts nothing more, but its delivery still answers
     // what queued behind it.
     if (snapshot) {
-      await sendDelivery<MessengerReplyPayload>(
+      const reply: MessengerReplyPayload = {
+        event: snapshot.event,
+        thread: snapshot.thread
+      };
+      await sendDelivery(
         tasks,
         MESSENGER_REPLY_SINK,
         // Its own id: this run's row stays until it completes.
         `${step.id}:reply`,
-        { event: snapshot.event, thread: snapshot.thread },
+        {},
         {
           sentAt: step.createdAt,
           attempts: 0,
-          progress: { [STAGE]: snapshot.stage }
-        }
+          progress: {
+            [STAGE]: snapshot.stage,
+            [REPLY]: reply as unknown as TaskJson
+          }
+        },
+        { retain: true }
       );
     }
     await storage.delete(key);
@@ -179,14 +204,13 @@ export function registerMessengerReplies(
 export function sendMessengerReply(
   tasks: Tasks,
   id: string,
-  payload: MessengerReplyPayload,
   live: LiveMessengerReply
 ): Promise<void> {
   return sendDelivery(
     tasks,
     MESSENGER_REPLY_SINK,
     id,
-    payload as unknown as TaskJson,
+    {},
     undefined,
     // Kept once answered: a repeated webhook or button callback after the
     // reply ended is a repeat, not a new request.

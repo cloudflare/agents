@@ -145,8 +145,7 @@ import {
 import {
   registerMessengerReplies,
   sendMessengerReply,
-  type LiveMessengerReply,
-  type MessengerReplyPayload
+  type LiveMessengerReply
 } from "./messengers/reply-task";
 import { ThinkModelResolver } from "./model";
 import {
@@ -3057,12 +3056,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * lives.
    * @internal
    */
-  _sendMessengerReply(
-    id: string,
-    payload: MessengerReplyPayload,
-    live: LiveMessengerReply
-  ): Promise<void> {
-    return sendMessengerReply(this.tasks, id, payload, live);
+  _sendMessengerReply(id: string, live: LiveMessengerReply): Promise<void> {
+    return sendMessengerReply(this.tasks, id, live);
   }
 
   private _runChatRecoveryFiber<T>(

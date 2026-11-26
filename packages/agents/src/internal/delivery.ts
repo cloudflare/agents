@@ -66,7 +66,12 @@ export interface DeliverySink<Payload> {
    * Told once that a delivery gave up. Not awaited: the run ends `error`
    * whatever it does, and a throw or rejection is logged.
    */
-  onGiveUp?(error: Error, payload: Payload): void | Promise<void>;
+  onGiveUp?(
+    error: Error,
+    payload: Payload,
+    /** What the delivery's attempts kept, as they left it. */
+    progress: Pick<TaskCheckpoint, "get">
+  ): void | Promise<void>;
 }
 
 /** The wait after the first failure, doubled after each one. */
@@ -176,7 +181,7 @@ export async function sendDelivery<Payload>(
     status: "pending",
     attempt: resume.attempts,
     input: payload as TaskJson,
-    retain: false,
+    retain: options.retain ?? false,
     createdAt: resume.sentAt,
     // Its earlier attempts ended (they were the released version's), so
     // none of them counts as lost.
@@ -221,7 +226,7 @@ async function attemptDelivery<Payload>(
     console.error(`[agents] ${error.message}`);
     // Not awaited: a hook that never returns must not hold the run open.
     void Promise.resolve()
-      .then(() => sink.onGiveUp?.(error, payload))
+      .then(() => sink.onGiveUp?.(error, payload, step.checkpoint))
       .catch((hookError: unknown) => {
         console.error(`[agents] delivery ${step.id} onGiveUp threw`, hookError);
       });

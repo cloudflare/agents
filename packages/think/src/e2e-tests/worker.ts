@@ -2323,17 +2323,14 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
     // restart).
     let recorded!: () => void;
     const stageKept = new Promise<void>((resolve) => (recorded = resolve));
-    void this._sendMessengerReply(
-      id,
-      { event, thread },
-      {
-        answer: async (record) => {
-          if (stage === "streaming") record("streaming");
-          recorded();
-          await new Promise((resolve) => setTimeout(resolve, 60_000));
-        }
+    void this._sendMessengerReply(id, {
+      payload: { event, thread },
+      answer: async (record) => {
+        if (stage === "streaming") record("streaming");
+        recorded();
+        await new Promise((resolve) => setTimeout(resolve, 60_000));
       }
-    );
+    });
     // Returns once the stage is in the run's row: the reply's answer is
     // running and its checkpoint written (this call's response waits for
     // the write to be durable).
