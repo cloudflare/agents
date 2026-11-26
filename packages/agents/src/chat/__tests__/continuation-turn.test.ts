@@ -331,7 +331,6 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual([]);
     expect(host.droppedEvents).toEqual([]);
     expect(turns.continuation.pending?.requestId).toBe("cont-2");
-    expect(turns.continuation.pending?.pastCoalesce).toBe(false);
 
     await fire();
     await drain();
@@ -647,7 +646,6 @@ describe("the continuation turn", () => {
       requestId: "cont-9",
       errorPrefix: "[test]",
       prerequisite: null,
-      pastCoalesce: false,
       targetMessageIds: ["a9"]
     };
     turns.continuation.running = running;
@@ -2044,7 +2042,6 @@ describe("what a continuation turn runs", () => {
       expect(host.ran).toEqual(["free-1"]);
       expect(turns.aborts.has("free-1")).toBe(false);
       expect(turns.continuation.pending?.requestId).toBe("cont-1");
-      expect(turns.continuation.pending?.pastCoalesce).toBe(false);
     });
 
     it("never calls the model when it was stopped while it waited in the queue", async () => {

@@ -42,7 +42,7 @@ import { EventType } from "@tanstack/ai/client";
 import type { ModelMessage } from "@tanstack/ai";
 import {
   ChatRecoveryEngine,
-  ContinuationState,
+  ContinuationSlots,
   ReplyStreams,
   createChatStreams,
   ResumeHandshake,
@@ -177,7 +177,7 @@ export class TanStackAgent extends Agent<Env> {
 
   // ── Handshake host state (shared with the streaming/broadcast loop) ─────────
   private _pendingResumeConnections: Set<string> = new Set();
-  private _continuation = new ContinuationState<Connection>();
+  private _continuation = new ContinuationSlots<Connection>();
   private _resumeHandshakeInstance: ResumeHandshake | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {

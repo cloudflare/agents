@@ -1226,7 +1226,7 @@ export class AIChatAgent<
 
   /**
    * The shared resume-handshake driver (Tier-2). Lazily built; the
-   * `ReplyStreams` / `ContinuationState` / pending set are stable after the
+   * `ReplyStreams` / `ContinuationSlots` / pending set are stable after the
    * constructor, so a single instance threads them for the agent's lifetime.
    */
   private _resumeHandshake(): ResumeHandshake {

@@ -2143,8 +2143,7 @@ export class ThinkClientToolsAgent extends Think {
       clientTools: undefined,
       body: undefined,
       errorPrefix: "[Think] Auto-continuation failed:",
-      prerequisite: null,
-      pastCoalesce: false
+      prerequisite: null
     };
 
     // Drive the controller into an in-flight drain so it stays armed

@@ -35,7 +35,7 @@
  *   - Context blocks with LLM-writable persistent memory
  *   - Non-destructive compaction (summaries replace ranges at read time)
  *   - FTS5 full-text search across conversation history
- *   - Abort/cancel support via AbortRegistry
+ *   - Abort/cancel support (one abort signal per request)
  *   - Error handling with partial message persistence
  *   - Message sanitization (strips OpenAI ephemeral metadata)
  *   - Row size enforcement (compacts large tool outputs)
@@ -11284,7 +11284,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /**
    * The shared resume-handshake driver (Tier-2). Lazily built; the
-   * `ReplyStreams` / `ContinuationState` / pending set are stable after
+   * `ReplyStreams` / `ContinuationSlots` / pending set are stable after
    * `onStart`, so a single instance threads them for the agent's lifetime. The
    * idle-connect payload (transcript + recovering, `_buildIdleConnectMessages`)
    * stays host-owned and is NOT part of the driver.

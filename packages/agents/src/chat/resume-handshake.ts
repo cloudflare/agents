@@ -25,10 +25,7 @@ import {
   STREAM_RESUME_NONE_REASONS,
   type StreamResumeNoneReason
 } from "./protocol";
-import type {
-  ContinuationPending,
-  ContinuationSlots
-} from "./continuation-state";
+import type { ContinuationSlots } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
 import type { ReplyStreams } from "./reply-stream";
 import { replayCompletedChunks, replayErroredChunks } from "./stream-rows";
@@ -53,14 +50,7 @@ export interface ResumeHandshakeHost {
   readonly responseMessageType: string;
   /** The host's stream log. Named as released hosts pass it. */
   readonly resumableStream: ReplyStreams;
-  /**
-   * The continuation slots. `running` is optional: released ai-chat 0.12.3
-   * and Think 0.24.0 pass their own `ContinuationState`, which has none.
-   */
-  readonly continuation: Pick<
-    ContinuationSlots<Connection>,
-    "pending" | "activeRequestId" | "activeConnectionId" | "awaitingConnections"
-  > & { readonly running?: ContinuationPending<Connection> | null };
+  readonly continuation: ContinuationSlots<Connection>;
   /**
    * Accepted-but-not-yet-streamed turns (#1784). Optional: experimental
    * recovery adapters that don't track a pre-stream window omit it and keep the
@@ -116,7 +106,7 @@ export interface ResumeHandshakeHost {
 /**
  * Drives the server side of the stream-resume protocol over a
  * {@link ResumeHandshakeHost}. Construct once per agent (the host wires its
- * `ReplyStreams` / `ContinuationState` / pending set in) and call the three
+ * `ReplyStreams` / `ContinuationSlots` / pending set in) and call the three
  * public methods from the host's existing onConnect / onMessage wiring, so
  * handler registration timing stays host-owned.
  */
@@ -225,7 +215,7 @@ export class ResumeHandshake {
     connection = this.#once(connection);
     const { resumableStream, continuation, preStream } = this.host;
     // The continuation whose stream comes next: its turn started, or not yet.
-    const waiting = continuation.running ?? continuation.pending ?? null;
+    const waiting = continuation.running ?? continuation.pending;
     if (resumableStream.hasActiveStream()) {
       // A request the tab waits on that ended while it was away, and a
       // recovery now streams under another id: end it first, or the tab
