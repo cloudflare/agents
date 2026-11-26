@@ -272,6 +272,8 @@ export type ChatTurnResult = {
 
 /** The input of a chat-turn run. */
 export interface ChatTurnInput {
+  /** `"continue"`: extend the last assistant message instead of answering. */
+  readonly mode?: "continue";
   /** The session the turn is in, when one definition serves many. */
   readonly session?: string;
   readonly trigger: ChatModelCall["trigger"];
@@ -700,7 +702,8 @@ export function chatTurnDefinition(
           ? { leafId: run.replyId }
           : run.questionId !== undefined &&
               !partial &&
-              run.trigger !== "tool-answer"
+              run.trigger !== "tool-answer" &&
+              run.mode !== "continue"
             ? { leafId: run.questionId }
             : {};
       // A byte budget reads only the newest messages that fit it.
@@ -715,8 +718,11 @@ export function chatTurnDefinition(
     };
     const messages = await history();
     // A tool answer continues the reply that asked for it (named, or the
-    // latest).
-    if (!partial && run.trigger === "tool-answer") {
+    // latest); a host's "continue the last turn" does the same.
+    if (
+      !partial &&
+      (run.trigger === "tool-answer" || run.mode === "continue")
+    ) {
       const last = messages.at(-1);
       if (last?.role === "assistant") {
         partial = last;
