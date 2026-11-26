@@ -55,7 +55,7 @@ import {
 } from "./before-turn";
 import {
   CONTINUATION_COALESCE_MS,
-  ContinuationState,
+  ContinuationSlots,
   addContinuationTarget,
   continuationTargetIsLatest,
   type ContinuationConnection,
@@ -420,8 +420,8 @@ export class ChatTurns<
   readonly queue: TurnLane;
   /** One abort controller per request id. */
   readonly aborts: TurnAborts = new Map();
-  /** Pending, deferred and active auto-continuation slots. */
-  readonly continuation = new ContinuationState<TConnection>();
+  /** Pending, running and active auto-continuation slots. */
+  readonly continuation = new ContinuationSlots<TConnection>();
   /** Accepted turns whose stream has not started, and connections parked on them. */
   /**
    * Accepted-but-not-yet-streamed turns and the connections parked waiting for
@@ -675,7 +675,6 @@ export class ChatTurns<
     this.#continuationParts = {
       continuation: this.continuation,
       rearmForBatch: () => this.rearmContinuation(),
-      activateDeferred: () => this.#activateDeferredContinuation(),
       aborts: this.aborts,
       messages: () => host.messages(),
       clientToolNames: () => this.clientToolNames(),
@@ -1377,7 +1376,7 @@ export class ChatTurns<
    */
   #admitContinuation(): void {
     const pending = this.continuation.pending;
-    if (!this.admissions || !pending || pending.pastCoalesce) return;
+    if (!this.admissions || !pending) return;
     void this.admissions
       .admitContinuation(pending.requestId, [...pending.targetMessageIds])
       .catch((error: unknown) =>
@@ -1398,6 +1397,7 @@ export class ChatTurns<
     const target = { targetMessageIds };
     if (
       this.continuation.pending ||
+      this.continuation.running ||
       !continuationTargetIsLatest(this.host.messages(), target)
     ) {
       this.admissions?.end(requestId);
@@ -1528,25 +1528,12 @@ export class ChatTurns<
    * Schedule a continuation for a result that settled its call and opted in
    * with `autoContinue` (#1650). Results that arrive close together share
    * one continuation through the coalesce timer, and it fires through the
-   * barrier ({@link fireContinuationWhenStable}). While a continuation runs
-   * (`pastCoalesce`), the result is kept as the deferred follow-up instead.
+   * barrier ({@link fireContinuationWhenStable}). One that arrives while a
+   * continuation runs is the next continuation: its turn waits behind the
+   * running one in the lane.
    */
   #scheduleContinuation(spec: ContinuationSpec<TConnection>): void {
     const c = this.continuation;
-    if (c.pending?.pastCoalesce) {
-      c.deferred = {
-        connection: spec.connection,
-        connectionId: spec.connection.id,
-        errorPrefix: spec.errorPrefix,
-        prerequisite: null,
-        // Results coalesced into one follow-up: keep every message they target.
-        targetMessageIds: addContinuationTarget(
-          c.deferred?.targetMessageIds,
-          spec.targetMessageId
-        )
-      };
-      return;
-    }
     if (c.pending) {
       c.pending.connection = spec.connection;
       c.pending.connectionId = spec.connection.id;
@@ -1567,7 +1554,7 @@ export class ChatTurns<
         targetMessageIds: [spec.targetMessageId]
       };
     }
-    c.awaitingConnections.set(spec.connection.id, spec.connection);
+    c.awaitPending();
     this.armCoalesce();
   }
 
@@ -1578,8 +1565,7 @@ export class ChatTurns<
    * Never creates a continuation.
    */
   rearmContinuation(): void {
-    const pending = this.continuation.pending;
-    if (!pending || pending.pastCoalesce) return;
+    if (!this.continuation.pending) return;
     this.armCoalesce();
   }
 
@@ -1611,7 +1597,7 @@ export class ChatTurns<
    */
   fireContinuationWhenStable(): void {
     const pending = this.continuation.pending;
-    if (!pending || pending.pastCoalesce || this.barrierActive) return;
+    if (!pending || this.barrierActive) return;
     // While the reply streams the batch can still grow. The finalize
     // re-arms ({@link replyFinalized}).
     if (this.host.isReplyStreaming()) return;
@@ -1632,26 +1618,12 @@ export class ChatTurns<
         // No await from here to the decision, so a re-armed timer cannot
         // interleave and fire twice.
         this.barrierActive = false;
-        const current = this.continuation.pending;
-        if (!current || current.pastCoalesce) return;
+        if (!this.continuation.pending) return;
         if (this.host.isReplyStreaming()) return;
         if (hasIncompleteToolBatch(this.host.messages())) return;
         this.cancelCoalesce();
         this.host.fireContinuation();
       });
-  }
-
-  /**
-   * The deferred follow-up becomes the pending continuation, through the
-   * barrier: its batch may still be incomplete, or a reply streaming.
-   */
-  #activateDeferredContinuation(): void {
-    const pending = this.continuation.activateDeferred(() =>
-      this.host.generateRequestId()
-    );
-    if (!pending) return;
-    this.#admitContinuation();
-    this.fireContinuationWhenStable();
   }
 
   /**
@@ -2011,12 +1983,14 @@ export class ChatTurns<
    * A tab that waits on nothing stops nothing.
    */
   cancelWaitingContinuation(connectionId: string, reason?: unknown): void {
-    const { pending, activeRequestId, activeConnectionId } = this.continuation;
-    if (pending && this.continuation.awaitingConnections.has(connectionId)) {
-      if (pending.pastCoalesce) {
-        void this.cancel(pending.requestId, reason);
-        return;
-      }
+    const { pending, running, activeRequestId, activeConnectionId } =
+      this.continuation;
+    const waits = this.continuation.awaitingConnections.has(connectionId);
+    if (running && waits) {
+      void this.cancel(running.requestId, reason);
+      return;
+    }
+    if (pending && waits) {
       // Fired and queued, or not fired yet: its turn finds nothing to claim.
       this.#dropWaiting(null);
       return;
@@ -2247,7 +2221,7 @@ export class ChatTurns<
     if (this.pendingInteraction !== null) return true;
     const pending = this.continuation.pending;
     return (
-      (pending !== null && !pending.pastCoalesce && this.continuationArmed()) ||
+      (pending !== null && this.continuationArmed()) ||
       this.#continuationParts.firing.size > 0
     );
   }

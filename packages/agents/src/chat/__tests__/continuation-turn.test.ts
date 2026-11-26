@@ -21,7 +21,7 @@ import type {
 } from "../continuation-state";
 import {
   CONTINUATION_COALESCE_MS,
-  ContinuationState
+  ContinuationSlots
 } from "../continuation-state";
 import {
   continuationStreamStarted,
@@ -251,7 +251,9 @@ describe("the continuation turn", () => {
       // Counted as firing only until the turn starts: from here the queue
       // says the chat is busy.
       busyInTurn = turns.hasPendingDecision();
-      expect(continuation.pastCoalesce).toBe(true);
+      expect(turns.continuation.running?.requestId).toBe(
+        continuation.requestId
+      );
       expect(turns.aborts.has(continuation.requestId)).toBe(true);
       await host.stream(continuation.requestId, true);
     };
@@ -336,7 +338,7 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual(["cont-2"]);
   });
 
-  it("keeps a continuation's record until its turn or its drop, deferred follow-ups included", async () => {
+  it("keeps a continuation's record until its turn or its drop, the next one's included", async () => {
     const kept = memoryStorage();
     turns = new ChatTurns<TestConnection>(host, {
       defaultDebounceMs: 750,
@@ -365,8 +367,8 @@ describe("the continuation turn", () => {
     expect(host.droppedEvents).toEqual(["cont-1:moved_on"]);
     expect(records()).toEqual([]);
 
-    // A follow-up deferred behind a running continuation is kept as soon as
-    // it becomes pending.
+    // An answer that arrives while a continuation runs schedules the next
+    // one, which is kept at once.
     host.transcript = [user("u3"), toolReply("a3", "output-available")];
     let release!: () => void;
     host.model = () =>
@@ -376,13 +378,12 @@ describe("the continuation turn", () => {
     await result("a3");
     await fire();
     await drain();
-    expect(turns.continuation.pending?.pastCoalesce).toBe(true);
+    expect(turns.continuation.running?.requestId).toBe("cont-2");
     await result("a3");
-    expect(turns.continuation.deferred).not.toBeNull();
-    release();
-    await drain();
     expect(turns.continuation.pending?.requestId).toBe("cont-3");
     expect(records()).toContain("cont-3");
+    release();
+    await drain();
   });
 
   it("holds a restored continuation's replay until its turn is on the queue", async () => {
@@ -638,16 +639,18 @@ describe("the continuation turn", () => {
     await fire();
     expect(turns.aborts.has("cont-1")).toBe(true);
     turns.reset();
-    // The chat after the reset has a deferred result of its own by the time
-    // the dropped turn ends. It is not the dropped turn's to run or drop.
-    const deferred = {
+    // The chat after the reset has a continuation of its own running by the
+    // time the dropped turn ends. It is not the dropped turn's to settle.
+    const running = {
       connection: makeConnection("c9"),
       connectionId: "c9",
+      requestId: "cont-9",
       errorPrefix: "[test]",
       prerequisite: null,
+      pastCoalesce: false,
       targetMessageIds: ["a9"]
     };
-    turns.continuation.deferred = deferred;
+    turns.continuation.running = running;
     release();
     await blocker;
     await drain();
@@ -655,7 +658,7 @@ describe("the continuation turn", () => {
     expect(host.ran).toEqual([]);
     expect(host.errors).toEqual([]);
     expect(turns.aborts.has("cont-1")).toBe(false);
-    expect(turns.continuation.deferred).toBe(deferred);
+    expect(turns.continuation.running).toBe(running);
     expect(turns.continuation.pending).toBeNull();
   });
 
@@ -678,31 +681,32 @@ describe("the continuation turn", () => {
     expect(turns.continuation.pending?.requestId).toBe("cont-2");
   });
 
-  it("keeps a result that arrives before the stream deferred until the turn settles", async () => {
+  it("runs a result that arrives before the stream as the next continuation, after the turn", async () => {
     const second = makeConnection("c2");
-    let deferredAtStreamStart: unknown;
+    let pendingAtStreamStart: string | undefined;
     host.model = async (continuation) => {
       if (continuation.requestId !== "cont-1") return;
       await result("a1", second);
       host.replyStreaming = true;
       turns.streamStarted("cont-1", () => {});
-      deferredAtStreamStart = turns.continuation.deferred;
-      expect(turns.continuation.pending).toBeNull();
+      pendingAtStreamStart = turns.continuation.pending?.requestId;
       host.replyStreaming = false;
       turns.replyFinalized();
     };
     await result("a1");
     await fire();
     await drain();
+    expect(host.ran).toEqual(["cont-1"]);
 
-    expect(deferredAtStreamStart).not.toBeNull();
-    // The turn settled: the deferred result ran as the next continuation.
+    expect(pendingAtStreamStart).toBe("cont-2");
+    await fire();
+    await drain();
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
-    expect(turns.continuation.deferred).toBeNull();
     expect(turns.continuation.pending).toBeNull();
+    expect(turns.continuation.running).toBeNull();
   });
 
-  it("runs the deferred result after a continuation that failed before it streamed", async () => {
+  it("runs the next result after a continuation that failed before it streamed", async () => {
     const second = makeConnection("c2");
     host.model = async (continuation) => {
       if (continuation.requestId !== "cont-1") return;
@@ -712,16 +716,18 @@ describe("the continuation turn", () => {
     await result("a1");
     await fire();
     await drain();
+    await fire();
+    await drain();
 
     expect(host.errors).toHaveLength(1);
-    // The failed turn's own connection is released, and the result it
-    // deferred still reaches the model.
+    // The failed turn's own connection is released, and the result that
+    // arrived while it ran still reaches the model.
     expect(connection.sent).toEqual([RESUME_NONE]);
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
     expect(turns.aborts.has("cont-1")).toBe(false);
   });
 
-  it("stops after the deferred result's continuation fails too", async () => {
+  it("stops after the next result's continuation fails too", async () => {
     const second = makeConnection("c2");
     host.model = async (continuation) => {
       if (continuation.requestId === "cont-1") await result("a1", second);
@@ -738,26 +744,28 @@ describe("the continuation turn", () => {
     expect(host.errors).toHaveLength(2);
     expect(second.sent).toEqual([RESUME_NONE]);
     expect(turns.continuation.pending).toBeNull();
-    expect(turns.continuation.deferred).toBeNull();
+    expect(turns.continuation.running).toBeNull();
     expect(turns.hasPendingDecision()).toBe(false);
   });
 
-  it("does not run the deferred result once the reply went on to its answer", async () => {
+  it("does not run the next result once the reply went on to its answer", async () => {
     const second = makeConnection("c2");
     host.model = async (continuation) => {
-      // A result lands while the turn waits on the model: deferred.
+      // A result lands while the turn waits on the model: the next one.
       await result("a1", second);
       await host.stream(continuation.requestId, true);
     };
     await result("a1");
     await fire();
     await drain();
+    await fire();
+    await drain();
 
-    // The deferred result's turn finds a transcript that ends in the
-    // model's answer: it calls no model and releases its connection.
+    // The next result's turn finds a transcript that ends in the model's
+    // answer: it calls no model and releases its connection.
     expect(host.ran).toEqual(["cont-1"]);
     expect(second.sent).toEqual([RESUME_NONE]);
-    expect(turns.continuation.deferred).toBeNull();
+    expect(turns.continuation.running).toBeNull();
     expect(turns.continuation.pending).toBeNull();
   });
 
@@ -823,7 +831,7 @@ describe("the continuation turn", () => {
     expect(turns.continuation.pending).toBeNull();
   });
 
-  it("a newer pending continuation takes over the targets of the deferred result it covers", async () => {
+  it("results that arrive while a continuation runs share the next one, every target kept", async () => {
     const second = makeConnection("c2");
     const third = makeConnection("c3");
     host.transcript = [
@@ -838,12 +846,11 @@ describe("the continuation turn", () => {
         followUpTargets = continuation.targetMessageIds;
         return;
       }
-      // Deferred, for the latest reply: arrives while the turn waits on
-      // the model.
+      // For the latest reply: arrives while the turn waits on the model.
       await result("a1", second);
       host.replyStreaming = true;
       turns.streamStarted("cont-1", () => {});
-      // A newer pending one, for an older reply: arrives while it streams.
+      // For an older reply: arrives while it streams, and joins it.
       await result("a0", third);
       host.replyStreaming = false;
       turns.replyFinalized();
@@ -857,22 +864,22 @@ describe("the continuation turn", () => {
     // The follow-up still answers the latest reply's result: it answers
     // both messages.
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
-    expect(followUpTargets).toEqual(["a0", "a1"]);
+    expect(followUpTargets).toEqual(["a1", "a0"]);
   });
 
-  it("a stopped continuation drops the result deferred while it ran", async () => {
+  it("a stopped continuation drops the next one, scheduled while it ran", async () => {
     const second = makeConnection("c2");
     host.model = async (continuation) => {
       if (continuation.requestId !== "cont-1") return;
-      // Deferred: arrives while the turn waits on the model. Then the user
-      // stops the continuation.
+      // Arrives while the turn waits on the model. Then the user stops the
+      // continuation.
       await result("a1", second);
       turns.cancel(continuation.requestId);
-      expect(turns.continuation.deferred).toBeNull();
+      expect(turns.continuation.pending).toBeNull();
       // The app is told, under the id of the turn the result waited behind.
-      expect(host.droppedEvents).toEqual(["cont-1:stopped"]);
+      expect(host.droppedEvents).toEqual(["cont-2:stopped<cont-1"]);
       // Its own continuation is left to its settle.
-      expect(turns.continuation.pending?.requestId).toBe("cont-1");
+      expect(turns.continuation.running?.requestId).toBe("cont-1");
     };
     await result("a1");
     await fire();
@@ -881,7 +888,7 @@ describe("the continuation turn", () => {
     await drain();
 
     expect(host.ran).toEqual(["cont-1"]);
-    expect(turns.continuation.deferred).toBeNull();
+    expect(turns.continuation.running).toBeNull();
     expect(turns.continuation.pending).toBeNull();
     expect(turns.hasPendingDecision()).toBe(false);
   });
@@ -1345,7 +1352,7 @@ describe("the continuation turn", () => {
     });
   });
 
-  it("leaves a newer pending continuation alone, and lets it cover the deferred result", async () => {
+  it("results that arrive before and during the stream share one next continuation", async () => {
     const second = makeConnection("c2");
     const third = makeConnection("c3");
     let followUpTargets: readonly string[] | undefined;
@@ -1354,11 +1361,11 @@ describe("the continuation turn", () => {
         followUpTargets = continuation.targetMessageIds;
         return;
       }
-      // Deferred: arrives while the turn waits on the model.
+      // Arrives while the turn waits on the model: the next continuation.
       await result("a1", second);
       host.replyStreaming = true;
       turns.streamStarted("cont-1", () => {});
-      // A newer pending one: arrives while the turn streams.
+      // Arrives while the turn streams: joins the next continuation.
       await result("a1", third);
       host.replyStreaming = false;
       turns.replyFinalized();
@@ -1373,7 +1380,7 @@ describe("the continuation turn", () => {
     // once.
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
     expect(followUpTargets).toEqual(["a1"]);
-    expect(turns.continuation.deferred).toBeNull();
+    expect(turns.continuation.pending).toBeNull();
     expect(third.sent).toEqual([RESUME_NONE]);
   });
 });
@@ -1620,11 +1627,10 @@ describe("what a continuation turn runs", () => {
   });
 
   it("the stream of an ordinary turn leaves no record behind", () => {
-    const state = new ContinuationState<TestConnection>();
+    const state = new ContinuationSlots<TestConnection>();
     const parts = {
       continuation: state,
       rearmForBatch: () => turns.rearmContinuation(),
-      activateDeferred: () => {},
       aborts: turns.aborts,
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
@@ -1644,7 +1650,6 @@ describe("what a continuation turn runs", () => {
     const parts = {
       continuation: turns.continuation,
       rearmForBatch: () => turns.rearmContinuation(),
-      activateDeferred: () => {},
       aborts: turns.aborts,
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
@@ -1671,7 +1676,6 @@ describe("what a continuation turn runs", () => {
     const parts = {
       continuation: turns.continuation,
       rearmForBatch: () => turns.rearmContinuation(),
-      activateDeferred: () => {},
       aborts: turns.aborts,
       messages: () => host.transcript,
       clientToolNames: () => new Set<string>(),
@@ -1704,8 +1708,12 @@ describe("what a continuation turn runs", () => {
   });
 
   it("the stream's end clears the continuation it made active", async () => {
+    host.model = async (continuation) => {
+      turns.streamStarted(continuation.requestId, () => {});
+    };
     await result("a1");
-    turns.streamStarted("cont-1", () => {});
+    await fire();
+    await drain();
     expect(turns.continuation.activeRequestId).toBe("cont-1");
 
     turns.streamEnded("other");
@@ -1779,9 +1787,9 @@ describe("what a continuation turn runs", () => {
       expect(stopped).toBe(true);
     });
 
-    it("reports the result deferred behind a continuation that is stopped", async () => {
+    it("reports the next continuation, scheduled while one runs, when that one is stopped", async () => {
       host.model = async (continuation) => {
-        // Arrives while the continuation runs: deferred. Then the user
+        // Arrives while the continuation runs: the next one. Then the user
         // stops the continuation.
         await result("a1");
         turns.cancel(continuation.requestId);
@@ -1793,9 +1801,8 @@ describe("what a continuation turn runs", () => {
       await drain();
 
       expect(host.ran).toEqual(["cont-1"]);
-      expect(turns.continuation.deferred).toBeNull();
-      // It had no continuation of its own yet, so it has no id of its own.
-      expect(host.droppedEvents).toEqual(["(result):stopped<cont-1"]);
+      expect(turns.continuation.pending).toBeNull();
+      expect(host.droppedEvents).toEqual(["cont-2:stopped<cont-1"]);
     });
 
     it("drops a result still being applied at a stop for a host that does not listen for drops", async () => {

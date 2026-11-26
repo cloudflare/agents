@@ -50,6 +50,11 @@ export interface ContinuationDeferred<
   targetMessageIds: readonly string[];
 }
 
+/**
+ * @deprecated `ChatTurns` keeps {@link ContinuationSlots}. Kept, unchanged,
+ * only because released `@cloudflare/ai-chat` 0.12.3 and `@cloudflare/think`
+ * 0.24.0 import it (`node-tests/released-imports.test.ts`).
+ */
 export class ContinuationState<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
@@ -159,6 +164,81 @@ export class ContinuationState<
       this.awaitingConnections.set(d.connectionId, d.connection);
     }
     return this.pending;
+  }
+}
+
+/**
+ * The continuation slots `ChatTurns` keeps: the continuation a tool answer
+ * scheduled whose turn has not started (`pending`), the one whose turn
+ * started and whose stream has not (`running`), the one whose stream runs
+ * (`activeRequestId`), and the tabs waiting for a continuation's stream.
+ *
+ * An answer that arrives while a continuation runs schedules the next
+ * pending continuation, whose turn waits behind the running one in the
+ * lane: there is no deferred slot.
+ */
+export class ContinuationSlots<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> {
+  pending: ContinuationPending<TConnection> | null = null;
+  running: ContinuationPending<TConnection> | null = null;
+  activeRequestId: string | null = null;
+  activeConnectionId: string | null = null;
+  awaitingConnections: Map<string, TConnection> = new Map();
+
+  /** Free the pending slot and forget the waiting tabs, sending nothing. */
+  clearPending(): void {
+    this.pending = null;
+    this.awaitingConnections.clear();
+  }
+
+  clearAll(): void {
+    this.clearPending();
+    this.running = null;
+    this.activeRequestId = null;
+    this.activeConnectionId = null;
+  }
+
+  /** A tab left: forget it without cancelling the continuation it started. */
+  releaseConnection(connectionId: string): void {
+    this.awaitingConnections.delete(connectionId);
+    if (this.pending?.connectionId === connectionId) {
+      this.pending = { ...this.pending, connectionId: null };
+    }
+    if (this.running?.connectionId === connectionId) {
+      this.running = { ...this.running, connectionId: null };
+    }
+    if (this.activeConnectionId === connectionId) {
+      this.activeConnectionId = null;
+    }
+  }
+
+  /** Tell every waiting tab there is no stream (`STREAM_RESUME_NONE`). */
+  sendResumeNone(): void {
+    const msg = JSON.stringify({ type: MSG_STREAM_RESUME_NONE });
+    for (const connection of this.awaitingConnections.values()) {
+      sendIfOpen(connection, msg);
+    }
+    this.awaitingConnections.clear();
+  }
+
+  /**
+   * The pending continuation's tab waits on it. While another continuation
+   * runs and its stream has not started, the tabs waiting are that one's,
+   * so this waits until that one's stream starts or its turn ends.
+   */
+  awaitPending(): void {
+    const pending = this.pending;
+    if (!pending || pending.connectionId === null || this.running) return;
+    this.awaitingConnections.set(pending.connectionId, pending.connection);
+  }
+
+  /** Hand every waiting tab to `notify` (`STREAM_RESUMING`), then forget them. */
+  flushAwaitingConnections(notify: (conn: TConnection) => void): void {
+    for (const connection of this.awaitingConnections.values()) {
+      notify(connection);
+    }
+    this.awaitingConnections.clear();
   }
 }
 

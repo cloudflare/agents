@@ -11,7 +11,7 @@ import {
   type ResumeHandshakeHost
 } from "../resume-handshake";
 import { EndedRequests } from "../chat-frames";
-import { ContinuationState } from "../continuation-state";
+import { ContinuationSlots, ContinuationState } from "../continuation-state";
 import type { ReplyStreams } from "../reply-stream";
 import { PreStreamTurns } from "../pre-stream-turns";
 import { STREAM_RESUME_NONE_REASONS } from "../protocol";
@@ -178,7 +178,7 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
 
 function makeHost(opts: {
   resumableStream: ReplyStreams;
-  continuation?: ContinuationState<Connection>;
+  continuation?: ResumeHandshakeHost["continuation"];
   preStream?: PreStreamTurns<Connection>;
   pendingTerminal?: PendingChatTerminal | null;
   pendingResumeConnections?: Set<string>;
@@ -192,7 +192,7 @@ function makeHost(opts: {
     }),
     responseMessageType: RESPONSE_TYPE,
     resumableStream: opts.resumableStream,
-    continuation: opts.continuation ?? new ContinuationState<Connection>(),
+    continuation: opts.continuation ?? new ContinuationSlots<Connection>(),
     preStream: opts.preStream,
     pendingResumeConnections:
       opts.pendingResumeConnections ?? new Set<string>(),
@@ -317,7 +317,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       active: true,
       activeRequestId: "req-1"
     });
-    const continuation = new ContinuationState<Connection>();
+    const continuation = new ContinuationSlots<Connection>();
     continuation.activeRequestId = "req-1";
     continuation.activeConnectionId = "other";
     const handshake = new ResumeHandshake(
@@ -340,9 +340,51 @@ describe("ResumeHandshake (driver → golden frames)", () => {
   it("REQUEST with no active stream but a matching pending continuation parks + keeps waiting (#1784)", async () => {
     const frames: SentFrame[] = [];
     const { resumableStream } = makeStream({ active: false });
-    const continuation = new ContinuationState<Connection>();
+    const continuation = new ContinuationSlots<Connection>();
     // `connectionId` is read by the driver's pending check; `requestId` is
     // echoed into the keep-waiting frame.
+    continuation.pending = {
+      connectionId: null,
+      requestId: "cont-1"
+    } as ContinuationSlots<Connection>["pending"];
+    const handshake = new ResumeHandshake(
+      makeHost({ resumableStream, continuation })
+    );
+    const conn = makeConnection("c1", frames);
+
+    await handshake.handleResumeRequest(conn);
+
+    // Now parks AND tells the client to keep waiting so its short resume probe
+    // doesn't resolve "no stream" before the continuation stream starts.
+    expect(frames).toEqual([streamPendingFrame("cont-1")]);
+    expect(continuation.awaitingConnections.get("c1")).toBe(conn);
+  });
+
+  it("parks a tab on a running continuation whose stream has not started", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({ active: false });
+    const continuation = new ContinuationSlots<Connection>();
+    continuation.running = {
+      connectionId: null,
+      requestId: "cont-1"
+    } as ContinuationSlots<Connection>["running"];
+    const handshake = new ResumeHandshake(
+      makeHost({ resumableStream, continuation })
+    );
+    const conn = makeConnection("c1", frames);
+
+    await handshake.handleResumeRequest(conn);
+
+    expect(frames).toEqual([streamPendingFrame("cont-1")]);
+    expect(continuation.awaitingConnections.get("c1")).toBe(conn);
+  });
+
+  it("still parks on the pending continuation of a released host's ContinuationState", async () => {
+    // Released ai-chat 0.12.3 and Think 0.24.0 pass their own
+    // `ContinuationState`, which has no `running` slot.
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({ active: false });
+    const continuation = new ContinuationState<Connection>();
     continuation.pending = {
       connectionId: null,
       requestId: "cont-1"
@@ -354,8 +396,6 @@ describe("ResumeHandshake (driver → golden frames)", () => {
 
     await handshake.handleResumeRequest(conn);
 
-    // Now parks AND tells the client to keep waiting so its short resume probe
-    // doesn't resolve "no stream" before the continuation stream starts.
     expect(frames).toEqual([streamPendingFrame("cont-1")]);
     expect(continuation.awaitingConnections.get("c1")).toBe(conn);
   });
@@ -426,7 +466,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       active: true,
       activeRequestId: "req-1"
     });
-    const continuation = new ContinuationState<Connection>();
+    const continuation = new ContinuationSlots<Connection>();
     continuation.activeRequestId = "req-1";
     continuation.activeConnectionId = "old-owner";
     const handshake = new ResumeHandshake(
@@ -449,7 +489,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       active: true,
       activeRequestId: "req-1"
     });
-    const continuation = new ContinuationState<Connection>();
+    const continuation = new ContinuationSlots<Connection>();
     continuation.activeRequestId = "req-1";
     continuation.activeConnectionId = "old-owner";
     const handshake = new ResumeHandshake(

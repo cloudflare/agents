@@ -3018,7 +3018,7 @@ describe("Think — before-turn repair", () => {
     );
     expect(await agent.getContinuationSlotsForTest()).toEqual({
       pending: false,
-      deferred: false
+      next: false
     });
 
     await closeWS(ws);
@@ -3809,13 +3809,13 @@ describe("Think — chained client tools across continuations (#2443)", () => {
 
     // A second result for `tc-chain-1` lands after the first continuation
     // took its pending but before its stream starts. The call is already
-    // answered, so it defers nothing.
+    // answered, so it schedules no next one.
     await agent.holdContinuationStartForTest();
     sendToolResult(ws, "tc-chain-1", "step one");
     await waitUntil(() => agent.isContinuationStartHeldForTest(), 8000);
     sendToolResult(ws, "tc-chain-1", "step one (retried)");
     await handled(agent, MSG_TOOL_RESULT, 2);
-    expect((await agent.getContinuationSlotsForTest()).deferred).toBe(false);
+    expect((await agent.getContinuationSlotsForTest()).next).toBe(false);
     await agent.releaseContinuationStartForTest();
 
     await answerMidStreamThenSettle(agent, ws);

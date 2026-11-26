@@ -68,13 +68,13 @@ async function settled(agent: {
   waitForIdleForTest(): Promise<unknown>;
   getContinuationStateForTest(): Promise<{
     hasPending: boolean;
-    hasDeferred: boolean;
+    hasNext: boolean;
   }>;
 }) {
   await waitUntil(async () => {
     await agent.waitForIdleForTest();
     const state = await agent.getContinuationStateForTest();
-    return !state.hasPending && !state.hasDeferred;
+    return !state.hasPending && !state.hasNext;
   });
 }
 
@@ -915,7 +915,7 @@ describe("chat turn races", () => {
     expect(await agent.getChatMessageCallCountForTest()).toBe(0);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
-      hasDeferred: false
+      hasNext: false
     });
     // The tab that was waiting on the continuation is told there is none.
     expect(
@@ -951,7 +951,7 @@ describe("chat turn races", () => {
     expect(await agent.getChatMessageCallCountForTest()).toBe(0);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
-      hasDeferred: false
+      hasNext: false
     });
     expect(
       seen.some((m) => m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE)
@@ -992,7 +992,7 @@ describe("chat turn races", () => {
     expect(await agent.getChatMessageCallCountForTest()).toBe(0);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
-      hasDeferred: false
+      hasNext: false
     });
     ws.close(1000);
   });
@@ -1032,8 +1032,7 @@ describe("chat turn races", () => {
     // A second result lands meanwhile. Then the model call fails.
     send(ws, toolResult("call-2"));
     await waitUntil(
-      async () =>
-        (await agent.getContinuationStateForTest()).hasDeferred === true
+      async () => (await agent.getContinuationStateForTest()).hasNext === true
     );
     await agent.releaseModelCallForTest();
 
@@ -1046,7 +1045,7 @@ describe("chat turn races", () => {
     expect(await agent.getChatMessageCallCountForTest()).toBe(2);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
-      hasDeferred: false
+      hasNext: false
     });
     ws.close(1000);
   });
@@ -1167,7 +1166,7 @@ describe("chat turn races", () => {
     expect(errorFrames).toHaveLength(2);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
-      hasDeferred: false
+      hasNext: false
     });
     ws.close(1000);
   });
@@ -1299,7 +1298,7 @@ describe("chat turn races", () => {
     ).toHaveLength(2);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
-      hasDeferred: false
+      hasNext: false
     });
     ws.close(1000);
   });
@@ -1380,7 +1379,7 @@ describe("chat turn races", () => {
     expect(await agent.getChatMessageCallCountForTest()).toBe(1);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
-      hasDeferred: false
+      hasNext: false
     });
     // The answer is kept for the next turn.
     const stored = (await agent.getPersistedMessages()) as ChatMessage[];
@@ -1474,8 +1473,7 @@ describe("chat turn races", () => {
     expect(continuationId).not.toBeNull();
     send(ws, toolResult("call-2"));
     await waitUntil(
-      async () =>
-        (await agent.getContinuationStateForTest()).hasDeferred === true
+      async () => (await agent.getContinuationStateForTest()).hasNext === true
     );
     // The cancel is handled while the model call is still held. The call
     // is released however the checks end.
@@ -1495,7 +1493,7 @@ describe("chat turn races", () => {
     expect(await agent.getChatMessageCallCountForTest()).toBe(1);
     expect(await agent.getContinuationStateForTest()).toMatchObject({
       hasPending: false,
-      hasDeferred: false
+      hasNext: false
     });
     const stored = (await agent.getPersistedMessages()) as ChatMessage[];
     expect(stored[1].parts[1]).toMatchObject({ state: "output-available" });

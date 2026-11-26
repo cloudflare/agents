@@ -331,7 +331,7 @@ describe("AIChatAgent pending interaction helpers", () => {
     // The continuation is queued behind the active turn.
     await vi.waitFor(async () => {
       const state = await agentStub.getContinuationStateForTest();
-      expect(state.hasPending || state.hasDeferred).toBe(true);
+      expect(state.hasPending || state.hasNext).toBe(true);
     });
     await agentStub.resetTurnStateForTest();
     await agentStub.releaseStreamForTest("req-reset-turn");
