@@ -182,6 +182,28 @@ export function releaseParked(
   tabs.clear();
 }
 
+/** A turn streaming in this isolate, that a tool answer can join. */
+export interface LiveTurn {
+  readonly requestId: string;
+  /** Whether the reply holds the call `toolCallId` and no answer to it. */
+  waitsOn(toolCallId: string): boolean;
+  inject(chunk: UIMessageChunk): void;
+}
+
+/**
+ * The turns streaming in this isolate, by session: at most one per lane.
+ * Kept per Streams capability (one per chat host), in memory only: a turn
+ * that a reset cut off is continued from its stream, not from here.
+ */
+const liveTurns = new WeakMap<Streams, Map<string, LiveTurn>>();
+
+/** @internal The live turns of the chat whose stream log is `streams`. */
+export function liveTurnsOf(streams: Streams): Map<string, LiveTurn> {
+  let turns = liveTurns.get(streams);
+  if (!turns) liveTurns.set(streams, (turns = new Map()));
+  return turns;
+}
+
 /** The run's checkpoint key holding the reply a continuation extends. */
 const BASE_CHECKPOINT = "chat:base";
 /** The run's checkpoint key counting the stream chunks recovery discarded. */
@@ -740,6 +762,8 @@ export function chatTurnDefinition(
       }));
       const continuing = partial;
       let started = false;
+      const liveKey = sessionId;
+      const live = liveTurnsOf(deps.streams);
       const recorded = watchStall(
         chunksOf(source, requestId),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
@@ -758,6 +782,38 @@ export function chatTurnDefinition(
         })
       ).pipeThrough(
         new TransformStream<UIMessageChunk, UIMessageChunk>({
+          start(controller) {
+            // A tool answer that arrives while this reply streams joins it
+            // as a chunk, stored and sent like the model's.
+            live.set(liveKey, {
+              requestId,
+              waitsOn: (toolCallId) => {
+                let asked = false;
+                for (const chunk of seen) {
+                  const id = (chunk as { toolCallId?: unknown }).toolCallId;
+                  if (id !== toolCallId) continue;
+                  if (chunk.type === "tool-input-available") asked = true;
+                  if (
+                    chunk.type === "tool-output-available" ||
+                    chunk.type === "tool-output-error"
+                  ) {
+                    return false;
+                  }
+                }
+                return asked;
+              },
+              inject: (chunk) => {
+                out.append(chunk as never);
+                seen.push(chunk);
+                send({ body: JSON.stringify(chunk), done: false });
+                controller.enqueue(chunk);
+              }
+            });
+          },
+          flush() {
+            if (live.get(liveKey)?.requestId === requestId)
+              live.delete(liveKey);
+          },
           transform(chunk, controller) {
             // Every reply has an id: a continuation keeps the reply's, a new
             // reply keeps the model's or gets one from the run.
@@ -810,6 +866,7 @@ export function chatTurnDefinition(
           throw step.signal.reason ?? new Error("stopped");
         break;
       } catch (error) {
+        if (live.get(liveKey)?.requestId === requestId) live.delete(liveKey);
         if (step.signal.aborted) {
           // A cleared chat keeps nothing of the turn.
           if (cancelReason(step.signal.reason) === CHAT_CLEARED) {
