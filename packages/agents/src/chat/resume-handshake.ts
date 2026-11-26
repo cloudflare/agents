@@ -245,13 +245,17 @@ export class ResumeHandshake {
       // Park the connection AND tell it to keep waiting (#1784) so its resume
       // probe does not time out before the continuation stream begins; the host
       // flushes `awaitingConnections` into `STREAM_RESUMING` on stream start.
+      // Requests it waits on that ended meanwhile are ended first.
+      for (const requestId of requestIds) this.sendEnded(connection, requestId);
       continuation.awaitingConnections.set(connection.id, connection);
       this._sendStreamPending(connection, waiting.requestId, probeId);
     } else if (await this._replayTerminalOnResume(connection, probeId)) {
       // A turn terminalized while no client was connected (#1645): drive the
       // resume handshake so the terminal error frame can be delivered on the
       // resumed stream (the only path that surfaces as an error on the client)
-      // once this connection ACKs — see `_replayTerminalOnAck`.
+      // once this connection ACKs — see `_replayTerminalOnAck`. Other
+      // requests it waits on that ended are ended too.
+      for (const requestId of requestIds) this.sendEnded(connection, requestId);
     } else if (
       this._replayRecentTerminalOnResume(connection, requestIds, probeId)
     ) {

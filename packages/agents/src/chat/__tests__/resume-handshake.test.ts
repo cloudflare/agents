@@ -815,6 +815,45 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       expect(frames.filter((f) => f.id === "req-a" && f.done)).toHaveLength(1);
     });
 
+    it("ends the requests it waits on before parking the tab on a continuation", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-a",
+        done: true,
+        body: "",
+        outcome: "completed"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream();
+      const continuation = new ContinuationSlots<Connection>();
+      continuation.pending = {
+        connectionId: null,
+        requestId: "cont-1"
+      } as ContinuationSlots<Connection>["pending"];
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream, continuation }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended: new EndedRequests()
+      });
+
+      await handshake.handleResumeRequest(
+        makeConnection("c1", frames),
+        "probe-1",
+        ["req-a"]
+      );
+      expect(frames).toEqual([
+        {
+          body: "",
+          done: true,
+          id: "req-a",
+          type: RESPONSE_TYPE,
+          replay: true,
+          outcome: "completed"
+        },
+        streamPendingFrame("cont-1", "probe-1")
+      ]);
+    });
+
     it("follows a stream that closed into recovery with the end a stop recorded since", async () => {
       const kv = kvStore();
       recordRecentChatTerminal(kv, {
