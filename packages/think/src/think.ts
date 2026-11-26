@@ -230,8 +230,6 @@ import {
   applyToolPartUpdate,
   applyToolUpdate,
   unexecutedToolNames,
-  toolResultUpdate,
-  toolApprovalUpdate,
   pausedExecutionUpdate,
   CHAT_REQUEST_CONTEXT_KEY,
   frameText,
@@ -7131,19 +7129,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           );
         }
       },
-      applyToolResult: (event) =>
-        this._applyToolUpdateToMessages(
-          toolResultUpdate(
-            event.toolCallId,
-            event.output,
-            event.state as "output-error" | undefined,
-            event.errorText
-          )
-        ),
-      applyToolApproval: (event) =>
-        this._applyToolUpdateToMessages(
-          toolApprovalUpdate(event.toolCallId, event.approved, event.approvalId)
-        ),
+      applyToolUpdate: (update) => this._applyToolUpdateToMessages(update),
       continuation: (connection) => this._continuationSpec(connection),
       enqueueInteraction: (run) => this._enqueueInteractionOutcome(run)
     };

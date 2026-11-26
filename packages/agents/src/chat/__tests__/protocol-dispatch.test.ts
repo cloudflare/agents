@@ -117,13 +117,23 @@ function recordingHost(endedFrame: string | null = null) {
     messages: async (connection, messages) => {
       calls.push(["messages", connection.id, messages]);
     },
-    applyToolResult: async (event) => {
-      calls.push(["applyToolResult", event.toolCallId]);
+    applyToolUpdate: async (update) => {
+      // What the update does to a waiting part says which answer it is.
+      const part = update.apply({
+        type: "tool-x",
+        toolCallId: update.toolCallId,
+        state: "input-available"
+      }) as { approval?: { approved?: boolean } };
+      if (part.approval) {
+        calls.push([
+          "applyToolApproval",
+          update.toolCallId,
+          part.approval.approved
+        ]);
+        return { status: "unchanged" };
+      }
+      calls.push(["applyToolResult", update.toolCallId]);
       return { status: "changed", messageId: "a1" };
-    },
-    applyToolApproval: async (event) => {
-      calls.push(["applyToolApproval", event.toolCallId, event.approved]);
-      return { status: "unchanged" };
     },
     continuation: (connection, answer) => ({ connection, errorPrefix: answer }),
     enqueueInteraction: async (run) => {

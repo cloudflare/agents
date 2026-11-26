@@ -74,8 +74,6 @@ import {
   type ToolPartUpdate,
   applyToolPartUpdate,
   applyToolUpdate,
-  toolApprovalUpdate,
-  toolResultUpdate,
   type TurnResult,
   type MessagePart,
   type ServerChatTurn,
@@ -1192,19 +1190,7 @@ export class AIChatAgent<
         );
         await this.persistMessages(transformedMessages, [connection.id]);
       },
-      applyToolResult: (event) =>
-        this._applyToolPartUpdate(
-          toolResultUpdate(
-            event.toolCallId,
-            event.output,
-            event.state === "output-error" ? "output-error" : undefined,
-            event.errorText
-          )
-        ),
-      applyToolApproval: (event) =>
-        this._applyToolPartUpdate(
-          toolApprovalUpdate(event.toolCallId, event.approved, event.approvalId)
-        ),
+      applyToolUpdate: (update) => this._applyToolPartUpdate(update),
       continuation: (connection, answer) => ({
         connection,
         errorPrefix:
