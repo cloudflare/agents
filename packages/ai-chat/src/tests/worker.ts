@@ -159,6 +159,17 @@ function queuedTurnCountForTest(agent: AIChatAgent): number {
   )._turns.queue.queuedCount();
 }
 
+/** `agent` has no onChatResponse result waiting or being delivered. */
+function chatResponseDrainIdleForTest(agent: AIChatAgent): boolean {
+  const drain = agent as unknown as {
+    _pendingChatResponseResults: unknown[];
+    _insideResponseHook: boolean;
+  };
+  return (
+    drain._pendingChatResponseResults.length === 0 && !drain._insideResponseHook
+  );
+}
+
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
   return sql
     .exec<{ run_id: string }>(
@@ -2969,6 +2980,11 @@ export class ResponseAgent extends AIChatAgent<Env> {
 
   protected async onChatResponse(result: ChatResponseResult) {
     this._responseResults.push(result);
+  }
+
+  /** No onChatResponse result is waiting or being delivered. */
+  isChatResponseDrainIdleForTest(): boolean {
+    return chatResponseDrainIdleForTest(this);
   }
 
   getChatResponseResults(): ChatResponseResult[] {

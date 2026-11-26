@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import type { ChatResponseResult } from "../";
@@ -66,6 +66,36 @@ const userMessage: ChatMessage = {
   parts: [{ type: "text", text: "Hello" }]
 };
 
+/**
+ * Wait until the agent has recorded `count` onChatResponse results and
+ * nothing more can report: the chat is idle and no result is waiting or
+ * being delivered. Only then is an exact count final.
+ */
+async function waitForResults(
+  agent: {
+    getChatResponseResults(): Promise<unknown>;
+    waitForIdleForTest(): Promise<unknown>;
+    isChatResponseDrainIdleForTest(): Promise<boolean>;
+  },
+  count: number
+) {
+  await vi.waitFor(
+    async () => {
+      expect(
+        ((await agent.getChatResponseResults()) as unknown[]).length
+      ).toBeGreaterThanOrEqual(count);
+    },
+    { timeout: 3000 }
+  );
+  await vi.waitFor(
+    async () => {
+      await agent.waitForIdleForTest();
+      expect(await agent.isChatResponseDrainIdleForTest()).toBe(true);
+    },
+    { timeout: 3000 }
+  );
+}
+
 describe("onChatResponse hook", () => {
   it("fires with status=completed after a successful plaintext stream", async () => {
     const room = crypto.randomUUID();
@@ -79,7 +109,8 @@ describe("onChatResponse hook", () => {
     });
 
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 100));
+    // onChatResponse runs after the done frame, outside the turn.
+    await waitForResults(await getAgentByName(env.ResponseAgent, room), 1);
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     const results =
@@ -107,7 +138,8 @@ describe("onChatResponse hook", () => {
     });
 
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 100));
+    // onChatResponse runs after the done frame, outside the turn.
+    await waitForResults(await getAgentByName(env.ResponseAgent, room), 1);
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     const results =
@@ -137,7 +169,8 @@ describe("onChatResponse hook", () => {
       });
 
       expect(await done).toBe(true);
-      await new Promise((r) => setTimeout(r, 100));
+      // onChatResponse runs after the done frame, outside the turn.
+      await waitForResults(await getAgentByName(env.ResponseAgent, room), 1);
 
       const agentStub = await getAgentByName(env.ResponseAgent, room);
       const results =
@@ -168,7 +201,8 @@ describe("onChatResponse hook", () => {
     });
 
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
+    // onChatResponse runs after the done frame, outside the turn.
+    await waitForResults(await getAgentByName(env.ResponseAgent, room), 1);
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     const results =
@@ -205,7 +239,8 @@ describe("onChatResponse hook", () => {
     );
 
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
+    // onChatResponse runs after the done frame, outside the turn.
+    await waitForResults(await getAgentByName(env.ResponseAgent, room), 1);
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     const results =
@@ -221,14 +256,14 @@ describe("onChatResponse hook", () => {
   it("fires for saveMessages-initiated streams", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectResponseAgent(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     const done = waitForDone(ws);
 
     await agentStub.saveSyntheticUserMessage("trigger from saveMessages");
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
+    // onChatResponse runs after the done frame, outside the turn.
+    await waitForResults(agentStub, 1);
 
     const results =
       (await agentStub.getChatResponseResults()) as ChatResponseResult[];
@@ -262,7 +297,8 @@ describe("onChatResponse hook", () => {
       expect(await done).toBe(true);
     }
 
-    await new Promise((r) => setTimeout(r, 200));
+    // onChatResponse runs after the done frame, outside the turn.
+    await waitForResults(await getAgentByName(env.ResponseAgent, room), 3);
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     const results =
@@ -291,7 +327,8 @@ describe("onChatResponse hook", () => {
     });
 
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 100));
+    // onChatResponse runs after the done frame, outside the turn.
+    await waitForResults(await getAgentByName(env.ResponseAgent, room), 1);
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     const results =
