@@ -413,15 +413,17 @@ describe("a client tool call a reset cut off", () => {
     expect(await restarted.getIncidentsForTest()).toEqual([
       "skipped:continued_by_interaction"
     ]);
-    expect(
-      frames.some(
+    // Its done frame is sent after the reply is stored.
+    const completed = (list: Array<Record<string, unknown>>) =>
+      list.some(
         (frame) =>
           frame.type === MSG_CHAT_RESPONSE &&
           frame.done === true &&
           frame.id !== "r1" &&
+          frame.error !== true &&
           (frame.outcome ?? "completed") === "completed"
-      )
-    ).toBe(true);
+      );
+    expect(completed(await waitFor(async () => frames, completed))).toBe(true);
     // The cut-off request is not reported as failed.
     expect(JSON.stringify(doneFrame(frames, "r1") ?? {})).not.toContain(
       "interrupted"
