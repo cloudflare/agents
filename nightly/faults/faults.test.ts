@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { beforeAll, describe, expect, inject, it } from "vitest";
 import { violations } from "./invariants";
-import type { Cls } from "../shared/probe";
+import { isThink, type Cls } from "../shared/probe";
 import { CHAT_ONLY, SCENARIOS, THINK_ONLY } from "./scenarios";
 
 const RESULTS = path.join(import.meta.dirname, "results");
@@ -22,12 +22,17 @@ const unknown = only?.filter((name) => !(name in SCENARIOS)) ?? [];
 if (unknown.length)
   throw new Error(`FAULTS_ONLY names no scenario: ${unknown.join(", ")}`);
 
-for (const cls of ["chat", "think"] as Cls[]) {
+// Each class at the root and as a facet sub-agent of a hub.
+const classes = (process.env.FAULTS_CLASSES ?? "chat,think,fchat,fthink").split(
+  ","
+) as Cls[];
+
+for (const cls of classes) {
   describe.concurrent(cls, () => {
     for (const [name, run] of Object.entries(SCENARIOS)) {
       if (only && !only.includes(name)) continue;
-      if (cls === "chat" && THINK_ONLY.has(name)) continue;
-      if (cls === "think" && CHAT_ONLY.has(name)) continue;
+      if (!isThink(cls) && THINK_ONLY.has(name)) continue;
+      if (isThink(cls) && CHAT_ONLY.has(name)) continue;
       it(name, async () => {
         const result = await run(cls);
         writeFileSync(

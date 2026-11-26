@@ -11,6 +11,7 @@ import {
   Tab,
   ctl,
   isResp,
+  isThink,
   rid,
   settle,
   sleep,
@@ -436,7 +437,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await finish(cls, room, [tab], { reqId: id.slice(0, 14) }),
       "status-429",
       7000,
-      cls === "think"
+      isThink(cls)
     );
   },
   async rl429RetryAfterMs(cls: Cls) {
@@ -453,7 +454,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await finish(cls, room, [tab]),
       "status-429",
       5500,
-      cls === "think"
+      isThink(cls)
     );
   },
   async rl429Transient(cls: Cls) {
@@ -470,7 +471,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await finish(cls, room, [tab]),
       "status-429",
       7000,
-      cls === "think"
+      isThink(cls)
     );
   },
   async rl429SdkRetries(cls: Cls) {
@@ -503,7 +504,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await finish(cls, room, [tab]),
       "status-429",
       6000,
-      cls === "think"
+      isThink(cls)
     );
   },
 
@@ -900,7 +901,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     // Think waits out the 429's 10 s backoff; AIChatAgent ends the request.
-    if (cls === "think") await untilEvent(cls, room, "chat:recovery:scheduled");
+    if (isThink(cls)) await untilEvent(cls, room, "chat:recovery:scheduled");
     else await tab.done(id, 20000);
     const id2 = tab.request(rid("req"), [user("second question")], {
       clientTools: CLIENT_TOOLS
@@ -911,7 +912,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     });
     // Think answers the recovered request before the one sent during its
     // backoff. AIChatAgent ended the first with an error.
-    return roles(run, cls === "think" ? "uaua" : "uua");
+    return roles(run, isThink(cls) ? "uaua" : "uua");
   },
   // Upgrade probes (D2): a recovery is live when the caller deploys a new version about 6 s after the start.
   async recStopDuringBackoffStall(cls: Cls) {
@@ -1144,7 +1145,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     // Reset inside Think's 10 s backoff; AIChatAgent ends the request first.
-    if (cls === "think") await untilEvent(cls, room, "chat:recovery:scheduled");
+    if (isThink(cls)) await untilEvent(cls, room, "chat:recovery:scheduled");
     else await tab.done(id, 20000);
     await ctl(cls, room, "probeAbort");
     tab.close();
@@ -1154,7 +1155,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     // Think retries after its backoff; AIChatAgent ends the turn on the 429.
     return answered(
       await finish(cls, room, [tab2], {}, { maxMs: 120000 }),
-      cls === "think" ? "w8 " : undefined
+      isThink(cls) ? "w8 " : undefined
     );
   },
   async vDeclineInAttempt(cls: Cls) {

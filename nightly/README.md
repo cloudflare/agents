@@ -6,7 +6,7 @@ Each suite deploys its own Worker under a unique name, drives it, and deletes it
 
 ## faults
 
-An `AIChatAgent` and a `Think` agent on a scripted fake model, put through about fifty faults: stream stalls, 429s with `Retry-After`, context overflow, recovery attempts that throw or run out of budget, stops at each stage of a recovery, resets, and approvals over RPC. After each scenario the suite checks what must always hold:
+An `AIChatAgent` and a `Think` agent on a scripted fake model, each at the root and as a facet sub-agent of a hub, put through about fifty faults: stream stalls, 429s with `Retry-After`, context overflow, recovery attempts that throw or run out of budget, stops at each stage of a recovery, resets, and approvals over RPC. After each scenario the suite checks what must always hold:
 
 - the object settles, and every recovery that started has ended;
 - each request a tab sent gets a `done` frame, ends once, and a hand-off to recovery is always followed by an end;
@@ -16,6 +16,7 @@ An `AIChatAgent` and a `Think` agent on a scripted fake model, put through about
 cd nightly
 pnpm run faults                                   # deploy, run every scenario on both agents, delete
 FAULTS_ONLY=stall,rl429RetryAfter pnpm run faults  # a subset (an unknown name is an error)
+FAULTS_CLASSES=fchat,fthink pnpm run faults       # only the facets (chat, think, fchat, fthink)
 PROBE_URL=https://<worker>.workers.dev PROBE_KEY=<its PROBE_KEY> pnpm run faults   # against a Worker you deployed
 ```
 
