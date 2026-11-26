@@ -77,6 +77,8 @@ const AGENT_TOOL_REATTACH_POLL_MAX_MS = 5_000;
 // A detached agent-tool run: its attempts follow the child while the parent
 // is up and check on it on the backbone's cadence while it is not.
 const AGENT_TOOL_DETACHED_TASK = "__cf_agent_tool_detached";
+/** Both agent-tool definitions, for the reads that list every run. */
+const AGENT_TOOL_DEFINITIONS = [AGENT_TOOL_TASK, AGENT_TOOL_DETACHED_TASK];
 // The cancel reason `clearAgentToolRuns` gives an open run.
 const AGENT_TOOL_CLEARED_REASON = "agent tool run cleared";
 // When a detached run's give-up callback failed, give up again this much
@@ -1843,29 +1845,26 @@ export class AgentToolParent {
 
   _activeAgentToolRunCount(): number {
     const open = new Set(this._agentToolRunsStarting);
-    for (const definition of [AGENT_TOOL_TASK, AGENT_TOOL_DETACHED_TASK]) {
-      for (const record of this.host.tasks.peekList({
-        definition,
-        status: ["pending", "running"],
-        results: false,
-        limit: Number.MAX_SAFE_INTEGER
-      })) {
-        open.add(record.runId);
-      }
+    for (const record of this.host.tasks.peekList({
+      definition: AGENT_TOOL_DEFINITIONS,
+      status: ["pending", "running"],
+      results: false,
+      limit: Number.MAX_SAFE_INTEGER
+    })) {
+      open.add(record.runId);
     }
     return open.size;
   }
 
   /** Every run this agent keeps, awaited and detached, oldest first. */
   private _listAgentToolRuns(): AgentToolRunStorageRow[] {
-    return [AGENT_TOOL_TASK, AGENT_TOOL_DETACHED_TASK]
-      .flatMap((definition) =>
-        this.host.tasks.peekList({
-          definition,
-          order: "oldest",
-          limit: Number.MAX_SAFE_INTEGER
-        })
-      )
+    // One read for both definitions (a connect's replay, a clear).
+    return this.host.tasks
+      .peekList({
+        definition: AGENT_TOOL_DEFINITIONS,
+        order: "oldest",
+        limit: Number.MAX_SAFE_INTEGER
+      })
       .map((record) => this._agentToolRowFromTask(record))
       .filter((row): row is AgentToolRunStorageRow => row !== null)
       .sort((left, right) => left.started_at - right.started_at);
