@@ -213,6 +213,10 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     reason?: string;
     elapsedMs: number;
   }>;
+  abortReissuedRunWhileItWaitsForTest(runId?: string): Promise<{
+    result: string;
+    child: string | null;
+  }>;
   abortWhileReattachingThinkChildForTest(): Promise<{
     result: string;
     child: string | null;
@@ -1325,6 +1329,14 @@ describe("Think agent tools", () => {
     expect(status).toBe("interrupted");
     expect(reason).toBe("no-progress");
     expect(elapsedMs).toBeLessThan(10_000);
+  }, 30_000);
+
+  it("cancels a re-issued run and its child when the caller stops while it waits for its next check", async () => {
+    const parent = await freshParent();
+    const { result, child } =
+      await parent.abortReissuedRunWhileItWaitsForTest();
+    expect(result).toBe("aborted");
+    expect(child).toBe("aborted");
   }, 30_000);
 
   it("cancels the child when the caller stops while the parent re-attaches", async () => {

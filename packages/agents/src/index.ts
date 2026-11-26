@@ -3784,6 +3784,27 @@ export class Agent<
     metadata: AgentToolTaskMeta,
     local: AgentToolTaskLocal
   ): Promise<RunAgentToolResult<Output>> {
+    // The caller's signal reaches the first attempt through `local`; a run
+    // that goes on waiting for a later check is stopped from here.
+    const signal = local.signal;
+    const onAbort = () => {
+      void this.tasks
+        .cancel(
+          runId,
+          signal?.reason instanceof Error
+            ? signal.reason.message
+            : String(signal?.reason ?? "cancelled")
+        )
+        .catch(() => {});
+      void this._cf_resolveSubAgent(metadata.agentType, runId)
+        .then((child) =>
+          this._asAgentToolChildAdapter(child).cancelAgentToolRun(
+            runId,
+            signal?.reason
+          )
+        )
+        .catch(() => {});
+    };
     await this.tasks.run(AGENT_TOOL_TASK, null, {
       runId,
       metadata,
@@ -3791,7 +3812,14 @@ export class Agent<
       start: "now",
       local
     });
-    const result = await this._waitAgentToolTask<Output>(runId);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    let result: RunAgentToolResult<Output>;
+    try {
+      result = await this._waitAgentToolTask<Output>(runId);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
     // SAFETY: the attempt set it from this run's own result.
     return (local.fullResult as RunAgentToolResult<Output>) ?? result;
   }
@@ -4269,7 +4297,13 @@ export class Agent<
         sequence: 1
       };
     }
-    return this._pollReattachedAgentToolRun(adapter, meta, runId, step);
+    return this._pollReattachedAgentToolRun(
+      adapter,
+      meta,
+      runId,
+      step,
+      inspection
+    );
   }
 
   /**
@@ -4284,7 +4318,8 @@ export class Agent<
     adapter: AgentToolChildAdapter,
     meta: AgentToolTaskMeta,
     runId: string,
-    step: TaskStep
+    step: TaskStep,
+    inspection: AgentToolRunInspection
   ): Promise<
     { result: RunAgentToolResult; sequence: number } | TaskSettlement
   > {
@@ -4293,33 +4328,63 @@ export class Agent<
     const firstAt = checkpoint.get<number>("reattachFirstAt") ?? now;
     let progressAt = checkpoint.get<number>("reattachProgressAt") ?? now;
     const polls = checkpoint.get<number>("reattachPolls") ?? 0;
-    let lastSequence = checkpoint.get<number>("reattachLastSequence");
+    // The child's chunks are numbered per stream, and a recovered child
+    // turn streams into a new one: the cursor belongs to a stream. Events
+    // to clients are numbered on, across streams.
+    const streamId = inspection.streamId ?? null;
+    let cursor =
+      checkpoint.get<string | null>("reattachStream") === streamId
+        ? checkpoint.get<number>("reattachCursor")
+        : undefined;
+    const first = checkpoint.get<number>("reattachNextEvent") === undefined;
+    let nextEvent = checkpoint.get<number>("reattachNextEvent") ?? 1;
+    // Progress frames and milestones are progress too, though the child
+    // stores them beside its chunks.
+    const signalAt = Math.max(
+      inspection.progress?.at ?? 0,
+      inspection.milestones?.at(-1)?.at ?? 0
+    );
+    if (signalAt > (checkpoint.get<number>("reattachSignalAt") ?? 0)) {
+      if (!first) progressAt = now;
+      checkpoint.set("reattachSignalAt", signalAt);
+    }
     try {
-      if (lastSequence === undefined) {
+      if (first) {
         // The first check: what the child stored so far reaches clients
         // through the connect replay; follow from its end.
         const stored = await this._readAgentToolChunks(adapter, runId);
-        lastSequence = stored.at(-1)?.sequence ?? -1;
+        cursor = stored.at(-1)?.sequence ?? -1;
+        nextEvent = stored.length + 1;
       } else {
-        const fresh = await adapter.getAgentToolChunks(runId, {
-          afterSequence: lastSequence
-        });
+        const fresh = await adapter.getAgentToolChunks(
+          runId,
+          cursor === undefined ? undefined : { afterSequence: cursor }
+        );
         if (fresh.length > 0) {
-          // A stored chunk's event sequence is its store position plus one.
-          this._broadcastAgentToolChunks(
+          nextEvent = this._broadcastAgentToolChunks(
             meta.parentToolCallId,
             runId,
             fresh,
-            lastSequence + 2
+            nextEvent
           );
-          lastSequence = fresh[fresh.length - 1].sequence;
+          cursor = fresh[fresh.length - 1].sequence;
           progressAt = now;
+          // Forwarding a child's output is progress for the parent's own
+          // turn recovery too (chat hosts credit it; best-effort).
+          try {
+            await this._onAgentToolStreamProgress();
+          } catch {
+            // The next forward tries again.
+          }
         }
       }
     } catch {
       // The chunks could not be read this time: the budgets still count.
     }
-    const sequence = (lastSequence ?? -1) + 2;
+    checkpoint.set("reattachStream", streamId);
+    if (cursor !== undefined) checkpoint.set("reattachCursor", cursor);
+    checkpoint.set("reattachNextEvent", nextEvent);
+    const sequence = nextEvent;
     const maxWindow = this._resolvedOptions.agentToolReattachMaxWindowMs;
     const noProgress =
       this._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
@@ -4354,7 +4419,6 @@ export class Agent<
     checkpoint.set("reattachFirstAt", firstAt);
     checkpoint.set("reattachProgressAt", progressAt);
     checkpoint.set("reattachPolls", polls + 1);
-    checkpoint.set("reattachLastSequence", lastSequence ?? -1);
     const next = Math.min(
       now + Math.min(1000 * 2 ** polls, AGENT_TOOL_REATTACH_POLL_MAX_MS),
       Number.isFinite(noProgress) ? progressAt + noProgress : Infinity,

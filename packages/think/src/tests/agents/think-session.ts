@@ -6432,6 +6432,55 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   /**
+   * A run a released version left `interrupted`, re-issued with a signal
+   * while its child is still running. The caller aborts once the re-issued
+   * run waits for its next check. Returns the result and the child's status.
+   */
+  async abortReissuedRunWhileItWaitsForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{ result: string; child: string | null }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.setBeforeStepAsyncDelay(60_000);
+    const started = await child.startAgentToolRun("silent child", { runId });
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, error_message, interrupted_reason,
+        child_still_running, display_metadata, display_order, started_at,
+        completed_at
+      ) VALUES (
+        ${runId}, 'think-tool-call', 'ThinkTestAgent',
+        ${JSON.stringify("silent child")}, 1, 'interrupted', 'gave up',
+        'no-progress', 1, ${JSON.stringify({ name: "think child" })}, 0,
+        ${started.startedAt}, ${Date.now()}
+      )
+    `;
+    await carryForwardAgentToolRunsForTest(this);
+    const controller = new AbortController();
+    const running = this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input: "silent child",
+      inputPreview: "silent child",
+      signal: controller.signal
+    });
+    const waiting = Date.now() + 10_000;
+    while (
+      this.tasks.peek(runId)?.waitReason !== "retry" &&
+      Date.now() < waiting
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    controller.abort("stopped by the user");
+    const result = await running;
+    const inspection = await this.waitForTerminalInspectionForTest(
+      child,
+      runId
+    ).catch(() => null);
+    return { result: result.status, child: inspection?.status ?? null };
+  }
+
+  /**
    * The child's isolate resets mid-run, and the caller's signal aborts once
    * the parent has started re-attaching to the child's recovered turn.
    * Returns the parent's result and the child's run status.

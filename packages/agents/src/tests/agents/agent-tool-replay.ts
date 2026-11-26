@@ -1248,6 +1248,119 @@ export class TestAgentToolReplayAgent extends Agent {
     };
   }
 
+  /** Times the forward-progress hook ran (chat hosts credit recovery). */
+  streamProgressCredits = 0;
+
+  protected override async _onAgentToolStreamProgress(): Promise<void> {
+    this.streamProgressCredits++;
+  }
+
+  /**
+   * A run a released version left open, whose stub child is still running
+   * with `stored` chunks. Carries it forward and runs its first check.
+   */
+  private async recoverRunningChildForTest(
+    runId: string,
+    stored: string[]
+  ): Promise<{
+    poll: (
+      beforeEach?: () => Promise<void>
+    ) => Promise<AgentToolEventMessage[]>;
+    child: DurableObjectStub<TestAgentToolStubChild>;
+  }> {
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    await child.startAgentToolRun(
+      { chunkBodies: stored, tailHangs: true },
+      { runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached
+      ) VALUES (
+        ${runId}, ${`call-${runId}`}, 'TestAgentToolStubChild', 'running', 0,
+        ${Date.now()}, 0
+      )
+    `;
+    await this._agentTool._carryForwardAgentToolRuns();
+    await this.tasks.runDue("__cf_agent_tool");
+    const poll = async () =>
+      this._captureBroadcastsForTest(async () => {
+        this.makeAgentToolRunsDueForTest();
+        await this.tasks.runDue("__cf_agent_tool");
+      });
+    return {
+      poll,
+      child: child as unknown as DurableObjectStub<TestAgentToolStubChild>
+    };
+  }
+
+  /** Put a recovered run's last progress `ms` in the past. */
+  private ageReattachProgressForTest(runId: string, ms: number): void {
+    this.sql`
+      UPDATE cf_agents_task_runs
+      SET checkpoint = json_set(checkpoint, '$.reattachProgressAt',
+                                ${Date.now() - ms})
+      WHERE run_id = ${runId}
+    `;
+  }
+
+  /**
+   * A recovered run whose child keeps running and reports progress but
+   * stores no chunk, checked after its no-progress window would have
+   * passed. Returns the run's status after the check.
+   */
+  async recoveredChildReportsProgressForTest(
+    runId: string
+  ): Promise<string | null> {
+    const resolved = (
+      this as unknown as {
+        _resolvedOptions: { agentToolReattachNoProgressTimeoutMs: number };
+      }
+    )._resolvedOptions;
+    const before = resolved.agentToolReattachNoProgressTimeoutMs;
+    resolved.agentToolReattachNoProgressTimeoutMs = 60_000;
+    try {
+      const { poll, child } = await this.recoverRunningChildForTest(runId, []);
+      this.ageReattachProgressForTest(runId, 120_000);
+      await child.reportProgressForTest(runId);
+      await poll();
+      return this.tasks.peek(runId)?.status ?? null;
+    } finally {
+      resolved.agentToolReattachNoProgressTimeoutMs = before;
+    }
+  }
+
+  /**
+   * A recovered run whose child stores a chunk while still running, then
+   * has its turn recovered into a new stream. Returns the chunk bodies each
+   * check forwarded and the progress credits.
+   */
+  async recoveredChildStreamsForTest(runId: string): Promise<{
+    whileRunning: string[];
+    afterNewStream: string[];
+    credits: number;
+  }> {
+    const { poll, child } = await this.recoverRunningChildForTest(runId, [
+      "a",
+      "b",
+      "c"
+    ]);
+    const bodies = (frames: AgentToolEventMessage[]) =>
+      frames
+        .filter((frame) => frame.event.kind === "chunk")
+        .map((frame) => (frame.event as { body: string }).body);
+    await child.appendChunkForTest(runId, "d");
+    const whileRunning = bodies(await poll());
+    await child.restartStreamForTest(runId, ["e", "f"]);
+    const afterNewStream = bodies(await poll());
+    return {
+      whileRunning,
+      afterNewStream,
+      credits: this.streamProgressCredits
+    };
+  }
+
   /** Make every waiting awaited run's next check due now. */
   makeAgentToolRunsDueForTest(): void {
     this.sql`
@@ -1332,7 +1445,9 @@ export class TestAgentToolStubChild extends Agent {
         unstored_json TEXT,
         pending_json TEXT,
         inspect_delay_ms INTEGER,
-        output_json TEXT
+        output_json TEXT,
+        progress_at INTEGER,
+        stream_id TEXT
       )
     `;
   }
@@ -1435,6 +1550,36 @@ export class TestAgentToolStubChild extends Agent {
     `;
   }
 
+  /** A running run reports progress, storing no chunk. */
+  reportProgressForTest(runId: string): void {
+    this._ensureTables();
+    this.sql`
+      UPDATE cf_test_stub_runs SET progress_at = ${Date.now()}
+      WHERE run_id = ${runId}
+    `;
+  }
+
+  /** A running run stores one more chunk and stays running. */
+  async appendChunkForTest(runId: string, body: string): Promise<void> {
+    this._ensureTables();
+    const stored = await this.getAgentToolChunks(runId);
+    this._storeChunks(runId, [body], stored.length);
+  }
+
+  /**
+   * The run's turn was recovered into a new stream: its chunks start again
+   * from 0 there, and inspection names the new stream.
+   */
+  restartStreamForTest(runId: string, bodies: string[]): void {
+    this._ensureTables();
+    this.sql`DELETE FROM cf_test_stub_chunks WHERE run_id = ${runId}`;
+    this._storeChunks(runId, bodies, 0);
+    this.sql`
+      UPDATE cf_test_stub_runs SET stream_id = ${crypto.randomUUID()}
+      WHERE run_id = ${runId}
+    `;
+  }
+
   /** Store a run's pending chunks and complete it, as its turn would. */
   async flushPendingForTest(runId: string): Promise<void> {
     this._ensureTables();
@@ -1476,9 +1621,11 @@ export class TestAgentToolStubChild extends Agent {
       completed_at: number | null;
       inspect_delay_ms: number | null;
       output_json: string | null;
+      progress_at: number | null;
+      stream_id: string | null;
     }>`
       SELECT status, summary, error, started_at, completed_at, inspect_delay_ms,
-             output_json
+             output_json, progress_at, stream_id
       FROM cf_test_stub_runs WHERE run_id = ${runId}
     `;
     const row = rows[0];
@@ -1502,6 +1649,10 @@ export class TestAgentToolStubChild extends Agent {
         : {}),
       startedAt: row.started_at,
       completedAt: row.completed_at ?? undefined,
+      ...(row.progress_at !== null
+        ? { progress: { at: row.progress_at } }
+        : {}),
+      ...(row.stream_id !== null ? { streamId: row.stream_id } : {}),
       ...(milestones.length > 0 ? { milestones } : {})
     };
   }

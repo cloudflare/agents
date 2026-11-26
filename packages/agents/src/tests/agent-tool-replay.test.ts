@@ -208,6 +208,30 @@ describe("a recovered agent-tool run and the alarm that runs it", () => {
   });
 });
 
+describe("a recovered agent-tool run following a running child", () => {
+  it("counts a child's progress reports as progress, though it stores no chunk", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `recovered-progress-${crypto.randomUUID()}`
+    );
+    expect(
+      await agent.recoveredChildReportsProgressForTest("run-progress")
+    ).toBe("pending");
+  });
+
+  it("forwards what a running child stores, also from a new stream after the child's recovery, and credits the parent's progress", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `recovered-streams-${crypto.randomUUID()}`
+    );
+    expect(await agent.recoveredChildStreamsForTest("run-streams")).toEqual({
+      whileRunning: ["d"],
+      afterNewStream: ["e", "f"],
+      credits: 2
+    });
+  });
+});
+
 describe("agent-tool connect-time replay", () => {
   it("reads milestones without asking the child to reconcile its run", async () => {
     const agent = await getAgentByName(
