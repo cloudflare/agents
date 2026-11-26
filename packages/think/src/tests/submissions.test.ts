@@ -1309,33 +1309,33 @@ describe("Think durable submissions", () => {
 
   it("runs a submission's status hooks in order: a held one holds the next", async () => {
     const agent = await freshAgent();
+    // Its own id each run: the queue counts are per isolate, and a retry
+    // may share it.
+    const id = `sub-status-order-${crypto.randomUUID()}`;
     await agent.holdSubmissionStatusHookForTest();
     // The first report (pending) is held, so acceptance waits on it.
     const accepting = agent.testSubmitMessages("held status", {
-      submissionId: "sub-status-order"
+      submissionId: id
     });
     await vi.waitFor(async () => {
       expect(await agent.isSubmissionStatusHookHeldForTest()).toBe(true);
     });
     // Reported while the pending hook is still running: the submission is
     // aborted before the held hook returns, so the reports overlap.
-    const cancelling = agent.cancelSubmissionForTest(
-      "sub-status-order",
-      "stop"
-    );
+    const cancelling = agent.cancelSubmissionForTest(id, "stop");
     await vi.waitFor(async () => {
       // The aborted report has reached the queue: pending, then aborted.
-      expect(
-        await agent.statusReportsQueuedForTest("sub-status-order")
-      ).toBeGreaterThanOrEqual(2);
+      expect(await agent.statusReportsQueuedForTest(id)).toBeGreaterThanOrEqual(
+        2
+      );
     });
     await agent.releaseSubmissionStatusHookForTest();
     await accepting;
     await cancelling;
-    await agent.waitForSubmissionForTest("sub-status-order");
+    await agent.waitForSubmissionForTest(id);
 
     const statuses = (await agent.getSubmissionLog())
-      .filter((entry) => entry.submissionId === "sub-status-order")
+      .filter((entry) => entry.submissionId === id)
       .map((entry) => entry.status);
     expect(statuses[0]).toBe("pending");
     expect(statuses.at(-1)).toBe("aborted");
