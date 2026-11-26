@@ -103,6 +103,40 @@ describe("deliveries", () => {
     );
   });
 
+  it("gives a first attempt the sender never ran (a reset took it) the seeded progress", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const seen: unknown[] = [];
+        registerDeliverySink<object>(tasksOf(instance), "seeded-wake", {
+          deliver: (_payload, attempt) => {
+            seen.push({
+              local: attempt.local,
+              reply: attempt.checkpoint.get("reply")
+            });
+          }
+        });
+        // Accepted as sendDelivery accepts it, but its first attempt is
+        // left to the wake, as after a reset that came before it ran.
+        await instance.tasks.run(
+          deliveryDefinition("seeded-wake"),
+          {},
+          {
+            runId: "k",
+            retain: false,
+            start: "alarm",
+            checkpoint: { reply: { text: "hi" } }
+          }
+        );
+        expect(seen).toEqual([]);
+        await until(() => runs(state.storage).length === 0);
+        expect(seen).toEqual([{ local: undefined, reply: { text: "hi" } }]);
+      }
+    );
+  });
+
   it("joins a delivery that is still open instead of sending it twice", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
