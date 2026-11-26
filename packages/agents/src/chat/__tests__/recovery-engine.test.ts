@@ -40,6 +40,21 @@ import {
  * the predicate, the computed storage key, persistence, and event fan-out — the
  * exact orchestration both `AIChatAgent` and `Think` now delegate.
  */
+/**
+ * Turn bindings of a host that only starts attempt runs: no attempt is
+ * running, no message is stored and nothing else is called.
+ */
+const attemptRuns = (
+  startAttemptRun: ChatRecoveryTurnBindings["startAttemptRun"]
+): ChatRecoveryTurnBindings =>
+  ({
+    label: "[test]",
+    startAttemptRun,
+    attemptScope: new AsyncLocalStorage(),
+    latestMessage: () => undefined,
+    reconcileAgentToolChildRuns: () => Promise.resolve()
+  }) as unknown as ChatRecoveryTurnBindings;
+
 describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
   type FakeAdapterOptions = {
     awaitingClientInteraction?: boolean;
@@ -113,10 +128,10 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
         calls.push("emit");
         events.push(event);
       },
-      scheduleRecovery: () => {
+      turns: attemptRuns(() => {
         calls.push("schedule");
         return Promise.resolve();
-      },
+      }),
       setRecovering: (active, requestId) => {
         calls.push("setRecovering");
         recovering.push({ active, requestId });
@@ -451,7 +466,7 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
       emitRecoveryEvent: (event) => {
         events.push(event);
       },
-      scheduleRecovery: () => Promise.resolve(),
+      turns: attemptRuns(() => Promise.resolve()),
       setRecovering: (active, requestId) => {
         recovering.push({ active, requestId });
         return Promise.resolve();
@@ -642,11 +657,11 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
         order.push(`emit:${event.type}`);
         events.push(event);
       },
-      scheduleRecovery: (callback, data, reason, delaySeconds) => {
+      turns: attemptRuns(({ callback, data, delaySeconds }, reason) => {
         order.push("schedule");
         schedules.push({ callback, data, reason, delaySeconds });
         return Promise.resolve();
-      },
+      }),
       setRecovering: (active, requestId) => {
         order.push("setRecovering");
         recovering.push({ active, requestId });
@@ -873,10 +888,10 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
       emitRecoveryEvent: (event) => {
         events.push(event);
       },
-      scheduleRecovery: (callback, data, reason, delaySeconds) => {
+      turns: attemptRuns(({ callback, data, delaySeconds }, reason) => {
         schedules.push({ callback, data, reason, delaySeconds });
         return Promise.resolve();
-      },
+      }),
       setRecovering: (active, requestId) => {
         recovering.push({ active, requestId });
         return Promise.resolve();
@@ -1078,7 +1093,7 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
         return Promise.resolve();
       },
       emitRecoveryEvent: () => {},
-      scheduleRecovery: () => Promise.resolve(),
+      turns: attemptRuns(() => Promise.resolve()),
       setRecovering: () => Promise.resolve(),
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: (incident, config, partial, streamId, createdAt) => {
@@ -1775,14 +1790,14 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
         return Promise.resolve();
       },
       emitRecoveryEvent: (event) => events.push(event),
-      scheduleRecovery: (callback, data) => {
+      turns: attemptRuns(({ callback, data }) => {
         calls.push("schedule");
         scheduled.push({ callback, data });
         if (options.scheduleThrows) {
           return Promise.reject(new Error("schedule boom"));
         }
         return Promise.resolve();
-      },
+      }),
       setRecovering: () => Promise.resolve(),
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: (
@@ -1893,7 +1908,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     const h = makeHarness();
     const ended: string[] = [];
     h.adapter.turns = {
-      attemptScope: new AsyncLocalStorage(),
+      ...h.adapter.turns,
       endRequest: (requestId: string, outcome: string) =>
         void ended.push(`${outcome}:${requestId}`)
     } as unknown as ChatRecoveryTurnBindings;
@@ -1912,7 +1927,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     const h = makeHarness({ onChatRecovery: {} });
     const ended: string[] = [];
     h.adapter.turns = {
-      attemptScope: new AsyncLocalStorage(),
+      ...h.adapter.turns,
       endRequest: (requestId: string, outcome: string) =>
         void ended.push(`${outcome}:${requestId}`)
     } as unknown as ChatRecoveryTurnBindings;
@@ -1931,7 +1946,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     const h = makeHarness({ onChatRecovery: { continue: false } });
     const ended: string[] = [];
     h.adapter.turns = {
-      attemptScope: new AsyncLocalStorage(),
+      ...h.adapter.turns,
       endRequest: (requestId: string, outcome: string) =>
         void ended.push(`${outcome}:${requestId}`)
     } as unknown as ChatRecoveryTurnBindings;

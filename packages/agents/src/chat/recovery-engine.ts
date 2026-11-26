@@ -223,23 +223,6 @@ export interface ChatRecoveryAdapter {
   /** Broadcast a lifecycle event produced by the evaluation or a transition. */
   emitRecoveryEvent(event: ChatRecoveryIncidentEvent): void;
   /**
-   * Run a recovery attempt no turn's run kept: the host starts a chat-turn
-   * run for it (`ChatTurns.startAttemptRun`). `reason` selects
-   * deduplication and `delaySeconds` is `0` initially or the stable retry
-   * delay for a chained attempt.
-   */
-  scheduleRecovery(
-    callback: ChatRecoveryScheduleCallback,
-    data: Record<string, unknown>,
-    reason: ChatRecoveryScheduleReason,
-    delaySeconds: number,
-    /**
-     * Keys a retried enqueue of one replacement attempt, so a retry joins the
-     * run an earlier try already created. Only set for `"redefer"`.
-     */
-    dedupeKey?: string
-  ): Promise<void>;
-  /**
    * What the engine needs from the host's turn machinery to run a recovery
    * attempt and route a live stream interruption. Hosts that only use the
    * incident bookkeeping omit it.
@@ -331,6 +314,19 @@ export type ChatRecoveryAttemptScope = {
 export interface ChatRecoveryTurnBindings {
   /** Prefix for the host's log lines, such as `[Think]`. */
   label: string;
+  /**
+   * `ChatTurns.startAttemptRun`: run a recovery attempt no turn's run kept
+   * in a chat-turn run of its own. `reason` selects deduplication.
+   *
+   * @param dedupeKey - Keys a retried start of one replacement attempt, so
+   *   a retry joins the run an earlier try already created. Only set for
+   *   `"redefer"`.
+   */
+  startAttemptRun(
+    attempt: ChatRecoveryAttemptInput,
+    reason: ChatRecoveryScheduleReason,
+    dedupeKey?: string
+  ): Promise<void>;
   /** `ChatTurns.beginRecoveryAttempt`. */
   beginRecoveryAttempt(
     rootRequestId: string | undefined
@@ -437,7 +433,7 @@ export interface InterruptedChatTurn {
   /**
    * Where the recovery attempt goes when the turn's own run runs it.
    * Returns `false` when the run cannot keep it, and the attempt gets a
-   * run of its own (`ChatRecoveryAdapter.scheduleRecovery`).
+   * run of its own (`ChatRecoveryTurnBindings.startAttemptRun`).
    */
   attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
 }
@@ -1212,19 +1208,13 @@ export class ChatRecoveryEngine {
       delivery === undefined ? input.data : { ...input.data, delivery };
     // The caller's run takes the attempt when it can keep it; otherwise
     // (an attempt too large to journal) it gets a run of its own.
-    if (
-      !input.into?.({
-        callback: input.callback,
-        data,
-        delaySeconds: input.delaySeconds ?? 0
-      })
-    ) {
-      await this.adapter.scheduleRecovery(
-        input.callback,
-        data,
-        input.reason ?? "initial",
-        input.delaySeconds ?? 0
-      );
+    const attempt: ChatRecoveryAttemptInput = {
+      callback: input.callback,
+      data,
+      delaySeconds: input.delaySeconds ?? 0
+    };
+    if (!input.into?.(attempt)) {
+      await this.turns.startAttemptRun(attempt, input.reason ?? "initial");
     }
     return true;
   }
@@ -1375,12 +1365,7 @@ export class ChatRecoveryEngine {
     // The run of the attempt that timed out runs the next one; otherwise
     // (no such run, or it cannot keep it) the next one gets its own run.
     if (!currentRunAttempt()?.(next)) {
-      await adapter.scheduleRecovery(
-        next.callback,
-        next.data,
-        "stable_timeout_retry",
-        next.delaySeconds
-      );
+      await this.turns.startAttemptRun(next, "stable_timeout_retry");
     }
     return true;
   }
@@ -1525,11 +1510,13 @@ export class ChatRecoveryEngine {
         }),
       track: (turn) => turns.trackAlarmWork(turn),
       redefer: (dedupeKey) =>
-        this.adapter.scheduleRecovery(
-          callback,
-          data ?? {},
+        turns.startAttemptRun(
+          {
+            callback,
+            data: data ?? {},
+            delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+          },
           "redefer",
-          CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
           dedupeKey
         ),
       onDetachedError: (error) =>

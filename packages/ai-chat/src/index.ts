@@ -3295,6 +3295,8 @@ export class AIChatAgent<
       ...chatRecoveryStorageAdapter(this.ctx.storage),
       turns: {
         label: "[AIChatAgent]",
+        startAttemptRun: (attempt, reason, dedupeKey) =>
+          this._turns.startAttemptRun(attempt, reason, dedupeKey),
         beginRecoveryAttempt: (rootRequestId) =>
           this._turns.beginRecoveryAttempt(rootRequestId),
         // Recovery asks the overridable client-interaction check.
@@ -3346,12 +3348,6 @@ export class AIChatAgent<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
-      scheduleRecovery: (callback, data, reason, delaySeconds, dedupeKey) =>
-        this._turns.startAttemptRun(
-          { callback, data, delaySeconds },
-          reason,
-          dedupeKey
-        ),
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
