@@ -3157,6 +3157,7 @@ export class ThinkTestAgent extends Think {
       if (inspection?.status === "completed") break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, agent_type, status, display_order, started_at, detached,
@@ -6114,7 +6115,8 @@ export class ThinkAgentToolParent extends Agent {
         ${runId}, 'seed-tool-call', 'ThinkTestAgent', ${JSON.stringify("seed")},
         1, ${status}, ${JSON.stringify({ name: "seed" })}, 0, ${now}, ${completedAt}
       )
-    `;
+    `; // What a released version left, carried into its run as a start does.
+    await carryForwardAgentToolRunsForTest(this);
   }
 
   /** Launch a single real Think child against the current cap. */
@@ -6477,6 +6479,7 @@ export class ThinkAgentToolParent extends Agent {
     const child = await this.subAgent(ThinkTestAgent, runId);
     await child.setBeforeStepAsyncDelay(60_000);
     const started = await child.startAgentToolRun("silent child", { runId });
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,

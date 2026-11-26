@@ -1466,7 +1466,9 @@ describe("Think agent tools", () => {
       await parent.startupRecoveryIgnoresRunsCreatedDuringOnStartForTest();
 
     expect(staleStatus).toBe("interrupted");
-    expect(onStartRunStatus).toBe("running");
+    // A row written during onStart is not this start's to carry: it waits,
+    // untouched, for the next start.
+    expect(onStartRunStatus).toBeNull();
     expect(finishes).toHaveLength(1);
     expect(finishes[0]?.run.inputPreview).toBe("startup snapshot stale child");
     expect(

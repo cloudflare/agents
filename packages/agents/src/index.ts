@@ -5159,7 +5159,18 @@ export class Agent<
    *   an awaited one re-attaches, a detached one asks its child and
    *   delivers what is owed (a give-up that went out is not sent again).
    */
-  private async _carryForwardAgentToolRuns(): Promise<void> {
+  private _carryingForwardAgentToolRuns: Promise<void> | undefined;
+
+  private _carryForwardAgentToolRuns(): Promise<void> {
+    // One pass at a time: the pass drops the table it reads.
+    this._carryingForwardAgentToolRuns ??=
+      this._carryForwardAgentToolRunsOnce().finally(() => {
+        this._carryingForwardAgentToolRuns = undefined;
+      });
+    return this._carryingForwardAgentToolRuns;
+  }
+
+  private async _carryForwardAgentToolRunsOnce(): Promise<void> {
     const sql = this.ctx.storage.sql;
     if (!hasTable(sql, "cf_agent_tool_runs")) return;
     // `SELECT *`: a table from an old version may lack later columns.
