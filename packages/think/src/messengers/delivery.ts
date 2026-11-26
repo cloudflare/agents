@@ -7,7 +7,7 @@ import type {
   ChatStartEvent,
   StreamCallback
 } from "../think";
-import type { MessengerEvent } from "./events";
+import type { MessengerEvent, MessengerMessage } from "./events";
 import { toMessengerUserMessage } from "./events";
 
 export const MESSENGER_REPLY_FIBER_NAME = "think:messenger-reply";
@@ -317,11 +317,24 @@ export function parseMessengerReplySnapshot(
   }
 
   return {
-    event: candidate.event,
+    event: withDates(candidate.event),
     stage: candidate.stage,
     tag: candidate.tag ?? defaultDeliveryTag(candidate.stage),
     thread: candidate.thread,
     type: MESSENGER_REPLY_FIBER_NAME
+  };
+}
+
+/** A snapshot kept as JSON holds its messages' `createdAt` as strings. */
+function withDates(event: MessengerEvent): MessengerEvent {
+  const revive = (message: MessengerMessage): MessengerMessage =>
+    typeof message.createdAt === "string"
+      ? { ...message, createdAt: new Date(message.createdAt) }
+      : message;
+  return {
+    ...event,
+    ...(event.message && { message: revive(event.message) }),
+    ...(event.skipped && { skipped: event.skipped.map(revive) })
   };
 }
 
