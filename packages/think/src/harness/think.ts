@@ -144,6 +144,12 @@ function submissionStatus(
   }
 }
 
+/**
+ * Submissions read per page when deleting in bulk, whatever the limit: a
+ * small limit does not cost a read per submission it passes over.
+ */
+const DELETE_PAGE = 100;
+
 /** An operation's inspection: its status, times, key and metadata. */
 type ThinkOperationInspection = NonNullable<
   Awaited<ReturnType<ThinkHarness["inspection"]>>
@@ -1007,7 +1013,7 @@ export class Think<
     // differ only for a submission that settled before an older one).
     // Matched on Think's status, so a run the harness counts as completed
     // but which ended unanswered is not taken for a completed submission.
-    // Read a page of `limit` at a time, each after the last one read, so a
+    // Read a page of `DELETE_PAGE` at a time, each after the last one read, so a
     // long run of submissions that do not match is passed over, never
     // read twice, and no more than a page is in memory.
     let deleted = 0;
@@ -1018,7 +1024,7 @@ export class Think<
         status: taskStatusesFor(wanted),
         order: "oldest",
         ...(after !== undefined && { after }),
-        limit
+        limit: DELETE_PAGE
       });
       for (const submission of listed.map(submissionInspection)) {
         if (deleted >= limit) break;
@@ -1029,7 +1035,7 @@ export class Think<
           deleted++;
         }
       }
-      if (listed.length < limit) break;
+      if (listed.length < DELETE_PAGE) break;
       const last = listed[listed.length - 1];
       after = { operationId: last.operationId, createdAt: last.createdAt };
     }
