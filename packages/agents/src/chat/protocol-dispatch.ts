@@ -19,7 +19,7 @@ import type { Connection } from "agents";
 import type {
   ContinuationSource,
   ToolInteractionOutcome
-} from "./auto-continuation-controller";
+} from "./continuation-state";
 import type { ChatTurns } from "./chat-turns";
 import type { ClientToolSchema } from "./client-tools";
 import type { ChatFrames } from "./chat-frames";

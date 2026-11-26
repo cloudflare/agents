@@ -47,11 +47,6 @@ import {
   drainInteractionApplies
 } from "./async-helpers";
 import {
-  AutoContinuationController,
-  type ContinuationSource,
-  type ToolInteractionOutcome
-} from "./auto-continuation-controller";
-import {
   continuationWaitsOnClient,
   replyToContinueIsEmpty,
   repairTranscriptBeforeTurn,
@@ -59,9 +54,14 @@ import {
   type BeforeTurnRepairResult
 } from "./before-turn";
 import {
+  CONTINUATION_COALESCE_MS,
   ContinuationState,
+  addContinuationTarget,
   continuationTargetIsLatest,
-  type ContinuationConnection
+  type ContinuationConnection,
+  type ContinuationSource,
+  type ContinuationSpec,
+  type ToolInteractionOutcome
 } from "./continuation-state";
 import {
   continuationStreamEnded,
@@ -436,8 +436,18 @@ export class ChatTurns<
    * moved onto a durable alarm that releases the DO; if so, persist this state.
    */
   readonly preStream = new PreStreamTurns<TConnection>();
-  /** The coalesce timer and completeness barrier in front of a continuation. */
-  readonly autoContinuation: AutoContinuationController<TConnection>;
+  /**
+   * @internal The coalesce timer in front of a continuation (#1650): each
+   * tool result or approval re-arms it, and when it fires the barrier
+   * ({@link fireContinuationWhenStable}) runs.
+   */
+  coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * @internal Whether the barrier is draining the applies in flight. Only
+   * one drain runs; a result that re-arms the timer meanwhile is absorbed
+   * by it, and the drain re-checks when it ends.
+   */
+  barrierActive = false;
 
   /**
    * The newest tool-result/approval apply in flight, or `null`. Because the
@@ -662,20 +672,10 @@ export class ChatTurns<
       ? () => admissions.recoveryPending()
       : null;
     this.#released = admissions ? () => admissions.released() : null;
-    this.autoContinuation = new AutoContinuationController<TConnection>({
-      continuation: this.continuation,
-      generateRequestId: () => host.generateRequestId(),
-      isStreamActive: () => host.isReplyStreaming(),
-      hasPendingInteraction: () => this.pendingInteraction !== null,
-      hasIncompleteToolBatch: () => hasIncompleteToolBatch(host.messages()),
-      drainInteractionApplies: () => this.drainInteractions(),
-      keepAliveWhile: (fn) => host.keepAliveWhile(fn),
-      fire: () => host.fireContinuation(),
-      scheduled: () => this.#admitContinuation()
-    });
     this.#continuationParts = {
       continuation: this.continuation,
-      autoContinuation: this.autoContinuation,
+      rearmForBatch: () => this.rearmContinuation(),
+      activateDeferred: () => this.#activateDeferredContinuation(),
       aborts: this.aborts,
       messages: () => host.messages(),
       clientToolNames: () => this.clientToolNames(),
@@ -1352,10 +1352,16 @@ export class ChatTurns<
       apply,
       autoContinue,
       (outcome) => {
-        this.autoContinuation.afterInteraction(outcome, autoContinue, spec);
-        if (autoContinue && outcome.status === "changed") {
-          this.#admitContinuation();
+        if (!autoContinue) {
+          this.rearmContinuation();
+          return;
         }
+        if (outcome.status !== "changed") return;
+        this.#scheduleContinuation({
+          ...spec(),
+          targetMessageId: outcome.messageId
+        });
+        this.#admitContinuation();
       },
       enqueue,
       connectionId === undefined ? connectionOf(spec) : connectionId
@@ -1413,7 +1419,7 @@ export class ChatTurns<
     // The replay waits until its turn is on the queue (a host may await
     // before it enqueues), or until it will not run now.
     this.#replayWaiting.set(requestId, onQueued);
-    this.autoContinuation.fireWhenStable();
+    this.fireContinuationWhenStable();
     // Not fired now (a tool batch still waits on a sibling, say): nothing
     // will queue it before a request may.
     if (
@@ -1514,6 +1520,152 @@ export class ChatTurns<
       () => this.continuation.pending !== null,
       () => this.interactionTail
     );
+  }
+
+  // ── The continuation barrier ───────────────────────────────────────
+
+  /**
+   * Schedule a continuation for a result that settled its call and opted in
+   * with `autoContinue` (#1650). Results that arrive close together share
+   * one continuation through the coalesce timer, and it fires through the
+   * barrier ({@link fireContinuationWhenStable}). While a continuation runs
+   * (`pastCoalesce`), the result is kept as the deferred follow-up instead.
+   */
+  #scheduleContinuation(spec: ContinuationSpec<TConnection>): void {
+    const c = this.continuation;
+    if (c.pending?.pastCoalesce) {
+      c.deferred = {
+        connection: spec.connection,
+        connectionId: spec.connection.id,
+        errorPrefix: spec.errorPrefix,
+        prerequisite: null,
+        // Results coalesced into one follow-up: keep every message they target.
+        targetMessageIds: addContinuationTarget(
+          c.deferred?.targetMessageIds,
+          spec.targetMessageId
+        )
+      };
+      return;
+    }
+    if (c.pending) {
+      c.pending.connection = spec.connection;
+      c.pending.connectionId = spec.connection.id;
+      c.pending.errorPrefix = spec.errorPrefix;
+      // A later result for an older reply must not drop a newer one's target.
+      c.pending.targetMessageIds = addContinuationTarget(
+        c.pending.targetMessageIds,
+        spec.targetMessageId
+      );
+    } else {
+      c.pending = {
+        connection: spec.connection,
+        connectionId: spec.connection.id,
+        requestId: this.host.generateRequestId(),
+        errorPrefix: spec.errorPrefix,
+        prerequisite: null,
+        pastCoalesce: false,
+        targetMessageIds: [spec.targetMessageId]
+      };
+    }
+    c.awaitingConnections.set(spec.connection.id, spec.connection);
+    this.armCoalesce();
+  }
+
+  /**
+   * @internal Re-run the barrier for a pending continuation that has not
+   * fired: a result without `autoContinue` may complete a batch a sibling
+   * opted in for, and a finalized reply lifts the stream gate (#1650).
+   * Never creates a continuation.
+   */
+  rearmContinuation(): void {
+    const pending = this.continuation.pending;
+    if (!pending || pending.pastCoalesce) return;
+    this.armCoalesce();
+  }
+
+  /** @internal (Re)arm the coalesce timer. */
+  armCoalesce(): void {
+    if (this.coalesceTimer) clearTimeout(this.coalesceTimer);
+    this.coalesceTimer = setTimeout(() => {
+      this.coalesceTimer = null;
+      if (this.continuation.pending) this.fireContinuationWhenStable();
+    }, CONTINUATION_COALESCE_MS);
+  }
+
+  /** @internal Cancel the coalesce timer, if armed. */
+  cancelCoalesce(): void {
+    if (this.coalesceTimer) {
+      clearTimeout(this.coalesceTimer);
+      this.coalesceTimer = null;
+    }
+  }
+
+  /**
+   * @internal Fire the pending continuation, but only once the model's
+   * parallel tool batch is answered (#1649) and no reply streams (#1650).
+   * With the batch incomplete it drains the applies in flight and checks
+   * again; still incomplete, it returns without firing and without holding
+   * the isolate, leaving the continuation pending for the next sibling's
+   * result to re-arm. A sibling that never arrives never continues: a later
+   * turn repairs the transcript.
+   */
+  fireContinuationWhenStable(): void {
+    const pending = this.continuation.pending;
+    if (!pending || pending.pastCoalesce || this.barrierActive) return;
+    // While the reply streams the batch can still grow. The finalize
+    // re-arms ({@link replyFinalized}).
+    if (this.host.isReplyStreaming()) return;
+    if (
+      this.pendingInteraction === null &&
+      !hasIncompleteToolBatch(this.host.messages())
+    ) {
+      this.cancelCoalesce();
+      this.host.fireContinuation();
+      return;
+    }
+    this.barrierActive = true;
+    // Kept alive only for the applies that already arrived.
+    this.host
+      .keepAliveWhile(() => this.drainInteractions())
+      .catch(() => {})
+      .finally(() => {
+        // No await from here to the decision, so a re-armed timer cannot
+        // interleave and fire twice.
+        this.barrierActive = false;
+        const current = this.continuation.pending;
+        if (!current || current.pastCoalesce) return;
+        if (this.host.isReplyStreaming()) return;
+        if (hasIncompleteToolBatch(this.host.messages())) return;
+        this.cancelCoalesce();
+        this.host.fireContinuation();
+      });
+  }
+
+  /**
+   * The deferred follow-up becomes the pending continuation, through the
+   * barrier: its batch may still be incomplete, or a reply streaming.
+   */
+  #activateDeferredContinuation(): void {
+    const pending = this.continuation.activateDeferred(() =>
+      this.host.generateRequestId()
+    );
+    if (!pending) return;
+    this.#admitContinuation();
+    this.fireContinuationWhenStable();
+  }
+
+  /**
+   * @internal Whether the barrier will fire by itself: its timer is armed
+   * or its drain runs.
+   */
+  continuationArmed(): boolean {
+    return this.coalesceTimer !== null || this.barrierActive;
+  }
+
+  /** @internal Tear down the timer and the drain flag. */
+  resetContinuationBarrier(): void {
+    this.cancelCoalesce();
+    this.barrierActive = false;
   }
 
   // ── Continuations ──────────────────────────────────────────────────
@@ -2062,7 +2214,7 @@ export class ChatTurns<
     // New interactions must not serialize behind a stale, possibly hung,
     // apply from the turn being reset (#1649).
     this.interactionTail = Promise.resolve();
-    this.autoContinuation.reset();
+    this.resetContinuationBarrier();
     this.continuation.sendResumeNone();
     this.continuation.clearAll();
     this.preStream.releaseAwaiting();
@@ -2092,8 +2244,10 @@ export class ChatTurns<
    * between.
    */
   hasPendingDecision(): boolean {
+    if (this.pendingInteraction !== null) return true;
+    const pending = this.continuation.pending;
     return (
-      this.autoContinuation.hasPendingDecision() ||
+      (pending !== null && !pending.pastCoalesce && this.continuationArmed()) ||
       this.#continuationParts.firing.size > 0
     );
   }
@@ -2106,7 +2260,7 @@ export class ChatTurns<
     for (;;) {
       await this.queue.waitForIdle();
       if (!this.hasPendingDecision()) return;
-      await sleep(AutoContinuationController.COALESCE_MS);
+      await sleep(CONTINUATION_COALESCE_MS);
     }
   }
 
@@ -2152,7 +2306,7 @@ export class ChatTurns<
         // enqueues drains at the loop top) or to park.
         if (
           (await awaitWithDeadline(
-            sleep(AutoContinuationController.COALESCE_MS),
+            sleep(CONTINUATION_COALESCE_MS),
             deadline
           )) === TIMED_OUT
         ) {
