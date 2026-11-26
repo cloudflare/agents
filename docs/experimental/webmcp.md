@@ -186,8 +186,8 @@ Run them with `npm run test:webmcp` from `packages/agents`.
 
 ## Related Material
 
-- [`examples/webmcp/`](../examples/webmcp/) — Live demo with in-page tools + bridged tools, invoke UI, dark mode, connect/disconnect.
-- [`packages/agents/src/experimental/webmcp.ts`](../packages/agents/src/experimental/webmcp.ts) — Source.
+- [`examples/webmcp/`](../../examples/webmcp/) — Live demo with in-page tools + bridged tools, invoke UI, dark mode, connect/disconnect.
+- [`packages/agents/src/experimental/webmcp.ts`](../../packages/agents/src/experimental/webmcp.ts) — Source.
 - [Chrome WebMCP issue (cloudflare/agents#1216)](https://github.com/cloudflare/agents/issues/1216) — Original feature request.
 - [WebMCP Chrome extension](https://chromewebstore.google.com/detail/web-mcp/lmhcjoefoeigdnpmiamglmkggbnjlicl) — Inspect registered tools and invoke them outside of the AI flow.
 

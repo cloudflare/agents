@@ -19,7 +19,6 @@ examples/          # Self-contained demo apps (see examples/AGENTS.md)
   mcp-client/      # MCP client example
   ...              # ~20 examples total
 
-experimental/      # Work-in-progress experiments (not published, no stability guarantees)
 
 site/              # Deployed websites
   agents/          # agents.cloudflare.com (Astro)

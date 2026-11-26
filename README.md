@@ -151,7 +151,7 @@ The [`examples/`](examples) directory has 30+ self-contained demos. A non-exhaus
 - **Auth, payments, comms** — [`auth-agent/`](examples/auth-agent), [`cross-domain/`](examples/cross-domain), [`x402/`](examples/x402), [`x402-mcp/`](examples/x402-mcp), [`email-agent/`](examples/email-agent), [`github-webhook/`](examples/github-webhook), [`push-notifications/`](examples/push-notifications)
 - **Game & misc** — [`tictactoe/`](examples/tictactoe), [`ai-chat/`](examples/ai-chat)
 
-Examples using the [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/) live in [`openai-sdk/`](openai-sdk). Work-in-progress experiments live in [`experimental/`](experimental) (no stability guarantees).
+Examples using the [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/) live in [`openai-sdk/`](openai-sdk).
 
 Run any example locally:
 
@@ -181,7 +181,6 @@ npm start
 | [`packages/worker-bundler/`](packages/worker-bundler) | Runtime Workers bundler                                  |
 | [`packages/hono-agents/`](packages/hono-agents)       | Hono integration                                         |
 | [`examples/`](examples)                               | Self-contained demo apps                                 |
-| [`experimental/`](experimental)                       | Work-in-progress experiments (not published)             |
 | [`openai-sdk/`](openai-sdk)                           | Examples using the OpenAI Agents SDK                     |
 | [`guides/`](guides)                                   | In-depth pattern tutorials                               |
 | [`docs/`](docs)                                       | Markdown docs synced to developers.cloudflare.com        |
