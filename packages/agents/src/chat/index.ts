@@ -172,7 +172,6 @@ export {
 
 export {
   ContinuationState,
-  CONTINUATION_COALESCE_MS,
   addContinuationTarget,
   continuationTargetIsLatest,
   type ContinuationConnection,

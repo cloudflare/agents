@@ -56,7 +56,9 @@ class FakeHost implements ChatTurnsHost {
   generateRequestId() {
     return `cont-${++this.ids}`;
   }
+  keepAlives = 0;
   keepAliveWhile<T>(fn: () => Promise<T>) {
+    this.keepAlives++;
     return fn();
   }
   fireContinuation() {
@@ -94,6 +96,117 @@ describe("ChatTurns", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  // ── The continuation barrier's drain ───────────────────────────────
+
+  /** A reply whose tool batch still waits on `c2`. */
+  const halfAnswered = (): ChatTurnMessage => ({
+    id: "a1",
+    role: "assistant",
+    parts: [
+      { type: "tool-x", toolCallId: "c1", state: "output-available" },
+      { type: "tool-x", toolCallId: "c2", state: "input-available" }
+    ]
+  });
+
+  /**
+   * Schedule a continuation for `a1`, and hold one more apply in the chain
+   * so the barrier drains when the coalesce window ends.
+   */
+  async function scheduleBehindHeldApply(): Promise<() => Promise<void>> {
+    await turns.applyInteraction(
+      async () => ({ status: "changed", messageId: "a1" }),
+      true,
+      spec
+    );
+    let release!: () => void;
+    const held = turns.enqueueInteraction(
+      () =>
+        new Promise<boolean>((resolve) => {
+          release = () => resolve(true);
+        })
+    );
+    await vi.advanceTimersByTimeAsync(COALESCE);
+    return async () => {
+      release();
+      await held;
+      await vi.advanceTimersByTimeAsync(0);
+    };
+  }
+
+  it("drains the applies in flight, then holds while the batch is still incomplete", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    expect(host.keepAlives).toBe(1);
+    expect(turns.barrierActive).toBe(true);
+    expect(host.fired).toBe(0);
+
+    await release();
+    await vi.runAllTimersAsync();
+    expect(host.fired).toBe(0);
+    expect(turns.barrierActive).toBe(false);
+    expect(turns.continuation.pending).not.toBeNull();
+  });
+
+  it("fires once the drain finds the batch complete", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    expect(host.fired).toBe(0);
+
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    expect(host.fired).toBe(1);
+  });
+
+  it("absorbs a barrier check that re-enters during the drain", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    turns.fireContinuationWhenStable();
+    turns.fireContinuationWhenStable();
+    expect(host.keepAlives).toBe(1);
+    expect(host.fired).toBe(0);
+
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    await vi.runAllTimersAsync();
+    expect(host.fired).toBe(1);
+  });
+
+  it("cancels a coalesce timer re-armed during the drain, so it fires once", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    turns.rearmContinuation();
+    expect(turns.continuationArmed()).toBe(true);
+
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    expect(host.fired).toBe(1);
+    expect(turns.continuationArmed()).toBe(false);
+    await vi.runAllTimersAsync();
+    expect(host.fired).toBe(1);
+  });
+
+  it("a continuation scheduled after a reset during a drain fires once", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    turns.reset();
+    expect(turns.continuationArmed()).toBe(false);
+    // The old drain ends after the reset: the reset dropped its continuation.
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    await vi.runAllTimersAsync();
+    expect(host.fired).toBe(0);
+
+    await turns.applyInteraction(
+      async () => ({ status: "changed", messageId: "a1" }),
+      true,
+      spec
+    );
+    expect(turns.continuationArmed()).toBe(true);
+    await vi.advanceTimersByTimeAsync(COALESCE);
+    expect(host.fired).toBe(1);
+    expect(turns.continuationArmed()).toBe(false);
   });
 
   // ── Tool results ────────────────────────────────────────────────────
