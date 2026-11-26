@@ -4625,6 +4625,12 @@ export class Agent<
         local.childStarted?.reject(error);
         return fail(error);
       }
+      // This attempt runs inside `runAgentTool`, perhaps in a turn that
+      // holds the chat lane a delivery waits for: it never delivers. The
+      // tail's end, or the first check, wakes the run.
+      return TaskSettlement.park("child", {
+        until: this._detachedNextCheck(step, budget)
+      });
     }
 
     const reached = await this._askDetachedChild(meta, runId);
@@ -4637,10 +4643,10 @@ export class Agent<
       ) &&
       !this._isDetachedGiveUpAbort(inspection)
     ) {
-      return this._terminalResultFromInspection(
-        agentType,
-        inspection
-      ) as unknown as TaskJson;
+      return this._deliverDetachedFromAttempt(
+        meta,
+        this._terminalResultFromInspection(agentType, inspection)
+      );
     }
 
     const gaveUp = step.checkpoint.get<boolean>("gaveUp") === true;
@@ -4713,10 +4719,10 @@ export class Agent<
       ) &&
       !this._isDetachedGiveUpAbort(afterCancel)
     ) {
-      return this._terminalResultFromInspection(
-        agentType,
-        afterCancel
-      ) as unknown as TaskJson;
+      return this._deliverDetachedFromAttempt(
+        meta,
+        this._terminalResultFromInspection(agentType, afterCancel)
+      );
     }
     const giveUp = this._detachedGiveUpResult(
       meta,
@@ -4772,6 +4778,27 @@ export class Agent<
     } catch {
       // The run's own checks deliver.
     }
+  }
+
+  /**
+   * Deliver a detached run's terminal from one of its checks, then settle
+   * it marked `delivered`. A check runs from the run's wake, with the
+   * dispatch budget, so waiting for the chat lane here holds no job. A
+   * failed callback checks again later; a reset re-runs the check, which
+   * delivers again (at least once).
+   */
+  private async _deliverDetachedFromAttempt(
+    meta: AgentToolTaskMeta,
+    result: RunAgentToolResult
+  ): Promise<TaskJson | TaskSettlement> {
+    try {
+      await this._deliverDetachedOutcome(meta, result);
+    } catch {
+      return TaskSettlement.park("finish", {
+        until: Date.now() + DETACHED_DELIVERY_RETRY_MS
+      });
+    }
+    return { ...result, delivered: true } as unknown as TaskJson;
   }
 
   /** The give-up result of a detached run; `delivered` when it went out. */
@@ -4865,7 +4892,11 @@ export class Agent<
     const stored = record.result as { delivered?: unknown } | undefined;
     if (stored?.delivered === true) return;
     if (record.reason === AGENT_TOOL_CLEARED_REASON) return;
-    await this._deliverDetachedOutcome(meta, result);
+    // What no check delivered: a cancel, or a child that could not take the
+    // run. A report can run inside a job with no dispatch budget, so it
+    // delivers without waiting for the chat lane, as an explicit cancel
+    // always has.
+    await this._deliverDetachedOutcome(meta, result, false);
   }
 
   /**
@@ -4875,7 +4906,8 @@ export class Agent<
    */
   private async _deliverDetachedOutcome(
     meta: AgentToolTaskMeta,
-    result: RunAgentToolResult
+    result: RunAgentToolResult,
+    serialize = true
   ): Promise<void> {
     const completedAt = Date.now();
     this._broadcastAgentToolTerminal(
@@ -4929,9 +4961,9 @@ export class Agent<
         throw error;
       }
     };
-    // Delivery fires from an alarm or this isolate's attempt, never inside a
-    // turn: serialize it against the host's turn queue.
-    await this._runDetachedDelivery(invoke, { serialize: true });
+    // A check delivers serialized against the host's turn queue (a state-
+    // mutating `onFinish` never interleaves with a turn); a report does not.
+    await this._runDetachedDelivery(invoke, { serialize });
   }
 
   private async _safeRunOnError(error: unknown): Promise<void> {
