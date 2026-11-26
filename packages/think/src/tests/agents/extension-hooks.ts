@@ -11,6 +11,7 @@ import { tool } from "ai";
 import { Agent } from "agents";
 import { z } from "zod";
 import { Think } from "../../think";
+import { createThinkExtensionManager } from "../../extensions/wiring";
 import { WorkspaceFiles } from "../../workspace-files";
 import type { StreamCallback, ThinkModel, TurnConfig } from "../../think";
 
@@ -333,6 +334,11 @@ const TURN_CONTROL_EXTENSION_SOURCE = `{
  * An extension that sets a turn's tool choice and step limit from
  * `beforeTurn`, sends a message from it, and records streamed text.
  */
+type HostPropsSeen = {
+  agentPath?: { className: string; name: string }[];
+  rootJurisdiction?: string;
+};
+
 export class ThinkExtensionTurnAgent extends Think {
   extensionLoader = this.env.LOADER;
   readonly toolChoices: unknown[] = [];
@@ -405,6 +411,49 @@ export class ThinkExtensionTurnAgent extends Think {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
     return { done: cb.doneCalled, error: cb.errorMessage };
+  }
+
+  /**
+   * The props a host binding gets, for an agent at `agentPath` under a
+   * root in `rootJurisdiction`. The loader stops the load after that.
+   */
+  async hostPropsForTest(
+    agentPath: { className: string; name: string }[],
+    rootJurisdiction: DurableObjectJurisdiction | undefined
+  ): Promise<HostPropsSeen[]> {
+    const seen: HostPropsSeen[] = [];
+    const manager = createThinkExtensionManager({
+      loader: {
+        get() {
+          throw new Error("stop after the host binding");
+        }
+      } as unknown as WorkerLoader,
+      storage: this.ctx.storage,
+      agentClassName: "Kid",
+      agentId: "kid-id",
+      agentPath,
+      rootJurisdiction,
+      exports: {
+        HostBridgeLoopback: (options: { props: HostPropsSeen }) => {
+          seen.push({
+            agentPath: options.props.agentPath,
+            rootJurisdiction: options.props.rootJurisdiction
+          });
+          return {};
+        }
+      }
+    });
+    await manager
+      .load(
+        {
+          name: "probe",
+          version: "1.0.0",
+          permissions: { workspace: "read" }
+        },
+        "{ tools: {} }"
+      )
+      .catch(() => {});
+    return seen;
   }
 
   modelCalls(): { count: number; toolChoices: unknown[] } {

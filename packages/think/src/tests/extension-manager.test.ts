@@ -1019,6 +1019,31 @@ describe("Think — a sandboxed extension's turn controls", () => {
     );
   });
 
+  it("gives a sub-agent's host binding its path and its root's jurisdiction", async () => {
+    // Local runs have no jurisdictions, so this checks what the loopback is
+    // given; it looks the root up in that jurisdiction, as parentAgent() does.
+    const agent = await getAgentByName(
+      env.ThinkExtensionTurnAgent,
+      `turn-props-${crypto.randomUUID()}`
+    );
+    const path = [
+      { className: "Root", name: "r" },
+      { className: "Kid", name: "k" }
+    ];
+    expect(await agent.hostPropsForTest(path, "eu")).toEqual([
+      expect.objectContaining({ agentPath: path, rootJurisdiction: "eu" })
+    ]);
+    // A root agent's props are as before.
+    const [rootProps] = await agent.hostPropsForTest(
+      [{ className: "Root", name: "r" }],
+      "eu"
+    );
+    expect(rootProps).toEqual({
+      agentPath: undefined,
+      rootJurisdiction: undefined
+    });
+  });
+
   it("gives onChunk the streamed text", async () => {
     const agent = await turn("turn-chunks");
     await vi.waitFor(async () =>

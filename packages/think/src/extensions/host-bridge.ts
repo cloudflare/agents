@@ -19,6 +19,7 @@
  */
 
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { getAgentByName, type Agent } from "agents";
 import { validateUrl } from "agents/internal";
 import type {
   ThinkHostApi,
@@ -45,6 +46,8 @@ export type HostBridgeLoopbackProps = {
    * through the root.
    */
   agentPath?: readonly { className: string; name: string }[];
+  /** @internal The root's jurisdiction, with `agentPath`. */
+  rootJurisdiction?: DurableObjectJurisdiction;
   permissions: ExtensionPermissions;
   /** Namespaced context labels this extension declared (for "own" write validation). */
   ownContextLabels?: string[];
@@ -57,7 +60,8 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
   private _permissions = this.ctx.props.permissions;
 
   private _getAgent(): ThinkHostBridgeAgent {
-    const { agentClassName, agentId, agentPath } = this.ctx.props;
+    const { agentClassName, agentId, agentPath, rootJurisdiction } =
+      this.ctx.props;
     // Experimental: ctx.exports on WorkerEntrypoint.
     const exports = (
       this.ctx as unknown as {
@@ -66,17 +70,22 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
     ).exports;
     const [root] = agentPath ?? [];
     if (agentPath && root && agentPath.length > 1) {
-      const ns = exports[root.className];
-      const stub = ns.get(ns.idFromName(root.name)) as unknown as {
+      // As `parentAgent()` reaches a facet parent: the root by name, in
+      // its jurisdiction, then down the path.
+      const rootStub = getAgentByName(
+        exports[root.className] as unknown as DurableObjectNamespace<Agent>,
+        root.name,
+        rootJurisdiction ? { jurisdiction: rootJurisdiction } : undefined
+      ) as unknown as Promise<{
         _cf_invokeSubAgentPath(
           path: readonly { className: string; name: string }[],
           method: string,
           args: unknown[]
         ): Promise<unknown>;
-      };
+      }>;
       return {
-        _cfHostBridge: (operation, args) =>
-          stub._cf_invokeSubAgentPath(agentPath, "_cfHostBridge", [
+        _cfHostBridge: async (operation, args) =>
+          (await rootStub)._cf_invokeSubAgentPath(agentPath, "_cfHostBridge", [
             operation,
             args
           ]) as never
