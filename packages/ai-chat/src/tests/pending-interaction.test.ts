@@ -119,7 +119,6 @@ describe("AIChatAgent pending interaction helpers", () => {
   it("resolves after a tool result is applied via WebSocket", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -167,7 +166,6 @@ describe("AIChatAgent pending interaction helpers", () => {
   it("waits for an auto-continued turn to finish before resolving", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -233,7 +231,6 @@ describe("AIChatAgent pending interaction helpers", () => {
   it("resolves after a tool approval is applied via WebSocket", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -265,7 +262,6 @@ describe("AIChatAgent pending interaction helpers", () => {
   it("returns false when an active turn does not finish before timeout", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -291,7 +287,6 @@ describe("AIChatAgent pending interaction helpers", () => {
   it("resetTurnState aborts the active turn and skips queued continuations", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 

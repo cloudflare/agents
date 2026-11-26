@@ -59,7 +59,6 @@ describe("Regenerate message (reconcile stale rows)", () => {
   it("deletes the stale assistant message when client sends truncated array", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const userMsg: ChatMessage = {
       id: "user-1",
@@ -104,7 +103,6 @@ describe("Regenerate message (reconcile stale rows)", () => {
   it("does not delete messages when using CF_AGENT_CHAT_MESSAGES (no reconcile)", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -150,7 +148,6 @@ describe("Regenerate message (reconcile stale rows)", () => {
   it("reconcile deletes stale rows when subset is persisted", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -191,7 +188,6 @@ describe("Regenerate message (reconcile stale rows)", () => {
   it("reconcile preserves server messages when incoming set contains new IDs", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -231,7 +227,6 @@ describe("Regenerate message (reconcile stale rows)", () => {
   it("reconcile is a no-op when incoming set matches DB", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 

@@ -41,7 +41,6 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
   it("queues saveMessages behind an active websocket turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -158,7 +157,6 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     const { ws: observerWs } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -205,7 +203,6 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     const { ws: observerWs } = await connectSlowStream(room);
-    await delay(50);
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
     const running = agentStub.enqueueSyntheticUserMessage("Cut off", {

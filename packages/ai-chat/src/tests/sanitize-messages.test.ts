@@ -8,7 +8,6 @@ describe("Message Sanitization", () => {
   it("strips OpenAI itemId from persisted messages", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -58,7 +57,6 @@ describe("Message Sanitization", () => {
   it("strips reasoningEncryptedContent from persisted messages", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -97,7 +95,6 @@ describe("Message Sanitization", () => {
   it("removes empty reasoning parts from persisted messages", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -136,7 +133,6 @@ describe("Message Sanitization", () => {
   it("preserves Anthropic redacted_thinking blocks with empty text", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -200,7 +196,6 @@ describe("Message Sanitization", () => {
   it("removes empty OpenAI reasoning placeholders after stripping metadata", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -246,7 +241,6 @@ describe("Message Sanitization", () => {
   it("strips callProviderMetadata from tool parts", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -287,7 +281,6 @@ describe("Message Sanitization", () => {
   it("preserves messages without OpenAI metadata unchanged", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -326,7 +319,6 @@ describe("Message Sanitization", () => {
   it("truncates large strings in provider-executed tool input and output", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -394,7 +386,6 @@ describe("Message Sanitization", () => {
   it("truncation is idempotent — re-persisting does not change the message", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -430,7 +421,6 @@ describe("Message Sanitization", () => {
   it("does not truncate tool payloads when providerExecuted is absent", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -463,7 +453,6 @@ describe("Message Sanitization", () => {
   it("preserves Anthropic web_search encryptedContent for multi-turn replay", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -517,7 +506,6 @@ describe("Message Sanitization", () => {
   it("preserves opaque encrypted fields while truncating other provider payload strings", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -563,7 +551,6 @@ describe("Message Sanitization", () => {
   it("preserves web_fetch payloads and nested encryptedIndex fields", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -641,7 +628,6 @@ describe("Message Sanitization", () => {
   it("calls user-overridable sanitizeMessageForPersistence hook", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/custom-sanitize-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.CustomSanitizeAgent, room);
 
@@ -683,7 +669,6 @@ describe("Message Sanitization", () => {
   it("user hook runs after built-in sanitization", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/custom-sanitize-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.CustomSanitizeAgent, room);
 

@@ -70,7 +70,6 @@ describe("WebSocketChatTransport abort", () => {
   it("terminates the stream when abortSignal fires mid-stream", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     try {
       const transport = new WebSocketChatTransport<ChatMessage>({
@@ -104,7 +103,6 @@ describe("WebSocketChatTransport abort", () => {
   it("terminates immediately when abortSignal is already aborted", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     try {
       const transport = new WebSocketChatTransport<ChatMessage>({
@@ -138,7 +136,6 @@ describe("WebSocketChatTransport abort", () => {
   it("stream.cancel() terminates the local stream", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     try {
       const transport = new WebSocketChatTransport<ChatMessage>({
@@ -171,7 +168,6 @@ describe("WebSocketChatTransport abort", () => {
   it("leaves the server stream resumable after default client abort", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     try {
       const activeRequestIds = new Set<string>();
@@ -224,7 +220,6 @@ describe("WebSocketChatTransport abort", () => {
   it("keeps requestId in activeRequestIds after abort when cancelOnClientAbort is true", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     try {
       const activeRequestIds = new Set<string>();
@@ -277,7 +272,6 @@ describe("WebSocketChatTransport abort", () => {
   it("completes normally when stream finishes without abort", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     try {
       const transport = new WebSocketChatTransport<ChatMessage>({

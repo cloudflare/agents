@@ -7,7 +7,6 @@ describe("AIChatAgent destroy()", () => {
   it("clears active stream state on destroy", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -30,7 +29,6 @@ describe("AIChatAgent destroy()", () => {
   it("flushes pending chunk buffer on destroy", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 

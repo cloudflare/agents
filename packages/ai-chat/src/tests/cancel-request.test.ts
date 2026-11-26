@@ -89,7 +89,6 @@ describe("Cancel request", () => {
   it("ends a cancelled request aborted when onChatMessage fails with the abort's reason", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
     const requestId = "req-cancel-before-response";
     const collecting = collectMessages(ws);
 
@@ -123,7 +122,6 @@ describe("Cancel request", () => {
     async (_when, body) => {
       const room = crypto.randomUUID();
       const { ws } = await connectSlowStream(room);
-      await new Promise((r) => setTimeout(r, 50));
       const requestId = "req-one-terminal";
       const terminals: unknown[] = [];
       ws.addEventListener("message", (e: MessageEvent) => {
@@ -152,7 +150,6 @@ describe("Cancel request", () => {
   it("cancel during plaintext streaming sends done and stops chunks", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const requestId = "req-cancel-plain";
 
@@ -198,7 +195,6 @@ describe("Cancel request", () => {
   it("cancel during SSE streaming sends done and stops chunks", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const requestId = "req-cancel-sse";
 
@@ -235,7 +231,6 @@ describe("Cancel request", () => {
   it("abort controller is cleaned up after cancel", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -265,7 +260,6 @@ describe("Cancel request", () => {
   it("cancel with abortSignal wired to stream stops faster", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const requestId = "req-cancel-with-signal";
     const collecting = collectMessages(ws);
@@ -300,7 +294,6 @@ describe("Cancel request", () => {
   it("completing a full stream without cancel produces no abort-related issues", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await new Promise((r) => setTimeout(r, 50));
 
     const requestId = "req-no-cancel";
     const collecting = collectMessages(ws);

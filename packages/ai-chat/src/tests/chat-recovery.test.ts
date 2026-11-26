@@ -379,7 +379,6 @@ describe("chatRecovery", () => {
       const { ws } = await connectChatWS(
         `/agents/recovery-throwing-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const stub = (await getAgentByName(
         env.RecoveryThrowingAgent,
@@ -436,7 +435,6 @@ describe("chatRecovery", () => {
       const { ws } = await connectChatWS(
         `/agents/recovery-throwing-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const stub = (await getAgentByName(
         env.RecoveryThrowingAgent,
@@ -1046,7 +1044,6 @@ describe("chatRecovery", () => {
       const { ws } = await connectChatWS(
         `/agents/recovery-slow-stream-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const collecting = collectMessages(ws);
 
@@ -1093,7 +1090,6 @@ describe("chatRecovery", () => {
       const { ws } = await connectChatWS(
         `/agents/recovery-slow-stream-agent/${room}`
       );
-      await new Promise((r) => setTimeout(r, 50));
 
       const collecting = collectMessages(ws);
 

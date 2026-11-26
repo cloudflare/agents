@@ -23,7 +23,6 @@ describe("AIChatAgent message lists inside a facet", () => {
     const path = `/agents/test-chat-agent/${crypto.randomUUID()}/sub/test-chat-agent/${crypto.randomUUID()}`;
     const { ws: ws1 } = await connectChatWS(path);
     const { ws: ws2 } = await connectChatWS(path);
-    await new Promise((r) => setTimeout(r, 50));
     try {
       const sender = framesOf(ws1);
       const other = framesOf(ws2);

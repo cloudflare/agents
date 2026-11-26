@@ -80,7 +80,6 @@ describe("Pre-stream resume window (#1784)", () => {
     const { ws: ws1 } = await connectChatWS(
       `/agents/slow-stream-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -130,7 +129,6 @@ describe("Pre-stream resume window (#1784)", () => {
     const { ws: ws1 } = await connectChatWS(
       `/agents/slow-stream-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -172,7 +170,6 @@ describe("Pre-stream resume window (#1784)", () => {
     const { ws: ws1 } = await connectChatWS(
       `/agents/latest-message-concurrency-agent/${room}`
     );
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(
       env.LatestMessageConcurrencyAgent,

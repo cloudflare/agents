@@ -16,7 +16,6 @@ describe("Reconcile identical-content assistant messages (#1008)", () => {
   it("maps two identical-content assistant messages to distinct server IDs", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -98,7 +97,6 @@ describe("Reconcile identical-content assistant messages (#1008)", () => {
   it("handles mixed exact-ID and content matches without cursor jumping", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -178,7 +176,6 @@ describe("Reconcile identical-content assistant messages (#1008)", () => {
   it("exact-ID match at wrong position does not steal another message's slot", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -257,7 +254,6 @@ describe("Reconcile identical-content assistant messages (#1008)", () => {
   it("three identical assistant messages all get unique server IDs", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    await new Promise((r) => setTimeout(r, 50));
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 

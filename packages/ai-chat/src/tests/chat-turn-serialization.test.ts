@@ -88,7 +88,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("queues a second websocket request behind the active turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
     const doneIds: string[] = [];
@@ -151,7 +150,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("queues saveMessages behind the active turn and waitForIdle covers both turns", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -196,7 +194,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("waitForIdle covers tool-result continuations queued during an active turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -251,7 +248,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("coalesces rapid auto-continued tool results into a single continuation turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -311,7 +307,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("processes rapid auto-continued tool results when no turn is active", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -372,7 +367,6 @@ describe("AIChatAgent chat turn serialization", () => {
   it("queues a follow-up continuation when a tool result arrives after coalesce but before stream start", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -442,7 +436,6 @@ describe("AIChatAgent chat turn serialization", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     const { ws: observerWs } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
@@ -503,7 +496,6 @@ describe("AIChatAgent chat turn serialization", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     const { ws: observerWs } = await connectSlowStream(room);
-    await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
