@@ -48,13 +48,9 @@ export class PreStreamTurns<
   /** Connections parked waiting for a stream to start. */
   readonly awaitingConnections = new Map<string, TConnection>();
 
-  /** The most recently accepted pre-stream request id (for the keep-waiting frame). */
-  private _latestRequestId: string | null = null;
-
   /** Mark a freshly-accepted turn as in flight (pre-stream). */
   begin(requestId: string): void {
     this._accepted.add(requestId);
-    this._latestRequestId = requestId;
   }
 
   /**
@@ -63,10 +59,16 @@ export class PreStreamTurns<
    * stream is active).
    */
   settle(requestId: string): boolean {
+    const wasFirst = this.firstRequestId === requestId;
     this._accepted.delete(requestId);
-    if (this._accepted.size === 0) {
-      this._latestRequestId = null;
-      return true;
+    if (this._accepted.size === 0) return true;
+    // The next in line is now the one a parked tab's Stop should cancel.
+    const next = this.firstRequestId;
+    if (wasFirst && next) {
+      const frame = JSON.stringify({ type: MSG_STREAM_PENDING, id: next });
+      for (const connection of this.awaitingConnections.values()) {
+        sendIfOpen(connection, frame);
+      }
     }
     return false;
   }
@@ -76,9 +78,14 @@ export class PreStreamTurns<
     return this._accepted.size > 0;
   }
 
-  /** The request id to advertise in the keep-waiting frame, if known. */
-  get latestRequestId(): string | null {
-    return this._latestRequestId;
+  /**
+   * The request id to advertise in the keep-waiting frame: the oldest
+   * accepted one, which the chat lane runs first. A tab's Stop cancels it,
+   * not a newer request queued behind it.
+   */
+  get firstRequestId(): string | null {
+    const [first] = this._accepted;
+    return first ?? null;
   }
 
   /**
@@ -95,7 +102,7 @@ export class PreStreamTurns<
       connection,
       JSON.stringify({
         type: MSG_STREAM_PENDING,
-        ...(this._latestRequestId ? { id: this._latestRequestId } : {}),
+        ...(this.firstRequestId ? { id: this.firstRequestId } : {}),
         ...(probeId ? { probeId } : {})
       })
     );
@@ -138,6 +145,5 @@ export class PreStreamTurns<
   reset(): void {
     this._accepted.clear();
     this.awaitingConnections.clear();
-    this._latestRequestId = null;
   }
 }

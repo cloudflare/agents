@@ -1,7 +1,12 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { MessageType, type OutgoingMessage } from "../types";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import {
+  connectChatWS,
+  isUseChatResponseMessage,
+  socketBarrier,
+  waitUntilHandled
+} from "./test-utils";
 import { getAgentByName } from "agents";
 
 function isStreamResumingMessage(
@@ -352,13 +357,18 @@ describe("Resumable Streaming", () => {
         '{"type":"text-delta","id":"0","delta":"A2"}'
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      // Every frame the broadcasts sent ws2 is in by the barrier's reply.
+      await socketBarrier(ws2, messages2);
 
       // ws2 should NOT receive live chunks before ACK
       const preAckChunks = messages2.filter(isUseChatResponseMessage);
       expect(preAckChunks.length).toBe(0);
 
       // ws1 should receive the live chunks
+      await waitFor(
+        () => messages1.filter(isUseChatResponseMessage).length >= 2,
+        5000
+      );
       const ws1Chunks = messages1.filter(isUseChatResponseMessage);
       expect(ws1Chunks.map((m) => m.body)).toEqual([
         '{"type":"text-delta","id":"0","delta":"A"}',
@@ -444,9 +454,15 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitUntilHandled(
+        agentStub,
+        MessageType.CF_AGENT_STREAM_RESUME_ACK,
+        1
+      );
 
       // Should NOT receive chunks (only state/mcp messages)
+      // Every frame the ACK could have caused is in by the barrier's reply.
+      await socketBarrier(ws2, messages2);
       const chunkMsgs = messages2.filter(isUseChatResponseMessage);
       expect(chunkMsgs.length).toBe(0);
 
@@ -799,7 +815,8 @@ describe("Resumable Streaming", () => {
       );
       const messages2 = collectMessages(ws2);
 
-      await new Promise((r) => setTimeout(r, 100));
+      // Every frame the connect sent is in by the barrier's reply.
+      await socketBarrier(ws2, messages2);
 
       // Should NOT get resume notification for completed stream
       const resumeMsg = messages2.find(isStreamResumingMessage);
@@ -1311,7 +1328,7 @@ describe("Resumable Streaming", () => {
 
       ws1.close();
 
-      // Simulate hibernation: reinitialize ResumableStream (isLive=false)
+      // Simulate hibernation: reopen the reply stream log (isLive=false)
       await agentStub.testSimulateHibernationWake();
 
       // Verify stream was restored from SQLite but is not live
@@ -1372,6 +1389,11 @@ describe("Resumable Streaming", () => {
       const textPart = assistantMsg!.parts.find((p) => p.type === "text");
       expect(textPart).toBeDefined();
       expect(textPart!.text).toContain("partial response");
+      // The end the replay told this tab is recorded, so a tab that comes
+      // back after the next turn's start deleted the rows still learns it.
+      expect(
+        await agentStub.recentTerminalForTest("req-orphaned")
+      ).toMatchObject({ requestId: "req-orphaned", outcome: "aborted" });
 
       ws2.close(1000);
     });
@@ -1561,7 +1583,7 @@ describe("Resumable Streaming", () => {
 
       ws1.close();
 
-      // Simulate hibernation — _resumableStream restores from SQLite,
+      // Simulate hibernation — _replyStreams restores from SQLite,
       // but _isLive is false (no live LLM reader).
       await agentStub.testSimulateHibernationWake();
 

@@ -788,6 +788,34 @@ describe("sendEmail", () => {
 });
 
 describe("replyToEmail", () => {
+  it("answers a reply without adding a second Re:", async () => {
+    const stub = await getAgentByName(env.EmailAgent, "reply-re-probe");
+    const sent = await runInDurableObject(stub, async (agent) => {
+      const replies: { raw: string }[] = [];
+      await agent.replyToEmail(
+        {
+          from: "user@example.com",
+          to: "agent@example.com",
+          headers: new Headers({
+            subject: "Re: Hello",
+            "Message-ID": "<second@example.com>"
+          }),
+          rawSize: 0,
+          getRaw: async () => new Uint8Array(),
+          setReject: () => {},
+          forward: async () => ({ messageId: "forward" }),
+          reply: async (message) => {
+            replies.push(message);
+            return { messageId: "reply" };
+          }
+        },
+        { fromName: "Probe", body: "pong", secret: null }
+      );
+      return replies;
+    });
+    expect(sent[0].raw).toContain(`Subject: =?utf-8?B?${btoa("Re: Hello")}?=`);
+  });
+
   it("sends a signed MIME reply with the agent's routing headers", async () => {
     const stub = await getAgentByName(env.EmailAgent, "reply-probe");
     const sent = await runInDurableObject(stub, async (agent) => {

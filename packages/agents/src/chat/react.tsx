@@ -1097,6 +1097,9 @@ export function useAgentChat<
   // when _pk changes (async queries, socket recreation) or React Strict
   // Mode double-mounts.  The agent reference is updated every render so
   // sends always go through the latest socket.
+  const [pendingServerTurnId, setPendingServerTurnId] = useState<string | null>(
+    null
+  );
   const customTransportRef = useRef<WebSocketChatTransport<ChatMessage> | null>(
     null
   );
@@ -1106,6 +1109,7 @@ export function useAgentChat<
       agent: agentRef.current,
       activeRequestIds: localRequestIdsRef.current,
       cancelOnClientAbort,
+      onPendingServerTurnChange: setPendingServerTurnId,
       onRequestBuffered: (messageId) => {
         if (messageId) {
           pendingBufferedSendIdsRef.current.add(messageId);
@@ -2337,7 +2341,7 @@ export function useAgentChat<
           // resolve "no stream" mid pre-stream window. A later STREAM_RESUMING
           // (stream started) or STREAM_RESUME_NONE (settled without streaming)
           // resolves it. Advisory for clients not awaiting a resume.
-          customTransport.handleStreamPending();
+          customTransport.handleStreamPending(data);
           break;
 
         case MessageType.CF_AGENT_STREAM_RESUMING: {
@@ -3118,7 +3122,9 @@ export function useAgentChat<
   })();
 
   const effectiveIsServerStreaming =
-    isServerStreaming || hasPendingClientToolCalls;
+    isServerStreaming ||
+    pendingServerTurnId !== null ||
+    hasPendingClientToolCalls;
   const isStreaming = status === "streaming" || effectiveIsServerStreaming;
 
   return {

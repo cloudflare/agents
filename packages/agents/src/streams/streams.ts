@@ -89,7 +89,7 @@ export interface StreamsOptions {
 /**
  * @internal Synchronous operations returned by
  * {@link Streams.__DO_NOT_USE_WILL_BREAK__sync}. For same-isolate first-party
- * machinery only (the chat `ResumableStream` adapter); every method bypasses
+ * machinery only (the chat `ReplyStreams` adapter); every method bypasses
  * `lifecycle.ready()`, so the caller owns startup ordering.
  */
 export interface StreamsSyncInternal {
@@ -255,7 +255,7 @@ export class Streams extends LifecycleCapability {
     readonly blocks: SqlName;
     readonly counters: SqlName;
   };
-  /** This instance's schema version key. */
+  /** The key this instance's schema version had before the one record. */
   readonly #schemaVersionKey: string;
   /** The one-block INSERT, built once from this instance's table. */
   readonly #insertBlock: string;
@@ -338,18 +338,23 @@ export class Streams extends LifecycleCapability {
 
   /** Migrate stream storage during Lifecycle startup. */
   async onStart(): Promise<void> {
-    // Streams keeps its own version key, not the Lifecycle's one record:
-    // ThinkHarness binds a Streams to its own services, and a record entry
-    // would land under the harness's id and take its schema version.
-    const storage = this.lifecycle.storage;
-    const version = (await storage.get<number>(this.#schemaVersionKey)) ?? 0;
-    if (version < CURRENT_STREAM_SCHEMA_VERSION) {
-      this.#ensureTables();
-      await storage.put(this.#schemaVersionKey, CURRENT_STREAM_SCHEMA_VERSION);
-    }
+    // Probed at most once per start: for the key, then for the fold.
+    let legacyTable: boolean | undefined;
+    const hasLegacyTable = () =>
+      (legacyTable ??=
+        this.instanceName === undefined && this.#hasLegacyChunkTable());
+    const version = this.lifecycle.schema.migrateSync({
+      version: CURRENT_STREAM_SCHEMA_VERSION,
+      legacyKey: this.#schemaVersionKey,
+      // A released version reads v1 chunks only while this key says v1 or
+      // later: it stays until the chunk table is gone, so a rollback still
+      // reads them.
+      keepLegacyKey: hasLegacyTable,
+      steps: { [CURRENT_STREAM_SCHEMA_VERSION]: () => this.#ensureTables() }
+    });
     // Schema v1's chunk table only ever belonged to the default instance.
     if (version >= 1 && this.instanceName === undefined) {
-      this.#legacyChunkTable = this.#hasLegacyChunkTable();
+      this.#legacyChunkTable = hasLegacyTable();
     }
   }
 
@@ -571,7 +576,7 @@ export class Streams extends LifecycleCapability {
 
   /**
    * @internal Synchronous storage operations for same-isolate first-party
-   * machinery — today the chat `ResumableStream` adapter, whose whole public
+   * machinery — today the chat `ReplyStreams` adapter, whose whole public
    * surface is synchronous and constructed before the Lifecycle starts.
    * Bypasses `lifecycle.ready()`: the caller owns startup ordering. The
    * invariant-bearing writes (append fence, settlement, wakeups, events) go
@@ -591,16 +596,22 @@ export class Streams extends LifecycleCapability {
     return {
       ensureTables: () => this.#ensureTables(),
       counter: (name) => {
+        if (this.#countersTable === false) return 0;
         try {
           const rows = this.lifecycle.storage.sql
             .exec<{
               value: number;
             }>(`SELECT value FROM ${this.#tables.counters} WHERE key = ?`, name)
             .toArray();
+          this.#countersTable = true;
           return rows[0]?.value ?? 0;
         } catch (cause) {
-          if (!hasTable(this.lifecycle.storage.sql, this.#tables.counters.name))
+          if (
+            !hasTable(this.lifecycle.storage.sql, this.#tables.counters.name)
+          ) {
+            this.#countersTable = false;
             return 0;
+          }
           throw cause;
         }
       },
@@ -1544,6 +1555,8 @@ export class Streams extends LifecycleCapability {
     if (remaining > 0) return;
     this.#sqlWrite("DROP TABLE cf_agents_stream_chunks", []);
     this.#legacyChunkTable = false;
+    // Nothing a released version reads is left: its version key goes too.
+    this.lifecycle.storage.kv.delete(this.#schemaVersionKey);
   }
 
   #rowToStatus(row: StreamRow): StreamStatus {
@@ -1576,11 +1589,19 @@ export class Streams extends LifecycleCapability {
     };
   }
 
+  /**
+   * Whether this instance's counters table exists, once a read or write
+   * found out: a read of a missing table then costs nothing, not a failed
+   * query and a probe each time. Only {@link #writeCounter} creates it.
+   */
+  #countersTable: boolean | undefined;
+
   /** Run a counter write, making the counters table on the first one. */
   #writeCounter(query: string, name: string, value: number): void {
     const sql = this.lifecycle.storage.sql;
     try {
       sql.exec(query, name, value);
+      this.#countersTable = true;
       return;
     } catch (cause) {
       if (hasTable(sql, this.#tables.counters.name)) {
@@ -1592,6 +1613,7 @@ export class Streams extends LifecycleCapability {
       value INTEGER NOT NULL
     ) WITHOUT ROWID`);
     sql.exec(query, name, value);
+    this.#countersTable = true;
   }
 
   #ensureTables(): void {

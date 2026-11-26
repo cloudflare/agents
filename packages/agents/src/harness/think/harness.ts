@@ -1,4 +1,5 @@
 import {
+  asSchema,
   convertToModelMessages,
   stepCountIs,
   streamText,
@@ -14,6 +15,7 @@ import {
   bindLifecycleCapability,
   LifecycleCapability
 } from "../../lifecycle/capability";
+import { capabilitySchema } from "../../lifecycle/schema";
 import { REPLAY_ITEM_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
@@ -54,7 +56,11 @@ import type {
 } from "../../experimental/channels/harness";
 import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
-import { CONTEXT_RECORD_KIND, type Context } from "../../context/context";
+import {
+  CONTEXT_RECORD_KIND,
+  type Context,
+  type PreparedTurn
+} from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
@@ -68,6 +74,7 @@ import {
   SessionEvents,
   Watcher,
   type ThinkHarnessListener,
+  type PrefixChangeCause,
   type ThinkSessionEvent,
   type ThinkSessionListener
 } from "./events";
@@ -102,6 +109,7 @@ import type {
   ThinkHarnessOptions,
   ThinkInFlight,
   ThinkInput,
+  ThinkOperationInspection,
   ThinkOperationStatus,
   ThinkStreamCallback,
   ThinkOperationResult,
@@ -140,6 +148,13 @@ export const ROOT_SESSION: ThinkSessionId = "";
 /** The Tasks definition every operation is a run of. */
 const OPERATION_DEFINITION = "__cf_think_harness_operation";
 /**
+ * An operation submitted as a submission (internal `submission` option):
+ * the same handler and lane, a definition of its own so submissions can be
+ * listed and deleted apart from other operations, and kept across a reset.
+ */
+const SUBMISSION_DEFINITION = "__cf_think_harness_submission";
+const DEFINITIONS = [OPERATION_DEFINITION, SUBMISSION_DEFINITION] as const;
+/**
  * The session value (Sessions config) that records a session the harness
  * knows of: `{ parent?, createdAt }`. Not a `transcript:` key, so a reset
  * keeps it.
@@ -176,6 +191,14 @@ const INTERRUPTED_TOOL_ERROR =
   "The tool call was interrupted before it finished, because the agent restarted. It may or may not have taken effect.";
 
 /** The operation a session is running in this isolate. */
+/** A session's tools, its client's included, and its options' prompt. */
+type SessionBuild = {
+  readonly tools: ToolSet;
+  readonly system: string | undefined;
+  readonly remind: readonly RemindSection[];
+  readonly allSections: string | undefined;
+};
+
 type LiveRun = {
   readonly operationId: string;
   /** Chunks of the model call in progress. */
@@ -184,6 +207,11 @@ type LiveRun = {
   continues: boolean;
   /** The tools this run resolved, which decide which calls are a client's. */
   tools?: ToolSet;
+  /**
+   * The build an answer placed in this attempt made, which the attempt's
+   * model loop uses rather than building again.
+   */
+  built?: SessionBuild;
   /**
    * The run was cancelled and its terminal report finished it from
    * `partial`: the attempt, still unwinding, writes nothing more.
@@ -273,6 +301,16 @@ function runIdOf(session: ThinkSessionId, operationId: string): string {
 }
 
 /** The session and operation id a run id names. */
+/** A session's idempotency key as Tasks stores it: `[session, key]`. */
+function keyOf(session: ThinkSessionId, key: string): string {
+  return JSON.stringify([session, key]);
+}
+/** The caller's key from a stored one. */
+function callerKeyOf(stored: string): string {
+  // SAFETY: written only by keyOf, as a [session, key] pair.
+  return (JSON.parse(stored) as [string, string])[1];
+}
+
 function operationOf(runId: string): [ThinkSessionId, string] {
   // SAFETY: every run of the operation definition is named by runIdOf.
   return JSON.parse(runId) as [ThinkSessionId, string];
@@ -506,6 +544,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly sessions: ThinkSessions;
   readonly #options: ThinkHarnessOptions<TOOLS>;
   readonly #events = new SessionEvents();
+  /**
+   * Per session, how history was rewritten since its last model call, for
+   * that call's `prefix-changed` event. The next call removes the entry;
+   * each holds at most three operations.
+   */
+  readonly #rewrites = new Map<
+    ThinkSessionId,
+    Set<"compaction" | "edit" | "delete">
+  >();
   readonly #live = new Map<ThinkSessionId, LiveRun>();
   readonly #configured = new Set<ThinkSessionId>();
   /** Each session's context, from the `context` option, built on first use. */
@@ -588,18 +635,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     this.#streams = this.compose(
       new Streams({ name: this.composedName, maxChunkBytes: REPLAY_ITEM_BYTES })
     );
-    this.#tasks.register(
-      OPERATION_DEFINITION,
-      // SAFETY: every run of this definition was accepted by `enqueue` or
-      // carried forward by `onStart`, both with an OperationRunInput.
-      (input, run) => this.#operate(input as OperationRunInput, run),
-      {
-        onStatus: (record) => this.#onStatus(record),
-        // The terminal report of a run that ended outside its handler (an
-        // abort, the memory-limit breaker) finishes it from its progress.
-        keepCheckpoint: true
-      }
-    );
+    for (const definition of DEFINITIONS) {
+      this.#tasks.register(
+        definition,
+        // SAFETY: every run of these definitions was accepted by `enqueue`
+        // or carried forward by `onStart`, both with an OperationRunInput.
+        (input, run) => this.#operate(input as OperationRunInput, run),
+        {
+          onStatus: (record) => this.#onStatus(record),
+          // The terminal report of a run that ended outside its handler (an
+          // abort, the memory-limit breaker) finishes it from its progress.
+          keepCheckpoint: true
+        }
+      );
+    }
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -770,7 +819,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const whenBusy: unknown = options.whenBusy;
     if (whenBusy === "steer") throw new SteerNotSupportedError(session);
     await this.lifecycle.ready();
+    // A key names an operation in its own session only.
+    // An empty key is no key, as on Think.
+    const key = options.idempotencyKey
+      ? keyOf(session, options.idempotencyKey)
+      : undefined;
+    const byKey =
+      key === undefined ? undefined : this.#tasks.peekByIdempotencyKey(key);
     const operationId = options.operationId ?? crypto.randomUUID();
+    const runId = runIdOf(session, operationId);
+    const byId = this.#tasks.peek(runId);
+    if (
+      (byKey && byKey.runId !== runId) ||
+      (key !== undefined &&
+        byId?.idempotencyKey !== undefined &&
+        byId.idempotencyKey !== key)
+    ) {
+      throw new Error(
+        "operationId and idempotencyKey refer to different operations"
+      );
+    }
     await this.#ensureSession(session);
     if (options.clientTools !== undefined) {
       await this.#handle(session).internal_setConfig(
@@ -783,13 +851,95 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       source: options.source ?? "server"
     };
     const receipt = await this.#tasks.run(
-      OPERATION_DEFINITION,
+      options.submission ? SUBMISSION_DEFINITION : OPERATION_DEFINITION,
       // SAFETY: an OperationRunInput is plain JSON: UI messages and tool
       // answers as clients send them.
       stored as unknown as TaskJson,
-      { runId: runIdOf(session, operationId), lane: laneOf(session) }
+      {
+        runId,
+        lane: laneOf(session),
+        // An existing run is found by its id; a key it was not given
+        // would not match its row.
+        ...(key !== undefined && !byId && { idempotencyKey: key }),
+        ...(options.metadata !== undefined && { metadata: options.metadata })
+      }
     );
-    return { operationId, session, accepted: receipt.accepted };
+    // Two first submissions of one key can race past the checks above;
+    // Tasks dedupes them, and its receipt names the operation that won.
+    return {
+      operationId: operationOf(receipt.runId)[1],
+      session,
+      accepted: receipt.accepted
+    };
+  }
+
+  /** @internal The operation an idempotency key started in a session. */
+  async keyedOperation(
+    session: ThinkSessionId,
+    idempotencyKey: string
+  ): Promise<string | undefined> {
+    await this.lifecycle.ready();
+    const record = this.#tasks.peekByIdempotencyKey(
+      keyOf(session, idempotencyKey)
+    );
+    return record && operationOf(record.runId)[1];
+  }
+
+  /**
+   * @internal A session's submissions (operations submitted with the
+   * internal `submission` option), newest first unless asked: at most
+   * `limit`, each read with its result, as `inspect` reads one.
+   */
+  async submissions(
+    session: ThinkSessionId,
+    options: {
+      status?: readonly TaskStatus[];
+      order?: "oldest" | "newest";
+      /**
+       * Only submissions after this one in `order`: a page's last, as the
+       * page returned it, so it holds even after that one is deleted.
+       */
+      after?: { readonly operationId: string; readonly createdAt: number };
+      limit: number;
+    }
+  ): Promise<ThinkOperationInspection[]> {
+    await this.lifecycle.ready();
+    const after = options.after;
+    return this.#tasks
+      .peekList({
+        definition: SUBMISSION_DEFINITION,
+        lane: laneOf(session),
+        ...(options.status && { status: options.status }),
+        order: options.order ?? "newest",
+        ...(after && {
+          after: {
+            createdAt: after.createdAt,
+            runId: runIdOf(session, after.operationId)
+          }
+        }),
+        limit: options.limit
+      })
+      .map((record) => this.#inspection(record));
+  }
+
+  /**
+   * @internal Delete one settled submission. False when there is none by
+   * that id, or it is still open.
+   */
+  async deleteSubmission(
+    session: ThinkSessionId,
+    operationId: string
+  ): Promise<boolean> {
+    await this.lifecycle.ready();
+    const record = this.#tasks.peek(runIdOf(session, operationId));
+    if (
+      !record ||
+      record.definition !== SUBMISSION_DEFINITION ||
+      !TERMINAL.includes(record.status)
+    ) {
+      return false;
+    }
+    return this.#tasks.deleteRun(record.runId);
   }
 
   /** @internal Stop one operation, or everything open in a session. */
@@ -844,12 +994,45 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   ): Promise<ThinkOperationStatus | undefined> {
     await this.lifecycle.ready();
     const record = this.#tasks.peek(runIdOf(session, operationId));
-    if (!record) return undefined;
-    if (TERMINAL.includes(record.status)) return this.#result(record);
+    return record && this.#status(record);
+  }
+
+  /**
+   * @internal An operation's status with its run's times, key and
+   * metadata, for the harness-backed Think's submissions.
+   */
+  async inspection(
+    session: ThinkSessionId,
+    operationId: string
+  ): Promise<ThinkOperationInspection | undefined> {
+    await this.lifecycle.ready();
+    const record = this.#tasks.peek(runIdOf(session, operationId));
+    return record && this.#inspection(record);
+  }
+
+  /** A run's status. */
+  #status(record: TaskRecord): ThinkOperationStatus {
+    const [session, operationId] = operationOf(record.runId);
+    return TERMINAL.includes(record.status)
+      ? this.#result(record)
+      : {
+          operationId,
+          session,
+          status: isQueued(record) ? "queued" : "running"
+        };
+  }
+
+  /** A run's status, with its times, key and metadata. */
+  #inspection(record: TaskRecord): ThinkOperationInspection {
     return {
-      operationId,
-      session,
-      status: isQueued(record) ? "queued" : "running"
+      ...this.#status(record),
+      createdAt: record.createdAt,
+      ...(record.startedAt !== undefined && { startedAt: record.startedAt }),
+      ...(record.settledAt !== undefined && { settledAt: record.settledAt }),
+      ...(record.idempotencyKey !== undefined && {
+        idempotencyKey: callerKeyOf(record.idempotencyKey)
+      }),
+      ...(record.metadata !== undefined && { metadata: record.metadata })
     };
   }
 
@@ -1175,16 +1358,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     first: Turn,
     live: LiveRun
   ): Promise<OperationOutcome> {
-    const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
     let turn = first;
     // One build per attempt: every model call and tool call of it sees the
     // same tools and prompt. A change to them applies from the next turn.
-    const built = await this.#build(first.session);
+    const built = live.built ?? (await this.#build(first.session));
     const tools = built.tools;
     live.tools = tools;
     for (;;) {
       if (run.signal.aborted) throw run.signal.reason;
       const message = await this.#message(turn);
+      // Read at every step, so a host that sets it from a turn's own
+      // configuration (a `beforeTurn` before the first model call) holds.
+      const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
       const action = nextAction(
         {
           streamId: turn.streamId ?? undefined,
@@ -1192,9 +1377,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           steps: turn.steps
         },
         message,
-        // A call to a tool this build does not have is the harness's to
-        // answer: a client would never run it.
-        (name) => isServerTool(tools, name) || !Object.hasOwn(tools, name),
+        (name, part) => answersHere(tools, name, part),
         maxSteps
       );
       let next: Turn | OperationOutcome;
@@ -1286,11 +1469,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       case "answer": {
         const history = asUIMessages(await handle.getHistory());
-        const { tools } = await this.#build(session);
+        const built = await this.#build(session);
+        const { tools } = built;
         // The answered message is published before the model loop runs, if
-        // it runs at all: watches read its client tools from these.
+        // it runs at all: watches read its client tools from these. The
+        // loop uses this build too.
+        // Only this operation's own run: one cancelled while it built must
+        // not hand its build to the next turn.
         const live = this.#live.get(session);
-        if (live) live.tools = tools;
+        if (live?.operationId === operationId) {
+          live.tools = tools;
+          live.built = built;
+        }
         const answer = input.answer;
         if (answer.type === "tool-result" && source === "client") {
           // A client answers only its own tools. A server tool's result
@@ -1331,9 +1521,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           nextAction(
             { streamId: undefined, pendingModel: true, steps: 0 },
             answered,
-            // As in the step loop: a call to a tool this build does not
-            // have is the harness's to answer.
-            (name) => isServerTool(tools, name) || !Object.hasOwn(tools, name),
+            (name, part) => answersHere(tools, name, part),
             Number.POSITIVE_INFINITY
           )._tag !== "await-input";
         await this.#commit(run, session, undefined, (put) => {
@@ -1431,16 +1619,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // from an answered message) rides on this request alone.
     const context = this.#context(session);
     let contextSystem = "";
+    let recordSent: PreparedTurn["recordSent"] | undefined;
+    let blockReminder: string | null = null;
     let request = history;
     let optionsSystem = prompt.system;
     if (context) {
       await this.#remindBlocks(context, prompt.remind);
-      const prepared = await context.prepare({
+      const prepared = await context.prepareTurn({
         messages: history,
         // A call after an interruption is sent as the first attempt was.
         retry: start.interruptions > 0
       });
       contextSystem = prepared.system;
+      recordSent = prepared.recordSent;
+      blockReminder = prepared.reminder;
       request = withReminder(
         asUIMessages(await context.project(history)),
         prepared.reminder
@@ -1468,6 +1660,38 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (model === undefined) throw new Error("ThinkHarness has no model");
     const offered = modelTools(tools, config.activeTools);
     const effectiveSystem = config.system ?? system;
+    const causes: PrefixChangeCause[] = [];
+    if (context && recordSent) {
+      // What this request sends, now that `beforeTurn` chose it: a change
+      // in the tools from the last turn's reaches the model once, as a
+      // notice after the user message. The blocks were prepared above.
+      const tooled = await recordSent(
+        await toolFingerprint(tools, Object.keys(offered)),
+        await textHash(effectiveSystem ?? "")
+      );
+      if (tooled.changed) {
+        request = withReminder(
+          asUIMessages(await context.project(history)),
+          [blockReminder, tooled.reminder].filter(Boolean).join("\n\n") || null
+        );
+        causes.push({ kind: "tools", ...tooled.changed });
+      }
+      if (tooled.system) causes.push({ kind: "system" });
+    }
+    const rewrites = this.#rewrites.get(session);
+    if (rewrites) {
+      this.#rewrites.delete(session);
+      for (const operation of rewrites) {
+        causes.push({ kind: "messages", operation });
+      }
+    }
+    if (causes.length > 0) {
+      this.#events.emit(session, {
+        type: "prefix-changed",
+        operationId,
+        causes
+      });
+    }
     const messages: ModelMessage[] =
       config.messages ??
       (await convertToModelMessages(request, {
@@ -1475,10 +1699,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         ignoreIncompleteToolCalls: true
       }));
 
+    // A message a hook appended after the turn's parent, before the reply
+    // began (an extension's `sendMessage`), comes before the reply.
+    const replyParentId =
+      existing || parentId === undefined
+        ? parentId
+        : ((await appendedAfter(handle, parentId)) ?? parentId);
+
     // The stream id is durable before the stream exists, so an eviction at
     // any point leaves evidence the next attempt recovers from.
     const streamId = `think:${crypto.randomUUID()}`;
-    const turn = this.#write(run, start, { streamId, messageId });
+    const turn = this.#write(run, start, {
+      streamId,
+      messageId,
+      ...(replyParentId !== parentId && { parentId: replyParentId ?? null })
+    });
     const writer = await this.#streams.open(streamId, {
       tag: streamTag(session, operationId),
       metadata: { session, operationId, messageId }
@@ -1614,7 +1849,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       ) {
         let next = turn;
         await this.#commit(run, session, streamId, (put) => {
-          if (keep) put(keep, { parentId });
+          if (keep) put(keep, { parentId: replyParentId });
           next = this.#write(run, turn, {
             streamId: null,
             overflowRetries: turn.overflowRetries + 1
@@ -1632,7 +1867,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       const reason = errorText(failure);
       await this.#commit(run, session, streamId, (put) => {
-        if (keep) put(keep, { parentId });
+        if (keep) put(keep, { parentId: replyParentId });
         this.#write(run, turn, { streamId: null, ended: { reason } });
       });
       return {
@@ -1648,7 +1883,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     );
     let next = turn;
     await this.#commit(run, session, streamId, (put) => {
-      put(message, { parentId });
+      put(message, { parentId: replyParentId });
       next = this.#write(run, turn, {
         streamId: null,
         steps: turn.steps + 1,
@@ -2120,14 +2355,32 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * the list has no cap of its own.
    */
   #open(session?: ThinkSessionId): TaskRecord[] {
-    return this.#tasks.peekList({
-      definition: OPERATION_DEFINITION,
-      ...(session !== undefined && { lane: laneOf(session) }),
-      status: ["pending", "running"],
-      results: false,
-      order: "oldest",
-      limit: Number.MAX_SAFE_INTEGER
-    });
+    const [operations, submissions] = DEFINITIONS.map((definition) =>
+      this.#tasks.peekList({
+        definition,
+        ...(session !== undefined && { lane: laneOf(session) }),
+        status: ["pending", "running"],
+        results: false,
+        order: "oldest",
+        limit: Number.MAX_SAFE_INTEGER
+      })
+    );
+    if (submissions.length === 0) return operations;
+    if (operations.length === 0) return submissions;
+    // Both lists are oldest first: merge them by acceptance time.
+    const merged: TaskRecord[] = [];
+    let i = 0;
+    let j = 0;
+    while (i < operations.length || j < submissions.length) {
+      const next =
+        j >= submissions.length ||
+        (i < operations.length &&
+          operations[i].createdAt <= submissions[j].createdAt)
+          ? operations[i++]
+          : submissions[j++];
+      merged.push(next);
+    }
+    return merged;
   }
 
   /** A placed operation's progress, read from outside its attempt. */
@@ -2154,7 +2407,22 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   #bindOwned(): void {
     if (this.#bound) return;
-    bindLifecycleCapability(this.#sessions, this.lifecycle);
+    // The harness's services, but Sessions' own schema handle: its version
+    // is Sessions' (`sessions`), not the harness's carry-forward step.
+    // A Proxy, not a spread: a spread calls every getter now, and `name`
+    // throws on an object addressed without a name until startup has loaded
+    // the stored one. Everything but `schema` is read when used.
+    const services = this.lifecycle;
+    const schema = capabilitySchema(services, this.#sessions.capabilityId);
+    bindLifecycleCapability(
+      this.#sessions,
+      // An empty target: the services are frozen, and a Proxy of a frozen
+      // object must return its own `schema`.
+      new Proxy({} as typeof services, {
+        get: (_target, key) =>
+          key === "schema" ? schema : Reflect.get(services, key)
+      })
+    );
     this.#bound = true;
     // Writes made on a session's Sessions handle (from `configureSession`)
     // go around the harness; pass them on as events, so listeners and chat
@@ -2166,6 +2434,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         case "update":
         case "import":
           if (this.#takeOwn(session, change.message.id)) return;
+          // A message changed outside a turn: what earlier requests sent.
+          if (change.type === "update") this.#rewrote(session, "edit");
           this.#events.emit(session, {
             type: "message",
             message: asUIMessage(change.message)
@@ -2186,14 +2456,28 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             .catch((error: unknown) =>
               console.warn("ThinkHarness could not refresh the context", error)
             );
+          this.#rewrote(session, "compaction");
           this.#events.emit(session, { type: "transcript" });
           return;
         case "delete":
+          this.#rewrote(session, "delete");
           // No one message describes these: the active path changed.
           this.#events.emit(session, { type: "transcript" });
           return;
       }
     });
+  }
+
+  #rewrote(
+    session: ThinkSessionId,
+    operation: "compaction" | "edit" | "delete"
+  ): void {
+    let rewrites = this.#rewrites.get(session);
+    if (!rewrites) {
+      rewrites = new Set();
+      this.#rewrites.set(session, rewrites);
+    }
+    rewrites.add(operation);
   }
 
   /** Note messages the harness is about to write; returns the release. */
@@ -2332,12 +2616,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /** A session's tools, its client's included, and its options' prompt. */
-  async #build(session: ThinkSessionId): Promise<{
-    tools: ToolSet;
-    system: string | undefined;
-    remind: readonly RemindSection[];
-    allSections: string | undefined;
-  }> {
+  async #build(session: ThinkSessionId): Promise<SessionBuild> {
     const { tools, system, remind, allSections } =
       await this.#extensions.build(session);
     const declared =
@@ -2587,6 +2866,94 @@ const CONTEXT_OVERFLOW_PATTERN =
   /prompt is too long|context[_ ]length[_ ]exceeded|maximum context length|exceeds the maximum number of tokens|input token count|reduce the length of|input is too long|too many (?:input )?tokens|context window/i;
 
 /** A tool's own recovery field, or the default. */
+/**
+ * Whether the harness answers this call: a server tool's, or a call still
+ * waiting to run whose tool this build does not have (removed while the
+ * call was cut off), which is answered as no longer available. An approved
+ * call to a tool the build does not have waits, as in Think: it may be a
+ * client's tool the client did not declare again with the answer.
+ */
+function answersHere(
+  tools: ToolSet,
+  name: string,
+  part: ToolCallPart
+): boolean {
+  return (
+    isServerTool(tools, name) ||
+    (!Object.hasOwn(tools, name) && part.state === "input-available")
+  );
+}
+
+/**
+ * The latest message, when only user messages follow `parentId` up to it:
+ * what a hook appended after the turn's parent. Otherwise nothing.
+ */
+async function appendedAfter(
+  handle: Session,
+  parentId: string
+): Promise<string | undefined> {
+  const leaf = await handle.getLatestLeaf();
+  if (!leaf || leaf.id === parentId) return undefined;
+  const path = await handle.getHistory({ leafId: leaf.id });
+  const at = path.findIndex((message) => message.id === parentId);
+  if (at === -1) return undefined;
+  const after = path.slice(at + 1);
+  return after.length > 0 && after.every((message) => message.role === "user")
+    ? leaf.id
+    : undefined;
+}
+
+/** Each tool's hash, made once per tool object. */
+const toolHashes = new WeakMap<object, Promise<string>>();
+
+/**
+ * The tools `names` names in `tools`, the ones a request sends, each with
+ * a hash of its definition as the model sees it (description, input
+ * schema, input examples, provider fields).
+ */
+function toolFingerprint(
+  tools: ToolSet,
+  names: readonly string[]
+): Promise<readonly { readonly name: string; readonly hash: string }[]> {
+  return Promise.all(
+    names.map(async (name) => ({ name, hash: await toolHash(tools[name]) }))
+  );
+}
+
+/** The first 8 bytes of a text's SHA-256, as hex. */
+async function textHash(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text)
+  );
+  return [...new Uint8Array(digest).slice(0, 8)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function toolHash(tool: ToolSet[string] | undefined): Promise<string> {
+  if (!tool) return Promise.resolve("");
+  let made = toolHashes.get(tool);
+  if (!made) {
+    made = (async () => {
+      const definition = JSON.stringify({
+        type: tool.type,
+        description:
+          typeof tool.description === "string" ? tool.description : undefined,
+        inputSchema: await asSchema(tool.inputSchema).jsonSchema,
+        id: "id" in tool ? tool.id : undefined,
+        args: "args" in tool ? tool.args : undefined,
+        providerOptions: tool.providerOptions,
+        strict: "strict" in tool ? tool.strict : undefined,
+        inputExamples: "inputExamples" in tool ? tool.inputExamples : undefined
+      });
+      return textHash(definition);
+    })();
+    toolHashes.set(tool, made);
+  }
+  return made;
+}
+
 function toolRecovery(tool: object): ToolRecovery {
   return "recovery" in tool && tool.recovery === "rerun" ? "rerun" : "report";
 }
@@ -2654,6 +3021,9 @@ function toSessionEvents(
       // The shared interface has no "re-read" event; a watch sees the
       // change in its next state.
       return [];
+    case "prefix-changed":
+      // Observability, not part of the conversation.
+      return [];
   }
 }
 
@@ -2677,11 +3047,17 @@ export class ThinkSession implements HarnessSession {
   }
 
   /** Durably submit input. Resolves before the model runs. */
-  submit(
+  async submit(
     input: ThinkInput,
     options: ThinkSubmitOptions = {}
   ): Promise<ThinkReceipt> {
-    const operationId = options.operationId ?? crypto.randomUUID();
+    // A repeated key with no id names the operation the key started.
+    const operationId =
+      options.operationId ??
+      (options.idempotencyKey
+        ? await this.#harness.keyedOperation(this.id, options.idempotencyKey)
+        : undefined) ??
+      crypto.randomUUID();
     return this.#harness.enqueue(
       this.id,
       operationInput(input, operationId, options.autoContinue ?? true),
@@ -2813,7 +3189,14 @@ export class ThinkSession implements HarnessSession {
     callback: ThinkStreamCallback,
     options: ThinkSubmitOptions = {}
   ): Promise<ThinkOperationResult> {
-    const operationId = options.operationId ?? crypto.randomUUID();
+    // The operation the chunks belong to: the receipt's, once known, which
+    // a repeated idempotency key makes an earlier one.
+    let operationId =
+      options.operationId ??
+      (options.idempotencyKey
+        ? await this.#harness.keyedOperation(this.id, options.idempotencyKey)
+        : undefined) ??
+      crypto.randomUUID();
     let delivered = Promise.resolve();
     const deliver = (fn: () => void | Promise<void>) => {
       delivered = delivered.then(fn).catch((error: unknown) => {
@@ -2827,6 +3210,7 @@ export class ThinkSession implements HarnessSession {
     });
     try {
       const receipt = await this.submit(input, { ...options, operationId });
+      operationId = receipt.operationId;
       deliver(() => callback.onStart?.({ operationId: receipt.operationId }));
       const result = await this.wait(receipt.operationId);
       unsubscribe();

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
-import { ResumableStream, createChatStreams } from "../../chat";
+import { createChatStreams, type ReplyStreams } from "../../chat";
+import { openChatLog } from "../shared/chat-log";
 
 /**
  * Storage-ops benchmark harness for the chat-on-Streams replatform: measures
@@ -25,8 +26,8 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     return JSON.stringify({ type: "text-delta", delta: `${index}:${filler}` });
   }
 
-  #adapter(): ResumableStream {
-    return new ResumableStream(
+  #adapter(): ReplyStreams {
+    return openChatLog(
       this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,
@@ -189,7 +190,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * The replatformed path: real `ResumableStream` over the real Streams
+   * The replatformed path: real `ReplyStreams` over the real Streams
    * capability — packed segments through the read-fenced append (one chunk
    * INSERT per segment; the stream row is written only at open and settle).
    */
@@ -199,7 +200,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     chunkBytes: number
   ): Promise<{ rowsWritten: number; ms: number }> {
     await this.lifecycle.start();
-    const adapter = new ResumableStream(
+    const adapter = openChatLog(
       this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,
@@ -247,7 +248,7 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     sql.exec(`CREATE TABLE IF NOT EXISTS bench_legacy_chunks (
       id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, body TEXT NOT NULL,
       chunk_index INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
-    // The index the legacy ResumableStream shipped, so sweep reads are
+    // The index the legacy ReplyStreams shipped, so sweep reads are
     // measured against the real pre-replatform access path.
     sql.exec(`CREATE INDEX IF NOT EXISTS bench_legacy_chunks_stream_id
       ON bench_legacy_chunks(stream_id, chunk_index)`);
@@ -489,8 +490,8 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
       ] as T[];
     // The import runs as each start constructs the adapter; a second start
     // finds nothing left to import.
-    const adapter = new ResumableStream(this.streams, tagged, () => facet);
-    new ResumableStream(this.streams, tagged, () => facet);
+    const adapter = openChatLog(this.streams, tagged, () => facet);
+    openChatLog(this.streams, tagged, () => facet);
     const tables = sql
       .exec<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_ai_chat_stream_%'"
@@ -546,9 +547,9 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
-  #facetAdapter(facet: boolean): ResumableStream {
+  #facetAdapter(facet: boolean): ReplyStreams {
     const sql = this.ctx.storage.sql;
-    return new ResumableStream(
+    return openChatLog(
       this.streams,
       <T = Record<string, unknown>>(
         strings: TemplateStringsArray,

@@ -13,7 +13,6 @@ import {
   releaseChatConnection,
   type ChatProtocolHost
 } from "../protocol-dispatch";
-import type { ChatRequestContext } from "../request-context";
 import type { ResumeHandshake } from "../resume-handshake";
 
 type Call = [string, ...unknown[]];
@@ -46,6 +45,11 @@ function recordingHost(endedFrame: string | null = null) {
       await enqueue(async () => true);
       return true;
     },
+    applyingToolResult:
+      (clientTools: unknown, apply: () => Promise<unknown>) => async () => {
+        calls.push(["turns.applyingToolResult", clientTools]);
+        return apply();
+      },
     continuation: {
       releaseConnection: (id: string) => {
         calls.push(["continuation.releaseConnection", id]);
@@ -56,13 +60,6 @@ function recordingHost(endedFrame: string | null = null) {
         calls.push(["preStream.release", id]);
       }
     }
-  };
-  const requestContext = {
-    applyingToolResult:
-      (clientTools: unknown, apply: () => Promise<unknown>) => async () => {
-        calls.push(["requestContext.applyingToolResult", clientTools]);
-        return apply();
-      }
   };
   const handshake = {
     handleResumeRequest: async (
@@ -94,7 +91,6 @@ function recordingHost(endedFrame: string | null = null) {
   const host: ChatProtocolHost<Connection> = {
     // SAFETY: the dispatch reaches only the members the fakes implement.
     turns: turns as unknown as ChatTurns<Connection>,
-    requestContext: requestContext as unknown as ChatRequestContext,
     resumeHandshake: () => handshake as unknown as ResumeHandshake,
     emit: (type, payload) => calls.push(["emit", type, payload]),
     chatRequest: async (connection, request) => {
@@ -121,13 +117,23 @@ function recordingHost(endedFrame: string | null = null) {
     messages: async (connection, messages) => {
       calls.push(["messages", connection.id, messages]);
     },
-    applyToolResult: async (event) => {
-      calls.push(["applyToolResult", event.toolCallId]);
+    applyToolUpdate: async (update) => {
+      // What the update does to a waiting part says which answer it is.
+      const part = update.apply({
+        type: "tool-x",
+        toolCallId: update.toolCallId,
+        state: "input-available"
+      }) as { approval?: { approved?: boolean } };
+      if (part.approval) {
+        calls.push([
+          "applyToolApproval",
+          update.toolCallId,
+          part.approval.approved
+        ]);
+        return { status: "unchanged" };
+      }
+      calls.push(["applyToolResult", update.toolCallId]);
       return { status: "changed", messageId: "a1" };
-    },
-    applyToolApproval: async (event) => {
-      calls.push(["applyToolApproval", event.toolCallId, event.approved]);
-      return { status: "unchanged" };
     },
     continuation: (connection, answer) => ({ connection, errorPrefix: answer }),
     enqueueInteraction: async (run) => {
@@ -459,7 +465,7 @@ describe("dispatchChatProtocol", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(calls).toEqual([
       ["emit", "tool:result", { toolCallId: "t1", toolName: "pick" }],
-      ["requestContext.applyingToolResult", [{ name: "pick" }]],
+      ["turns.applyingToolResult", [{ name: "pick" }]],
       ["applyToolResult", "t1"],
       [
         "turns.applyInteraction",

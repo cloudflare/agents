@@ -144,7 +144,13 @@ describe("v1 chunk rows fold into blocks lazily", () => {
       seedV1(instance, { done: { state: "completed", chunks: ["a", "b"] } });
       // The first start records schema 2 and folds nothing.
       await instance.lifecycle.start();
-      expect(await ctx.storage.get("cf_agents:streams_schema_version")).toBe(2);
+      expect(
+        ctx.storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
+          ?.streams
+      ).toBe(2);
+      // v1 chunks remain, and a released version reads them only while its
+      // key says v1 or later: the key stays for a rollback.
+      expect(await ctx.storage.get("cf_agents:streams_schema_version")).toBe(1);
     });
     await evictDurableObject(stub);
     stub = env.CutoverHarnessObject.getByName(name);
@@ -155,6 +161,11 @@ describe("v1 chunk rows fold into blocks lazily", () => {
       expect(
         count(instance, "SELECT COUNT(*) AS n FROM cf_agents_stream_blocks")
       ).toBe(1);
+      // The chunk table is gone with its last stream, and the key with it.
+      const ctx = (instance as unknown as { ctx: DurableObjectState }).ctx;
+      expect(await ctx.storage.get("cf_agents:streams_schema_version")).toBe(
+        undefined
+      );
     });
   });
 

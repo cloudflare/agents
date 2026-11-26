@@ -93,12 +93,14 @@ describe("ThinkConfigStore", () => {
         session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
         PRIMARY KEY (session_id, key))`);
       state.storage.sql.exec(
-        "INSERT INTO assistant_config VALUES ('', 'lastBody', 'legacy')"
+        "INSERT INTO assistant_config VALUES ('', 'skillsFingerprint', 'legacy')"
       );
     });
     await stub.fetch("http://x/");
     await runInDurableObject(stub, (_instance, state) => {
-      expect(thinkConfigValue(state.storage.sql, "lastBody")).toBe("legacy");
+      expect(thinkConfigValue(state.storage.sql, "skillsFingerprint")).toBe(
+        "legacy"
+      );
     });
   });
 

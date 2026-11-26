@@ -39,7 +39,9 @@ import {
 import {
   classifyProviderError,
   reconcileOrphanPartial,
-  ChatRequestContext,
+  CHAT_REQUEST_CONTEXT_KEY,
+  requestContextFromLegacy,
+  storableRequestContext,
   interruptedToolPartAsError,
   type RepairedTranscriptSink,
   createChatFiberSnapshot,
@@ -57,7 +59,7 @@ import {
   ChatTurns,
   AgentToolRuns,
   createAgentToolRunStore,
-  createChatAdmissionStore,
+  takeReleasedChatAdmissions,
   newUserMessageIds,
   clientResolvableToolNames,
   chatRecoveryNames,
@@ -72,16 +74,13 @@ import {
   type ToolPartUpdate,
   applyToolPartUpdate,
   applyToolUpdate,
-  toolApprovalUpdate,
-  toolResultUpdate,
   type TurnResult,
   type MessagePart,
   type ServerChatTurn,
-  type SubmitConcurrencyDecision
+  type NormalizedMessageConcurrency
 } from "agents/chat";
 import {
   ChatFrames,
-  ResumableStream,
   createChatStreams,
   mergeQueuedUserMessages,
   truncateProviderToolPayloads
@@ -105,9 +104,11 @@ import {
   chatRecoveryStorageAdapter,
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
+  runAppStart,
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
+  recordRecentChatTerminal,
   storedAsFacet,
   type ChatRecoveryTaskReason,
   type StreamInterruptionOutcome
@@ -192,7 +193,7 @@ type ChatRecoveryContinueData = {
 // both consumers round-trip the same record across the deploy that ships them.
 
 // The monotonic forward-progress marker the recovery budget keys off is
-// derived from the stream log (`ResumableStream.progressMarker`): durably
+// derived from the stream log (`ReplyStreams.progressMarker`): durably
 // flushed segments, folded into a retired total as their rows are deleted.
 // Nothing is written per chunk. The pre-derivation KV counter
 // (`CHAT_RECOVERY_PROGRESS_KEY`) is read once per isolate and seeded into the
@@ -397,8 +398,17 @@ export class AIChatAgent<
       isReplyStreaming: () => this._turns.liveReply !== null,
       streamingReply: () =>
         this._turns.liveReply?.accumulator.toMessage() ?? null,
-      clientToolNames: () => this._requestContext.clientToolNames(),
-      hasActiveStream: () => this._resumableStream.hasActiveStream(),
+      saveRequestContext: (json) => {
+        this.#session
+          .internal_setConfig(CHAT_REQUEST_CONTEXT_KEY, json)
+          .catch((error: unknown) => {
+            console.error(
+              "[AIChatAgent] Failed to store the request context:",
+              error
+            );
+          });
+      },
+      hasActiveStream: () => this._replyStreams.hasActiveStream(),
       generateRequestId: () => nanoid(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
       abortRequest: (requestId, reason) => this.abortRequest(requestId, reason),
@@ -424,9 +434,9 @@ export class AIChatAgent<
       },
       // A request waiting in the queue survives an isolate reset.
       admissions: {
-        store: createChatAdmissionStore(() => this.ctx.storage.sql),
+        storage: () => this.ctx.storage,
         recoveryPending: () => this._chatRecoveryNames(),
-        recoveryOwns: (requestId) => this._chatRecoveryNames(requestId),
+        released: () => takeReleasedChatAdmissions(() => this.ctx.storage.sql),
         replayRequest: (record) => this._replayClientChatRequest(record)
       }
     }
@@ -450,7 +460,6 @@ export class AIChatAgent<
    * Registry of per-request AbortControllers.
    * Used to propagate cancellation signals for any external calls made by the agent.
    */
-  private readonly _abortRegistry = this._turns.aborts;
 
   /** Durable chat history for this Agent (lifts the pre-Sessions table). */
   readonly sessions = new Sessions({
@@ -482,21 +491,18 @@ export class AIChatAgent<
   readonly #session: Session = this.sessions.session();
 
   /**
-   * The Streams capability backing `_resumableStream`: chat's in-flight
+   * The Streams capability backing `_replyStreams`: chat's in-flight
    * output lives in the shared durable chunk log, readable by any
    * `streams.read()` consumer on this Durable Object.
    */
   readonly streams: Streams = createChatStreams();
 
   /**
-   * Resumable stream manager -- handles chunk buffering, persistence, and replay.
+   * The stream every reply writes (`pumpReply`): chunk buffering,
+   * persistence and replay.
    * @internal Protected for testing purposes.
    */
-  protected _resumableStream!: ResumableStream;
-
-  /** The stream every reply writes (`pumpReply`). */
-  private readonly _replyStreams = new ReplyStreams({
-    resumable: () => this._resumableStream,
+  protected readonly _replyStreams: ReplyStreams = new ReplyStreams({
     streamStarted: (requestId) =>
       this._turns.streamStarted(requestId, (c) =>
         this._resumeHandshake().notifyStreamResuming(c)
@@ -569,7 +575,6 @@ export class AIChatAgent<
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
 
   /** Shared admission policy state for overlapping submit-message requests. */
-  private readonly _submitConcurrency = this._turns.submits;
 
   /**
    * Set of connection IDs that are pending stream resume.
@@ -584,10 +589,13 @@ export class AIChatAgent<
     broadcast: (message, without) => this.broadcast(message, without),
     connections: () => this.getConnections(),
     reachesUnlisted: () => broadcastReachesUnlistedSockets(this),
+    observed: () =>
+      this._agentToolRuns.intercepting ||
+      this.broadcast !== AIChatAgent.prototype.broadcast,
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>
-      this._resumableStream.getOriginMessageIds(requestId),
+      this._replyStreams.getOriginMessageIds(requestId),
     recoveryOriginIds: () => this._chatRecoveryEngine().activeOriginMessageIds,
     clientView: (messages) => this._turns.clientView(messages)
   });
@@ -612,7 +620,7 @@ export class AIChatAgent<
    * turn between `begin()` and `_startStream()` is an unresolved `onMessage`
    * handler promise (queue/debounce/MCP/model awaits) that pins the DO in
    * memory, so the DO is only evicted once the turn either recorded a durable
-   * stream (resumed via `ResumableStream` on wake) or finished. This breaks if a
+   * stream (resumed via `ReplyStreams` on wake) or finished. This breaks if a
    * pre-stream wait is ever moved onto a durable alarm that releases the DO; if
    * that changes, this state must become durable.
    */
@@ -629,14 +637,14 @@ export class AIChatAgent<
       requestIndex: "idx_ai_chat_agent_tool_request_id",
       turnDefinition: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME
     }),
-    streams: () => this._resumableStream,
+    streams: () => this._replyStreams,
     storage: () => this.ctx.storage,
     responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
     resetError: "Agent tool run was skipped because the chat was cleared.",
     turnGeneration: () => this._turns.queue.generation,
     keepAliveWhile: (fn) => this.keepAliveWhile(fn),
     generateRequestId: () => nanoid(),
-    activeRequestId: () => this._resumableStream?.activeRequestId ?? null,
+    activeRequestId: () => this._replyStreams.activeRequestId,
     broadcastChunk: (requestId, body) =>
       this._frames.broadcast({
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
@@ -669,47 +677,89 @@ export class AIChatAgent<
   });
 
   /**
-   * The stored request context (the shared `ChatRequestContext`): the client
-   * tools and custom body of the most recent chat request, which tool
-   * continuations and `continueLastTurn` pass to `onChatMessage`. It owns
-   * when they change and writes them to SQLite so they survive hibernation.
+   * Load the last request context (the session's `transcript:chat:request`
+   * value). An agent from an earlier release kept it in
+   * `cf_ai_chat_request_context`: those rows are carried over once and the
+   * table dropped.
    */
-  private readonly _requestContext = new ChatRequestContext({
-    get: (key) =>
-      this.sql<{ value: string }>`
-        select value from cf_ai_chat_request_context where key = ${key}
-      `[0]?.value,
-    set: (key, json) => {
-      this.sql`
-        insert or replace into cf_ai_chat_request_context (key, value)
-        values (${key}, ${json})
-      `;
-    },
-    delete: (key) => {
-      this.sql`delete from cf_ai_chat_request_context where key = ${key}`;
+  /** The carry-forward of an earlier release's rows, while it runs (tests await it). */
+  private _requestContextCarried: Promise<void> | undefined;
+
+  private _restoreRequestContext(): void {
+    const stored = this.#session.internal_configNow(CHAT_REQUEST_CONTEXT_KEY);
+    if (stored !== null) {
+      this._turns.restoreRequestContext(stored);
+      return;
     }
-  });
+    let rows: Array<{ key: string; value: string }>;
+    try {
+      rows = this.ctx.storage.sql
+        .exec<{ key: string; value: string }>(
+          "SELECT key, value FROM cf_ai_chat_request_context"
+        )
+        .toArray();
+    } catch {
+      return; // No table: nothing kept by an earlier release.
+    }
+    // Nothing to carry: an earlier release created the table on every
+    // start. The root drops it; a sub-agent keeps it empty (no DROP there).
+    if (rows.length === 0) {
+      if (!storedAsFacet(this.ctx.storage.kv)) {
+        this.ctx.storage.sql.exec("DROP TABLE cf_ai_chat_request_context");
+      }
+      return;
+    }
+    const value = (key: string) => rows.find((row) => row.key === key)?.value;
+    const json = requestContextFromLegacy(
+      value("lastClientTools"),
+      value("lastBody")
+    );
+    this._turns.restoreRequestContext(json);
+    // Written through the session once it is ready (one over the row budget
+    // stays in memory only); the old rows go either way, so a later clear
+    // cannot bring them back.
+    this._requestContextCarried = this.#session
+      .internal_setConfig(
+        CHAT_REQUEST_CONTEXT_KEY,
+        storableRequestContext(json)
+      )
+      .catch((error: unknown) => {
+        console.error(
+          "[AIChatAgent] Failed to carry the request context forward:",
+          error
+        );
+      })
+      .finally(() => {
+        // A sub-agent empties the table instead: a DROP at a facet's start
+        // after an upgrade can reset its tree's storage.
+        this.ctx.storage.sql.exec(
+          storedAsFacet(this.ctx.storage.kv)
+            ? "DELETE FROM cf_ai_chat_request_context"
+            : "DROP TABLE IF EXISTS cf_ai_chat_request_context"
+        );
+      });
+  }
 
   /**
    * Client tool schemas from the most recent chat request.
-   * @internal
+   * @internal Kept for subclasses written against earlier releases.
    */
   protected get _lastClientTools(): ClientToolSchema[] | undefined {
-    return this._requestContext.clientTools;
+    return this._turns.lastClientTools;
   }
   protected set _lastClientTools(clientTools: ClientToolSchema[] | undefined) {
-    this._requestContext.clientTools = clientTools;
+    this._turns.lastClientTools = clientTools;
   }
 
   /**
    * Custom body data from the most recent chat request.
-   * @internal
+   * @internal Kept for subclasses written against earlier releases.
    */
   protected get _lastBody(): Record<string, unknown> | undefined {
-    return this._requestContext.body;
+    return this._turns.lastBody;
   }
   protected set _lastBody(body: Record<string, unknown> | undefined) {
-    this._requestContext.body = body;
+    this._turns.lastBody = body;
   }
 
   /** Default wait for trailing-edge debounced overlapping submits. */
@@ -786,7 +836,7 @@ export class AIChatAgent<
     fiberName: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
     snapshotKey: "__cfAIChatFiberSnapshot",
     generateId: () => nanoid(),
-    turnSignal: (requestId) => this._abortRegistry.getExistingSignal(requestId),
+    turnSignal: (requestId) => this._turns.aborts.get(requestId)?.signal,
     runTask: (input, local) =>
       this.tasks.run(
         (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME,
@@ -830,6 +880,10 @@ export class AIChatAgent<
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
         recover: (turn) => this._recoverChatTurn(turn),
+        replay: (runId, record) => this._turns.replayInRun(runId, record),
+        parkUntil: (runId, reply) => this._turns.parkUntil(runId, reply),
+        laneHeldForRecovery: () => this._turns.laneHeldForRecovery(),
+        holdParksUntil: (reply) => this._turns.holdParksUntil(reply),
         attempts
       })
     );
@@ -880,10 +934,10 @@ export class AIChatAgent<
             this._chatRecoveryEngine().activeRootRequestId ?? requestId,
           continuation,
           messages: this.messages,
-          lastBody: context ? context.body : this._lastBody,
+          lastBody: context ? context.body : this._turns.lastBody,
           lastClientTools: context
             ? context.clientTools
-            : this._lastClientTools,
+            : this._turns.lastClientTools,
           originMessageIds: this._frames.originIds(requestId)
         })
       },
@@ -930,28 +984,15 @@ export class AIChatAgent<
             // capability `onStart`; the constructor never reads or writes the
             // transcript. Legacy lift and hydration happen in `onStart`.
 
-            // Key-value table for request context that must survive hibernation
-            // (e.g., custom body fields, client tools from the last chat request).
-            this.sql`create table if not exists cf_ai_chat_request_context (
-              key text primary key,
-              value text not null
-            )`;
-
             // Created here, as always, so the run table exists on every
             // agent whether or not it ever runs as a tool.
             this._agentToolRuns.store.ensure();
           }
         );
 
-        // Restore request context from SQLite (survives hibernation)
-        this._withAgentSpan(
-          "restore_chat_request_context",
-          "initialization",
-          { "cloudflare.agents.component": "ai_chat" },
-          () => {
-            this._requestContext.restore();
-          }
-        );
+        // The last request context, read now: boot recovery runs before
+        // onStart and needs the client tools.
+        this._restoreRequestContext();
 
         // Initialize resumable stream manager (creates its own tables + restores state)
         this._withAgentSpan(
@@ -959,17 +1000,15 @@ export class AIChatAgent<
           "initialization",
           { "cloudflare.agents.component": "ai_chat" },
           () => {
-            this._resumableStream = new ResumableStream(
-              this.streams,
-              this.sql.bind(this),
-              () => storedAsFacet(this.ctx.storage.kv)
+            this._replyStreams.open(this.streams, this.sql.bind(this), () =>
+              storedAsFacet(this.ctx.storage.kv)
             );
           }
         );
 
         update({
           "cloudflare.agents.chat.active_stream.restored":
-            this._resumableStream.hasActiveStream()
+            this._replyStreams.hasActiveStream()
         });
       }
     );
@@ -1000,7 +1039,7 @@ export class AIChatAgent<
           });
         }
       );
-      const started = await _onStart(props);
+      const started = await runAppStart(async () => _onStart(props));
       // Requests an earlier isolate accepted and never started run again,
       // once the app has started and no interrupted turn waits for recovery.
       this._appStartedForAdmissions = true;
@@ -1019,18 +1058,15 @@ export class AIChatAgent<
       // The HTTP transcript has the stored messages only; this list names
       // the queued ones, which a tab keeps apart and draws last.
       if (this._turns.queuedMessageIds().size > 0) {
-        sendIfOpen(
-          connection,
-          JSON.stringify({
-            type: MessageType.CF_AGENT_CHAT_MESSAGES,
-            connect: true,
-            ...this._turns.connectView(this.messages)
-          })
-        );
+        this._frames.send(connection, {
+          type: MessageType.CF_AGENT_CHAT_MESSAGES,
+          connect: true,
+          ...this._turns.connectView(this.messages)
+        });
       }
 
       // Notify client about active streams that can be resumed
-      if (this._resumableStream.hasActiveStream()) {
+      if (this._replyStreams.hasActiveStream()) {
         this._resumeHandshake().notifyStreamResuming(connection);
       } else if (this._preStream.park(connection)) {
         // A turn is accepted but its stream hasn't started yet (#1784): park
@@ -1073,7 +1109,6 @@ export class AIChatAgent<
     const _onMessage = this.onMessage.bind(this);
     const protocol: ChatProtocolHost<Connection> = {
       turns: this._turns,
-      requestContext: this._requestContext,
       resumeHandshake: () => this._resumeHandshake(),
       emit: (type, payload) => this._emit(type, payload),
       chatRequest: (connection, request) =>
@@ -1137,11 +1172,11 @@ export class AIChatAgent<
         // client reconnects and runs the resume probe.
         await clearChatTerminal(this.ctx.storage);
         clearRecentChatTerminals(this.ctx.storage.kv);
-        this._resumableStream.clearAll();
+        this._replyStreams.clearAll();
         this._pendingResumeConnections.clear();
         this._preStream.releaseAwaiting();
         this._preStream.reset();
-        this._requestContext.clear();
+        this._turns.clearRequestContext();
         // `clearMessages()` above emptied `this.messages` through the
         // change feed.
         this._frames.broadcast({ type: MessageType.CF_AGENT_CHAT_CLEAR }, [
@@ -1158,19 +1193,7 @@ export class AIChatAgent<
         );
         await this.persistMessages(transformedMessages, [connection.id]);
       },
-      applyToolResult: (event) =>
-        this._applyToolPartUpdate(
-          toolResultUpdate(
-            event.toolCallId,
-            event.output,
-            event.state === "output-error" ? "output-error" : undefined,
-            event.errorText
-          )
-        ),
-      applyToolApproval: (event) =>
-        this._applyToolPartUpdate(
-          toolApprovalUpdate(event.toolCallId, event.approved, event.approvalId)
-        ),
+      applyToolUpdate: (update) => this._applyToolPartUpdate(update),
       continuation: (connection, answer) => ({
         connection,
         errorPrefix:
@@ -1206,13 +1229,13 @@ export class AIChatAgent<
 
   /**
    * The shared resume-handshake driver (Tier-2). Lazily built; the
-   * `ResumableStream` / `ContinuationState` / pending set are stable after the
+   * `ReplyStreams` / `ContinuationSlots` / pending set are stable after the
    * constructor, so a single instance threads them for the agent's lifetime.
    */
   private _resumeHandshake(): ResumeHandshake {
     return (this._resumeHandshakeInstance ??= new ResumeHandshake({
       responseMessageType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-      resumableStream: this._resumableStream,
+      resumableStream: this._replyStreams,
       continuation: this._continuation,
       preStream: this._preStream,
       pendingResumeConnections: this._pendingResumeConnections,
@@ -1226,7 +1249,9 @@ export class AIChatAgent<
         this._turns.liveReply.ended,
       ended: this._frames.ended,
       recentTerminal: (requestIds) =>
-        recentChatTerminal(this.ctx.storage.kv, requestIds)
+        recentChatTerminal(this.ctx.storage.kv, requestIds),
+      recordTerminal: (frame) =>
+        recordRecentChatTerminal(this.ctx.storage.kv, frame)
     }));
   }
 
@@ -1265,7 +1290,7 @@ export class AIChatAgent<
         ? undefined
         : this._chatTurnFibers.requestContext(requestId);
     const pinned =
-      live !== undefined && live.lastClientTools !== this._lastClientTools
+      live !== undefined && live.lastClientTools !== this._turns.lastClientTools
         ? clientResolvableToolNames(live.lastClientTools ?? undefined)
         : undefined;
     return this._turns.settleInterruptedReply(
@@ -1370,7 +1395,7 @@ export class AIChatAgent<
     part: UIMessage["parts"][number]
   ): UIMessage["parts"][number] {
     return interruptedToolPartAsError(part, {
-      clientToolNames: this._requestContext.clientToolNames()
+      clientToolNames: this._turns.clientToolNames()
     });
   }
 
@@ -1456,9 +1481,9 @@ export class AIChatAgent<
   }
 
   /** Remember where a merge strategy's queued user messages start. */
-  private _noteMergeStart(decision: SubmitConcurrencyDecision): void {
+  private _noteMergeStart(strategy: NormalizedMessageConcurrency | null): void {
     if (
-      decision.strategy === "merge" &&
+      strategy === "merge" &&
       !this._mergeQueuedUserStartIndexByEpoch.has(this._turnQueue.generation)
     ) {
       this._mergeQueuedUserStartIndexByEpoch.set(
@@ -1603,9 +1628,9 @@ export class AIChatAgent<
         if (prepared === null) forget();
         return prepared;
       },
-      enqueue: async (turn, generation, onQueued) => {
+      enqueue: async (turn, generation) => {
         try {
-          return await enqueue(turn, generation, onQueued);
+          return await enqueue(turn, generation);
         } finally {
           forget();
         }
@@ -1650,7 +1675,7 @@ export class AIChatAgent<
       )
     );
     const held = sent.filter((message) => heldIds.has(message.id));
-    let concurrencyDecision!: SubmitConcurrencyDecision;
+    let strategy: NormalizedMessageConcurrency | null = null;
     let epoch!: number;
     // Lists naming queued messages once this request was shown to the
     // other tabs.
@@ -1673,7 +1698,7 @@ export class AIChatAgent<
       isSubmitMessage: requestTrigger === "submit-message",
       concurrency: this.messageConcurrency,
       onDecision: (decision) => {
-        concurrencyDecision = decision;
+        strategy = decision.strategy;
       },
       onDropped: () => {
         if (connection) {
@@ -1752,7 +1777,7 @@ export class AIChatAgent<
       // it waited behind), and the other tabs are told.
       join: async ({ messages, generation, isCurrent }) => {
         epoch = generation;
-        this._noteMergeStart(concurrencyDecision);
+        this._noteMergeStart(strategy);
         // Stored already, by a join before a reset.
         if (messages.length === 0) return isCurrent();
         await this._withAgentSpan(
@@ -1777,22 +1802,20 @@ export class AIChatAgent<
         );
         return isCurrent();
       },
-      enqueue: async (turn, generation, onQueued) => {
+      enqueue: async (turn, generation) => {
         let stale = false;
-        const done = this._runExclusiveChatTurn(chatMessageId, turn, {
+        await this._runExclusiveChatTurn(chatMessageId, turn, {
           epoch: generation,
           onStale: () => {
             stale = true;
           }
         });
-        onQueued();
-        await done;
         return stale ? "stale" : "completed";
       },
       beforeStart: async () => {
         // Re-merge inside the lock: more overlapping submits may have
         // persisted additional user messages while this turn was queued.
-        if (concurrencyDecision.strategy === "merge") {
+        if (strategy === "merge") {
           await this._withAgentSpan(
             "merge_queued_messages",
             "turn",
@@ -1810,14 +1833,6 @@ export class AIChatAgent<
           this._mergeQueuedUserStartIndexByEpoch.delete(epoch);
 
           if (this._turnQueue.generation !== epoch) {
-            return false;
-          }
-
-          if (
-            this._submitConcurrency.isSuperseded(
-              concurrencyDecision.submitSequence
-            )
-          ) {
             return false;
           }
         }
@@ -1907,7 +1922,7 @@ export class AIChatAgent<
         // a regenerate skipped above never ran, and leaves the
         // context that continuations and `continueLastTurn` read.
         const { clientTools: requestClientTools, body: requestBody } =
-          this._requestContext.set({ clientTools, body: customBody });
+          this._turns.setRequestContext({ clientTools, body: customBody });
 
         this._emit("message:request");
 
@@ -2005,7 +2020,7 @@ export class AIChatAgent<
                   }
                   throw error;
                 } finally {
-                  this._abortRegistry.remove(chatMessageId);
+                  this._turns.aborts.delete(chatMessageId);
                   // Settle the pre-stream turn on the normal path (#1784):
                   // a no-op release when the turn streamed (already flushed
                   // into STREAM_RESUMING on _startStream) or a release on
@@ -2035,10 +2050,9 @@ export class AIChatAgent<
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
-    // earliest "successor exists" signal (`SubmitConcurrencyController.decide`)
-    // fires before the successor's `_preStream.begin()`, so releasing here would
-    // race a `begin()` that hasn't run yet and cut a parked client loose right
-    // before the successor streams. Leave it parked: the successor flushes it on
+    // lane skips a superseded run while it accepts the successor's, after the
+    // successor's `preStream.begin()`, and releasing here would still cut a
+    // parked client loose right before the successor streams. Leave it parked: the successor flushes it on
     // `_startStream`, or the final surviving turn's settle releases it. (Chat
     // clear releases parked connections explicitly via `resetTurnState`.)
     this._turns.settlePreStreamTurn(requestId, { releaseParked: false });
@@ -2353,8 +2367,8 @@ export class AIChatAgent<
       // read now that the turn starts.
       run: (continuation, abortSignal) =>
         this._runServerTurnReply(continuation.requestId, abortSignal, {
-          clientTools: this._lastClientTools,
-          body: this._lastBody,
+          clientTools: this._turns.lastClientTools,
+          body: this._turns.lastBody,
           continuation: true,
           connection: continuation.connection
         }),
@@ -2525,9 +2539,12 @@ export class AIChatAgent<
     }
   ): Promise<StreamResultStatus | undefined> {
     const { continuation } = turn;
-    const clientTools = pinnedOr(turn.clientTools, () => this._lastClientTools);
-    const body = pinnedOr(turn.body, () => this._lastBody);
-    if (turn.storeContext) this._requestContext.set({ clientTools, body });
+    const clientTools = pinnedOr(
+      turn.clientTools,
+      () => this._turns.lastClientTools
+    );
+    const body = pinnedOr(turn.body, () => this._turns.lastBody);
+    if (turn.storeContext) this._turns.setRequestContext({ clientTools, body });
     return this._runServerTurnReply(requestId, abortSignal, {
       clientTools,
       body,
@@ -3248,7 +3265,7 @@ export class AIChatAgent<
    * genuinely advanced could read as "no progress" between attempts and exhaust
    * its budget prematurely (#1628). It then became a KV counter bumped per
    * credited chunk. It is now derived from the stream log the chunks were
-   * already flushed to (`ResumableStream.progressMarker`): the log only grows
+   * already flushed to (`ReplyStreams.progressMarker`): the log only grows
    * when new content lands durably, a reconnect replay or a recovery
    * re-persist reads it without appending (#1637), and compaction rewrites
    * the transcript, not the log. Nothing is written per chunk.
@@ -3259,7 +3276,7 @@ export class AIChatAgent<
    */
   private readonly _chatRecoveryProgressMarker = chatRecoveryProgressReader(
     this.ctx.storage,
-    () => this._resumableStream
+    () => this._replyStreams
   );
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
@@ -3279,7 +3296,7 @@ export class AIChatAgent<
    */
   protected override async _onAgentToolStreamProgress(): Promise<void> {
     if (this._agentToolStreamProgress.shouldCredit(Date.now())) {
-      this._resumableStream.creditProgress();
+      this._replyStreams.creditProgress();
     }
   }
 
@@ -3595,9 +3612,9 @@ export class AIChatAgent<
           partialParts: input.partial.parts as MessagePart[],
           recoveryData: input.recoveryData,
           messages: [...this.messages],
-          lastBody: input.snapshot?.lastBody ?? this._lastBody,
+          lastBody: input.snapshot?.lastBody ?? this._turns.lastBody,
           lastClientTools:
-            input.snapshot?.lastClientTools ?? this._lastClientTools,
+            input.snapshot?.lastClientTools ?? this._turns.lastClientTools,
           createdAt: input.createdAt
         }),
       // Only persist while the stream is still active. The ACK handler (client
@@ -3609,7 +3626,7 @@ export class AIChatAgent<
       persistOrphanedStream: (streamId) =>
         this._persistOrphanedStream(streamId),
       completeRecoveredStream: (streamId) => {
-        this._resumableStream.complete(streamId);
+        this._replyStreams.complete(streamId);
       },
       // Nothing continues the cut-off request (the app declined, or the
       // conversation moved on): end it for the tabs, and record it for a
@@ -3637,15 +3654,15 @@ export class AIChatAgent<
     let streamId = "";
     if (requestId) {
       streamId =
-        this._resumableStream.latestStreamInfoForRequest(requestId)?.id ?? "";
+        this._replyStreams.latestStreamInfoForRequest(requestId)?.id ?? "";
     }
-    if (!streamId && this._resumableStream.hasActiveStream()) {
-      streamId = this._resumableStream.activeStreamId ?? "";
+    if (!streamId && this._replyStreams.hasActiveStream()) {
+      streamId = this._replyStreams.activeStreamId ?? "";
     }
     const streamStillActive = Boolean(
       streamId &&
-      this._resumableStream.hasActiveStream() &&
-      this._resumableStream.activeStreamId === streamId
+      this._replyStreams.hasActiveStream() &&
+      this._replyStreams.activeStreamId === streamId
     );
     return { streamId, streamStillActive };
   }
@@ -3748,8 +3765,8 @@ export class AIChatAgent<
     const turnContext = this._chatTurnFibers.requestContext(
       input.requestId
     ) ?? {
-      lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastBody: this._turns.lastBody,
+      lastClientTools: this._turns.lastClientTools
     };
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
@@ -3911,7 +3928,7 @@ export class AIChatAgent<
     hasSettledToolResults: boolean;
   } {
     return aiSdkRecoveryCodec.toRecoveryPartial(
-      this._resumableStream.getStreamChunks(streamId).map((chunk) => chunk.body)
+      this._replyStreams.getStreamChunks(streamId).map((chunk) => chunk.body)
     );
   }
 
@@ -3984,7 +4001,7 @@ export class AIChatAgent<
       const sync = this.#session.__DO_NOT_USE_WILL_BREAK__sync();
       const afters: Array<() => Promise<void>> = [];
       try {
-        this._resumableStream.cutover(
+        this._replyStreams.cutover(
           cutover.streamId,
           () => {
             for (const message of toWrite)
@@ -4278,7 +4295,7 @@ export class AIChatAgent<
           }
           return result;
         } finally {
-          if (chatMessageId) this._abortRegistry.remove(chatMessageId);
+          if (chatMessageId) this._turns.aborts.delete(chatMessageId);
         }
       }, abortSignal)
     );
@@ -4341,7 +4358,7 @@ export class AIChatAgent<
         // tails them after the run ends, and the next start reclaims them.
         if (
           context.kind === "final" &&
-          this._resumableStream.pendingCutoverId === context.streamId
+          this._replyStreams.pendingCutoverId === context.streamId
         ) {
           this.#pendingCutover = {
             streamId: context.streamId,
@@ -4377,8 +4394,9 @@ export class AIChatAgent<
    * When the DO is destroyed, cancel all pending requests and clean up resources
    */
   async destroy() {
-    this._abortRegistry.destroyAll();
-    this._resumableStream.destroy();
+    for (const controller of this._turns.aborts.values()) controller.abort();
+    this._turns.aborts.clear();
+    this._replyStreams.destroy();
     await super.destroy();
   }
 }

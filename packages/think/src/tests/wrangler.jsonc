@@ -172,6 +172,14 @@
         "name": "ThinkExtensionNetworkAgent"
       },
       {
+        "class_name": "ThinkExtensionTurnAgent",
+        "name": "ThinkExtensionTurnAgent"
+      },
+      {
+        "class_name": "ThinkPrefixChangedAgent",
+        "name": "ThinkPrefixChangedAgent"
+      },
+      {
         "class_name": "ThinkExtensionBeforeTurnModelAgent",
         "name": "ThinkExtensionBeforeTurnModelAgent"
       },
@@ -198,6 +206,10 @@
       {
         "class_name": "ThinkFetchToolsTestAgent",
         "name": "ThinkFetchToolsTestAgent"
+      },
+      {
+        "class_name": "ThinkSkillsToolsTestAgent",
+        "name": "ThinkSkillsToolsTestAgent"
       },
       {
         "class_name": "ThinkOnStartReconcileFailureAgent",
@@ -297,6 +309,8 @@
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
         "ThinkExtensionNetworkAgent",
+        "ThinkExtensionTurnAgent",
+        "ThinkPrefixChangedAgent",
         "ThinkExtensionBeforeTurnModelAgent",
         "ThinkMessengerDeliveryTestAgent",
         "ThinkMessengerRouteTestAgent",
@@ -304,6 +318,7 @@
         "ThinkExecuteToolAgent",
         "ThinkExecuteHitlAgent",
         "ThinkFetchToolsTestAgent",
+        "ThinkSkillsToolsTestAgent",
         "ThinkOnStartReconcileFailureAgent",
         "ThinkOnStartHydrationFailureAgent",
         "ThinkWindowedHydrationAgent",

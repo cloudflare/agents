@@ -1,25 +1,24 @@
 /**
  * Messenger replies as runs on the Tasks capability. A live webhook reply
- * executes as one journaled step through the messenger runtime's closure
- * registry, persisting its re-entry snapshot in host storage; a replay whose
- * closure is gone is recovered on wake through
+ * runs as one journaled step with its closure as the run's `local`, and
+ * keeps its re-entry snapshot in the run's checkpoint. A replay after a
+ * reset has no closure, and is recovered from that snapshot through
  * `ThinkMessengerRuntime.handleFiberRecovery`.
  *
- * Durable: the Task run and the reply's recovery snapshot (one storage key
- * per run, deleted when the step ends), owned by the {@link MessengerReplies}
- * capability. In memory: the live reply closure.
+ * Durable: nothing of its own (the run and its checkpoint belong to Tasks).
+ * A run from think@0.24.0 kept its snapshot in a storage key instead; a
+ * replay of one reads that key and deletes it.
+ * In memory: the live closure, for as long as the webhook waits on it.
  */
-
-import { LifecycleCapability } from "agents/lifecycle";
 
 import {
   isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
   isPlatformTransientError,
+  type FiberContext,
   type FiberRecoveryContext
 } from "agents";
-import type { TaskStep, Tasks } from "agents/tasks";
-import type { TaskJson } from "agents/tasks";
+import type { TaskJson, Tasks } from "agents/tasks";
 import type { ThinkMessengerRuntime } from "./chat-sdk";
 import { MESSENGER_REPLY_FIBER_NAME } from "./delivery";
 
@@ -31,84 +30,83 @@ import { MESSENGER_REPLY_FIBER_NAME } from "./delivery";
  */
 const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
 
-const runIdFor = (nonce: string) => `msgr_${nonce}`;
+/** The checkpoint key of a reply's re-entry snapshot. */
+const SNAPSHOT = "snapshot";
+
+/** Where a think@0.24.0 reply run (`msgr_<nonce>`) kept its snapshot. */
+const releasedSnapshotKey = (runId: string) =>
+  `__cf_messenger_recovery:${runId}`;
 
 /**
- * Messenger replies as Task runs, with the recovery snapshot each run keeps
- * in storage until its step ends.
+ * One reply the webhook that received its message is waiting on.
  *
  * @internal
  */
-export class MessengerReplies extends LifecycleCapability {
-  readonly #tasks: Tasks;
+export type LiveMessengerReply = {
+  /** The "accepted" snapshot, kept before any delivery work begins. */
+  snapshot: unknown;
+  answer(fiber: FiberContext): Promise<void>;
+};
 
-  /**
-   * Registers the reply Task definition on `tasks`, so construct it once per
-   * Durable Object construction, as Tasks requires.
-   */
-  constructor(tasks: Tasks, runtime: () => ThinkMessengerRuntime | undefined) {
-    super("think-messenger-replies");
-    this.#tasks = tasks;
-    tasks.register(MESSENGER_REPLY_TASK_DEFINITION, (input, step) =>
-      this.#deliver(input as { nonce: string }, step, runtime)
-    );
-  }
+/**
+ * The input to start one reply run.
+ *
+ * @internal
+ */
+export type MessengerReplyRun = {
+  reply: LiveMessengerReply;
+  idempotencyKey: string;
+  metadata: Record<string, unknown>;
+};
 
-  /**
-   * Durably accept one reply run and execute it inline while this isolate
-   * lives. `accepted` is false when the idempotency key already has a run.
-   */
-  async run(input: {
-    nonce: string;
-    idempotencyKey: string;
-    metadata: Record<string, unknown>;
-  }): Promise<{ accepted: boolean }> {
-    const receipt = await this.#tasks.run(
-      MESSENGER_REPLY_TASK_DEFINITION,
-      { nonce: input.nonce },
-      {
-        runId: runIdFor(input.nonce),
-        idempotencyKey: input.idempotencyKey,
-        metadata: input.metadata as Record<string, TaskJson>,
-        start: "now"
-      }
-    );
-    return { accepted: receipt.accepted };
-  }
-
-  async #deliver(
-    { nonce }: { nonce: string },
-    step: TaskStep,
-    getRuntime: () => ThinkMessengerRuntime | undefined
-  ): Promise<void> {
-    const storage = this.lifecycle.storage;
-    const tasks = this.#tasks;
-    await step.do(
+/**
+ * Register the reply definition on `tasks` (once per Durable Object
+ * construction, as Tasks requires) and return the function that durably
+ * accepts one reply run and executes it inline. `accepted` is false when
+ * the idempotency key already has a run.
+ *
+ * @internal
+ */
+export function registerMessengerReplies(
+  tasks: Tasks,
+  storage: DurableObjectStorage,
+  runtime: () => ThinkMessengerRuntime | undefined
+): (run: MessengerReplyRun) => Promise<{ accepted: boolean }> {
+  tasks.register(MESSENGER_REPLY_TASK_DEFINITION, (_input, step) =>
+    step.do(
       "deliver",
       { retries: { limit: 1 }, timeout: "1 day" },
       async ({ signal }) => {
-        const runtime = getRuntime();
-        if (!runtime) {
+        const messengers = runtime();
+        if (!messengers) {
           throw new Error("Messenger runtime is unavailable");
         }
-        const runId = runIdFor(nonce);
-        const persistKey = `__cf_messenger_recovery:${runId}`;
-        if (!runtime.hasLiveReply(nonce)) {
+        const live = step.local as LiveMessengerReply | undefined;
+        if (!live) {
           // Replay after an unclean interruption: recover through the
-          // runtime seam, preferring the snapshot a prior attempt (live
-          // or recovering) persisted before being interrupted itself.
-          const persisted = await storage.get(persistKey);
-          const createdAt = (await tasks.get(runId))?.createdAt ?? Date.now();
+          // runtime seam from the snapshot a prior attempt (live or
+          // recovering) kept before being interrupted itself.
+          let snapshot = step.checkpoint.get(SNAPSHOT);
+          if (snapshot === undefined) {
+            // A run from think@0.24.0: move its snapshot into the checkpoint.
+            // TEMPORARY: remove in the next minor after this ships.
+            const released = releasedSnapshotKey(step.id);
+            snapshot = (await storage.get(released)) as TaskJson | undefined;
+            if (snapshot !== undefined) {
+              step.checkpoint.set(SNAPSHOT, snapshot);
+              await storage.delete(released);
+            }
+          }
           const ctx: FiberRecoveryContext = {
-            id: runId,
+            id: step.id,
             name: MESSENGER_REPLY_FIBER_NAME,
-            snapshot: (persisted ?? null) as unknown,
-            createdAt,
+            snapshot: snapshot ?? null,
+            createdAt: (await tasks.get(step.id))?.createdAt ?? Date.now(),
             recoveryReason: "interrupted"
           };
-          await runtime.handleFiberRecovery(ctx, {
-            persistRecoverySnapshot: async (snapshot) => {
-              await storage.put(persistKey, snapshot);
+          await messengers.handleFiberRecovery(ctx, {
+            persistRecoverySnapshot: (snapshot) => {
+              step.checkpoint.set(SNAPSHOT, snapshot as unknown as TaskJson);
             },
             // Platform failures leave the step claimed and the run is
             // replayed; any other error fails this single-attempt step.
@@ -117,32 +115,33 @@ export class MessengerReplies extends LifecycleCapability {
               isDurableObjectMemoryLimitReset(error) ||
               isDurableObjectCodeUpdateReset(error)
           });
-          await storage.delete(persistKey);
           return undefined;
         }
-        // The initial "accepted" snapshot must be durable before any
-        // delivery work begins: an isolate lost mid-answer recovers
-        // through this snapshot, and without it replay could neither
-        // deliver nor apologize.
-        const initial = runtime.initialReplySnapshot(nonce);
-        if (initial !== undefined) {
-          await storage.put(persistKey, initial);
-        }
-        // Later fire-and-forget stash writes are safe: Durable Object
-        // storage applies same-key operations in issuance order, so the
-        // delete below can never be overtaken by an earlier put. A crash
-        // loses only the unflushed tail, which recovery tolerates by
-        // design (the snapshot is a hint; stream evidence is
-        // authoritative).
-        await runtime.executeLiveReply(nonce, {
-          id: runId,
+        // The "accepted" snapshot is in the run's row before any delivery
+        // work begins: an isolate lost mid-answer recovers through it, and
+        // without it replay could neither deliver nor apologize.
+        step.checkpoint.set(SNAPSHOT, live.snapshot as TaskJson);
+        await live.answer({
+          id: step.id,
           signal,
-          stash: (data) => void storage.put(persistKey, data).catch(() => {}),
+          stash: (data) => step.checkpoint.set(SNAPSHOT, data as TaskJson),
           snapshot: null
         });
-        await storage.delete(persistKey);
         return undefined;
       }
+    )
+  );
+  return async ({ reply, idempotencyKey, metadata }) => {
+    const receipt = await tasks.run(
+      MESSENGER_REPLY_TASK_DEFINITION,
+      {},
+      {
+        idempotencyKey,
+        metadata: metadata as Record<string, TaskJson>,
+        start: "now",
+        local: reply
+      }
     );
-  }
+    return { accepted: receipt.accepted };
+  };
 }

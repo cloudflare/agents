@@ -4,6 +4,7 @@
  * keeps the record, its order in the submissions lane and its waiters.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { UIMessage } from "ai";
 import type { TaskJson, TaskStatus } from "agents/tasks";
 import {
@@ -526,4 +527,45 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
     ...(row.started_at !== null && { startedAt: row.started_at }),
     ...(row.completed_at !== null && { settledAt: row.completed_at })
   };
+}
+
+/**
+ * Runs each submission's status reports one after another, in the order
+ * they arrive, so an app that stores the latest status never ends on an
+ * earlier one (a slow `running` hook finishing after `aborted`). Reports of
+ * different submissions do not wait for each other. A report caused from
+ * inside a running report of the same submission (its hook cancelled it)
+ * runs at once: queued behind that report, neither would return. Holds one
+ * promise per submission with a report in flight, removed when its last
+ * one ends.
+ *
+ * @internal
+ */
+export class SubmissionStatusQueue {
+  readonly #tails = new Map<string, Promise<void>>();
+  readonly #running = new AsyncLocalStorage<{
+    readonly queue: SubmissionStatusQueue;
+    readonly submissionId: string;
+  }>();
+
+  /** Run `report` after the submission's earlier reports have ended. */
+  run(submissionId: string, report: () => Promise<void>): Promise<void> {
+    const inside = this.#running.getStore();
+    const marked = () =>
+      this.#running.run({ queue: this, submissionId }, report);
+    if (inside?.queue === this && inside.submissionId === submissionId) {
+      return marked();
+    }
+    const previous = this.#tails.get(submissionId) ?? Promise.resolve();
+    // A failed report does not hold up the next; its caller still sees it.
+    const next = previous.then(marked);
+    const tail = next.catch(() => {});
+    this.#tails.set(submissionId, tail);
+    void tail.then(() => {
+      if (this.#tails.get(submissionId) === tail) {
+        this.#tails.delete(submissionId);
+      }
+    });
+    return next;
+  }
 }

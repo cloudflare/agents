@@ -13,6 +13,8 @@
  */
 
 import { reportDelivery } from "../dynamic-agents/unlisted-sockets";
+import { WEBSOCKET_MESSAGE_BYTES } from "../internal/platform-limits";
+import { fitsOutboundFrame } from "../websockets/frame-limit";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { withOriginMessageIds } from "./origin-message-ids";
 import {
@@ -58,6 +60,12 @@ export interface ChatFramesOptions {
    * to every socket it accepted for it).
    */
   reachesUnlisted?(): boolean;
+  /**
+   * Whether the host's broadcast is watched beyond the tabs it lists (an
+   * agent-tool run in flight, a subclass that overrides `broadcast`), so a
+   * frame is sent even with no tab to read it.
+   */
+  observed?(): boolean;
   /** Where recent terminal frames are recorded. */
   kv: RecentTerminalsKv;
   /** Connections that were told a stream resumes and have not acked yet. */
@@ -226,16 +234,42 @@ export class ChatFrames {
         this.ended.broadcast(ends, without);
         // When the root sent it, if it went through the root: an accept
         // before that, even after this call, got the frame.
+        const text = frameText(ready);
+        if (text === undefined) return;
         reportDelivery(
           (sentAt) => this.ended.delivered(ends, sentAt),
-          () => this.options.broadcast(JSON.stringify(ready), without)
+          () => this.options.broadcast(text, without)
         );
         this.#record(ready);
         return;
       }
     }
-    this.options.broadcast(JSON.stringify(ready), without);
+    // With nobody to read it, the frame is not serialized (#2724). A
+    // terminal is still recorded, for a tab that comes back.
+    if (!this.#reaches(without)) {
+      this.#record(ready);
+      return;
+    }
+    const text = frameText(ready);
+    if (text === undefined) return;
+    this.options.broadcast(text, without);
     this.#record(ready);
+  }
+
+  /**
+   * Whether a broadcast that leaves out `without` has a reader: a listed
+   * socket outside it, sockets the host reaches unlisted, or a host whose
+   * broadcast is observed.
+   */
+  #reaches(without: readonly string[]): boolean {
+    if (this.options.observed?.() || this.options.reachesUnlisted?.()) {
+      return true;
+    }
+    const left = new Set(without);
+    for (const connection of this.options.connections()) {
+      if (!left.has(connection.id)) return true;
+    }
+    return false;
   }
 
   /**
@@ -258,24 +292,27 @@ export class ChatFrames {
     messages: ReadonlyArray<TMessage>,
     exclude: readonly string[] = []
   ): void {
-    this.options.broadcast(
-      JSON.stringify(this.messagesFrame(messages)),
-      this.options.listsReachResumingTabs
-        ? [...exclude]
-        : [...exclude, ...this.options.resuming]
-    );
+    const without = this.options.listsReachResumingTabs
+      ? [...exclude]
+      : [...exclude, ...this.options.resuming];
+    if (!this.#reaches(without)) return;
+    const text = frameText(this.messagesFrame(messages));
+    if (text === undefined) return;
+    this.options.broadcast(text, without);
   }
 
   /** Send `frame` to one tab. A closed socket is ignored. */
   send(connection: ChatFrameConnection, frame: ChatFrame): void {
     const ready = this.#prepare(frame);
+    const text = frameText(ready);
+    if (text === undefined) return;
     const ends = endedRequestOf(ready);
     if (ends !== undefined) {
       if (this.ended.has(connection, ends)) return;
       this.ended.note(connection, ends);
     }
     try {
-      connection.send(JSON.stringify(ready));
+      connection.send(text);
     } catch {
       // The connection closed before the server could answer.
     }
@@ -340,4 +377,24 @@ export class ChatFrames {
       recordRecentChatTerminal(this.options.kv, frame);
     }
   }
+}
+
+/**
+ * A chat frame's JSON, or `undefined` when it is over the SDK's WebSocket
+ * message limit (`WEBSOCKET_MESSAGE_BYTES`, 1 KiB under what production
+ * delivers). Production drops a larger message without telling either side,
+ * so such a frame is not sent and the drop is logged instead. Only the
+ * message list can get that large: it carries the transcript.
+ *
+ * @internal
+ */
+export function frameText(frame: {
+  readonly type?: unknown;
+}): string | undefined {
+  const text = JSON.stringify(frame);
+  if (fitsOutboundFrame(text)) return text;
+  console.error(
+    `[agents/chat] Not sending a ${String(frame.type)} frame of ${text.length} characters: it is over the ${WEBSOCKET_MESSAGE_BYTES}-byte limit for one WebSocket message, so the client keeps the list it has. The transcript is too large to send whole; in Think and AIChatAgent, a lower hydrationByteBudget keeps it under the limit.`
+  );
+  return undefined;
 }

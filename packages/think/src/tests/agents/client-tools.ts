@@ -108,11 +108,13 @@ function createClientToolMockModel(): LanguageModel {
 // the client — which can resolve the tool and send `cf_agent_tool_result` —
 // but the assistant message hasn't been persisted yet. On the continuation
 // invocation it emits plain text.
-function createSlowClientToolMockModel(
+export function createSlowClientToolMockModel(
   delayMs: number,
   trailingGaps: number,
   finishReason: "tool-calls" | "stop" = "tool-calls",
-  onPrompt?: (prompt: unknown[]) => void
+  onPrompt?: (prompt: unknown[]) => void,
+  /** Awaited after the tool call, before the trailing text: a test's gate. */
+  hold?: () => Promise<void>
 ): LanguageModel {
   let callCount = 0;
   return {
@@ -167,6 +169,7 @@ function createSlowClientToolMockModel(
             // Streaming real chunks (not silent gaps) keeps the stall watchdog
             // happy and guarantees the tool call is already in the accumulator.
             controller.enqueue({ type: "text-start", id: "t-trail" });
+            await hold?.();
             for (let i = 0; i < trailingGaps; i++) {
               await new Promise((r) => setTimeout(r, delayMs));
               controller.enqueue({
@@ -916,6 +919,11 @@ export class ThinkClientToolsAgent extends Think {
   private _slowClientToolGaps = 12;
   private _slowClientToolFinishReason: "tool-calls" | "stop" = "tool-calls";
   private _slowClientToolPromptTails: string[] = [];
+  /** Holds the slow client-tool reply after its tool call until released. */
+  private _slowClientToolHold: {
+    promise: Promise<void>;
+    release: () => void;
+  } | null = null;
   private _textOnlyPrompts: unknown[][] = [];
   private _useMidStreamParallelToolStream = false;
   private _midStreamParallelGapMs = 40;
@@ -1006,10 +1014,12 @@ export class ThinkClientToolsAgent extends Think {
     storedBody: Record<string, unknown>,
     lastBody: Record<string, unknown>
   ): Promise<{ ranWith: string; storedAfter: string }> {
-    const internals = this as unknown as {
-      _lastBody: Record<string, unknown> | undefined;
-    };
-    internals._lastBody = storedBody;
+    const internals = (
+      this as unknown as {
+        _turns: { lastBody: Record<string, unknown> | undefined };
+      }
+    )._turns;
+    internals.lastBody = storedBody;
     await this.startRecoveryContinueForTest({
       lastBody,
       lastClientTools: null
@@ -1018,7 +1028,7 @@ export class ThinkClientToolsAgent extends Think {
     // JSON text: an RPC return type cannot carry `unknown` values.
     return {
       ranWith: JSON.stringify(this._turnBodies.at(-1) ?? null),
-      storedAfter: JSON.stringify(internals._lastBody ?? null)
+      storedAfter: JSON.stringify(internals.lastBody ?? null)
     };
   }
 
@@ -1238,7 +1248,8 @@ export class ThinkClientToolsAgent extends Think {
         (prompt) => {
           const last = prompt.at(-1) as { role?: string } | undefined;
           this._slowClientToolPromptTails.push(last?.role ?? "");
-        }
+        },
+        () => this._slowClientToolHold?.promise ?? Promise.resolve()
       );
     if (this._useMidStreamParallelToolStream)
       return createMidStreamParallelToolModel(
@@ -1320,6 +1331,44 @@ export class ThinkClientToolsAgent extends Think {
 
   private _streamParents: Array<string | null> = [];
 
+  /** The type of every socket message this agent has finished handling. */
+  private readonly _handledMessageTypes: string[] = [];
+
+  /**
+   * Whether a client tool result or approval is queued or being applied. The
+   * chat protocol starts the apply without awaiting it, so a handled message
+   * can still have its apply to come.
+   */
+  hasPendingInteractionForTest(): boolean {
+    // The harness-backed Think (`pnpm test:harness`) has no `_turns`.
+    const turns = this["_turns"] as unknown as
+      | { pendingInteraction: unknown }
+      | undefined;
+    return (turns?.pendingInteraction ?? null) !== null;
+  }
+
+  /** How many socket messages of `type` the agent has finished handling. */
+  handledMessageCountForTest(type: string): number {
+    return this._handledMessageTypes.filter((handled) => handled === type)
+      .length;
+  }
+
+  // Think installs its chat protocol handler at start, before this hook, so
+  // the wrapper here sees every message, the protocol's included.
+  override onStart(): void {
+    const handle = this.onMessage;
+    this.onMessage = async (connection, message) => {
+      await handle.call(this, connection, message);
+      if (typeof message !== "string") return;
+      try {
+        const { type } = JSON.parse(message) as { type?: unknown };
+        if (typeof type === "string") this._handledMessageTypes.push(type);
+      } catch {
+        // Not JSON: nothing to record.
+      }
+    };
+  }
+
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     // Every reply's stream starts here (`pumpReply`). Only this Think has
@@ -1334,7 +1383,7 @@ export class ThinkClientToolsAgent extends Think {
     streams.start = (requestId, options) => {
       const streamId = start(requestId, options);
       this._streamParents.push(
-        this["_resumableStream"].getStreamParentMessageId(streamId)
+        this["_replyStreams"].getStreamParentMessageId(streamId)
       );
       return streamId;
     };
@@ -1383,6 +1432,18 @@ export class ThinkClientToolsAgent extends Think {
     if (finishReason !== undefined) {
       this._slowClientToolFinishReason = finishReason;
     }
+  }
+
+  /** Hold the slow client-tool reply open after its tool call. */
+  async holdSlowClientToolStreamForTest(): Promise<void> {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => (release = resolve));
+    this._slowClientToolHold = { promise, release };
+  }
+
+  async releaseSlowClientToolStreamForTest(): Promise<void> {
+    this._slowClientToolHold?.release();
+    this._slowClientToolHold = null;
   }
 
   /** Role of the last prompt message of each slow client-tool model call. */
@@ -1516,8 +1577,10 @@ export class ThinkClientToolsAgent extends Think {
 
   async getCapturedClientTools(): Promise<ClientToolSchema[] | undefined> {
     return (
-      this as unknown as { _lastClientTools: ClientToolSchema[] | undefined }
-    )._lastClientTools;
+      this as unknown as {
+        _turns: { lastClientTools: ClientToolSchema[] | undefined };
+      }
+    )._turns.lastClientTools;
   }
 
   /**
@@ -1534,18 +1597,18 @@ export class ThinkClientToolsAgent extends Think {
     polluteRegistry: boolean;
   }): Promise<boolean> {
     const internal = this as unknown as {
-      _lastClientTools: ClientToolSchema[] | undefined;
+      _turns: { lastClientTools: ClientToolSchema[] | undefined };
       _persistAssistantMessage: (msg: UIMessage) => Promise<void>;
       _settleInterruptedReply: (msg: UIMessage) => UIMessage;
       hasPendingInteraction: () => boolean;
     };
 
     if (opts.polluteRegistry) {
-      internal._lastClientTools = [
+      internal._turns.lastClientTools = [
         { name: "client_action", description: "A client tool" }
       ];
     } else {
-      internal._lastClientTools = undefined;
+      internal._turns.lastClientTools = undefined;
     }
 
     // The reply was cut off, so it is stored the way a cut-off reply is:
@@ -1820,13 +1883,41 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   isChatTurnActiveForTest(): boolean {
-    return (this as unknown as { _turnQueue: { isActive: boolean } })._turnQueue
-      .isActive;
+    const queue = (this as unknown as { _turnQueue?: { isActive: boolean } })
+      ._turnQueue;
+    return queue?.isActive ?? false;
   }
 
   getOverlappingSubmitCountForTest(): number {
-    return this["_turns"].submits.overlappingSubmitCount;
+    return this._overlappingSubmits.count;
   }
+
+  /** Counts the client requests that arrive under a superseding strategy. */
+  private readonly _overlappingSubmits = ((
+    turns:
+      | {
+          runClientRequest(request: {
+            onDecision?(decision: { strategy: unknown }): void;
+          }): Promise<void>;
+        }
+      | undefined
+  ) => {
+    const counter = { count: 0 };
+    // The harness-backed Think has no `_turns`: nothing to count there.
+    if (!turns) return counter;
+    const run = turns.runClientRequest.bind(turns);
+    turns.runClientRequest = (request) =>
+      run({
+        ...request,
+        onDecision: (decision) => {
+          const { strategy } = decision;
+          if (strategy !== null && strategy !== "queue" && strategy !== "drop")
+            counter.count++;
+          request.onDecision?.(decision);
+        }
+      });
+    return counter;
+  })(this["_turns"] as never);
 
   private _interactionAppliesSeen = 0;
 
@@ -1899,15 +1990,20 @@ export class ThinkClientToolsAgent extends Think {
     this._releaseHeldTurnQueue = null;
   }
 
-  /** The request id of the continuation waiting to run, if any. */
+  /** The continuation whose stream comes next: running, else scheduled. */
   async pendingContinuationRequestIdForTest(): Promise<string | null> {
-    return (
-      (
-        this["_turns"] as unknown as {
-          continuation: { pending: { requestId: string } | null };
-        }
-      ).continuation.pending?.requestId ?? null
-    );
+    const continuation = (
+      this["_turns"] as unknown as
+        | {
+            continuation: {
+              running: { requestId: string } | null;
+              pending: { requestId: string } | null;
+            };
+          }
+        | undefined
+    )?.continuation;
+    if (!continuation) return null;
+    return (continuation.running ?? continuation.pending)?.requestId ?? null;
   }
 
   /** How many continuation turns reached `beforeTurn`. */
@@ -1963,26 +2059,26 @@ export class ThinkClientToolsAgent extends Think {
   async holdCoalesceTimerForTest(): Promise<void> {
     const held = { requested: false };
     this._coalesceArmHeld = held;
-    this["_turns"].autoContinuation.armTimer = () => {
+    this["_turns"].armCoalesce = () => {
       held.requested = true;
     };
   }
 
   async releaseCoalesceTimerForTest(): Promise<void> {
-    const controller = this["_turns"].autoContinuation;
-    delete (controller as { armTimer?: unknown }).armTimer;
-    if (this._coalesceArmHeld?.requested) controller.armTimer();
+    const turns = this["_turns"];
+    delete (turns as { armCoalesce?: unknown }).armCoalesce;
+    if (this._coalesceArmHeld?.requested) turns.armCoalesce();
     this._coalesceArmHeld = null;
   }
 
   async getContinuationSlotsForTest(): Promise<{
     pending: boolean;
-    deferred: boolean;
+    next: boolean;
   }> {
     const continuation = this["_turns"].continuation;
     return {
-      pending: continuation.pending !== null,
-      deferred: continuation.deferred !== null
+      pending: continuation.pending !== null || continuation.running !== null,
+      next: continuation.pending !== null && continuation.running !== null
     };
   }
 
@@ -2001,15 +2097,13 @@ export class ThinkClientToolsAgent extends Think {
   }> {
     const internal = this["_turns"] as unknown as {
       continuation: { pending: unknown };
-      autoContinuation: {
-        _timer: ReturnType<typeof setTimeout> | null;
-        _barrierActive: boolean;
-      };
+      coalesceTimer: ReturnType<typeof setTimeout> | null;
+      barrierActive: boolean;
     };
     return {
       hasPending: internal.continuation.pending != null,
-      barrierActive: internal.autoContinuation._barrierActive,
-      timerArmed: internal.autoContinuation._timer != null
+      barrierActive: internal.barrierActive,
+      timerArmed: internal.coalesceTimer != null
     };
   }
 
@@ -2025,12 +2119,12 @@ export class ThinkClientToolsAgent extends Think {
   async evictInMemoryContinuationState(): Promise<void> {
     const internal = this["_turns"] as unknown as {
       continuation: { pending: unknown };
-      autoContinuation: { reset(): void };
+      resetContinuationBarrier(): void;
       pendingInteraction: Promise<boolean> | null;
       interactionTail: Promise<void>;
     };
-    // reset() cancels the coalesce timer and clears the double-fire guard.
-    internal.autoContinuation.reset();
+    // Cancels the coalesce timer and clears the double-fire guard.
+    internal.resetContinuationBarrier();
     internal.continuation.pending = null;
     internal.pendingInteraction = null;
     internal.interactionTail = Promise.resolve();
@@ -2059,7 +2153,8 @@ export class ThinkClientToolsAgent extends Think {
         pending: Record<string, unknown> | null;
         awaitingConnections: Map<string, unknown>;
       };
-      autoContinuation: { fireWhenStable(): void; reset(): void };
+      fireContinuationWhenStable(): void;
+      resetContinuationBarrier(): void;
       pendingInteraction: Promise<boolean> | null;
       interactionTail: Promise<void>;
       hasPendingDecision(): boolean;
@@ -2075,8 +2170,7 @@ export class ThinkClientToolsAgent extends Think {
       clientTools: undefined,
       body: undefined,
       errorPrefix: "[Think] Auto-continuation failed:",
-      prerequisite: null,
-      pastCoalesce: false
+      prerequisite: null
     };
 
     // Drive the controller into an in-flight drain so it stays armed
@@ -2089,7 +2183,7 @@ export class ThinkClientToolsAgent extends Think {
     });
     internal.pendingInteraction = new Promise<boolean>(() => {});
     internal.interactionTail = drainGate;
-    internal.autoContinuation.fireWhenStable();
+    internal.fireContinuationWhenStable();
 
     try {
       const hasArmedContinuation = internal.hasPendingDecision();
@@ -2104,7 +2198,7 @@ export class ThinkClientToolsAgent extends Think {
       internal.pendingInteraction = null;
       releaseDrain();
       internal.interactionTail = Promise.resolve();
-      internal.autoContinuation.reset();
+      internal.resetContinuationBarrier();
     }
   }
 

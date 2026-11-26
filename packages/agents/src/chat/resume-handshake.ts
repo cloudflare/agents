@@ -25,9 +25,10 @@ import {
   STREAM_RESUME_NONE_REASONS,
   type StreamResumeNoneReason
 } from "./protocol";
-import type { ContinuationState } from "./continuation-state";
+import type { ContinuationSlots } from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
-import type { ResumableStream } from "./resumable-stream";
+import type { ReplyStreams } from "./reply-stream";
+import { replayCompletedChunks, replayErroredChunks } from "./stream-rows";
 import type { ChatRecentTerminal } from "./recent-terminals";
 import { endedRequestOf, type EndedRequests } from "./chat-frames";
 
@@ -47,8 +48,9 @@ export interface PendingChatTerminal {
 export interface ResumeHandshakeHost {
   /** The host's use-chat-response message-type constant (wire string). */
   readonly responseMessageType: string;
-  readonly resumableStream: ResumableStream;
-  readonly continuation: ContinuationState<Connection>;
+  /** The host's stream log. Named as released hosts pass it. */
+  readonly resumableStream: ReplyStreams;
+  readonly continuation: ContinuationSlots<Connection>;
   /**
    * Accepted-but-not-yet-streamed turns (#1784). Optional: experimental
    * recovery adapters that don't track a pre-stream window omit it and keep the
@@ -89,6 +91,12 @@ export interface ResumeHandshakeHost {
    */
   recentTerminal?(requestIds: readonly string[]): ChatRecentTerminal | null;
   /**
+   * Record a terminal frame the handshake sent one tab itself (an orphaned
+   * stream's end), as `ChatFrames` records the ones it sends. Optional,
+   * paired with {@link recentTerminal}.
+   */
+  recordTerminal?(frame: Record<string, unknown>): void;
+  /**
    * Which tabs were sent which request's end (the host's
    * `ChatFrames.ended`), so the handshake tells a tab each end once.
    */
@@ -98,7 +106,7 @@ export interface ResumeHandshakeHost {
 /**
  * Drives the server side of the stream-resume protocol over a
  * {@link ResumeHandshakeHost}. Construct once per agent (the host wires its
- * `ResumableStream` / `ContinuationState` / pending set in) and call the three
+ * `ReplyStreams` / `ContinuationSlots` / pending set in) and call the three
  * public methods from the host's existing onConnect / onMessage wiring, so
  * handler registration timing stays host-owned.
  */
@@ -206,6 +214,8 @@ export class ResumeHandshake {
   ): Promise<void> {
     connection = this.#once(connection);
     const { resumableStream, continuation, preStream } = this.host;
+    // The continuation whose stream comes next: its turn started, or not yet.
+    const waiting = continuation.running ?? continuation.pending;
     if (resumableStream.hasActiveStream()) {
       // A request the tab waits on that ended while it was away, and a
       // recovery now streams under another id: end it first, or the tab
@@ -228,20 +238,15 @@ export class ResumeHandshake {
         this.notifyStreamResuming(connection, probeId);
       }
     } else if (
-      continuation.pending !== null &&
-      (continuation.pending.connectionId === null ||
-        continuation.pending.connectionId === connection.id)
+      waiting !== null &&
+      (waiting.connectionId === null || waiting.connectionId === connection.id)
     ) {
       // A continuation turn is accepted but its stream has not started yet.
       // Park the connection AND tell it to keep waiting (#1784) so its resume
       // probe does not time out before the continuation stream begins; the host
       // flushes `awaitingConnections` into `STREAM_RESUMING` on stream start.
       continuation.awaitingConnections.set(connection.id, connection);
-      this._sendStreamPending(
-        connection,
-        continuation.pending.requestId,
-        probeId
-      );
+      this._sendStreamPending(connection, waiting.requestId, probeId);
     } else if (await this._replayTerminalOnResume(connection, probeId)) {
       // A turn terminalized while no client was connected (#1645): drive the
       // resume handshake so the terminal error frame can be delivered on the
@@ -412,6 +417,17 @@ export class ResumeHandshake {
       // no live reader), reconstruct the partial assistant message from stored
       // chunks and persist it so it survives further page refreshes.
       if (orphanedStreamId) {
+        // Recorded while the rows still hold the ids: the next stream's
+        // start deletes them, and a tab that comes back then still learns
+        // how the request ended.
+        const messageIds = resumableStream.getOriginMessageIds(requestId);
+        this.host.recordTerminal?.({
+          id: requestId,
+          body: "",
+          done: true,
+          outcome: "aborted",
+          ...(messageIds && { messageIds })
+        });
         await this.host.persistOrphanedStream(orphanedStreamId);
       }
     } else if (resumableStream.hasActiveStream()) {
@@ -433,7 +449,7 @@ export class ResumeHandshake {
       // the app kept it, and must not come back if it did not. Only its
       // recorded end is sent.
     } else if (
-      resumableStream.replayCompletedChunksByRequestId(connection, requestId)
+      replayCompletedChunks(resumableStream.streamOps, connection, requestId)
     ) {
       // A stream that closed into recovery ends on "recovering", which is
       // not an end for the tab. A stop since then recorded the request's
@@ -555,7 +571,8 @@ export class ResumeHandshake {
     // mid-replay, skip the terminal frame; the record is retained, so the next
     // reconnect retries the whole sequence.
     if (
-      !resumableStream.replayErroredChunksByRequestId(
+      !replayErroredChunks(
+        resumableStream.streamOps,
         connection,
         pending.requestId
       )

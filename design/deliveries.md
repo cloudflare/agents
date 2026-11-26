@@ -51,11 +51,23 @@ A code-update or memory-limit reset thrown by the sink is rethrown, so the run s
 | Sink                          | Key                                                | Replaces                                                                                                                                                                                                                                                                                    |
 | ----------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `think-workflow-notification` | `workflow-notification:<submissionId>:<eventType>` | Think's queue push with in-process retry off, the scheduled-retry backoff, the `attempts` / `firstFailedAt` payload fields                                                                                                                                                                  |
+| `channels:<key>`              | `channels:<key>:<responseId>:<surface key hash>`   | nothing: a gateway surface (email) that joined a conversation got none of its responses                                                                                                                                                                                                     |
 | `think-messenger-recovery`    | `messenger-recovery:<incidentId>`                  | Think's `cf_think_messenger_recovery:*` KV records, the per-key promise chain, the eight scheduled retries. Held from the interruption; released with `{ outcome, text }` when recovery settles; `posted` in the checkpoint is the cursor over the reply's posts (5-minute attempt timeout) |
 
-## For Channels
+## Channels: responses to gateway surfaces
 
-A Channel's `deliver()` returns `delivered`, `failed` (retryable or not) or `uncertain`. A Channel sink maps them when that call site lands: `delivered` returns; retryable `failed` throws (or waits the provider's `retryAfter`); non-retryable `failed` gives up at once; `uncertain` records what was sent in the checkpoint, and the next attempt continues that message or gives up with its reference. None of these is built before its call site.
+`deliverToSurfaces(channel, { tasks })` (`agents/experimental/channels/deliveries.ts`, internal until its first in-repo user) is a `ConversationChannel` that serves a gateway Channel (email today; Slack and Telegram once they send) inside the agent. When a turn starts a response, each surface of that Channel that joined the conversation gets one delivery run (sink `channels:<key>`, id `channels:<key>:<responseId>:<address hash>`). Its handler reads the response from Streams, live to its end, and calls the Channel's `stream` (or collects it and calls `deliver`). The Channel's result decides what happens:
+
+| Result                  | Delivery                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------- |
+| `delivered`             | acknowledged                                                                    |
+| `failed`, retryable     | throws: backoff, retried                                                        |
+| `failed`, not retryable | `NonRetryableError`: given up at once                                           |
+| `uncertain`             | `NonRetryableError`, with the Channel's reference: given up, never posted again |
+
+An attempt follows the response while it is generated, so its timeout is an hour, not the module's 60 s. A Channel that cannot stream is called only once the response has ended: with its text, with a short notice when it was interrupted before any text, or not at all when it ended with none. A Channel call that throws counts as a retryable failure for `deliver` (one provider call; nothing arrived) and as `uncertain` for `stream`. Surfaces are kept one per `surface.key` when the Channel gives one (an email thread's root), so a thread that writes twice gets each response once, at its latest message.
+
+Just before its provider call the handler writes `posting` to the run's checkpoint, and after the Channel answers it writes `false`. An attempt that finds `posting: true` belongs to a run whose earlier attempt was cut by a reset after the provider may have seen the post, so it gives up instead of posting again. A reset before anything left the object loses that write with it (a send waits for the object's writes to be durable), so that delivery is posted once, on a later attempt. Continuing the same provider message after a reset needs a Channel that can resume a message; none can yet.
 
 ## What was not built
 

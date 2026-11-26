@@ -1,6 +1,8 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import { SubmissionStatusQueue } from "../../submissions";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
+import { createSlowClientToolMockModel } from "./client-tools";
 import {
   Agent,
   getCurrentAgent,
@@ -66,13 +68,13 @@ import {
   toolApprovalUpdate,
   toolResultUpdate,
   type ChatProtocolHost,
-  REPLAY_CHUNK_BYTES
+  REPLAY_CHUNK_BYTES,
+  turnSignal
 } from "agents/chat";
 import { currentTurnCheckpoint } from "agents/chat";
 import type {
-  ChatTurns,
   ClientToolSchema,
-  ResumableStream,
+  ReplyStreams,
   ToolPartUpdate,
   TurnLane
 } from "agents/chat";
@@ -410,20 +412,52 @@ async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
  * `callback`, oldest first: a recovery Task run, or a replayed chat-turn run
  * whose `model-turn` step journaled the attempt it runs itself.
  */
+/**
+ * The attempt a turn's own run waits to dispatch: the result of the step
+ * before its waiting backoff (`model-turn` for `backoff`, `continuation` for
+ * `backoff-2`, `continuation-N` for `backoff-N+1`).
+ */
+function waitingRunAttemptsForTest(
+  agent: Think
+): Array<{ runId: string; callback: string; delay: number; at: number }> {
+  return agent.sql<{
+    runId: string;
+    callback: string;
+    delay: number;
+    at: number;
+  }>`
+    SELECT r.run_id AS runId,
+           json_extract(p.result, '$.callback') AS callback,
+           json_extract(p.result, '$.delaySeconds') AS delay,
+           p.updated_at AS at
+    FROM cf_agents_task_runs r
+    JOIN cf_agents_task_steps b
+      ON b.run_id = r.run_id AND b.kind = 'sleep' AND b.state = 'waiting'
+         AND b.step_name LIKE 'backoff%'
+    JOIN cf_agents_task_steps p
+      ON p.run_id = r.run_id AND p.step_name = CASE
+        WHEN b.step_name = 'backoff' THEN 'model-turn'
+        WHEN b.step_name = 'backoff-2' THEN 'continuation'
+        ELSE 'continuation-' || (CAST(substr(b.step_name, 9) AS INTEGER) - 1)
+      END
+    WHERE r.status IN ('pending', 'running')
+      AND json_extract(p.result, '$.callback') IS NOT NULL
+    ORDER BY r.created_at ASC
+  `;
+}
+
 function pendingRecoveryRunIds(agent: Think, callback: string): string[] {
-  return agent.sql<{ run_id: string }>`
-    SELECT run_id, created_at FROM cf_agents_task_runs
+  const tasks = agent.sql<{ run_id: string }>`
+    SELECT run_id FROM cf_agents_task_runs
     WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
       AND status IN ('pending', 'running')
       AND json_extract(metadata, '$.callback') = ${callback}
-    UNION ALL
-    SELECT r.run_id, r.created_at FROM cf_agents_task_runs r
-    JOIN cf_agents_task_steps s
-      ON s.run_id = r.run_id AND s.step_name = 'model-turn'
-    WHERE r.status IN ('pending', 'running')
-      AND json_extract(s.result, '$.callback') = ${callback}
     ORDER BY created_at ASC
   `.map((row) => row.run_id);
+  const runs = waitingRunAttemptsForTest(agent)
+    .filter((attempt) => attempt.callback === callback)
+    .map((attempt) => attempt.runId);
+  return [...tasks, ...runs];
 }
 
 /**
@@ -471,35 +505,41 @@ function latestRecoveryAttemptForTest(
   agent: Think,
   pendingOnly = false
 ): { delay: number | null; keyed: boolean } | undefined {
-  const row = agent.sql<{
+  const task = agent.sql<{
     delay: number | null;
     key: string | null;
-    turn: number;
+    at: number;
   }>`
-    SELECT delay, key, turn FROM (
-      SELECT json_extract(input, '$.delaySeconds') AS delay,
-             idempotency_key AS key, 0 AS turn, created_at AS at
-      FROM cf_agents_task_runs
-      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND (${pendingOnly ? 1 : 0} = 0 OR status = 'pending')
-      UNION ALL
-      SELECT json_extract(s.result, '$.delaySeconds'), NULL, 1, s.updated_at
-      FROM cf_agents_task_steps s
-      JOIN cf_agents_task_runs r ON r.run_id = s.run_id
-      WHERE s.step_name = 'model-turn'
-        AND json_extract(s.result, '$.callback') IS NOT NULL
-        AND (${pendingOnly ? 1 : 0} = 0 OR r.status IN ('pending', 'running'))
-    )
-    ORDER BY at DESC
+    SELECT json_extract(input, '$.delaySeconds') AS delay,
+           idempotency_key AS key, created_at AS at
+    FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND (${pendingOnly ? 1 : 0} = 0 OR status = 'pending')
+    ORDER BY created_at DESC
     LIMIT 1
   `[0];
-  if (!row) return undefined;
-  return {
-    delay: row.delay,
-    keyed: row.turn
-      ? turnAttemptReasons.get(agent)?.at(-1) === "initial"
-      : row.key != null
-  };
+  const inRun = (
+    pendingOnly
+      ? waitingRunAttemptsForTest(agent)
+      : agent.sql<{ delay: number; at: number }>`
+          SELECT json_extract(result, '$.delaySeconds') AS delay,
+                 updated_at AS at
+          FROM cf_agents_task_steps
+          WHERE (step_name = 'model-turn' OR step_name LIKE 'continuation%')
+            AND json_extract(result, '$.callback') IS NOT NULL
+        `
+  ).reduce<{ delay: number; at: number } | undefined>(
+    (latest, row) => (!latest || row.at >= latest.at ? row : latest),
+    undefined
+  );
+  if (!task && !inRun) return undefined;
+  if (inRun && (!task || inRun.at >= task.at)) {
+    return {
+      delay: inRun.delay,
+      keyed: turnAttemptReasons.get(agent)?.at(-1) === "initial"
+    };
+  }
+  return { delay: task!.delay, keyed: task!.key != null };
 }
 
 function recoveryTransportCountsForTest(
@@ -527,6 +567,15 @@ async function runQueuedRecoveryTaskForTest(
 ): Promise<boolean> {
   const runId = pendingRecoveryRunIds(agent, callback)[0];
   if (!runId) return false;
+  // A turn's own run that kept the attempt suspends in its backoff once the
+  // turn's step has ended: wait for that, so the wake below is its own.
+  for (let i = 0; i < 200; i++) {
+    const [run] = agent.sql<{ status: string }>`
+      SELECT status FROM cf_agents_task_runs WHERE run_id = ${runId}
+    `;
+    if (run?.status !== "running") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   const past = Date.now() - 1_000;
   agent.sql`
     UPDATE cf_agents_task_runs
@@ -551,12 +600,30 @@ async function waitForThinkIdleForTest(agent: Think): Promise<void> {
   )._turnQueue.waitForIdle();
 }
 
+/**
+ * Wait until no task run has a step running: a recovered turn's run keeps
+ * its next attempt once its step ends, and suspends in that attempt's
+ * backoff.
+ */
+async function waitForRunStepsForTest(agent: Think): Promise<void> {
+  for (let i = 0; i < 300; i++) {
+    const [row] = agent.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_steps s
+      JOIN cf_agents_task_runs r ON r.run_id = s.run_id
+      WHERE r.status = 'running' AND s.state = 'running'
+    `;
+    if ((row?.count ?? 0) === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 async function runRecoveryWorkForTest(
   agent: Think,
   callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
 ): Promise<void> {
   if (await runQueuedRecoveryTaskForTest(agent, callback)) {
     await waitForThinkIdleForTest(agent);
+    await waitForRunStepsForTest(agent);
     return;
   }
   const rows = agent.sql<{ payload: string }>`
@@ -944,9 +1011,18 @@ function createEmptyStreamResult(): StreamableResult {
  * `_streamResult` and then abort mid-stream without racing the chunk
  * pipeline.
  */
+/** Holds a delayed-chunk stream after `after` chunks until it is opened. */
+type ChunkHoldForTest = {
+  after: number;
+  reached: boolean;
+  released: Promise<void>;
+  open: () => void;
+};
+
 function createDelayedMultiChunkMockModel(
   chunks: string[],
-  delayMs: number
+  delayMs: number,
+  hold?: ChunkHoldForTest | null
 ): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -963,7 +1039,11 @@ function createDelayedMultiChunkMockModel(
         async start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
           controller.enqueue({ type: "text-start", id: `t-${callId}` });
-          for (const chunk of chunks) {
+          for (const [index, chunk] of chunks.entries()) {
+            if (hold && index === hold.after) {
+              hold.reached = true;
+              await hold.released;
+            }
             await new Promise((resolve) => setTimeout(resolve, delayMs));
             controller.enqueue({
               type: "text-delta",
@@ -1095,6 +1175,21 @@ type TurnIdentityLogEntry = {
   getMessengerThreadId: string | null;
 };
 
+// Each submission's status reports as they reach Think's queue, counted
+// before they wait there: a test can tell a report arrived while an earlier
+// hook is still held.
+const statusReportsQueued = new Map<string, number>();
+{
+  const run = SubmissionStatusQueue.prototype.run;
+  SubmissionStatusQueue.prototype.run = function (submissionId, report) {
+    statusReportsQueued.set(
+      submissionId,
+      (statusReportsQueued.get(submissionId) ?? 0) + 1
+    );
+    return run.call(this, submissionId, report);
+  };
+}
+
 export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
   private _nextSubAgentConnectionSendDelayMs = 0;
@@ -1177,19 +1272,17 @@ export class ThinkTestAgent extends Think {
   }
 
   override async _cf_sendToSubAgentConnection(
-    connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
+    ...args: Parameters<Think["_cf_sendToSubAgentConnection"]>
   ): Promise<void> {
     await this._delayNextSubAgentConnectionSend();
-    await super._cf_sendToSubAgentConnection(connectionId, message);
+    await super._cf_sendToSubAgentConnection(...args);
   }
 
   override async _cf_sendManyToSubAgentConnection(
-    connectionId: string,
-    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+    ...args: Parameters<Think["_cf_sendManyToSubAgentConnection"]>
   ): Promise<void> {
     await this._delayNextSubAgentConnectionSend();
-    await super._cf_sendManyToSubAgentConnection(connectionId, messages);
+    await super._cf_sendManyToSubAgentConnection(...args);
   }
 
   private async _delayNextSubAgentConnectionSend(): Promise<void> {
@@ -1262,7 +1355,7 @@ export class ThinkTestAgent extends Think {
         this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
       if (requestId) {
         const streamId =
-          this["_resumableStream"]
+          this["_replyStreams"]
             .getAllStreamMetadata()
             .find((m) => m.request_id === requestId)?.id ?? undefined;
         if (streamId) return { requestId, streamId };
@@ -1298,8 +1391,8 @@ export class ThinkTestAgent extends Think {
       // so the chunk is buffered and replayed in order instead of being dropped.
       const live = await this._waitForLiveTurnForTest(runId);
       if (live) {
-        this["_resumableStream"].storeChunk(live.streamId, race.body);
-        this["_resumableStream"].flushBuffer();
+        this["_replyStreams"].storeChunk(live.streamId, race.body);
+        this["_replyStreams"].flushBuffer();
         this.broadcast(
           JSON.stringify({
             type: "cf_agent_use_chat_response",
@@ -1479,14 +1572,14 @@ export class ThinkTestAgent extends Think {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     this["_agentToolRuns"].store.ensure();
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of backlog) {
-      this["_resumableStream"].storeChunk(streamId, body);
+      this["_replyStreams"].storeChunk(streamId, body);
     }
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
@@ -1571,7 +1664,7 @@ export class ThinkTestAgent extends Think {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     this["_agentToolRuns"].store.ensure();
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
@@ -1588,7 +1681,7 @@ export class ThinkTestAgent extends Think {
         })
       );
     const send = (body: string) => {
-      this["_resumableStream"].storeChunk(streamId, body);
+      this["_replyStreams"].storeChunk(streamId, body);
       broadcast(body);
     };
     const delta = (value: string) =>
@@ -1598,8 +1691,8 @@ export class ThinkTestAgent extends Think {
     send(delta("a"));
     send(delta("b"));
     send(oversized);
-    this["_resumableStream"].storeChunk(streamId, delta("c"));
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].storeChunk(streamId, delta("c"));
+    this["_replyStreams"].flushBuffer();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(delta("c"));
@@ -1653,14 +1746,14 @@ export class ThinkTestAgent extends Think {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     this["_agentToolRuns"].store.ensure();
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of backlog) {
-      this["_resumableStream"].storeChunk(streamId, body);
+      this["_replyStreams"].storeChunk(streamId, body);
     }
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
@@ -1698,7 +1791,7 @@ export class ThinkTestAgent extends Think {
         id: "t",
         delta: "post-restart"
       });
-      this["_resumableStream"].storeChunk(streamId, postBody);
+      this["_replyStreams"].storeChunk(streamId, postBody);
       this.broadcast(
         JSON.stringify({
           type: "cf_agent_use_chat_response",
@@ -1754,7 +1847,7 @@ export class ThinkTestAgent extends Think {
     const runId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     this["_agentToolRuns"].store.ensure();
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     this.sql`
       INSERT INTO cf_agent_tool_child_runs
         (run_id, request_id, stream_id, status, started_at)
@@ -1781,12 +1874,12 @@ export class ThinkTestAgent extends Think {
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of stored.slice(0, 2)) {
-      this["_resumableStream"].storeChunk(streamId, body);
+      this["_replyStreams"].storeChunk(streamId, body);
       broadcast(body);
     }
     broadcast(progress("before-attach"));
-    this["_resumableStream"].storeChunk(streamId, stored[2]);
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].storeChunk(streamId, stored[2]);
+    this["_replyStreams"].flushBuffer();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(progress("during-drain"));
@@ -2751,12 +2844,12 @@ export class ThinkTestAgent extends Think {
    * sends on connect mid-stream.
    */
   async testStartResumableStream(requestId: string): Promise<string> {
-    return this._resumableStream.start(requestId);
+    return this._replyStreams.start(requestId);
   }
 
   async testStoreResumableChunk(streamId: string, body: string): Promise<void> {
-    this._resumableStream.storeChunk(streamId, body);
-    this._resumableStream.flushBuffer();
+    this._replyStreams.storeChunk(streamId, body);
+    this._replyStreams.flushBuffer();
   }
 
   /**
@@ -2767,7 +2860,7 @@ export class ThinkTestAgent extends Think {
     requestId: string,
     close: "finish" | "complete" | "error"
   ): Promise<void> {
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._replyStreams.start(requestId);
     const [connection] = [...this.getConnections()];
     if (!connection) {
       throw new Error(
@@ -2785,7 +2878,7 @@ export class ThinkTestAgent extends Think {
     internals._resumeHandshake().notifyStreamResuming(connection);
     if (close === "finish") {
       this["_replyStreams"].finish(streamId);
-      this._resumableStream.finalizePending();
+      this._replyStreams.finalizePending();
     } else if (close === "complete") {
       this["_replyStreams"].complete(streamId);
     } else {
@@ -2801,7 +2894,7 @@ export class ThinkTestAgent extends Think {
 
   /** Emit the real resume notification followed by a terminal broadcast. */
   async testSendStreamResumingBeforeTerminal(requestId: string): Promise<void> {
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._replyStreams.start(requestId);
     const [connection] = [...this.getConnections()];
     if (!connection) {
       throw new Error(
@@ -2820,7 +2913,7 @@ export class ThinkTestAgent extends Think {
     )
       ._resumeHandshake()
       .notifyStreamResuming(connection);
-    this._resumableStream.complete(streamId);
+    this._replyStreams.complete(streamId);
     this.broadcast(
       JSON.stringify({
         type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
@@ -2833,7 +2926,7 @@ export class ThinkTestAgent extends Think {
 
   /** Pair with `testStartResumableStream` — clean up the simulated stream. */
   async testCompleteResumableStream(streamId: string): Promise<void> {
-    this._resumableStream.complete(streamId);
+    this._replyStreams.complete(streamId);
   }
 
   /**
@@ -2893,7 +2986,7 @@ export class ThinkTestAgent extends Think {
   }
 
   async getLatestStreamStatusForTest(): Promise<string | null> {
-    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
+    return this._replyStreams.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   /** Store a `think_config` value, as an earlier isolate would have. */
@@ -2918,6 +3011,33 @@ export class ThinkTestAgent extends Think {
       error: cb.errorMessage,
       interruptedCalls: cb.interruptedCalls
     };
+  }
+
+  /**
+   * Run a turn and count the chat frames serialized during it, by type
+   * (#2724). Counts `JSON.stringify` calls on a frame object.
+   */
+  async countChatFrameSerializationsForTest(
+    message: string
+  ): Promise<Record<string, number>> {
+    const counts: Record<string, number> = {};
+    const stringify = JSON.stringify;
+    JSON.stringify = ((...args: Parameters<typeof stringify>) => {
+      const type = (args[0] as { type?: unknown } | null | undefined)?.type;
+      if (
+        type === "cf_agent_chat_messages" ||
+        type === "cf_agent_use_chat_response"
+      ) {
+        counts[type] = (counts[type] ?? 0) + 1;
+      }
+      return stringify(...args);
+    }) as typeof JSON.stringify;
+    try {
+      await this.testChat(message);
+    } finally {
+      JSON.stringify = stringify;
+    }
+    return counts;
   }
 
   private _userTextsForTest(): string[] {
@@ -3266,11 +3386,8 @@ export class ThinkTestAgent extends Think {
         ${Date.now()})
     `;
     const internals = this as unknown as {
-      _aborts: {
-        getSignal(id: string): AbortSignal | undefined;
-        remove(id: string): void;
-      };
       _turns: {
+        aborts: Map<string, AbortController>;
         beginRecoveryAttempt(id: string): {
           signal: AbortSignal;
           end(): void;
@@ -3278,8 +3395,11 @@ export class ThinkTestAgent extends Think {
       };
       _submissionAbortControllers: Map<string, AbortController>;
     };
-    const recoveredTurn = internals._aborts.getSignal("recovered-request");
-    const otherTurn = internals._aborts.getSignal("a-users-turn");
+    const recoveredTurn = turnSignal(
+      internals._turns.aborts,
+      "recovered-request"
+    );
+    const otherTurn = turnSignal(internals._turns.aborts, "a-users-turn");
     const attempt = internals._turns.beginRecoveryAttempt("first-request");
     const otherAttempt = internals._turns.beginRecoveryAttempt("a-users-root");
     const otherSubmission = new AbortController();
@@ -3299,8 +3419,8 @@ export class ThinkTestAgent extends Think {
     } finally {
       attempt.end();
       otherAttempt.end();
-      internals._aborts.remove("recovered-request");
-      internals._aborts.remove("a-users-turn");
+      internals._turns.aborts.delete("recovered-request");
+      internals._turns.aborts.delete("a-users-turn");
       internals._submissionAbortControllers.delete("a-users-submission");
     }
   }
@@ -3428,11 +3548,13 @@ export class ThinkTestAgent extends Think {
     };
     const callback = new TestCollectingCallback();
     let stampAtClose: string | null | undefined;
-    const stream = this._resumableStream as unknown as {
-      complete(streamId: string, outcome?: string): void;
+    // SAFETY: the fixture wraps the log's private row settle, which every
+    // close of a stream goes through.
+    const stream = this._replyStreams as unknown as {
+      _completeRow(streamId: string, outcome?: string): void;
     };
-    const complete = stream.complete.bind(stream);
-    stream.complete = (streamId, outcome) => {
+    const complete = stream._completeRow.bind(stream);
+    stream._completeRow = (streamId, outcome) => {
       complete(streamId, outcome);
       if (via === "submit" && stampAtClose === undefined) {
         const [running] = submissionRecords(this, ["running"]);
@@ -3481,11 +3603,11 @@ export class ThinkTestAgent extends Think {
         routeOutcomes: this._routeOutcomesForTest,
         stampAtClose,
         activeStream:
-          this._resumableStream.hasActiveStream() ||
-          this._resumableStream.pendingCutoverId !== null
+          this._replyStreams.hasActiveStream() ||
+          this._replyStreams.pendingCutoverId !== null
       };
     } finally {
-      stream.complete = complete;
+      stream._completeRow = complete;
       self._routeStreamInterruption = route;
       this._stopRightAfterStall = false;
       this._stallAfterChunks = null;
@@ -3688,9 +3810,9 @@ export class ThinkTestAgent extends Think {
     const requestId = crypto.randomUUID();
     // Any read creates the run table.
     await this.inspectAgentToolRun(runId);
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     for (const delta of ["a", "b", "c"]) {
-      this["_resumableStream"].storeChunk(
+      this["_replyStreams"].storeChunk(
         streamId,
         JSON.stringify({ type: "text-delta", id: "t", delta })
       );
@@ -3844,11 +3966,14 @@ export class ThinkTestAgent extends Think {
       UPDATE cf_agent_tool_child_runs SET request_id = 'recovered-request'
       WHERE run_id = ${runId}
     `;
-    const signal = (
-      this as unknown as {
-        _aborts: { getSignal(id: string): AbortSignal | undefined };
-      }
-    )._aborts.getSignal("recovered-request");
+    const signal = turnSignal(
+      (
+        this as unknown as {
+          _turns: { aborts: Map<string, AbortController> };
+        }
+      )._turns.aborts,
+      "recovered-request"
+    );
     const abortedBefore = signal?.aborted ?? false;
     await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
     return {
@@ -3965,7 +4090,7 @@ export class ThinkTestAgent extends Think {
 
   /** The close outcome recorded on the request's latest chat stream. */
   async getStreamOutcomeForTest(requestId: string): Promise<string | null> {
-    return this._resumableStream.getOutcome(requestId) ?? null;
+    return this._replyStreams.getOutcome(requestId) ?? null;
   }
 
   /**
@@ -4106,12 +4231,11 @@ export class ThinkTestAgent extends Think {
       this._midStreamHookForTest = {
         afterChunks: 5,
         run: async () => {
-          const streamId = this._resumableStream.activeStreamId;
+          const streamId = this._replyStreams.activeStreamId;
           if (!streamId) throw new Error("no active continuation stream");
           recorded = {
-            messageId: this._resumableStream.getStreamMessageId(streamId),
-            basePartCount:
-              this._resumableStream.getStreamBasePartCount(streamId)
+            messageId: this._replyStreams.getStreamMessageId(streamId),
+            basePartCount: this._replyStreams.getStreamBasePartCount(streamId)
           };
           await internals._persistOrphanedStream(streamId);
           await internals._persistOrphanedStream(streamId);
@@ -4944,14 +5068,12 @@ export class ThinkTestAgent extends Think {
           pending: Record<string, unknown> | null;
           awaitingConnections: Map<string, unknown>;
         };
-        autoContinuation: {
-          _timer: ReturnType<typeof setTimeout> | null;
-          cancelTimer(): void;
-        };
+        coalesceTimer: ReturnType<typeof setTimeout> | null;
+        cancelCoalesce(): void;
       };
     };
-    // Seed a pending auto-continuation with `pastCoalesce: false` so the buggy
-    // re-arm path (`autoContinuation.rearmForBatch`) would reset the
+    // Seed a pending auto-continuation so the buggy
+    // re-arm path (`ChatTurns.rearmContinuation`) would reset the
     // coalesce timer in the recovery `finally`.
     internal._turns.continuation.pending = {
       connection: undefined,
@@ -4960,8 +5082,7 @@ export class ThinkTestAgent extends Think {
       clientTools: undefined,
       body: undefined,
       errorPrefix: "[Think] Auto-continuation failed:",
-      prerequisite: null,
-      pastCoalesce: false
+      prerequisite: null
     };
     this._stallAfterChunks = afterChunks;
     this._stallAttemptsRemaining = 1;
@@ -4971,7 +5092,7 @@ export class ThinkTestAgent extends Think {
       // Read synchronously: no `await` has yielded since the recovery `finally`
       // ran, so an erroneously armed 50ms timer cannot have fired yet.
       const coalesceTimerArmedAfterStall =
-        internal._turns.autoContinuation._timer !== null;
+        internal._turns.coalesceTimer !== null;
       const streamingAssistantCleared = internal._turns.liveReply === null;
       const scheduledContinues = recoveryWorkCountForTest(
         this,
@@ -4986,7 +5107,7 @@ export class ThinkTestAgent extends Think {
     } finally {
       // Tear down the seeded pending + any armed timer so nothing leaks into a
       // later turn (and the seeded undefined connection never gets used).
-      internal._turns.autoContinuation.cancelTimer();
+      internal._turns.cancelCoalesce();
       internal._turns.continuation.pending = null;
       internal._turns.continuation.awaitingConnections.clear();
       this._stallAfterChunks = null;
@@ -9306,7 +9427,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     if (this._delayedChunks) {
       return createDelayedMultiChunkMockModel(
         this._delayedChunks.chunks,
-        this._delayedChunks.delayMs
+        this._delayedChunks.delayMs,
+        this._chunkHold
       );
     }
     return createMockModel(this._programmaticResponse);
@@ -9392,7 +9514,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   /** Abort the request (not cancelSubmission), after it starts streaming. */
   async abortSubmissionRequestForTest(requestId: string): Promise<void> {
     for (let attempt = 0; attempt < 200; attempt++) {
-      if (this._resumableStream.latestActiveStreamInfoForRequest(requestId)) {
+      if (this._replyStreams.latestActiveStreamInfoForRequest(requestId)) {
         this.abortRequest(requestId);
         return;
       }
@@ -9440,7 +9562,17 @@ export class ThinkProgrammaticTestAgent extends Think {
         setTimeout(resolve, this._submissionStatusDelayMs)
       );
     }
+    const hold = this._statusHookHold;
+    if (hold) {
+      this._statusHookHold = null;
+      hold.reached = true;
+      await hold.released;
+    }
     this._submissionLog.push(result);
+    if (this._cancelInSubmissionStatusHook && result.status === "running") {
+      this._cancelInSubmissionStatusHook = false;
+      await this.cancelSubmission(result.submissionId, "from the hook");
+    }
     if (
       this._waitInSubmissionStatusHook &&
       ["completed", "aborted", "skipped", "error"].includes(result.status)
@@ -9456,6 +9588,45 @@ export class ThinkProgrammaticTestAgent extends Think {
         );
       }
     }
+  }
+
+  private _statusHookHold: {
+    reached: boolean;
+    released: Promise<void>;
+    open: () => void;
+  } | null = null;
+  private _heldStatusHook: { reached: boolean; open: () => void } | null = null;
+
+  /** Hold the next `onSubmissionStatus` call until released. */
+  async holdSubmissionStatusHookForTest(): Promise<void> {
+    let open = () => {};
+    const released = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    this._statusHookHold = { reached: false, released, open };
+    this._heldStatusHook = this._statusHookHold;
+  }
+
+  /** How many status reports of a submission have reached Think's queue. */
+  async statusReportsQueuedForTest(submissionId: string): Promise<number> {
+    return statusReportsQueued.get(submissionId) ?? 0;
+  }
+
+  /** Whether the held `onSubmissionStatus` call is waiting. */
+  async isSubmissionStatusHookHeldForTest(): Promise<boolean> {
+    return this._heldStatusHook?.reached ?? false;
+  }
+
+  async releaseSubmissionStatusHookForTest(): Promise<void> {
+    this._heldStatusHook?.open();
+    this._heldStatusHook = null;
+  }
+
+  private _cancelInSubmissionStatusHook = false;
+
+  /** Cancel the submission from its own `running` status hook, once. */
+  async cancelInSubmissionStatusHookForTest(): Promise<void> {
+    this._cancelInSubmissionStatusHook = true;
   }
 
   /** Call `waitForSubmission` from `onSubmissionStatus` on terminal statuses. */
@@ -9589,6 +9760,32 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async clearDelayedChunkResponse(): Promise<void> {
     this._delayedChunks = null;
+  }
+
+  private _chunkHold: ChunkHoldForTest | null = null;
+
+  /** Hold the next delayed-chunk streams after `after` chunks. */
+  async holdChunksAfterForTest(after: number): Promise<void> {
+    let open = () => {};
+    const released = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    this._chunkHold = { after, reached: false, released, open };
+  }
+
+  /** Resolve once no turn runs or waits. */
+  async waitForIdleForTest(): Promise<void> {
+    await waitForThinkIdleForTest(this);
+  }
+
+  /** Whether a held stream has sent its chunks and is waiting. */
+  async isChunkStreamHeldForTest(): Promise<boolean> {
+    return this._chunkHold?.reached ?? false;
+  }
+
+  async releaseChunksForTest(): Promise<void> {
+    this._chunkHold?.open();
+    this._chunkHold = null;
   }
 
   async setInBandStreamErrorResponse(
@@ -9796,8 +9993,10 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setLastBodyForTest(body: Record<string, unknown>): Promise<void> {
     (
-      this as unknown as { _lastBody: Record<string, unknown> | undefined }
-    )._lastBody = body;
+      this as unknown as {
+        _turns: { lastBody: Record<string, unknown> | undefined };
+      }
+    )._turns.lastBody = body;
   }
 
   async setWorkflowEventFailuresForTest(count: number): Promise<void> {
@@ -10472,20 +10671,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     messageId: string
   ): Promise<void> {
     const internals = this as unknown as {
-      _resumableStream: {
+      _replyStreams: {
         start(requestId: string): string;
         storeChunk(streamId: string, body: string): unknown;
       };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
-    const streamId = internals._resumableStream.start(requestId);
+    const streamId = internals._replyStreams.start(requestId);
     for (const chunk of [
       { type: "start", messageId },
       { type: "text-start", id: "t1" },
       { type: "text-delta", id: "t1", delta: "recovered" },
       { type: "text-end", id: "t1" }
     ]) {
-      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+      internals._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
     }
     await internals._persistOrphanedStream(streamId);
   }
@@ -10520,7 +10719,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       ...(options.leafMetadata && { metadata: options.leafMetadata })
     } as UIMessage);
     const internals = this as unknown as {
-      _resumableStream: {
+      _replyStreams: {
         start(
           requestId: string,
           options: {
@@ -10533,7 +10732,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
-    const streamId = internals._resumableStream.start(requestId, {
+    const streamId = internals._replyStreams.start(requestId, {
       messageId: leafId,
       basePartCount: leafParts.length,
       continuation: true
@@ -10550,7 +10749,7 @@ export class ThinkProgrammaticTestAgent extends Think {
         { type: "text-end", id: "t2" }
       ])
     ]) {
-      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+      internals._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
     }
     if (options.deleteLeaf) await this.session.deleteMessages([leafId]);
     for (let i = 0; i < times; i++) {
@@ -10664,17 +10863,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     chunks: Array<Record<string, unknown>>;
   }): Promise<{ scheduledContinueCount: number; scheduledRetryCount: number }> {
     const internals = this as unknown as {
-      _resumableStream: {
+      _replyStreams: {
         start(requestId: string): string;
         storeChunk(streamId: string, body: string): unknown;
         flushBuffer(): void;
       };
     };
-    const streamId = internals._resumableStream.start(input.requestId);
+    const streamId = internals._replyStreams.start(input.requestId);
     for (const chunk of input.chunks) {
-      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+      internals._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
     }
-    internals._resumableStream.flushBuffer();
+    internals._replyStreams.flushBuffer();
     const snapshot = {
       __cfThinkChatFiberSnapshot: {
         kind: "think-chat-turn",
@@ -11132,7 +11331,8 @@ export class ThinkProgrammaticTestAgent extends Think {
    * non-zero between tests means a controller leaked.
    */
   async getAbortControllerCount(): Promise<number> {
-    return (this as unknown as { _aborts: { size: number } })._aborts.size;
+    return (this as unknown as { _turns: { aborts: { size: number } } })._turns
+      .aborts.size;
   }
 
   async getStoredMessages(): Promise<UIMessage[]> {
@@ -11160,7 +11360,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     });
     return {
       streamStatus:
-        this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
+        this._replyStreams.latestStreamInfoForRequest(requestId)?.status ??
         null,
       resultStatus: (() => {
         const record = submissionRecords(this).find(
@@ -11169,10 +11369,9 @@ export class ThinkProgrammaticTestAgent extends Think {
         );
         return (record && progressOf(record).resultStatus) ?? null;
       })(),
-      hasActiveStream: this._resumableStream.hasActiveStream(),
+      hasActiveStream: this._replyStreams.hasActiveStream(),
       hasActiveRequestStream:
-        this._resumableStream.latestActiveStreamInfoForRequest(requestId) !==
-        null,
+        this._replyStreams.latestActiveStreamInfoForRequest(requestId) !== null,
       resumeFrames
     };
   }
@@ -11961,12 +12160,12 @@ export class ThinkRecoveryTestAgent extends Think {
   async bumpRecoveryProgressForTest(): Promise<void> {
     // One explicit credit — the same unit a flushed segment or a forwarded
     // child chunk adds to the derived marker.
-    this._resumableStream.creditProgress();
+    this._replyStreams.creditProgress();
   }
 
   /** The recovery progress marker as the engine would read it now. */
   async readProgressMarkerForTest(): Promise<number> {
-    return this._resumableStream.progressMarker();
+    return this._replyStreams.progressMarker();
   }
 
   /** Simulate compaction collapsing the transcript by dropping all assistant
@@ -11992,8 +12191,8 @@ export class ThinkRecoveryTestAgent extends Think {
     afterToolOutputCount: number;
   }> {
     const self = this as unknown as {
-      _resumableStream: { start(id: string): string };
       _replyStreams: {
+        start(id: string): string;
         store(
           streamId: string,
           chunk: { type: string; [key: string]: unknown },
@@ -12002,7 +12201,7 @@ export class ThinkRecoveryTestAgent extends Think {
         ): number | undefined;
       };
     };
-    const streamId = self._resumableStream.start("req-tool-durability");
+    const streamId = self._replyStreams.start("req-tool-durability");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
     const store = async (chunk: {
       type: string;
@@ -12039,8 +12238,8 @@ export class ThinkRecoveryTestAgent extends Think {
     afterCall: number;
   }> {
     const self = this as unknown as {
-      _resumableStream: { start(id: string): string };
       _replyStreams: {
+        start(id: string): string;
         store(
           streamId: string,
           chunk: { type: string; [key: string]: unknown },
@@ -12049,7 +12248,7 @@ export class ThinkRecoveryTestAgent extends Think {
         ): number | undefined;
       };
     };
-    const streamId = self._resumableStream.start("req-tool-call-durability");
+    const streamId = self._replyStreams.start("req-tool-call-durability");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
     const store = async (chunk: {
       type: string;
@@ -12085,8 +12284,8 @@ export class ThinkRecoveryTestAgent extends Think {
     afterPersist: number;
   }> {
     const self = this as unknown as {
-      _resumableStream: { start(id: string): string };
       _replyStreams: {
+        start(id: string): string;
         store(
           streamId: string,
           chunk: { type: string; [key: string]: unknown },
@@ -12097,10 +12296,10 @@ export class ThinkRecoveryTestAgent extends Think {
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      this._resumableStream.progressMarker();
+      this._replyStreams.progressMarker();
 
     const start = await read();
-    const streamId = self._resumableStream.start("req-progress-immunity");
+    const streamId = self._replyStreams.start("req-progress-immunity");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
     const store = async (chunk: {
       type: string;
@@ -12153,7 +12352,7 @@ export class ThinkRecoveryTestAgent extends Think {
     };
     self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
-      this._resumableStream.progressMarker();
+      this._replyStreams.progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -12811,18 +13010,18 @@ export class ThinkRecoveryTestAgent extends Think {
     chunkCount: number;
     text: string;
   } | null> {
-    const stream = this._resumableStream.getAllStreamMetadata()[0] ?? null;
+    const stream = this._replyStreams.getAllStreamMetadata()[0] ?? null;
     if (!stream) return null;
 
-    // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
+    // Use ReplyStreams.getStreamChunks so packed segment rows are unpacked
     // into individual chunk bodies (matching production replay/reconstruction).
     const chunks = (
       this as unknown as {
-        _resumableStream: {
+        _replyStreams: {
           getStreamChunks(id: string): Array<{ body: string }>;
         };
       }
-    )._resumableStream.getStreamChunks(stream.id);
+    )._replyStreams.getStreamChunks(stream.id);
 
     const text = chunks
       .map((chunk) => {
@@ -12926,44 +13125,107 @@ export class ThinkRecoveryTestAgent extends Think {
     await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
+  /**
+   * Leave the request context the way an earlier release did: the
+   * `think_config` keys `lastClientTools` and `lastBody`, and no session
+   * value. Reset the isolate next, so the start reads them as after an
+   * upgrade.
+   */
+  async seedLegacyRequestContextForTest(
+    lastClientTools: string,
+    lastBody: string
+  ): Promise<void> {
+    const config = (
+      this as unknown as {
+        _cfConfig: { set(key: string, value: string): void };
+      }
+    )._cfConfig;
+    config.set("lastClientTools", lastClientTools);
+    config.set("lastBody", lastBody);
+    await this.sessions
+      .session(this.session.sessionId)
+      .internal_setConfig("transcript:chat:request", null);
+  }
+
+  /** Reset this agent's isolate, as an eviction does. */
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
+
+  /** What this isolate holds, what is stored, and whether the old keys are left. */
+  async requestContextStateForTest(): Promise<{
+    clientTools: string[] | null;
+    body: string | null;
+    stored: string | null;
+    legacyLeft: boolean;
+  }> {
+    await (this as unknown as { _requestContextCarried?: Promise<void> })
+      ._requestContextCarried;
+    const internals = this as unknown as {
+      _cfConfig: { get(key: string): string | undefined };
+      _turns: {
+        lastClientTools?: ClientToolSchema[];
+        lastBody?: Record<string, unknown>;
+      };
+    };
+    return {
+      clientTools:
+        internals._turns.lastClientTools?.map((tool) => tool.name) ?? null,
+      body: JSON.stringify(internals._turns.lastBody ?? null),
+      stored: await this.sessions
+        .session(this.session.sessionId)
+        .internal_config("transcript:chat:request"),
+      legacyLeft:
+        internals._cfConfig.get("lastClientTools") !== undefined ||
+        internals._cfConfig.get("lastBody") !== undefined
+    };
+  }
+
   async setRequestContextForTest(
     body?: Record<string, unknown>,
     clientTools?: ClientToolSchema[]
   ): Promise<void> {
-    const internals = this as unknown as {
-      _lastBody?: Record<string, unknown>;
-      _lastClientTools?: ClientToolSchema[];
-    };
-    internals._lastBody = body;
-    internals._lastClientTools = clientTools;
+    const internals = (
+      this as unknown as {
+        _turns: {
+          lastBody?: Record<string, unknown>;
+          lastClientTools?: ClientToolSchema[];
+        };
+      }
+    )._turns;
+    internals.lastBody = body;
+    internals.lastClientTools = clientTools;
   }
 
   /**
    * Simulate the durable state a HITL turn leaves before a Durable Object
-   * restart: the client tools are persisted to the `think_config` store (where
-   * onStart's `_restoreClientTools()` reads them), while the IN-MEMORY cache is
+   * restart: the client tools are stored as the session's request-context
+   * value (where `_restoreRequestContext()` reads them), while the IN-MEMORY cache is
    * cleared to mimic a fresh wake whose onStart has not run yet. Used to
    * exercise the hibernation ordering guard in `_beginChatRecoveryIncident`.
    */
   async seedDurableClientToolsForTest(
     clientTools: ClientToolSchema[]
   ): Promise<void> {
-    const internals = this as unknown as {
-      _lastClientTools?: ClientToolSchema[];
-      _requestContext: { persist(): void };
-    };
-    internals._lastClientTools = clientTools;
-    internals._requestContext.persist();
-    internals._lastClientTools = undefined;
+    await this.sessions
+      .session(this.session.sessionId)
+      .internal_setConfig(
+        "transcript:chat:request",
+        JSON.stringify({ clientTools })
+      );
+    await this.clearInMemoryClientToolsForTest();
   }
 
-  /** Clear the in-memory client-tool cache (without touching the durable
-   *  `think_config` store) to simulate a fresh post-hibernation wake whose
-   *  onStart `_restoreClientTools()` has not run yet. */
+  /** Clear the in-memory client-tool cache (without touching the stored
+   *  session value) to simulate a fresh post-hibernation wake whose
+   *  `_restoreRequestContext()` has not run yet. */
   async clearInMemoryClientToolsForTest(): Promise<void> {
-    (
-      this as unknown as { _lastClientTools?: ClientToolSchema[] }
-    )._lastClientTools = undefined;
+    const internals = this as unknown as {
+      _turns: { lastClientTools?: ClientToolSchema[] };
+      _requestContextLoaded: boolean;
+    };
+    internals._turns.lastClientTools = undefined;
+    internals._requestContextLoaded = false;
   }
 
   async insertInterruptedStream(
@@ -12999,7 +13261,7 @@ export class ThinkRecoveryTestAgent extends Think {
     }
     // What startup does after a restart: pick the streaming row back up as
     // the active stream, so recovery persists its partial.
-    if (options.restore) this["_resumableStream"].restore();
+    if (options.restore) this["_replyStreams"].restore();
   }
 
   /**
@@ -13009,7 +13271,7 @@ export class ThinkRecoveryTestAgent extends Think {
    */
   async acknowledgeResumeForTest(requestId: string): Promise<boolean> {
     const self = this as unknown as {
-      _resumableStream: {
+      _replyStreams: {
         replayChunks(
           connection: { id: string; send(message: string): void },
           requestId: string
@@ -13017,7 +13279,7 @@ export class ThinkRecoveryTestAgent extends Think {
       };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
-    const orphaned = self._resumableStream.replayChunks(
+    const orphaned = self._replyStreams.replayChunks(
       { id: "tab-after-reset", send: () => {} },
       requestId
     );
@@ -13051,7 +13313,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
   /** Status of a single stream row, or null if absent. */
   async getStreamStatusForTest(streamId: string): Promise<string | null> {
-    return this._resumableStream.getStreamMetadata(streamId)?.status ?? null;
+    return this._replyStreams.getStreamMetadata(streamId)?.status ?? null;
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
@@ -13071,7 +13333,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
   /** Reclaim leftover streams now, as the next stream start does. */
   async runStreamCleanupForTest(nowMs?: number): Promise<number> {
-    return this._resumableStream.reclaim(nowMs);
+    return this._replyStreams.reclaim(nowMs);
   }
 
   /** Complete a reply's stream (mirrors a real turn end). */
@@ -13614,11 +13876,11 @@ export class ThinkRecoveryTestAgent extends Think {
         // A foreign producer invokes reclaim after the successor's cutover,
         // while the recovery callback is still paused before ledger settlement.
         // SAFETY: the fixture accesses the existing private stream adapter.
-        const { _resumableStream } = this as unknown as {
-          _resumableStream: ResumableStream;
+        const { _replyStreams } = this as unknown as {
+          _replyStreams: ReplyStreams;
         };
-        const foreignStream = _resumableStream.start("foreign-terminal-gap");
-        _resumableStream.complete(foreignStream);
+        const foreignStream = _replyStreams.start("foreign-terminal-gap");
+        _replyStreams.complete(foreignStream);
       }
       await this.recoverSubmissionsOnStartForTest();
       // Repeated reconciliation must not duplicate terminal notifications.
@@ -15379,8 +15641,34 @@ export class ThinkAdmissionTestAgent extends Think {
       }))
     );
     let body = ctx.body as
-      | { tag?: string; chunks?: number; delayMs?: number }
+      | {
+          tag?: string;
+          chunks?: number;
+          delayMs?: number;
+          clientToolThenHang?: boolean;
+          clientToolThenEnd?: boolean;
+        }
       | undefined;
+    // The reply calls a client tool and its stream stays open: only a stop
+    // or an eviction ends it. The answer's continuation replies with text.
+    if (body?.clientToolThenHang) {
+      return { model: createSlowClientToolMockModel(1000, 600) };
+    }
+    // The reply calls a client tool and ends; the answer's continuation
+    // replies with text.
+    if (body?.clientToolThenEnd) {
+      // The continuation streams slowly, so a tab that reconnects after a
+      // reset sees it.
+      if (ctx.continuation) {
+        return {
+          model: createDelayedMultiChunkMockModel(
+            ["Continuation ", "after ", "tool"],
+            400
+          )
+        };
+      }
+      return { model: createSlowClientToolMockModel(10, 1) };
+    }
     // A turn with no body (a submission) streams slowly when the question
     // it answers says "slow".
     if (body?.tag === undefined) {
@@ -15409,31 +15697,51 @@ export class ThinkAdmissionTestAgent extends Think {
     return this.messages;
   }
 
+  /** Every recovery incident's status and reason. */
+  async getIncidentsForTest(): Promise<string[]> {
+    const incidents = await this.ctx.storage.list<{
+      status: string;
+      reason?: string;
+    }>({ prefix: "cf:chat-recovery:incident:" });
+    return [...incidents.values()].map(
+      (incident) => `${incident.status}:${incident.reason ?? ""}`
+    );
+  }
+
   /** The next admission record write fails, as SQLite's row limit would. */
   failNextAdmissionForTest(): void {
-    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
-    const store = (
-      admissions as unknown as {
-        host: { store: { add: (...args: unknown[]) => void } };
-      }
-    ).host.store;
-    const add = store.add;
-    store.add = () => {
-      store.add = add;
-      throw new Error("SQLITE_TOOBIG: string or blob too big");
+    // A client request's record is its run on the chat lane.
+    const tasks = this.tasks as unknown as {
+      run: (...args: unknown[]) => Promise<unknown>;
+    };
+    const run = tasks.run;
+    tasks.run = (...args: unknown[]) => {
+      const input = args[1] as { admission?: unknown } | undefined;
+      if (!input?.admission) return run.apply(this.tasks, args);
+      tasks.run = run;
+      return Promise.reject(new Error("SQLITE_TOOBIG: string or blob too big"));
     };
   }
 
   /** Make every admission record `ms` older, as a long wait would. */
   ageAdmissionsForTest(ms: number): void {
-    this
-      .sql`UPDATE cf_agents_chat_admissions SET created_at = created_at - ${ms}`;
+    this.sql`
+      UPDATE cf_agents_task_runs SET created_at = created_at - ${ms}
+      WHERE lane = 'chat'
+    `;
   }
 
+  /** The client requests waiting on the chat lane, in order. */
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
-      return this.sql<{ request_id: string; stopped: number }>`
-        SELECT request_id, stopped FROM cf_agents_chat_admissions ORDER BY seq
+      return this.sql<{ request_id: string; stopped: number | null }>`
+        SELECT json_extract(metadata, '$.requestId') AS request_id,
+               json_extract(metadata, '$.chat.stopped') AS stopped
+        FROM cf_agents_task_runs
+        WHERE lane = 'chat' AND status IN ('pending', 'running')
+          AND json_type(input, '$.admission') IS NOT NULL
+          AND json_type(checkpoint, '$.snapshot') IS NULL
+        ORDER BY seq
       `.map((row) => ({
         requestId: row.request_id,
         stopped: row.stopped === 1
@@ -15444,24 +15752,11 @@ export class ThinkAdmissionTestAgent extends Think {
   }
 
   /**
-   * Write an admission record by hand: the record a reset leaves when it
-   * lands between a turn's fiber and the record's delete.
+   * A record left between a turn's fiber and the record's delete. There is
+   * no such window any more: the record is the turn's run, which recovery
+   * owns once its model call began. Nothing to write.
    */
-  seedAdmissionForTest(requestId: string, messageIds: string[]): void {
-    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
-    admissions?.admit({
-      requestId,
-      messages: messageIds.map((id) => ({ id, role: "user", parts: [] })),
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: {
-        trigger: "submit-message",
-        body: {},
-        clientTools: undefined
-      }
-    });
-    admissions?.live.delete(requestId);
-  }
+  seedAdmissionForTest(_requestId: string, _messageIds: string[]): void {}
 }
 
 /** {@link ThinkAdmissionTestAgent} under `messageConcurrency: "latest"`. */

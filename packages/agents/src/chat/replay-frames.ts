@@ -2,7 +2,7 @@
  * Wire framing for resumable-stream replay: the `USE_CHAT_RESPONSE` frames a
  * reconnecting client receives when stored chunks are replayed to it. Pure
  * senders over one connection — the store and lifecycle decisions stay in
- * `ResumableStream`.
+ * `ReplyStreams`.
  */
 
 import type { Connection } from "agents";

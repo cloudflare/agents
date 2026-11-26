@@ -26,6 +26,9 @@ import type { SessionChangeListener, SessionsOptions } from "./types";
  */
 const CURRENT_SESSIONS_SCHEMA_VERSION = 2;
 
+/** Thrown by schema step 1 when a legacy source was not fully lifted. */
+const LIFT_INCOMPLETE = Symbol("sessions.liftIncomplete");
+
 /**
  * Durable conversation history for a Lifecycle Object.
  *
@@ -39,7 +42,7 @@ const CURRENT_SESSIONS_SCHEMA_VERSION = 2;
 export class Sessions extends LifecycleCapability {
   readonly #core: SessionsCore;
   readonly #handles = new Map<string, Session>();
-  /** The KV key of this instance's schema version. */
+  /** The KV key Sessions kept its schema version under before the record. */
   readonly #schemaKey: string;
 
   constructor(options: SessionsOptions = {}) {
@@ -74,29 +77,39 @@ export class Sessions extends LifecycleCapability {
 
   /** Migrate session storage during Lifecycle startup. */
   async onStart(): Promise<void> {
-    const storage = this.lifecycle.storage;
-    const version = (await storage.get<number>(this.#schemaKey)) ?? 0;
     this.#core.ensureTables();
     if (this.instanceName !== undefined) {
       // A named instance never held released rows: nothing to lift or
       // rebuild. Its tables start at the current version.
-      if (version < CURRENT_SESSIONS_SCHEMA_VERSION) {
-        await storage.put(this.#schemaKey, CURRENT_SESSIONS_SCHEMA_VERSION);
-      }
+      await this.lifecycle.schema.migrate({
+        version: CURRENT_SESSIONS_SCHEMA_VERSION,
+        steps: {},
+        legacyKey: this.#schemaKey
+      });
       return;
     }
-    if (version < CURRENT_SESSIONS_SCHEMA_VERSION) {
-      // Stamp the version only when every legacy source was fully lifted. A
-      // partial migration that recorded success would never be retried, and
-      // the rows it left behind would stay unreachable through the new API
-      // forever. The lift is idempotent, so retrying costs reads and nothing
-      // else. The compactions rebuild runs after it, so lifted overlays are
-      // rebuilt too; it is a no-op once done.
-      const lifted = version >= 1 || this.#core.migrateLegacy();
+    // On the Lifecycle's one schema record; the version Sessions kept under
+    // its own key is folded in once. `migrate`, not `migrateSync`: the lift
+    // and the rebuild read long spans to verify, and those reads stay
+    // outside a transaction (each step opens its own for its writes).
+    try {
+      await this.lifecycle.schema.migrate({
+        version: CURRENT_SESSIONS_SCHEMA_VERSION,
+        legacyKey: this.#schemaKey,
+        steps: {
+          // A lift that left a source behind leaves the version unstamped,
+          // so it retries on a later start; the lift is idempotent.
+          1: () => {
+            if (!this.#core.migrateLegacy()) throw LIFT_INCOMPLETE;
+          },
+          // A no-op on a table that already has the column.
+          2: () => this.#core.rebuildCompactions()
+        }
+      });
+    } catch (error) {
+      if (error !== LIFT_INCOMPLETE) throw error;
+      // Lifted overlays are rebuilt even while the lift retries.
       this.#core.rebuildCompactions();
-      if (lifted) {
-        await storage.put(this.#schemaKey, CURRENT_SESSIONS_SCHEMA_VERSION);
-      }
     }
     // Not gated on the version: overlays an earlier release wrote (before
     // the rebuild, or after a rollback) get their continuation here.

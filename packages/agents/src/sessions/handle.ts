@@ -517,6 +517,19 @@ export class Session {
     return this.#core.config(this.sessionId, key);
   }
 
+  /**
+   * @internal {@link internal_config}, read now without waiting for startup,
+   * for code that runs before it finishes (boot recovery). `null` when there
+   * is no value or the tables do not exist yet.
+   */
+  internal_configNow(key: string): string | null {
+    try {
+      return this.#core.config(this.sessionId, key);
+    } catch {
+      return null;
+    }
+  }
+
   /** @internal Set, or delete with `null`, a value kept for this session. */
   async internal_setConfig(key: string, value: string | null): Promise<void> {
     await this.#ready();

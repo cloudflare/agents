@@ -25,6 +25,7 @@ import {
 } from "../harness";
 import type {
   ThinkOperationResult,
+  ThinkOperationStatus,
   ThinkReceipt,
   ThinkSubmitOptions
 } from "../types";
@@ -33,6 +34,9 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
+const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
+const ACTIVE_TOOLS_KEY = "test:active-tools";
+const LATE_EXAMPLES_KEY = "test:late-examples";
 const ENVIRONMENT_KEY = "test:environment";
 const REMIND_SECTION_KEY = "test:remind-section";
 const REMIND_LABEL_KEY = "test:remind-label";
@@ -151,6 +155,8 @@ function storageSql(storage: DurableObjectStorage) {
 export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** Every model call's prompt, in order, for this isolate. */
   readonly prompts: PromptMessage[][] = [];
+  /** Times the `tools` option was resolved, in this isolate. */
+  #toolBuilds = 0;
   /** The tool names each model call was offered, in order. */
   readonly offered: string[][] = [];
   #releaseSlow: () => void = () => {};
@@ -177,54 +183,61 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         return { stream: this.#reply(messages) };
       }
     }),
-    tools: () => ({
-      multiply: tool({
-        description: "Multiply by three",
-        inputSchema: z.object({ value: z.number() }),
-        execute: async ({ value }) => value * 3
-      }),
-      gate: tool({
-        description: "Wait until released",
-        inputSchema: z.object({}),
-        execute: () => this.#gate()
-      }),
-      // Gone from the tools once a test removes it.
-      ...(!this.ctx.storage.kv.get<boolean>(NO_GATE_SAFE_KEY) && {
-        gate_safe: {
-          ...tool({
-            description: "Wait until released; safe to rerun",
-            inputSchema: z.object({}),
-            execute: () => this.#gate()
-          }),
-          recovery: "rerun" as const
-        }
-      }),
-      // Gone from the tools once a test removes it.
-      ...(!this.ctx.storage.kv.get<boolean>(NO_DANGEROUS_KEY) && {
-        dangerous: tool({
-          description: "Needs approval",
+    tools: () => {
+      this.#toolBuilds++;
+      return {
+        multiply: tool({
+          description: "Multiply by three",
+          inputSchema: z.object({ value: z.number() }),
+          execute: async ({ value }) => value * 3
+        }),
+        gate: tool({
+          description: "Wait until released",
           inputSchema: z.object({}),
-          needsApproval: true,
-          execute: async () => {
-            const runs =
-              (this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0) + 1;
-            this.ctx.storage.kv.put(DANGEROUS_RUNS_KEY, runs);
-            return "did the dangerous thing";
+          execute: () => this.#gate()
+        }),
+        // Gone from the tools once a test removes it.
+        ...(!this.ctx.storage.kv.get<boolean>(NO_GATE_SAFE_KEY) && {
+          gate_safe: {
+            ...tool({
+              description: "Wait until released; safe to rerun",
+              inputSchema: z.object({}),
+              execute: () => this.#gate()
+            }),
+            recovery: "rerun" as const
           }
+        }),
+        // Gone from the tools once a test removes it.
+        ...(!this.ctx.storage.kv.get<boolean>(NO_DANGEROUS_KEY) && {
+          dangerous: tool({
+            description: "Needs approval",
+            inputSchema: z.object({}),
+            needsApproval: true,
+            execute: async () => {
+              const runs =
+                (this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0) + 1;
+              this.ctx.storage.kv.put(DANGEROUS_RUNS_KEY, runs);
+              return "did the dangerous thing";
+            }
+          })
+        }),
+        ask: tool({
+          description: "Runs on the client",
+          inputSchema: z.object({ question: z.string() })
+        }),
+        // A client tool the app adds only once `addLateTool()` is called.
+        ...(this.ctx.storage.kv.get<boolean>(LATE_TOOL_KEY) && {
+          late: tool({
+            description: "Runs on the client, added later",
+            inputSchema: z.object({}),
+            // Examples only once a test adds them.
+            ...(this.ctx.storage.kv.get<boolean>(LATE_EXAMPLES_KEY) && {
+              inputExamples: [{ input: {} }]
+            })
+          })
         })
-      }),
-      ask: tool({
-        description: "Runs on the client",
-        inputSchema: z.object({ question: z.string() })
-      }),
-      // A client tool the app adds only once `addLateTool()` is called.
-      ...(this.ctx.storage.kv.get<boolean>(LATE_TOOL_KEY) && {
-        late: tool({
-          description: "Runs on the client, added later",
-          inputSchema: z.object({})
-        })
-      })
-    }),
+      };
+    },
     // A shipped extension's remind section, set only once a test asks.
     extensions: [
       {
@@ -249,13 +262,31 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
-      beforeTurn: ({ toolSet }) => {
+      beforeTurn: async ({ toolSet, session, system: built }) => {
+        // As an extension's `sendMessage` from this hook does.
+        if (this.ctx.storage.kv.get<boolean>(NOTE_IN_BEFORE_TURN_KEY)) {
+          await this.#handles.get(session)?.appendMessage({
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: "note" }]
+          });
+        }
         // A hook that edits the tools it is shown changes nothing offered.
         if (this.ctx.storage.kv.get<boolean>(EDIT_TOOLSET_KEY)) {
           delete toolSet.multiply;
         }
         const system = this.ctx.storage.kv.get<string>(SYSTEM_KEY);
-        return system ? { system } : undefined;
+        const activeTools = this.ctx.storage.kv.get<string[]>(ACTIVE_TOOLS_KEY);
+        if (!system && !activeTools) return undefined;
+        return {
+          // "+text" extends the built prompt, as a profile hook does.
+          ...(system && {
+            system: system.startsWith("+")
+              ? `${built}\n\n${system.slice(1)}`
+              : system
+          }),
+          ...(activeTools && { activeTools })
+        };
       },
       beforeToolCall: ({ toolName }) => {
         const blocked = this.ctx.storage.kv.get<string>(BLOCK_KEY);
@@ -467,6 +498,22 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.session(session).submit(text, rest);
   }
 
+  /**
+   * Submit, and return why it was refused, or null. Caught here, so a
+   * refusal does not also surface as the object's unhandled rejection.
+   */
+  async submitRefusal(
+    text: string,
+    options: ThinkSubmitOptions = {}
+  ): Promise<string | null> {
+    try {
+      await this.harness.session().submit(text, options);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   /** Submit through the shared harness interface, asking to steer. */
   async steer(text: string): Promise<string> {
     const session: HarnessSession = this.harness.session();
@@ -522,6 +569,42 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       from: { participantId }
     });
     return session.wait(operationId);
+  }
+
+  addLateExamples(): void {
+    this.ctx.storage.kv.put(LATE_EXAMPLES_KEY, true);
+  }
+
+  setActiveTools(names: string[] | null): void {
+    if (names) this.ctx.storage.kv.put(ACTIVE_TOOLS_KEY, names);
+    else this.ctx.storage.kv.delete(ACTIVE_TOOLS_KEY);
+  }
+
+  noteInBeforeTurn(): void {
+    this.ctx.storage.kv.put(NOTE_IN_BEFORE_TURN_KEY, true);
+  }
+
+  /** Each `prefix-changed` event, in order: its session and causes. */
+  readonly #prefixChanges: { session: string; causes: unknown }[] = [];
+  readonly unobservePrefix = this.harness.observe((session, event) => {
+    if (event.type === "prefix-changed") {
+      this.#prefixChanges.push({ session, causes: event.causes });
+    }
+  });
+
+  prefixChanges(): { session: string; causes: unknown }[] {
+    return this.#prefixChanges;
+  }
+
+  /** Edit a message on the Sessions handle, around the harness. */
+  async editMessage(session: string, id: string, text: string): Promise<void> {
+    const handle = this.#handles.get(session);
+    const message = (await handle?.getHistory())?.find((m) => m.id === id);
+    if (!handle || !message) throw new Error(`no message ${id}`);
+    await handle.updateMessage({
+      ...message,
+      parts: [{ type: "text", text }]
+    });
   }
 
   addLateTool(): void {
@@ -644,8 +727,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.session(session).reset();
   }
 
-  regenerate(): Promise<ThinkReceipt> {
-    return this.harness.session().regenerate();
+  regenerate(session?: string): Promise<ThinkReceipt> {
+    return this.harness.session(session).regenerate();
   }
 
   /** Write on the Sessions handle directly; the event types a listener saw. */
@@ -1019,6 +1102,13 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  /** The one schema record: each capability id's version. */
+  schemaVersions(): Record<string, number> | undefined {
+    return this.ctx.storage.kv.get<Record<string, number>>(
+      "cf_agents:schema_versions"
+    );
+  }
+
   /** A released version's store with `count` sessions, each with a tool. */
   seedStoreSessions(count: number): void {
     const store = openHarnessStore(this.ctx.storage, {
@@ -1152,25 +1242,72 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** Think's chat(): the chunk types the callback saw, and how it ended. */
-  async chatCallback(text: string): Promise<{ types: string[]; end: string }> {
+  async chatCallback(
+    text: string,
+    options: ThinkSubmitOptions = {}
+  ): Promise<{ types: string[]; end: string }> {
     const types: string[] = [];
     let end = "";
-    await this.harness.session().chat(text, {
-      onEvent: (json) => {
-        types.push((JSON.parse(json) as { type: string }).type);
+    await this.harness.session().chat(
+      text,
+      {
+        onEvent: (json) => {
+          types.push((JSON.parse(json) as { type: string }).type);
+        },
+        onDone: () => {
+          end = "done";
+        },
+        onError: (error) => {
+          end = `error: ${error}`;
+        }
       },
-      onDone: () => {
-        end = "done";
-      },
-      onError: (error) => {
-        end = `error: ${error}`;
-      }
-    });
+      options
+    );
     return { types, end };
   }
 
-  inspect(operationId: string) {
+  /** The root session's submissions, newest first: their ids and statuses. */
+  async submissionList(): Promise<{ id: string; status: string }[]> {
+    const listed = await this.harness.submissions(this.harness.session().id, {
+      limit: 100
+    });
+    return listed.map((s) => ({ id: s.operationId, status: s.status }));
+  }
+
+  /** One page of the root session's submissions, oldest first, by id. */
+  async submissionPage(
+    limit: number,
+    after?: { operationId: string; createdAt: number }
+  ): Promise<{ id: string; createdAt: number }[]> {
+    const listed = await this.harness.submissions(this.harness.session().id, {
+      order: "oldest",
+      limit,
+      ...(after && { after })
+    });
+    return listed.map((s) => ({ id: s.operationId, createdAt: s.createdAt }));
+  }
+
+  deleteSubmission(operationId: string): Promise<boolean> {
+    return this.harness.deleteSubmission(
+      this.harness.session().id,
+      operationId
+    );
+  }
+
+  /** An operation's status (see `inspectRecord` for the rest). */
+  async inspect(
+    operationId: string
+  ): Promise<ThinkOperationStatus | undefined> {
     return this.harness.session().inspect(operationId);
+  }
+
+  /** An operation's key, metadata and times, as plain JSON for RPC. */
+  async inspectRecord(operationId: string): Promise<string> {
+    const inspection = await this.harness.inspection(
+      this.harness.session().id,
+      operationId
+    );
+    return JSON.stringify(inspection ?? null);
   }
 
   setSystem(system: string): void {
@@ -1228,6 +1365,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   setRemindSection(value: string): void {
     this.ctx.storage.kv.put(REMIND_SECTION_KEY, value);
+  }
+
+  takeToolBuilds(): number {
+    const builds = this.#toolBuilds;
+    this.#toolBuilds = 0;
+    return builds;
   }
 
   removeDangerous(): void {

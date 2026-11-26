@@ -1033,6 +1033,20 @@ describe("think messengers core", () => {
     expect(parseMessengerReplySnapshot({ type: "wrong" })).toBeNull();
   });
 
+  it("gives a snapshot kept as JSON its messages' dates back", () => {
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const event = {
+      ...baseEvent,
+      message: { ...baseEvent.message!, createdAt },
+      skipped: [{ ...baseEvent.message!, createdAt }]
+    };
+    const parsed = parseMessengerReplySnapshot(
+      JSON.parse(JSON.stringify(messengerReplySnapshot("accepted", event)))
+    );
+    expect(parsed?.event.message?.createdAt).toEqual(createdAt);
+    expect(parsed?.event.skipped?.[0]?.createdAt).toEqual(createdAt);
+  });
+
   it("carries an additive delivery tag without changing recovery classification", () => {
     const completed = messengerReplySnapshot("completed", baseEvent);
     expect(completed.tag).toEqual({
@@ -1630,11 +1644,13 @@ describe("think messengers core", () => {
         if ((await agent.getModelLog()).length > 0) break;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      // Past the 1s lock TTL, well inside the 4s first turn.
+      // Past the 1s lock TTL, while the first turn's model call is held.
+      // This waits out the lock's own timer; the turn cannot end meanwhile.
       await new Promise((resolve) => setTimeout(resolve, 1500));
       await send("l2", "second");
       // Queued behind the running turn, not handled under a lock of its own.
       expect(await agent.queueDepthForTest(threadId)).toBe(1);
+      await agent.releaseSlowModelForTest();
       await first;
 
       expect(await agent.getModelLog()).toEqual([
@@ -1643,6 +1659,61 @@ describe("think messengers core", () => {
         { content: "second", kind: "prompt" },
         { content: "second", kind: "stream-end" }
       ]);
+    }, 30_000);
+
+    it("answers a reply run think@0.24.0 left interrupted, from its stored snapshot", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `released-${crypto.randomUUID()}`
+      );
+      expect(await agent.replayReleasedReplyForTest()).toBe(true);
+      expect(await agent.getRecorded("prompt")).toContain("released hello");
+      // One message, edited as the answer streamed.
+      expect(await agent.getAdapterCalls()).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
+    });
+
+    it("answers a webhook reply once after the object reset mid-reply", async () => {
+      const name = `reset-${crypto.randomUUID()}`;
+      // A reset stub stays broken: each call takes a new one.
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      await (
+        await agent()
+      )
+        .fetch("https://example.com/messengers/fake/webhook", {
+          body: JSON.stringify({
+            id: "x1",
+            text: "hello",
+            threadId: "fake:dm"
+          }),
+          method: "POST"
+        })
+        .catch(() => undefined);
+      let posted: Array<{ kind: string; content: string }> = [];
+      let open = 1;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        const stub = await agent();
+        // Settled first: posts read after it are all there will be.
+        open = await stub.openReplyRunsForTest();
+        posted = await stub.getAdapterCalls();
+        if (open === 0 && posted.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(open).toBe(0);
+      // One message, edited as the answer streamed.
+      expect(posted).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
+      expect(
+        (await (await agent()).getRecorded("prompt")).filter((prompt) =>
+          prompt.includes("hello")
+        ).length
+      ).toBeGreaterThan(1);
     }, 30_000);
 
     it("finds the private Chat SDK queue methods the recovery drain relies on", () => {

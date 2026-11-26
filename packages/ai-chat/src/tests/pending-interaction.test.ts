@@ -1,9 +1,9 @@
 import { env } from "cloudflare:workers";
 import type { UIMessage as ChatMessage } from "ai";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitUntilHandled } from "./test-utils";
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -295,6 +295,10 @@ describe("AIChatAgent pending interaction helpers", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The active turn stays active until the test releases its stream.
+    await agentStub.holdStreamForTest("req-reset-turn");
+    // Released however the test ends.
+    onTestFinished(() => agentStub.releaseStreamForTest("req-reset-turn"));
     sendChatRequest(ws, "req-reset-turn", [firstUserMessage], {
       format: "plaintext",
       useAbortSignal: true,
@@ -302,7 +306,9 @@ describe("AIChatAgent pending interaction helpers", () => {
       chunkDelayMs: 80
     });
 
-    await delay(120);
+    await vi.waitFor(async () => {
+      expect(await agentStub.isStreamHeldForTest("req-reset-turn")).toBe(true);
+    });
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
 
     await agentStub.persistToolCallMessage(
@@ -321,8 +327,14 @@ describe("AIChatAgent pending interaction helpers", () => {
       })
     );
 
-    await delay(20);
-    agentStub.resetTurnStateForTest();
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 1);
+    // The continuation is queued behind the active turn.
+    await vi.waitFor(async () => {
+      const state = await agentStub.getContinuationStateForTest();
+      expect(state.hasPending || state.hasNext).toBe(true);
+    });
+    await agentStub.resetTurnStateForTest();
+    await agentStub.releaseStreamForTest("req-reset-turn");
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getAbortControllerCount()).toBe(0);

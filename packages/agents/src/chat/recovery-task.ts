@@ -9,6 +9,12 @@
  * @internal Sibling-package support for AI Chat and Think.
  */
 
+import {
+  holdLaneForReply,
+  inLaneRecoveryAttempt,
+  runHoldingLane
+} from "./turn-task";
+import { isTaskSuspension } from "../tasks/replay";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isPlatformFailure, tryN } from "../retries";
 import type { TaskJson } from "../tasks";
@@ -47,6 +53,8 @@ export type ChatRecoveryHandoff = {
   readonly detached: (onTurnStarted: () => void) => Promise<void>;
   /** Keep the detached turn inside the current alarm's breaker domain. */
   readonly track: (turn: Promise<void>) => void;
+  /** The incident the attempt recovers: a replacement holds its lane. */
+  readonly incidentId?: string;
   /**
    * Enqueue exactly one replacement attempt for a detached platform
    * failure. `dedupeKey` is stable across every retried call for the same
@@ -87,9 +95,18 @@ export async function dispatchChatRecoveryToHandoff(
   });
   const turn = handoff.detached(signalHandoff);
   const tracked = reachedTurn.then(() => handoff.track(turn));
+  // In a lane run's recovery attempt, a replacement attempt keeps the lane
+  // the recovered reply held, until it ends as well.
+  const incidentId = handoff.incidentId;
+  const holding = inLaneRecoveryAttempt() && incidentId !== undefined;
+  let releaseReplacement = () => {};
+  const replaced = new Promise<void>((resolve) => {
+    releaseReplacement = resolve;
+  });
   turn.catch((error) => {
     if (!handedOff) return;
     if (isPlatformFailure(error)) {
+      if (holding) replacementHolds.set(incidentId, releaseReplacement);
       // A failed attempt may still have durably created the run before
       // throwing — acceptance can fail on the wake-mirror push after the
       // insert already committed — so every retry reuses the SAME key
@@ -101,11 +118,24 @@ export async function dispatchChatRecoveryToHandoff(
       void tryN(3, () => handoff.redefer(dedupeKey), {
         baseDelayMs: 50,
         maxDelayMs: 500
-      }).catch((redeferError) => handoff.onDetachedError(redeferError));
+      }).catch((redeferError) => {
+        if (holding) {
+          replacementHolds.delete(incidentId);
+          releaseReplacement();
+        }
+        handoff.onDetachedError(redeferError);
+      });
       return;
     }
     handoff.onDetachedError(error);
   });
+  // A lane run's recovery keeps the lane until the recovered reply ends: a
+  // question queued behind it must not stream beside it.
+  holdLaneForReply(
+    turn.catch(async (error) => {
+      if (holding && handedOff && isPlatformFailure(error)) await replaced;
+    })
+  );
   await Promise.race([turn, tracked]);
 }
 
@@ -221,16 +251,46 @@ export async function enqueueChatRecoveryTask(
   });
 }
 
+/**
+ * The release of a lane held for a recovered reply that failed on the
+ * platform after its handoff, by incident id: its replacement attempt
+ * ({@link dispatchChatRecoveryToHandoff}'s `redefer`) runs holding that
+ * lane and releases it when its own recovered reply ends. A reset loses it
+ * with the park it holds, which the turn's run then recovers.
+ */
+const replacementHolds = new Map<string, () => void>();
+
 /** Build the shared recovery Task handler for one chat host. */
 export function createChatRecoveryTaskDefinition(
   hooks: ChatRecoveryTaskHooks
 ): (input: unknown, step: TaskStep) => Promise<void> {
   return async (unknownInput, step) => {
-    await runChatRecoveryAttempt(
-      step,
-      hooks,
-      parseChatRecoveryTaskInput(unknownInput)
-    );
+    const input = parseChatRecoveryTaskInput(unknownInput);
+    const incidentId = input.data?.incidentId;
+    const release =
+      typeof incidentId === "string"
+        ? replacementHolds.get(incidentId)
+        : undefined;
+    if (!release || typeof incidentId !== "string") {
+      await runChatRecoveryAttempt(step, hooks, input);
+      return;
+    }
+    let reply: Promise<void> | undefined;
+    try {
+      ({ reply } = await runHoldingLane(() =>
+        runChatRecoveryAttempt(step, hooks, input)
+      ));
+    } catch (error) {
+      // Tasks keeps the run for a later wake (a suspension, or a platform
+      // failure past the step's retries): so does the hold.
+      if (isTaskSuspension(error) || isPlatformFailure(error)) throw error;
+      replacementHolds.delete(incidentId);
+      release();
+      throw error;
+    }
+    replacementHolds.delete(incidentId);
+    if (reply) void reply.finally(release);
+    else release();
   };
 }
 

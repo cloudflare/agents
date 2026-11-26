@@ -942,7 +942,11 @@ export class DynamicAgentsInternal extends LifecycleCapability {
           // the channel overtook a following message's state, in tests).
           const root = this.rootStub();
           await operation(
-            new RootDynamicAgentConnectionBridge(root, connectionId)
+            new RootDynamicAgentConnectionBridge(
+              root,
+              connectionId,
+              this.#host.selfPath
+            )
           );
         }
       );
@@ -1179,62 +1183,108 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     return metas;
   }
 
+  /**
+   * The root's sockets for a sub-agent connection id, addressed to
+   * `ownerPath` (the sub-agent asking). Usually one; two while a client that
+   * reconnected with its id (PartySocket reuses `_pk`) is accepted before
+   * the root sees its old socket close (#2709). Each operation goes to
+   * every one of them: they are the same client, and the old one is
+   * closing. A socket with the same id addressed to another sub-agent is a
+   * different client and is left alone.
+   */
+  #childConnections(
+    connectionId: string,
+    ownerPath: ReadonlyArray<AgentPathStep> | undefined
+  ): Connection[] {
+    const connections: Connection[] = [];
+    for (const connection of this.#host._webSockets.getConnections(
+      connectionId
+    )) {
+      if (connection.id !== connectionId) continue;
+      if (!this.connectionHasChildTarget(connection)) continue;
+      if (ownerPath && !this.#addressedTo(connection, ownerPath)) continue;
+      connections.push(connection);
+    }
+    return connections;
+  }
+
+  /**
+   * Whether `connection` is addressed to the sub-agent at `ownerPath`, read
+   * the way that sub-agent lists its connections (`connectionMetas`).
+   */
+  #addressedTo(
+    connection: Connection,
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): boolean {
+    const outerUri = this.#host._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    return (
+      typeof outerUri === "string" &&
+      this.#pathFromOuterUri(outerUri, ownerPath) !== null
+    );
+  }
+
   async sendToConnection(
     connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
+    message: string | ArrayBuffer | ArrayBufferView,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) {
-      return;
+    for (const connection of this.#childConnections(connectionId, ownerPath)) {
+      connection.send(message);
     }
-    connection.send(message);
   }
 
   async sendManyToConnection(
     connectionId: string,
-    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) {
-      return;
+    for (const connection of this.#childConnections(connectionId, ownerPath)) {
+      for (const message of messages) connection.send(message);
     }
-    for (const message of messages) connection.send(message);
   }
 
   async closeConnection(
     connectionId: string,
     code?: number,
-    reason?: string
+    reason?: string,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) {
-      return;
+    for (const connection of this.#childConnections(connectionId, ownerPath)) {
+      connection.close(code, reason);
     }
-    connection.close(code, reason);
   }
 
   async setConnectionState(
     connectionId: string,
-    state: unknown
+    state: unknown,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<unknown> {
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) {
-      return null;
+    let forwarded: unknown = null;
+    for (const connection of this.#childConnections(connectionId, ownerPath)) {
+      ensureConnectionWrapped(connection);
+      connection.setState(withoutEventLogFlag(state));
+      forwarded = this.getForwardedState(connection);
     }
-    ensureConnectionWrapped(connection);
-    connection.setState(withoutEventLogFlag(state));
-    return this.getForwardedState(connection);
+    return forwarded;
   }
 
   /**
    * Root-side: set a sub-agent socket's event-log subscriptions, the one
    * flag a facet writes on its own (see `createBridgeConnection`).
    */
-  setConnectionFlag(connectionId: string, key: string, value: unknown): void {
+  setConnectionFlag(
+    connectionId: string,
+    key: string,
+    value: unknown,
+    ownerPath?: ReadonlyArray<AgentPathStep>
+  ): void {
     if (key !== CF_EVENT_LOGS_KEY) return;
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) return;
-    setConnectionFlag(connection, key, value);
+    for (const connection of this.#childConnections(connectionId, ownerPath)) {
+      setConnectionFlag(connection, key, value);
+    }
   }
 
   #connectionMetaForPath(
@@ -1414,18 +1464,17 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         Date.now()
       );
     }
-    const routed = await this.#resolveConnection(connection, {
-      create: true,
-      request,
-      gate: options.gate
-    });
-    if (routed.status !== "ok") return false;
-
-    await routed.child._cf_handleSubAgentWebSocketConnect(
-      this.#createConnectionBridge(connection),
-      routed.meta
+    // The socket's first frames wait for this hand-over: a frame handed to
+    // the facet before its connect would be handled before `onConnect`.
+    return this.#handOverInOrder(
+      connection,
+      { create: true, request, gate: options.gate },
+      (child, meta) =>
+        child._cf_handleSubAgentWebSocketConnect(
+          this.#createConnectionBridge(connection),
+          meta
+        )
     );
-    return true;
   }
 
   #createConnectionBridge(
@@ -1455,23 +1504,31 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     );
   }
 
+  /**
+   * Per socket, the connect or frame the facet is being handed now: resolved
+   * and removed once its call to the facet has gone out. At most one entry
+   * per socket with a hand-over in progress.
+   */
+  readonly #inboundTails = new Map<string, Promise<void>>();
+
   async forwardWebSocketMessage(
     connection: Connection,
     message: WSMessage,
     replyBridge?: DynamicAgentConnectionBridge
   ): Promise<boolean> {
-    const routed = await this.#resolveConnection(connection, { create: false });
-    if (routed.status === "no-match") return false;
-    if (routed.status === "dropped") return true;
-
-    const bridge = this.#createConnectionBridge(connection);
-    await routed.child._cf_handleSubAgentWebSocketMessage(
-      message,
-      bridge,
-      routed.meta,
-      replyBridge ?? bridge
+    return this.#handOverInOrder(
+      connection,
+      { create: false },
+      (child, meta) => {
+        const bridge = this.#createConnectionBridge(connection);
+        return child._cf_handleSubAgentWebSocketMessage(
+          message,
+          bridge,
+          meta,
+          replyBridge ?? bridge
+        );
+      }
     );
-    return true;
   }
 
   async forwardWebSocketClose(
@@ -1480,6 +1537,21 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     reason: string,
     wasClean: boolean
   ): Promise<boolean> {
+    // A client that reconnected with its id before this socket closed
+    // (#2709) is still connected: the sub-agent keeps the connection.
+    // Only a socket with the same route is that client: one routed to a
+    // descendant of the same sub-agent is not.
+    const path = this.connectionTargetPath(connection);
+    if (
+      path !== null &&
+      this.#childConnections(connection.id, path).some(
+        (other) =>
+          other.readyState === WebSocket.OPEN &&
+          this.isSameAgentPath(this.connectionTargetPath(other) ?? [], path)
+      )
+    ) {
+      return true;
+    }
     const routed = await this.#resolveConnection(connection, { create: false });
     if (routed.status === "no-match") return false;
     if (routed.status === "dropped") return true;
@@ -1491,6 +1563,51 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       this.#createConnectionBridge(connection),
       routed.meta
     );
+    return true;
+  }
+
+  /**
+   * Hand a socket's connect and frames to its facet in the order the socket
+   * delivered them (F11). Each waits until the one before it has been
+   * handed over, not until the facet handled it: resolving the facet takes
+   * a call of its own, and one slower than the next frame's would let that
+   * frame go first.
+   *
+   * @returns False when the socket does not target a sub-agent, or its
+   *   connect found no child.
+   */
+  async #handOverInOrder(
+    connection: Connection,
+    resolve: { create: boolean; request?: Request; gate?: boolean },
+    handOver: (
+      child: DynamicAgentWebSocketEndpoint,
+      meta: DynamicAgentConnectionMeta
+    ) => Promise<void>
+  ): Promise<boolean> {
+    const previous = this.#inboundTails.get(connection.id);
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#inboundTails.set(connection.id, tail);
+    const handedOver = () => {
+      release();
+      if (this.#inboundTails.get(connection.id) === tail) {
+        this.#inboundTails.delete(connection.id);
+      }
+    };
+    let handled: Promise<void>;
+    try {
+      await previous;
+      const routed = await this.#resolveConnection(connection, resolve);
+      if (routed.status === "no-match") return false;
+      // A connect that found no child reports false, as before.
+      if (routed.status === "dropped") return !resolve.create;
+      handled = handOver(routed.child, routed.meta);
+    } finally {
+      handedOver();
+    }
+    await handled;
     return true;
   }
 

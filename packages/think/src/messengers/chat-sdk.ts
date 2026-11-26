@@ -26,6 +26,7 @@ import { createChatSdkState, defaultKeyShard } from "agents/chat-sdk";
 import type { ChatSdkStateAdapterOptions } from "agents/chat-sdk";
 import { ChatSdkStateAgent } from "agents/chat-sdk";
 import type { StreamCallback } from "../think";
+import type { MessengerReplyRun } from "./reply-task";
 import type {
   MessengerAttachment,
   MessengerAction,
@@ -255,11 +256,9 @@ export interface MessengerThinkHost extends MessengerThinkTarget {
    * and execute it inline while this isolate lives. The same idempotency key
    * joins the existing run (`accepted: false`).
    */
-  _runMessengerReplyTask(input: {
-    nonce: string;
-    idempotencyKey: string;
-    metadata: Record<string, unknown>;
-  }): Promise<{ accepted: boolean }>;
+  _runMessengerReplyTask(
+    run: MessengerReplyRun
+  ): Promise<{ accepted: boolean }>;
   subAgent<T extends Agent>(
     agentClass: SubAgentClass<T>,
     name: string
@@ -286,21 +285,6 @@ export function chatSdkMessenger(
 
 export class ThinkMessengerRuntime {
   private chat?: Chat<Record<string, Adapter>>;
-  /**
-   * Live reply closures keyed by run nonce. A closure exists only in the
-   * isolate that accepted the webhook; an interrupted reply is recovered on
-   * wake through {@link handleFiberRecovery} from its persisted snapshot.
-   */
-  private readonly liveReplies = new Map<
-    string,
-    {
-      definition: NormalizedMessengerDefinition;
-      event: MessengerEvent;
-      thread: ChatThread;
-      snapshotEvent: ReturnType<typeof serializableMessengerEvent>;
-      snapshotThread: ReturnType<ChatThread["toJSON"]>;
-    }
-  >();
   private readonly definitionsByAdapterName = new Map<
     string,
     NormalizedMessengerDefinition
@@ -677,78 +661,34 @@ export class ThinkMessengerRuntime {
     return chat.registerSingleton();
   }
 
-  /** Whether this isolate still holds the live closure for one reply. */
-  hasLiveReply(nonce: string): boolean {
-    return this.liveReplies.has(nonce);
-  }
-
-  /**
-   * The durable "accepted" snapshot for one live reply, when its closure is
-   * still held. The task definition persists this BEFORE delivery begins:
-   * an isolate lost mid-answer recovers through it, and without it replay
-   * could neither deliver nor apologize.
-   */
-  initialReplySnapshot(nonce: string): unknown | undefined {
-    const entry = this.liveReplies.get(nonce);
-    if (!entry) return undefined;
-    return messengerReplySnapshot(
-      "accepted",
-      entry.snapshotEvent,
-      entry.snapshotThread
-    );
-  }
-
-  /** Execute one live (same-isolate) reply under the given fiber context. */
-  async executeLiveReply(nonce: string, fiber: FiberContext): Promise<void> {
-    const entry = this.liveReplies.get(nonce);
-    if (!entry) {
-      throw new Error(
-        "Messenger reply closure is no longer available in this isolate"
-      );
-    }
-    await this.answer(
-      entry.definition,
-      entry.event,
-      entry.thread,
-      fiber,
-      entry.snapshotEvent
-    );
-  }
-
   private async enqueueReply(
     definition: NormalizedMessengerDefinition,
     event: MessengerEvent,
     thread: ChatThread
   ): Promise<void> {
     const snapshotEvent = serializableMessengerEvent(event);
-    const snapshotThread = thread.toJSON();
-    const nonce = crypto.randomUUID();
-    this.liveReplies.set(nonce, {
-      definition,
-      event,
-      thread,
-      snapshotEvent,
-      snapshotThread
+    // Durable acceptance plus inline execution on the host's Tasks
+    // capability. A duplicate webhook joins the existing run (`accepted:
+    // false`) and returns; an interrupted run is recovered on wake from the
+    // snapshot in its checkpoint.
+    await this.host._runMessengerReplyTask({
+      reply: {
+        snapshot: messengerReplySnapshot(
+          "accepted",
+          snapshotEvent,
+          thread.toJSON()
+        ),
+        answer: (fiber) =>
+          this.answer(definition, event, thread, fiber, snapshotEvent)
+      },
+      idempotencyKey: idempotencyKeyForEvent(event),
+      metadata: {
+        messengerId: event.messengerId,
+        messageId: event.message?.id,
+        provider: event.provider,
+        threadId: event.thread.id
+      }
     });
-    try {
-      // Durable acceptance plus inline execution on the host's Fibers
-      // capability. A duplicate webhook joins the existing run
-      // (`accepted: false`) and returns; an interrupted run is recovered on
-      // wake by the reply definition's `recover` callback, which replaces
-      // the legacy join-time recovery branch.
-      await this.host._runMessengerReplyTask({
-        nonce,
-        idempotencyKey: idempotencyKeyForEvent(event),
-        metadata: {
-          messengerId: event.messengerId,
-          messageId: event.message?.id,
-          provider: event.provider,
-          threadId: event.thread.id
-        }
-      });
-    } finally {
-      this.liveReplies.delete(nonce);
-    }
   }
 
   private async answer(

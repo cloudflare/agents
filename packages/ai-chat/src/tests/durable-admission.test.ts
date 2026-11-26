@@ -20,7 +20,9 @@ type AdmissionStub = {
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
   seedQueuedRequestForTest(requestId: string): Promise<void>;
+  turnInNextOnStartForTest(): Promise<void>;
   getTranscriptsSeenForTest(): Promise<string[][]>;
+  getIncidentsForTest(): Promise<string[]>;
   ageAdmissionsForTest(ms: number): Promise<void>;
 };
 
@@ -49,10 +51,23 @@ function sendChatRequest(
 }
 
 /** Every frame a socket receives, from now on. */
+/** Record what a tab is sent; it acks a resumed stream, as a client does. */
 function record(ws: WebSocket): unknown[] {
   const frames: unknown[] = [];
   ws.addEventListener("message", (event: MessageEvent) => {
-    frames.push(JSON.parse(event.data as string));
+    const frame = JSON.parse(event.data as string) as {
+      type?: unknown;
+      id?: unknown;
+    };
+    frames.push(frame);
+    if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: frame.id
+        })
+      );
+    }
   });
   return frames;
 }
@@ -278,6 +293,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const binding = "LatestMessageConcurrencyAgent";
     const path = `/agents/latest-message-concurrency-agent/${room}`;
     const { ws } = await connectChatWS(path);
+    const sent = record(ws);
     sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
     await delay(300);
     sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
@@ -308,7 +324,10 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       messages[4].id
     ]);
     expect(textOf(messages[4])).toBe(QUICK_REPLY);
-    expect(doneFrame(frames, "r2")?.outcome).toBe("skipped");
+    // Skipped on the lane when r3 arrived, before the reset: it does not
+    // come back.
+    expect(doneFrame(sent, "r2")?.outcome).toBe("skipped");
+    expect(doneFrame(frames, "r2")).toBeUndefined();
     tab.close();
   }, 40_000);
 
@@ -337,6 +356,31 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
   }, 40_000);
 
+  it("an onStart that waits for its own turn is not held behind a replay", async () => {
+    const room = crypto.randomUUID();
+    const binding = "AsyncStartAdmissionAgent";
+    const stub = await agent(binding, room);
+    await stub.seedQueuedRequestForTest("r9");
+    await stub.turnInNextOnStartForTest();
+    await reset(binding, room);
+    const restarted = await agent(binding, room);
+    // The onStart turn runs first; the replay runs once onStart is done.
+    const messages = await waitFor(
+      () => restarted.getPersistedMessages(),
+      (m) => m.filter((x) => x.role === "assistant").length === 2,
+      15_000
+    );
+    // onStart's turn answers first, then the replay.
+    expect(
+      messages.map((m) => [m.role, m.role === "user" ? m.id : ""])
+    ).toEqual([
+      ["user", "on-start"],
+      ["assistant", ""],
+      ["user", "u-r9"],
+      ["assistant", ""]
+    ]);
+  }, 40_000);
+
   it("a request replayed after a reset runs once the app's onStart is done", async () => {
     const room = crypto.randomUUID();
     const binding = "AsyncStartAdmissionAgent";
@@ -351,6 +395,157 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(textOf(messages[1])).toBe(QUICK_REPLY);
   }, 40_000);
+});
+
+describe("a tool call a reset cut off", () => {
+  it.each([
+    {
+      hangOn: "call",
+      answer: {
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolName: "chooseOption",
+        output: { choice: "a" }
+      }
+    },
+    {
+      hangOn: "approval",
+      answer: { type: MessageType.CF_AGENT_TOOL_APPROVAL, approved: true }
+    }
+  ])(
+    "continues with the client's answer ($hangOn), without waiting out recovery",
+    async ({ hangOn, answer }) => {
+      const room = crypto.randomUUID();
+      const binding = "RecoverySlowStreamAgent";
+      const path = `/agents/recovery-slow-stream-agent/${room}`;
+      const { ws } = await connectChatWS(path);
+      sendChatRequest(ws, "r1", [user("u1", "one")], {
+        toolThenHang: hangOn,
+        ...(hangOn === "call" && { clientTools: [{ name: "chooseOption" }] })
+      });
+      // The call reached the tab before the reset cut the reply.
+      const sent = record(ws);
+      await waitFor(
+        async () => sent,
+        (frames) => JSON.stringify(frames).includes("call-hang")
+      );
+      await reset(binding, room);
+
+      const { ws: tab } = await connectChatWS(path);
+      const frames = record(tab);
+      const stub = await agent(binding, room);
+      // Recovery stores the cut-off reply, its call waiting on the client.
+      await waitFor(
+        () => stub.getPersistedMessages(),
+        (messages) => JSON.stringify(messages).includes("call-hang")
+      );
+      const answeredAt = Date.now();
+      tab.send(
+        JSON.stringify({
+          ...answer,
+          toolCallId: "call-hang",
+          autoContinue: true
+        })
+      );
+      const messages = await waitFor(
+        () => stub.getPersistedMessages(),
+        (m) => m.some((x) => x.role === "assistant" && textOf(x).length > 0)
+      );
+      expect(
+        messages.some((x) => x.role === "assistant" && textOf(x).length > 0)
+      ).toBe(true);
+      expect(Date.now() - answeredAt).toBeLessThan(15_000);
+      // The answer's continuation took the reply; recovery stepped aside.
+      expect(await stub.getIncidentsForTest()).toEqual([
+        "skipped:continued_by_interaction"
+      ]);
+      // Its done frame is sent after the reply is stored.
+      const completed = (list: unknown[]) =>
+        list.some(
+          (frame) =>
+            isUseChatResponseMessage(frame) &&
+            frame.done &&
+            frame.id !== "r1" &&
+            !(frame as { error?: boolean }).error &&
+            (frame as { outcome?: string }).outcome === "completed"
+        );
+      expect(completed(await waitFor(async () => frames, completed))).toBe(
+        true
+      );
+      // The cut-off request is not reported as failed.
+      expect(JSON.stringify(doneFrame(frames, "r1") ?? {})).not.toContain(
+        "interrupted"
+      );
+      tab.close();
+    },
+    40_000
+  );
+});
+
+describe("two resets a few seconds apart", () => {
+  it.each([
+    { name: "", sendAfter: false },
+    { name: ", and a new request sent after the second", sendAfter: true }
+  ])(
+    "the request cut at the first reset is answered before the one queued behind it$name",
+    async ({ sendAfter }) => {
+      const room = crypto.randomUUID();
+      const binding = "RecoverySlowStreamAgent";
+      const path = `/agents/recovery-slow-stream-agent/${room}`;
+      const { ws } = await connectChatWS(path);
+      sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
+      await delay(300);
+      sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
+      await delay(300);
+
+      await reset(binding, room);
+      // The recovered turn starts streaming the cut reply's continuation.
+      const { ws: tab } = await connectChatWS(path);
+      record(tab);
+      const second = await agent(binding, room);
+      await waitFor(
+        () => second.getTranscriptsSeenForTest(),
+        (seen) => seen.length >= 1
+      );
+      await delay(1500);
+      // The second reset cuts the recovered reply.
+      await reset(binding, room);
+      tab.close();
+
+      const { ws: tab2 } = await connectChatWS(path);
+      record(tab2);
+      const third = await agent(binding, room);
+      // A request the tab sends now waits behind the cut reply's recovery.
+      if (sendAfter) {
+        sendChatRequest(
+          tab2,
+          "r3",
+          [user("u1", "one"), user("u2", "two"), user("u3", "three")],
+          QUICK
+        );
+      }
+      const messages = await waitFor(
+        () => third.getPersistedMessages(),
+        (m) =>
+          m.filter((x) => x.role === "assistant").length >= (sendAfter ? 3 : 2),
+        30_000
+      );
+      // u1 is answered, then each later question in turn.
+      const asked = sendAfter ? ["u1", "u2", "u3"] : ["u1", "u2"];
+      expect(messages.map((m) => m.role)).toEqual(
+        asked.flatMap(() => ["user", "assistant"])
+      );
+      expect(
+        messages.filter((m) => m.role === "user").map((m) => m.id)
+      ).toEqual(asked);
+      for (let i = 3; i < messages.length; i += 2) {
+        expect(textOf(messages[i])).toBe(QUICK_REPLY);
+      }
+      // u1's reply was continued to its end, not left cut off.
+      expect(textOf(messages[1])).toContain("chunk-29");
+      tab2.close();
+    },
+    60_000
+  );
 });
 
 describe("a turn started from onStart", () => {

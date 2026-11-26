@@ -13,7 +13,7 @@ import {
   createChatFiberSnapshot,
   wrapChatFiberSnapshot
 } from "agents/chat";
-import type { ResumableStream } from "agents/chat";
+import type { ReplyStreams } from "agents/chat";
 import {
   EFFECT_TASK,
   effectKeyOf,
@@ -1846,10 +1846,10 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
       // not only the no-parts settlement covered by the Workers regression.
       for (let attempt = 0; attempt < 100; attempt++) {
         const stream =
-          this._resumableStream.latestActiveStreamInfoForRequest(submissionId);
+          this._replyStreams.latestActiveStreamInfoForRequest(submissionId);
         if (
           stream &&
-          this._resumableStream.getStreamChunks(stream.id).length > 2
+          this._replyStreams.getStreamChunks(stream.id).length > 2
         ) {
           this.abortRequest(submissionId);
           return;
@@ -2093,8 +2093,8 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   }> {
     const submission = await this.inspectSubmission(submissionId);
     // SAFETY: the fixture uses the host's existing adapter, not synthetic SQL cleanup.
-    const { _resumableStream: stream } = this as unknown as {
-      _resumableStream: ResumableStream;
+    const { _replyStreams: stream } = this as unknown as {
+      _replyStreams: ReplyStreams;
     };
     const foreign = stream.start(crypto.randomUUID());
     stream.complete(foreign);

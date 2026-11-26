@@ -393,6 +393,10 @@ export class TestThrowingStateAgent extends Agent<Cloudflare.Env, TestState> {
     this.setState(state);
   }
 
+  getState(): TestState {
+    return this.state;
+  }
+
   // Check if onStateChanged was called
   wasOnStateChangedCalled(): boolean {
     return this.onStateChangedCalled;

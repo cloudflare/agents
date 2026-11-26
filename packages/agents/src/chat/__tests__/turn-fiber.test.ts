@@ -84,7 +84,11 @@ describe("ChatTurnFibers", () => {
       attempts: {
         _chatRecoveryContinue: async () => {},
         _chatRecoveryRetry: async () => {}
-      }
+      },
+      replay: async () => {},
+      parkUntil: () => {},
+      laneHeldForRecovery: () => false,
+      holdParksUntil: () => {}
     })({ requestId: "r1", continuation: false, nonce: "n0", lane: true }, step);
     // The model call ran in a run of its own, which keeps the snapshot.
     expect(log).toEqual(["task:r1:false:nonce-1"]);

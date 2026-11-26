@@ -19,13 +19,17 @@ import type { Connection } from "agents";
 import type {
   ContinuationSource,
   ToolInteractionOutcome
-} from "./auto-continuation-controller";
+} from "./continuation-state";
 import type { ChatTurns } from "./chat-turns";
 import type { ClientToolSchema } from "./client-tools";
 import type { ChatFrames } from "./chat-frames";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
+import {
+  toolApprovalUpdate,
+  toolResultUpdate,
+  type ToolPartUpdate
+} from "./tool-state";
 import { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
-import type { ChatRequestContext } from "./request-context";
 import type { ResumeHandshake } from "./resume-handshake";
 
 /**
@@ -73,7 +77,6 @@ export type ToolApprovalEvent = Extract<
  */
 export interface ChatProtocolHost<TConnection extends Connection> {
   readonly turns: ChatTurns<TConnection>;
-  readonly requestContext: ChatRequestContext;
   resumeHandshake(): ResumeHandshake;
   /** The observability events every host emits for these messages. */
   emit(
@@ -99,8 +102,8 @@ export interface ChatProtocolHost<TConnection extends Connection> {
   clear(connection: TConnection): Promise<void>;
   /** A tab pushed its whole transcript. */
   messages(connection: TConnection, messages: unknown[]): Promise<void>;
-  applyToolResult(event: ToolResultEvent): Promise<ToolInteractionOutcome>;
-  applyToolApproval(event: ToolApprovalEvent): Promise<ToolInteractionOutcome>;
+  /** Apply a tool result or approval to the tool part it answers. */
+  applyToolUpdate(update: ToolPartUpdate): Promise<ToolInteractionOutcome>;
   /** The continuation a tool answer from `connection` starts. */
   continuation(
     connection: TConnection,
@@ -248,8 +251,15 @@ export async function dispatchChatProtocol<TConnection extends Connection>(
       // with the latest schemas. A duplicate or a result for a call that
       // is gone changes nothing.
       void host.turns.applyInteraction(
-        host.requestContext.applyingToolResult(event.clientTools, () =>
-          host.applyToolResult(event)
+        host.turns.applyingToolResult(event.clientTools, () =>
+          host.applyToolUpdate(
+            toolResultUpdate(
+              event.toolCallId,
+              event.output,
+              event.state === "output-error" ? "output-error" : undefined,
+              event.errorText
+            )
+          )
         ),
         event.autoContinue === true,
         () => host.continuation(connection, "tool-result"),
@@ -264,7 +274,14 @@ export async function dispatchChatProtocol<TConnection extends Connection>(
         approved: event.approved
       });
       void host.turns.applyInteraction(
-        () => host.applyToolApproval(event),
+        () =>
+          host.applyToolUpdate(
+            toolApprovalUpdate(
+              event.toolCallId,
+              event.approved,
+              event.approvalId
+            )
+          ),
         event.autoContinue === true,
         () => host.continuation(connection, "tool-approval"),
         (run) => host.enqueueInteraction(run),

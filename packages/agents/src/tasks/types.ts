@@ -239,7 +239,14 @@ export type TaskWaitReason =
   | "sleep"
   | "retry"
   /** @internal Parked by its handler until `Tasks.settle()`. */
-  | "park";
+  | "park"
+  /** @internal A debounced lane run in its quiet period. */
+  | "debounce"
+  /**
+   * @internal A lane run that arrived with `latest` (or `debounce`, past its
+   * quiet period) and waits its turn; a later such arrival replaces it.
+   */
+  | "overlap";
 
 /** Safe projection of an error retained with a run that ended `error`. */
 export interface TaskError {
@@ -270,6 +277,19 @@ export interface TaskRunOptions {
    * accepted; a run queued behind another waits with no deadline of its own.
    */
   lane?: string;
+
+  /**
+   * @internal What a run arriving at a busy `lane` does. `"queue"`
+   * (default) waits its turn. `"latest"` skips the lane's runs that have not
+   * started and themselves arrived with `latest` or `debounce` (a started
+   * one, or one queued plainly, goes on), listed in the receipt's
+   * `superseded`. `"drop"`
+   * stores nothing (`dropped` on the receipt). `{ debounceMs }` is `latest`
+   * whose run, at a busy lane, also waits `debounceMs` from its arrival
+   * before it may start, even when it reaches the lane's head sooner. At a
+   * free lane it starts at once.
+   */
+  policy?: "queue" | "latest" | "drop" | { readonly debounceMs: number };
 
   /**
    * @internal Where the first attempt runs. Omitted: in this invocation,
@@ -303,6 +323,10 @@ export interface TaskReceipt {
   accepted: boolean;
   status: TaskStatus;
   createdAt: number;
+  /** @internal The runs a `latest` or debounced arrival skipped, in lane order. */
+  superseded?: string[];
+  /** @internal A `drop` arrival at a busy lane: nothing was stored. */
+  dropped?: true;
 }
 
 /**

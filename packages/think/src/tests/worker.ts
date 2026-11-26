@@ -52,10 +52,13 @@ export {
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
   ThinkExtensionNetworkAgent,
+  ThinkExtensionTurnAgent,
+  ThinkPrefixChangedAgent,
   ThinkExtensionBeforeTurnModelAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
+  ThinkSkillsToolsTestAgent,
   ThinkMessengerDeliveryTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkMcpToolMaterializationAgent,
@@ -109,10 +112,13 @@ import type {
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
   ThinkExtensionNetworkAgent,
+  ThinkExtensionTurnAgent,
+  ThinkPrefixChangedAgent,
   ThinkExtensionBeforeTurnModelAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
+  ThinkSkillsToolsTestAgent,
   ThinkMessengerDeliveryTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkMcpToolMaterializationAgent,
@@ -270,6 +276,8 @@ export type Env = {
   StuckThinkAgentToolChild: DurableObjectNamespace<StuckThinkAgentToolChild>;
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   ThinkExtensionNetworkAgent: DurableObjectNamespace<ThinkExtensionNetworkAgent>;
+  ThinkExtensionTurnAgent: DurableObjectNamespace<ThinkExtensionTurnAgent>;
+  ThinkPrefixChangedAgent: DurableObjectNamespace<ThinkPrefixChangedAgent>;
   ThinkExtensionBeforeTurnModelAgent: DurableObjectNamespace<ThinkExtensionBeforeTurnModelAgent>;
   ThinkMessengerDeliveryTestAgent: DurableObjectNamespace<ThinkMessengerDeliveryTestAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
@@ -277,6 +285,7 @@ export type Env = {
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   ThinkFetchToolsTestAgent: DurableObjectNamespace<ThinkFetchToolsTestAgent>;
+  ThinkSkillsToolsTestAgent: DurableObjectNamespace<ThinkSkillsToolsTestAgent>;
   ThinkOnStartReconcileFailureAgent: DurableObjectNamespace<ThinkOnStartReconcileFailureAgent>;
   ThinkOnStartHydrationFailureAgent: DurableObjectNamespace<ThinkOnStartHydrationFailureAgent>;
   ThinkWindowedHydrationAgent: DurableObjectNamespace<ThinkWindowedHydrationAgent>;

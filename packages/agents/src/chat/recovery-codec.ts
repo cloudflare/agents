@@ -49,7 +49,7 @@ export function partialHasSettledToolResults(parts: MessagePart[]): boolean {
 
 /**
  * Reconstructs the partial assistant state of an interrupted turn from its
- * stored `ResumableStream` chunk bodies (oldest-first).
+ * stored `ReplyStreams` chunk bodies (oldest-first).
  */
 export interface ChatRecoveryCodec {
   /**
@@ -90,7 +90,7 @@ export interface ProgressCreditThrottle {
  * The host-agnostic rule for crediting recovery forward progress from a stored
  * stream chunk, from when the marker was a counter bumped per chunk. Neither
  * host bumps a counter any more: the marker is derived from the stream log
- * (`ResumableStream.progressMarker`), so a chunk counts once its segment is
+ * (`ReplyStreams.progressMarker`), so a chunk counts once its segment is
  * durably flushed. The rule stays exported for consumers that still keep a
  * counter of their own:
  *

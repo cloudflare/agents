@@ -11,12 +11,7 @@ export {
   type StreamChunkData
 } from "./message-builder";
 
-export {
-  sanitizeMessage,
-  enforceRowSizeLimit,
-  byteLength,
-  type EnforceRowSizeLimitOptions
-} from "./sanitize";
+export { sanitizeMessage, byteLength } from "../sessions/sanitize";
 export {
   KV_DELETE_MAX_KEYS,
   MAX_BOUND_PARAMS,
@@ -32,8 +27,6 @@ export {
 } from "./stream-accumulator";
 
 export { TurnLane, type TurnResult, type EnqueueOptions } from "./turn-lane";
-// Released `@cloudflare/ai-chat` 0.12 and `@cloudflare/think` 0.24 import it.
-export { TurnQueue } from "./turn-queue";
 
 export { originMessageIds, withOriginMessageIds } from "./origin-message-ids";
 
@@ -42,7 +35,8 @@ export {
   ChatFrames,
   type ChatFrame,
   type ChatFrameConnection,
-  type ChatFramesOptions
+  type ChatFramesOptions,
+  frameText
 } from "./chat-frames";
 
 /** @internal Host helpers for `AIChatAgent` and `Think`. Not a public API. */
@@ -66,11 +60,7 @@ export {
   type TextSegmentEvent
 } from "./text-segment-joiner";
 
-export {
-  SubmitConcurrencyController,
-  type NormalizedMessageConcurrency,
-  type SubmitConcurrencyDecision
-} from "./submit-concurrency";
+export type { NormalizedMessageConcurrency } from "./lifecycle";
 
 export {
   transition as broadcastTransition,
@@ -79,15 +69,12 @@ export {
   type TransitionResult as BroadcastTransitionResult
 } from "./broadcast-state";
 
-export {
-  ResumableStream,
-  createChatStreams,
-  type SqlTaggedTemplate
-} from "./resumable-stream";
+export { createChatStreams, type SqlTaggedTemplate } from "./reply-stream";
 export { storedAsFacet } from "../dynamic-agents/facet-flag";
 export {
   createChatTurnTaskDefinition,
   currentTurnCheckpoint,
+  runAppStart,
   type ChatTurnClosureEntry,
   type ChatTurnTaskHooks
 } from "./turn-task";
@@ -100,13 +87,11 @@ export {
   CHAT_ADMISSIONS_TABLE,
   ChatAdmissions,
   chatRecoveryNames,
-  createChatAdmissionStore,
   newUserMessageIds,
+  takeReleasedChatAdmissions,
   type ChatAdmissionRecord,
-  type ChatAdmissionStore,
   type ChatAdmissionsHost,
-  type HeldChatMessage,
-  type StoredSubmitDecision
+  type HeldChatMessage
 } from "./admissions";
 
 /**
@@ -171,12 +156,11 @@ export {
 } from "./agent-tools";
 
 export {
-  ContinuationState,
+  ContinuationSlots,
   addContinuationTarget,
   continuationTargetIsLatest,
   type ContinuationConnection,
-  type ContinuationPending,
-  type ContinuationDeferred
+  type ContinuationPending
 } from "./continuation-state";
 
 /**
@@ -188,18 +172,11 @@ export {
  */
 export { PreStreamTurns } from "./pre-stream-turns";
 
-/**
- * @internal Shared auto-continuation barrier (the tool-result → auto-continue
- * flow, #1649 / #1650) — sibling-package support for `@cloudflare/ai-chat` and
- * `@cloudflare/think`, not a public API. See `auto-continuation-controller.ts`.
- */
-export {
-  AutoContinuationController,
-  type AutoContinuationHost,
-  type ContinuationSource,
-  type ContinuationSpec,
-  type ToolInteractionOutcome
-} from "./auto-continuation-controller";
+export type {
+  ContinuationSource,
+  ContinuationSpec,
+  ToolInteractionOutcome
+} from "./continuation-state";
 
 /**
  * @internal The auto-continuation turn's lifecycle, from fire to settle.
@@ -242,6 +219,9 @@ export {
  */
 export {
   ChatTurns,
+  CHAT_REQUEST_CONTEXT_KEY,
+  requestContextFromLegacy,
+  storableRequestContext,
   type ChatTurnsHost,
   type ChatTurnsOptions,
   type ChatTurnsAdmissionOptions,
@@ -292,8 +272,6 @@ export {
   type AgentToolSql,
   type AgentToolTableNames
 } from "./agent-tool-run-store";
-
-export { AbortRegistry } from "./abort-registry";
 
 /**
  * @internal Small async control-flow helpers shared by the chat hosts
@@ -382,19 +360,6 @@ export {
   type BeforeTurnRepairOptions,
   type BeforeTurnRepairResult
 } from "./before-turn";
-
-/**
- * @internal The one owner of a chat's stored request context (client tools
- * and body). Sibling-package support, not a public API. See
- * `request-context.ts`.
- */
-export {
-  ChatRequestContext,
-  clientRequestContext,
-  type ClientRequestContext,
-  type RequestContextKey,
-  type RequestContextStore
-} from "./request-context";
 
 export type { OrphanPersistStore } from "./orphan-store";
 
@@ -535,7 +500,11 @@ export {
   iterateWithStallWatchdog
 } from "./stall-watchdog";
 
-export { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
+export {
+  ChatRecoverySupersededError,
+  isTurnStopped,
+  turnSignal
+} from "./turn-stop";
 
 /**
  * @internal The reply pump both chat hosts run every reply through, with

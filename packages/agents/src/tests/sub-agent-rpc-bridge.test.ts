@@ -8,10 +8,15 @@ function uniqueName(): string {
   return `rpc-bridge-test-${crypto.randomUUID()}`;
 }
 
-async function connectWS(parent: string, child: string): Promise<WebSocket> {
+async function connectWS(
+  parent: string,
+  child: string,
+  pk?: string
+): Promise<WebSocket> {
   const path =
     `/agents/test-sub-agent-parent/${parent}` +
-    `/sub/slow-reply-sub-agent/${child}`;
+    `/sub/slow-reply-sub-agent/${child}` +
+    (pk ? `?_pk=${pk}` : "");
   const response = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
@@ -284,6 +289,105 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("reaches a client that reconnected with its id before the old socket closed (#2709)", async () => {
+    // PartySocket reuses its `_pk` on a reconnect, and the new socket can
+    // arrive before the root sees the old one close.
+    const parent = uniqueName();
+    const child = uniqueName();
+    const pk = crypto.randomUUID();
+    const old = await connectWS(parent, child, pk);
+    const ws = await connectWS(parent, child, pk);
+    try {
+      const message = "after-reconnect";
+      const delivered = waitForTextMessage(ws, message);
+      const response = await callRPC(ws, "sendConnectionMessageAfterDelay", [
+        message
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+      await expect(delivered).resolves.toBe(message);
+
+      // Once the root has handled the old socket's close, the sub-agent
+      // still has the client: its broadcast reaches the new socket.
+      const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+      old.close();
+      await vi.waitFor(async () => {
+        expect(await parentStub.subAgentClosesHandledForTest()).toBe(1);
+      });
+      const broadcast = waitForTextMessage(ws, "after-old-close");
+      await parentStub.broadcastFromSubAgentDetached(child, [
+        "after-old-close"
+      ]);
+      await expect(broadcast).resolves.toBe("after-old-close");
+    } finally {
+      ws.close();
+      old.close();
+    }
+  });
+
+  it("tells a sub-agent its socket closed while a socket to its child has the same id", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+    const pk = crypto.randomUUID();
+    const base = `/agents/test-sub-agent-parent/${parent}/sub/broadcast-sub-agent/${child}`;
+    const open = async (path: string) => {
+      const response = await exports.default.fetch(
+        `http://example.com${path}?_pk=${pk}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      expect(response.status).toBe(101);
+      const ws = response.webSocket as WebSocket;
+      ws.accept();
+      return ws;
+    };
+    const own = await open(base);
+    const nested = await open(
+      `${base}/sub/broadcast-sub-agent/${uniqueName()}`
+    );
+    const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+    try {
+      own.close();
+      await vi.waitFor(async () => {
+        expect(await parentStub.subAgentClosesHandledForTest()).toBe(1);
+      });
+      expect(await parentStub.subAgentClosedConnectionIds(child)).toEqual([pk]);
+    } finally {
+      nested.close();
+      own.close();
+    }
+  });
+
+  it("keeps a sub-agent's sends off another sub-agent's socket with the same id", async () => {
+    // A client picks its `_pk`, so two sub-agents can each have a socket
+    // with the same id: each one's frames are its own.
+    const parent = uniqueName();
+    const pk = crypto.randomUUID();
+    const other = await connectWS(parent, uniqueName(), pk);
+    const ws = await connectWS(parent, uniqueName(), pk);
+    const leaked: string[] = [];
+    other.addEventListener("message", (event: MessageEvent) => {
+      if (event.data === "only-mine") leaked.push(event.data as string);
+    });
+    try {
+      const delivered = waitForTextMessage(ws, "only-mine");
+      expectSuccessfulResult(
+        await callRPC(ws, "sendConnectionMessageAfterDelay", ["only-mine"]),
+        "scheduled"
+      );
+      await expect(delivered).resolves.toBe("only-mine");
+      // Sent after the other socket would have got it: the same root call.
+      const after = waitForTextMessage(other, "after");
+      expectSuccessfulResult(
+        await callRPC(other, "sendConnectionMessageAfterDelay", ["after"]),
+        "scheduled"
+      );
+      await after;
+      expect(leaked).toEqual([]);
+    } finally {
+      ws.close();
+      other.close();
+    }
+  });
+
   it("delivers a live-frame send before a later detached send", async () => {
     const parentName = uniqueName();
     const childName = uniqueName();
@@ -485,6 +589,39 @@ describe("facet connection operations after frame completion (issue #2055)", () 
       const response = await callRPC(ws, "sendTwiceBroadcastSendNow", ids);
       expectSuccessfulResult(response, "sent");
       await expect(delivered).resolves.toEqual(ids);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("hands a facet its frames in send order when one waits on a slow facet init (F11)", async () => {
+    const parentName = uniqueName();
+    const path =
+      `/agents/test-sub-agent-parent/${parentName}` +
+      `/sub/counter-sub-agent/${uniqueName()}`;
+    const response = await exports.default.fetch(`http://example.com${path}`, {
+      headers: { Upgrade: "websocket" }
+    });
+    const ws = response.webSocket as WebSocket;
+    ws.accept();
+    try {
+      // The facet is up once a first frame comes back.
+      const warm = waitForTextMessage(ws, "seen:order:warm", 5000);
+      ws.send("order:warm");
+      await warm;
+      // The next frame's facet init is slow, as a facet still starting is.
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      await parent.delayFacetInitForTest(1, 200);
+      const sent = Array.from({ length: 5 }, (_, i) => `order:${i}`);
+      const delivered = waitForTextMessages(
+        ws,
+        new Set(sent.map((frame) => `seen:${frame}`)),
+        5000
+      );
+      for (const frame of sent) ws.send(frame);
+      await expect(delivered).resolves.toEqual(
+        sent.map((frame) => `seen:${frame}`)
+      );
     } finally {
       ws.close();
     }

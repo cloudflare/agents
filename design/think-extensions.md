@@ -24,7 +24,7 @@ A transform is `(draft, build) => void | Promise<void>`, where `build` is `{ ses
 
 **A build** starts from empty drafts and passes them through every loaded extension in load order. Each extension sees what the ones before it made. The result depends only on what is loaded and in what order, so building again is always safe. ThinkHarness builds where it resolves a session's tools: once per model call, and when a watch starts or a tool answer arrives.
 
-**One build per attempt.** A run builds once, when an attempt starts, and every model call and tool call of that attempt uses that build. A change to the extensions or the options' tools applies from the next turn (or the next attempt after a reset). A call to a tool the attempt's build lacks, because it was removed while the call was cut off, is answered with the tool error `Tool "<name>" is no longer available.` A call the model makes to a tool it was never offered is answered by the AI SDK as an invalid call.
+**One build per attempt.** A run builds once, when an attempt starts, and every model call and tool call of that attempt uses that build. A change to the extensions or the options' tools applies from the next turn (or the next attempt after a reset). A call still waiting to run whose tool the attempt's build lacks (it was removed while the call was cut off) is answered with the tool error `Tool "<name>" is no longer available.` An approved call to a tool the build lacks waits instead, as in Think, because it may be a client's tool that the client did not declare again with the answer. A call the model makes to a tool it was never offered is answered by the AI SDK as an invalid call.
 
 **Data crosses, functions stay.** `tools.set(name, tool)` takes an AI SDK tool. The runtime beside the extension keeps the tool object and gives the harness a data entry:
 
@@ -67,6 +67,24 @@ Each call has the agent's `hookTimeout`. An extension that fails or passes it is
 A manifest's `network` hosts are enforced by `HostBridgeLoopback`, the binding the app already re-exports for host access. The extension Worker's `globalOutbound` is that binding, so every `fetch()` it makes arrives at the bridge's `fetch`. The bridge checks the URL with the web tools' URL policy (`allowedHosts` from the manifest, private and local addresses refused) and answers `403` when it fails. It forwards a request that passes with `redirect: "manual"`, so each redirect hop comes back through the check. A TCP socket (`connect()`) from the Worker fails, even to a listed host: the bridge has no way to check a socket, so the outbound refuses it. Before the hosts were enforced, such a socket opened to any host. Without the re-export, or with an app's own `createHostBinding`, which may serve the host operations alone, nothing is known to enforce the list. The Worker then keeps the agent's network as before, and the manager warns once. An extension with no hosts has no network at all.
 
 A context block's `type` in the manifest is ignored with a warning, once per manager. An extension writes its blocks with `host.setContext()`, which its `context.write` permission governs.
+
+## The harness-backed Think shell
+
+The shell (`think/src/harness/think.ts`) takes Think's extension members as Think does: `extensionLoader`, `getExtensions()` and `extensionManager`. At start, with a loader, it creates the same released `ExtensionManager`, loads `getExtensions()` and restores what was loaded at run time (its `ext:<name>` rows, as on Think). It also registers each extension's context blocks. The manager's tools join ThinkHarness as one shipped extension, `sandboxed`, after the subclass's own tools. Its released hooks run from the shell's hook options: `beforeTurn` after the subclass's, then the three observers and `onChunk`. `_cfHostBridge` serves `HostBridgeLoopback` over the same host API as Think.
+
+## Telling the model when the tools change
+
+On every model call, ThinkHarness gives the session's context the tools that call offers, each with a hash of its definition as the model sees it (description, input schema, input examples, provider fields), made once per tool object. The context's record for each user message keeps that list (no new row). When a turn's list differs from the previous record's, the model is told once, after that turn's user message: what was added, what is gone (not to be called, earlier description to be disregarded), what changed. A turn with the same tools writes nothing new. A session without a context gets no notice.
+
+## Saying when the prefix changed
+
+Before a model call whose prefix differs from the session's previous call, which loses a provider's prompt cache, ThinkHarness emits a `prefix-changed` session event with its causes:
+
+- `tools`: the names added, removed and changed, from the same comparison the notice uses;
+- `system`: the system prompt sent differs from the previous turn's, compared by a hash on the same record as the tools (a refresh, or a `beforeTurn` prompt that changed);
+- `messages`: history was compacted, or a message was edited or deleted around the harness.
+
+The harness-backed Think forwards it as the `chat:prefix:changed` observability event, on the `chat` channel. It is not named `think:`, because that prefix has no channel of its own. The `Think` class emits it from E4, when its turn runs on ThinkHarness. `tools` and `system` need a context in the session (as the notice does), and compare with what the branch being answered was sent, so a regeneration compares with its own branch. `messages` names the operation without checking which branch it touched. A changed block isn't a cause: it goes after the new message, so the prefix holds. The rewrites are kept in memory per session until that session's next call (at most three each), so a rewrite made before an eviction goes unreported. No row and no hashing of the transcript.
 
 ## Guarantees
 

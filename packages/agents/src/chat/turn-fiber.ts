@@ -36,6 +36,7 @@ import type { TaskJson } from "../tasks";
 import { MAX_PARTED_INPUT_BYTES } from "../tasks/serialization";
 import {
   currentChatRun,
+  noteHeldTurn,
   type ChatTurnClosureEntry,
   type ChatTurnTaskInput
 } from "./turn-task";
@@ -214,6 +215,7 @@ export class ChatTurnFibers {
       return body();
     });
     if (inLane) return inLane;
+    noteHeldTurn(requestId);
     const nonce = this.host.generateId();
     let resolveOutcome!: (value: unknown) => void;
     let rejectOutcome!: (error: unknown) => void;

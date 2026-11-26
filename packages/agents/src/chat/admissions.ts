@@ -17,8 +17,8 @@
  * The rules, checked in `ChatAdmission.tla` and `ChatOrder.tla`:
  *
  * - every accepted request writes a record when it is accepted: its request
- *   id, the user messages it holds, its concurrency decision, and what the
- *   host needs to run it again (tools, body, trigger);
+ *   id, the user messages it holds, the concurrency strategy it overlapped
+ *   other turns under, and what the host needs to run it again (tools, body, trigger);
  * - the held messages join the transcript at the front of the queue, once:
  *   a message already stored (a reset after the join) is not stored again;
  * - the record goes when the request's turn has a fiber (recovery owns the
@@ -44,9 +44,10 @@
  * `@cloudflare/think`, not a public API.
  */
 
-import { ROW_PIECE_UNITS, splitPieces } from "../internal/platform-limits";
+import type { Tasks } from "../tasks";
+import { CHAT_TURN_LANE } from "./turn-task";
 import type { AgentToolSql } from "./agent-tool-run-store";
-import type { NormalizedMessageConcurrency } from "./submit-concurrency";
+import type { NormalizedMessageConcurrency } from "./lifecycle";
 
 /**
  * The new user messages a client request holds until its turn starts: the
@@ -73,18 +74,6 @@ export function newUserMessageIds(
   return ids;
 }
 
-/** The concurrency decision a request was accepted with, as stored. */
-export interface StoredSubmitDecision {
-  strategy: NormalizedMessageConcurrency | null;
-  /**
-   * Whether the request overlapped a queued turn under a policy that can
-   * supersede it (`latest`, `merge`, `debounce`). A replay gives it a new
-   * sequence number, in record order.
-   */
-  overlapping: boolean;
-  debounceUntilMs: number | null;
-}
-
 /** A message a request holds until its turn starts. JSON. */
 export interface HeldChatMessage {
   id: string;
@@ -109,7 +98,11 @@ export interface ChatAdmissionRecord {
    * on came after it.
    */
   afterUserId: string | null;
-  decision: StoredSubmitDecision;
+  /**
+   * The `messageConcurrency` strategy the request arrived under while other
+   * turns were queued; `null` when none were.
+   */
+  strategy: NormalizedMessageConcurrency | null;
   /** What the host needs to run the request again. JSON. */
   payload: unknown;
   /** A stop by the request id landed while it had no fiber. */
@@ -117,222 +110,85 @@ export interface ChatAdmissionRecord {
   createdAt: number;
 }
 
-/** Where a host keeps admission records. Synchronous, like DO SQLite. */
-export interface ChatAdmissionStore {
-  /** Write a record. Its `seq` follows every record written before it. */
-  add(record: {
-    requestId: string;
-    messages: HeldChatMessage[];
-    afterUserId: string | null;
-    decision: StoredSubmitDecision;
-    payload: unknown;
-  }): void;
-  /** Delete a record. Nothing happens when there is none. */
-  remove(requestId: string): void;
-  /** Mark a record stopped. Nothing happens when there is none. */
-  stop(requestId: string): void;
-  /** Mark every record stopped. */
-  stopAll(): void;
-  /** Delete every record. */
-  clear(): void;
-  /** Every record, in admission order. */
-  list(): ChatAdmissionRecord[];
-}
-
-/** The table admission records live in. */
+/** The table an earlier release kept admission records in. */
 export const CHAT_ADMISSIONS_TABLE = "cf_agents_chat_admissions";
 
 /**
- * A {@link ChatAdmissionStore} on the host's SQLite. The table is created on
- * first write, so an object that never takes a client request pays nothing
- * for it.
+ * Read the admission records an earlier release left, in admission order.
+ * `drop()` deletes their tables, once their replacements are written: the
+ * records now live on the chat lane's runs. An object with no table pays
+ * one read of no rows.
  */
-export function createChatAdmissionStore(
-  sql: () => AgentToolSql,
-  table: string = CHAT_ADMISSIONS_TABLE
-): ChatAdmissionStore {
+export function takeReleasedChatAdmissions(sql: () => AgentToolSql): {
+  records: ChatAdmissionRecord[];
+  drop(): void;
+} {
+  const table = CHAT_ADMISSIONS_TABLE;
+  const pieces = `${table}_messages`;
   const run = (query: string, ...bindings: unknown[]) =>
     sql()
       .exec(query, ...bindings)
       .toArray();
-  const pieces = `${table}_messages`;
-  // Records whose messages are split into pieces, so a delete touches the
-  // pieces table only for them.
-  const withPieces = new Set<string>();
-  let listed = false;
-  let state: "unknown" | "absent" | "ready" = "unknown";
-  const ensure = (): void => {
-    if (state === "ready") return;
-    run(
-      `create table if not exists ${table} (
-        request_id text primary key,
-        seq integer not null,
-        message_ids text not null,
-        decision text not null,
-        payload text,
-        stopped integer not null default 0,
-        created_at integer not null,
-        messages text,
-        message_pieces integer not null default 0,
-        after_user_id text
-      )`
-    );
-    // A table an earlier build of this release created has no held
-    // messages. Its records read as holding none.
-    const columns = new Set(
-      run(`pragma table_info(${table})`).map((row) => String(row.name))
-    );
-    if (!columns.has("messages")) {
-      run(`alter table ${table} add column messages text`);
-      run(
-        `alter table ${table} add column message_pieces integer not null default 0`
+  try {
+    run(`select 1 from ${table} limit 0`);
+  } catch (error) {
+    if (!String(error).includes("no such table")) throw error;
+    return { records: [], drop: () => {} };
+  }
+  const columns = new Set(
+    run(`select name from pragma_table_info('${table}')`).map((row) =>
+      String(row.name)
+    )
+  );
+  const has = (name: string) => columns.has(name);
+  const records = run(
+    `select request_id, seq, message_ids, decision, payload, stopped,
+            created_at,
+            ${has("messages") ? "messages" : "null as messages"},
+            ${has("message_pieces") ? "message_pieces" : "0 as message_pieces"},
+            ${has("after_user_id") ? "after_user_id" : "null as after_user_id"}
+     from ${table} order by seq`
+  ).map((row): ChatAdmissionRecord => {
+    const requestId = String(row.request_id);
+    let messages: unknown = row.messages;
+    let payload: unknown = parseJson<unknown>(row.payload);
+    if (Number(row.message_pieces) > 0) {
+      const joined = parseJson<unknown>(
+        run(
+          `select data from ${pieces} where request_id = ? order by piece`,
+          requestId
+        )
+          .map((piece) => String(piece.data))
+          .join("")
       );
-      run(`alter table ${table} add column after_user_id text`);
+      if (Array.isArray(joined)) {
+        messages = joined;
+      } else if (joined && typeof joined === "object") {
+        const both = joined as { messages?: unknown; payload?: unknown };
+        messages = both.messages;
+        payload = both.payload ?? undefined;
+      }
     }
-    run(
-      `create table if not exists ${pieces} (
-        request_id text not null,
-        piece integer not null,
-        data text not null,
-        primary key (request_id, piece)
-      )`
-    );
-    state = "ready";
-  };
-  /** Whether the table exists, without creating it. */
-  const exists = (): boolean => {
-    if (state === "ready") return true;
-    if (state === "absent") return false;
-    // A read of no rows: it fails only when the table is missing, and reads
-    // nothing either way (a `sqlite_master` scan reads the whole schema).
-    let found = true;
-    try {
-      run(`select 1 from ${table} limit 0`);
-    } catch (error) {
-      if (!String(error).includes("no such table")) throw error;
-      found = false;
-    }
-    if (found) ensure();
-    else state = "absent";
-    return found;
-  };
+    return {
+      requestId,
+      seq: Number(row.seq),
+      messageIds: parseJson<string[]>(row.message_ids) ?? [],
+      messages: heldMessages(
+        typeof messages === "string" ? messages : JSON.stringify(messages)
+      ),
+      afterUserId:
+        typeof row.after_user_id === "string" ? row.after_user_id : null,
+      strategy: releasedStrategy(row.decision),
+      payload,
+      stopped: Number(row.stopped) === 1,
+      createdAt: Number(row.created_at)
+    };
+  });
   return {
-    add(record) {
-      ensure();
-      const messages = JSON.stringify(record.messages);
-      const payload =
-        record.payload === undefined ? null : JSON.stringify(record.payload);
-      // The row holds the messages and the payload (client tools, body)
-      // together, so it is their combined size that must fit. Longer JSON (a
-      // message with large files) goes to the pieces table.
-      const split = messages.length + (payload?.length ?? 0) > ROW_PIECE_UNITS;
-      let count = 0;
-      if (split) {
-        withPieces.add(record.requestId);
-        run(`delete from ${pieces} where request_id = ?`, record.requestId);
-        const both = JSON.stringify({
-          messages: record.messages,
-          payload: record.payload ?? null
-        });
-        for (const piece of splitPieces(both, ROW_PIECE_UNITS)) {
-          run(
-            `insert into ${pieces} (request_id, piece, data) values (?, ?, ?)`,
-            record.requestId,
-            count++,
-            piece
-          );
-        }
-      }
-      run(
-        `insert or replace into ${table}
-           (request_id, seq, message_ids, decision, payload, stopped,
-            created_at, messages, message_pieces, after_user_id)
-         select ?, coalesce(max(seq), 0) + 1, ?, ?, ?, 0, ?, ?, ?, ?
-         from ${table}`,
-        record.requestId,
-        JSON.stringify(record.messages.map((message) => message.id)),
-        JSON.stringify(record.decision),
-        split ? null : payload,
-        Date.now(),
-        split ? null : messages,
-        count,
-        record.afterUserId
-      );
-    },
-    remove(requestId) {
-      if (!exists()) return;
-      run(`delete from ${table} where request_id = ?`, requestId);
-      // Before the first list this isolate cannot know which records were
-      // split, so it deletes pieces whatever.
-      if (withPieces.delete(requestId) || !listed) {
-        run(`delete from ${pieces} where request_id = ?`, requestId);
-      }
-    },
-    stop(requestId) {
-      if (!exists()) return;
-      run(`update ${table} set stopped = 1 where request_id = ?`, requestId);
-    },
-    stopAll() {
-      if (!exists()) return;
-      run(`update ${table} set stopped = 1`);
-    },
-    clear() {
-      if (!exists()) return;
-      run(`delete from ${table}`);
-      run(`delete from ${pieces}`);
-      withPieces.clear();
-    },
-    list() {
-      // A table that does not exist yet has no pieces either.
-      listed = true;
-      if (!exists()) return [];
-      return run(
-        `select request_id, seq, message_ids, decision, payload, stopped,
-                created_at, messages, message_pieces, after_user_id
-         from ${table} order by seq`
-      ).map((row) => {
-        const requestId = String(row.request_id);
-        let messages: unknown = row.messages;
-        let payload: unknown = parseJson<unknown>(row.payload);
-        if (Number(row.message_pieces) > 0) {
-          withPieces.add(requestId);
-          const joined = parseJson<unknown>(
-            run(
-              `select data from ${pieces} where request_id = ?
-               order by piece`,
-              requestId
-            )
-              .map((piece) => String(piece.data))
-              .join("")
-          );
-          if (Array.isArray(joined)) {
-            // Messages alone, as an earlier build of this release split them.
-            messages = joined;
-          } else if (joined && typeof joined === "object") {
-            const both = joined as { messages?: unknown; payload?: unknown };
-            messages = both.messages;
-            payload = both.payload ?? undefined;
-          }
-        }
-        return {
-          requestId,
-          seq: Number(row.seq),
-          messageIds: parseJson<string[]>(row.message_ids) ?? [],
-          messages: heldMessages(
-            typeof messages === "string" ? messages : JSON.stringify(messages)
-          ),
-          afterUserId:
-            typeof row.after_user_id === "string" ? row.after_user_id : null,
-          decision: parseJson<StoredSubmitDecision>(row.decision) ?? {
-            strategy: null,
-            overlapping: false,
-            debounceUntilMs: null
-          },
-          payload,
-          stopped: Number(row.stopped) === 1,
-          createdAt: Number(row.created_at)
-        };
-      });
+    records,
+    drop: () => {
+      run(`drop table if exists ${pieces}`);
+      run(`drop table if exists ${table}`);
     }
   };
 }
@@ -419,7 +275,7 @@ export async function chatRecoveryNames(input: {
 
 /**
  * Request ids of chat-turn runs that have not settled: Task runs of the
- * turn definition (a turn queued on the chat lane once its model call
+ * turn definition (not one parked while its recovered reply streams) (a turn queued on the chat lane once its model call
  * began), and legacy fibers (facets). A table that does not exist
  * yet holds none.
  */
@@ -433,6 +289,7 @@ export function interruptedTurnRequestIds(
       .exec(
         `select input, metadata from cf_agents_task_runs
          where definition = ? and status in ('pending', 'running')
+           and coalesce(wait_reason, '') != 'park'
            and (lane is null or json_type(checkpoint, '$.snapshot') is not null)`,
         turnName
       )
@@ -467,138 +324,313 @@ export function interruptedTurnRequestIds(
   return ids;
 }
 
-/** What {@link ChatAdmissions} needs from the turn core and the host. */
+/** What a client request's run holds until its turn starts. JSON. */
+export interface ChatAdmissionInput {
+  /**
+   * Admission order: increasing across the requests of one object (runs
+   * accepted in the same millisecond list in no set order).
+   */
+  order?: number;
+  messages: HeldChatMessage[];
+  afterUserId: string | null;
+  /** The strategy it overlapped other turns under, when it did. */
+  strategy?: NormalizedMessageConcurrency;
+  payload: unknown;
+}
+
+/** Where a continuation's record is kept until its turn starts. */
+export const CHAT_CONTINUATION_KEY_PREFIX = "cf:chat:continuation:";
+
+/** What {@link ChatAdmissions} needs from the host. */
 export interface ChatAdmissionsHost {
-  store: ChatAdmissionStore;
-  /** Whether an interrupted turn still waits for recovery. */
-  recoveryPending(): Promise<boolean>;
-  /** Whether a turn of `requestId` had a fiber, so recovery owns it. */
-  recoveryOwns(requestId: string): Promise<boolean>;
-  /**
-   * The records about to be replayed, in order, before the first of them
-   * is queued: their concurrency decisions are restored together, so a
-   * request a later one superseded is superseded already when it reaches
-   * the front of the queue.
-   */
-  beginReplay(records: ChatAdmissionRecord[]): void;
-  /**
-   * Run a record's request again. Call `onQueued` once it is on the turn
-   * queue, or once it ended before it got there.
-   */
-  replay(record: ChatAdmissionRecord, onQueued: () => void): Promise<void>;
+  /** The chat lane's runs: the client requests that wait. */
+  tasks(): Pick<Tasks, "peekList" | "inputOf" | "patchMetadata" | "cancel">;
+  /** The chat-turn definition the lane's runs are of. */
+  definition: string;
+  /** Where continuations' records are kept. */
+  storage(): Pick<DurableObjectStorage, "put" | "delete" | "list">;
 }
 
 /**
- * The records of one chat, and their replay after a reset. See the module
- * comment for the rule.
+ * The requests accepted and not started yet. A client request's record is
+ * its run on the chat lane (its input holds the messages it waits with); a
+ * continuation's is a storage key, since it takes no place in the lane
+ * until it fires (it can wait long, for a sibling's answer).
+ *
+ * In memory: one entry per waiting request of this isolate (and those an
+ * earlier isolate left, read once), removed when its turn starts or it ends.
  */
 export class ChatAdmissions {
-  /** Requests a process in this isolate owns. Their records are not orphans. */
-  readonly live = new Set<string>();
-  /** Records left by an earlier isolate may exist. Cleared after a replay. */
-  #orphansMaybe = true;
-  #replaying: Promise<void> | null = null;
+  /**
+   * Waiting client requests: their run, the messages they hold, and whether
+   * a later arrival can supersede it (it arrived under a strategy that can).
+   */
+  readonly #held = new Map<
+    string,
+    {
+      runId: string | null;
+      messages: HeldChatMessage[];
+      supersedable: boolean;
+      /** A request an earlier isolate left: what its replay would run. */
+      seeded?: ChatAdmissionRecord;
+    }
+  >();
+  /** Stops of requests no run was known for, by request id. */
+  readonly #stoppedUnseen = new Set<string>();
+  /** Continuations with a record. */
+  readonly #continuations = new Set<string>();
+  #seeded = false;
+  #continuationsRead = false;
 
   constructor(private readonly host: ChatAdmissionsHost) {}
 
-  /**
-   * The records, as last read. Every write goes through this class, so the
-   * copy stays current. `null` until the first read.
-   */
-  #records: ChatAdmissionRecord[] | null = null;
-
-  #list(): ChatAdmissionRecord[] {
-    this.#records ??= this.host.store.list();
-    return this.#records;
-  }
-
-  /** Change the copy as the store was changed, if it was read. */
-  #changed(
-    change: (records: ChatAdmissionRecord[]) => ChatAdmissionRecord[]
-  ): void {
-    if (this.#records) this.#records = change(this.#records);
-  }
-
-  /** Record an accepted request. It holds its messages until its turn. */
-  admit(record: {
-    requestId: string;
-    messages: HeldChatMessage[];
-    afterUserId: string | null;
-    decision: StoredSubmitDecision;
-    payload: unknown;
-  }): void {
-    this.live.add(record.requestId);
-    this.host.store.add(record);
-    this.#changed((records) => [
-      ...records.filter((r) => r.requestId !== record.requestId),
-      {
-        requestId: record.requestId,
-        seq: (records.at(-1)?.seq ?? 0) + 1,
-        messageIds: record.messages.map((message) => message.id),
-        messages: record.messages,
-        afterUserId: record.afterUserId,
-        decision: record.decision,
-        payload: record.payload,
-        stopped: false,
-        createdAt: Date.now()
+  /** Read, once, the runs an earlier isolate left waiting. */
+  #seed(): void {
+    if (this.#seeded) return;
+    const tasks = this.host.tasks();
+    let runs: ReturnType<typeof tasks.peekList>;
+    try {
+      runs = tasks.peekList({
+        definition: this.host.definition,
+        lane: CHAT_TURN_LANE,
+        status: ["pending", "running"],
+        results: false,
+        order: "oldest"
+      });
+    } catch {
+      // Tasks has not started: read them on a later call.
+      return;
+    }
+    this.#seeded = true;
+    const found: Array<{
+      requestId: string;
+      runId: string;
+      admission: ChatAdmissionInput;
+    }> = [];
+    for (const run of runs) {
+      const requestId = run.metadata?.requestId;
+      if (typeof requestId !== "string" || this.#held.has(requestId)) continue;
+      // A cleared request's messages are discarded: they wait no more.
+      if (
+        (run.metadata?.chat as { cleared?: unknown } | undefined)?.cleared ===
+        true
+      ) {
+        continue;
       }
-    ]);
-  }
-
-  /** The request's turn has a fiber, or the request ended without one. */
-  release(requestId: string): void {
-    this.host.store.remove(requestId);
-    this.#changed((records) =>
-      records.filter((r) => r.requestId !== requestId)
-    );
-  }
-
-  /** The process that owned the request ended. */
-  end(requestId: string): void {
-    this.live.delete(requestId);
-    this.release(requestId);
-  }
-
-  stop(requestId: string): void {
-    this.host.store.stop(requestId);
-    this.#changed((records) =>
-      records.map((r) =>
-        r.requestId === requestId ? { ...r, stopped: true } : r
-      )
-    );
-  }
-
-  stopAll(): void {
-    this.host.store.stopAll();
-    this.#changed((records) => records.map((r) => ({ ...r, stopped: true })));
-  }
-
-  /** A clear: every record goes. */
-  clear(): void {
-    this.host.store.clear();
-    this.#records = [];
-    this.#orphansMaybe = false;
-  }
-
-  /** The record of a request, if it has one. */
-  record(requestId: string): ChatAdmissionRecord | undefined {
-    return this.#list().find((r) => r.requestId === requestId);
+      const admission = tasks.inputOf<{ admission?: ChatAdmissionInput }>(
+        run.runId
+      )?.admission;
+      if (!admission) continue;
+      found.push({ requestId, runId: run.runId, admission });
+    }
+    found.sort((a, b) => (a.admission.order ?? 0) - (b.admission.order ?? 0));
+    for (const { requestId, runId, admission } of found) {
+      this.#held.set(requestId, {
+        runId,
+        messages: admission.messages,
+        supersedable: supersedes(admission.strategy ?? null),
+        seeded: {
+          requestId,
+          seq: admission.order ?? 0,
+          messageIds: admission.messages.map((message) => message.id),
+          messages: admission.messages,
+          afterUserId: admission.afterUserId,
+          strategy: admission.strategy ?? null,
+          payload: admission.payload,
+          stopped: false,
+          createdAt: Date.now()
+        }
+      });
+    }
   }
 
   /**
-   * The messages requests hold that have not joined the transcript yet, in
-   * admission order: what a tab draws after the transcript, marked as
-   * queued. A message already stored (its turn has started) is left out.
+   * A client request waits in the lane, holding `messages`: as `runId` once
+   * its run is accepted (`null` until then).
+   */
+  hold(
+    requestId: string,
+    runId: string | null,
+    messages: HeldChatMessage[],
+    supersedable = false
+  ): void {
+    this.#held.set(requestId, { runId, messages, supersedable });
+    if (runId !== null && this.#stoppedUnseen.delete(requestId)) {
+      this.#mark(runId, { stopped: true });
+    }
+  }
+
+  /**
+   * The messages the waiting requests a superseding arrival can skip hold,
+   * in admission order. The arrival holds them ahead of its own: a
+   * superseded request never runs, and its question is still answered.
+   * Some may not be skipped (one that started meanwhile); their messages
+   * are stored by their own turn first, and a join leaves out what is
+   * stored.
+   */
+  supersedableMessages(): HeldChatMessage[] {
+    this.#seed();
+    const messages: HeldChatMessage[] = [];
+    for (const held of this.#held.values()) {
+      if (held.supersedable) messages.push(...held.messages);
+    }
+    return messages;
+  }
+
+  /**
+   * Keep a continuation's record until its turn starts. `carried`: one an
+   * earlier release kept, which {@link continuations} hands back to
+   * schedule.
+   */
+  async admitContinuation(
+    requestId: string,
+    targetMessageIds: string[],
+    carried = false
+  ): Promise<void> {
+    if (!carried) this.#continuations.add(requestId);
+    await this.host
+      .storage()
+      .put(CHAT_CONTINUATION_KEY_PREFIX + requestId, { targetMessageIds });
+  }
+
+  /** The continuations an earlier isolate left, in the order they were kept. */
+  async continuations(): Promise<
+    Array<{ requestId: string; targetMessageIds: string[] }>
+  > {
+    // Read once per isolate: this isolate's own are known without a read.
+    if (this.#continuationsRead) return [];
+    this.#continuationsRead = true;
+    const kept = await this.host
+      .storage()
+      .list<{ targetMessageIds?: unknown }>({
+        prefix: CHAT_CONTINUATION_KEY_PREFIX
+      });
+    const out: Array<{ requestId: string; targetMessageIds: string[] }> = [];
+    for (const [key, value] of kept) {
+      const requestId = key.slice(CHAT_CONTINUATION_KEY_PREFIX.length);
+      if (this.#continuations.has(requestId)) continue;
+      const ids = Array.isArray(value?.targetMessageIds)
+        ? value.targetMessageIds.filter(
+            (id): id is string => typeof id === "string"
+          )
+        : [];
+      this.#continuations.add(requestId);
+      out.push({ requestId, targetMessageIds: ids });
+    }
+    return out;
+  }
+
+  /** Read the continuations `requestIds` again on the next call. */
+  forgetRead(requestIds: string[]): void {
+    this.#continuationsRead = false;
+    for (const requestId of requestIds) this.#continuations.delete(requestId);
+  }
+
+  /** Whether any client request waits in the lane. */
+  waiting(): boolean {
+    this.#seed();
+    return this.#held.size > 0;
+  }
+
+  /**
+   * The runs `runIds` were superseded: their requests wait no more.
    *
-   * @param stored - The ids of the stored messages.
+   * @returns The records of those an earlier isolate left: no request here
+   *   ends them.
+   */
+  endRuns(runIds: readonly string[]): ChatAdmissionRecord[] {
+    const seeded: ChatAdmissionRecord[] = [];
+    if (runIds.length === 0) return seeded;
+    const ended = new Set(runIds);
+    for (const [requestId, held] of this.#held) {
+      if (held.runId !== null && ended.has(held.runId)) {
+        this.#held.delete(requestId);
+        if (held.seeded) seeded.push(held.seeded);
+      }
+    }
+    return seeded;
+  }
+
+  /** A request's turn started, or it ended: it waits no more. */
+  end(requestId: string): void {
+    this.#held.delete(requestId);
+    if (this.#continuations.delete(requestId)) {
+      void this.host
+        .storage()
+        .delete(CHAT_CONTINUATION_KEY_PREFIX + requestId)
+        .catch((error: unknown) =>
+          console.error("[chat] a continuation record was not removed:", error)
+        );
+    }
+  }
+
+  /** A stop by the request id, kept on its waiting run. */
+  stop(requestId: string): void {
+    this.#seed();
+    const held = this.#held.get(requestId);
+    if (held?.runId) this.#mark(held.runId, { stopped: true });
+    // Not known here yet (the lane's runs are read before Tasks started, or
+    // the request's run is accepted later): its replay asks.
+    else {
+      this.#stoppedUnseen.add(requestId);
+      // Bounded: most are stops of requests that already ended.
+      if (this.#stoppedUnseen.size > 64) {
+        const [oldest] = this.#stoppedUnseen;
+        this.#stoppedUnseen.delete(oldest);
+      }
+    }
+  }
+
+  /** Whether a stop landed for `requestId` before its run was known. */
+  takeStop(requestId: string): boolean {
+    return this.#stoppedUnseen.delete(requestId);
+  }
+
+  /** Stop every waiting request. */
+  stopAll(): void {
+    this.#seed();
+    for (const [requestId, held] of this.#held) {
+      if (held.runId) this.#mark(held.runId, { stopped: true });
+      else this.#stoppedUnseen.add(requestId);
+    }
+  }
+
+  /**
+   * A clear: no waiting request runs, and its messages are discarded. Their
+   * runs end now, so none holds the lane (a quiet period, say) for the
+   * requests after the clear.
+   */
+  clear(): void {
+    this.#seed();
+    const tasks = this.host.tasks();
+    for (const held of this.#held.values()) {
+      if (!held.runId) continue;
+      this.#mark(held.runId, { cleared: true });
+      void tasks
+        .cancel(held.runId, "chat cleared")
+        .catch((error: unknown) =>
+          console.error("[chat] a cleared request's run did not end:", error)
+        );
+    }
+    this.#held.clear();
+    for (const requestId of [...this.#continuations]) this.end(requestId);
+  }
+
+  #mark(runId: string, flag: Record<string, boolean>): void {
+    this.host.tasks().patchMetadata(runId, "chat", flag);
+  }
+
+  /**
+   * The messages waiting requests hold that are not in `stored`, in
+   * admission order. Tabs draw them after the transcript.
    */
   waitingMessages(stored: ReadonlySet<string>): HeldChatMessage[] {
-    const records = this.#list();
-    if (records.length === 0) return [];
+    this.#seed();
+    if (this.#held.size === 0) return [];
     const seen = new Set<string>();
     const waiting: HeldChatMessage[] = [];
-    for (const record of records) {
-      for (const message of record.messages) {
+    for (const { messages } of this.#held.values()) {
+      for (const message of messages) {
         if (stored.has(message.id) || seen.has(message.id)) continue;
         seen.add(message.id);
         waiting.push(message);
@@ -606,92 +638,26 @@ export class ChatAdmissions {
     }
     return waiting;
   }
+}
 
-  /**
-   * Whether an earlier isolate left records to replay (or a replay runs),
-   * so a host holds the object awake only when there is something to do.
-   */
-  hasOrphans(): boolean {
-    if (this.#replaying) return true;
-    if (!this.#orphansMaybe) return false;
-    if (this.#orphans().length > 0) return true;
-    this.#orphansMaybe = false;
-    return false;
-  }
+/**
+ * Whether a request that arrived under `strategy` while other turns were
+ * queued supersedes the waiting ones that arrived so too, and can be
+ * superseded itself (`latest`, `merge`, debounce).
+ */
+export function supersedes(
+  strategy: NormalizedMessageConcurrency | null
+): boolean {
+  return strategy !== null && strategy !== "queue" && strategy !== "drop";
+}
 
-  /**
-   * Queue the records an earlier isolate left, in order, each as its own
-   * request. Unless `force`, nothing happens while an interrupted turn
-   * still waits for recovery: the recovery's end calls this again.
-   *
-   * @returns Once every record is queued or ended. Not when their turns end.
-   */
-  async resume(options: { force?: boolean } = {}): Promise<void> {
-    if (this.#replaying) return this.#replaying;
-    if (!this.#orphansMaybe) return;
-    const orphans = this.#orphans();
-    if (orphans.length === 0) {
-      this.#orphansMaybe = false;
-      return;
-    }
-    if (!options.force && (await this.host.recoveryPending())) return;
-    if (this.#replaying) return this.#replaying;
-    const replaying = this.#replay();
-    this.#replaying = replaying;
-    try {
-      await replaying;
-    } finally {
-      if (this.#replaying === replaying) this.#replaying = null;
-    }
-  }
-
-  /**
-   * A new request is about to join the queue: the records an earlier
-   * isolate left go first, whether recovery is done or not.
-   */
-  async beforeEnqueue(): Promise<void> {
-    if (!this.#orphansMaybe && !this.#replaying) return;
-    await this.resume({ force: true });
-  }
-
-  #orphans(): ChatAdmissionRecord[] {
-    return this.#list().filter((r) => !this.live.has(r.requestId));
-  }
-
-  async #replay(): Promise<void> {
-    // However long a request waited (a turn ahead of it can run for hours),
-    // its record is replayed: its message lives nowhere else.
-    const records: ChatAdmissionRecord[] = [];
-    for (const record of this.#orphans()) {
-      if (await this.host.recoveryOwns(record.requestId)) {
-        this.release(record.requestId);
-        continue;
-      }
-      records.push(record);
-    }
-    const replays = records.filter(
-      (record) => !this.live.has(record.requestId)
-    );
-    for (const record of replays) this.live.add(record.requestId);
-    this.host.beginReplay(replays);
-    for (const listed of replays) {
-      // Read again: a stop or a clear can have landed while this pass
-      // awaited, and the request has no abort controller yet to take it.
-      const record = this.record(listed.requestId);
-      if (!record) {
-        this.live.delete(listed.requestId);
-        continue;
-      }
-      await new Promise<void>((queued) => {
-        this.host.replay(record, queued).then(
-          () => queued(),
-          (error: unknown) => {
-            queued();
-            console.error("[chat] a replayed request failed:", error);
-          }
-        );
-      });
-    }
-    this.#orphansMaybe = this.#orphans().length > 0;
-  }
+/** The strategy a released record overlapped other turns under. */
+function releasedStrategy(
+  column: unknown
+): NormalizedMessageConcurrency | null {
+  const decision = parseJson<{
+    strategy?: NormalizedMessageConcurrency | null;
+    overlapping?: boolean;
+  }>(column);
+  return decision?.overlapping ? (decision.strategy ?? null) : null;
 }

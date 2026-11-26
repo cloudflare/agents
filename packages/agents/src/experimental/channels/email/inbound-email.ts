@@ -1,8 +1,7 @@
 import PostalMime from "postal-mime";
 import type {
   Attachment as PostalMimeAttachment,
-  Email as PostalMimeEmail,
-  Header as PostalMimeHeader
+  Email as PostalMimeEmail
 } from "postal-mime";
 import type {
   EmailMessageSurfaceInput,
@@ -10,6 +9,8 @@ import type {
   EmailSurfaceRecipients
 } from "./email-surface";
 import { utf8ByteLength } from "../internal";
+import { isAutoReplyEmail } from "../../../email";
+import { boundedReferences } from "../../../email-headers";
 import type {
   ChannelAttachment,
   ChannelEmailIngress,
@@ -19,8 +20,6 @@ import type {
 
 /** Parsed, provider-specific email retained while selecting an application route. */
 export type InboundEmailRaw = PostalMimeEmail;
-
-const EMAIL_HEADER_VALUE_LIMIT = 2048;
 
 export type InboundEmailOptions = {
   /** Only accept messages delivered to this address. */
@@ -47,35 +46,6 @@ function emailReferences(value: string | undefined): string[] {
 
 function firstReference(value: string | undefined): string | undefined {
   return emailReferences(value)[0];
-}
-
-function boundedReferences(references: readonly string[]): string[] {
-  const unique = [...new Set(references.filter(Boolean))];
-  if (unique.length < 2) return unique;
-  const selected = [unique[0]!];
-  for (let index = unique.length - 1; index > 0; index -= 1) {
-    const candidate = unique[index]!;
-    const header = [...selected, candidate]
-      .map((reference) => `<${reference}>`)
-      .join(" ");
-    if (utf8ByteLength(header) <= EMAIL_HEADER_VALUE_LIMIT) {
-      selected.splice(1, 0, candidate);
-    }
-  }
-  return selected;
-}
-
-function isAutoReply(headers: readonly PostalMimeHeader[]): boolean {
-  return headers.some((header) => {
-    const key = header.key.toLowerCase();
-    const value = header.value.trim().toLowerCase();
-    if (key === "auto-submitted") return value !== "no";
-    if (key === "x-auto-response-suppress") return true;
-    return (
-      key === "precedence" &&
-      (value === "bulk" || value === "junk" || value === "list")
-    );
-  });
 }
 
 function attachmentSize(content: PostalMimeAttachment["content"]): number {
@@ -197,7 +167,9 @@ export function inboundEmail(
           inReplyTo: reference,
           references: [...new Set(references)]
         },
-        label: `Email · ${recipientLabel(replyTo)}`
+        label: `Email · ${recipientLabel(replyTo)}`,
+        // One surface per thread: each reply's headers replace the last.
+        key: threadRoot
       };
 
       const event: ChannelInboundMessageInput = {
@@ -223,7 +195,7 @@ export function inboundEmail(
           ...(replyReference && { reply: { id: replyReference } }),
           metadata: {
             ...(sentAt && { sentAt }),
-            autoReply: isAutoReply(parsed.headers)
+            autoReply: isAutoReplyEmail(parsed.headers)
           }
         }
       };

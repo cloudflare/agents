@@ -44,6 +44,7 @@ export {
   ThinkLegacySessionApiAgent
 } from "./think-session";
 export { ThinkFetchToolsTestAgent } from "./fetch-tools";
+export { ThinkSkillsToolsTestAgent } from "./skills-tools";
 export { ThinkExecuteToolAgent } from "./execute-tool";
 export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export { ThinkFiberTestAgent } from "./fiber";
@@ -51,6 +52,7 @@ export { ThinkClientToolsAgent } from "./client-tools";
 export {
   ThinkExtensionHookAgent,
   ThinkExtensionNetworkAgent,
+  ThinkExtensionTurnAgent,
   ThinkExtensionBeforeTurnModelAgent
 } from "./extension-hooks";
 export {
@@ -62,3 +64,4 @@ export {
   ThinkPromptCacheTestAgent,
   ThinkUpgradeTestAgent
 } from "./prompt-cache";
+export { ThinkPrefixChangedAgent } from "./prefix-changed";

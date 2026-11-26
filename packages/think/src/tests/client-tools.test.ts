@@ -192,6 +192,75 @@ function makeToolMessage(
   };
 }
 
+/**
+ * Wait until the agent has finished handling `count` socket messages of
+ * `type`, and any tool result or approval they queued has been applied (the
+ * chat protocol starts that apply without awaiting it): the event a test
+ * waits for after it sends one, not a time.
+ */
+async function handled(
+  agent: {
+    handledMessageCountForTest(type: string): Promise<number>;
+    hasPendingInteractionForTest(): Promise<boolean>;
+  },
+  type: string,
+  count = 1
+): Promise<void> {
+  await waitUntil(
+    async () =>
+      (await agent.handledMessageCountForTest(type)) >= count &&
+      !(await agent.hasPendingInteractionForTest()),
+    5000,
+    10
+  );
+}
+
+/**
+ * Wait until no interaction is being applied, no turn runs and no
+ * continuation waits: the state a test reads
+ * after a reply's done frame, once the turn has also finished its writes.
+ * A reply that waits on a client tool counts as settled.
+ */
+async function settled(agent: {
+  isChatTurnActiveForTest(): Promise<boolean>;
+  pendingContinuationRequestIdForTest(): Promise<string | null>;
+  hasPendingInteractionForTest(): Promise<boolean>;
+}): Promise<void> {
+  await waitUntil(
+    async () =>
+      !(await agent.hasPendingInteractionForTest()) &&
+      !(await agent.isChatTurnActiveForTest()) &&
+      (await agent.pendingContinuationRequestIdForTest()) === null,
+    8000
+  );
+}
+
+/**
+ * Wait until an incomplete parallel batch is parked: its continuation waits
+ * for the missing results with no coalesce timer armed, no drain running and
+ * no turn active. Nothing can continue from there without a new result.
+ */
+async function batchParked(agent: {
+  isChatTurnActiveForTest(): Promise<boolean>;
+  hasPendingInteractionForTest(): Promise<boolean>;
+  getContinuationBarrierState(): Promise<{
+    hasPending: boolean;
+    barrierActive: boolean;
+    timerArmed: boolean;
+  }>;
+}): Promise<void> {
+  await waitUntil(async () => {
+    const barrier = await agent.getContinuationBarrierState();
+    return (
+      barrier.hasPending &&
+      !barrier.barrierActive &&
+      !barrier.timerArmed &&
+      !(await agent.hasPendingInteractionForTest()) &&
+      !(await agent.isChatTurnActiveForTest())
+    );
+  }, 8000);
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -271,7 +340,7 @@ describe("Think — tool result application", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT);
     const messages = (await agent.getMessages()) as UIMessage[];
     const assistantMsg = messages.find((m) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
@@ -305,7 +374,7 @@ describe("Think — tool result application", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -337,7 +406,7 @@ describe("Think — tool result application", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -370,7 +439,7 @@ describe("Think — tool result application", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -400,7 +469,7 @@ describe("Think — tool result application", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -430,7 +499,7 @@ describe("Think — tool result application", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -461,7 +530,7 @@ describe("Think — tool result application", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -494,7 +563,7 @@ describe("Think — tool approval", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_APPROVAL);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -523,7 +592,7 @@ describe("Think — tool approval", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_APPROVAL);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -551,7 +620,7 @@ describe("Think — tool approval", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_APPROVAL);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -582,7 +651,7 @@ describe("Think — tool approval", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_APPROVAL);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -613,7 +682,7 @@ describe("Think — tool approval", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_APPROVAL);
     const messages = (await agent.getMessages()) as UIMessage[];
     const toolPart = messages.find((m) => m.role === "assistant")!
       .parts[0] as Record<string, unknown>;
@@ -642,8 +711,7 @@ describe("Think — auto-continuation", () => {
     });
     await donePromise;
 
-    // Wait for message broadcast
-    await delay(200);
+    await settled(agent);
 
     // Now send tool result with autoContinue
     const continuationDone = waitForDone(ws, 15000);
@@ -658,7 +726,7 @@ describe("Think — auto-continuation", () => {
     );
     await continuationDone;
 
-    await delay(200);
+    await settled(agent);
     const messages = (await agent.getMessages()) as UIMessage[];
     // Should have user + assistant (with tool) + continuation assistant
     expect(messages.length).toBeGreaterThanOrEqual(2);
@@ -691,8 +759,9 @@ describe("Think — auto-continuation", () => {
       })
     );
 
-    // Wait and verify no continuation stream started
-    await delay(500);
+    // Once the result is handled and nothing runs, no continuation started.
+    await handled(agent, MSG_TOOL_RESULT);
+    await settled(agent);
     const messages = (await agent.getMessages()) as UIMessage[];
     // Should still be 2 messages (user + original assistant)
     expect(messages).toHaveLength(2);
@@ -712,7 +781,7 @@ describe("Think — auto-continuation", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // Approve and auto-continue
     const continuationDone = waitForDone(ws, 15000);
@@ -726,7 +795,7 @@ describe("Think — auto-continuation", () => {
     );
     await continuationDone;
 
-    await delay(200);
+    await settled(agent);
     const messages = (await agent.getMessages()) as UIMessage[];
     expect(messages.length).toBeGreaterThanOrEqual(2);
 
@@ -903,7 +972,7 @@ describe("Think — auto-continuation", () => {
         error: "continuation failed before streaming"
       });
     });
-    await delay(200);
+    await settled(agent);
     expect(
       (await responseLog()).filter((response) => response.status === "error")
     ).toHaveLength(1);
@@ -1240,7 +1309,7 @@ describe("Think — auto-continuation", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // Reject and auto-continue
     const continuationDone = waitForDone(ws, 15000);
@@ -1254,7 +1323,7 @@ describe("Think — auto-continuation", () => {
     );
     await continuationDone;
 
-    await delay(200);
+    await settled(agent);
     const messages = (await agent.getMessages()) as UIMessage[];
     expect(messages.length).toBeGreaterThanOrEqual(2);
 
@@ -1316,10 +1385,11 @@ describe("Think — auto-continuation", () => {
         })
       );
 
-      // Wait well past the 50ms coalesce window WITHOUT sending the slow
-      // result. The old behavior fired a continuation here (it saw only the
-      // fast result and treated `tc-slow` as an orphan).
-      await delay(400);
+      // Without the slow result, nothing continues. The old behavior fired a
+      // continuation here (it saw only the fast result and treated `tc-slow`
+      // as an orphan).
+      await handled(agent, MSG_TOOL_RESULT);
+      await batchParked(agent);
 
       let log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(0);
@@ -1337,7 +1407,7 @@ describe("Think — auto-continuation", () => {
         })
       );
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -1491,7 +1561,7 @@ describe("Think — auto-continuation", () => {
         const log = (await agent.getResponseLog()) as ChatResponseResult[];
         return log.some((entry) => entry.continuation);
       }, 8000);
-      await delay(100);
+      await settled(agent);
 
       const messages = (await agent.getMessages()) as UIMessage[];
       const toolPart = messages
@@ -1543,7 +1613,7 @@ describe("Think — auto-continuation", () => {
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       return log.some((entry) => entry.continuation);
     }, 8000);
-    await delay(300);
+    await settled(agent);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.filter((entry) => entry.continuation)).toHaveLength(1);
@@ -1619,7 +1689,7 @@ describe("Think — auto-continuation", () => {
         );
       }
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       // All three results survived — none was clobbered back to input-available.
       const messages = (await agent.getMessages()) as UIMessage[];
@@ -1692,7 +1762,7 @@ describe("Think — auto-continuation", () => {
       })
     );
 
-    await delay(400);
+    await handled(agent, MSG_TOOL_RESULT);
     let log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.filter((entry) => entry.continuation).length).toBe(0);
 
@@ -1708,7 +1778,7 @@ describe("Think — auto-continuation", () => {
       })
     );
     await continuationDone;
-    await delay(200);
+    await settled(agent);
 
     log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -1772,10 +1842,10 @@ describe("Think — auto-continuation", () => {
         })
       );
 
-      // Wait far longer than the coalesce window. The old bounded-wait barrier
-      // would eventually fire through; the event-driven barrier holds with no
-      // hold on the isolate and no spurious repair.
-      await delay(1500);
+      // The barrier is event-driven: once the result is handled and nothing
+      // runs, it has held, with no spurious repair.
+      await handled(agent, MSG_TOOL_RESULT);
+      await batchParked(agent);
 
       let log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(0);
@@ -1802,7 +1872,7 @@ describe("Think — auto-continuation", () => {
         })
       );
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -1883,8 +1953,9 @@ describe("Think — auto-continuation", () => {
       );
       await closeWS(ws);
 
-      // Wait well past the coalesce window and the old 60s-style fire-through.
-      await delay(1500);
+      // Once the result is handled and nothing runs, no continuation fired.
+      await handled(agent, MSG_TOOL_RESULT);
+      await batchParked(agent);
 
       // No continuation fired and the orphaned sibling was NOT repaired to
       // errored while it was legitimately just never answered.
@@ -1987,7 +2058,7 @@ describe("Think — auto-continuation", () => {
           autoContinue: true
         })
       );
-      await delay(300);
+      await handled(agent, MSG_TOOL_RESULT);
       expect(
         ((await agent.getResponseLog()) as ChatResponseResult[]).filter(
           (entry) => entry.continuation
@@ -2008,7 +2079,7 @@ describe("Think — auto-continuation", () => {
         })
       );
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -2055,7 +2126,7 @@ describe("Think — auto-continuation", () => {
         autoContinue: false
       })
     );
-    await delay(400);
+    await handled(agent, MSG_TOOL_RESULT);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.filter((entry) => entry.continuation).length).toBe(0);
@@ -2113,7 +2184,7 @@ describe("Think — auto-continuation", () => {
           autoContinue: true
         })
       );
-      await delay(300);
+      await handled(agent, MSG_TOOL_RESULT);
       expect(
         ((await agent.getResponseLog()) as ChatResponseResult[]).filter(
           (entry) => entry.continuation
@@ -2138,7 +2209,7 @@ describe("Think — auto-continuation", () => {
         })
       );
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -2168,7 +2239,7 @@ describe("Think — auto-continuation", () => {
     // continuation was requested — the fast sibling's autoContinue:true — lives
     // in the in-memory pending, not the persisted transcript. So if the isolate
     // is evicted between siblings, the errored completing result finds no
-    // pending and `autoContinuation.rearmForBatch` no-ops (it never
+    // pending and `ChatTurns.rearmContinuation` no-ops (it never
     // CREATES a pending): the continuation is silently dropped.
     //
     // This is NOT a regression (the old in-memory timer was equally fragile to
@@ -2224,7 +2295,7 @@ describe("Think — auto-continuation", () => {
           autoContinue: true
         })
       );
-      await delay(300);
+      await handled(agent, MSG_TOOL_RESULT);
       expect(
         ((await agent.getResponseLog()) as ChatResponseResult[]).filter(
           (entry) => entry.continuation
@@ -2247,7 +2318,7 @@ describe("Think — auto-continuation", () => {
           autoContinue: false
         })
       );
-      await delay(400);
+      await handled(agent, MSG_TOOL_RESULT, 2);
 
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(0);
@@ -2355,7 +2426,7 @@ describe("Think — auto-continuation", () => {
         })
       );
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -2439,7 +2510,7 @@ describe("Think — auto-continuation", () => {
       // Only the stream-finalize re-check can fire this; if it didn't, this
       // would time out.
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -2514,7 +2585,7 @@ describe("Think — auto-continuation", () => {
       await waitUntil(async () => {
         return (await agent.streamingToolCallState("tc-slow")) === undefined;
       }, 8000);
-      await delay(300);
+      await batchParked(agent);
 
       // The barrier must still be holding — no continuation, no repair.
       const midLog = (await agent.getResponseLog()) as ChatResponseResult[];
@@ -2533,7 +2604,7 @@ describe("Think — auto-continuation", () => {
         })
       );
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -2609,8 +2680,10 @@ describe("Think — auto-continuation", () => {
         })
       );
 
-      // The approval sibling is still pending — the barrier must hold.
-      await delay(400);
+      // The approval sibling is still pending: the barrier holds once the
+      // result is handled and nothing runs.
+      await handled(agent, MSG_TOOL_RESULT);
+      await batchParked(agent);
       const midLog = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(midLog.filter((entry) => entry.continuation).length).toBe(0);
       expect(repairedToolCallIds.flat()).not.toContain("tc-approval");
@@ -2626,7 +2699,7 @@ describe("Think — auto-continuation", () => {
         })
       );
       await continuationDone;
-      await delay(200);
+      await settled(agent);
 
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -2703,7 +2776,7 @@ describe("Think — client tool schemas", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT);
     const captured = await agent.getCapturedClientTools();
     expect(captured).toBeDefined();
     expect(captured).toHaveLength(1);
@@ -2731,7 +2804,7 @@ describe("Think — client tool schemas", () => {
 
     // Clear
     ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
-    await delay(200);
+    await handled(agent, MSG_CHAT_CLEAR);
 
     captured = await agent.getCapturedClientTools();
     expect(captured).toBeUndefined();
@@ -2945,7 +3018,7 @@ describe("Think — before-turn repair", () => {
     );
     expect(await agent.getContinuationSlotsForTest()).toEqual({
       pending: false,
-      deferred: false
+      next: false
     });
 
     await closeWS(ws);
@@ -2986,7 +3059,7 @@ describe("Think — before-turn repair", () => {
     // Tab B answers the same call late, listing other tools. Its result
     // settles nothing, so the stored tools stay.
     tabB.send(result(toolsOfB));
-    await delay(200);
+    await handled(agent, MSG_TOOL_RESULT, 2);
     expect(await agent.getCapturedClientTools()).toEqual(toolsOfA);
 
     await closeWS(tabA);
@@ -3146,7 +3219,7 @@ describe("Think — tool broadcast and persistence", () => {
       })
     );
 
-    await delay(200);
+    await handled(agent1, MSG_TOOL_RESULT);
     await closeWS(ws);
 
     // Get a new agent instance (same room = same DO)
@@ -3160,7 +3233,7 @@ describe("Think — tool broadcast and persistence", () => {
 
   it("other tabs receive continuation stream chunks", async () => {
     const room = crypto.randomUUID();
-    await freshAgent(room);
+    const agent = await freshAgent(room);
     const { ws: ws1 } = await connectWS(room);
     const { ws: ws2 } = await connectWS(room);
     await collectMessages(ws1, 3);
@@ -3172,8 +3245,7 @@ describe("Think — tool broadcast and persistence", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await donePromise1;
-    // Tab 2 also receives the stream
-    await delay(200);
+    await settled(agent);
 
     // Tab 1 sends tool result with autoContinue
     const continuationDone1 = waitForDone(ws1, 15000);
@@ -3208,7 +3280,7 @@ describe("resume coordination during pending continuation", () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
-    await delay(100);
+    await collectMessages(ws, 3);
 
     const userMsg: UIMessage = {
       id: "msg-immediate-resume-user",
@@ -3276,7 +3348,7 @@ describe("resume coordination during pending continuation", () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
-    await delay(100);
+    await collectMessages(ws, 3);
 
     const userMsg: UIMessage = {
       id: "msg-close-before-coalesce-user",
@@ -3324,7 +3396,7 @@ describe("resume coordination during pending continuation", () => {
       })
     );
 
-    await delay(10);
+    await handled(agent, MSG_TOOL_RESULT);
     await closeWS(ws);
 
     await waitUntil(async () => {
@@ -3340,7 +3412,7 @@ describe("resume coordination during pending continuation", () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
-    await delay(100);
+    await collectMessages(ws, 3);
 
     const userMsg: UIMessage = {
       id: "msg-resume-hold-user",
@@ -3414,7 +3486,7 @@ describe("resume coordination during pending continuation", () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
-    await delay(100);
+    await collectMessages(ws, 3);
 
     const userMsg: UIMessage = {
       id: "msg-resume-fail-user",
@@ -3489,7 +3561,7 @@ describe("resume coordination during pending continuation", () => {
     const agent = await freshAgent(room);
     const { ws: ws1 } = await connectWS(room);
     const { ws: ws2 } = await connectWS(room);
-    await delay(100);
+    await collectMessages(ws2, 3);
 
     const userMsg: UIMessage = {
       id: "msg-resume-none-user",
@@ -3537,7 +3609,7 @@ describe("resume coordination during pending continuation", () => {
     );
 
     await waitForDone(ws1, 10000);
-    await delay(100);
+    await settled(agent);
 
     const nonePromise = waitForMessageOfType(ws2, MSG_STREAM_RESUME_NONE, 3000);
     ws2.send(
@@ -3566,7 +3638,7 @@ describe("deferred continuation", () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
-    await delay(100);
+    await collectMessages(ws, 3);
 
     const userMsg: UIMessage = {
       id: "msg-deferred-user",
@@ -3623,8 +3695,10 @@ describe("deferred continuation", () => {
       })
     );
 
-    // Hold past the coalesce window with the batch still incomplete.
-    await delay(300);
+    // The batch is still incomplete: once the result is handled and nothing
+    // runs, no continuation has started.
+    await handled(agent, MSG_TOOL_RESULT);
+    await batchParked(agent);
     let log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.filter((entry) => entry.continuation).length).toBe(0);
 
@@ -3640,7 +3714,7 @@ describe("deferred continuation", () => {
       })
     );
     await continuationDone;
-    await delay(200);
+    await settled(agent);
 
     log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.filter((entry) => entry.continuation).length).toBe(1);
@@ -3712,7 +3786,7 @@ describe("Think — chained client tools across continuations (#2443)", () => {
       4000
     );
     await waitForIdle(agent);
-    await delay(200);
+    await settled(agent);
     expect(await agent.getChainedModelCallsForTest()).toEqual([0, 1, 2]);
   }
 
@@ -3735,13 +3809,13 @@ describe("Think — chained client tools across continuations (#2443)", () => {
 
     // A second result for `tc-chain-1` lands after the first continuation
     // took its pending but before its stream starts. The call is already
-    // answered, so it defers nothing.
+    // answered, so it schedules no next one.
     await agent.holdContinuationStartForTest();
     sendToolResult(ws, "tc-chain-1", "step one");
     await waitUntil(() => agent.isContinuationStartHeldForTest(), 8000);
     sendToolResult(ws, "tc-chain-1", "step one (retried)");
-    await delay(100);
-    expect((await agent.getContinuationSlotsForTest()).deferred).toBe(false);
+    await handled(agent, MSG_TOOL_RESULT, 2);
+    expect((await agent.getContinuationSlotsForTest()).next).toBe(false);
     await agent.releaseContinuationStartForTest();
 
     await answerMidStreamThenSettle(agent, ws);
@@ -3784,7 +3858,7 @@ describe("Think — a tool result while the reply is being stored", () => {
         (await agent.streamingToolCallState("tc-client-1")) ===
         "output-available"
     );
-    await delay(100);
+    await handled(agent, MSG_TOOL_RESULT);
     await agent.releaseReplyStoreForTest();
 
     // The continuation answers after the tool call's reply.
@@ -3916,7 +3990,7 @@ describe("Think — tool results with nothing to continue", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await done;
-    await delay(200);
+    await settled(agent);
 
     // While the tool runs in the tab, the app appends a status message.
     const note = (await agent.appendNoteForTest(
@@ -3936,7 +4010,12 @@ describe("Think — tool results with nothing to continue", () => {
         autoContinue: true
       })
     );
-    await delay(800);
+    await handled(agent, MSG_TOOL_RESULT);
+    // The continuation is decided after the message is handled.
+    await vi.waitFor(() => expect(dropped).toEqual(["moved_on"]), {
+      timeout: 5000,
+      interval: 10
+    });
 
     const stored = (await agent.getMessages()) as UIMessage[];
     expect(stored.map((m) => m.id)).toEqual(beforeResult.map((m) => m.id));
@@ -3964,7 +4043,7 @@ describe("Think — tool results with nothing to continue", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await done;
-    await delay(200);
+    await settled(agent);
 
     // Tab A's result continues the reply.
     const continued = waitForDone(tabA, 15000);
@@ -3978,7 +4057,7 @@ describe("Think — tool results with nothing to continue", () => {
       })
     );
     await continued;
-    await delay(200);
+    await settled(agent);
     const afterFirst = (await agent.getMessages()) as UIMessage[];
 
     // Tab B's result for the same call arrives.
@@ -3991,7 +4070,7 @@ describe("Think — tool results with nothing to continue", () => {
         autoContinue: true
       })
     );
-    await delay(500);
+    await handled(agent, MSG_TOOL_RESULT, 2);
 
     expect(await agent.getMessages()).toEqual(afterFirst);
     await closeWS(tabA);
@@ -4010,7 +4089,7 @@ describe("Think — tool results with nothing to continue", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await done;
-    await delay(200);
+    await settled(agent);
 
     // A recovery continue for that reply starts and waits for the client.
     await agent.startRecoveryContinueForTest();
@@ -4046,7 +4125,7 @@ describe("Think — tool results with nothing to continue", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await done;
-    await delay(200);
+    await settled(agent);
     const continued = waitForDone(ws, 15000);
     ws.send(
       JSON.stringify({
@@ -4058,7 +4137,7 @@ describe("Think — tool results with nothing to continue", () => {
       })
     );
     await continued;
-    await delay(300);
+    await settled(agent);
 
     const connections = await agent.getResponseConnectionsForTest();
     const log = (await agent.getResponseLog()) as unknown as Array<{
@@ -4081,7 +4160,7 @@ describe("Think — tool results with nothing to continue", () => {
     const done = waitForDone(ws, 15000);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await done;
-    await delay(200);
+    await settled(agent);
 
     expect(await agent.getMessages()).toEqual([]);
     expect(await agent.getResponseLog()).toEqual([]);
@@ -4099,7 +4178,7 @@ describe("Think — tool results with nothing to continue", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await done;
-    await delay(200);
+    await settled(agent);
 
     await agent.startRecoveryContinueForTest();
     await delay(300);
@@ -4130,7 +4209,7 @@ describe("Think — tool results with nothing to continue", () => {
     const done = waitForDone(ws);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await done;
-    await delay(200);
+    await settled(agent);
 
     const result = await agent.runRecoveryContinueWithContextForTest(
       { chat: true },
@@ -4157,7 +4236,7 @@ describe("Think — tool results with nothing to continue", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await done;
-    await delay(200);
+    await settled(agent);
 
     // A recovery continue for that reply starts and waits for the client.
     await agent.startRecoveryContinueForTest();
@@ -4175,7 +4254,7 @@ describe("Think — tool results with nothing to continue", () => {
       })
     );
     await continued;
-    await delay(200);
+    await settled(agent);
     const afterAnswer = (await agent.getMessages()) as UIMessage[];
 
     // The chat settles and the attempt ends without asking the model again.
@@ -4217,7 +4296,7 @@ describe("Think — tool results with nothing to continue", () => {
         autoContinue: true
       })
     );
-    await delay(500);
+    await handled(agent, MSG_TOOL_RESULT);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     expect(messages).toHaveLength(4);
@@ -4254,7 +4333,6 @@ describe("Think — the continuation turn", () => {
     await waitUntil(
       async () => (await agent.pendingContinuationRequestIdForTest()) !== null
     );
-    await delay(150);
     const continuationId = await agent.pendingContinuationRequestIdForTest();
     expect(continuationId).not.toBeNull();
 
@@ -4265,14 +4343,75 @@ describe("Think — the continuation turn", () => {
         id: continuationId
       })
     );
-    await delay(50);
+    await handled(agent, "cf_agent_chat_request_cancel");
     await agent.releaseTurnQueueForTest();
-    await delay(400);
+    await settled(agent);
 
     expect(await agent.continuationTurnCountForTest()).toBe(0);
     expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();
     expect(await agent.getMessages()).toHaveLength(2);
     await closeWS(ws);
+  });
+
+  async function stopParkedContinuation(siblingContinues: boolean) {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await agent.persistToolCallMessage([
+      makeUserMessage("use two tools"),
+      {
+        id: "assistant-pair",
+        role: "assistant",
+        parts: ["tc-a", "tc-b"].map((toolCallId) => ({
+          type: "tool-client_action",
+          toolCallId,
+          toolName: "client_action",
+          state: "input-available",
+          input: {}
+        }))
+      } as unknown as UIMessage
+    ]);
+    const result = (toolCallId: string, autoContinue: boolean) =>
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "done",
+        autoContinue
+      });
+
+    // The first result opts in; its continuation parks on the unanswered
+    // sibling, so it cannot fire before the stop.
+    ws.send(result("tc-a", true));
+    await handled(agent, MSG_TOOL_RESULT);
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    expect(continuationId).not.toBeNull();
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_chat_request_cancel",
+        id: continuationId
+      })
+    );
+    await handled(agent, "cf_agent_chat_request_cancel");
+    expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();
+
+    const done = siblingContinues ? waitForDone(ws, 15000) : null;
+    ws.send(result("tc-b", siblingContinues));
+    await handled(agent, MSG_TOOL_RESULT, 2);
+    await done;
+    await settled(agent);
+    const turns = await agent.continuationTurnCountForTest();
+    await closeWS(ws);
+    return turns;
+  }
+
+  it("a stop for a continuation parked on a sibling drops it: the sibling's result alone does not continue", async () => {
+    expect(await stopParkedContinuation(false)).toBe(0);
+  });
+
+  it("a stop for a continuation parked on a sibling drops it: the sibling's own opt-in continues once", async () => {
+    expect(await stopParkedContinuation(true)).toBe(1);
   });
 
   it("names the message a continuation is stored in on its chunk frames", async () => {
@@ -4414,7 +4553,7 @@ describe("Think — stop means stop for continuations", () => {
       JSON.stringify({ type: "cf_agent_chat_request_cancel", id: requestId })
     );
     expect((await done).at(-1)?.outcome).toBe("aborted");
-    await delay(500);
+    await settled(agent);
 
     // Stop means stop: no continuation turn starts.
     expect(await agent.continuationTurnCountForTest()).toBe(0);
@@ -4455,7 +4594,7 @@ describe("Think — stop means stop for continuations", () => {
     await waitUntil(
       async () => (await agent.pendingContinuationRequestIdForTest()) !== null
     );
-    await delay(150);
+    await handled(agent, MSG_TOOL_RESULT);
 
     // The tab has no request id for the continuation yet: the transport
     // sends a cancel that names the continuation by its connection.
@@ -4521,7 +4660,7 @@ describe("Think — stop means stop for continuations", () => {
     await waitUntil(
       async () => (await agent.pendingContinuationRequestIdForTest()) !== null
     );
-    await delay(150);
+    await handled(agent, MSG_TOOL_RESULT);
 
     // The user stops everything. No turn is running.
     await agent.cancelAllChats();
@@ -4536,7 +4675,7 @@ describe("Think — stop means stop for continuations", () => {
         autoContinue: false
       })
     );
-    await delay(400);
+    await handled(agent, MSG_TOOL_RESULT, 2);
 
     expect(await agent.continuationTurnCountForTest()).toBe(0);
     expect(dropped).toEqual(["stopped"]);
@@ -4554,6 +4693,10 @@ describe("Think — stop means stop for continuations", () => {
     onTestFinished(unsubscribe);
     const agent = await freshAgent(room);
     await agent.setSlowClientToolStreamMode(true, 25, 40);
+    // The reply stays open after its tool call until the stop has landed, so
+    // the continuation is still held by the stream gate when it does (std
+    // race 5: a late stop used to land after the continuation had started).
+    await agent.holdSlowClientToolStreamForTest();
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
@@ -4580,8 +4723,11 @@ describe("Think — stop means stop for continuations", () => {
     );
     // The app stops everything, not through the WebSocket cancel.
     await agent.cancelAllChats();
+    // Its effect: the held continuation is dropped.
+    await waitUntil(async () => dropped.length > 0, 8000);
+    await agent.releaseSlowClientToolStreamForTest();
     await done;
-    await delay(500);
+    await settled(agent);
 
     expect(await agent.continuationTurnCountForTest()).toBe(0);
     expect(dropped).toEqual(["stopped"]);
@@ -4735,7 +4881,7 @@ describe("Think — onChatResponse via WebSocket", () => {
     sendChatRequest(ws, [makeUserMessage("hello from ws")]);
     await donePromise;
 
-    await delay(200);
+    await settled(agent);
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.length).toBeGreaterThanOrEqual(1);
     expect(log[0].status).toBe("completed");
@@ -4757,7 +4903,7 @@ describe("Think — onChatResponse via WebSocket", () => {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // Tool result with autoContinue triggers continuation
     const continuationDone = waitForDone(ws, 15000);
@@ -4771,7 +4917,7 @@ describe("Think — onChatResponse via WebSocket", () => {
       })
     );
     await continuationDone;
-    await delay(200);
+    await settled(agent);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.length).toBeGreaterThanOrEqual(2);
@@ -4845,7 +4991,7 @@ describe("Think — custom body via WebSocket", () => {
     sendChatRequest(ws, [makeUserMessage("no body")]);
     await donePromise;
 
-    await delay(200);
+    await settled(agent);
     await closeWS(ws);
   });
 });
@@ -4866,7 +5012,7 @@ describe("Think — regeneration", () => {
     const donePromise1 = waitForDone(ws);
     sendChatRequest(ws, [userMsg]);
     await donePromise1;
-    await delay(200);
+    await settled(agent);
 
     const messagesAfterFirst = (await agent.getMessages()) as UIMessage[];
     expect(messagesAfterFirst).toHaveLength(2);
@@ -4877,7 +5023,7 @@ describe("Think — regeneration", () => {
     const donePromise2 = waitForDone(ws);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
     await donePromise2;
-    await delay(200);
+    await settled(agent);
 
     // getHistory follows latest leaf — should see the NEW response
     const messagesAfterRegen = (await agent.getMessages()) as UIMessage[];
@@ -4911,18 +5057,18 @@ describe("Think — regeneration", () => {
     let donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg]);
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // Regenerate twice
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // History shows latest branch (2 messages: user + latest assistant)
     const messages = (await agent.getMessages()) as UIMessage[];
@@ -4949,7 +5095,7 @@ describe("Think — regeneration", () => {
     let donePromise = waitForDone(ws);
     sendChatRequest(ws, [user1]);
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     const afterTurn1 = (await agent.getMessages()) as UIMessage[];
     const assistant1 = afterTurn1[1];
@@ -4958,7 +5104,7 @@ describe("Think — regeneration", () => {
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [user1, assistant1, user2]);
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // Now regenerate the second response — send [user1, assistant1, user2]
     donePromise = waitForDone(ws);
@@ -4966,7 +5112,7 @@ describe("Think — regeneration", () => {
       trigger: "regenerate-message"
     });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // History should be: user1 -> assistant1 -> user2 -> new_assistant2
     const messages = (await agent.getMessages()) as UIMessage[];
@@ -4995,13 +5141,13 @@ describe("Think — regeneration", () => {
     let donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg]);
     await donePromise;
-    await delay(200);
+    await settled(agent);
     expect(await agent.getStreamParentsForTest()).toEqual([null]);
 
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     const prompts = await agent.getTextOnlyPromptTextsForTest();
     expect(prompts).toHaveLength(2);
@@ -5026,14 +5172,14 @@ describe("Think — regeneration", () => {
     let donePromise = waitForDone(ws);
     sendChatRequest(ws, [user1]);
     await donePromise;
-    await delay(200);
+    await settled(agent);
     const assistant1 = ((await agent.getMessages()) as UIMessage[])[1];
 
     const user2 = makeUserMessage("tell me more");
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [user1, assistant1, user2]);
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // Regenerate the second response.
     donePromise = waitForDone(ws);
@@ -5041,13 +5187,13 @@ describe("Think — regeneration", () => {
       trigger: "regenerate-message"
     });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // Regenerate the first response while the second turn is still stored.
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [user1], { trigger: "regenerate-message" });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     const prompts = await agent.getTextOnlyPromptTextsForTest();
     expect(prompts).toHaveLength(4);
@@ -5082,7 +5228,7 @@ describe("Think — regeneration", () => {
     let donePromise = waitForDone(ws);
     sendChatRequest(ws, [user1]);
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // A later answer still waiting on a client tool result. Transcript
     // repair would record it as failed if it reached the regeneration.
@@ -5095,7 +5241,7 @@ describe("Think — regeneration", () => {
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [user1], { trigger: "regenerate-message" });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     const [later] = (await agent.getBranches(user2.id)) as UIMessage[];
     expect((later.parts[0] as Record<string, unknown>).state).toBe(
@@ -5117,13 +5263,13 @@ describe("Think — regeneration", () => {
     let donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg]);
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     // Regenerate
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log).toHaveLength(2);
@@ -5146,7 +5292,7 @@ describe("Think — regeneration", () => {
     const donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
     await donePromise;
-    await delay(200);
+    await settled(agent);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     expect(messages).toHaveLength(2);
@@ -5175,7 +5321,7 @@ describe("Think — messageConcurrency", () => {
 
     await done1;
     await waitForDone(ws, 10000);
-    await delay(200);
+    await settled(agent);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.length).toBe(2);
@@ -5201,7 +5347,7 @@ describe("Think — messageConcurrency", () => {
 
     await done1;
     await waitForDone(ws, 10000);
-    await delay(200);
+    await settled(agent);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     const userMessages = messages.filter((m: UIMessage) => m.role === "user");
@@ -5228,7 +5374,7 @@ describe("Think — messageConcurrency", () => {
     expect((await done2).at(-1)?.outcome).toBe("skipped");
 
     expect((await done1).at(-1)?.outcome).toBe("completed");
-    await delay(200);
+    await settled(agent);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.length).toBe(1);
@@ -5279,7 +5425,7 @@ describe("Think — messageConcurrency", () => {
 
     expect((await done1).at(-1)?.outcome).toBe("completed");
     expect((await done2).at(-1)?.outcome).toBe("aborted");
-    await delay(200);
+    await settled(agent);
 
     // Only the first request reached the model.
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
@@ -5326,7 +5472,7 @@ describe("Think — messageConcurrency", () => {
     );
     await done1;
     expect((await done2).at(-1)?.outcome).toBe("aborted");
-    await delay(100);
+    await settled(agent);
     expect(
       (await agent.getCapturedClientTools())?.map((tool) => tool.name)
     ).toEqual(["first_tool"]);
@@ -5391,7 +5537,7 @@ describe("Think — messageConcurrency", () => {
 
     await done1;
     await waitForDone(ws, 10000);
-    await delay(200);
+    await settled(agent);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     const userMessages = messages.filter((m: UIMessage) => m.role === "user");
@@ -5420,7 +5566,7 @@ describe("Think — messageConcurrency", () => {
 
     await done1;
     await waitForDone(ws, 10000);
-    await delay(200);
+    await settled(agent);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     const userMessages = messages.filter((m: UIMessage) => m.role === "user");
@@ -5442,13 +5588,13 @@ describe("Think — messageConcurrency", () => {
     const done1 = waitForDone(ws, 10000);
     sendChatRequest(ws, [userMsg]);
     await done1;
-    await delay(200);
+    await settled(agent);
 
     await agent.clearResponseLog();
     const done2 = waitForDone(ws, 10000);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
     await done2;
-    await delay(200);
+    await settled(agent);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.length).toBe(1);
@@ -5471,7 +5617,7 @@ describe("Think — messageConcurrency", () => {
     await waitForOverlappingSubmits(agent, 1);
 
     ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
-    await delay(500);
+    await handled(agent, MSG_CHAT_CLEAR);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     expect(messages.length).toBe(0);
@@ -5491,15 +5637,15 @@ describe("Think — messageConcurrency", () => {
     const done1 = waitForDone(ws, 10000);
     sendChatRequest(ws, [makeUserMessage("Before clear")]);
     await done1;
-    await delay(100);
+    await settled(agent);
 
     ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
-    await delay(100);
+    await handled(agent, MSG_CHAT_CLEAR);
 
     const done2 = waitForDone(ws, 10000);
     sendChatRequest(ws, [makeUserMessage("After clear")]);
     await done2;
-    await delay(200);
+    await settled(agent);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     expect(messages.length).toBe(2);
@@ -5525,7 +5671,7 @@ describe("Think — messageConcurrency", () => {
 
     await done1;
     await waitForDone(ws, 10000);
-    await delay(200);
+    await settled(agent);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.every((r: ChatResponseResult) => r.status === "completed")).toBe(
@@ -5551,7 +5697,7 @@ describe("Think — messageConcurrency", () => {
     await waitForDoneId(ws, request2, 3000);
 
     await done1;
-    await delay(500);
+    await settled(agent);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log.length).toBe(1);

@@ -45,7 +45,10 @@ import {
 import type { ClientToolSchema } from "./client-tools";
 import type { PinnedTurnContext } from "./server-turn";
 import type { SaveMessagesResult } from "./lifecycle";
-import { CHAT_RECOVERY_CANCELLED_REASON } from "./recovery-engine";
+import {
+  CHAT_RECOVERY_CANCELLED_REASON,
+  CHAT_RECOVERY_CONTINUED_REASON
+} from "./recovery-engine";
 import type {
   ChatRecoveryEngine,
   ChatRecoveryScheduleCallback
@@ -320,6 +323,19 @@ async function runAdmittedAttempt<
       attempt.superseded.aborted ||
       (await engine.isRecoverySuperseded(incidentId))
     ) {
+      await host.onClientContinued?.();
+      return;
+    }
+    // The answer's continuation waits behind this attempt, which holds the
+    // lane: it continues the reply once the attempt ends.
+    if (stop.continuationWaiting()) {
+      if (incidentId) {
+        await engine.updateIncident(
+          incidentId,
+          "skipped",
+          CHAT_RECOVERY_CONTINUED_REASON
+        );
+      }
       await host.onClientContinued?.();
       return;
     }

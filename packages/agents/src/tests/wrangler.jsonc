@@ -101,6 +101,10 @@
         "name": "ChannelsHarnessObject"
       },
       {
+        "class_name": "ChannelsDeliveryObject",
+        "name": "ChannelsDeliveryObject"
+      },
+      {
         "class_name": "ThinkChannelsObject",
         "name": "ThinkChannelsObject"
       },
@@ -545,6 +549,7 @@
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
         "ChannelsHarnessObject",
+        "ChannelsDeliveryObject",
         "ThinkChannelsObject",
         "CutoverHarnessObject",
         "SqliteStrategiesBench",

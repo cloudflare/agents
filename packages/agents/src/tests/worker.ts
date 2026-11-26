@@ -53,8 +53,14 @@ export {
 export { StreamBenchObject } from "./capabilities/streams-bench.ts";
 export { ThinkChannelsObject } from "./capabilities/think-channels.ts";
 import type { ThinkChannelsObject } from "./capabilities/think-channels.ts";
-export { ChannelsHarnessObject } from "./capabilities/channels.ts";
-import type { ChannelsHarnessObject } from "./capabilities/channels.ts";
+export {
+  ChannelsDeliveryObject,
+  ChannelsHarnessObject
+} from "./capabilities/channels.ts";
+import type {
+  ChannelsDeliveryObject,
+  ChannelsHarnessObject
+} from "./capabilities/channels.ts";
 export { SqliteStrategiesBench } from "./capabilities/sqlite-strategies-bench.ts";
 export {
   SessionBenchObject,
@@ -282,6 +288,7 @@ export type Env = {
   TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
   StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;
   ChannelsHarnessObject: DurableObjectNamespace<ChannelsHarnessObject>;
+  ChannelsDeliveryObject: DurableObjectNamespace<ChannelsDeliveryObject>;
   ThinkChannelsObject: DurableObjectNamespace<ThinkChannelsObject>;
   CutoverHarnessObject: DurableObjectNamespace<CutoverHarnessObject>;
   SqliteStrategiesBench: DurableObjectNamespace<SqliteStrategiesBench>;

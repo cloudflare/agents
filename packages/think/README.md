@@ -986,7 +986,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **WebSocket protocol** — wire-compatible with `useAgentChat` from `@cloudflare/think/react`
 - **Built-in workspace** — every agent gets `this.workspace` with file tools auto-wired
 - **Lifecycle hooks** — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse` fire on every turn
-- **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`
+- **Stream resumption** — page refresh replays the reply's stored chunks
 - **Client tools** — accept tool schemas from clients, handle results and approvals
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
 - **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery

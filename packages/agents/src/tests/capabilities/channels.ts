@@ -1,7 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  deliverToSurfaces,
+  posting,
+  reportingPosting
+} from "../../experimental/channels/deliveries";
+import {
   Channels,
   type AgentHarness,
+  type Channel,
+  type ChannelMessageSurface,
+  type DeliveryResult,
   type EventOrigin,
   type GatewayEvent,
   type GatewayOrigin,
@@ -13,8 +21,12 @@ import {
   type SubmitOptions
 } from "../../experimental/channels";
 import { WebChannel } from "../../experimental/channels/web";
+import { email } from "../../experimental/channels/email";
+import { chatSdkChannel } from "../../experimental/channels/chat-sdk";
+import type { Adapter } from "chat";
 import { Lifecycle } from "../../lifecycle";
 import { Streams } from "../../streams";
+import { Tasks } from "../../tasks";
 
 type Listener = (events: readonly SessionEvent[]) => Promise<void>;
 
@@ -34,7 +46,7 @@ export type HarnessCall =
  * test sends the session events a real harness would. Operations never
  * settle on their own.
  */
-class ScriptedHarness implements AgentHarness {
+export class ScriptedHarness implements AgentHarness {
   readonly calls: HarnessCall[] = [];
   reject = false;
   /** What a new watch starts from, per session. */
@@ -210,5 +222,245 @@ export class ChannelsHarnessObject extends DurableObject<Cloudflare.Env> {
 
   async responseState(responseId: string): Promise<string | null> {
     return (await this.channels.streams.status(responseId))?.state ?? null;
+  }
+}
+
+/**
+ * The fake Channel's scripts, by object id: in the isolate, not the
+ * object's storage, so a reset cannot roll a step of one back.
+ */
+const fakeScripts = new Map<string, FakePost[]>();
+
+/** What the fake gateway Channel does with the next posts, in order. */
+export type FakePost =
+  | "ok"
+  | "retryable"
+  | "refused"
+  | "uncertain"
+  /** The object resets after the provider saw the post. */
+  | "reset"
+  /** The object resets before the post left it. */
+  | "reset-before-send"
+  /**
+   * The object resets after a preview (a draft a later post replaces) left
+   * it, before the post.
+   */
+  | "reset-after-preview";
+
+/**
+ * Channels whose `fake` Channel is a gateway Channel served inside the
+ * agent (`deliverToSurfaces`): it records what each post streamed, and does
+ * with each what the test scripted.
+ */
+export class ChannelsDeliveryObject extends DurableObject<Cloudflare.Env> {
+  readonly harness = new ScriptedHarness();
+  readonly tasks = new Tasks();
+
+  // It says when it posts, so a reset after only a preview is retried.
+  readonly #fake: Channel = reportingPosting({
+    stream: async (surface, chunks, options): Promise<DeliveryResult> => {
+      const id = this.ctx.id.toString();
+      const [outcome = "ok", ...rest] = fakeScripts.get(id) ?? [];
+      fakeScripts.set(id, rest);
+      if (outcome === "reset-before-send") {
+        // Nothing has left the object: its writes since its last I/O go.
+        this.ctx.abort("reset before the post");
+        return new Promise<never>(() => {});
+      }
+      let text = "";
+      let interrupted = false;
+      try {
+        for await (const chunk of chunks) {
+          if (chunk.type === "text-delta") text += chunk.delta;
+        }
+      } catch {
+        // A Channel finalizes what it has: the response was interrupted.
+        interrupted = true;
+      }
+      if (outcome === "reset-after-preview") {
+        // The preview's call made the object's writes durable first.
+        await this.ctx.storage.sync();
+        this.ctx.abort("reset after a preview");
+        return new Promise<never>(() => {});
+      }
+      posting(options);
+      if (interrupted && outcome === "ok") {
+        this.ctx.storage.kv.put("posts", [
+          ...this.getPosts(),
+          { label: surface.label, text, outcome: "uncertain" }
+        ]);
+        return {
+          status: "uncertain",
+          error: { code: "INTERRUPTED", message: "the response was cut" }
+        };
+      }
+      // Kept so they outlive a reset.
+      this.ctx.storage.kv.put("posts", [
+        ...this.getPosts(),
+        { label: surface.label, text, outcome }
+      ]);
+      switch (outcome) {
+        case "ok":
+          return { status: "delivered" };
+        case "retryable":
+          return {
+            status: "failed",
+            retryable: true,
+            error: { code: "RATE_LIMITED", message: "slow down" }
+          };
+        case "refused":
+          return {
+            status: "failed",
+            retryable: false,
+            error: { code: "CHANNEL_NOT_FOUND", message: "no such thread" }
+          };
+        case "uncertain":
+          return {
+            status: "uncertain",
+            reference: "msg-1",
+            error: { code: "STREAM_CUT", message: "cut mid-stream" }
+          };
+        case "reset":
+          // The provider saw the post: a real send waits for the object's
+          // writes to be durable first (the output gate), as this sync does.
+          await this.ctx.storage.sync();
+          this.ctx.abort("reset mid-post");
+          return new Promise<never>(() => {});
+      }
+    }
+  });
+
+  readonly channels = Channels.forHarness(this.harness, {
+    streams: new Streams({ maxChunkBytes: 1024 }),
+    channels: {
+      fake: deliverToSurfaces(this.#fake, { tasks: this.tasks }),
+      // A Channel that cannot stream, whose first send throws.
+      thrower: deliverToSurfaces(
+        {
+          deliver: async (_surface, message) => {
+            const thrown = this.ctx.storage.kv.get<number>("thrown") ?? 0;
+            if (thrown === 0) {
+              this.ctx.storage.kv.put("thrown", 1);
+              throw new Error("socket hang up");
+            }
+            this.ctx.storage.kv.put("thrower", [
+              ...(this.ctx.storage.kv.get<string[]>("thrower") ?? []),
+              message.markdown
+            ]);
+            return { status: "delivered" };
+          }
+        },
+        { tasks: this.tasks }
+      ),
+      // A Chat SDK adapter as a Channel, streaming through the adapter.
+      chat: deliverToSurfaces(
+        chatSdkChannel({
+          name: "fakechat",
+          path: "/webhooks/fakechat",
+          adapter: {
+            name: "fakechat",
+            initialize: async () => {},
+            stream: async (threadId: string, text: AsyncIterable<unknown>) => {
+              let streamed = "";
+              for await (const part of text) streamed += String(part);
+              this.ctx.storage.kv.put("chat", [
+                ...this.getChatPosts(),
+                { threadId, text: streamed }
+              ]);
+              return { id: "chat-1", threadId, raw: {} };
+            }
+          } as unknown as Adapter
+        }),
+        { tasks: this.tasks }
+      ),
+      email: deliverToSurfaces(
+        email({
+          from: "agent@example.com",
+          binding: {
+            send: async (message) => {
+              this.ctx.storage.kv.put("emails", [
+                ...this.getEmails(),
+                {
+                  to: message.to as string | string[],
+                  subject: message.subject,
+                  text: String(message.text),
+                  inReplyTo: (message.headers as Record<string, string>)?.[
+                    "In-Reply-To"
+                  ]
+                }
+              ]);
+              return { messageId: "m-1" };
+            }
+          }
+        }),
+        { tasks: this.tasks }
+      )
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.tasks)
+    .use(this.channels.streams)
+    .use(this.channels);
+
+  setScript(script: FakePost[]): void {
+    fakeScripts.set(this.ctx.id.toString(), script);
+  }
+
+  /** A message from a surface of the fake Channel, as the gateway sends it. */
+  receive(event: GatewayEvent, origin: GatewayOrigin): Promise<void> {
+    return this.channels.receive(event, origin);
+  }
+
+  emit(events: SessionEvent[], session = "default"): Promise<void> {
+    return this.harness.emit(session, events);
+  }
+
+  /** Posts as the Channel saw them: the surface label and the text. */
+  getPosts(): Array<{ label: string; text: string; outcome: FakePost }> {
+    return this.ctx.storage.kv.get("posts") ?? [];
+  }
+
+  /** Run startup again, as a new instance would. */
+  async wake(): Promise<void> {
+    await this.channels.onStart();
+  }
+
+  /** What the thrower Channel delivered, after its first send threw. */
+  getThrown(): string[] {
+    return this.ctx.storage.kv.get<string[]>("thrower") ?? [];
+  }
+
+  /** What the Chat SDK adapter streamed, by thread. */
+  getChatPosts(): Array<{ threadId: string; text: string }> {
+    return this.ctx.storage.kv.get("chat") ?? [];
+  }
+
+  /** What the email Channel sent. */
+  getEmails(): Array<{
+    to: string | string[];
+    subject: string;
+    text: string;
+    inReplyTo?: string;
+  }> {
+    return this.ctx.storage.kv.get("emails") ?? [];
+  }
+
+  /** Deliveries still open (pending or running). */
+  openDeliveries(): number {
+    return this.ctx.storage.sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE definition LIKE '__cf_delivery:channels:%' AND status IN ('pending', 'running')"
+      )
+      .one().n;
+  }
+
+  surfaceOf(label: string): ChannelMessageSurface {
+    return {
+      version: 1,
+      channelKey: "fake",
+      address: { thread: label },
+      label
+    };
   }
 }

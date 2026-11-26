@@ -403,3 +403,11 @@ export type MessageConcurrency =
   | "merge"
   | "drop"
   | { strategy: "debounce"; debounceMs?: number };
+
+/** A {@link MessageConcurrency} with its debounce wait filled in. */
+export type NormalizedMessageConcurrency =
+  | "queue"
+  | "latest"
+  | "merge"
+  | "drop"
+  | { strategy: "debounce"; debounceMs: number };

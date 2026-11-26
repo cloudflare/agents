@@ -1220,6 +1220,234 @@ describe("Context", () => {
     });
   });
 
+  it("tells the model once, in place, when the tools it is sent change", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s));
+      const a = { name: "search", hash: "1" };
+      const b = { name: "fetch", hash: "1" };
+      await session.appendMessage(user("u1", "hello"));
+      const first = await context.prepare({ tools: [a, b] });
+      expect(first.reminder).toBeNull();
+      await session.appendMessage(assistant("a1", "hi"));
+
+      // Same tools: nothing.
+      await session.appendMessage(user("u2", "again"));
+      await context.prepare({ tools: [a, b] });
+      expect(
+        texts((await context.project(await session.getHistory())).at(-1))
+      ).toHaveLength(1);
+      await session.appendMessage(assistant("a2", "ok"));
+
+      // fetch gone, search changed, write added.
+      await session.appendMessage(user("u3", "now"));
+      const third = await context.prepare({
+        tools: [
+          { name: "search", hash: "2" },
+          { name: "write", hash: "1" }
+        ]
+      });
+      expect(third.system).toBe(first.system);
+      expect(third.reminder).toBeNull();
+      const sent = await context.project(await session.getHistory());
+      const notice = texts(sent.at(-1)).at(-1) ?? "";
+      expect(notice).toContain("Added: write.");
+      expect(notice).toContain("Removed: fetch. Do not call them");
+      expect(notice).toContain("Changed: search.");
+      await session.appendMessage(assistant("a3", "ok"));
+
+      // Next turn: the notice stays on u3 and is not sent again.
+      await session.appendMessage(user("u4", "next"));
+      await context.prepare({
+        tools: [
+          { name: "search", hash: "2" },
+          { name: "write", hash: "1" }
+        ]
+      });
+      const later = JSON.stringify(
+        await context.project(await session.getHistory())
+      );
+      expect(later.split("The tools you can call changed").length - 1).toBe(1);
+      expect(
+        texts((await context.project(await session.getHistory())).at(-1))
+      ).toHaveLength(1);
+    });
+  });
+
+  it("sends a tool change on a continuation once, and records nothing for it", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s));
+      await session.appendMessage(user("u1", "hello"));
+      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await session.appendMessage(assistant("a1", "partial"));
+      const continued = await context.prepare({ tools: [] });
+      expect(continued.reminder).toContain("Removed: search.");
+      // A retry sends nothing new.
+      await session.appendMessage(user("u2", "again"));
+      expect(
+        (await context.prepare({ tools: [], retry: true })).reminder
+      ).toBeNull();
+    });
+  });
+
+  it("starts comparing tools on a session recorded before the fingerprint, and across a compaction", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s));
+      // A record written without tools, as before this change.
+      await session.appendMessage(user("u1", "hello"));
+      await context.prepare();
+      await session.appendMessage(assistant("a1", "hi"));
+      // The first turn with tools records them and says nothing.
+      await session.appendMessage(user("u2", "again"));
+      expect(
+        (await context.prepare({ tools: [{ name: "search", hash: "1" }] }))
+          .reminder
+      ).toBeNull();
+      expect(
+        JSON.stringify(await context.project(await session.getHistory()))
+      ).not.toContain("The tools you can call changed");
+      await session.appendMessage(assistant("a2", "ok"));
+      await session.appendMessage(user("u3", "more"));
+      await session.appendMessage(assistant("a3", "ok"));
+      // A summary hides the record that holds the fingerprint.
+      await session.addCompaction("earlier turns", "u1", "a3");
+      await session.appendMessage(user("u4", "next"));
+      await context.prepare({ tools: [] });
+      const last = texts(
+        (await context.project(await session.getHistory())).at(-1)
+      );
+      expect(last.at(-1)).toContain("Removed: search.");
+    });
+  });
+
+  it("tells the model about changed tools in a session with no blocks", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      const session = sessions.session();
+      const context = new Context(session, {
+        sql: storageSql(storage),
+        blocks: []
+      });
+      await session.appendMessage(user("u1", "hello"));
+      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      const second = await context.prepare({ tools: [] });
+      expect(second.system).toBe("");
+      const last = texts(
+        (await context.project(await session.getHistory())).at(-1)
+      );
+      expect(last.at(-1)).toContain("Removed: search.");
+    });
+  });
+
+  it("does not send the model its own write back after a turn that only changed tools", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "todo", whenChanged: "remind" }
+      ]);
+      await session.appendMessage(user("u1", "plan it"));
+      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await modelWrites(context, session, "a1", "todo", "1. draft");
+      // Only the tools change on this turn.
+      await session.appendMessage(user("u2", "next"));
+      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      await session.appendMessage(assistant("a2", "ok"));
+      await session.appendMessage(user("u3", "more"));
+      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      const sent = JSON.stringify(
+        await context.project(await session.getHistory())
+      );
+      // Only the tool call itself holds it.
+      expect(sent.split("1. draft").length - 1).toBe(1);
+    });
+  });
+
+  it("keeps each call's tools to its own record when two calls overlap", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      // A remind block whose read can be held at a gate.
+      let hold = false;
+      let atGate = false;
+      let reached = () => {};
+      const waiting = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "notes" },
+        {
+          label: "clock",
+          whenChanged: "remind",
+          provider: {
+            get: async () => {
+              if (hold) {
+                atGate = true;
+                reached();
+                await gate;
+              }
+              return "noon";
+            }
+          }
+        }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      await context.prepare();
+      await session.appendMessage(assistant("a1", "hi"));
+      await context.setBlock("notes", "likes tea");
+      await session.appendMessage(user("u2", "again"));
+      const u1 = (await session.getMessage("u1"))!;
+      // A regeneration of a1 that passes tools stops inside prepare...
+      hold = true;
+      const regeneration = context.prepare({
+        messages: [u1],
+        tools: [{ name: "search", hash: "1" }]
+      });
+      // Wait for it at the gate; a call that fails before it fails the test.
+      await Promise.race([waiting, regeneration]);
+      // The calls overlap only if the regeneration is held at the gate.
+      expect(atGate).toBe(true);
+      hold = false;
+      // ...while the new turn u2 records the code write, passing no tools.
+      await context.prepare();
+      release();
+      await regeneration;
+      const record = JSON.parse(
+        (await session.internal_annotations("context", ["u2"])).get("u2") ??
+          "{}"
+      ) as { tools?: unknown; changes?: unknown };
+      expect(record.changes).toBeDefined();
+      expect(record.tools).toBeUndefined();
+    });
+  });
+
+  it("reads each remind provider once on a turn that changes only tools", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      let reads = 0;
+      const { session, context } = await setup(storage, (s) => install(s), [
+        {
+          label: "clock",
+          whenChanged: "remind",
+          provider: {
+            get: async () => {
+              reads++;
+              return "noon";
+            }
+          }
+        }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+      reads = 0;
+      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      expect(reads).toBe(1);
+    });
+  });
+
   it("projects the same history to the same messages", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>

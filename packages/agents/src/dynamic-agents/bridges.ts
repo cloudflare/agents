@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { serializeRpcResponse } from "../websockets/frame-limit";
 import { RpcTarget } from "cloudflare:workers";
 import type { Connection } from "../lifecycle/durable-object-lifecycle";
+import type { AgentPathStep } from "../sub-routing";
 import {
   setConnectionFlag,
   withoutEventLogFlag
@@ -192,14 +193,25 @@ export class DynamicAgentConnectionBridge
 export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionBridgeLike {
   #root: RootFacetRpcSurface;
   #connectionId: string;
+  /** The sub-agent the connection is addressed to: the caller. */
+  #ownerPath: ReadonlyArray<AgentPathStep>;
 
-  constructor(root: RootFacetRpcSurface, connectionId: string) {
+  constructor(
+    root: RootFacetRpcSurface,
+    connectionId: string,
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ) {
     this.#root = root;
     this.#connectionId = connectionId;
+    this.#ownerPath = ownerPath;
   }
 
   send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
-    return this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+    return this.#root._cf_sendToSubAgentConnection(
+      this.#connectionId,
+      message,
+      this.#ownerPath
+    );
   }
 
   sendMany(
@@ -207,7 +219,8 @@ export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionB
   ): Promise<void> {
     return this.#root._cf_sendManyToSubAgentConnection(
       this.#connectionId,
-      messages
+      messages,
+      this.#ownerPath
     );
   }
 
@@ -215,19 +228,25 @@ export class RootDynamicAgentConnectionBridge implements DynamicAgentConnectionB
     return this.#root._cf_closeSubAgentConnection(
       this.#connectionId,
       code,
-      reason
+      reason,
+      this.#ownerPath
     );
   }
 
   setState(state: unknown): Promise<unknown> {
-    return this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
+    return this.#root._cf_setSubAgentConnectionState(
+      this.#connectionId,
+      state,
+      this.#ownerPath
+    );
   }
 
   setFlag(key: string, value: unknown): Promise<void> {
     return this.#root._cf_setSubAgentConnectionFlag(
       this.#connectionId,
       key,
-      value
+      value,
+      this.#ownerPath
     );
   }
 

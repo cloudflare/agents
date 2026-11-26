@@ -29,6 +29,7 @@ import {
   convertToModelMessages,
   type LanguageModel,
   type ToolSet,
+  type TypedToolCall,
   type UIMessage
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -42,7 +43,34 @@ import {
 import { Workspace } from "@cloudflare/computer";
 import { workspaceExtension } from "./extensions/workspace";
 import { fetchExtension } from "./extensions/fetch";
+import { skillsExtension } from "./extensions/skills";
+import { sandboxedExtensions } from "./extensions/sandboxed";
+import {
+  callThinkHostApi,
+  createThinkHostApi,
+  type ThinkHostApi,
+  type ThinkHostOperation
+} from "../extensions/host-api";
+import { coreOf, type ExtensionManager } from "../extensions/manager";
+import {
+  createThinkExtensionManager,
+  loadThinkExtensions,
+  ThinkExtensionHooks
+} from "../extensions/wiring";
+import type { ExtensionConfig } from "../turn-types";
+import { ThinkSkills } from "../skills-runtime";
+import { declaredOverrides } from "../overrides";
+import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
+import {
+  admittedSubmissionMetadata,
+  isTerminalSubmissionStatus,
+  TERMINAL_SUBMISSION_STATUSES,
+  type DeleteSubmissionsOptions,
+  type ListSubmissionsOptions,
+  type ThinkSubmissionStatus
+} from "../submissions";
+import type { TaskStatus } from "agents/tasks";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
@@ -73,6 +101,9 @@ import type {
   TurnContext,
   TurnInputMessages
 } from "../think";
+
+const { snapshot: snapshotDeclaredMembers, isOverridden: isMethodOverridden } =
+  declaredOverrides(() => Think.prototype);
 
 function toInput(
   input: Exclude<TurnInputMessages, (current: UIMessage[]) => unknown>
@@ -111,6 +142,69 @@ function submissionStatus(
           ? "aborted"
           : "error";
   }
+}
+
+/**
+ * Submissions read per page when deleting in bulk, whatever the limit: a
+ * small limit does not cost a read per submission it passes over.
+ */
+const DELETE_PAGE = 100;
+
+/** An operation's inspection: its status, times, key and metadata. */
+type ThinkOperationInspection = NonNullable<
+  Awaited<ReturnType<ThinkHarness["inspection"]>>
+>;
+
+/** A harness operation as Think's submission inspection. */
+function submissionInspection(
+  status: ThinkOperationInspection
+): ThinkSubmissionInspection {
+  return {
+    submissionId: status.operationId,
+    requestId: status.operationId,
+    status: submissionStatus(status),
+    createdAt: status.createdAt,
+    ...(status.startedAt !== undefined && { startedAt: status.startedAt }),
+    ...(status.settledAt !== undefined && { completedAt: status.settledAt }),
+    ...(status.idempotencyKey !== undefined && {
+      idempotencyKey: status.idempotencyKey
+    }),
+    ...(status.metadata !== undefined && { metadata: status.metadata }),
+    ...(status.status === "unanswered" &&
+      status.reason !== undefined && { error: status.reason }),
+    ...("messageId" in status &&
+      status.messageId !== undefined && { messageId: status.messageId })
+  };
+}
+
+/** A status filter as a list, or none. */
+function submissionStatuses(
+  status: ThinkSubmissionStatus | ThinkSubmissionStatus[] | undefined
+): ThinkSubmissionStatus[] | undefined {
+  if (status === undefined) return undefined;
+  return Array.isArray(status) ? status : [status];
+}
+
+/**
+ * The run statuses a submission of these statuses can have. An operation
+ * that ended unanswered is a completed run, so a terminal status other
+ * than `completed` also looks at completed runs; callers match the mapped
+ * status after.
+ */
+function taskStatusesFor(
+  wanted: readonly ThinkSubmissionStatus[]
+): TaskStatus[] {
+  const out = new Set<TaskStatus>();
+  for (const status of wanted) {
+    if (status === "pending" || status === "running") {
+      out.add("pending");
+      out.add("running");
+    } else {
+      out.add("completed");
+      if (status !== "completed") out.add(status);
+    }
+  }
+  return [...out];
 }
 
 function saveResult(result: ThinkOperationResult): SaveMessagesResult {
@@ -153,6 +247,22 @@ export class Think<
   /** Wait for MCP connections before a turn's tools are built, as on Think. */
   waitForMcpConnections: boolean | { timeout: number } = false;
 
+  /** WorkerLoader binding for sandboxed extensions, as on Think. */
+  extensionLoader?: WorkerLoader;
+
+  /** The sandboxed extensions, made at start when `extensionLoader` is set. */
+  extensionManager?: ExtensionManager;
+
+  /** Per-extension hook timeout in milliseconds, as on Think. */
+  hookTimeout = 5000;
+
+  /** Runs the sandboxed extensions' hooks of each turn, as Think does. */
+  readonly #extensionHooks = new ThinkExtensionHooks(
+    () =>
+      this.extensionManager &&
+      coreOf(this.extensionManager, () => this.hookTimeout)
+  );
+
   /** Think's opt-in fetch tools, as on Think: off unless set. */
   fetchTools: false | Omit<CreateFetchToolsOptions, "workspace" | "onEvent"> =
     false;
@@ -160,9 +270,12 @@ export class Think<
   #messages: UIMessage[] = [];
   #context: Context | undefined;
   #handle: Session | undefined;
+  /** Skills from `getSkills()`, loaded in onStart as Think loads them. */
+  readonly #skills = new ThinkSkills();
   #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
 
   constructor(ctx: AgentContext, env: Env) {
+    snapshotDeclaredMembers(new.target.prototype);
     super(ctx, env);
     const self = this;
     this.harness = new ThinkHarness({
@@ -197,8 +310,20 @@ export class Think<
               ).call(this, "tool:fetch", { ...event })
           )
         },
-        // MCP tools come after the agent's own and the context's, as in
-        // Think.
+        // The sandboxed extensions' tools follow the agent's own, as in
+        // Think. Then skills, then MCP tools.
+        {
+          name: "sandboxed",
+          after: true,
+          extension: sandboxedExtensions(() => this.extensionManager)
+        },
+        {
+          name: "skills",
+          after: true,
+          extension: skillsExtension(this.#skills, () =>
+            this.getSkillScriptRunner()
+          )
+        },
         {
           name: "mcp",
           after: true,
@@ -219,22 +344,52 @@ export class Think<
         id === this.harness.session().id ? this.#context : undefined,
       model: async () => this.resolveModel(await this.getModel()),
       // As in Think: an overridden getSystemPrompt() stays above the
-      // context blocks; the default is only the fallback for no blocks.
+      // context blocks; the default is only the fallback for no blocks,
+      // the skill catalog's included.
       system: () =>
-        this.getSystemPrompt !== Think.prototype.getSystemPrompt ||
-        !this.#context ||
-        this.#context.getBlocks().length === 0
+        isMethodOverridden(this, "getSystemPrompt") ||
+        ((!this.#context || this.#context.getBlocks().length === 0) &&
+          !this.#skills.loaded)
           ? this.getSystemPrompt()
           : undefined,
       tools: () => this.getTools(),
+      // A turn's `beforeTurn` may set its own, as in Think.
       get maxSteps() {
-        return self.maxSteps;
+        return self.#turnMaxSteps ?? self.maxSteps;
       },
       hooks: {
         beforeTurn: (turn) => this.#beforeTurn(turn),
-        beforeToolCall: (call) => this.#beforeToolCall(call),
-        afterToolCall: (result) =>
-          this.afterToolCall({
+        beforeToolCall: async (call) => {
+          // The step's chunks reach extensions before its tool calls do.
+          await this.#chunkHooks;
+          const decision = await this.#beforeToolCall(call);
+          // As in Think: extensions hear of a call that runs, with the
+          // input it runs with.
+          if (!decision || decision.action === "run") {
+            const input =
+              decision?.action === "run" && decision.input !== undefined
+                ? decision.input
+                : call.input;
+            await this.#extensionHooks.toolCallStart({
+              // SAFETY: a snapshot reads the name, id and input only.
+              toolCall: { ...call, input } as unknown as TypedToolCall<ToolSet>,
+              stepNumber: undefined
+            });
+          }
+          return decision;
+        },
+        afterToolCall: async (result) => {
+          await this.#extensionHooks.toolCallFinish({
+            // SAFETY: a snapshot reads the name, id and input only.
+            toolCall: result as unknown as TypedToolCall<ToolSet>,
+            stepNumber: undefined,
+            durationMs: 0,
+            success: result.ok,
+            ...(result.ok
+              ? { output: result.output }
+              : { error: result.errorText })
+          });
+          return this.afterToolCall({
             toolName: result.toolName,
             toolCallId: result.toolCallId,
             input: result.input,
@@ -244,17 +399,46 @@ export class Think<
             ...(result.ok
               ? { success: true, output: result.output }
               : { success: false, error: result.errorText })
-          } as unknown as ToolCallResultContext),
-        onStepFinish: ({ message, finishReason, operationId }) =>
-          this.onStepFinish({
+          } as unknown as ToolCallResultContext);
+        },
+        onStepFinish: async ({ message, finishReason, operationId, step }) => {
+          await this.#chunkHooks;
+          await this.#extensionHooks.stepFinish({
+            stepNumber: step,
+            finishReason: finishReason ?? "unknown",
+            text: message.parts
+              .map((part) => (part.type === "text" ? part.text : ""))
+              .join(""),
+            reasoningText: undefined,
+            toolCalls: [],
+            toolResults: []
+            // SAFETY: the fields a step snapshot reads are all here.
+          } as unknown as StepContext);
+          return this.onStepFinish({
             response: { messages: [] },
             finishReason,
             message,
             requestId: operationId
-          } as unknown as StepContext),
-        onChunk: ({ chunk }) =>
-          void this.onChunk({ chunk } as unknown as ChunkContext),
+          } as unknown as StepContext);
+        },
+        onChunk: ({ chunk }) => {
+          // A snapshot reads a delta's text as `text`, as a stream part has it.
+          const text = "delta" in chunk ? chunk.delta : undefined;
+          // In order, one after another, as Think awaits each chunk's hooks.
+          this.#chunkHooks = this.#chunkHooks
+            .then(() =>
+              this.#extensionHooks.chunk({
+                chunk: text === undefined ? chunk : { ...chunk, text }
+              } as unknown as ChunkContext)
+            )
+            .catch((error: unknown) =>
+              console.error("[Think] An extension's onChunk failed", error)
+            );
+          void this.onChunk({ chunk } as unknown as ChunkContext);
+        },
         onTurnEnd: async (end) => {
+          // The extensions' chunk hooks finish inside the turn, as in Think.
+          await this.#chunkHooks;
           if (!end.message) return;
           await this.onChatResponse({
             message: end.message,
@@ -282,8 +466,19 @@ export class Think<
         }
       }
     });
-    this.harness.observe((_session, event) => {
-      if (event.type === "run-end") this.#running = undefined;
+    this.harness.observe((session, event) => {
+      if (event.type === "prefix-changed") {
+        this._emit("chat:prefix:changed", {
+          session,
+          requestId: event.operationId,
+          causes: event.causes
+        });
+      }
+      if (event.type === "run-end") {
+        this.#running = undefined;
+        this.#extensionTurn = undefined;
+        this.#turnMaxSteps = undefined;
+      }
     });
     this.lifecycle.use(this.harness);
 
@@ -304,6 +499,23 @@ export class Think<
         sql: this
       });
       await this.#context.load();
+      if (this.extensionLoader) {
+        this.extensionManager = createThinkExtensionManager({
+          loader: this.extensionLoader,
+          storage: this.ctx.storage,
+          agentClassName: this.constructor.name,
+          agentId: this.ctx.id.toString(),
+          exports: (
+            this.ctx as unknown as { exports?: Record<string, unknown> }
+          ).exports
+        });
+        await loadThinkExtensions(
+          this.extensionManager,
+          this.getExtensions(),
+          this.#context
+        );
+      }
+      await this.#skills.start(() => this.getSkills());
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
         if (event.type === "reset") this.#messages = [];
@@ -385,6 +597,16 @@ export class Think<
     return session;
   }
 
+  /** The skill sources, as in Think: none unless overridden. */
+  getSkills(): SkillSource[] | Promise<SkillSource[]> {
+    return [];
+  }
+
+  /** A runner for `run_skill_script`, as in Think: none unless overridden. */
+  getSkillScriptRunner(): SkillScriptRunner | null {
+    return null;
+  }
+
   /** Declare the prompt context blocks, as in Think. */
   configureContext(): ContextConfig[] | Promise<ContextConfig[]> {
     return [];
@@ -402,10 +624,11 @@ export class Think<
 
   // Think calls these with a default; the harness-backed Think has none of
   // the features behind them, so each returns Think's empty default.
-  getSkills(): unknown[] | Promise<unknown[]> {
-    return [];
-  }
-  getExtensions(): unknown[] {
+  /**
+   * Sandboxed extensions to load at start, in order, as on Think. Needs
+   * `extensionLoader`.
+   */
+  getExtensions(): ExtensionConfig[] {
     return [];
   }
   getActions(): Record<string, unknown> | Promise<Record<string, unknown>> {
@@ -553,6 +776,43 @@ export class Think<
     await this.#sync();
   }
 
+  /** The extensions' `onChunk` calls, chained so they run in order. */
+  #chunkHooks: Promise<void> = Promise.resolve();
+
+  /** The running turn's own `maxSteps`, from its `beforeTurn`. */
+  #turnMaxSteps: number | undefined;
+
+  /** The extensions' `beforeTurn` changes, kept for the operation. */
+  #extensionTurn:
+    | { readonly operationId: string; readonly changes: TurnConfig }
+    | undefined;
+
+  /** What a sandboxed extension can reach on this agent, as on Think. */
+  readonly #hostApi = createThinkHostApi({
+    workspace: () => this.workspace,
+    context: () => this.context,
+    messages: () => this.#messages,
+    // Not a submission: a tool calling this during a turn would wait on
+    // its own turn. One appended from `beforeTurn` comes before the reply,
+    // as in Think: the harness attaches the reply to it.
+    appendMessage: (message) => this.appendMessageToHistory(message)
+  });
+
+  /**
+   * Run one host operation for a sandboxed extension, as on Think.
+   * `HostBridgeLoopback` calls this after it checks the extension's
+   * permissions.
+   *
+   * @internal
+   */
+  async _cfHostBridge<K extends ThinkHostOperation>(
+    operation: K,
+    args: Parameters<ThinkHostApi[K]>
+  ): Promise<Awaited<ReturnType<ThinkHostApi[K]>>> {
+    await this.__unsafe_ensureInitialized();
+    return await callThinkHostApi(this.#hostApi, operation, args);
+  }
+
   protected async appendMessageToHistory(
     message: UIMessage,
     parentId?: string | null
@@ -669,22 +929,45 @@ export class Think<
     messages: UIMessage[],
     options?: SubmitMessagesOptions
   ): Promise<SubmitMessagesResult> {
-    const submissionId =
-      options?.submissionId ?? options?.idempotencyKey ?? crypto.randomUUID();
-    const receipt = await this.harness
-      .session()
-      .submit(messages, { operationId: submissionId });
-    const inspection = await this.inspectSubmission(submissionId);
+    if (messages.length === 0) {
+      throw new Error("submitMessages requires at least one message");
+    }
+    const metadata = admittedSubmissionMetadata(options?.metadata);
+    const { submissionId, idempotencyKey } = options ?? {};
+    if (submissionId !== undefined && idempotencyKey) {
+      // Think's message for a pair that names two submissions; the harness
+      // refuses the pair too.
+      const session = this.harness.session().id;
+      const keyed = await this.harness.keyedOperation(session, idempotencyKey);
+      const byId = await this.harness.inspection(session, submissionId);
+      if (
+        (keyed !== undefined && keyed !== submissionId) ||
+        (byId?.idempotencyKey !== undefined &&
+          byId.idempotencyKey !== idempotencyKey)
+      ) {
+        throw new Error(
+          "submissionId and idempotencyKey refer to different submissions"
+        );
+      }
+    }
+    const receipt = await this.harness.session().submit(messages, {
+      ...(options?.submissionId !== undefined && {
+        operationId: options.submissionId
+      }),
+      submission: true,
+      // An empty key is no key, as on Think.
+      ...(options?.idempotencyKey && {
+        idempotencyKey: options.idempotencyKey
+      }),
+      ...(metadata !== undefined && { metadata })
+    });
+    const inspection = await this.inspectSubmission(receipt.operationId);
     return {
       ...(inspection ?? {
-        submissionId,
+        submissionId: receipt.operationId,
         status: "pending",
         createdAt: Date.now()
       }),
-      ...(options?.idempotencyKey !== undefined && {
-        idempotencyKey: options.idempotencyKey
-      }),
-      ...(options?.metadata !== undefined && { metadata: options.metadata }),
       accepted: receipt.accepted
     };
   }
@@ -692,18 +975,78 @@ export class Think<
   async inspectSubmission(
     submissionId: string
   ): Promise<ThinkSubmissionInspection | null> {
-    const status = await this.harness.session().inspect(submissionId);
-    if (!status) return null;
-    return {
-      submissionId,
-      requestId: submissionId,
-      status: submissionStatus(status),
-      createdAt: Date.now(),
-      ...(status.status === "unanswered" &&
-        status.reason !== undefined && { error: status.reason }),
-      ...("messageId" in status &&
-        status.messageId !== undefined && { messageId: status.messageId })
-    };
+    const status = await this.harness.inspection(
+      this.harness.session().id,
+      submissionId
+    );
+    return status ? submissionInspection(status) : null;
+  }
+
+  async listSubmissions(
+    options?: ListSubmissionsOptions
+  ): Promise<ThinkSubmissionInspection[]> {
+    const wanted = submissionStatuses(options?.status);
+    if (wanted?.length === 0) return [];
+    const listed = await this.harness.submissions(this.harness.session().id, {
+      ...(wanted && { status: taskStatusesFor(wanted) }),
+      limit: Math.min(Math.max(options?.limit ?? 50, 1), 100)
+    });
+    return listed
+      .map(submissionInspection)
+      .filter((submission) => !wanted || wanted.includes(submission.status));
+  }
+
+  async deleteSubmission(submissionId: string): Promise<boolean> {
+    return this.harness.deleteSubmission(
+      this.harness.session().id,
+      submissionId
+    );
+  }
+
+  async deleteSubmissions(options?: DeleteSubmissionsOptions): Promise<number> {
+    const wanted = (
+      submissionStatuses(options?.status) ?? TERMINAL_SUBMISSION_STATUSES
+    ).filter(isTerminalSubmissionStatus);
+    if (wanted.length === 0) return 0;
+    const session = this.harness.session().id;
+    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
+    const matches: readonly ThinkSubmissionStatus[] = wanted;
+    const matching = (submission: ThinkSubmissionInspection) =>
+      matches.includes(submission.status) &&
+      (!options?.completedBefore ||
+        (submission.completedAt !== undefined &&
+          submission.completedAt < options.completedBefore.getTime()));
+    // Oldest accepted first (Think deletes oldest settled first; the two
+    // differ only for a submission that settled before an older one).
+    // Matched on Think's status, so a run the harness counts as completed
+    // but which ended unanswered is not taken for a completed submission.
+    // Read a page of `DELETE_PAGE` at a time, each after the last one read, so a
+    // long run of submissions that do not match is passed over, never
+    // read twice, and no more than a page is in memory.
+    let deleted = 0;
+    // The last record read, as it was read: it may be deleted by then.
+    let after: { operationId: string; createdAt: number } | undefined;
+    while (deleted < limit) {
+      const listed = await this.harness.submissions(session, {
+        status: taskStatusesFor(wanted),
+        order: "oldest",
+        ...(after !== undefined && { after }),
+        limit: DELETE_PAGE
+      });
+      for (const submission of listed.map(submissionInspection)) {
+        if (deleted >= limit) break;
+        if (!matching(submission)) continue;
+        if (
+          await this.harness.deleteSubmission(session, submission.submissionId)
+        ) {
+          deleted++;
+        }
+      }
+      if (listed.length < DELETE_PAGE) break;
+      const last = listed[listed.length - 1];
+      after = { operationId: last.operationId, createdAt: last.createdAt };
+    }
+    return deleted;
   }
 
   async waitForSubmission(
@@ -789,24 +1132,54 @@ export class Think<
   async #beforeTurn(turn: ThinkTurnContext): Promise<ThinkTurnConfig | void> {
     // Every tool on offer, as Think's `beforeTurn` sees them.
     const tools = turn.toolSet;
-    const model = this.resolveModel(await this.getModel());
+    // Resolved only when read, as in Think: a `beforeTurn` that sets its
+    // own model never needs the default's binding.
+    const chosen = await this.getModel();
+    let resolved: LanguageModel | undefined;
+    const resolveDefault = () => (resolved ??= this.resolveModel(chosen));
     this.#running = {
       requestId: turn.operationId,
       trigger: "submission",
       continuation: turn.continuation
     };
-    const config = await this.beforeTurn({
+    const context = {
       system: turn.system ?? this.getSystemPrompt(),
       messages: await convertToModelMessages([...turn.messages], {
         tools,
         ignoreIncompleteToolCalls: true
       }),
       tools,
-      model,
+      get model() {
+        return resolveDefault();
+      },
       continuation: turn.continuation,
       requestId: turn.operationId
-    });
-    if (!config) return;
+    };
+    const own = await this.beforeTurn(context);
+    // The sandboxed extensions see the subclass's config, as in Think,
+    // once per operation: Think prepares a turn once for its whole tool
+    // loop, and the harness asks before every model call.
+    const folded =
+      this.#extensionTurn?.operationId === turn.operationId
+        ? this.#extensionTurn.changes
+        : undefined;
+    const config =
+      folded !== undefined
+        ? { ...(own ?? {}), ...folded }
+        : await this.#extensionHooks.beforeTurn(
+            // SAFETY: the fields a turn snapshot reads are all here.
+            context as unknown as TurnContext,
+            own ?? {}
+          );
+    if (folded === undefined) {
+      // `messages` is the first call's transcript: a later call has the
+      // tool results since, so it is not kept.
+      const { messages: _messages, ...kept } = changesOf(own ?? {}, config);
+      this.#extensionTurn = { operationId: turn.operationId, changes: kept };
+    }
+    this.#turnMaxSteps = config.maxSteps;
+    // Nothing to change: neither the subclass nor an extension set a field.
+    if (!own && Object.keys(config).length === 0) return;
     const system = config.instructions ?? config.system;
     return {
       ...(config.model !== undefined && {
@@ -815,6 +1188,15 @@ export class Think<
       ...(typeof system === "string" && { system }),
       ...(config.messages && { messages: config.messages }),
       ...(config.activeTools && { activeTools: config.activeTools }),
+      ...(config.toolChoice !== undefined && {
+        toolChoice: config.toolChoice
+      }),
+      ...(config.providerOptions !== undefined && {
+        // SAFETY: provider options are JSON by the AI SDK's contract.
+        providerOptions: config.providerOptions as NonNullable<
+          ThinkTurnConfig["providerOptions"]
+        >
+      }),
       ...(config.maxOutputTokens !== undefined && {
         maxOutputTokens: config.maxOutputTokens
       }),
@@ -929,3 +1311,13 @@ function stubUnsupported(target: object, legacy: object): void {
 }
 
 stubUnsupported(Think.prototype, LegacyThink.prototype);
+
+/** The fields `folded` set or changed relative to `own`. */
+function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
+  const changes: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(folded)) {
+    if ((own as Record<string, unknown>)[key] !== value) changes[key] = value;
+  }
+  // SAFETY: every key is one of `folded`'s, a TurnConfig's.
+  return changes as TurnConfig;
+}

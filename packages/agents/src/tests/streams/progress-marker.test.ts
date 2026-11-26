@@ -9,7 +9,7 @@ import type { StreamBenchObject } from "../capabilities/streams-bench";
  * from a retired total once they are deleted. It must move only when new
  * content lands, never when rows are merely read or removed.
  */
-describe("ResumableStream.progressMarker", () => {
+describe("ReplyStreams.progressMarker", () => {
   it("counts flushed segments, survives cutover, reclaim and clear, and never moves on replay", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {

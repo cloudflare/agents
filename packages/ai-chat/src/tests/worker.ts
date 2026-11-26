@@ -37,7 +37,6 @@ import type {
 } from "../";
 import {
   CHAT_RECOVERY_TASK_NAME,
-  ResumableStream,
   chatRecoveryTaskRunOptions,
   recentChatTerminal,
   toolResultUpdate,
@@ -46,7 +45,8 @@ import {
   type ReplyStreams,
   type ToolPartUpdate,
   REPLAY_CHUNK_BYTES,
-  CHAT_RECOVERY_PROGRESS_KEY
+  CHAT_RECOVERY_PROGRESS_KEY,
+  turnSignal
 } from "agents/chat";
 
 /** The fiber run table of a release before fibers ran on Tasks. */
@@ -119,6 +119,44 @@ function messageReceivedAtForTest(
   id: string
 ): number | null {
   return messageReceivedAt.get(agent)?.[id] ?? null;
+}
+
+type ContinuationStateForTest = {
+  /** A continuation is scheduled or running and has not streamed yet. */
+  hasPending: boolean;
+  /** A next continuation is scheduled behind one that runs. */
+  hasNext: boolean;
+  activeRequestId: string | null;
+  activeConnectionId: string | null;
+};
+
+/** What `agent`'s auto-continuation holds: armed, next, running. */
+function continuationStateForTest(
+  agent: AIChatAgent
+): ContinuationStateForTest {
+  const continuation = (
+    agent as unknown as {
+      _continuation: {
+        pending: unknown;
+        running: unknown;
+        activeRequestId: string | null;
+        activeConnectionId: string | null;
+      };
+    }
+  )._continuation;
+  return {
+    hasPending: continuation.pending !== null || continuation.running !== null,
+    hasNext: continuation.pending !== null && continuation.running !== null,
+    activeRequestId: continuation.activeRequestId,
+    activeConnectionId: continuation.activeConnectionId
+  };
+}
+
+/** How many turns `agent`'s queue holds, the running one included. */
+function queuedTurnCountForTest(agent: AIChatAgent): number {
+  return (
+    agent as unknown as { _turns: { queue: { queuedCount(): number } } }
+  )._turns.queue.queuedCount();
 }
 
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
@@ -595,6 +633,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return messageReceivedAtForTest(this, id);
   }
 
+  /** How many turns the queue holds, the running one included. */
+  queuedTurnCountForTest(): number {
+    return queuedTurnCountForTest(this);
+  }
+
   /** Holds the next model call (inside onChatMessage) until released. */
   private _modelGate: TestGate | null = null;
 
@@ -631,14 +674,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   /** The request id of the continuation waiting to run, if any. */
+  /** The continuation whose stream comes next: running, else scheduled. */
   pendingContinuationRequestIdForTest(): string | null {
-    return (
-      (
-        this as unknown as {
-          _continuation: { pending: { requestId: string } | null };
-        }
-      )._continuation.pending?.requestId ?? null
-    );
+    const { running, pending } = (
+      this as unknown as {
+        _continuation: {
+          running: { requestId: string } | null;
+          pending: { requestId: string } | null;
+        };
+      }
+    )._continuation;
+    return (running ?? pending)?.requestId ?? null;
   }
 
   private _persistDelayForTest: {
@@ -1349,13 +1395,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   setTestBody(body: Record<string, unknown>): void {
-    const context = (
-      this as unknown as {
-        _requestContext: { body: typeof body; persist(): void };
-      }
-    )._requestContext;
-    context.body = body;
-    context.persist();
+    this["_turns"].lastBody = body;
+    this["_turns"].storeRequestContext();
   }
 
   resetTurnStateForTest(): void {
@@ -1407,33 +1448,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this.hasPendingInteraction();
   }
 
-  getContinuationStateForTest(): {
-    hasPending: boolean;
-    hasDeferred: boolean;
-    activeRequestId: string | null;
-    activeConnectionId: string | null;
-  } {
-    const continuation = (
-      this as unknown as {
-        _continuation: {
-          pending: unknown;
-          deferred: unknown;
-          activeRequestId: string | null;
-          activeConnectionId: string | null;
-        };
-      }
-    )._continuation;
-
-    return {
-      hasPending: continuation.pending !== null,
-      hasDeferred: continuation.deferred !== null,
-      activeRequestId: continuation.activeRequestId,
-      activeConnectionId: continuation.activeConnectionId
-    };
+  getContinuationStateForTest(): ContinuationStateForTest {
+    return continuationStateForTest(this);
   }
 
   getLatestStreamStatusForTest(): string | null {
-    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
+    return this._replyStreams.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {
@@ -1703,7 +1723,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testFlushChunkBuffer(): void {
-    this._resumableStream.flushBuffer();
+    this._replyStreams.flushBuffer();
   }
 
   /**
@@ -1711,7 +1731,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * earlier versions mirrored the progress marker into.
    */
   async probeProgressMirrorForTest(): Promise<unknown> {
-    const stream = this._resumableStream;
+    const stream = this._replyStreams;
     const id = stream.start("req-mirror");
     for (let i = 0; i < 10; i++) stream.storeChunk(id, `{"i":${i}}`);
     stream.finish(id);
@@ -1730,19 +1750,19 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   getActiveStreamId(): string | null {
-    return this._resumableStream.activeStreamId;
+    return this._replyStreams.activeStreamId;
   }
 
   getActiveRequestId(): string | null {
-    return this._resumableStream.activeRequestId;
+    return this._replyStreams.activeRequestId;
   }
 
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    // Delegate to ResumableStream so tests see the same unpacked, per-chunk
+    // Delegate to ReplyStreams so tests see the same unpacked, per-chunk
     // view that production consumers get (packed segment rows are expanded).
-    return this._resumableStream.getStreamChunks(streamId);
+    return this._replyStreams.getStreamChunks(streamId);
   }
 
   /** Rows a stream's chunks are stored in. */
@@ -1797,7 +1817,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
-    return this._resumableStream.getStreamMetadata(streamId);
+    return this._replyStreams.getStreamMetadata(streamId);
   }
 
   /**
@@ -1836,9 +1856,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
       { type: "text-start", id: "t" },
       { type: "text-delta", id: "t", delta: "After" }
     ]) {
-      this._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+      this._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
     }
-    this._resumableStream.flushBuffer();
+    this._replyStreams.flushBuffer();
     await self._persistOrphanedStream(streamId);
     await self._persistOrphanedStream(streamId);
     const reply = this.messages.find((m) => m.id === "a1");
@@ -1849,7 +1869,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   /** Record every stream started from now on, for {@link getStartedStreamMetadata}. */
   captureStreamStarts(): void {
-    const stream = this._resumableStream;
+    const stream = this._replyStreams;
     const start = stream.start.bind(stream);
     stream.start = (requestId, options) => {
       const streamId = start(requestId, options);
@@ -1874,7 +1894,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     created_at: number;
     message_id: string | null;
   }> {
-    return this._resumableStream.getAllStreamMetadata();
+    return this._replyStreams.getAllStreamMetadata();
   }
 
   testInsertStaleStream(
@@ -1918,12 +1938,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testRestoreActiveStream(): void {
-    this._resumableStream.restore();
+    this._replyStreams.restore();
   }
 
   /** Reclaim leftover chat streams now, as the next stream start would. */
   testReclaimStreams(nowMs?: number): number {
-    return this._resumableStream.reclaim(nowMs);
+    return this._replyStreams.reclaim(nowMs);
   }
 
   /** Number of pending stream-cleanup schedules (always 0: none are armed). */
@@ -1934,16 +1954,18 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * Simulate DO hibernation wake by reinitializing the ResumableStream.
-   * The new instance calls restore() which reads from SQLite and sets
+   * Simulate DO hibernation wake by reopening the reply stream log.
+   * Opening calls restore() which reads from SQLite and sets
    * _activeStreamId, but _isLive remains false (no live LLM reader).
    * This mimics the DO constructor running after eviction.
    */
+  /** The recorded end of `requestId` (the recent terminals), or null. */
+  recentTerminalForTest(requestId: string): unknown {
+    return recentChatTerminal(this.ctx.storage.kv, [requestId]);
+  }
+
   testSimulateHibernationWake(): void {
-    this._resumableStream = new ResumableStream(
-      this.streams,
-      this.sql.bind(this)
-    );
+    this._replyStreams.open(this.streams, this.sql.bind(this));
     // A woken isolate builds its resume handshake again, around the new
     // stream. SAFETY: a test resets the host's private lazy instance.
     (
@@ -1987,9 +2009,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _abortRegistry: { size: number };
+        _turns: { aborts: { size: number } };
       }
-    )._abortRegistry.size;
+    )._turns.aborts.size;
   }
 }
 
@@ -2081,32 +2103,51 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     this.ctx.abort("test: forced reset");
   }
 
-  /** The admission records, as `ChatTurns` stores them. */
+  /** Every recovery incident's status and reason. */
+  async getIncidentsForTest(): Promise<string[]> {
+    const incidents = await this.ctx.storage.list<{
+      status: string;
+      reason?: string;
+    }>({ prefix: "cf:chat-recovery:incident:" });
+    return [...incidents.values()].map(
+      (incident) => `${incident.status}:${incident.reason ?? ""}`
+    );
+  }
+
   /** The next admission record write fails, as SQLite's row limit would. */
   failNextAdmissionForTest(): void {
-    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
-    const store = (
-      admissions as unknown as {
-        host: { store: { add: (...args: unknown[]) => void } };
-      }
-    ).host.store;
-    const add = store.add;
-    store.add = () => {
-      store.add = add;
-      throw new Error("SQLITE_TOOBIG: string or blob too big");
+    // A client request's record is its run on the chat lane.
+    const tasks = this.tasks as unknown as {
+      run: (...args: unknown[]) => Promise<unknown>;
+    };
+    const run = tasks.run;
+    tasks.run = (...args: unknown[]) => {
+      const input = args[1] as { admission?: unknown } | undefined;
+      if (!input?.admission) return run.apply(this.tasks, args);
+      tasks.run = run;
+      return Promise.reject(new Error("SQLITE_TOOBIG: string or blob too big"));
     };
   }
 
   /** Make every admission record `ms` older, as a long wait would. */
   ageAdmissionsForTest(ms: number): void {
-    this
-      .sql`UPDATE cf_agents_chat_admissions SET created_at = created_at - ${ms}`;
+    this.sql`
+      UPDATE cf_agents_task_runs SET created_at = created_at - ${ms}
+      WHERE lane = 'chat'
+    `;
   }
 
+  /** The client requests waiting on the chat lane, in order. */
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
-      return this.sql<{ request_id: string; stopped: number }>`
-        SELECT request_id, stopped FROM cf_agents_chat_admissions ORDER BY seq
+      return this.sql<{ request_id: string; stopped: number | null }>`
+        SELECT json_extract(metadata, '$.requestId') AS request_id,
+               json_extract(metadata, '$.chat.stopped') AS stopped
+        FROM cf_agents_task_runs
+        WHERE lane = 'chat' AND status IN ('pending', 'running')
+          AND json_type(input, '$.admission') IS NOT NULL
+          AND json_type(checkpoint, '$.snapshot') IS NULL
+        ORDER BY seq
       `.map((row) => ({
         requestId: row.request_id,
         stopped: row.stopped === 1
@@ -2117,20 +2158,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * Write an admission record by hand: the record a reset leaves when it
-   * lands between a turn's fiber and the record's delete.
+   * A record left between a turn's fiber and the record's delete. There is
+   * no such window any more: the record is the turn's run, which recovery
+   * owns once its model call began. Nothing to write.
    */
-  seedAdmissionForTest(requestId: string, messageIds: string[]): void {
-    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
-    admissions?.admit({
-      requestId,
-      messages: messageIds.map((id) => ({ id, role: "user", parts: [] })),
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: { trigger: "submit-message", body: {}, clientTools: undefined }
-    });
-    admissions?.live.delete(requestId);
-  }
+  seedAdmissionForTest(_requestId: string, _messageIds: string[]): void {}
 
   /** The messages waiting requests hold, not stored yet. */
   getQueuedMessageIdsForTest(): string[] {
@@ -2189,6 +2221,43 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     const errorAfterChunks = body?.errorAfterChunks ?? 0;
     const throwError = body?.throwError ?? false;
     const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
+
+    // The reply calls a tool, and its stream stays open: only a stop,
+    // a stall or an eviction ends it. The answer's continuation falls
+    // through to the plain reply.
+    // With `"approval"` the call is a server tool's, waiting on approval.
+    const hangOn = (
+      options?.body as { toolThenHang?: "call" | "approval" } | undefined
+    )?.toolThenHang;
+    if (hangOn && !options?.continuation) {
+      const sse = (chunk: unknown) =>
+        new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`);
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(sse({ type: "start" }));
+            controller.enqueue(
+              sse({
+                type: "tool-input-available",
+                toolCallId: "call-hang",
+                toolName: hangOn === "call" ? "chooseOption" : "deleteFile",
+                input: {}
+              })
+            );
+            if (hangOn === "approval") {
+              controller.enqueue(
+                sse({
+                  type: "tool-approval-request",
+                  toolCallId: "call-hang",
+                  approvalId: "approval-hang"
+                })
+              );
+            }
+          }
+        }),
+        { headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
 
     const failOnAbort = (options?.body as { failOnAbort?: string } | undefined)
       ?.failOnAbort;
@@ -2320,6 +2389,15 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return next;
   }
 
+  getContinuationStateForTest(): ContinuationStateForTest {
+    return continuationStateForTest(this);
+  }
+
+  /** How many turns the queue holds, the running one included. */
+  queuedTurnCountForTest(): number {
+    return queuedTurnCountForTest(this);
+  }
+
   holdStreamForTest(requestId = "next"): void {
     this._streamGates.set(requestId, new TestGate());
   }
@@ -2449,9 +2527,9 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _abortRegistry: { size: number };
+        _turns: { aborts: { size: number } };
       }
-    )._abortRegistry.size;
+    )._turns.aborts.size;
   }
 
   getStartedRequestIds(): string[] {
@@ -2495,31 +2573,37 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * Number of *overlapping* submits the agent has observed past
-   * `_getSubmitConcurrencyDecision` — i.e. submits that arrived while a
-   * turn was already queued or in-flight under `latest` / `merge` /
-   * `debounce` concurrency policies. The very first submit on an empty
-   * queue is NOT counted (it isn't overlapping with anything), nor are
-   * submits under `queue` / `drop` policies or `regenerate-message`
-   * triggers.
+   * Number of submits that arrived while a turn was queued or running,
+   * under `latest`, `merge` or debounce. Regenerations, and submits under
+   * `queue` or `drop`, are not counted.
    *
-   * Used as a deterministic barrier in concurrency tests to wait for the
-   * agent to have registered every overlapping submit before asserting
-   * on which turns ran — otherwise assertions race the DO's
-   * webSocketMessage dispatch under CPU pressure and can observe
-   * intermediate state where the most recent submit hasn't yet bumped
-   * `_latestOverlappingSubmitSequence`.
-   *
-   * Returns `_latestOverlappingSubmitSequence`, which equals the total
-   * count of overlapping submits observed so far.
+   * A barrier in concurrency tests: wait until the agent took every
+   * overlapping submit before asserting on which turns ran.
    */
   getOverlappingSubmitCountForTest(): number {
-    return (
-      this as unknown as {
-        _submitConcurrency: { overlappingSubmitCount: number };
-      }
-    )._submitConcurrency.overlappingSubmitCount;
+    return this._overlappingSubmits.count;
   }
+
+  /** Counts the client requests that arrive under a superseding strategy. */
+  private readonly _overlappingSubmits = ((turns: {
+    runClientRequest(request: {
+      onDecision?(decision: { strategy: unknown }): void;
+    }): Promise<void>;
+  }) => {
+    const counter = { count: 0 };
+    const run = turns.runClientRequest.bind(turns);
+    turns.runClientRequest = (request) =>
+      run({
+        ...request,
+        onDecision: (decision) => {
+          const { strategy } = decision;
+          if (strategy !== null && strategy !== "queue" && strategy !== "drop")
+            counter.count++;
+          request.onDecision?.(decision);
+        }
+      });
+    return counter;
+  })((this as unknown as { _turns: never })._turns);
 
   resetTurnStateForTest(): void {
     this.resetTurnState();
@@ -2743,36 +2827,6 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
   getChatResponseResults(): ChatResponseResult[] {
     return [...this._chatResponseResults];
-  }
-
-  /**
-   * #1575: drive `ResumableStream.replayErroredChunksByRequestId` against a
-   * controllable connection so the return-value contract is testable in
-   * isolation: `failAfter` sends succeed, then the connection simulates a
-   * post-close send (the only error `sendIfOpen` swallows). Returns the
-   * method's boolean and how many frames actually went out.
-   */
-  replayErroredChunksByRequestIdForTest(
-    requestId: string,
-    failAfter: number
-  ): { returned: boolean; sent: number } {
-    let sent = 0;
-    const fakeConnection = {
-      send(_message: string) {
-        if (sent >= failAfter) {
-          throw new TypeError("WebSocket send() after close");
-        }
-        sent++;
-      }
-    };
-    const rs = this["_resumableStream"];
-    const returned = rs.replayErroredChunksByRequestId(
-      fakeConnection as unknown as Parameters<
-        typeof rs.replayErroredChunksByRequestId
-      >[0],
-      requestId
-    );
-    return { returned, sent };
   }
 
   async persistToolCallMessage(
@@ -3474,7 +3528,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     beforeCall: number;
     afterCall: number;
   }> {
-    const streamId = this._resumableStream.start("req-tool-call-durability");
+    const streamId = this._replyStreams.start("req-tool-call-durability");
     const store = (chunk: Record<string, unknown>) =>
       storeStreamChunk(this, streamId, JSON.stringify(chunk));
     const rawCount = (): number =>
@@ -3596,6 +3650,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     if (this.recoveryShouldThrow) {
       throw new Error("onChatRecovery boom");
     }
+
     if (this.recoveryOverride) return this.recoveryOverride;
     return {};
   }
@@ -3671,14 +3726,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     afterPersist: number;
   }> {
     const self = this as unknown as {
-      _resumableStream: { start(id: string): string };
+      _replyStreams: { start(id: string): string };
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      this._resumableStream.progressMarker();
+      this._replyStreams.progressMarker();
 
     const start = await read();
-    const streamId = self._resumableStream.start("req-progress-immunity");
+    const streamId = self._replyStreams.start("req-progress-immunity");
     await storeStreamChunk(
       this,
       streamId,
@@ -4592,7 +4647,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       const status = await this.driveStallingTurnForTest({ timeoutMs: 100 });
       await new Promise((resolve) => setTimeout(resolve, 50));
       // oxlint-disable-next-line typescript/no-explicit-any -- private field
-      const stream = (this as any)._resumableStream;
+      const stream = (this as any)._replyStreams;
       return {
         outcomes,
         streamOpen:
@@ -4632,6 +4687,68 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       }
     ]);
     return result.status;
+  }
+
+  private _transientInRecoveryOnce = false;
+  private _throwsBeforeHandoff = 0;
+  private _transientThrown = false;
+
+  /**
+   * Make the next recovery's `continueLastTurn` throw a transient error,
+   * then its replacement attempt's `onChatRecovery` throw one
+   * `throwsBeforeHandoff` times, before it hands off.
+   */
+  armTransientInRecoveryForTest(throwsBeforeHandoff = 0): void {
+    this._transientInRecoveryOnce = true;
+    this._throwsBeforeHandoff = throwsBeforeHandoff;
+    // The replacement's leaf check, before its handoff, throws.
+    const self = this as unknown as { _recoveryLeaf(): unknown };
+    const leaf = self._recoveryLeaf.bind(this);
+    self._recoveryLeaf = () => {
+      if (this._transientThrown && this._throwsBeforeHandoff > 0) {
+        this._throwsBeforeHandoff--;
+        throw new Error("Network connection lost.");
+      }
+      return leaf();
+    };
+  }
+
+  /** How many of the replacement's throws before its handoff are left. */
+  throwsBeforeHandoffLeftForTest(): number {
+    return this._throwsBeforeHandoff;
+  }
+
+  /** The recovery Task's open runs, as `status` or `status:waitReason`. */
+  openRecoveryTaskRunsForTest(): string[] {
+    return this.sql<{ status: string; wait_reason: string | null }>`
+      SELECT status, wait_reason FROM cf_agents_task_runs
+      WHERE definition = '__cf_internal_chat_recovery'
+        AND status IN ('pending', 'running')
+    `.map((row) =>
+      row.wait_reason ? `${row.status}:${row.wait_reason}` : row.status
+    );
+  }
+
+  /** Run every open recovery Task run now, as its later wake would. */
+  async runOpenRecoveryTaskRunsForTest(): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now() - 1_000}
+      WHERE definition = '__cf_internal_chat_recovery'
+        AND status IN ('pending', 'running')
+    `;
+    await this.tasks.runDue("__cf_internal_chat_recovery");
+  }
+
+  protected override async continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: { signal?: AbortSignal }
+  ): Promise<SaveMessagesResult> {
+    if (this._transientInRecoveryOnce && options?.signal) {
+      this._transientInRecoveryOnce = false;
+      this._transientThrown = true;
+      throw new Error("Network connection lost.");
+    }
+    return super.continueLastTurn(body, options);
   }
 
   getFailingReaderCallsForTest(): number {
@@ -4703,13 +4820,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     status: string | undefined;
     body: Record<string, unknown> | undefined;
   }> {
-    const self = this as unknown as {
-      _requestContext: {
-        set(context: { body: Record<string, unknown> | undefined }): void;
-      };
-      _lastBody: Record<string, unknown> | undefined;
-    };
-    self._requestContext.set({ body: { theme: "dark" } });
+    this["_turns"].setRequestContext({ body: { theme: "dark" } });
     const runId = crypto.randomUUID();
     if (recovered) {
       this._failingTurn = {
@@ -4726,7 +4837,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       inspection = await this.inspectAgentToolRun(runId);
     }
     await this["_turns"].waitForIdle();
-    return { status: inspection?.status, body: self._lastBody };
+    return { status: inspection?.status, body: this._lastBody };
   }
 
   /** The request id of the turn `onChatResponse` last started. */
@@ -4768,7 +4879,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const followUp = this._followUpRequestId;
     const row = this["_agentToolRuns"].store.read(runId);
     const followUpStream = followUp
-      ? this._resumableStream.latestStreamInfoForRequest(followUp)?.id
+      ? this._replyStreams.latestStreamInfoForRequest(followUp)?.id
       : undefined;
     return {
       status: inspection?.status,
@@ -5042,12 +5153,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async bumpRecoveryProgressForTest(): Promise<void> {
     // One explicit credit — the same unit a flushed segment or a forwarded
     // child chunk adds to the derived marker.
-    this._resumableStream.creditProgress();
+    this._replyStreams.creditProgress();
   }
 
   /** The recovery progress marker as the engine would read it now. */
   async readProgressMarkerForTest(): Promise<number> {
-    return this._resumableStream.progressMarker();
+    return this._replyStreams.progressMarker();
   }
 
   /** Simulate a parent re-attach that forwards `chunks` of a child's stream by
@@ -5071,7 +5182,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     };
     self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
-      this._resumableStream.progressMarker();
+      this._replyStreams.progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -5099,7 +5210,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   getPartialText(streamId?: string) {
-    const id = streamId ?? this._resumableStream.activeStreamId ?? undefined;
+    const id = streamId ?? this._replyStreams.activeStreamId ?? undefined;
     if (!id) return { text: "", parts: [] };
     return (
       this as unknown as {
@@ -5249,6 +5360,59 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   ): void {
     this._lastBody = body;
     this._lastClientTools = clientTools;
+  }
+
+  /**
+   * Leave the request context the way an earlier release did: rows in
+   * `cf_ai_chat_request_context` and no session value. Reset the isolate
+   * next, so the start reads them the way it does after an upgrade.
+   */
+  async seedLegacyRequestContextForTest(
+    lastClientTools: string | null,
+    lastBody: string | null
+  ): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS cf_ai_chat_request_context (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    );
+    // Null for both: the empty table every earlier release created.
+    if (lastClientTools !== null && lastBody !== null)
+      sql.exec(
+        "INSERT OR REPLACE INTO cf_ai_chat_request_context (key, value) VALUES ('lastClientTools', ?), ('lastBody', ?)",
+        lastClientTools,
+        lastBody
+      );
+    await this.sessions
+      .session()
+      .internal_setConfig("transcript:chat:request", null);
+  }
+
+  /** Reset this agent's isolate, as an eviction does. */
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
+
+  /** What this isolate holds, what is stored, and whether the old table is left. */
+  async requestContextStateForTest(): Promise<{
+    clientTools: string[] | null;
+    body: string | null;
+    stored: string | null;
+    tableLeft: boolean;
+  }> {
+    await this["_requestContextCarried"];
+    return {
+      clientTools: this._lastClientTools?.map((tool) => tool.name) ?? null,
+      body: JSON.stringify(this._lastBody ?? null),
+      stored: await this.sessions
+        .session()
+        .internal_config("transcript:chat:request"),
+      tableLeft:
+        this.ctx.storage.sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE name = 'cf_ai_chat_request_context'"
+          )
+          .toArray().length > 0
+    };
   }
 
   /** The next turn's response reader throws `message` after a partial. */
@@ -5495,15 +5659,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   async triggerInterruptedStreamCheck(): Promise<void> {
-    if (
-      !this._resumableStream.hasActiveStream() ||
-      this._resumableStream.isLive
-    ) {
+    // SAFETY: a test reads whether the restored stream has a reader.
+    const live = (this._replyStreams as unknown as { _isLive: boolean })
+      ._isLive;
+    if (!this._replyStreams.hasActiveStream() || live) {
       return;
     }
 
-    const streamId = this._resumableStream.activeStreamId!;
-    const requestId = this._resumableStream.activeRequestId ?? "";
+    const streamId = this._replyStreams.activeStreamId!;
+    const requestId = this._replyStreams.activeRequestId ?? "";
 
     const partial = this.getPartialText(streamId);
 
@@ -5534,7 +5698,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await this._persistOrphanedStream(streamId);
     }
 
-    this._resumableStream.complete(streamId);
+    this._replyStreams.complete(streamId);
 
     if (options.continue !== false) {
       const targetId = this.messages
@@ -5646,7 +5810,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
                 ${body}, ${createdAt}, ${createdAt})
       `;
     }
-    this._resumableStream.restore();
+    this._replyStreams.restore();
   }
 
   getActiveFibers(): Array<{ id: string; name: string }> {
@@ -5854,7 +6018,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
     }
     const internals = this as unknown as {
       _chatTurnFibers: { liveTurns: Map<string, unknown> };
-      _abortRegistry: { size: number };
+      _turns: { aborts: { size: number } };
       _turnQueue: { isActive: boolean };
     };
     return {
@@ -5865,7 +6029,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
         SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE checkpoint IS NOT NULL
       `[0].n,
       fibers: this.getActiveFibers().length,
-      abortControllers: internals._abortRegistry.size,
+      abortControllers: internals._turns.aborts.size,
       queueIdle: !internals._turnQueue.isActive
     };
   }
@@ -5890,9 +6054,9 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _abortRegistry: { size: number };
+        _turns: { aborts: { size: number } };
       }
-    )._abortRegistry.size;
+    )._turns.aborts.size;
   }
 
   async waitForIdleForTest(): Promise<void> {
@@ -5924,6 +6088,19 @@ export class AsyncStartAdmissionAgent extends SlowStreamAgent {
   override async onStart(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 300));
     this._ready = true;
+    // Opted in by a test: onStart waits for a turn of its own.
+    if (this.ctx.storage.kv.get("onStartTurn") === true) {
+      this.ctx.storage.kv.delete("onStartTurn");
+      await this.saveMessages((messages) => [
+        ...messages,
+        { id: "on-start", role: "user", parts: [{ type: "text", text: "hi" }] }
+      ]);
+    }
+  }
+
+  /** The next start's onStart waits for a turn of its own. */
+  turnInNextOnStartForTest(): void {
+    this.ctx.storage.kv.put("onStartTurn", true);
   }
 
   override async onChatMessage(
@@ -5944,21 +6121,39 @@ export class AsyncStartAdmissionAgent extends SlowStreamAgent {
    */
   async seedQueuedRequestForTest(requestId: string): Promise<void> {
     const id = `u-${requestId}`;
-    const { admissions } = (this as unknown as { _turns: ChatTurns })._turns;
-    admissions?.admit({
+    const nonce = crypto.randomUUID();
+    await this.tasks.get(nonce);
+    const input = {
       requestId,
-      messages: [
-        { id, role: "user", parts: [{ type: "text", text: requestId }] }
-      ] as ChatMessage[],
-      afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-      payload: {
-        trigger: "submit-message",
-        body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 },
-        clientTools: undefined
+      continuation: false,
+      nonce,
+      lane: true,
+      admission: {
+        messages: [
+          { id, role: "user", parts: [{ type: "text", text: requestId }] }
+        ],
+        afterUserId: null,
+        decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+        payload: {
+          trigger: "submit-message",
+          body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 },
+          clientTools: undefined
+        }
       }
-    });
-    admissions?.live.delete(requestId);
+    };
+    const now = Date.now();
+    // Its run on the chat lane, as a reset leaves it before it started.
+    this.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, metadata, idempotency_key, retain,
+         attempt, next_at, cancel_requested, created_at, updated_at, lane, seq)
+      VALUES
+        (${`chat_${nonce}`}, ${AIChatAgent.CHAT_FIBER_NAME},
+         ${JSON.stringify(input)}, 'pending', ${JSON.stringify({ requestId })},
+         NULL, 0, 0, ${now}, 0, ${now}, ${now}, 'chat',
+         (SELECT coalesce(MAX(seq), 0) + 1 FROM cf_agents_task_runs
+          WHERE lane = 'chat'))
+    `;
   }
 }
 
@@ -6172,6 +6367,46 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 
   /** Create the pre-capability chat stream tables with one stream in them. */
+  /** Old request-context rows, as an earlier release kept them, and no session value. */
+  async seedLegacyRequestContextForTest(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS cf_ai_chat_request_context (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    );
+    sql.exec(
+      "INSERT OR REPLACE INTO cf_ai_chat_request_context (key, value) VALUES ('lastBody', ?)",
+      JSON.stringify({ theme: "dark" })
+    );
+    await this.sessions
+      .session()
+      .internal_setConfig("transcript:chat:request", null);
+  }
+
+  /** Whether the old request-context table is left, the rows in it, and the stored value. */
+  async legacyRequestContextForTest(): Promise<{
+    tableLeft: boolean;
+    rowsLeft: number;
+    stored: string | null;
+  }> {
+    await this["_requestContextCarried"];
+    const sql = this.ctx.storage.sql;
+    const tableLeft =
+      sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE name = 'cf_ai_chat_request_context'"
+        )
+        .toArray().length > 0;
+    return {
+      tableLeft,
+      rowsLeft: tableLeft
+        ? sql.exec("SELECT 1 FROM cf_ai_chat_request_context").toArray().length
+        : 0,
+      stored: await this.sessions
+        .session()
+        .internal_config("transcript:chat:request")
+    };
+  }
+
   seedLegacyChatTablesForTest(): void {
     const sql = this.ctx.storage.sql;
     sql.exec(
@@ -6217,8 +6452,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     return {
       tables,
       rowsLeft,
-      importedChunks:
-        this._resumableStream.getStreamChunks("legacy-stream").length
+      importedChunks: this._replyStreams.getStreamChunks("legacy-stream").length
     };
   }
 
@@ -6723,15 +6957,15 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     const finished = await this._waitForRunTerminalForTest(runId);
     await this._waitForRunsSettledForTest();
     const store = this["_agentToolRuns"].store;
-    const signal = this["_abortRegistry"].getSignal("another-turn");
+    const signal = turnSignal(this["_turns"].aborts, "another-turn");
     // A later turn could run under the finished run's old request id.
     const ownRequestId = store.read(runId)?.requestId ?? "";
-    const own = this["_abortRegistry"].getSignal(ownRequestId);
+    const own = turnSignal(this["_turns"].aborts, ownRequestId);
     await this.cancelAgentToolRun(runId, "late cancel");
     const otherTurnAborted = signal?.aborted ?? false;
     const ownRequestAborted = own?.aborted ?? false;
-    this["_abortRegistry"].remove("another-turn");
-    this["_abortRegistry"].remove(ownRequestId);
+    this["_turns"].aborts.delete("another-turn");
+    this["_turns"].aborts.delete(ownRequestId);
     const row = store.read(runId);
     return {
       status: finished?.status,
@@ -6759,9 +6993,9 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       VALUES (${runId}, 'recovered-request', 'first-request', 'running',
         ${Date.now()})
     `;
-    const registry = this["_abortRegistry"];
-    const recoveredTurn = registry.getSignal("recovered-request");
-    const otherTurn = registry.getSignal("a-users-turn");
+    const registry = this["_turns"].aborts;
+    const recoveredTurn = turnSignal(registry, "recovered-request");
+    const otherTurn = turnSignal(registry, "a-users-turn");
     const attempt = this["_turns"].beginRecoveryAttempt("first-request");
     const otherAttempt = this["_turns"].beginRecoveryAttempt("a-users-root");
     try {
@@ -6775,8 +7009,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     } finally {
       attempt.end();
       otherAttempt.end();
-      registry.remove("recovered-request");
-      registry.remove("a-users-turn");
+      registry.delete("recovered-request");
+      registry.delete("a-users-turn");
     }
   }
 
@@ -6917,7 +7151,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
       if (requestId) {
         const streamId =
-          this._resumableStream.latestStreamInfoForRequest(requestId)?.id;
+          this._replyStreams.latestStreamInfoForRequest(requestId)?.id;
         if (streamId) return { requestId, streamId };
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -7000,7 +7234,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "cold-realign-run";
     const requestId = "cold-realign-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     const backlog = [
       JSON.stringify({ type: "text-start" }),
       JSON.stringify({ type: "text-delta", delta: "a" }),
@@ -7009,7 +7243,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     for (const body of backlog) {
       await storeStreamChunk(this, streamId, body);
     }
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7095,7 +7329,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   async progressDuringDrainForTest(): Promise<string[]> {
     const runId = "progress-drain-run";
     const requestId = "progress-drain-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7127,7 +7361,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     }
     broadcast(progress("before-attach"));
     await storeStreamChunk(this, streamId, stored[2]);
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(progress("during-drain"));
@@ -7171,7 +7405,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   > {
     const runId = "skipped-chunk-run";
     const requestId = "skipped-chunk-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7197,7 +7431,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     await send(delta("a"));
     await send(oversized);
     await storeStreamChunk(this, streamId, delta("c"));
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(delta("c"));
@@ -7253,14 +7487,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "inspect-pending-run";
     const requestId = "inspect-pending-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of backlog) {
       await storeStreamChunk(this, streamId, body);
     }
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7476,13 +7710,13 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "starve-run";
     const requestId = "starve-req";
-    const streamId = this["_resumableStream"].start(requestId);
+    const streamId = this["_replyStreams"].start(requestId);
     await storeStreamChunk(
       this,
       streamId,
       JSON.stringify({ type: "text-start" })
     );
-    this["_resumableStream"].flushBuffer();
+    this["_replyStreams"].flushBuffer();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7701,11 +7935,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, started_at)
       VALUES (${runId}, 'recovered-request', 'running', ${Date.now()})
     `;
-    const signal = (
-      this as unknown as {
-        _abortRegistry: { getSignal(id: string): AbortSignal | undefined };
-      }
-    )._abortRegistry.getSignal("recovered-request");
+    const signal = turnSignal(
+      (
+        this as unknown as {
+          _turns: { aborts: Map<string, AbortController> };
+        }
+      )._turns.aborts,
+      "recovered-request"
+    );
     const abortedBefore = signal?.aborted ?? false;
     await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
     return {
@@ -7748,6 +7985,20 @@ type AgentToolFinishForTest = {
 };
 
 export class AIChatAgentToolParent extends Agent<Env> {
+  async seedChildLegacyRequestContextForTest(childName: string): Promise<void> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    await child.seedLegacyRequestContextForTest();
+  }
+
+  async childLegacyRequestContextForTest(childName: string): Promise<{
+    tableLeft: boolean;
+    rowsLeft: number;
+    stored: string | null;
+  }> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    return child.legacyRequestContextForTest();
+  }
+
   async seedChildLegacyChatTablesForTest(childName: string): Promise<void> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);
     await child.seedLegacyChatTablesForTest();

@@ -1527,6 +1527,8 @@ export class ChatRecoveryEngine {
           run: () => turns.attempts[callback](data, onTurnStarted)
         }),
       track: (turn) => turns.trackAlarmWork(turn),
+      incidentId:
+        typeof data?.incidentId === "string" ? data.incidentId : undefined,
       redefer: (dedupeKey) =>
         this.adapter.scheduleRecovery(
           callback,

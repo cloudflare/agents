@@ -257,8 +257,8 @@ describe("waitForConnections E2E", () => {
       const name = `hibernation-race-${crypto.randomUUID()}`;
       let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
 
-      // The server answers only once the test has ended, so the restored
-      // connection is still connecting when it is read.
+      // The server answers only once the test calls releaseSlowServers(), so
+      // the restored connection is still connecting when it is read.
       await stub.insertMcpServer(
         "race-roundtrip-server",
         "Race Round Trip Server",

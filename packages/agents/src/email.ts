@@ -57,7 +57,7 @@ export type EmailHeader = {
 export function isAutoReplyEmail(headers: EmailHeader[]): boolean {
   return headers.some((h) => {
     const key = h.key.toLowerCase();
-    const value = h.value.toLowerCase();
+    const value = h.value.trim().toLowerCase();
 
     // RFC 3834: Auto-Submitted header
     // "no" means normal (human-sent) email, anything else indicates auto-reply

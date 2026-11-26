@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, it, expect, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitUntilHandled } from "./test-utils";
 import { getAgentByName } from "agents";
 
 function collectMessages(ws: WebSocket): Array<Record<string, unknown>> {
@@ -227,7 +227,7 @@ describe("Client tools continuation", () => {
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
       expect(await agentStub.getContinuationStateForTest()).toMatchObject({
         hasPending: false,
-        hasDeferred: false,
+        hasNext: false,
         activeRequestId: null
       });
     } finally {
@@ -390,7 +390,7 @@ describe("Client tools continuation", () => {
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(2);
       expect(await agentStub.getContinuationStateForTest()).toMatchObject({
         hasPending: false,
-        hasDeferred: false,
+        hasNext: false,
         activeRequestId: null
       });
     } finally {
@@ -1280,7 +1280,7 @@ describe("Client tools continuation", () => {
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
       expect(await agentStub.getContinuationStateForTest()).toEqual({
         hasPending: false,
-        hasDeferred: false,
+        hasNext: false,
         activeRequestId: null,
         activeConnectionId: null
       });
@@ -1371,7 +1371,7 @@ describe("Client tools continuation", () => {
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
       expect(await agentStub.getContinuationStateForTest()).toEqual({
         hasPending: false,
-        hasDeferred: false,
+        hasNext: false,
         activeRequestId: null,
         activeConnectionId: null
       });
@@ -1453,6 +1453,7 @@ describe("Client tools continuation", () => {
 
     await agentStub.clearCapturedContext();
 
+    const callsBefore = await agentStub.getChatMessageCallCountForTest();
     ws.send(
       JSON.stringify({
         type: "cf_agent_tool_result",
@@ -1463,7 +1464,13 @@ describe("Client tools continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    // The continuation has reached the model.
+    const deadline = Date.now() + 3000;
+    while ((await agentStub.getChatMessageCallCountForTest()) <= callsBefore) {
+      if (Date.now() > deadline) throw new Error("No continuation ran");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
 
     // Client tools should be undefined after chat clear
     const continuationClientTools = await agentStub.getCapturedClientTools();

@@ -1,13 +1,7 @@
 /**
- * ContinuationState — shared state container for auto-continuation lifecycle.
- *
- * Tracks pending, deferred, and active continuation state for the
- * tool-result → auto-continue flow. Both AIChatAgent and Think use this
- * to manage which connection/tools/body a continuation turn should use
- * and to coordinate with clients requesting stream resume.
- *
- * The scheduling algorithm (prerequisite chaining, debounce, TurnQueue
- * enrollment) stays in the host — this class only manages the data.
+ * The auto-continuation slots (`ContinuationSlots`) and the types and pure
+ * helpers the continuation lifecycle shares (`continuation-turn.ts`,
+ * `ChatTurns`' barrier).
  */
 
 import { CHAT_MESSAGE_TYPES } from "./protocol";
@@ -30,7 +24,6 @@ export interface ContinuationPending<
   requestId: string;
   errorPrefix: string | null;
   prerequisite: Promise<boolean> | null;
-  pastCoalesce: boolean;
   /**
    * The messages whose tool results or approvals this continuation answers.
    * It runs only while one of them is still the last message
@@ -40,63 +33,53 @@ export interface ContinuationPending<
   targetMessageIds: readonly string[];
 }
 
-export interface ContinuationDeferred<
-  TConnection extends ContinuationConnection = ContinuationConnection
-> {
-  connection: TConnection;
-  connectionId: string | null;
-  errorPrefix: string;
-  prerequisite: Promise<boolean> | null;
-  targetMessageIds: readonly string[];
-}
-
-export class ContinuationState<
+/**
+ * The continuation slots `ChatTurns` keeps: the continuation a tool answer
+ * scheduled whose turn has not started (`pending`), the one whose turn
+ * started and whose stream has not (`running`), the one whose stream runs
+ * (`activeRequestId`), and the tabs waiting for a continuation's stream.
+ *
+ * An answer that arrives while a continuation runs schedules the next
+ * pending continuation, whose turn waits behind the running one in the
+ * lane: there is no deferred slot.
+ */
+export class ContinuationSlots<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
   pending: ContinuationPending<TConnection> | null = null;
-  deferred: ContinuationDeferred<TConnection> | null = null;
+  running: ContinuationPending<TConnection> | null = null;
   activeRequestId: string | null = null;
   activeConnectionId: string | null = null;
   awaitingConnections: Map<string, TConnection> = new Map();
 
-  /** Clear pending state and awaiting connections (without sending RESUME_NONE). */
+  /** Free the pending slot and forget the waiting tabs, sending nothing. */
   clearPending(): void {
     this.pending = null;
     this.awaitingConnections.clear();
   }
 
-  clearDeferred(): void {
-    this.deferred = null;
-  }
-
   clearAll(): void {
     this.clearPending();
-    this.clearDeferred();
+    this.running = null;
     this.activeRequestId = null;
     this.activeConnectionId = null;
   }
 
-  /**
-   * Mark a connection as no longer available without canceling the
-   * continuation it initiated.
-   */
+  /** A tab left: forget it without cancelling the continuation it started. */
   releaseConnection(connectionId: string): void {
     this.awaitingConnections.delete(connectionId);
     if (this.pending?.connectionId === connectionId) {
       this.pending = { ...this.pending, connectionId: null };
     }
-    if (this.deferred?.connectionId === connectionId) {
-      this.deferred = { ...this.deferred, connectionId: null };
+    if (this.running?.connectionId === connectionId) {
+      this.running = { ...this.running, connectionId: null };
     }
     if (this.activeConnectionId === connectionId) {
       this.activeConnectionId = null;
     }
   }
 
-  /**
-   * Send STREAM_RESUME_NONE to all connections waiting for a
-   * continuation stream to start, then clear the map.
-   */
+  /** Tell every waiting tab there is no stream (`STREAM_RESUME_NONE`). */
   sendResumeNone(): void {
     const msg = JSON.stringify({ type: MSG_STREAM_RESUME_NONE });
     for (const connection of this.awaitingConnections.values()) {
@@ -106,59 +89,22 @@ export class ContinuationState<
   }
 
   /**
-   * Flush awaiting connections by notifying each one via the provided
-   * callback (typically sends STREAM_RESUMING), then clear.
+   * The pending continuation's tab waits on it. While another continuation
+   * runs and its stream has not started, the tabs waiting are that one's,
+   * so this waits until that one's stream starts or its turn ends.
    */
+  awaitPending(): void {
+    const pending = this.pending;
+    if (!pending || pending.connectionId === null || this.running) return;
+    this.awaitingConnections.set(pending.connectionId, pending.connection);
+  }
+
+  /** Hand every waiting tab to `notify` (`STREAM_RESUMING`), then forget them. */
   flushAwaitingConnections(notify: (conn: TConnection) => void): void {
     for (const connection of this.awaitingConnections.values()) {
       notify(connection);
     }
     this.awaitingConnections.clear();
-  }
-
-  /**
-   * Transition pending → active. Called when the continuation stream
-   * actually starts. Moves request/connection IDs to active slots,
-   * clears pending fields.
-   */
-  activatePending(): void {
-    if (!this.pending) return;
-    this.activeRequestId = this.pending.requestId;
-    this.activeConnectionId = this.pending.connectionId;
-    this.pending = null;
-  }
-
-  /**
-   * Transition deferred → pending. Called when a continuation turn
-   * completes and there's a deferred follow-up waiting.
-   *
-   * Returns the new pending state (so the host can enqueue the turn),
-   * or null if there was nothing deferred.
-   */
-  activateDeferred(
-    generateRequestId: () => string
-  ): ContinuationPending<TConnection> | null {
-    if (this.pending || !this.deferred) return null;
-
-    const d = this.deferred;
-    this.deferred = null;
-    this.activeRequestId = null;
-    this.activeConnectionId = null;
-
-    this.pending = {
-      connection: d.connection,
-      connectionId: d.connectionId,
-      requestId: generateRequestId(),
-      errorPrefix: d.errorPrefix,
-      prerequisite: d.prerequisite,
-      pastCoalesce: false,
-      targetMessageIds: d.targetMessageIds
-    };
-
-    if (d.connectionId !== null) {
-      this.awaitingConnections.set(d.connectionId, d.connection);
-    }
-    return this.pending;
   }
 }
 
@@ -197,3 +143,46 @@ export function continuationTargetIsLatest(
   const last = messages.at(-1)?.id;
   return last !== undefined && pending.targetMessageIds.includes(last);
 }
+
+/**
+ * The window that batches adjacent client tool results and approvals into
+ * one continuation barrier check (#1650), in milliseconds.
+ */
+export const CONTINUATION_COALESCE_MS = 50;
+
+/**
+ * The data a host supplies to schedule (or re-target) a pending/deferred
+ * auto-continuation. The tools and body the continuation turn runs with are
+ * not part of it: the turn reads the stored request context when it starts
+ * (`ChatTurns.lastClientTools`), so there is one copy of them.
+ */
+export interface ContinuationSpec<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> {
+  connection: TConnection;
+  errorPrefix: string;
+  /**
+   * The message the result or approval is stored in: the assistant message
+   * whose tool part it settled. The continuation runs only while that
+   * message is the latest.
+   */
+  targetMessageId: string;
+}
+
+/**
+ * A {@link ContinuationSpec} before its target is known. The target comes
+ * from applying the result ({@link ToolInteractionOutcome}).
+ */
+export type ContinuationSource<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> = Omit<ContinuationSpec<TConnection>, "targetMessageId">;
+
+/**
+ * What applying a client tool result or approval did to its tool part:
+ * settled it (in the message `messageId`), found it already settled, or
+ * found no such part.
+ */
+export type ToolInteractionOutcome =
+  | { status: "changed"; messageId: string }
+  | { status: "unchanged" }
+  | { status: "missing" };

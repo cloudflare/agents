@@ -131,6 +131,134 @@ describe("ThinkHarness turns", () => {
     expect(await stub.inspect("nope")).toBeUndefined();
   });
 
+  it("keeps an operation's key, metadata and times, and dedupes a repeated key", async () => {
+    const stub = fresh();
+    const first = await stub.submit("hello", {
+      operationId: "op-1",
+      idempotencyKey: "key-1",
+      metadata: { source: "test" }
+    });
+    const again = await stub.submit("hello", { idempotencyKey: "key-1" });
+    // The repeated key names the operation the first submission started.
+    expect(again).toMatchObject({ operationId: "op-1", accepted: false });
+    // A key paired with another operation's id is refused, as Think refuses.
+    expect(
+      await stub.submitRefusal("hello", {
+        operationId: "op-2",
+        idempotencyKey: "key-1"
+      })
+    ).toMatch(/refer to different operations/);
+    // The same key in another session is that session's own.
+    const other = await stub.submit("hello", {
+      idempotencyKey: "key-1",
+      session: "other"
+    });
+    expect(other.accepted).toBe(true);
+    expect(other.operationId).not.toBe("op-1");
+    await stub.wait(first.operationId);
+    const inspection = JSON.parse(await stub.inspectRecord("op-1")) as {
+      status: string;
+      idempotencyKey?: string;
+      metadata?: unknown;
+      createdAt: number;
+      startedAt: number;
+      settledAt: number;
+    };
+    expect(inspection).toMatchObject({
+      status: "done",
+      idempotencyKey: "key-1",
+      metadata: { source: "test" }
+    });
+    expect(inspection.startedAt).toBeGreaterThanOrEqual(inspection.createdAt);
+    expect(inspection.settledAt).toBeGreaterThanOrEqual(inspection.startedAt);
+    expect(await stub.inspect("op-2")).toBeUndefined();
+  });
+
+  it("pages submissions after a page's last one, even once it is deleted", async () => {
+    const stub = fresh();
+    // Ids in run-id order: submissions accepted in the same millisecond
+    // are listed by run id.
+    for (const id of ["s1", "s2", "s3"]) {
+      await stub.wait(
+        (await stub.submit(id, { operationId: id, submission: true }))
+          .operationId
+      );
+    }
+    const first = await stub.submissionPage(2);
+    expect(first.map((s) => s.id)).toEqual(["s1", "s2"]);
+    // The page ended in one that is then deleted; the next page still
+    // starts after it, not from the front again.
+    expect(await stub.deleteSubmission("s2")).toBe(true);
+    const next = await stub.submissionPage(2, {
+      operationId: "s2",
+      createdAt: first[1].createdAt
+    });
+    expect(next.map((s) => s.id)).toEqual(["s3"]);
+    // The cursor is by time first: an id before every other, at a time
+    // after the newest, leaves nothing to read.
+    expect(
+      await stub.submissionPage(2, {
+        operationId: "s0",
+        createdAt: next[0].createdAt + 1
+      })
+    ).toEqual([]);
+  });
+
+  it("treats an empty idempotency key as none, as Think does", async () => {
+    const stub = fresh();
+    const first = await stub.submit("one", { idempotencyKey: "" });
+    const second = await stub.submit("two", { idempotencyKey: "" });
+    expect(second.operationId).not.toBe(first.operationId);
+    expect(second.accepted).toBe(true);
+  });
+
+  it("streams the joined operation's chunks when a chat repeats a running key", async () => {
+    const stub = fresh();
+    await stub.submit("gate", { operationId: "gated", idempotencyKey: "k" });
+    await stub.gateStarted(1);
+    const chat = stub.chatCallback("gate", { idempotencyKey: "k" });
+    await stub.release();
+    const { types, end } = await chat;
+    expect(end).toBe("done");
+    // The chunks of the operation the key started, which the chat joined.
+    expect(types).toContain("text-delta");
+  });
+
+  it("lists submissions apart from other operations, keeps them across a reset, and deletes settled ones", async () => {
+    const stub = fresh();
+    await stub.submit("plain", { operationId: "op-plain" });
+    const first = await stub.submit("one", {
+      operationId: "sub-1",
+      submission: true
+    });
+    await stub.wait(first.operationId);
+    const gate = await stub.submit("gate", {
+      operationId: "sub-2",
+      submission: true
+    });
+    await stub.gateStarted(1);
+    expect(await stub.submissionList()).toEqual([
+      { id: "sub-2", status: "running" },
+      { id: "sub-1", status: "done" }
+    ]);
+    // An open submission is not deleted, nor an operation that is not one.
+    expect(await stub.deleteSubmission("sub-2")).toBe(false);
+    expect(await stub.deleteSubmission("op-plain")).toBe(false);
+    expect(await stub.inspect("op-plain")).toBeDefined();
+    await stub.release();
+    await stub.wait(gate.operationId);
+    // A reset keeps submissions, as Think keeps its own.
+    await stub.reset();
+    expect((await stub.submissionList()).map((s) => s.id)).toEqual([
+      "sub-2",
+      "sub-1"
+    ]);
+    expect(await stub.deleteSubmission("sub-1")).toBe(true);
+    expect(await stub.submissionList()).toEqual([
+      { id: "sub-2", status: "done" }
+    ]);
+  });
+
   it("refuses to steer instead of queueing the input", async () => {
     const stub = fresh();
     expect(await stub.steer("hello")).toBe("SteerNotSupportedError");
@@ -228,11 +356,11 @@ describe("ThinkHarness hooks", () => {
 });
 
 describe("ThinkHarness approvals and client tools", () => {
-  it("answers an approval of a tool removed meanwhile as no longer available", async () => {
+  it("builds once for an answer that continues the turn", async () => {
     const stub = fresh();
     await stub.prompt("approve");
     const [call] = await stub.lastToolCalls();
-    await stub.removeDangerous();
+    await stub.takeToolBuilds();
     const receipt = await stub.answer({
       type: "approval",
       approvalId: call?.approvalId ?? "",
@@ -241,9 +369,28 @@ describe("ThinkHarness approvals and client tools", () => {
     const result = await stub.wait(receipt.operationId);
     expect(result).toMatchObject({
       status: "done",
-      text: 'tool said: error: Tool "dangerous" is no longer available.'
+      text: "tool said: did the dangerous thing"
     });
+    // The answer's build serves the tool run and the model call after it.
+    expect(await stub.takeToolBuilds()).toBe(1);
+  });
+
+  it("keeps an approved call to a tool the build no longer has waiting, as Think does", async () => {
+    const stub = fresh();
+    await stub.prompt("approve");
+    const [call] = await stub.lastToolCalls();
+    // Gone from the server's tools: the call may be a client's to run.
+    await stub.removeDangerous();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    await stub.wait(receipt.operationId);
     expect(await stub.dangerousRuns()).toBe(0);
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [dangerous approval-responded]"
+    );
   });
 
   it("waits for an approval, then runs the tool and continues the same message", async () => {
@@ -676,6 +823,22 @@ describe("ThinkHarness durability", () => {
     );
   });
 
+  it("reads a transcript cold through an id that carries no name", async () => {
+    // The object learned its name when first addressed by it; later it is
+    // addressed by id alone, and its Lifecycle loads the stored name at
+    // startup. Binding the harness's Sessions must not read the name first.
+    const named = fresh();
+    await named.prompt("hello");
+    await evictDurableObject(named);
+    const byId = env.THINK_HARNESS_TEST.get(
+      env.THINK_HARNESS_TEST.idFromString(named.id.toString())
+    );
+    expect(await byId.messages()).toEqual([
+      "user: hello",
+      "assistant: echo: hello"
+    ]);
+  });
+
   it("carries more sessions than one batch forward, with their client tools", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
@@ -688,6 +851,12 @@ describe("ThinkHarness durability", () => {
     expect(sessions).toHaveLength(121);
     expect(sessions.slice(0, 2).map((s) => s.id)).toEqual(["s-000", "s-001"]);
     expect(await stub.clientToolsValue("s-119")).toBe('[{"name":"tool_119"}]');
+    // Each kept apart in the one record: Sessions' version under its own
+    // id, the harness's carry-forward under the harness's.
+    expect(await stub.schemaVersions()).toMatchObject({
+      sessions: 2,
+      "think-harness": 1
+    });
     expect(await stub.harnessTables()).toEqual([]);
   });
 
@@ -1093,6 +1262,146 @@ describe("ThinkHarness context", () => {
     );
   });
 
+  it("tells the model once when the tools change between turns", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+
+    const [first, second, third] = await stub.promptTexts();
+    expect(first).not.toContain("The tools you can call changed");
+    // After the user message of the turn that noticed it.
+    expect(second).toMatch(
+      /\|user:again[^|]*The tools you can call changed[^|]*Added: late\./
+    );
+    // Recorded there: every later request carries it in place, once.
+    expect(third.startsWith(second)).toBe(true);
+    // And not again: the next turn's user message is as written. (The
+    // fixture's model echoes its input, so the reply repeats it.)
+    expect(third.endsWith("|user:thanks")).toBe(true);
+  });
+
+  it("reports a changed prefix once, with why, and nothing while it holds", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.prompt("again", session);
+    expect(await stub.prefixChanges()).toEqual([]);
+
+    await stub.addLateTool();
+    await stub.prompt("tools", session);
+    // A changed remind block goes after the new message: the prefix holds.
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("reminded", session);
+    // A refresh puts it in a new snapshot of the system prompt.
+    await stub.refreshContext(session);
+    await stub.prompt("refreshed", session);
+    await stub.prompt("steady", session);
+    expect(await stub.prefixChanges()).toEqual([
+      {
+        session,
+        causes: [{ kind: "tools", added: ["late"], removed: [], changed: [] }]
+      },
+      { session, causes: [{ kind: "system" }] }
+    ]);
+  });
+
+  it("reports a beforeTurn system prompt that changes between turns", async () => {
+    const stub = fresh();
+    await stub.setSystem("Fixed.");
+    await stub.prompt("hello", session);
+    await stub.prompt("same", session);
+    await stub.setSystem("Fixed, then changed.");
+    await stub.prompt("changed", session);
+    expect(await stub.prefixChanges()).toEqual([
+      { session, causes: [{ kind: "system" }] }
+    ]);
+  });
+
+  it("reports no refresh a beforeTurn system prompt replaces", async () => {
+    const stub = fresh();
+    await stub.setSystem("Fixed.");
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.refreshContext(session);
+    await stub.prompt("refreshed", session);
+    expect(await stub.prefixChanges()).toEqual([]);
+  });
+
+  it("reports a refresh a beforeTurn system prompt extends", async () => {
+    const stub = fresh();
+    await stub.setSystem("+Profile: Ana.");
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.refreshContext(session);
+    await stub.prompt("refreshed", session);
+    expect(await stub.prefixChanges()).toEqual([
+      { session, causes: [{ kind: "system" }] }
+    ]);
+  });
+
+  it("reports history rewritten around the harness as the next call's cause", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    const [first] = await stub.messageIds(session);
+    await stub.editMessage(session, first, "hello, edited");
+    await stub.prompt("again", session);
+    await stub.compact(session);
+    await stub.prompt("compacted", session);
+    expect(await stub.prefixChanges()).toEqual([
+      { session, causes: [{ kind: "messages", operation: "edit" }] },
+      { session, causes: [{ kind: "messages", operation: "compaction" }] }
+    ]);
+  });
+
+  it("counts a tool's input examples in its definition", async () => {
+    const stub = fresh();
+    await stub.addLateTool();
+    await stub.prompt("hello", session);
+    await stub.addLateExamples();
+    await stub.prompt("again", session);
+    const [, second] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Changed: late\./);
+  });
+
+  it("counts only the tools a turn sends, after its activeTools", async () => {
+    const stub = fresh();
+    await stub.setActiveTools(["multiply", "set_context", "search_context"]);
+    await stub.prompt("hello", session);
+    // A tool added but not offered by turn 2's activeTools is not announced.
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    // Turn 3 offers everything: what it adds is announced.
+    await stub.setActiveTools(null);
+    await stub.prompt("thanks", session);
+    const [, second, third] = await stub.promptTexts();
+    expect(second).not.toContain("The tools you can call changed");
+    expect(third).toMatch(/\|user:thanks[^|]*Added: [^|]*late/);
+    expect(third).toMatch(/\|user:thanks[^|]*Added: [^|]*gate/);
+  });
+
+  it("tells the model once when a client declares a tool between turns", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    // A client tool arrives with the submission, not from the options.
+    const receipt = await stub.submit("again", {
+      session,
+      clientTools: [
+        {
+          name: "pick_color",
+          description: "Ask the user for a color",
+          parameters: { type: "object", properties: {} }
+        }
+      ]
+    });
+    const result = await stub.wait(receipt.operationId, session);
+    expect(result.status).toBe("done");
+    const [, second] = await stub.promptTexts();
+    expect(second).toMatch(
+      /\|user:again[^|]*The tools you can call changed[^|]*Added: pick_color\./
+    );
+  });
+
   it("delivers a changed remind block once and keeps every request a prefix of the next", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);
@@ -1135,6 +1444,47 @@ describe("ThinkHarness context", () => {
     const prompt = await stub.lastPromptText();
     expect(prompt.split("|")[0]).toContain("Monday");
     expect(prompt).toMatch(/\|user:[^|]*Today is Tuesday\.[^|]*$/);
+    // Once: the tools' step adds no second copy of the blocks' reminder.
+    expect(prompt.split("Today is Tuesday.")).toHaveLength(2);
+  });
+
+  it("sends a changed block and changed tools before the same message, each once", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+    const [, second, third] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Today is Tuesday\./);
+    expect(second).toMatch(/\|user:again[^|]*Added: late\./);
+    expect(third.split("Today is Tuesday.")).toHaveLength(3); // echoed once
+    expect(third.split("Added: late.")).toHaveLength(3);
+    expect(third.startsWith(second)).toBe(true);
+  });
+
+  it("sends a regenerated answer a block changed since once", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    const receipt = await stub.regenerate(session);
+    await stub.wait(receipt.operationId, session);
+    const prompt = await stub.lastPromptText();
+    expect(prompt.split("Today is Tuesday.")).toHaveLength(2);
+  });
+
+  it("records the tools at the user message when beforeTurn adds a message", async () => {
+    const stub = fresh();
+    await stub.noteInBeforeTurn();
+    await stub.prompt("hello", session);
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+    const [, second, third] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Added: late\./);
+    // Recorded there: the next request keeps it in place and adds no other.
+    expect(third).toMatch(/\|user:again[^|]*Added: late\./);
+    expect(third.split("Added: late.")).toHaveLength(3); // echoed once
   });
 
   it("sends a call recovered after an eviction as its first attempt; a change since waits", async () => {

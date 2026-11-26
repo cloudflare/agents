@@ -83,6 +83,31 @@ export class TestCallableAgent extends Agent<
     return "done";
   }
 
+  readonly #gates = new Map<string, () => void>();
+  readonly #gated = new Map<string, Promise<void>>();
+
+  #gate(key: string): Promise<void> {
+    let gate = this.#gated.get(key);
+    if (!gate) {
+      gate = new Promise<void>((resolve) => this.#gates.set(key, resolve));
+      this.#gated.set(key, gate);
+    }
+    return gate;
+  }
+
+  // Async method that returns once the test opens its gate
+  @callable()
+  async gatedMethod(key: string): Promise<string> {
+    await this.#gate(key);
+    return key;
+  }
+
+  /** Open `gatedMethod`'s gate for `key`. */
+  openGateForTest(key: string): void {
+    void this.#gate(key);
+    this.#gates.get(key)?.();
+  }
+
   // Async method used to verify RPC response delivery tolerates disconnects
   @callable()
   async delayedThrow(delayMs: number): Promise<never> {

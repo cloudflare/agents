@@ -1,19 +1,20 @@
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { memoryLane } from "./memory-lane";
+import { memoryLane, memoryStorage } from "./memory-lane";
 import { ChatRecoverySupersededError } from "../turn-stop";
-import { createChatAdmissionStore } from "../admissions";
 import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { turnSignal } from "../turn-stop";
 import type { UIMessage } from "ai";
-import { AutoContinuationController } from "../auto-continuation-controller";
 import {
   ChatTurns,
   type ChatTurnMessage,
   type ChatTurnsHost
 } from "../chat-turns";
-import type { ContinuationConnection } from "../continuation-state";
+import {
+  CONTINUATION_COALESCE_MS,
+  type ContinuationConnection
+} from "../continuation-state";
 
-const COALESCE = AutoContinuationController.COALESCE_MS;
+const COALESCE = CONTINUATION_COALESCE_MS;
 
 function makeConnection(id: string): ContinuationConnection & {
   sent: string[];
@@ -42,12 +43,12 @@ class FakeHost implements ChatTurnsHost {
     return this.replyStreaming;
   }
   streaming: ChatTurnMessage | null = null;
-  clientTools = new Set<string>();
+  saved: Array<string | null> = [];
   streamingReply() {
     return this.streaming;
   }
-  clientToolNames() {
-    return this.clientTools;
+  saveRequestContext(json: string | null) {
+    this.saved.push(json);
   }
   hasActiveStream() {
     return this.activeStream;
@@ -55,7 +56,9 @@ class FakeHost implements ChatTurnsHost {
   generateRequestId() {
     return `cont-${++this.ids}`;
   }
+  keepAlives = 0;
   keepAliveWhile<T>(fn: () => Promise<T>) {
+    this.keepAlives++;
     return fn();
   }
   fireContinuation() {
@@ -93,6 +96,144 @@ describe("ChatTurns", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  // ── The continuation barrier's drain ───────────────────────────────
+
+  /** A reply whose tool batch still waits on `c2`. */
+  const halfAnswered = (): ChatTurnMessage => ({
+    id: "a1",
+    role: "assistant",
+    parts: [
+      { type: "tool-x", toolCallId: "c1", state: "output-available" },
+      { type: "tool-x", toolCallId: "c2", state: "input-available" }
+    ]
+  });
+
+  /**
+   * Schedule a continuation for `a1`, and hold one more apply in the chain
+   * so the barrier drains when the coalesce window ends.
+   */
+  async function scheduleBehindHeldApply(): Promise<() => Promise<void>> {
+    await turns.applyInteraction(
+      async () => ({ status: "changed", messageId: "a1" }),
+      true,
+      spec
+    );
+    let release!: () => void;
+    const held = turns.enqueueInteraction(
+      () =>
+        new Promise<boolean>((resolve) => {
+          release = () => resolve(true);
+        })
+    );
+    await vi.advanceTimersByTimeAsync(COALESCE);
+    return async () => {
+      release();
+      await held;
+      await vi.advanceTimersByTimeAsync(0);
+    };
+  }
+
+  it("drains the applies in flight, then holds while the batch is still incomplete", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    expect(host.keepAlives).toBe(1);
+    expect(turns.barrierActive).toBe(true);
+    expect(host.fired).toBe(0);
+
+    await release();
+    await vi.runAllTimersAsync();
+    expect(host.fired).toBe(0);
+    expect(turns.barrierActive).toBe(false);
+    expect(turns.continuation.pending).not.toBeNull();
+  });
+
+  it("fires once the drain finds the batch complete", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    expect(host.fired).toBe(0);
+
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    expect(host.fired).toBe(1);
+  });
+
+  it("waits for an apply in flight even when the batch looks complete", async () => {
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    const release = await scheduleBehindHeldApply();
+    expect(host.keepAlives).toBe(1);
+    expect(host.fired).toBe(0);
+
+    await release();
+    expect(host.fired).toBe(1);
+  });
+
+  it("holds when a continuation claims its turn during the drain", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    // Another continuation's turn starts while the drain waits.
+    turns.continuation.running = {
+      connection,
+      connectionId: "c1",
+      requestId: "cont-0",
+      errorPrefix: "[test]",
+      prerequisite: null,
+      targetMessageIds: ["a1"]
+    };
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    expect(host.fired).toBe(0);
+  });
+
+  it("absorbs a barrier check that re-enters during the drain", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    turns.fireContinuationWhenStable();
+    turns.fireContinuationWhenStable();
+    expect(host.keepAlives).toBe(1);
+    expect(host.fired).toBe(0);
+
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    await vi.runAllTimersAsync();
+    expect(host.fired).toBe(1);
+  });
+
+  it("cancels a coalesce timer re-armed during the drain, so it fires once", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    turns.rearmContinuation();
+    expect(turns.continuationArmed()).toBe(true);
+
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    expect(host.fired).toBe(1);
+    expect(turns.continuationArmed()).toBe(false);
+    await vi.runAllTimersAsync();
+    expect(host.fired).toBe(1);
+  });
+
+  it("a continuation scheduled after a reset during a drain fires once", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    turns.reset();
+    expect(turns.continuationArmed()).toBe(false);
+    // The old drain ends after the reset: the reset dropped its continuation.
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    await vi.runAllTimersAsync();
+    expect(host.fired).toBe(0);
+
+    await turns.applyInteraction(
+      async () => ({ status: "changed", messageId: "a1" }),
+      true,
+      spec
+    );
+    expect(turns.continuationArmed()).toBe(true);
+    await vi.advanceTimersByTimeAsync(COALESCE);
+    expect(host.fired).toBe(1);
+    expect(turns.continuationArmed()).toBe(false);
   });
 
   // ── Tool results ────────────────────────────────────────────────────
@@ -160,16 +301,11 @@ describe("ChatTurns", () => {
   it("continues an answer after a reset that landed before its continuation ran", async () => {
     // A tab approved a tool call with autoContinue; the isolate reset during
     // the coalesce window, before the continuation's turn existed (P1).
-    const db = new DatabaseSync(":memory:");
+    const kept = memoryStorage();
     const admissions = () => ({
-      store: createChatAdmissionStore(() => ({
-        exec: (query: string, ...bindings: unknown[]) => {
-          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-          return { toArray: () => rows as Record<string, unknown>[] };
-        }
-      })),
+      storage: kept.storage,
       recoveryPending: async () => false,
-      recoveryOwns: async () => false,
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
@@ -212,16 +348,11 @@ describe("ChatTurns", () => {
   });
 
   it("does not continue after a reset what a stop dropped", async () => {
-    const db = new DatabaseSync(":memory:");
+    const kept = memoryStorage();
     const admissions = () => ({
-      store: createChatAdmissionStore(() => ({
-        exec: (query: string, ...bindings: unknown[]) => {
-          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-          return { toArray: () => rows as Record<string, unknown>[] };
-        }
-      })),
+      storage: kept.storage,
       recoveryPending: async () => false,
-      recoveryOwns: async () => false,
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
@@ -247,17 +378,47 @@ describe("ChatTurns", () => {
     expect(after.continuation.pending).toBeNull();
   });
 
+  it("schedules a continuation an earlier release kept", async () => {
+    const kept = memoryStorage();
+    host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
+    const restarted = new FakeHost();
+    restarted.transcript = host.transcript;
+    const after = new ChatTurns(restarted, {
+      defaultDebounceMs: 750,
+      lane: memoryLane(),
+      admissions: {
+        storage: kept.storage,
+        recoveryPending: async () => false,
+        released: () => ({
+          records: [
+            {
+              requestId: "cont-old",
+              seq: 1,
+              messageIds: [],
+              messages: [],
+              afterUserId: null,
+              strategy: null,
+              payload: { trigger: "continuation", targetMessageIds: ["a1"] },
+              stopped: false,
+              createdAt: 1
+            }
+          ],
+          drop: () => {}
+        }),
+        replayRequest: () => null
+      }
+    });
+    await after.resumeAdmissions();
+    expect(restarted.fired).toBe(1);
+    expect(after.continuation.pending?.requestId).toBe("cont-old");
+  });
+
   it("drops a kept continuation whose answered message is no longer the latest", async () => {
-    const db = new DatabaseSync(":memory:");
+    const kept = memoryStorage();
     const admissions = () => ({
-      store: createChatAdmissionStore(() => ({
-        exec: (query: string, ...bindings: unknown[]) => {
-          const rows = db.prepare(query).all(...(bindings as SQLInputValue[]));
-          return { toArray: () => rows as Record<string, unknown>[] };
-        }
-      })),
+      storage: kept.storage,
       recoveryPending: async () => false,
-      recoveryOwns: async () => false,
+      released: () => ({ records: [], drop: () => {} }),
       replayRequest: () => null
     });
     host.transcript = [user("u1"), toolReply("a1", "approval-responded")];
@@ -314,12 +475,12 @@ describe("ChatTurns", () => {
         ]
       }
     ];
-    turns.autoContinuation.rearmForBatch();
+    turns.rearmContinuation();
     await vi.advanceTimersByTimeAsync(COALESCE);
     expect(host.fired).toBe(0);
 
     host.transcript = [user("u1"), toolReply("a1", "output-available")];
-    turns.autoContinuation.rearmForBatch();
+    turns.rearmContinuation();
     await vi.advanceTimersByTimeAsync(COALESCE);
     expect(host.fired).toBe(1);
   });
@@ -346,7 +507,7 @@ describe("ChatTurns", () => {
   // ── Cancel ──────────────────────────────────────────────────────────
 
   it("cancels a request's turn and a recovery attempt running for it", () => {
-    const signal = turns.aborts.getSignal("req-1");
+    const signal = turnSignal(turns.aborts, "req-1");
     const attempt = turns.beginRecoveryAttempt("req-1");
     const other = turns.beginRecoveryAttempt("req-2");
 
@@ -376,7 +537,7 @@ describe("ChatTurns", () => {
 
   it("reset tears down turns, aborts, interactions and continuations together", async () => {
     host.transcript = [user("u1"), toolReply("a1", "output-available")];
-    const signal = turns.aborts.getSignal("req-1");
+    const signal = turnSignal(turns.aborts, "req-1");
     const parked = makeConnection("parked");
     turns.preStream.begin("req-1");
     turns.preStream.park(parked);
@@ -395,7 +556,7 @@ describe("ChatTurns", () => {
     expect(turns.aborts.size).toBe(0);
     expect(turns.pendingInteraction).toBeNull();
     expect(turns.continuation.pending).toBeNull();
-    expect(turns.autoContinuation.isArmed()).toBe(false);
+    expect(turns.continuationArmed()).toBe(false);
     expect(turns.preStream.hasInFlight()).toBe(false);
     expect(parked.sent.at(-1)).toContain("cf_agent_stream_resume_none");
 
@@ -407,64 +568,29 @@ describe("ChatTurns", () => {
     expect(host.fired).toBe(0);
   });
 
-  // ── Submits ─────────────────────────────────────────────────────────
-
-  it("skips a submit superseded while it waited in the queue", async () => {
-    let release!: () => void;
-    const active = turns.queue.enqueue(
-      "r1",
-      () => new Promise<void>((resolve) => (release = resolve))
-    );
-    const older = turns.decideSubmit("latest", true);
-    const newer = turns.decideSubmit("latest", true);
-    await vi.advanceTimersByTimeAsync(0);
-    release();
-    await active;
-
-    await expect(
-      turns.awaitSubmitTurn(older, turns.queue.generation)
-    ).resolves.toBe(false);
-    await expect(
-      turns.awaitSubmitTurn(newer, turns.queue.generation)
-    ).resolves.toBe(true);
-  });
-
-  it("skips a debounced submit when the chat is reset during its quiet period", async () => {
-    let release!: () => void;
-    const active = turns.queue.enqueue(
-      "r1",
-      () => new Promise<void>((resolve) => (release = resolve))
-    );
-    const decision = turns.decideSubmit(
-      { strategy: "debounce", debounceMs: 200 },
-      true
-    );
-    const generation = turns.queue.generation;
-    await vi.advanceTimersByTimeAsync(0);
-    release();
-    await active;
-
-    const admitted = turns.awaitSubmitTurn(decision, generation);
-    turns.reset();
-    await vi.advanceTimersByTimeAsync(200);
-    await expect(admitted).resolves.toBe(false);
-  });
-
   it("releases parked connections when the last accepted turn settles without a stream", () => {
     const parked = makeConnection("parked");
     turns.preStream.begin("r1");
     turns.preStream.begin("r2");
     turns.preStream.park(parked);
-    const before = parked.sent.length;
+    const released = () =>
+      parked.sent.some((frame) =>
+        frame.includes("cf_agent_stream_resume_none")
+      );
 
+    // r1 ends without a stream: the tab keeps waiting, now on r2.
     turns.settlePreStreamTurn("r1");
+    expect(JSON.parse(parked.sent.at(-1) ?? "null")).toEqual({
+      type: "cf_agent_stream_pending",
+      id: "r2"
+    });
     turns.settlePreStreamTurn("r2", { releaseParked: false });
-    expect(parked.sent.length).toBe(before);
+    expect(released()).toBe(false);
 
     turns.preStream.begin("r3");
     host.activeStream = true;
     turns.settlePreStreamTurn("r3");
-    expect(parked.sent.length).toBe(before);
+    expect(released()).toBe(false);
 
     turns.preStream.begin("r4");
     host.activeStream = false;
@@ -493,11 +619,11 @@ describe("ChatTurns", () => {
     // A server tool sits at input-available while it runs.
     expect(turns.hasPendingInteraction()).toBe(false);
 
-    host.clientTools = new Set(["x"]);
+    turns.lastClientTools = [{ name: "x" }];
     expect(turns.hasPendingInteraction()).toBe(true);
 
     // A stored snapshot of the streaming reply defers to the live copy.
-    host.clientTools = new Set();
+    turns.lastClientTools = undefined;
     host.transcript = [user("u1"), toolReply("a1", "input-available")];
     expect(turns.hasPendingInteraction()).toBe(false);
   });
@@ -511,10 +637,10 @@ describe("ChatTurns", () => {
     ];
     expect(turns.hasPendingInteraction()).toBe(false);
 
-    host.clientTools = new Set(["x"]);
+    turns.lastClientTools = [{ name: "x" }];
     expect(turns.hasPendingInteraction()).toBe(true);
 
-    host.clientTools = new Set();
+    turns.lastClientTools = undefined;
     host.transcript = [
       user("u1"),
       toolReply("a1", "approval-requested"),
@@ -655,7 +781,7 @@ describe("ChatTurns", () => {
   describe("a stop is reported to the host", () => {
     it("cancel reports the request and its reason, whether or not a turn runs under it", async () => {
       await turns.cancel("nothing-runs-here", "why");
-      turns.aborts.getSignal("r1");
+      turnSignal(turns.aborts, "r1");
       await turns.cancel("r1");
       expect(host.stops).toEqual([
         { requestId: "nothing-runs-here", reason: "why" },
@@ -670,7 +796,7 @@ describe("ChatTurns", () => {
 
     it("a caller's linked signal is a stop like any other", () => {
       const caller = new AbortController();
-      turns.aborts.getSignal("r1");
+      turnSignal(turns.aborts, "r1");
       turns.linkExternal("r1", caller.signal);
       caller.abort("gave up");
       expect(host.stops).toEqual([{ requestId: "r1", reason: "gave up" }]);
@@ -678,7 +804,7 @@ describe("ChatTurns", () => {
 
     it("a recovery attempt superseded by another turn is not a stop", () => {
       const attempt = new AbortController();
-      const signal = turns.aborts.getSignal("r1");
+      const signal = turnSignal(turns.aborts, "r1");
       turns.linkExternal("r1", attempt.signal);
       attempt.abort(new ChatRecoverySupersededError());
       // The turn ends, and nothing a user's stop does follows.
@@ -687,20 +813,18 @@ describe("ChatTurns", () => {
     });
 
     it("the runtime's own abort is not a stop", () => {
-      const signal = turns.aborts.getSignal("r1");
-      turns.runtimeAbort(
-        () => void turns.cancel("r1", new ChatStreamStalledError("stalled"))
-      );
+      const signal = turnSignal(turns.aborts, "r1");
+      const stalled = new ChatStreamStalledError("stalled");
+      turns.runtimeAbort(() => void turns.cancel("r1", stalled), stalled);
       expect(signal?.aborted).toBe(true);
       expect(host.stops).toEqual([]);
       expect(turns.isStopped(signal)).toBe(false);
     });
 
     it("a stop that lands after the runtime's abort still counts as a stop", () => {
-      const signal = turns.aborts.getSignal("r1");
-      turns.runtimeAbort(
-        () => void turns.cancel("r1", new ChatStreamStalledError("stalled"))
-      );
+      const signal = turnSignal(turns.aborts, "r1");
+      const stalled = new ChatStreamStalledError("stalled");
+      turns.runtimeAbort(() => void turns.cancel("r1", stalled), stalled);
       expect(turns.isStopped(signal)).toBe(false);
       // The signal is already aborted, and keeps the stall as its reason.
       void turns.cancel("r1", "user pressed stop");
@@ -708,8 +832,32 @@ describe("ChatTurns", () => {
       expect(turns.isStopped(signal)).toBe(true);
     });
 
+    it("a user's stop issued inside the runtime's abort is a stop", () => {
+      const signal = turnSignal(turns.aborts, "r1");
+      const stalled = new ChatStreamStalledError("stalled");
+      // A subclass's abortRequest stops the request for its user the moment
+      // the watchdog aborts it.
+      turns.runtimeAbort(() => {
+        void turns.cancel("r1", stalled);
+        void turns.cancel("r1", "user stop");
+      }, stalled);
+      expect(turns.isStopped(signal)).toBe(true);
+      expect(host.stops).toEqual([{ requestId: "r1", reason: "user stop" }]);
+    });
+
+    it("a copy of the runtime's reason inside its abort is still the runtime's", () => {
+      const signal = turnSignal(turns.aborts, "r1");
+      const stalled = new ChatStreamStalledError("stalled");
+      turns.runtimeAbort(
+        () => void turns.cancel("r1", new ChatStreamStalledError("wrapped")),
+        stalled
+      );
+      expect(turns.isStopped(signal)).toBe(false);
+      expect(host.stops).toEqual([]);
+    });
+
     it("a host whose stop bookkeeping fails still stopped the turn", async () => {
-      const signal = turns.aborts.getSignal("r1");
+      const signal = turnSignal(turns.aborts, "r1");
       host.stopped = () => {
         throw new Error("storage is down");
       };
@@ -741,11 +889,8 @@ describe("ChatTurns", () => {
           log.push(`${id}:persist`);
           return "prepared";
         },
-        enqueue: async (turn, generation, onQueued) => {
-          const result = turns.queue.enqueue(id, turn, { generation });
-          onQueued();
-          return (await result).status;
-        },
+        enqueue: async (turn, generation) =>
+          (await turns.queue.enqueue(id, turn, { generation })).status,
         run: async (prepared, signal) => {
           log.push(`${id}:run:${prepared}:${signal.aborted}`);
         },
@@ -771,7 +916,7 @@ describe("ChatTurns", () => {
       expect(preStreamDuringRun).toBe(true);
       expect(turns.aborts.has("r1")).toBe(false);
       expect(turns.preStream.hasInFlight()).toBe(false);
-      expect(turns.submits.pendingEnqueueCount).toBe(0);
+      expect(turns.queue.queuedCount()).toBe(0);
     });
 
     it("ends a request aborted when its run throws after a stop, without reporting an error", async () => {
@@ -809,7 +954,7 @@ describe("ChatTurns", () => {
       // Nothing was accepted: no pre-stream mark, no persist, no queue.
       expect(log).toEqual([]);
       expect(turns.preStream.hasInFlight()).toBe(false);
-      expect(turns.submits.pendingEnqueueCount).toBe(0);
+      expect(turns.queue.queuedCount()).toBe(0);
     });
 
     it("drops an overlapping submit before accepting it", async () => {
@@ -889,6 +1034,69 @@ describe("ChatTurns", () => {
       expect(log).not.toContain("r2:run:prepared:false");
     });
 
+    it("skips a request superseded under a debounce with no quiet period", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const debounce = { strategy: "debounce" as const, debounceMs: 0 };
+      const second = request("r2", log, { concurrency: debounce });
+      const third = request("r3", log, { concurrency: debounce });
+      await vi.advanceTimersByTimeAsync(0);
+      release();
+      await Promise.all([first, second, third]);
+
+      expect(log).toContain("r2:skipped");
+      expect(log).toContain("r3:run:prepared:false");
+    });
+
+    it("skips a debounced request when the chat is reset during its quiet period", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = request("r2", log, {
+        concurrency: { strategy: "debounce", debounceMs: 200 }
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      release();
+      await first;
+      turns.reset();
+      await vi.advanceTimersByTimeAsync(200);
+      await second;
+      expect(log.filter((entry) => entry.startsWith("r2"))).toEqual([
+        "r2:accepted",
+        "r2:persist",
+        "r2:skipped"
+      ]);
+    });
+
+    it("starts a debounced request once its quiet period is over, and a newer one restarts it", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const debounce = { strategy: "debounce" as const, debounceMs: 200 };
+      const second = request("r2", log, { concurrency: debounce });
+      await vi.advanceTimersByTimeAsync(150);
+      const third = request("r3", log, { concurrency: debounce });
+      release();
+      await first;
+      await vi.advanceTimersByTimeAsync(150);
+      expect(log).not.toContain("r3:run:prepared:false");
+      await vi.advanceTimersByTimeAsync(50);
+      await Promise.all([second, third]);
+      expect(log).toContain("r2:skipped");
+      expect(log).toContain("r3:run:prepared:false");
+      expect(log).not.toContain("r2:run:prepared:false");
+    });
+
     it("skips a request its persist declines or its host check rejects", async () => {
       const log: Log = [];
       await request("r1", log, { persist: async () => null });
@@ -932,7 +1140,7 @@ describe("ChatTurns", () => {
       ]);
       expect(turns.aborts.size).toBe(0);
       expect(turns.preStream.hasInFlight()).toBe(false);
-      expect(turns.submits.pendingEnqueueCount).toBe(0);
+      expect(turns.queue.queuedCount()).toBe(0);
 
       await expect(
         request("r3", [], {
@@ -963,7 +1171,7 @@ describe("ChatTurns", () => {
       );
 
     it("settles a known client's call in a reply the conversation moved past", async () => {
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       const messages = [
         user("u1"),
         toolReply("a1", "input-available"),
@@ -977,7 +1185,7 @@ describe("ChatTurns", () => {
     });
 
     it("a continuation turn keeps the host's known client call in the message it continues", async () => {
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       const messages = [
         user("u1"),
         toolReply("a1", "input-available")
@@ -987,14 +1195,14 @@ describe("ChatTurns", () => {
         "input-available"
       );
       // The same call for a tool no client sent a schema for is dead.
-      host.clientTools = new Set();
+      turns.lastClientTools = undefined;
       expect(stateOf((await repair(messages, true)).messages[1])).toBe(
         "output-error"
       );
     });
 
     it("reports the calls a continuation turn kept for a client, and says so before the turn", async () => {
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       const messages = [
         user("u1"),
         toolReply("a1", "input-available")
@@ -1012,12 +1220,12 @@ describe("ChatTurns", () => {
       expect(turns.continuationWaitsOnClient()).toBe(true);
       host.transcript = [...messages, user("u2")];
       expect(turns.continuationWaitsOnClient()).toBe(false);
-      host.clientTools = new Set();
+      turns.lastClientTools = undefined;
       expect(turns.continuationWaitsOnClient(messages)).toBe(false);
     });
 
     it("settleBeforeTurn stores what the repair changed and reports it", async () => {
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       const messages = [
         user("u1"),
         toolReply("a1", "input-available"),
@@ -1060,7 +1268,7 @@ describe("ChatTurns", () => {
       expect(stateOf(turns.settleInterruptedReply(reply, flip))).toBe(
         "output-error"
       );
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       expect(turns.settleInterruptedReply(reply, flip)).toBe(reply);
     });
 
@@ -1072,7 +1280,7 @@ describe("ChatTurns", () => {
       );
       // And the reverse: a call the stored tools name, which the pinned
       // ones do not, is settled.
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       expect(
         stateOf(turns.settleInterruptedReply(reply, flip, new Set()))
       ).toBe("output-error");
@@ -1186,5 +1394,126 @@ describe("ChatTurns", () => {
       expect(turns.replyToContinueIsEmpty([answered])).toBe(false);
       expect(turns.replyToContinueIsEmpty([])).toBe(false);
     });
+  });
+});
+
+describe("ChatTurns request context", () => {
+  const changed = { status: "changed", messageId: "m" } as const;
+  const setup = () => {
+    const host = new FakeHost();
+    const turns = new ChatTurns(host, {
+      defaultDebounceMs: 750,
+      lane: memoryLane()
+    });
+    return { host, turns };
+  };
+
+  it("stores a request's tools and body as one value, again for an equal request (a Sessions clear may have deleted it)", () => {
+    const { host, turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "x" }], body: { a: 1 } });
+    turns.setRequestContext({ clientTools: [{ name: "x" }], body: { a: 1 } });
+    const json = JSON.stringify({
+      clientTools: [{ name: "x" }],
+      body: { a: 1 }
+    });
+    expect(host.saved).toEqual([json, json]);
+    expect([...turns.clientToolNames()]).toEqual(["x"]);
+  });
+
+  it("a request with no tools and an empty body clears the value", () => {
+    const { host, turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "x" }] });
+    turns.setRequestContext({ clientTools: [], body: {} });
+    expect(host.saved).toEqual([
+      JSON.stringify({ clientTools: [{ name: "x" }] }),
+      null
+    ]);
+    expect(turns.lastClientTools).toBeUndefined();
+  });
+
+  it("restores the stored value without writing it, and reads a malformed one as none", () => {
+    const { host, turns } = setup();
+    const json = JSON.stringify({
+      clientTools: [{ name: "x" }],
+      body: { b: 2 }
+    });
+    turns.restoreRequestContext(json);
+    expect(turns.lastBody).toEqual({ b: 2 });
+    expect(host.saved).toEqual([]);
+    turns.restoreRequestContext("{not json");
+    expect(turns.lastClientTools).toBeUndefined();
+    expect(turns.lastBody).toBeUndefined();
+  });
+
+  it("a tool result's tools replace the stored ones only when it changed a message and no request came in meanwhile", async () => {
+    const { turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "old" }] });
+    await turns.applyingToolResult([{ name: "new" }], async () => changed)();
+    expect([...turns.clientToolNames()]).toEqual(["new"]);
+    await turns.applyingToolResult([{ name: "skip" }], async () => ({
+      status: "unchanged"
+    }))();
+    expect([...turns.clientToolNames()]).toEqual(["new"]);
+    const late = turns.applyingToolResult([{ name: "late" }], async () => {
+      turns.setRequestContext({ clientTools: [{ name: "fresh" }] });
+      return changed;
+    });
+    await late();
+    expect([...turns.clientToolNames()]).toEqual(["fresh"]);
+  });
+
+  it("ignores a clientTools value that is not a list, from a request or a stored value", () => {
+    const { turns } = setup();
+    turns.setRequestContext({ clientTools: "pick" as unknown as [] });
+    expect(turns.lastClientTools).toBeUndefined();
+    turns.restoreRequestContext(JSON.stringify({ clientTools: { name: "x" } }));
+    expect(turns.lastClientTools).toBeUndefined();
+  });
+
+  it("a failed apply leaves the stored tools", async () => {
+    const { host, turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "pick" }] });
+    const writes = host.saved.length;
+    await expect(
+      turns.applyingToolResult([{ name: "choose" }], async () => {
+        throw new Error("storage failed");
+      })()
+    ).rejects.toThrow("storage failed");
+    expect(turns.lastClientTools).toEqual([{ name: "pick" }]);
+    expect(host.saved).toHaveLength(writes);
+  });
+
+  it("holds what an interrupted turn is recovered with, and a clear empties it", () => {
+    const { turns } = setup();
+    turns.setRequestContext({
+      clientTools: [{ name: "pick" }],
+      body: { model: "fast" }
+    });
+    expect({
+      lastClientTools: turns.lastClientTools,
+      lastBody: turns.lastBody
+    }).toEqual({
+      lastClientTools: [{ name: "pick" }],
+      lastBody: { model: "fast" }
+    });
+    turns.clearRequestContext();
+    expect(turns.lastClientTools).toBeUndefined();
+    expect(turns.lastBody).toBeUndefined();
+  });
+
+  it("a clear drops both, and a value past the row budget stays in memory only", () => {
+    const { host, turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "x" }], body: { a: 1 } });
+    turns.clearRequestContext();
+    expect(host.saved.at(-1)).toBeNull();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // An oversized replacement deletes the older stored value, so a restart
+    // runs without a context rather than with the older one.
+    turns.setRequestContext({ body: { model: "fast" } });
+    turns.setRequestContext({ body: { big: "x".repeat(8_000_000) } });
+    expect(host.saved.at(-1)).toBeNull();
+    expect(turns.lastBody).toBeDefined();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
