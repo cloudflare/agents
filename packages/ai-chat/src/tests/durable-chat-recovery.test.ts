@@ -34,8 +34,8 @@ interface ChatRecoveryTestStub {
   openChatTurnRunsForTest(): Promise<number>;
   armTransientInRecoveryForTest(throwsBeforeHandoff?: number): Promise<void>;
   throwsBeforeHandoffLeftForTest(): Promise<number>;
-  openRecoveryTaskRunsForTest(): Promise<string[]>;
-  runOpenRecoveryTaskRunsForTest(): Promise<void>;
+  openAttemptRunsForTest(): Promise<string[]>;
+  runOpenAttemptRunsForTest(): Promise<void>;
   armFailingReaderTurnForTest(
     message: string,
     prelude: "partial"
@@ -167,6 +167,8 @@ interface ChatRecoveryTestStub {
     progress?: number;
     workBaseline?: number;
     interruptedAttempts?: number;
+    recoveryRootRequestId?: string;
+    scheduleCount?: number;
     scheduled?: {
       callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
       targetMessageId?: string;
@@ -189,6 +191,13 @@ interface ChatRecoveryTestStub {
   runChatRecoveryRetryDirectForTest(
     data: Record<string, unknown>
   ): Promise<void>;
+  seedReleasedRecoveryRunForTest(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: Record<string, unknown>,
+    delaySeconds: number
+  ): Promise<void>;
+  openReleasedRecoveryRunsForTest(): Promise<number>;
+  recoveryRunStepsForTest(): Promise<string[]>;
   preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void>;
@@ -2167,6 +2176,119 @@ describe("onChatRecovery", () => {
     expect(assistantMessages).toHaveLength(1);
   });
 
+  it("finishes a recovery run an earlier version enqueued, after its backoff", async () => {
+    const agentStub = await getTestAgent(`upgrade-${crypto.randomUUID()}`);
+    await agentStub.persistMessages([
+      { id: "u-up", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-up",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ]);
+    // What the earlier version left: a scheduled incident, and its attempt
+    // as a run of the recovery Task waiting out a backoff.
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-up",
+      requestId: "root-up",
+      recoveryRootRequestId: "root-up",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      scheduleCount: 1,
+      scheduled: { callback: "_chatRecoveryContinue", targetMessageId: "a-up" },
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.seedReleasedRecoveryRunForTest(
+      "_chatRecoveryContinue",
+      {
+        incidentId: "inc-up",
+        originalRequestId: "root-up",
+        targetAssistantId: "a-up",
+        delivery: 1
+      },
+      60
+    );
+    expect(await agentStub.openReleasedRecoveryRunsForTest()).toBe(1);
+
+    // This version runs it: the reply is continued, once, and the run ends.
+    await agentStub.runScheduledRecoveryContinueForTest();
+    await agentStub.waitForIdleForTest();
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+    expect(await agentStub.getIncidentForTest("inc-up")).toBeNull();
+    expect(await agentStub.openReleasedRecoveryRunsForTest()).toBe(0);
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(stored.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(
+      stored[1].parts.map((p) => (p as { text?: string }).text ?? "").join("")
+    ).toContain("Continued response.");
+  });
+
+  it("retries, in its own run, a recovery run an earlier version enqueued that times out waiting for a stable chat", async () => {
+    const agentStub = await getTestAgent(`upgrade-wait-${crypto.randomUUID()}`);
+    await agentStub.persistMessages([
+      { id: "u-x", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-x",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ]);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-wait",
+      requestId: "root-wait",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.seedReleasedRecoveryRunForTest(
+      "_chatRecoveryContinue",
+      {
+        incidentId: "inc-wait",
+        originalRequestId: "root-wait",
+        targetAssistantId: "a-x"
+      },
+      60
+    );
+    await agentStub.runScheduledRecoveryContinueForTest();
+
+    // The attempt timed out waiting and planned the next one into its own
+    // run: still one run, now waiting out the retry's delay.
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(1);
+    expect(await agentStub.openReleasedRecoveryRunsForTest()).toBe(1);
+    const steps = await agentStub.recoveryRunStepsForTest();
+    expect(steps).toEqual(
+      expect.arrayContaining(["backoff-2:waiting", "continuation:completed"])
+    );
+    expect(steps.some((step) => step.startsWith("continuation-2"))).toBe(false);
+    const incident = await agentStub.getIncidentForTest("inc-wait");
+    expect(incident?.attempt).toBe(2);
+    expect(incident?.status).toBe("scheduled");
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
+
+    // The retry fires in that run once the chat is stable: the reply is
+    // continued and the run ends.
+    await agentStub.setForceStableTimeoutForTest(false);
+    await agentStub.runScheduledRecoveryContinueForTest();
+    await agentStub.waitForIdleForTest();
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+    expect(await agentStub.getIncidentForTest("inc-wait")).toBeNull();
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(0);
+  });
+
   it("reschedules a continuation that times out waiting for stable state, within the attempt budget", async () => {
     const agentStub = await getTestAgent(`stable-retry-${crypto.randomUUID()}`);
     await agentStub.setForceStableTimeoutForTest(true);
@@ -3917,7 +4039,7 @@ describe("platform-transient reader errors (#1964)", () => {
     for (let i = 0; i < 1000; i++) {
       if (
         (await agentStub.throwsBeforeHandoffLeftForTest()) === 0 &&
-        (await agentStub.openRecoveryTaskRunsForTest()).length === 1
+        (await agentStub.openAttemptRunsForTest()).length === 1
       ) {
         break;
       }
@@ -3977,7 +4099,7 @@ describe("platform-transient reader errors (#1964)", () => {
       true
     );
     // The platform recovers: the deferred replacement runs again.
-    await agentStub.runOpenRecoveryTaskRunsForTest();
+    await agentStub.runOpenAttemptRunsForTest();
     await done;
     await agentStub.waitForIdleForTest();
     ws.close(1000);

@@ -113,7 +113,11 @@ import {
   inLaneRecoveryAttempt,
   type ChatTurnTaskInput
 } from "./turn-task";
-import type { TaskRunOptions, Tasks } from "../tasks";
+import type { TaskJson, TaskRunOptions, Tasks } from "../tasks";
+import type {
+  ChatRecoveryAttemptInput,
+  ChatRecoveryScheduleReason
+} from "./recovery-engine";
 
 const utf8 = new TextEncoder();
 
@@ -630,6 +634,65 @@ export class ChatTurns<
           : null
       )
     );
+  }
+
+  /**
+   * Run a recovery attempt no turn's run kept in a chat-turn run of its
+   * own, from the alarm, where `trackAlarmWork` keeps the continuation's
+   * model turn inside the memory-limit breaker. The run's input carries
+   * the attempt, so one too large for a step's journal still runs.
+   *
+   * A first schedule (`initial`) joins an open run for the same incident,
+   * callback and schedule number, so a retried start of one schedule makes
+   * one run. A later schedule of the same incident carries a newer number
+   * and gets its own run: the older run is stale by then and returns
+   * without a turn. Chained and timed-out attempts are unkeyed: each is
+   * started while the run before it still exists, and is a new attempt.
+   *
+   * @param dedupeKey - The run's id: every retry of one failed start reuses
+   *   it and joins the run an earlier try already created (the `redefer` of
+   *   `dispatchChatRecoveryToHandoff`).
+   */
+  async startAttemptRun(
+    attempt: ChatRecoveryAttemptInput,
+    reason: ChatRecoveryScheduleReason,
+    dedupeKey?: string
+  ): Promise<void> {
+    const { callback, data } = attempt;
+    const text = (value: unknown) =>
+      typeof value === "string" ? value : undefined;
+    const incidentId = text(data.incidentId);
+    const recoveredRequestId = text(data.recoveredRequestId);
+    // The schedule's number is part of the key. A second schedule of the
+    // same incident has a newer number, which makes the run it would join
+    // stale (`recoveryDelivery`), so it must get its own run.
+    const delivery =
+      typeof data.delivery === "number" ? data.delivery : undefined;
+    const input: ChatTurnTaskInput = {
+      requestId:
+        recoveredRequestId ?? text(data.originalRequestId) ?? incidentId ?? "",
+      continuation: false,
+      nonce: dedupeKey ?? crypto.randomUUID(),
+      // SAFETY: the attempt is the recovery engine's JSON payload.
+      attempt: attempt as unknown as TaskJson
+    };
+    await this.#lane.tasks().run(this.#lane.definition, input, {
+      retain: false,
+      ...(dedupeKey !== undefined && { runId: dedupeKey }),
+      ...(reason === "initial" &&
+        incidentId && {
+          idempotencyKey: `chat-recovery:${callback}:${incidentId}${
+            delivery === undefined ? "" : `:${delivery}`
+          }`
+        }),
+      // No `requestId`: the run is not a turn of that request.
+      metadata: {
+        callback,
+        ...(incidentId && { incidentId }),
+        ...(recoveredRequestId && { recoveredRequestId })
+      },
+      start: "alarm"
+    });
   }
 
   constructor(

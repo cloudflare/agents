@@ -81,7 +81,7 @@ export type ChatRecoveryScheduleCallback =
  *
  * - `"stable_timeout_retry"` — a reschedule issued from INSIDE the currently-
  *   executing recovery attempt (a continuation that timed out waiting for
- *   stable state). That attempt — a `__cf_internal_chat_recovery` Task run —
+ *   stable state). That attempt's run
  *   settles only AFTER the callback returns, so an idempotent reschedule would
  *   dedup onto the doomed attempt and settle with it — the retry would never
  *   fire. A fresh (non-idempotent) delayed attempt survives.
@@ -223,11 +223,10 @@ export interface ChatRecoveryAdapter {
   /** Broadcast a lifecycle event produced by the evaluation or a transition. */
   emitRecoveryEvent(event: ChatRecoveryIncidentEvent): void;
   /**
-   * Enqueue a recovery callback. The engine owns the surrounding orchestration
-   * and the package chooses its durable transport: a Task for a root chat agent,
-   * or the temporary routed-schedule fallback for a dynamic agent. `reason`
-   * selects deduplication and `delaySeconds` is `0` initially or the stable
-   * retry delay for a chained attempt.
+   * Run a recovery attempt no turn's run kept: the host starts a chat-turn
+   * run for it (`ChatTurns.startAttemptRun`). `reason` selects
+   * deduplication and `delaySeconds` is `0` initially or the stable retry
+   * delay for a chained attempt.
    */
   scheduleRecovery(
     callback: ChatRecoveryScheduleCallback,
@@ -436,9 +435,9 @@ export interface InterruptedChatTurn {
   /** When the turn's run was created. */
   createdAt: number;
   /**
-   * Where the recovery attempt goes when the turn's own run runs it, instead
-   * of a recovery Task of its own. Returns `false` when the run cannot keep
-   * it, and the attempt goes to the recovery Task.
+   * Where the recovery attempt goes when the turn's own run runs it.
+   * Returns `false` when the run cannot keep it, and the attempt gets a
+   * run of its own (`ChatRecoveryAdapter.scheduleRecovery`).
    */
   attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
 }
@@ -1117,8 +1116,8 @@ export class ChatRecoveryEngine {
    * 1. transition the incident to `scheduled` (persist + drive the #1620
    *    "recovering…" status) via {@link updateIncident};
    * 2. emit `chat:recovery:scheduled`; and
-   * 3. enqueue the callback through the adapter's transport — a Task run on
-   *    a root agent, an idempotent schedule on the routed fallback.
+   * 3. hand the attempt to the caller's run, or to a run of its own through
+   *    the adapter when the caller has none or cannot keep it.
    *
    * `recoveryKind` is passed explicitly (not read off the incident) because a
    * caller can legitimately report a different kind than the incident was opened
@@ -1134,7 +1133,7 @@ export class ChatRecoveryEngine {
     data: Record<string, unknown>;
     reason?: ChatRecoveryScheduleReason;
     delaySeconds?: number;
-    /** Hand the attempt to the caller's own run instead of the host's Task. */
+    /** Hand the attempt to the caller's own run instead of a run of its own. */
     into?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<boolean> {
     const { incident } = input;
@@ -1212,7 +1211,7 @@ export class ChatRecoveryEngine {
     const data =
       delivery === undefined ? input.data : { ...input.data, delivery };
     // The caller's run takes the attempt when it can keep it; otherwise
-    // (an attempt too large to journal) it goes to the host's Task.
+    // (an attempt too large to journal) it gets a run of its own.
     if (
       !input.into?.({
         callback: input.callback,
@@ -1330,9 +1329,7 @@ export class ChatRecoveryEngine {
 
   /**
    * Reschedule a recovery continuation/retry that timed out waiting for stable
-   * state, from INSIDE the currently-executing recovery attempt (a
-   * `__cf_internal_chat_recovery` Task run for a root agent, the routed
-   * one-shot schedule row for a dynamic agent). Reads the
+   * state, from INSIDE the currently-executing recovery attempt. Reads the
    * incident; if it is still under the attempt cap, bumps `attempt`, marks it
    * `scheduled` with `reason:"stable_timeout_retry"`, and issues a separate
    * delayed attempt. It must not join the currently executing attempt: Tasks
@@ -1376,7 +1373,7 @@ export class ChatRecoveryEngine {
       delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
     };
     // The run of the attempt that timed out runs the next one; otherwise
-    // (no such run, or it cannot keep it) the host's recovery Task does.
+    // (no such run, or it cannot keep it) the next one gets its own run.
     if (!currentRunAttempt()?.(next)) {
       await adapter.scheduleRecovery(
         next.callback,
@@ -1502,7 +1499,7 @@ export class ChatRecoveryEngine {
 
   /**
    * Run a recovery callback (`_chatRecoveryContinue` or `_chatRecoveryRetry`)
-   * the Task transport delivered, up to its model handoff, then return. The
+   * an attempt's run delivered, up to its model handoff, then return. The
    * turn continues as tracked alarm work, and a detached platform failure
    * enqueues one replacement attempt.
    *
@@ -1527,8 +1524,6 @@ export class ChatRecoveryEngine {
           run: () => turns.attempts[callback](data, onTurnStarted)
         }),
       track: (turn) => turns.trackAlarmWork(turn),
-      incidentId:
-        typeof data?.incidentId === "string" ? data.incidentId : undefined,
       redefer: (dedupeKey) =>
         this.adapter.scheduleRecovery(
           callback,
@@ -1972,8 +1967,7 @@ export class ChatRecoveryEngine {
    * 6. terminalize via `exhaustChatRecovery` — BEFORE sealing. The terminal
    *    writes can reject with a platform transient in the deploy/storage window
    *    a give-up runs in (#1730); letting that throw propagate is deliberate, so
-   *    the current recovery attempt (a Task run on a root agent, a one-shot
-   *    schedule row on the routed fallback) defers and the WHOLE give-up
+   *    the current recovery attempt's run defers and the WHOLE give-up
    *    re-runs on a healthy isolate. Sealing first would arm the
    *    re-entry guard and turn that re-run into a no-op, dropping the durable
    *    terminal record. The re-run is idempotent (terminal writes overwrite the
