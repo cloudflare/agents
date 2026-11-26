@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**239 of the 1271 tests that construct Think pass (18%).** Across the whole suite, 531 of 1563.
+**287 of the 1279 tests that construct Think pass (22%).** Across the whole suite, 580 of 1572.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -25,14 +25,14 @@ supported by the harness-backed Think yet".
 | `agent-tools.test.ts`                  | 12 / 64  | 18%  |
 | `assistant-agent-loop.test.ts`         | 9 / 33   | 27%  |
 | `assistant-agent.test.ts`              | 5 / 5    | 100% |
-| `assistant-message-metadata.test.ts`   | 0 / 9    | 0%   |
+| `assistant-message-metadata.test.ts`   | 1 / 9    | 11%  |
 | `attachment-consumption.test.ts`       | 0 / 4    | 0%   |
 | `browser-tools.test.ts`                | 6 / 6    | 100% |
 | `channel-policy.test.ts`               | 1 / 3    | 33%  |
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 0 / 138  | 0%   |
+| `client-tools.test.ts`                 | 34 / 138 | 24%  |
 | `cold-rpc-initialization.test.ts`      | 4 / 4    | 100% |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
@@ -52,10 +52,10 @@ supported by the harness-backed Think yet".
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
 | `mcp-tool-materialization.test.ts`     | 5 / 5    | 100% |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
-| `message-reconciliation.test.ts`       | 0 / 11   | 0%   |
-| `messengers.test.ts`                   | 79 / 104 | 75%  |
+| `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
+| `messengers.test.ts`                   | 80 / 107 | 74%  |
 | `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
-| `onconnect-broadcast.test.ts`          | 1 / 14   | 7%   |
+| `onconnect-broadcast.test.ts`          | 4 / 17   | 23%  |
 | `onstart-degraded.test.ts`             | 1 / 5    | 20%  |
 | `origin-message-ids.test.ts`           | 0 / 8    | 0%   |
 | `periphery-action-tools.test.ts`       | 9 / 9    | 100% |
@@ -74,8 +74,8 @@ supported by the harness-backed Think yet".
 | `skills-tools.test.ts`                 | 2 / 2    | 100% |
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
-| `streaming-message-id.test.ts`         | 0 / 1    | 0%   |
-| `submissions.test.ts`                  | 20 / 116 | 17%  |
+| `streaming-message-id.test.ts`         | 1 / 1    | 100% |
+| `submissions.test.ts`                  | 25 / 119 | 21%  |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
 | `think-eviction.test.ts`               | 2 / 3    | 66%  |
