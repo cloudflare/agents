@@ -1277,7 +1277,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     first: Turn,
     live: LiveRun
   ): Promise<OperationOutcome> {
-    const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
     let turn = first;
     // One build per attempt: every model call and tool call of it sees the
     // same tools and prompt. A change to them applies from the next turn.
@@ -1287,6 +1286,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     for (;;) {
       if (run.signal.aborted) throw run.signal.reason;
       const message = await this.#message(turn);
+      // Read at every step, so a host that sets it from a turn's own
+      // configuration (a `beforeTurn` before the first model call) holds.
+      const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
       const action = nextAction(
         {
           streamId: turn.streamId ?? undefined,
@@ -1580,10 +1582,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         ignoreIncompleteToolCalls: true
       }));
 
+    // A message a hook appended after the turn's parent, before the reply
+    // began (an extension's `sendMessage`), comes before the reply.
+    const replyParentId =
+      existing || parentId === undefined
+        ? parentId
+        : ((await appendedAfter(handle, parentId)) ?? parentId);
+
     // The stream id is durable before the stream exists, so an eviction at
     // any point leaves evidence the next attempt recovers from.
     const streamId = `think:${crypto.randomUUID()}`;
-    const turn = this.#write(run, start, { streamId, messageId });
+    const turn = this.#write(run, start, {
+      streamId,
+      messageId,
+      ...(replyParentId !== parentId && { parentId: replyParentId ?? null })
+    });
     const writer = await this.#streams.open(streamId, {
       tag: streamTag(session, operationId),
       metadata: { session, operationId, messageId }
@@ -1719,7 +1732,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       ) {
         let next = turn;
         await this.#commit(run, session, streamId, (put) => {
-          if (keep) put(keep, { parentId });
+          if (keep) put(keep, { parentId: replyParentId });
           next = this.#write(run, turn, {
             streamId: null,
             overflowRetries: turn.overflowRetries + 1
@@ -1737,7 +1750,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       const reason = errorText(failure);
       await this.#commit(run, session, streamId, (put) => {
-        if (keep) put(keep, { parentId });
+        if (keep) put(keep, { parentId: replyParentId });
         this.#write(run, turn, { streamId: null, ended: { reason } });
       });
       return {
@@ -1753,7 +1766,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     );
     let next = turn;
     await this.#commit(run, session, streamId, (put) => {
-      put(message, { parentId });
+      put(message, { parentId: replyParentId });
       next = this.#write(run, turn, {
         streamId: null,
         steps: turn.steps + 1,
@@ -2718,6 +2731,25 @@ function answersHere(
     isServerTool(tools, name) ||
     (!Object.hasOwn(tools, name) && part.state === "input-available")
   );
+}
+
+/**
+ * The latest message, when only user messages follow `parentId` up to it:
+ * what a hook appended after the turn's parent. Otherwise nothing.
+ */
+async function appendedAfter(
+  handle: Session,
+  parentId: string
+): Promise<string | undefined> {
+  const leaf = await handle.getLatestLeaf();
+  if (!leaf || leaf.id === parentId) return undefined;
+  const path = await handle.getHistory({ leafId: leaf.id });
+  const at = path.findIndex((message) => message.id === parentId);
+  if (at === -1) return undefined;
+  const after = path.slice(at + 1);
+  return after.length > 0 && after.every((message) => message.role === "user")
+    ? leaf.id
+    : undefined;
 }
 
 function toolRecovery(tool: object): ToolRecovery {

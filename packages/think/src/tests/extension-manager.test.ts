@@ -972,3 +972,38 @@ describe("ExtensionManager network hosts with an app's own host binding", () => 
     expect(warned).toBe(true);
   });
 });
+
+describe("Think — a sandboxed extension's turn controls", () => {
+  async function turn(name: string) {
+    const agent = await getAgentByName(env.ThinkExtensionTurnAgent, name);
+    const result = await agent.testChat("start");
+    expect(result.done).toBe(true);
+    return agent;
+  }
+
+  it("applies the tool choice and step limit an extension's beforeTurn returns", async () => {
+    const agent = await turn("turn-controls");
+    const { count, toolChoices } = await agent.modelCalls();
+    // maxSteps 1: the model is called once although it asked for a tool.
+    expect(count).toBe(1);
+    expect(toolChoices[0]).toEqual({ type: "required" });
+  });
+
+  it("keeps a message an extension sends from beforeTurn on the conversation", async () => {
+    const agent = await turn("turn-message");
+    const texts = await agent.activeTexts();
+    // Before the reply, as Think places it.
+    expect(texts.slice(0, 2)).toEqual([
+      "user: start",
+      "user: from the extension"
+    ]);
+    expect(texts[2]?.startsWith("assistant: ")).toBe(true);
+  });
+
+  it("gives onChunk the streamed text", async () => {
+    const agent = await turn("turn-chunks");
+    await vi.waitFor(async () =>
+      expect(await agent.streamedText()).toBe("hello")
+    );
+  });
+});

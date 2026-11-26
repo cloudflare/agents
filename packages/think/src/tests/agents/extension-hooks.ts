@@ -312,3 +312,116 @@ export class ThinkExtensionNetworkAgent extends Think {
     );
   }
 }
+
+const TURN_CONTROL_EXTENSION_SOURCE = `{
+  tools: {},
+  hooks: {
+    beforeTurn: async (ctx, host) => {
+      await host?.sendMessage("from the extension");
+      return { toolChoice: "required", maxSteps: 1 };
+    },
+    onChunk: async (ctx, host) => {
+      if (typeof ctx.text !== "string") return;
+      const seen = (await host?.readFile("ext-log/text.txt")) ?? "";
+      await host?.writeFile("ext-log/text.txt", seen + ctx.text);
+    }
+  }
+}`;
+
+/**
+ * An extension that sets a turn's tool choice and step limit from
+ * `beforeTurn`, sends a message from it, and records streamed text.
+ */
+export class ThinkExtensionTurnAgent extends Think {
+  extensionLoader = this.env.LOADER;
+  readonly toolChoices: unknown[] = [];
+
+  override getTools(): ToolSet {
+    return {
+      ping: tool({
+        description: "ping",
+        inputSchema: z.object({ msg: z.string() }),
+        execute: async ({ msg }: { msg: string }) => `pong: ${msg}`
+      })
+    };
+  }
+
+  override getModel(): LanguageModel {
+    const toolChoices = this.toolChoices;
+    return {
+      specificationVersion: "v3",
+      provider: "test",
+      modelId: "mock-turn-controls",
+      supportedUrls: {},
+      doGenerate() {
+        throw new Error("doGenerate not implemented in mock");
+      },
+      doStream(options: Record<string, unknown>) {
+        toolChoices.push(options.toolChoice);
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({ type: "text-start", id: "t" });
+            controller.enqueue({ type: "text-delta", id: "t", delta: "hel" });
+            controller.enqueue({ type: "text-delta", id: "t", delta: "lo" });
+            controller.enqueue({ type: "text-end", id: "t" });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: `tc${toolChoices.length}`,
+              toolName: "ping",
+              input: JSON.stringify({ msg: "hi" })
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+            controller.close();
+          }
+        });
+        return Promise.resolve({ stream });
+      }
+    } as LanguageModel;
+  }
+
+  override getExtensions() {
+    return [
+      {
+        manifest: {
+          name: "turnctl",
+          version: "1.0.0",
+          permissions: {
+            workspace: "read-write" as const,
+            session: { sendMessage: true }
+          }
+        },
+        source: TURN_CONTROL_EXTENSION_SOURCE
+      }
+    ];
+  }
+
+  async testChat(message: string): Promise<{ done: boolean; error?: string }> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return { done: cb.doneCalled, error: cb.errorMessage };
+  }
+
+  modelCalls(): { count: number; toolChoices: unknown[] } {
+    return { count: this.toolChoices.length, toolChoices: this.toolChoices };
+  }
+
+  async streamedText(): Promise<string | null> {
+    return new WorkspaceFiles(this.workspace).readText(
+      "/workspace/ext-log/text.txt"
+    );
+  }
+
+  async activeTexts(): Promise<string[]> {
+    return (await this.getMessages()).map(
+      (message) =>
+        `${message.role}: ${message.parts
+          .map((part) => (part.type === "text" ? part.text : ""))
+          .join("")}`
+    );
+  }
+}
