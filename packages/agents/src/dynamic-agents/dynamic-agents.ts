@@ -195,6 +195,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   #connectionOperationTails = new Map<string, Promise<void>>();
   /** State writes of a virtual connection still on their way to the root. */
   #pendingStateWrites = new Map<string, number>();
+  /** This facet's event-log flag writes still on their way to the root. */
+  #pendingFlagWrites = new Map<string, number>();
 
   /**
    * The newest queued send batch per connection, while it can still take
@@ -960,15 +962,21 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     });
 
     this.#connectionOperationTails.set(connectionId, completion);
-    if (operationName === "setState" || operationName === "setFlag") {
-      this.#pendingStateWrites.set(
+    const pendingWrites =
+      operationName === "setState"
+        ? this.#pendingStateWrites
+        : operationName === "setFlag"
+          ? this.#pendingFlagWrites
+          : undefined;
+    if (pendingWrites) {
+      pendingWrites.set(
         connectionId,
-        (this.#pendingStateWrites.get(connectionId) ?? 0) + 1
+        (pendingWrites.get(connectionId) ?? 0) + 1
       );
       void completion.then(() => {
-        const left = (this.#pendingStateWrites.get(connectionId) ?? 1) - 1;
-        if (left > 0) this.#pendingStateWrites.set(connectionId, left);
-        else this.#pendingStateWrites.delete(connectionId);
+        const left = (pendingWrites.get(connectionId) ?? 1) - 1;
+        if (left > 0) pendingWrites.set(connectionId, left);
+        else pendingWrites.delete(connectionId);
       });
     }
     this.#host.ctx.waitUntil(completion);
@@ -1800,12 +1808,19 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   createBridgeConnection(meta: DynamicAgentConnectionMeta): Connection {
     let stored = this.#virtualConnections.get(meta.id);
     if (stored) {
-      // While a state write of this facet is still on its way to the root,
-      // the root's copy in `meta` is older than ours: keep ours, or the
-      // next message would undo the write (an event-log unsubscribe).
-      stored.meta = this.#pendingStateWrites.has(meta.id)
-        ? { ...meta, state: stored.meta.state }
-        : meta;
+      // While a write of this facet is still on its way to the root, the
+      // root's copy in `meta` is older than ours: keep ours, or the next
+      // message would undo the write. The state and the event-log flag
+      // are kept apart: a facet's full-state writes never carry the flag,
+      // so the flag another facet wrote (a nested follower's subscription)
+      // comes from the root even while this facet's own state write waits.
+      stored.meta = {
+        ...meta,
+        state: relayedConnectionState(stored.meta.state, meta.state, {
+          stateWritePending: this.#pendingStateWrites.has(meta.id),
+          flagWritePending: this.#pendingFlagWrites.has(meta.id)
+        })
+      };
       if (stored.connection) {
         (
           stored.connection as unknown as {
@@ -2163,4 +2178,29 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // bridge, so neither touches the parent's own WebSocket handles (#1679).
     await this.#host.__unsafe_ensureInitialized();
   }
+}
+
+/**
+ * @internal The state a facet keeps for a socket when a relayed message
+ * brings the root's copy: its own while its own write of that part is in
+ * flight, the root's otherwise. The user state and the event-log flag are
+ * decided apart, because each is written on its own.
+ */
+export function relayedConnectionState(
+  ours: unknown,
+  root: unknown,
+  pending: { stateWritePending: boolean; flagWritePending: boolean }
+): unknown {
+  const state = pending.stateWritePending ? ours : root;
+  const flagSource = pending.flagWritePending ? ours : root;
+  const flag = isPlainRecord(flagSource)
+    ? flagSource[CF_EVENT_LOGS_KEY]
+    : undefined;
+  const base = withoutEventLogFlag(state);
+  if (flag === undefined) return base;
+  return { ...(isPlainRecord(base) ? base : {}), [CF_EVENT_LOGS_KEY]: flag };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
