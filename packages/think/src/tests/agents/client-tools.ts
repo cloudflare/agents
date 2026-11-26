@@ -1334,6 +1334,26 @@ export class ThinkClientToolsAgent extends Think {
   /** The type of every socket message this agent has finished handling. */
   private readonly _handledMessageTypes: string[] = [];
 
+  /** The type of every socket message that has reached this agent. */
+  private readonly _receivedMessageTypes: string[] = [];
+
+  private _interactionApplyHold: LatchForTest | null = null;
+
+  /** Hold the next client tool result or approval before it is applied. */
+  holdNextInteractionApplyForTest(): void {
+    this._interactionApplyHold = new LatchForTest();
+  }
+
+  /** Whether an apply is held by {@link holdNextInteractionApplyForTest}. */
+  interactionApplyHeldForTest(): boolean {
+    return this._interactionApplyHold?.isWaiting ?? false;
+  }
+
+  releaseInteractionApplyForTest(): void {
+    this._interactionApplyHold?.open();
+    this._interactionApplyHold = null;
+  }
+
   /**
    * Whether a client tool result or approval is queued or being applied. The
    * chat protocol starts the apply without awaiting it, so a handled message
@@ -1347,6 +1367,12 @@ export class ThinkClientToolsAgent extends Think {
     return (turns?.pendingInteraction ?? null) !== null;
   }
 
+  /** How many socket messages of `type` have reached the agent. */
+  receivedMessageCountForTest(type: string): number {
+    return this._receivedMessageTypes.filter((received) => received === type)
+      .length;
+  }
+
   /** How many socket messages of `type` the agent has finished handling. */
   handledMessageCountForTest(type: string): number {
     return this._handledMessageTypes.filter((handled) => handled === type)
@@ -1357,15 +1383,21 @@ export class ThinkClientToolsAgent extends Think {
   // the wrapper here sees every message, the protocol's included.
   override onStart(): void {
     const handle = this.onMessage;
-    this.onMessage = async (connection, message) => {
-      await handle.call(this, connection, message);
-      if (typeof message !== "string") return;
+    const typeOf = (message: unknown): string | undefined => {
+      if (typeof message !== "string") return undefined;
       try {
         const { type } = JSON.parse(message) as { type?: unknown };
-        if (typeof type === "string") this._handledMessageTypes.push(type);
+        return typeof type === "string" ? type : undefined;
       } catch {
         // Not JSON: nothing to record.
+        return undefined;
       }
+    };
+    this.onMessage = async (connection, message) => {
+      const type = typeOf(message);
+      if (type !== undefined) this._receivedMessageTypes.push(type);
+      await handle.call(this, connection, message);
+      if (type !== undefined) this._handledMessageTypes.push(type);
     };
   }
 
@@ -1921,12 +1953,19 @@ export class ThinkClientToolsAgent extends Think {
 
   private _interactionAppliesSeen = 0;
 
-  /** Counts every apply, as a subclass that wraps applies would see them. */
+  /**
+   * Counts every apply, as a subclass that wraps applies would see them, and
+   * holds one when a test asked ({@link holdNextInteractionApplyForTest}).
+   */
   protected override _enqueueInteractionApply(
     apply: () => Promise<void>
   ): Promise<boolean> {
     this._interactionAppliesSeen++;
-    return super._enqueueInteractionApply(apply);
+    const hold = this._interactionApplyHold;
+    return super._enqueueInteractionApply(async () => {
+      await hold?.wait();
+      await apply();
+    });
   }
 
   async getInteractionAppliesSeenForTest(): Promise<number> {

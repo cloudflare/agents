@@ -448,6 +448,42 @@ describe("dispatchChatProtocol", () => {
     ]);
   });
 
+  it("answers a resume request only after a tool result still being applied", async () => {
+    const { host, calls } = recordingHost();
+    let applied: (scheduled: boolean) => void = () => {};
+    // A tool result's apply is running: it may schedule a continuation.
+    Object.assign(host.turns, {
+      pendingInteraction: new Promise<boolean>((resolve) => {
+        applied = resolve;
+      })
+    });
+    const answered = dispatchChatProtocol(
+      connection,
+      send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST, probeId: "p" }),
+      host
+    );
+    // Give the dispatch every chance to answer early.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(calls).toEqual([]);
+
+    applied(true);
+    await answered;
+    expect(calls).toEqual([["resume.request", "c1", "p", undefined]]);
+  });
+
+  it("answers a resume request although the apply before it failed", async () => {
+    const { host, calls } = recordingHost();
+    Object.assign(host.turns, {
+      pendingInteraction: Promise.reject(new Error("apply failed"))
+    });
+    await dispatchChatProtocol(
+      connection,
+      send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST }),
+      host
+    );
+    expect(calls).toEqual([["resume.request", "c1", undefined, undefined]]);
+  });
+
   it("applies a tool result through the request context and the apply chain", async () => {
     const { host, calls } = recordingHost();
     await dispatchChatProtocol(

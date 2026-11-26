@@ -3344,6 +3344,88 @@ describe("resume coordination during pending continuation", () => {
     await closeWS(ws);
   });
 
+  it("tells a tab that asks to resume while a tool result is still being applied to wait for its continuation", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const userMsg: UIMessage = {
+      id: "msg-resume-during-apply-user",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    } as UIMessage;
+    const initialDone = waitForDone(ws, 10000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: "req-resume-during-apply",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMsg] })
+        }
+      })
+    );
+    await initialDone;
+    await agent.persistToolCallMessage([
+      userMsg,
+      {
+        id: "assistant-resume-during-apply",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-resume-during-apply",
+            state: "input-available",
+            input: { action: "test" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    const resumeResponse = Promise.race([
+      waitForMessageOfType(ws, MSG_STREAM_RESUMING, 5000).then(
+        () => "resuming" as const
+      ),
+      waitForMessageOfType(ws, MSG_STREAM_RESUME_NONE, 5000).then(
+        () => "none" as const
+      )
+    ]);
+
+    // The result's apply is slow (storage): it is still running when the
+    // tab asks whether there is a stream to resume.
+    await agent.holdNextInteractionApplyForTest();
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-resume-during-apply",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+    await vi.waitFor(async () => {
+      expect(await agent.interactionApplyHeldForTest()).toBe(true);
+    });
+    const received = await agent.receivedMessageCountForTest(
+      MSG_STREAM_RESUME_REQUEST
+    );
+    ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
+    // The request has reached the agent while the apply is still held.
+    await vi.waitFor(async () => {
+      expect(
+        await agent.receivedMessageCountForTest(MSG_STREAM_RESUME_REQUEST)
+      ).toBeGreaterThan(received);
+    });
+    expect(await agent.interactionApplyHeldForTest()).toBe(true);
+    await agent.releaseInteractionApplyForTest();
+
+    // The continuation the result schedules is the stream to resume.
+    expect(await resumeResponse).toBe("resuming");
+    await waitForDone(ws, 10000);
+    await closeWS(ws);
+  });
+
   it("continues when the initiating connection closes before coalescing finishes", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
