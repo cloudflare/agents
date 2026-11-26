@@ -8,10 +8,15 @@ function uniqueName(): string {
   return `rpc-bridge-test-${crypto.randomUUID()}`;
 }
 
-async function connectWS(parent: string, child: string): Promise<WebSocket> {
+async function connectWS(
+  parent: string,
+  child: string,
+  pk?: string
+): Promise<WebSocket> {
   const path =
     `/agents/test-sub-agent-parent/${parent}` +
-    `/sub/slow-reply-sub-agent/${child}`;
+    `/sub/slow-reply-sub-agent/${child}` +
+    (pk ? `?_pk=${pk}` : "");
   const response = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
@@ -281,6 +286,28 @@ describe("facet connection operations after frame completion (issue #2055)", () 
       await expect(delivered).resolves.toBe(message);
     } finally {
       ws.close();
+    }
+  });
+
+  it("reaches a client that reconnected with its id before the old socket closed (#2709)", async () => {
+    // PartySocket reuses its `_pk` on a reconnect, and the new socket can
+    // arrive before the root sees the old one close.
+    const parent = uniqueName();
+    const child = uniqueName();
+    const pk = crypto.randomUUID();
+    const old = await connectWS(parent, child, pk);
+    const ws = await connectWS(parent, child, pk);
+    try {
+      const message = "after-reconnect";
+      const delivered = waitForTextMessage(ws, message);
+      const response = await callRPC(ws, "sendConnectionMessageAfterDelay", [
+        message
+      ]);
+      expectSuccessfulResult(response, "scheduled");
+      await expect(delivered).resolves.toBe(message);
+    } finally {
+      ws.close();
+      old.close();
     }
   });
 

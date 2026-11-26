@@ -1179,26 +1179,44 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     return metas;
   }
 
+  /**
+   * The root's sockets for a sub-agent connection id. Usually one; two
+   * while a client that reconnected with its id (PartySocket reuses `_pk`)
+   * is accepted before the root sees its old socket close (#2709). Each
+   * operation goes to every one of them: they are the same client, and the
+   * old one is closing.
+   */
+  #childConnections(connectionId: string): Connection[] {
+    const connections: Connection[] = [];
+    for (const connection of this.#host._webSockets.getConnections(
+      connectionId
+    )) {
+      if (
+        connection.id === connectionId &&
+        this.connectionHasChildTarget(connection)
+      ) {
+        connections.push(connection);
+      }
+    }
+    return connections;
+  }
+
   async sendToConnection(
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) {
-      return;
+    for (const connection of this.#childConnections(connectionId)) {
+      connection.send(message);
     }
-    connection.send(message);
   }
 
   async sendManyToConnection(
     connectionId: string,
     messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
   ): Promise<void> {
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) {
-      return;
+    for (const connection of this.#childConnections(connectionId)) {
+      for (const message of messages) connection.send(message);
     }
-    for (const message of messages) connection.send(message);
   }
 
   async closeConnection(
@@ -1206,24 +1224,22 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     code?: number,
     reason?: string
   ): Promise<void> {
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) {
-      return;
+    for (const connection of this.#childConnections(connectionId)) {
+      connection.close(code, reason);
     }
-    connection.close(code, reason);
   }
 
   async setConnectionState(
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) {
-      return null;
+    let forwarded: unknown = null;
+    for (const connection of this.#childConnections(connectionId)) {
+      ensureConnectionWrapped(connection);
+      connection.setState(withoutEventLogFlag(state));
+      forwarded = this.getForwardedState(connection);
     }
-    ensureConnectionWrapped(connection);
-    connection.setState(withoutEventLogFlag(state));
-    return this.getForwardedState(connection);
+    return forwarded;
   }
 
   /**
@@ -1232,9 +1248,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    */
   setConnectionFlag(connectionId: string, key: string, value: unknown): void {
     if (key !== CF_EVENT_LOGS_KEY) return;
-    const connection = this.#host._webSockets.getConnection(connectionId);
-    if (!connection || !this.connectionHasChildTarget(connection)) return;
-    setConnectionFlag(connection, key, value);
+    for (const connection of this.#childConnections(connectionId)) {
+      setConnectionFlag(connection, key, value);
+    }
   }
 
   #connectionMetaForPath(
