@@ -3137,45 +3137,46 @@ export class ThinkTestAgent extends Think {
     this._detachedTestDeliveries.push(run.runId);
   }
 
+  private _heldTurnForTest: Promise<void> | undefined;
+
   /**
-   * A detached run whose child has finished, collected by the reconcile
-   * tick while a chat turn holds the chat lane. The delivery is serialized
-   * behind the lane: the tick must not wait on it for good. Returns how
-   * long the tick took, and the deliveries before and after the turn ends.
+   * A detached run started while a chat turn holds the chat lane. The run's
+   * first attempt parks; its next check is made due for the alarm. Returns
+   * the run id.
    */
-  async reconcileDetachedWhileLaneBusyForTest(): Promise<{
-    elapsedMs: number;
-    deliveredBefore: number;
-    deliveredAfter: number;
-  }> {
+  async startDetachedWhileLaneBusyForTest(): Promise<string> {
     const runId = crypto.randomUUID();
-    const child = await this.subAgent(ThinkTestAgent, runId);
-    await child.startAgentToolRun("detached work", { runId });
+    const { turn } = await this._holdActiveRpcTurnForTest();
+    this._heldTurnForTest = turn;
+    await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      input: "detached work",
+      detached: { onFinish: "onDetachedTestDoneForTest" }
+    });
     const ready = Date.now() + 10_000;
+    const child = await this.subAgent(ThinkTestAgent, runId);
     while (Date.now() < ready) {
       const inspection = await child.inspectAgentToolRun(runId);
       if (inspection?.status === "completed") break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    ensureReleasedAgentToolTable(this.ctx.storage.sql);
     this.sql`
-      INSERT INTO cf_agent_tool_runs (
-        run_id, agent_type, status, display_order, started_at, detached,
-        detached_on_finish, detached_max_budget_at
-      ) VALUES (
-        ${runId}, 'ThinkTestAgent', 'running', 0, ${Date.now()}, 1,
-        'onDetachedTestDoneForTest', ${Date.now() + 3_600_000}
-      )
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now() - 1}
+      WHERE run_id = ${runId}
     `;
-    const { turn } = await this._holdActiveRpcTurnForTest();
-    const startedAt = Date.now();
-    await (
-      this as unknown as { _cfDetachedReconcileTick(): Promise<void> }
-    )._cfDetachedReconcileTick();
-    const elapsedMs = Date.now() - startedAt;
-    const deliveredBefore = this._detachedTestDeliveries.length;
+    this.sql`UPDATE cf_agents_jobs SET time = ${Date.now() - 1000}`;
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+    return runId;
+  }
+
+  /** Release the held turn; then the deliveries that landed. */
+  async releaseHeldTurnForTest(): Promise<{
+    before: number;
+    after: number;
+  }> {
+    const before = this._detachedTestDeliveries.length;
     await this.releaseBeforeStepForTest();
-    await turn;
+    await this._heldTurnForTest;
     const delivered = Date.now() + 10_000;
     while (
       this._detachedTestDeliveries.length === 0 &&
@@ -3183,11 +3184,7 @@ export class ThinkTestAgent extends Think {
     ) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    return {
-      elapsedMs,
-      deliveredBefore,
-      deliveredAfter: this._detachedTestDeliveries.length
-    };
+    return { before, after: this._detachedTestDeliveries.length };
   }
 
   /**
