@@ -866,7 +866,9 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         outcome: "completed"
       });
       const frames: SentFrame[] = [];
-      const { resumableStream } = makeStream();
+      const { state, resumableStream } = makeStream({
+        replayErroredReturn: true
+      });
       const handshake = new ResumeHandshake({
         ...makeHost({
           resumableStream,
@@ -876,11 +878,8 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         ended: new EndedRequests()
       });
 
-      await handshake.handleResumeRequest(
-        makeConnection("c1", frames),
-        "probe-1",
-        ["req-a", "req-b"]
-      );
+      const conn = makeConnection("c1", frames);
+      await handshake.handleResumeRequest(conn, "probe-1", ["req-a", "req-b"]);
       expect(frames).toEqual([
         streamResumingFrame("req-a", "probe-1"),
         {
@@ -892,6 +891,13 @@ describe("ResumeHandshake (driver → golden frames)", () => {
           outcome: "completed"
         }
       ]);
+
+      // The ACK on the same tab replays req-a's chunks, then its error.
+      await handshake.handleResumeAck(conn, "req-a");
+      expect(state.calls.replayErrored).toEqual(["req-a"]);
+      expect(frames[2]).toEqual(
+        terminalErrorFrame("req-a", "boom", RESPONSE_TYPE)
+      );
     });
 
     it("follows a stream that closed into recovery with the end a stop recorded since", async () => {
