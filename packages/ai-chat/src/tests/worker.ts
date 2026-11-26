@@ -8690,17 +8690,17 @@ export class AIChatAgentToolParent extends Agent<Env> {
     };
   }
 
-  /**
-   * #1589: run a child that injects a chunk into the tail attach window and
-   * return the forwarded agent-tool events so the test can assert the chunk
-   * survives the stored-replay → live-forwarding handoff.
-   */
   /** Release the tool child's reply if its injection never landed. */
   async releaseChildInjectionHoldForTest(runId: string): Promise<void> {
     const child = await this.subAgent(AIChatAgentToolChild, runId);
     await child.releaseInjectionHoldForTest();
   }
 
+  /**
+   * #1589: run a child that injects a chunk into the tail attach window and
+   * return the forwarded agent-tool events so the test can assert the chunk
+   * survives the stored-replay → live-forwarding handoff.
+   */
   async runChildWithAttachRaceForTest(
     input: AgentToolInput,
     raceBody: string,
