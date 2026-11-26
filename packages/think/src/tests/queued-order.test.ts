@@ -215,6 +215,7 @@ describe("a message queued behind a running turn", () => {
     );
     expect(answered).toBe(true);
     const lists = seenB.filter((f) => f.type === "cf_agent_chat_messages");
+    expect(lists.length).toBeGreaterThan(0);
     expect(lists.at(-1)?.queuedMessageIds).toBeUndefined();
     tabA.close();
     tabB.close();
