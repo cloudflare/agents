@@ -142,7 +142,10 @@ import {
   createInferenceInvocation,
   drainInferenceStream
 } from "./inference/invocation";
-import { MessengerReplies } from "./messengers/reply-task";
+import {
+  registerMessengerReplies,
+  type MessengerReplyRun
+} from "./messengers/reply-task";
 import { ThinkModelResolver } from "./model";
 import {
   ThinkTranscriptCache,
@@ -1569,11 +1572,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         return (input) => host._cf_deliverRecoveredMessengerReply(input);
       })
     );
-    this.#messengerReplies = new MessengerReplies(
+    this.#runMessengerReply = registerMessengerReplies(
       this.tasks,
       () => this._messengerRuntime
     );
-    this.lifecycle.use(this.#messengerReplies);
 
     const _onStart = this.onStart.bind(this);
     const startThink = async (
@@ -2511,7 +2513,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // ── Config storage helpers (think_config table) ─────────────────
 
   /** Messenger replies as Task runs. */
-  readonly #messengerReplies: MessengerReplies;
+  readonly #runMessengerReply: (
+    run: MessengerReplyRun
+  ) => Promise<{ accepted: boolean }>;
 
   /** Think's private keyed config rows. */
   private readonly _cfConfig = new ThinkConfigStore();
@@ -3046,12 +3050,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * lives.
    * @internal
    */
-  _runMessengerReplyTask(input: {
-    nonce: string;
-    idempotencyKey: string;
-    metadata: Record<string, unknown>;
-  }): Promise<{ accepted: boolean }> {
-    return this.#messengerReplies.run(input);
+  _runMessengerReplyTask(
+    run: MessengerReplyRun
+  ): Promise<{ accepted: boolean }> {
+    return this.#runMessengerReply(run);
   }
 
   private _runChatRecoveryFiber<T>(

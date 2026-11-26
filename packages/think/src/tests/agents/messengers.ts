@@ -159,6 +159,15 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     const recordEnd = (text: string) => this._record("stream-end", text);
     const mode = this._recoveryMode();
     const nextCall = () => ++this._streamCalls;
+    // An agent named `reset-…` resets in its first model call, mid-reply.
+    const resetOnce = this.name.startsWith("reset-")
+      ? async () => {
+          if (this.ctx.storage.kv.get("reset-done")) return;
+          this.ctx.storage.kv.put("reset-done", true);
+          await this.ctx.storage.sync();
+          this.ctx.abort("reset mid-reply");
+        }
+      : undefined;
     // An agent named `slow-…` takes 4s per model call.
     const slowMs = this.name.startsWith("slow-") ? 4000 : 0;
     return {
@@ -172,6 +181,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       async doStream(options: { prompt: unknown }) {
         const prompt = lastUserText(options.prompt);
         record(prompt);
+        await resetOnce?.();
         if (slowMs) {
           await new Promise((resolve) => setTimeout(resolve, slowMs));
           recordEnd(prompt);
@@ -566,6 +576,17 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       heldAfterStart,
       delivered: await this._untilRecoveredReplyDelivered(incidentId)
     };
+  }
+
+  /** Messenger reply runs not yet settled. */
+  async openReplyRunsForTest(): Promise<number> {
+    return (
+      this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_messenger_reply'
+          AND status IN ('pending', 'running')
+      `[0]?.n ?? 0
+    );
   }
 
   async getAdapterCalls(): Promise<Array<{ kind: string; content: string }>> {

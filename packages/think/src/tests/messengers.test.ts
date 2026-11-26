@@ -1645,6 +1645,43 @@ describe("think messengers core", () => {
       ]);
     }, 30_000);
 
+    it("answers a webhook reply once after the object reset mid-reply", async () => {
+      const name = `reset-${crypto.randomUUID()}`;
+      // A reset stub stays broken: each call takes a new one.
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      await (
+        await agent()
+      )
+        .fetch("https://example.com/messengers/fake/webhook", {
+          body: JSON.stringify({
+            id: "x1",
+            text: "hello",
+            threadId: "fake:dm"
+          }),
+          method: "POST"
+        })
+        .catch(() => undefined);
+      let posted: string[] = [];
+      let open = 1;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        const stub = await agent();
+        posted = (await stub.getAdapterCalls()).map((call) => call.content);
+        open = await stub.openReplyRunsForTest();
+        if (open === 0 && posted.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(open).toBe(0);
+      expect(posted.join("")).toContain("Got");
+      expect(posted).not.toContain(INTERRUPTED_MESSENGER_RESPONSE);
+      expect(
+        (await (await agent()).getRecorded("prompt")).filter((prompt) =>
+          prompt.includes("hello")
+        ).length
+      ).toBeGreaterThan(1);
+    }, 30_000);
+
     it("finds the private Chat SDK queue methods the recovery drain relies on", () => {
       // The drain feature-checks these at runtime and silently skips when a
       // `chat` release drops or renames them; this fails the upgrade instead.
