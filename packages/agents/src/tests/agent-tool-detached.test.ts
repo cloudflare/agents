@@ -158,7 +158,6 @@ describe("detached agent-tool runs on Tasks", () => {
       staysRunning: true,
       summary: "real result"
     });
-    await agent.expireDetachedBudgetForTest("run-race");
     await agent.checkWithChildBeforeCancelForTest("run-race", "completes");
     await agent.detachedStateForTest("run-race");
     expect(statuses(await agent.getDetachedDeliveryLog(), "run-race")).toEqual([
@@ -172,7 +171,6 @@ describe("detached agent-tool runs on Tasks", () => {
       chunkBodies: [],
       staysRunning: true
     });
-    await agent.expireDetachedBudgetForTest("run-stopped");
     await agent.checkWithChildBeforeCancelForTest("run-stopped", "is stopped");
     await agent.detachedStateForTest("run-stopped");
     expect(
@@ -187,7 +185,6 @@ describe("detached agent-tool runs on Tasks", () => {
       { chunkBodies: [], staysRunning: true },
       { onMilestones: ["sources-gathered"] }
     );
-    await agent.expireDetachedBudgetForTest("run-ms");
     await agent.checkWithChildBeforeCancelForTest(
       "run-ms",
       "milestone and completes"

@@ -557,6 +557,7 @@ export class TestAgentToolReplayAgent extends Agent {
     runId: string,
     before: "completes" | "is stopped" | "milestone and completes"
   ): Promise<void> {
+    await this.detachedAttemptEndedForTest(runId);
     const self = this as unknown as {
       _asAgentToolChildAdapter(child: unknown): {
         cancelAgentToolRun(runId: string, reason?: unknown): Promise<void>;
@@ -586,6 +587,10 @@ export class TestAgentToolReplayAgent extends Agent {
       });
     };
     try {
+      // The budget runs out only now, with the child's cancel replaced, so
+      // whichever attempt gives up (this check or one its wake started)
+      // meets the replaced cancel.
+      this.expireDetachedBudgetForTest(runId);
       await this.checkDetachedForTest(runId);
     } finally {
       self._asAgentToolChildAdapter = original;
