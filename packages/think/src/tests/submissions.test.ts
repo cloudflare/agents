@@ -61,6 +61,7 @@ type ThinkSubmissionTestStub = {
   holdSubmissionStatusHookForTest(): Promise<void>;
   cancelInSubmissionStatusHookForTest(): Promise<void>;
   isSubmissionStatusHookHeldForTest(): Promise<boolean>;
+  statusReportsQueuedForTest(submissionId: string): Promise<number>;
   releaseSubmissionStatusHookForTest(): Promise<void>;
   setProgrammaticResponseForTest(response: string): Promise<void>;
   useRecoveryToolModelForTest(): Promise<void>;
@@ -1323,9 +1324,10 @@ describe("Think durable submissions", () => {
       "stop"
     );
     await vi.waitFor(async () => {
+      // The aborted report has reached the queue: pending, then aborted.
       expect(
-        await agent.inspectSubmissionForTest("sub-status-order")
-      ).toMatchObject({ status: "aborted" });
+        await agent.statusReportsQueuedForTest("sub-status-order")
+      ).toBeGreaterThanOrEqual(2);
     });
     await agent.releaseSubmissionStatusHookForTest();
     await accepting;
