@@ -66,6 +66,8 @@ interface FakeStreamState {
   /** Chunk bodies the completed stream holds. */
   completedChunks?: string[];
   replayErroredReturn: boolean;
+  /** Chunk bodies an errored stream holds, sent before its error. */
+  erroredChunks?: string[];
   originMessageIds?: string[];
   outcome?: ChatTurnOutcome;
   /** The latest stored stream of each request, by request id. */
@@ -152,13 +154,22 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
         }
         if (rowState === "errored") {
           state.calls.replayErrored.push(tag);
-          return state.replayErroredReturn ? [] : [settledRow(tag, "errored")];
+          return state.replayErroredReturn && !state.erroredChunks
+            ? []
+            : [settledRow(tag, "errored")];
         }
         return [];
       },
       readChunks: (streamId: string, fromSeq: number) => {
         if (fromSeq !== 0) return [];
         if (streamId.startsWith("errored-")) {
+          if (state.erroredChunks) {
+            return state.erroredChunks.map((body, seq) => ({
+              seq,
+              chunk: JSON.stringify(body),
+              created_at: 0
+            }));
+          }
           return [
             { seq: 0, chunk: JSON.stringify(DROPPED_CHUNK), created_at: 0 }
           ];
@@ -867,7 +878,7 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       });
       const frames: SentFrame[] = [];
       const { state, resumableStream } = makeStream({
-        replayErroredReturn: true
+        erroredChunks: ["missed text"]
       });
       const handshake = new ResumeHandshake({
         ...makeHost({
@@ -895,7 +906,8 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       // The ACK on the same tab replays req-a's chunks, then its error.
       await handshake.handleResumeAck(conn, "req-a");
       expect(state.calls.replayErrored).toEqual(["req-a"]);
-      expect(frames[2]).toEqual(
+      expect(frames[2]).toMatchObject({ id: "req-a", body: "missed text" });
+      expect(frames[3]).toEqual(
         terminalErrorFrame("req-a", "boom", RESPONSE_TYPE)
       );
     });
