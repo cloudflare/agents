@@ -4511,6 +4511,18 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
+  /** Start a run for a recovery attempt no turn's run kept, as the engine does. */
+  async startAttemptRunForTest(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: Record<string, unknown>,
+    delaySeconds: number
+  ): Promise<void> {
+    await this["_turns"].startAttemptRun(
+      { callback, data, delaySeconds },
+      "initial"
+    );
+  }
+
   /**
    * Leave a recovery run as the release enqueued it: a run of the recovery
    * Task, with the options its `chatRecoveryTaskRunOptions` built for a
