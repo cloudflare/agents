@@ -1,8 +1,8 @@
 {
-  "total": 1572,
-  "passed": 580,
-  "needThink": 1279,
-  "needThinkPassed": 287,
+  "total": 1583,
+  "passed": 583,
+  "needThink": 1290,
+  "needThinkPassed": 290,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -86,7 +86,7 @@
     },
     "durable-admission.test.ts": {
       "total": 9,
-      "passed": 4
+      "passed": 2
     },
     "empty-reply.test.ts": {
       "total": 10,
@@ -109,8 +109,8 @@
       "passed": 6
     },
     "extension-manager.test.ts": {
-      "total": 48,
-      "passed": 48
+      "total": 50,
+      "passed": 50
     },
     "facet-request-order.test.ts": {
       "total": 1,
@@ -149,8 +149,8 @@
       "passed": 4
     },
     "messengers.test.ts": {
-      "total": 107,
-      "passed": 80
+      "total": 111,
+      "passed": 79
     },
     "nested-agent-tools.test.ts": {
       "total": 3,
@@ -196,6 +196,10 @@
       "total": 13,
       "passed": 13
     },
+    "prefix-changed.test.ts": {
+      "total": 1,
+      "passed": 1
+    },
     "prompt-cache.test.ts": {
       "total": 10,
       "passed": 4
@@ -237,8 +241,8 @@
       "passed": 1
     },
     "submissions.test.ts": {
-      "total": 119,
-      "passed": 25
+      "total": 123,
+      "passed": 28
     },
     "telegram-messenger.test.ts": {
       "total": 2,
@@ -363,9 +367,7 @@
     "context-upgrade.test.ts > Think context upgrade > ignores a context record a client sends in message metadata",
     "context-upgrade.test.ts > Think context upgrade > rebuilds the prompt from the blocks at the turn after a compaction",
     "context-upgrade.test.ts > Think context upgrade > stores the prompt only on the session, never in a _system_prompt row",
-    "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a clear before the replay drops it",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a record left between the turn's fiber and the record's delete is recovery's",
-    "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > runs however long it waited: its question is never dropped",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > submissions: one running and one pending at the reset each get their own reply, in order",
     "execute-tool.test.ts > execute tool on the codemode runtime > maps needsApproval AI SDK tools to requiresApproval — the call pauses durably",
     "execute-tool.test.ts > execute tool on the codemode runtime > one-liner: createExecuteTool(agent) runs without state.* and records on this.codemode",
@@ -419,6 +421,8 @@
     "extension-manager.test.ts > ExtensionManager worker id scoping for host bindings > never reuses a host extension id without a scope",
     "extension-manager.test.ts > ExtensionManager worker id stability > reuses the same worker id across managers for identical extensions",
     "extension-manager.test.ts > Think — a sandboxed extension's turn controls > applies the tool choice and step limit an extension's beforeTurn returns",
+    "extension-manager.test.ts > Think — a sandboxed extension's turn controls > applies them in a sub-agent, through the root",
+    "extension-manager.test.ts > Think — a sandboxed extension's turn controls > gives a sub-agent's host binding its path and its root's jurisdiction",
     "extension-manager.test.ts > Think — a sandboxed extension's turn controls > gives onChunk the streamed text",
     "extension-manager.test.ts > Think — a sandboxed extension's turn controls > keeps a message an extension sends from beforeTurn on the conversation",
     "fetch-tools.test.ts > Think — fetchTools integration > does not register fetch tools by default",
@@ -555,17 +559,18 @@
     "messengers.test.ts > telegram messenger provider > supports distinct Telegram adapter names and rejects duplicate defaults",
     "messengers.test.ts > telegram messenger provider > verifies Telegram secret token headers",
     "messengers.test.ts > think messengers core > accepts a custom channelSpeakerLabel formatter",
+    "messengers.test.ts > think messengers core > apologizes for a reply a reset cut off while it streamed",
     "messengers.test.ts > think messengers core > attachment fetch > copies a view backed by a SharedArrayBuffer instead of dropping it",
     "messengers.test.ts > think messengers core > attachment fetch > copies only a Buffer view's own bytes out of its backing store",
     "messengers.test.ts > think messengers core > attachment fetch > returns a view's own buffer without copying when the view spans all of it",
     "messengers.test.ts > think messengers core > attachment fetch > returns an ArrayBuffer from the adapter unchanged",
     "messengers.test.ts > think messengers core > attachment fetch > returns an empty ArrayBuffer when the adapter resolves nothing",
     "messengers.test.ts > think messengers core > burst replies end to end (#2312) > finds the private Chat SDK queue methods the recovery drain relies on",
-    "messengers.test.ts > think messengers core > carries an additive delivery tag without changing recovery classification",
     "messengers.test.ts > think messengers core > checkpoints completed before posting the terminal reply when failed after text (#1842)",
     "messengers.test.ts > think messengers core > checkpoints completed before posting the terminal reply when failed before text (#1842)",
     "messengers.test.ts > think messengers core > checkpoints completed before posting the terminal reply when interrupted (#1842)",
     "messengers.test.ts > think messengers core > classifies messenger delivery failures",
+    "messengers.test.ts > think messengers core > classifies what a reply cut off at each stage does next",
     "messengers.test.ts > think messengers core > converts messenger actions to Think user messages",
     "messengers.test.ts > think messengers core > converts messenger events to Think user messages with attachments",
     "messengers.test.ts > think messengers core > creates serializable recovery snapshots without live raw data",
@@ -574,7 +579,7 @@
     "messengers.test.ts > think messengers core > detects mentions on messages the adapter did not flag",
     "messengers.test.ts > think messengers core > does not leak internal error details into messenger replies",
     "messengers.test.ts > think messengers core > falls back through fullName || userName || userId for the default label",
-    "messengers.test.ts > think messengers core > gives a snapshot kept as JSON its messages' dates back",
+    "messengers.test.ts > think messengers core > gives an event kept as JSON its messages' dates back",
     "messengers.test.ts > think messengers core > gives queued messages a TTL that outlasts a slow turn",
     "messengers.test.ts > think messengers core > honors custom webhook verifier responses before Chat SDK handling",
     "messengers.test.ts > think messengers core > inline attachment data > fetches Blob data through arrayBuffer()",
@@ -599,14 +604,12 @@
     "messengers.test.ts > think messengers core > never prefixes direct message actions",
     "messengers.test.ts > think messengers core > never prefixes direct messages regardless of channelSpeakerLabel",
     "messengers.test.ts > think messengers core > normalizes inferred defaults",
-    "messengers.test.ts > think messengers core > parses and classifies messenger recovery snapshots",
     "messengers.test.ts > think messengers core > posts only the apology, never an empty stream, when an interrupted turn has no text",
     "messengers.test.ts > think messengers core > posts text past the visible limit before the target delivers the rest (#2106)",
     "messengers.test.ts > think messengers core > prefixes channel actions with the resolved speaker label",
     "messengers.test.ts > think messengers core > prefixes channel messages with the default fullName cascade",
     "messengers.test.ts > think messengers core > preserves attachment fetchMetadata and backfills id when converting",
     "messengers.test.ts > think messengers core > preserves delivery errors when cancelling local self targets",
-    "messengers.test.ts > think messengers core > recovers interrupted messenger reply fibers through the shared Chat runtime",
     "messengers.test.ts > think messengers core > rejects duplicate adapter names before creating a shared Chat runtime",
     "messengers.test.ts > think messengers core > rejects invalid and duplicate paths",
     "messengers.test.ts > think messengers core > rejects webhook requests when custom verification returns false",
@@ -723,6 +726,7 @@
     "periphery-turn-policy.test.ts > wrapToolsWithDecision > refuses changed input for an approved action",
     "periphery-turn-policy.test.ts > wrapToolsWithDecision > runs, blocks or substitutes as the decision says",
     "periphery-turn-policy.test.ts > wrapToolsWithDecision > streams an async generator tool through",
+    "prefix-changed.test.ts > harness-backed Think: chat:prefix:changed > emits once when the tools a turn sends change",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > extends the previous request every turn with no reduction",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > never rewrites the prefix when truncationStep is Infinity",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > rewrites the prefix once per compaction",
@@ -763,20 +767,23 @@
     "submissions.test.ts > Think durable submissions > does not delete pending or missing submissions",
     "submissions.test.ts > Think durable submissions > does not link a cancelled turn's partial to a reused submission id",
     "submissions.test.ts > Think durable submissions > does not treat public workflow-shaped metadata as workflow configuration",
-    "submissions.test.ts > Think durable submissions > emits a cancelled running submission's terminal status once",
+    "submissions.test.ts > Think durable submissions > hands a waiter the result when the terminal hook deletes the submission",
     "submissions.test.ts > Think durable submissions > ignores an app's own __cf_progress field and still records the turn's progress",
     "submissions.test.ts > Think durable submissions > lets a status hook cancel its own submission",
     "submissions.test.ts > Think durable submissions > lists and deletes terminal submissions",
     "submissions.test.ts > Think durable submissions > lists nothing for an empty status filter",
     "submissions.test.ts > Think durable submissions > never marks a live turn stale, however long it runs past the stale window (#2498)",
+    "submissions.test.ts > Think durable submissions > refuses a wait from a status hook on a submission still open",
     "submissions.test.ts > Think durable submissions > refuses metadata that leaves no room for the turn's progress, and keeps the progress of metadata that fits",
     "submissions.test.ts > Think durable submissions > rejects conflicting submission id and idempotency key pairs",
     "submissions.test.ts > Think durable submissions > rejects empty submissions before persistence",
     "submissions.test.ts > Think durable submissions > runs a submission's status hooks in order: a held one holds the next",
+    "submissions.test.ts > Think durable submissions > says a submission cancelled from its running hook applied no messages",
     "submissions.test.ts > Think durable submissions > stores a submitted message over 1.8 MB whole",
     "submissions.test.ts > Think durable submissions > stores error status and message when an in-band stream error occurs",
     "submissions.test.ts > Think durable submissions > stores error status and message when turn setup throws",
     "submissions.test.ts > Think durable submissions > takes no keep-alive hold when it starts with no stored requests to replay",
+    "submissions.test.ts > Think durable submissions > throws from a submission's own status hook when it waits for it, and outside waits still end",
     "submissions.test.ts > Think durable submissions > waitForSubmission resolves when a running submission completes",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > allows unverified adapter webhooks only when Think verifies them",
     "telegram-messenger.test.ts > telegram messenger adapter config (#2397) > forwards nativeStreaming to the adapter",
