@@ -1075,8 +1075,9 @@ export class TestAgentToolReplayAgent extends Agent {
 
   /**
    * A released completed row whose output is too large for a Task value,
-   * then an open row after it: both are carried, the large one without its
-   * output, which a re-issue reads back from the child.
+   * then an open row after it. The large row stays on the table, its only
+   * copy; the open one is carried. A re-issue returns the large output from
+   * the row even when the child is gone.
    */
   async carryOversizedReleasedRowForTest(): Promise<{
     carried: Record<string, string | null>;
@@ -1117,6 +1118,7 @@ export class TestAgentToolReplayAgent extends Agent {
       this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM cf_agent_tool_runs
       `[0]?.n ?? 0;
+    await this.deleteSubAgent(TestAgentToolStubChild, big);
     const again = await this.runAgentTool(TestAgentToolStubChild, {
       runId: big,
       input: { chunkBodies: [], summary: "must not run" }
@@ -1125,6 +1127,47 @@ export class TestAgentToolReplayAgent extends Agent {
       carried,
       tableRows,
       reissueBytes: JSON.stringify(again.output ?? "").length
+    };
+  }
+
+  /**
+   * A run a released version left open whose child then finished with an
+   * output too large for a Task value. A caller joins the open run (as a
+   * recovered turn does) while its recovered attempt runs: what it gets.
+   */
+  async joinRecoveredRunWithLargeOutputForTest(
+    runId: string
+  ): Promise<{ status: string; bytes: number; recordHasOutput: boolean }> {
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    await child.startAgentToolRun(
+      {
+        chunkBodies: [],
+        summary: "big",
+        output: { blob: "z".repeat(1_200_000) }
+      },
+      { runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, agent_type, status, display_order, started_at, detached
+      ) VALUES (
+        ${runId}, 'TestAgentToolStubChild', 'running', 0, ${Date.now()}, 0
+      )
+    `;
+    await this._agentTool._carryForwardAgentToolRuns();
+    const joined = this.runAgentTool(TestAgentToolStubChild, {
+      runId,
+      input: { chunkBodies: [], summary: "must not run" }
+    });
+    await this.tasks.runDue("__cf_agent_tool");
+    const result = await joined;
+    const record = this.tasks.peek(runId)?.result as
+      | { output?: unknown }
+      | undefined;
+    return {
+      status: result.status,
+      bytes: JSON.stringify(result.output ?? "").length,
+      recordHasOutput: record?.output !== undefined
     };
   }
 

@@ -153,19 +153,33 @@ describe("agent-tool results the run's record cannot hold", () => {
     expect(reissueBytes).toBe(callerBytes);
   });
 
-  it("carries a released row too large for the record without its output, and the rows after it", async () => {
+  it("keeps a released row too large for the record on the table, and carries the rows after it", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,
       `carry-oversized-${crypto.randomUUID()}`
     );
     const { carried, tableRows, reissueBytes } =
       await agent.carryOversizedReleasedRowForTest();
+    // The large row stays on the table; the open row after it is carried.
     expect(carried).toEqual({
-      "released-big": "completed",
+      "released-big": null,
       "released-open-after": "running"
     });
-    expect(tableRows).toBe(0);
+    expect(tableRows).toBe(1);
+    // Read from the row, with the child gone.
     expect(reissueBytes).toBeGreaterThan(1_200_000);
+  });
+
+  it("gives a caller that joins a recovered run its large output", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `join-large-${crypto.randomUUID()}`
+    );
+    const { status, bytes, recordHasOutput } =
+      await agent.joinRecoveredRunWithLargeOutputForTest("run-join-large");
+    expect(status).toBe("completed");
+    expect(recordHasOutput).toBe(false);
+    expect(bytes).toBeGreaterThan(1_200_000);
   });
 
   it("reads the output of a carried row that has none from the child", async () => {

@@ -3579,12 +3579,9 @@ export class Agent<
       // re-attaches to the child instead of letting the model re-run work
       // the child already did (#1630).
       const settled = this._agentToolTaskResult<Output>(task);
-      if (settled?.status === "completed" && settled.output === undefined) {
-        // A result kept without its output (too large for the record, or
-        // carried from a version that did not store it): the child holds it.
-        return (await this._agentToolOutputFromChild(settled)) ?? settled;
+      if (settled && settled.status !== "interrupted") {
+        return this._agentToolResultWithOutput<Output>(task, settled);
       }
-      if (settled && settled.status !== "interrupted") return settled;
       if (settled) {
         const meta = this._agentToolTaskMeta(task);
         this.tasks.deleteRun(runId);
@@ -3791,25 +3788,34 @@ export class Agent<
   }
 
   /**
-   * The output of a completed run whose record does not hold it, read from
-   * the child; `undefined` when the child cannot say.
+   * A settled run's result with its output. A record marked
+   * `outputOnChild` (the output was too large for it, or a carried row had
+   * none) reads it from the child, for at most 2 s; the stored result
+   * stands when the child cannot say.
    */
-  private async _agentToolOutputFromChild<Output>(
+  private async _agentToolResultWithOutput<Output>(
+    record: TaskRecord,
     settled: RunAgentToolResult<Output>
-  ): Promise<RunAgentToolResult<Output> | undefined> {
-    try {
-      const adapter = this._asAgentToolChildAdapter<unknown, Output>(
-        await this._cf_resolveSubAgent(settled.agentType, settled.runId)
-      );
-      const inspection = await adapter.inspectAgentToolRun(settled.runId);
-      if (inspection?.status !== "completed") return undefined;
-      return this._terminalResultFromInspection<Output>(
-        settled.agentType,
-        inspection
-      );
-    } catch {
-      return undefined;
+  ): Promise<RunAgentToolResult<Output>> {
+    const stored = record.result as { outputOnChild?: unknown } | undefined;
+    if (settled.status !== "completed" || stored?.outputOnChild !== true) {
+      return settled;
     }
+    const fromChild = await this._settleWithinRecoveryTimeout(
+      (async () => {
+        const adapter = this._asAgentToolChildAdapter<unknown, Output>(
+          await this._cf_resolveSubAgent(settled.agentType, settled.runId)
+        );
+        const inspection = await adapter.inspectAgentToolRun(settled.runId);
+        if (inspection?.status !== "completed") return undefined;
+        return this._terminalResultFromInspection<Output>(
+          settled.agentType,
+          inspection
+        );
+      })(),
+      DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
+    );
+    return fromChild ?? settled;
   }
 
   /** The result of an awaited run's task, once its terminal report returned. */
@@ -3817,15 +3823,16 @@ export class Agent<
     runId: string
   ): Promise<RunAgentToolResult<Output>> {
     const record = await this.tasks.wait(runId);
-    const meta = this._agentToolTaskMeta(record);
-    return (
-      (record && this._agentToolTaskResult<Output>(record)) ?? {
-        runId,
-        agentType: meta?.agentType ?? "",
-        status: "error",
-        error: "Agent tool run was deleted before it finished."
-      }
-    );
+    const settled = record && this._agentToolTaskResult<Output>(record);
+    if (record && settled) {
+      return this._agentToolResultWithOutput<Output>(record, settled);
+    }
+    return {
+      runId,
+      agentType: this._agentToolTaskMeta(record)?.agentType ?? "",
+      status: "error",
+      error: "Agent tool run was deleted before it finished."
+    };
   }
 
   /** An awaited run's metadata, or `undefined` for any other record. */
@@ -3848,7 +3855,11 @@ export class Agent<
     const agentType = this._agentToolTaskMeta(record)?.agentType ?? "";
     if (record.status === "completed") {
       // SAFETY: the attempt returns a `RunAgentToolResult` as its value.
-      return record.result as unknown as RunAgentToolResult<Output>;
+      const { outputOnChild: _onChild, ...result } =
+        record.result as unknown as RunAgentToolResult<Output> & {
+          outputOnChild?: true;
+        };
+      return result;
     }
     if (record.status === "aborted" || record.status === "skipped") {
       return {
@@ -3921,8 +3932,9 @@ export class Agent<
 
   /**
    * The value a run's record keeps. An output too large for a Task value is
-   * left on the child, which keeps it: the caller in this isolate gets the
-   * whole result through `local`, and a later re-issue reads it back.
+   * left on the child, which keeps it, and the record is marked
+   * `outputOnChild`: the caller in this isolate gets the whole result
+   * through `local`, and a later reader asks the child.
    */
   private _agentToolResultForRecord(
     result: RunAgentToolResult,
@@ -3930,12 +3942,19 @@ export class Agent<
   ): TaskJson {
     // SAFETY: a `RunAgentToolResult` is JSON (its output came over RPC).
     const value = result as unknown as TaskJson;
-    if (result.output === undefined) return value;
-    const bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
-    if (bytes <= MAX_SERIALIZED_BYTES) return value;
+    if (this._fitsAgentToolRecord(result)) return value;
     if (local) local.fullResult = result;
     const { output: _output, ...rest } = result;
-    return rest as unknown as TaskJson;
+    return { ...rest, outputOnChild: true } as unknown as TaskJson;
+  }
+
+  /** Whether a result, output included, fits a Task value. */
+  private _fitsAgentToolRecord(result: RunAgentToolResult): boolean {
+    if (result.output === undefined) return true;
+    const json = JSON.stringify(result);
+    // A UTF-8 byte is at most 3 per UTF-16 unit: skip the encode when it fits.
+    if (json.length * 3 <= MAX_SERIALIZED_BYTES) return true;
+    return new TextEncoder().encode(json).byteLength <= MAX_SERIALIZED_BYTES;
   }
 
   /** The terminal report of an awaited run: `onAgentToolFinish`, once settled. */
@@ -5185,6 +5204,11 @@ export class Agent<
         startedAt: row.started_at
       };
       const open = row.status === "starting" || row.status === "running";
+      const result = open ? undefined : this._resultFromAgentToolRow(row);
+      // A released result too large for a Task value stays on its row,
+      // which readers still read, until detached runs move off the table
+      // too: the row is its only copy the parent keeps.
+      if (result && !this._fitsAgentToolRecord(result)) continue;
       try {
         // `importRun` writes a run once, so a reset between it and the
         // delete carries nothing twice.
@@ -5194,13 +5218,18 @@ export class Agent<
           status: open ? "running" : "completed",
           attempt: open ? 1 : 0,
           metadata: meta,
-          ...(open
-            ? {}
-            : {
-                result: this._agentToolResultForRecord(
-                  this._resultFromAgentToolRow(row)
-                )
-              }),
+          ...(result
+            ? {
+                result: {
+                  ...result,
+                  // An older version may have kept no output: ask the child.
+                  ...(result.status === "completed" &&
+                  result.output === undefined
+                    ? { outputOnChild: true }
+                    : {})
+                } as unknown as TaskJson
+              }
+            : {}),
           retain: true,
           createdAt: row.started_at,
           ...(open ? {} : { settledAt: row.completed_at ?? row.started_at })
