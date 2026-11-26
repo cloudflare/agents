@@ -9,3 +9,4 @@ Clients and reconnecting tabs.
 - A chat tab that joins a running reply gets live chunks again (#2703, #3068).
 - A tab is told a request's end once, after a stop or a reconnect too (#3074, #3135, #3064).
 - Connection state that is not a plain object keeps its shape (#2942).
+- After a reconnect, `useAgentChat` shows a turn the server accepted but has not started streaming as busy, and Stop cancels it (#2741).
