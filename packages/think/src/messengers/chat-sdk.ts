@@ -380,7 +380,7 @@ export class ThinkMessengerRuntime {
     const thread = this.reviveThread(definition, payload.thread);
     const mode = messengerReplyRecoveryMode(stage);
     if (mode === "answer") {
-      await this.answer(definition, event, thread, record, payload.event);
+      await this.answer(definition, event, thread, record, event);
       return;
     }
     if (mode === "apologize") {

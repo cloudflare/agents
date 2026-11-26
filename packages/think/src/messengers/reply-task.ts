@@ -13,7 +13,11 @@ import {
   isDurableObjectMemoryLimitReset,
   isPlatformTransientError
 } from "agents";
-import { registerDeliverySink, sendDelivery } from "agents/internal";
+import {
+  registerDeliverySink,
+  sendDelivery,
+  type DeliverySink
+} from "agents/internal";
 import { NonRetryableError, type TaskJson, type Tasks } from "agents/tasks";
 import type { MessengerReplyStage } from "./delivery";
 import type { MessengerEvent } from "./events";
@@ -86,19 +90,15 @@ export async function recoverMessengerReply(
 }
 
 /**
- * Register the reply sink and, TEMPORARY for one release, the definition
- * replies ran on before (think@0.24.0, and main until this change): such a
- * run left open by a reset becomes a reply delivery at the stage its
- * snapshot recorded.
+ * Where reply deliveries go: the first attempt answers live, a later one
+ * recovers by the stage the reply reached.
  *
  * @internal
  */
-export function registerMessengerReplies(
-  tasks: Tasks,
-  storage: DurableObjectStorage,
+export function messengerReplySink(
   runtime: () => MessengerReplyRuntime | undefined
-): void {
-  registerDeliverySink<MessengerReplyPayload>(tasks, MESSENGER_REPLY_SINK, {
+): DeliverySink<MessengerReplyPayload> {
+  return {
     attemptTimeoutMs: REPLY_ATTEMPT_TIMEOUT_MS,
     async deliver(payload, attempt) {
       const messengers = runtime();
@@ -117,10 +117,32 @@ export function registerMessengerReplies(
         record
       );
     },
-    onGiveUp(error) {
+    onGiveUp(error, payload) {
       console.error("[Think] A messenger reply was given up", error);
+      // Nothing else will answer what queued behind it.
+      runtime()?.drainAfterRecovery(payload);
     }
-  });
+  };
+}
+
+/**
+ * Register the reply sink and, TEMPORARY for one release, the definition
+ * replies ran on before (think@0.24.0, and main until this change): such a
+ * run left open by a reset becomes a reply delivery at the stage its
+ * snapshot recorded.
+ *
+ * @internal
+ */
+export function registerMessengerReplies(
+  tasks: Tasks,
+  storage: DurableObjectStorage,
+  runtime: () => MessengerReplyRuntime | undefined
+): void {
+  registerDeliverySink(
+    tasks,
+    MESSENGER_REPLY_SINK,
+    messengerReplySink(runtime)
+  );
 
   // TEMPORARY: remove in the next minor after this ships.
   tasks.register(RELEASED_REPLY_DEFINITION, async (_input, step) => {
@@ -128,7 +150,9 @@ export function registerMessengerReplies(
     const snapshot = releasedSnapshot(
       step.checkpoint.get("snapshot") ?? (await storage.get(key))
     );
-    if (snapshot && snapshot.stage !== "completed") {
+    // A completed reply posts nothing more, but its delivery still answers
+    // what queued behind it.
+    if (snapshot) {
       await sendDelivery<MessengerReplyPayload>(
         tasks,
         MESSENGER_REPLY_SINK,
@@ -148,7 +172,7 @@ export function registerMessengerReplies(
 
 /**
  * Accept one reply and answer it here and now. A repeated webhook (same
- * id) while the reply runs joins it.
+ * id) joins the reply, or finds it answered.
  *
  * @internal
  */
@@ -164,7 +188,9 @@ export function sendMessengerReply(
     id,
     payload as unknown as TaskJson,
     undefined,
-    live
+    // Kept once answered: a repeated webhook or button callback after the
+    // reply ended is a repeat, not a new request.
+    { local: live, retain: true }
   );
 }
 

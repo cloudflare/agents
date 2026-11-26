@@ -11,7 +11,10 @@ let botMessageId = 100;
 
 async function fakeTelegramBotApi(request: Request): Promise<Response> {
   const url = new URL(request.url);
-  if (url.hostname !== "fake-telegram.test") return fetch(request);
+  // The replay talks to the fake Bot API only: anything else fails it.
+  if (url.hostname !== "fake-telegram.test") {
+    throw new Error(`Unexpected outbound request to ${url.hostname}`);
+  }
   if (url.pathname === "/__calls") {
     return Response.json(
       botApiCalls.get(url.searchParams.get("bot") ?? "") ?? []
@@ -56,8 +59,8 @@ export default defineConfig({
       },
       miniflare: {
         // The fake Telegram Bot API the recorded-webhook replay points its
-        // adapter at. Everything else goes out as usual. Its own config: an
-        // outbound service changes how other tests' failed fetches look.
+        // adapter at. Any other host fails. Its own config: an outbound
+        // service changes how other tests' failed fetches look.
         // SAFETY: Miniflare hands undici's Request and takes its Response,
         // which Node's global ones are.
         outboundService: fakeTelegramBotApi as never

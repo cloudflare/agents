@@ -149,16 +149,24 @@ export async function sendDelivery<Payload>(
     attempts: number;
     progress?: Record<string, TaskJson>;
   },
-  local?: unknown
+  options: {
+    /** Handed to the first attempt in this isolate as `attempt.local`. */
+    local?: unknown;
+    /**
+     * Keep the run's row once delivered, so the same id later is still
+     * taken as a repeat. Default: deleted on acknowledgement.
+     */
+    retain?: boolean;
+  } = {}
 ): Promise<void> {
   if (!resume) {
     // The first attempt runs here and now: its claim arms the run's only
     // wake, so the accept writes none.
     await tasks.run(deliveryDefinition(sink), payload, {
       runId: id,
-      retain: false,
+      retain: options.retain ?? false,
       start: "now",
-      ...(local !== undefined && { local })
+      ...(options.local !== undefined && { local: options.local })
     });
     return;
   }

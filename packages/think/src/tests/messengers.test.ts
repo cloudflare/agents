@@ -1702,6 +1702,46 @@ describe("think messengers core", () => {
       expect(prompts).toEqual(["hello", "follow up"]);
     });
 
+    it.each([
+      ["a reply given up", { giveUp: true }],
+      ["a completed reply", { stage: "completed" as const }]
+    ])("answers messages queued behind %s", async (_label, options) => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `drain-${crypto.randomUUID()}`
+      );
+      expect(await agent.recoverWithQueuedFollowUpForTest(options)).toBeNull();
+      let prompts: string[] = [];
+      for (let i = 0; i < 50 && prompts.length < 1; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["follow up"]);
+    });
+
+    it("answers a repeated reply id once, after the first was answered", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `repeat-${crypto.randomUUID()}`
+      );
+      expect(await agent.sendReplyTwiceForTest()).toBe(1);
+    });
+
+    it("lets a completed reply think@0.24.0 left open post nothing more", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `released-done-${crypto.randomUUID()}`
+      );
+      expect(await agent.replayReleasedReplyForTest("completed")).toBe(true);
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        if ((await agent.openReplyRunsForTest()) === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(await agent.openReplyRunsForTest()).toBe(0);
+      expect(await agent.getAdapterCalls()).toEqual([]);
+    });
+
     it("keeps queued messages behind a recovered reply that will be retried", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,

@@ -4,7 +4,11 @@ import { Message, parseMarkdown } from "chat";
 import { Think } from "../../think";
 import { releaseDelivery, sendDelivery } from "agents/internal";
 import { recoveredReplyId } from "../../messengers/recovered-reply";
-import { recoverMessengerReply } from "../../messengers/reply-task";
+import {
+  messengerReplySink,
+  recoverMessengerReply,
+  sendMessengerReply
+} from "../../messengers/reply-task";
 import { telegramMessenger } from "../../messengers/telegram";
 import {
   chatSdkMessenger,
@@ -318,7 +322,9 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     enqueue?: boolean;
     failPost?: boolean;
     retried?: boolean;
-    stage?: "accepted" | "streaming";
+    stage?: "accepted" | "streaming" | "completed";
+    /** The reply's delivery gives up instead of recovering. */
+    giveUp?: boolean;
   }): Promise<string | null> {
     const runtime = (
       this as unknown as { _messengerRuntime: ThinkMessengerRuntime }
@@ -359,18 +365,26 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       }
     };
     try {
+      const payload = {
+        event,
+        thread: {
+          _type: "chat:Thread",
+          adapterName: "fake",
+          channelId: threadId,
+          id: threadId,
+          isDM: true
+        }
+      };
+      if (options?.giveUp) {
+        await messengerReplySink(() => runtime).onGiveUp?.(
+          new Error("gave up"),
+          payload
+        );
+        return null;
+      }
       await recoverMessengerReply(
         runtime,
-        {
-          event,
-          thread: {
-            _type: "chat:Thread",
-            adapterName: "fake",
-            channelId: threadId,
-            id: threadId,
-            isDM: true
-          }
-        },
+        payload,
         options?.stage ?? "accepted",
         () => {},
         () => options?.retried ?? false
@@ -600,7 +614,9 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
    * key that release wrote, its run replayed with no live reply. Returns
    * whether the key is gone afterwards.
    */
-  async replayReleasedReplyForTest(): Promise<boolean> {
+  async replayReleasedReplyForTest(
+    stage: "accepted" | "completed" = "accepted"
+  ): Promise<boolean> {
     const nonce = crypto.randomUUID();
     const threadId = "fake:dm-released";
     const event: MessengerEvent = {
@@ -628,8 +644,8 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       // The snapshot as think@0.24.0 wrote it.
       {
         type: "think:messenger-reply",
-        stage: "accepted",
-        tag: { stage: "accepted", kind: "interim", turnEnded: false },
+        stage,
+        tag: { stage, kind: "interim", turnEnded: false },
         event,
         thread: {
           _type: "chat:Thread",
@@ -646,6 +662,29 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       { runId: `msgr_${nonce}`, start: "now" }
     );
     return (await this.ctx.storage.get(key)) === undefined;
+  }
+
+  /**
+   * Sends the same reply id twice, the second after the first was
+   * answered; returns how many times it was answered.
+   */
+  async sendReplyTwiceForTest(): Promise<number> {
+    let answered = 0;
+    const id = `repeat-${crypto.randomUUID()}`;
+    const send = () =>
+      sendMessengerReply(
+        this.tasks,
+        id,
+        { event: {} as MessengerEvent, thread: null },
+        {
+          answer: async () => {
+            answered++;
+          }
+        }
+      );
+    await send();
+    await send();
+    return answered;
   }
 
   /** Messenger reply runs not yet settled. */
