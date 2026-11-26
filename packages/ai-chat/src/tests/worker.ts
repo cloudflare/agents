@@ -4508,6 +4508,50 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
+  /** How many chat-turn runs are waiting out a recovery's backoff. */
+  backingOffChatTurnRunsForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_chat_turn'
+          AND status = 'pending' AND wait_reason = 'sleep'
+      `[0]?.count ?? 0
+    );
+  }
+
+  /**
+   * End the backoff of every chat-turn run that is waiting one out, and run
+   * it, as its wake would once the time had passed. A test holds a
+   * recovery's backoff by giving the failure a long `retry-after`, and ends
+   * it here when it wants the attempt to run.
+   *
+   * @returns How many runs were waiting.
+   */
+  async endRecoveryBackoffsForTest(): Promise<number> {
+    const past = Date.now() - 1_000;
+    const waiting = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
+      WHERE definition = '__cf_internal_chat_turn'
+        AND status = 'pending' AND wait_reason = 'sleep'
+    `;
+    for (const { run_id } of waiting) {
+      this.sql`
+        UPDATE cf_agents_task_steps SET next_at = ${past}
+        WHERE run_id = ${run_id} AND kind = 'sleep' AND state = 'waiting'
+      `;
+      this.sql`
+        UPDATE cf_agents_task_runs SET next_at = ${past}
+        WHERE run_id = ${run_id}
+      `;
+      this.sql`
+        UPDATE cf_agents_jobs SET time = ${past}
+        WHERE id = ${`task:${run_id}`}
+      `;
+    }
+    if (waiting.length > 0) await this.alarm();
+    return waiting.length;
+  }
+
   /** Run every open chat-turn Task run now, as a later wake would. */
   async runOpenChatTurnRunsForTest(): Promise<void> {
     const past = Date.now() - 1_000;
