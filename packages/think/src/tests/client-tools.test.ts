@@ -4723,6 +4723,9 @@ describe("Think — stop means stop for continuations", () => {
     );
     // The app stops everything, not through the WebSocket cancel.
     await agent.cancelAllChats();
+    // Its effect: the held continuation is dropped.
+    await waitUntil(async () => dropped.length > 0, 8000);
+    await agent.releaseSlowClientToolStreamForTest();
     await done;
     await settled(agent);
 
