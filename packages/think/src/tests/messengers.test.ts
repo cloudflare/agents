@@ -1742,6 +1742,13 @@ describe("think messengers core", () => {
         if (asked && (await agent.openReplyRunsForTest()) === 0) break;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
+      // Answered (one message, edited as it streamed), and the kept run
+      // holds no text of it.
+      expect(await agent.openReplyRunsForTest()).toBe(0);
+      expect(await agent.getAdapterCalls()).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
       expect(await agent.replyRowsHoldForTest("42 Main Street")).toBe(false);
     });
 

@@ -116,8 +116,6 @@ export function messengerReplySink(
         attempt.checkpoint.set(STAGE, stage);
       const live = attempt.local as LiveMessengerReply | undefined;
       if (live) {
-        // Kept before any delivery work: a reset mid-answer recovers from it.
-        attempt.checkpoint.set(REPLY, live.payload as unknown as TaskJson);
         await live.answer(record);
         return;
       }
@@ -206,16 +204,15 @@ export function sendMessengerReply(
   id: string,
   live: LiveMessengerReply
 ): Promise<void> {
-  return sendDelivery(
-    tasks,
-    MESSENGER_REPLY_SINK,
-    id,
-    {},
-    undefined,
+  return sendDelivery(tasks, MESSENGER_REPLY_SINK, id, {}, undefined, {
+    local: live,
+    // Written with the run's row: a reset before the first attempt runs
+    // still finds what to answer.
+    progress: { [REPLY]: live.payload as unknown as TaskJson },
     // Kept once answered: a repeated webhook or button callback after the
     // reply ended is a repeat, not a new request.
-    { local: live, retain: true }
-  );
+    retain: true
+  });
 }
 
 /** The definition think@0.24.0 ran replies on. */

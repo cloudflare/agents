@@ -158,6 +158,11 @@ export async function sendDelivery<Payload>(
     /** Handed to the first attempt in this isolate as `attempt.local`. */
     local?: unknown;
     /**
+     * Checkpoint entries the delivery starts with, durable with its row
+     * (before any attempt can be cut off). Keys must not be reserved.
+     */
+    progress?: Record<string, TaskJson>;
+    /**
      * Keep the run's row once delivered, so the same id later is still
      * taken as a repeat. Default: deleted on acknowledgement.
      */
@@ -171,7 +176,8 @@ export async function sendDelivery<Payload>(
       runId: id,
       retain: options.retain ?? false,
       start: "now",
-      ...(options.local !== undefined && { local: options.local })
+      ...(options.local !== undefined && { local: options.local }),
+      ...(options.progress && { checkpoint: options.progress })
     });
     return;
   }

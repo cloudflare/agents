@@ -72,6 +72,37 @@ describe("deliveries", () => {
     );
   });
 
+  it("starts a delivery with its progress already in its row", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        const seen: unknown[] = [];
+        registerDeliverySink<object>(tasksOf(instance), "seeded", {
+          deliver: (_payload, attempt) => {
+            // In the row before the sink runs, not only in memory.
+            seen.push(
+              state.storage.sql
+                .exec<{ checkpoint: string | null }>(
+                  "SELECT checkpoint FROM cf_agents_task_runs WHERE run_id = 'k'"
+                )
+                .one().checkpoint
+            );
+            seen.push(attempt.checkpoint.get("reply"));
+          }
+        });
+        await sendDelivery(tasksOf(instance), "seeded", "k", {}, undefined, {
+          progress: { reply: { text: "hi" } }
+        });
+        expect(JSON.parse(String(seen[0]))).toMatchObject({
+          reply: { text: "hi" }
+        });
+        expect(seen[1]).toEqual({ text: "hi" });
+      }
+    );
+  });
+
   it("joins a delivery that is still open instead of sending it twice", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
