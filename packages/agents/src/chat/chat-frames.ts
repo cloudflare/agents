@@ -60,6 +60,12 @@ export interface ChatFramesOptions {
    * to every socket it accepted for it).
    */
   reachesUnlisted?(): boolean;
+  /**
+   * Whether the host's broadcast is watched beyond the tabs it lists (an
+   * agent-tool run in flight, a subclass that overrides `broadcast`), so a
+   * frame is sent even with no tab to read it.
+   */
+  observed?(): boolean;
   /** Where recent terminal frames are recorded. */
   kv: RecentTerminalsKv;
   /** Connections that were told a stream resumes and have not acked yet. */
@@ -238,10 +244,32 @@ export class ChatFrames {
         return;
       }
     }
+    // With nobody to read it, the frame is not serialized (#2724). A
+    // terminal is still recorded, for a tab that comes back.
+    if (!this.#reaches(without)) {
+      this.#record(ready);
+      return;
+    }
     const text = frameText(ready);
     if (text === undefined) return;
     this.options.broadcast(text, without);
     this.#record(ready);
+  }
+
+  /**
+   * Whether a broadcast that leaves out `without` has a reader: a listed
+   * socket outside it, sockets the host reaches unlisted, or a host whose
+   * broadcast is observed.
+   */
+  #reaches(without: readonly string[]): boolean {
+    if (this.options.observed?.() || this.options.reachesUnlisted?.()) {
+      return true;
+    }
+    const left = new Set(without);
+    for (const connection of this.options.connections()) {
+      if (!left.has(connection.id)) return true;
+    }
+    return false;
   }
 
   /**
@@ -264,14 +292,13 @@ export class ChatFrames {
     messages: ReadonlyArray<TMessage>,
     exclude: readonly string[] = []
   ): void {
+    const without = this.options.listsReachResumingTabs
+      ? [...exclude]
+      : [...exclude, ...this.options.resuming];
+    if (!this.#reaches(without)) return;
     const text = frameText(this.messagesFrame(messages));
     if (text === undefined) return;
-    this.options.broadcast(
-      text,
-      this.options.listsReachResumingTabs
-        ? [...exclude]
-        : [...exclude, ...this.options.resuming]
-    );
+    this.options.broadcast(text, without);
   }
 
   /** Send `frame` to one tab. A closed socket is ignored. */

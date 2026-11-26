@@ -2997,6 +2997,33 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * Run a turn and count the chat frames serialized during it, by type
+   * (#2724). Counts `JSON.stringify` calls on a frame object.
+   */
+  async countChatFrameSerializationsForTest(
+    message: string
+  ): Promise<Record<string, number>> {
+    const counts: Record<string, number> = {};
+    const stringify = JSON.stringify;
+    JSON.stringify = ((...args: Parameters<typeof stringify>) => {
+      const type = (args[0] as { type?: unknown } | null | undefined)?.type;
+      if (
+        type === "cf_agent_chat_messages" ||
+        type === "cf_agent_use_chat_response"
+      ) {
+        counts[type] = (counts[type] ?? 0) + 1;
+      }
+      return stringify(...args);
+    }) as typeof JSON.stringify;
+    try {
+      await this.testChat(message);
+    } finally {
+      JSON.stringify = stringify;
+    }
+    return counts;
+  }
+
   private _userTextsForTest(): string[] {
     return this.messages
       .filter((message) => message.role === "user")
