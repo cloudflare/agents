@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import type { UIMessage as ChatMessage } from "ai";
@@ -197,6 +197,11 @@ interface ChatRecoveryTestStub {
     delaySeconds: number
   ): Promise<void>;
   openReleasedRecoveryRunsForTest(): Promise<number>;
+  startAttemptRunForTest(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: Record<string, unknown>,
+    delaySeconds: number
+  ): Promise<void>;
   recoveryRunStepsForTest(): Promise<string[]>;
   preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
@@ -2175,6 +2180,66 @@ describe("onChatRecovery", () => {
     );
     expect(assistantMessages).toHaveLength(1);
   });
+
+  it("runs an attempt too large for a step's journal in a run of its own", async () => {
+    const agentStub = await getTestAgent(
+      `large-attempt-${crypto.randomUUID()}`
+    );
+    await agentStub.persistMessages([
+      { id: "u-big", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-big",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ]);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-big",
+      requestId: "root-big",
+      recoveryRootRequestId: "root-big",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      scheduleCount: 1,
+      scheduled: {
+        callback: "_chatRecoveryContinue",
+        targetMessageId: "a-big"
+      },
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    // The interrupted request's body rides in the attempt: 1.5 MiB here,
+    // past what a turn's run can journal (1 MiB), so it gets its own run.
+    await agentStub.startAttemptRunForTest(
+      "_chatRecoveryContinue",
+      {
+        incidentId: "inc-big",
+        originalRequestId: "root-big",
+        targetAssistantId: "a-big",
+        delivery: 1,
+        lastBody: { big: "x".repeat(1_500_000) }
+      },
+      0
+    );
+
+    // The run starts from the alarm and continues the reply, once.
+    await vi.waitFor(
+      async () => {
+        expect(await agentStub.getIncidentForTest("inc-big")).toBeNull();
+      },
+      { timeout: 10_000, interval: 20 }
+    );
+    await agentStub.waitForIdleForTest();
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(0);
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(
+      stored[1].parts.map((p) => (p as { text?: string }).text ?? "").join("")
+    ).toContain("Continued response.");
+  }, 20_000);
 
   it("finishes a recovery run an earlier version enqueued, after its backoff", async () => {
     const agentStub = await getTestAgent(`upgrade-${crypto.randomUUID()}`);
