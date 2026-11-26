@@ -268,6 +268,23 @@ describe("routeStreamInterruption", () => {
     });
   });
 
+  it("names the incident by the transcript as it was when the stream broke", async () => {
+    const t = setup({ partialParts: [], retryTarget: "user-1" });
+    const messages = [
+      { id: "user-1", role: "user" as const, parts: [] as never[] }
+    ];
+    t.host.messages = () => messages;
+    const retryTarget = t.host.retryTargetUserId;
+    // A newer question lands while the route waits.
+    t.host.retryTargetUserId = async () => {
+      messages.push({ id: "user-2", role: "user", parts: [] });
+      return retryTarget();
+    };
+
+    await t.run();
+    expect(t.incident()?.incidentId).toContain(":user-1");
+  });
+
   it("retries the question when the turn produced nothing", async () => {
     const t = setup({ partialParts: [], retryTarget: "user-1" });
     expect(await t.run()).toBe("scheduled");

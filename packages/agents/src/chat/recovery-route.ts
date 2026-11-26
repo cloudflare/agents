@@ -234,6 +234,10 @@ async function route(
   // Inside a recovery attempt the interrupted turn belongs to that attempt's
   // chain, and the next attempt must not join the run that schedules it.
   const chained = engine.activeRootRequestId !== undefined;
+  // Read before anything awaits, so the incident's identity is the
+  // transcript as it was when the stream was interrupted.
+  const latestUserMessageId =
+    [...host.messages()].reverse().find((m) => m.role === "user")?.id ?? null;
   const recoveryRootRequestId = engine.activeRootRequestId ?? requestId;
 
   // A turn that failed before it produced any part has nothing to continue.
@@ -246,8 +250,7 @@ async function route(
   const { incident, config, exhausted, stopped } = await engine.beginIncident({
     requestId,
     recoveryRootRequestId,
-    latestUserMessageId:
-      [...host.messages()].reverse().find((m) => m.role === "user")?.id ?? null,
+    latestUserMessageId,
     recoveryKind,
     trigger: "stalled"
   });
