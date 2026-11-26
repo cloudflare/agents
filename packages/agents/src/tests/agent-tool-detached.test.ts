@@ -155,6 +155,20 @@ describe("detached agent-tool runs on Tasks", () => {
     ]);
   });
 
+  it("clears a run that gave up while its child may still finish, freeing its slot", async () => {
+    const agent = await parent("detached-gave-up-clear");
+    await agent.startDetachedForTest(
+      "run-gave-up-clear",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
+    );
+    await agent.checkDetachedForTest("run-gave-up-clear");
+    expect(await agent.clearRunsForTest("run-gave-up-clear")).toEqual({
+      task: null,
+      open: 0
+    });
+  });
+
   it("settles an unconfirmed give-up once a later check reads the give-up's own abort (#2769)", async () => {
     const agent = await parent("detached-unconfirmed");
     await agent.startDetachedForTest(
@@ -441,6 +455,25 @@ describe("detached agent-tool runs a released version left", () => {
     ).toBe("completed");
     expect(
       statuses(await agent.getDetachedDeliveryLog(), "released-owed-gone")
+    ).toEqual(["completed"]);
+  });
+
+  it("delivers the milestones the child still has before a released recorded outcome", async () => {
+    const agent = await parent("detached-owed-milestone");
+    await agent.carryForwardReleasedOwedWithoutChildForTest(
+      "released-owed-ms",
+      {
+        childWithMilestone: "sources-gathered"
+      }
+    );
+    expect((await agent.checkDetachedForTest("released-owed-ms")).status).toBe(
+      "completed"
+    );
+    expect(
+      await agent.getDetachedMilestonesForTest("released-owed-ms")
+    ).toEqual(["sources-gathered"]);
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "released-owed-ms")
     ).toEqual(["completed"]);
   });
 

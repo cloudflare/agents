@@ -1396,10 +1396,15 @@ export class AgentToolParent {
 
     if (step.checkpoint.get<boolean>("owedInInput") === true) {
       // Carried forward from a released version that recorded this outcome
-      // but had not delivered it.
+      // but had not delivered it. Milestones the child still has go first.
       const owed = this.host.tasks.inputOf<RunAgentToolResult>(runId);
-      if (owed)
+      if (owed) {
+        const asked = await this._askDetachedChild(meta, runId);
+        if (asked?.inspection) {
+          this._deliverDetachedMilestones(meta, runId, asked.inspection);
+        }
         return this._deliverDetachedFromAttempt(meta, owed, step.signal);
+      }
     }
 
     const reached = await this._askDetachedChild(meta, runId);
@@ -1794,7 +1799,10 @@ export class AgentToolParent {
     for (const row of retained) {
       try {
         const cls = this._agentToolClassByName(row.agent_type);
-        if (row.status === "starting" || row.status === "running") {
+        // Its task, not its row: a detached run that gave up while its child
+        // may still finish shows `interrupted` but is still open.
+        const open = this.host.tasks.peek(row.run_id)?.status;
+        if (open === "pending" || open === "running") {
           // The cancel aborts the run's attempt, which stops following the
           // child. A cleared detached run delivers nothing.
           await this.host.tasks.cancel(row.run_id, AGENT_TOOL_CLEARED_REASON);

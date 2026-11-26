@@ -351,6 +351,21 @@ export class TestAgentToolReplayAgent extends Agent {
     }
   }
 
+  /** Clear every run; what is left of `runId`, and the open-run count. */
+  async clearRunsForTest(
+    runId: string
+  ): Promise<{ task: string | null; open: number }> {
+    await this.clearAgentToolRuns();
+    return {
+      task: this.tasks.peek(runId)?.status ?? null,
+      open: (
+        this as unknown as {
+          _agentTools: { _activeAgentToolRunCount(): number };
+        }
+      )._agentTools._activeAgentToolRunCount()
+    };
+  }
+
   /** A detached run's state; waits for its report once it settled. */
   async detachedStateForTest(runId: string): Promise<{
     status: string | null;
@@ -453,17 +468,33 @@ export class TestAgentToolReplayAgent extends Agent {
    * not delivered it, whose child is gone; carried forward.
    */
   async carryForwardReleasedOwedWithoutChildForTest(
-    runId: string
+    runId: string,
+    options: { childWithMilestone?: string } = {}
   ): Promise<void> {
+    if (options.childWithMilestone) {
+      const child = await this.subAgent(TestAgentToolStubChild, runId);
+      await child.startAgentToolRun(
+        {
+          chunkBodies: ["a"],
+          summary: "recorded",
+          milestones: [{ beforeChunk: 0, name: options.childWithMilestone }]
+        },
+        { runId }
+      );
+    }
     ensureReleasedAgentToolTable(this.ctx.storage.sql);
     const now = Date.now();
+    const milestones = options.childWithMilestone
+      ? JSON.stringify([options.childWithMilestone])
+      : null;
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, agent_type, status, summary, started_at, completed_at,
-        detached, detached_on_finish, detached_max_budget_at
+        detached, detached_on_finish, detached_max_budget_at,
+        detached_on_milestones
       ) VALUES (
         ${runId}, 'TestAgentToolStubChild', 'completed', 'recorded', ${now},
-        ${now}, 1, 'onDetachedDone', ${now + 3_600_000}
+        ${now}, 1, 'onDetachedDone', ${now + 3_600_000}, ${milestones}
       )
     `;
     await this._agentTool._carryForwardAgentToolRuns();

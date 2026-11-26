@@ -93,6 +93,14 @@ const LEGACY_RECOVERY_LOOP_CALLBACKS = new Set([
   "_chatRecoveryRetry"
 ]);
 
+/**
+ * TEMPORARY, with the hand-over: callbacks a release scheduled that no longer
+ * exist. A held schedule for one is dropped instead of handed over, because
+ * the sub-agent's own start already ran the cleanup that would have cancelled
+ * it: `_cfDetachedReconcileTick`, the released detached agent-tool backbone.
+ */
+const RETIRED_HANDOVER_CALLBACKS = new Set(["_cfDetachedReconcileTick"]);
+
 /** TEMPORARY: wait before a failed hand-over to a sub-agent is tried again. */
 const HANDOVER_RETRY_MS = 30_000;
 
@@ -429,6 +437,7 @@ export class Scheduler<
     timing: SchedulerJobPayload
   ): Promise<LifecycleJobOutcome | void> {
     const { owner_path, owner_path_key, handover_time, ...rest } = timing;
+    if (RETIRED_HANDOVER_CALLBACKS.has(job.fn)) return undefined;
     try {
       await this.lifecycle.routes.to(
         { key: owner_path_key ?? owner_path!, data: owner_path! },

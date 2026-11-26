@@ -2280,13 +2280,14 @@ export class TestSubAgentParent extends Agent {
     subAgentName: string,
     id: string,
     value: string,
-    delayMs = 0
+    delayMs = 0,
+    callback = "scheduledCallback"
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     const selfPath = await child.getSelfPath();
     this.sql`
       INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
-      VALUES (${id}, 'scheduler', 'scheduledCallback', ${Date.now() + delayMs},
+      VALUES (${id}, 'scheduler', ${callback}, ${Date.now() + delayMs},
         ${JSON.stringify({
           payload: { value },
           type: "delayed",

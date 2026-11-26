@@ -558,6 +558,28 @@ describe("SubAgent", () => {
     ).toEqual([]);
   });
 
+  it("drops a held schedule for the released detached agent-tool backbone instead of handing it over", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertLegacyRootSchedule(
+      "sched-retired",
+      "old-tick",
+      "tick",
+      120_000,
+      "_cfDetachedReconcileTick"
+    );
+    await agent.restartSchedulerForTest();
+    await runDurableObjectAlarm(agent);
+
+    await vi.waitFor(async () => {
+      expect(
+        (await agent.rootScheduleRows()).filter((r) => r.id === "old-tick")
+      ).toEqual([]);
+    });
+    expect(await agent.subAgentScheduleTimes("sched-retired")).toEqual([]);
+  });
+
   it("keeps one copy when a sub-agent scheduled the same thing again before the hand-over", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
