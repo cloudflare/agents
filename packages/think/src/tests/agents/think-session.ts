@@ -67,7 +67,8 @@ import {
   toolApprovalUpdate,
   toolResultUpdate,
   type ChatProtocolHost,
-  REPLAY_CHUNK_BYTES
+  REPLAY_CHUNK_BYTES,
+  turnSignal
 } from "agents/chat";
 import { currentTurnCheckpoint } from "agents/chat";
 import type {
@@ -3279,11 +3280,8 @@ export class ThinkTestAgent extends Think {
         ${Date.now()})
     `;
     const internals = this as unknown as {
-      _aborts: {
-        getSignal(id: string): AbortSignal | undefined;
-        remove(id: string): void;
-      };
       _turns: {
+        aborts: Map<string, AbortController>;
         beginRecoveryAttempt(id: string): {
           signal: AbortSignal;
           end(): void;
@@ -3291,8 +3289,11 @@ export class ThinkTestAgent extends Think {
       };
       _submissionAbortControllers: Map<string, AbortController>;
     };
-    const recoveredTurn = internals._aborts.getSignal("recovered-request");
-    const otherTurn = internals._aborts.getSignal("a-users-turn");
+    const recoveredTurn = turnSignal(
+      internals._turns.aborts,
+      "recovered-request"
+    );
+    const otherTurn = turnSignal(internals._turns.aborts, "a-users-turn");
     const attempt = internals._turns.beginRecoveryAttempt("first-request");
     const otherAttempt = internals._turns.beginRecoveryAttempt("a-users-root");
     const otherSubmission = new AbortController();
@@ -3312,8 +3313,8 @@ export class ThinkTestAgent extends Think {
     } finally {
       attempt.end();
       otherAttempt.end();
-      internals._aborts.remove("recovered-request");
-      internals._aborts.remove("a-users-turn");
+      internals._turns.aborts.delete("recovered-request");
+      internals._turns.aborts.delete("a-users-turn");
       internals._submissionAbortControllers.delete("a-users-submission");
     }
   }
@@ -3857,11 +3858,14 @@ export class ThinkTestAgent extends Think {
       UPDATE cf_agent_tool_child_runs SET request_id = 'recovered-request'
       WHERE run_id = ${runId}
     `;
-    const signal = (
-      this as unknown as {
-        _aborts: { getSignal(id: string): AbortSignal | undefined };
-      }
-    )._aborts.getSignal("recovered-request");
+    const signal = turnSignal(
+      (
+        this as unknown as {
+          _turns: { aborts: Map<string, AbortController> };
+        }
+      )._turns.aborts,
+      "recovered-request"
+    );
     const abortedBefore = signal?.aborted ?? false;
     await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
     return {
@@ -11202,7 +11206,8 @@ export class ThinkProgrammaticTestAgent extends Think {
    * non-zero between tests means a controller leaked.
    */
   async getAbortControllerCount(): Promise<number> {
-    return (this as unknown as { _aborts: { size: number } })._aborts.size;
+    return (this as unknown as { _turns: { aborts: { size: number } } })._turns
+      .aborts.size;
   }
 
   async getStoredMessages(): Promise<UIMessage[]> {

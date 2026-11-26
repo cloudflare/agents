@@ -2,6 +2,7 @@ import { memoryLane, memoryStorage } from "./memory-lane";
 import { ChatRecoverySupersededError } from "../turn-stop";
 import { ChatStreamStalledError } from "../stall-watchdog";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { turnSignal } from "../turn-stop";
 import type { UIMessage } from "ai";
 import { AutoContinuationController } from "../auto-continuation-controller";
 import {
@@ -364,7 +365,7 @@ describe("ChatTurns", () => {
   // ── Cancel ──────────────────────────────────────────────────────────
 
   it("cancels a request's turn and a recovery attempt running for it", () => {
-    const signal = turns.aborts.getSignal("req-1");
+    const signal = turnSignal(turns.aborts, "req-1");
     const attempt = turns.beginRecoveryAttempt("req-1");
     const other = turns.beginRecoveryAttempt("req-2");
 
@@ -394,7 +395,7 @@ describe("ChatTurns", () => {
 
   it("reset tears down turns, aborts, interactions and continuations together", async () => {
     host.transcript = [user("u1"), toolReply("a1", "output-available")];
-    const signal = turns.aborts.getSignal("req-1");
+    const signal = turnSignal(turns.aborts, "req-1");
     const parked = makeConnection("parked");
     turns.preStream.begin("req-1");
     turns.preStream.park(parked);
@@ -630,7 +631,7 @@ describe("ChatTurns", () => {
   describe("a stop is reported to the host", () => {
     it("cancel reports the request and its reason, whether or not a turn runs under it", async () => {
       await turns.cancel("nothing-runs-here", "why");
-      turns.aborts.getSignal("r1");
+      turnSignal(turns.aborts, "r1");
       await turns.cancel("r1");
       expect(host.stops).toEqual([
         { requestId: "nothing-runs-here", reason: "why" },
@@ -645,7 +646,7 @@ describe("ChatTurns", () => {
 
     it("a caller's linked signal is a stop like any other", () => {
       const caller = new AbortController();
-      turns.aborts.getSignal("r1");
+      turnSignal(turns.aborts, "r1");
       turns.linkExternal("r1", caller.signal);
       caller.abort("gave up");
       expect(host.stops).toEqual([{ requestId: "r1", reason: "gave up" }]);
@@ -653,7 +654,7 @@ describe("ChatTurns", () => {
 
     it("a recovery attempt superseded by another turn is not a stop", () => {
       const attempt = new AbortController();
-      const signal = turns.aborts.getSignal("r1");
+      const signal = turnSignal(turns.aborts, "r1");
       turns.linkExternal("r1", attempt.signal);
       attempt.abort(new ChatRecoverySupersededError());
       // The turn ends, and nothing a user's stop does follows.
@@ -662,7 +663,7 @@ describe("ChatTurns", () => {
     });
 
     it("the runtime's own abort is not a stop", () => {
-      const signal = turns.aborts.getSignal("r1");
+      const signal = turnSignal(turns.aborts, "r1");
       turns.runtimeAbort(
         () => void turns.cancel("r1", new ChatStreamStalledError("stalled"))
       );
@@ -672,7 +673,7 @@ describe("ChatTurns", () => {
     });
 
     it("a stop that lands after the runtime's abort still counts as a stop", () => {
-      const signal = turns.aborts.getSignal("r1");
+      const signal = turnSignal(turns.aborts, "r1");
       turns.runtimeAbort(
         () => void turns.cancel("r1", new ChatStreamStalledError("stalled"))
       );
@@ -684,7 +685,7 @@ describe("ChatTurns", () => {
     });
 
     it("a host whose stop bookkeeping fails still stopped the turn", async () => {
-      const signal = turns.aborts.getSignal("r1");
+      const signal = turnSignal(turns.aborts, "r1");
       host.stopped = () => {
         throw new Error("storage is down");
       };

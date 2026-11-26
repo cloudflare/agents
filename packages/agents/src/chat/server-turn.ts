@@ -26,14 +26,13 @@
  * `@cloudflare/think`, not a public API.
  */
 
-import type { AbortRegistry } from "./abort-registry";
 import type {
   AbortedTurnReason,
   SaveMessagesResult,
   SkippedTurnReason
 } from "./lifecycle";
 import type { TurnLane } from "./turn-lane";
-import { isTurnStopped } from "./turn-stop";
+import { isTurnStopped, turnSignal, type TurnAborts } from "./turn-stop";
 
 export type ServerTurnStatus = SaveMessagesResult["status"];
 
@@ -118,14 +117,13 @@ export interface ServerChatTurn<TInput = undefined> {
 /** The parts of the turn core a server-started turn runs on. */
 export interface ServerTurnParts {
   queue: TurnLane;
-  aborts: AbortRegistry;
+  aborts: TurnAborts;
   /**
-   * Link the caller's signal to the turn. `ChatTurns` passes its own
-   * `linkExternal`, so a signal that stops the running turn is a stop like
-   * any other and drops the continuations waiting on it. Defaults to the
-   * registry's plain link.
+   * Link the caller's signal to the turn: `ChatTurns.linkExternal`, so a
+   * signal that stops the running turn is a stop like any other and drops
+   * the continuations waiting on it.
    */
-  linkExternal?: (
+  linkExternal: (
     requestId: string,
     signal: AbortSignal | undefined
   ) => () => void;
@@ -156,15 +154,12 @@ export async function runServerTurn<TInput = undefined>(
   const generation = queue.generation;
   const isCurrent = () => queue.generation === generation;
 
-  // The registry hands out a signal for every string id. Anything else
-  // would give a turn no stop can reach.
-  const signal = aborts.getSignal(requestId);
-  if (!signal) {
+  // Anything but a string would give a turn no stop can reach.
+  if (typeof requestId !== "string") {
     throw new TypeError("runServerTurn: requestId must be a string");
   }
-  const detachExternal = parts.linkExternal
-    ? parts.linkExternal(requestId, turn.signal)
-    : aborts.linkExternal(requestId, turn.signal);
+  const signal = turnSignal(aborts, requestId);
+  const detachExternal = parts.linkExternal(requestId, turn.signal);
   let released = false;
   // Runs when the turn's work ends, and again after the queue for a turn
   // that never started. `_reply` and a reset can remove the controller
@@ -173,7 +168,7 @@ export async function runServerTurn<TInput = undefined>(
     if (released) return;
     released = true;
     detachExternal();
-    aborts.remove(requestId);
+    aborts.delete(requestId);
   };
 
   let outcome: ServerTurnOutcome = { status: "completed" };

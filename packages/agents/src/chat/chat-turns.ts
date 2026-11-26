@@ -34,7 +34,6 @@
 
 import { tryN } from "../retries";
 import type { UIMessage } from "ai";
-import { AbortRegistry } from "./abort-registry";
 import {
   ChatAdmissions,
   supersedes,
@@ -168,7 +167,12 @@ export function requestContextFromLegacy(
   return Object.keys(value).length > 0 ? JSON.stringify(value) : null;
 }
 import { ChatStreamStalledError } from "./stall-watchdog";
-import { ChatRecoverySupersededError, isTurnStopped } from "./turn-stop";
+import {
+  ChatRecoverySupersededError,
+  isTurnStopped,
+  turnSignal,
+  type TurnAborts
+} from "./turn-stop";
 
 /** The transcript shape the core reads: ids for targets, parts for batches. */
 export type ChatTurnMessage = {
@@ -414,7 +418,7 @@ export class ChatTurns<
   /** Serializes turns; its generation is the chat's reset epoch. */
   readonly queue: TurnLane;
   /** One abort controller per request id. */
-  readonly aborts = new AbortRegistry();
+  readonly aborts: TurnAborts = new Map();
   /** Pending, deferred and active auto-continuation slots. */
   readonly continuation = new ContinuationState<TConnection>();
   /** Accepted turns whose stream has not started, and connections parked on them. */
@@ -765,14 +769,13 @@ export class ChatTurns<
       : this.#strategy(request.concurrency, request.isSubmitMessage);
     request.onDecision?.({ strategy });
 
-    // The registry hands out a signal for every string id. Anything else
-    // would give a turn no stop can reach.
-    const signal = this.aborts.getSignal(requestId);
-    if (!signal) {
+    // Anything but a string would give a turn no stop can reach.
+    if (typeof requestId !== "string") {
       throw new TypeError("runClientRequest: requestId must be a string");
     }
+    const signal = turnSignal(this.aborts, requestId);
     // A stop that landed on the record before the reset still stops it.
-    if (replay?.record.stopped) this.aborts.cancel(requestId);
+    if (replay?.record.stopped) this.aborts.get(requestId)?.abort();
     this.preStream.begin(requestId);
     let reservation: TurnReservation | undefined;
     let stage: "persist" | "turn" = "persist";
@@ -894,7 +897,7 @@ export class ChatTurns<
       if (!joined && this.queue.generation === generation) {
         this.host.waitingChanged?.();
       }
-      this.aborts.remove(requestId);
+      this.aborts.delete(requestId);
       this.settlePreStreamTurn(requestId);
     }
   }
@@ -1757,9 +1760,9 @@ export class ChatTurns<
   cancel(requestId: string, reason?: unknown): Promise<void> {
     // A request that waits as a record, here or after a reset, stays stopped.
     this.admissions?.stop(requestId);
-    this.#noteStopped(this.aborts.getExistingSignal(requestId));
+    this.#noteStopped(this.aborts.get(requestId)?.signal);
     this.#stop(() => {
-      this.aborts.cancel(requestId, reason);
+      this.aborts.get(requestId)?.abort(reason);
       this.#recoveryAttempts.get(requestId)?.abort(reason);
     }, requestId);
     return this.#afterStop(requestId, reason);
@@ -1808,9 +1811,9 @@ export class ChatTurns<
    */
   stopAll(reason?: unknown): Promise<void> {
     this.admissions?.stopAll();
-    for (const signal of this.aborts.signals()) this.#noteStopped(signal);
+    for (const { signal } of this.aborts.values()) this.#noteStopped(signal);
     this.#stop(() => {
-      this.aborts.destroyAll(reason);
+      this.#abortAll(reason);
       for (const attempt of this.#recoveryAttempts.values()) {
         attempt.abort(reason);
       }
@@ -1855,9 +1858,8 @@ export class ChatTurns<
   }
 
   /**
-   * Link an external `AbortSignal` to the request `requestId`, the way
-   * `AbortRegistry.linkExternal` does, with one difference: when the signal
-   * fires it stops the request through {@link cancel}. A caller that stops a
+   * Link an external `AbortSignal` to the request `requestId`: when the
+   * signal fires it stops the request through {@link cancel}. A caller that stops a
    * turn through the `signal` it passed to `saveMessages`, `continueLastTurn`
    * or `chat()` gets the same "stop means stop" as one that calls
    * `abortRequest`.
@@ -1877,13 +1879,19 @@ export class ChatTurns<
     };
     if (signal.aborted) {
       // The controller has to exist for the stop to land on it.
-      this.aborts.getSignal(requestId);
+      turnSignal(this.aborts, requestId);
       stop();
       return () => {};
     }
     const listener = stop;
     signal.addEventListener("abort", listener, { once: true });
     return () => signal.removeEventListener("abort", listener);
+  }
+
+  /** Abort every request's controller, and forget them. */
+  #abortAll(reason?: unknown): void {
+    for (const controller of this.aborts.values()) controller.abort(reason);
+    this.aborts.clear();
   }
 
   /**
@@ -1912,7 +1920,7 @@ export class ChatTurns<
   #stop(abort: () => void, requestId: string | null): void {
     const active = this.queue.activeRequestId;
     const activeSignal =
-      active === null ? undefined : this.aborts.getExistingSignal(active);
+      active === null ? undefined : this.aborts.get(active)?.signal;
     const wasAborted = activeSignal?.aborted ?? false;
 
     abort();
@@ -2003,7 +2011,7 @@ export class ChatTurns<
     this.admissions?.clear();
     this.queue.reset();
     this.#lastReply = null;
-    this.aborts.destroyAll();
+    this.#abortAll();
     this.pendingInteraction = null;
     // New interactions must not serialize behind a stale, possibly hung,
     // apply from the turn being reset (#1649).

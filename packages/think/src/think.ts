@@ -274,6 +274,7 @@ import {
   retryAfterSeconds,
   isDurableObjectResetError,
   isTurnStopped,
+  turnSignal,
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
@@ -2309,7 +2310,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       }
     };
   }
-  private readonly _aborts = this._turns.aborts;
   private readonly _turnQueue = this._turns.queue;
   /**
    * The Streams capability backing `_resumableStream`: chat's in-flight
@@ -2970,7 +2970,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     fiberName: (this.constructor as typeof Think).CHAT_FIBER_NAME,
     snapshotKey: "__cfThinkChatFiberSnapshot",
     generateId: () => crypto.randomUUID(),
-    turnSignal: (requestId) => this._turns.aborts.getExistingSignal(requestId),
+    turnSignal: (requestId) => this._turns.aborts.get(requestId)?.signal,
     runTask: (input, local) =>
       this.tasks.run(
         (this.constructor as typeof Think).CHAT_FIBER_NAME,
@@ -4582,9 +4582,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (!cleared()) cancelledByCaller = true;
     };
     // By id (`cancelChat`), which aborts the registry's controller...
-    this._aborts
-      .getSignal(requestId)
-      ?.addEventListener("abort", noteCancel, { once: true });
+    turnSignal(this._turns.aborts, requestId).addEventListener(
+      "abort",
+      noteCancel,
+      { once: true }
+    );
     // ...or through the caller's own signal, which the turn core links only
     // once the turn is admitted, after `onStart`.
     if (options?.signal?.aborted) noteCancel();
@@ -4637,7 +4639,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       if (result.status === "skipped") await reportCleared();
     } finally {
       // The core drops the controller. This covers an `onStart` that threw.
-      this._aborts.remove(requestId);
+      this._turns.aborts.delete(requestId);
       options?.signal?.removeEventListener("abort", noteCancel);
     }
   }

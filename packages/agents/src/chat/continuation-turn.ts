@@ -38,7 +38,6 @@
  */
 
 import { isDurableObjectResetError } from "../retries";
-import type { AbortRegistry } from "./abort-registry";
 import type { AutoContinuationController } from "./auto-continuation-controller";
 import { continuationWaitsOnClient } from "./before-turn";
 import {
@@ -52,7 +51,7 @@ import {
   type TurnFailureHost,
   type TurnFailureResult
 } from "./turn-failure";
-import { isTurnStopped } from "./turn-stop";
+import { isTurnStopped, turnSignal, type TurnAborts } from "./turn-stop";
 
 /** The parts of the turn core the continuation lifecycle works on. */
 export interface ContinuationTurnParts<
@@ -60,7 +59,7 @@ export interface ContinuationTurnParts<
 > {
   readonly continuation: ContinuationState<TConnection>;
   readonly autoContinuation: AutoContinuationController<TConnection>;
-  readonly aborts: AbortRegistry;
+  readonly aborts: TurnAborts;
   /** The stored transcript, oldest first. */
   messages(): ReadonlyArray<{
     id: string;
@@ -315,7 +314,7 @@ export async function runContinuationTurn<
   const errorPrefix = unscheduled
     ? unscheduled.errorPrefix
     : pending!.errorPrefix;
-  const signal = parts.aborts.getSignal(requestId);
+  const signal = turnSignal(parts.aborts, requestId);
   const firing = { requestId };
   parts.firing.add(firing);
   if (unscheduled) parts.unscheduled.add(requestId);
@@ -391,7 +390,7 @@ export async function runContinuationTurn<
       // The abort signal goes however the turn ended. The release is for a
       // turn that never started (a reset dropped the turn from the queue):
       // a turn that ran has settled already.
-      parts.aborts.remove(requestId);
+      parts.aborts.delete(requestId);
       releaseOwnPending(parts, requestId);
       // However it ended, nothing waits for it to be queued any more.
       queued();
@@ -404,7 +403,7 @@ export async function runContinuationTurn<
     parts.firing.delete(firing);
     // Replaced meanwhile (a clear, a stop): that one fires on its own.
     if (parts.continuation.pending?.requestId !== requestId) {
-      parts.aborts.remove(requestId);
+      parts.aborts.delete(requestId);
       queued();
       return;
     }
@@ -607,7 +606,9 @@ export function dropWaitingContinuations<
     continuation.clearDeferred();
     parts.dropped({ requestId: null, ...stopped });
   }
-  for (const requestId of parts.unscheduled) parts.aborts.cancel(requestId);
+  for (const requestId of parts.unscheduled) {
+    parts.aborts.get(requestId)?.abort();
+  }
 }
 
 /**
