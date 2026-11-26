@@ -176,6 +176,10 @@
         "name": "ThinkExtensionTurnAgent"
       },
       {
+        "class_name": "ThinkExtensionTurnParent",
+        "name": "ThinkExtensionTurnParent"
+      },
+      {
         "class_name": "ThinkPrefixChangedAgent",
         "name": "ThinkPrefixChangedAgent"
       },
@@ -310,6 +314,7 @@
         "ThinkExtensionHookAgent",
         "ThinkExtensionNetworkAgent",
         "ThinkExtensionTurnAgent",
+        "ThinkExtensionTurnParent",
         "ThinkPrefixChangedAgent",
         "ThinkExtensionBeforeTurnModelAgent",
         "ThinkMessengerDeliveryTestAgent",

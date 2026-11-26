@@ -53,6 +53,7 @@ export {
   ThinkExtensionHookAgent,
   ThinkExtensionNetworkAgent,
   ThinkExtensionTurnAgent,
+  ThinkExtensionTurnParent,
   ThinkExtensionBeforeTurnModelAgent
 } from "./extension-hooks";
 export {

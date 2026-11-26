@@ -39,6 +39,10 @@ interface ThinkExtensionManagerOptions {
   readonly storage: DurableObjectStorage;
   readonly agentClassName: string;
   readonly agentId: string;
+  /** The agent's path from the root, root first (`Agent#selfPath`). */
+  readonly agentPath: readonly { className: string; name: string }[];
+  /** The root's jurisdiction, for a sub-agent's lookup of its root. */
+  readonly rootJurisdiction: DurableObjectJurisdiction | undefined;
   /** `ctx.exports` of the agent's Durable Object. */
   readonly exports: Record<string, unknown> | undefined;
 }
@@ -52,7 +56,8 @@ interface ThinkExtensionManagerOptions {
 export function createThinkExtensionManager(
   options: ThinkExtensionManagerOptions
 ): ExtensionManager {
-  const { agentClassName, agentId, exports } = options;
+  const { agentClassName, agentId, agentPath, rootJurisdiction, exports } =
+    options;
   const hasBridge = exports && typeof exports.HostBridgeLoopback === "function";
 
   return new ExtensionManager({
@@ -71,6 +76,14 @@ export function createThinkExtensionManager(
                 props: {
                   agentClassName,
                   agentId,
+                  // A sub-agent is reached through its root.
+                  ...(agentPath.length > 1 && {
+                    agentPath: agentPath.map(({ className, name }) => ({
+                      className,
+                      name
+                    })),
+                    ...(rootJurisdiction && { rootJurisdiction })
+                  }),
                   permissions,
                   ownContextLabels
                 }

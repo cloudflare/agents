@@ -3316,8 +3316,12 @@ export class Agent<
     );
   }
 
-  /** The root's jurisdiction, for a lookup of the root (#2470). */
-  private _cf_rootJurisdictionOptions():
+  /**
+   * The root's jurisdiction, for a lookup of the root (#2470).
+   *
+   * @internal Also read by Think's extension host bridge.
+   */
+  _cf_rootJurisdictionOptions():
     | { jurisdiction: DurableObjectJurisdiction }
     | undefined {
     const jurisdiction = this._dynamicAgents.rootJurisdiction;

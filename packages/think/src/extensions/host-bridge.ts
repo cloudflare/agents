@@ -19,6 +19,7 @@
  */
 
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { getAgentByName, type Agent } from "agents";
 import { validateUrl } from "agents/internal";
 import type {
   ThinkHostApi,
@@ -39,6 +40,14 @@ type ThinkHostBridgeAgent = {
 export type HostBridgeLoopbackProps = {
   agentClassName: string;
   agentId: string;
+  /**
+   * @internal For an agent that is a sub-agent (a facet): its path from
+   * the root, root first. A facet has no namespace of its own, so calls go
+   * through the root.
+   */
+  agentPath?: readonly { className: string; name: string }[];
+  /** @internal The root's jurisdiction, with `agentPath`. */
+  rootJurisdiction?: DurableObjectJurisdiction;
   permissions: ExtensionPermissions;
   /** Namespaced context labels this extension declared (for "own" write validation). */
   ownContextLabels?: string[];
@@ -50,11 +59,40 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
 > {
   private _permissions = this.ctx.props.permissions;
 
-  private _getAgent() {
-    const { agentClassName, agentId } = this.ctx.props;
-    // @ts-expect-error — experimental: ctx.exports on WorkerEntrypoint
-    const ns = this.ctx.exports[agentClassName] as DurableObjectNamespace;
-    return ns.get(ns.idFromString(agentId));
+  private _getAgent(): ThinkHostBridgeAgent {
+    const { agentClassName, agentId, agentPath, rootJurisdiction } =
+      this.ctx.props;
+    // Experimental: ctx.exports on WorkerEntrypoint.
+    const exports = (
+      this.ctx as unknown as {
+        exports: Record<string, DurableObjectNamespace>;
+      }
+    ).exports;
+    const [root] = agentPath ?? [];
+    if (agentPath && root && agentPath.length > 1) {
+      // As `parentAgent()` reaches a facet parent: the root by name, in
+      // its jurisdiction, then down the path.
+      const rootStub = getAgentByName(
+        exports[root.className] as unknown as DurableObjectNamespace<Agent>,
+        root.name,
+        rootJurisdiction ? { jurisdiction: rootJurisdiction } : undefined
+      ) as unknown as Promise<{
+        _cf_invokeSubAgentPath(
+          path: readonly { className: string; name: string }[],
+          method: string,
+          args: unknown[]
+        ): Promise<unknown>;
+      }>;
+      return {
+        _cfHostBridge: async (operation, args) =>
+          (await rootStub)._cf_invokeSubAgentPath(agentPath, "_cfHostBridge", [
+            operation,
+            args
+          ]) as never
+      };
+    }
+    const ns = exports[agentClassName];
+    return ns.get(ns.idFromString(agentId)) as unknown as ThinkHostBridgeAgent;
   }
 
   // ── Permission checks ──────────────────────────────────────────
@@ -128,10 +166,7 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
     operation: K,
     ...args: Parameters<ThinkHostApi[K]>
   ): Promise<Awaited<ReturnType<ThinkHostApi[K]>>> {
-    return (this._getAgent() as unknown as ThinkHostBridgeAgent)._cfHostBridge(
-      operation,
-      args
-    );
+    return this._getAgent()._cfHostBridge(operation, args);
   }
 
   // ── Workspace ──────────────────────────────────────────────────

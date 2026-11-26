@@ -513,6 +513,8 @@ export class Think<
           storage: this.ctx.storage,
           agentClassName: this.constructor.name,
           agentId: this.ctx.id.toString(),
+          agentPath: this.selfPath,
+          rootJurisdiction: this._cf_rootJurisdictionOptions()?.jurisdiction,
           exports: (
             this.ctx as unknown as { exports?: Record<string, unknown> }
           ).exports
