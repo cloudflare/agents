@@ -26,12 +26,10 @@ class WakeProbe extends LifecycleCapability {
     this.host.sql`CREATE TABLE IF NOT EXISTS facet_wake_runs (
       id TEXT NOT NULL, at INTEGER NOT NULL
     )`;
-    const at = Date.now();
-    this.host.sql`INSERT INTO facet_wake_runs (id, at) VALUES ('start', ${at})`;
-    // Also kept in this isolate, so a test can read when a facet started
-    // from its root without reaching the facet, which would start it.
+    // Kept in this isolate, so a test can read when a facet started from
+    // its root without reaching the facet, which would start it.
     const path = this.host.selfPath.map((step) => step.name).join("/");
-    startsByPath.set(path, [...(startsByPath.get(path) ?? []), at]);
+    startsByPath.set(path, [...(startsByPath.get(path) ?? []), Date.now()]);
   }
 
   /** `handoff-*` jobs' handed-off work, keyed by job id. */
@@ -153,17 +151,7 @@ abstract class WakeAgent extends Agent<Cloudflare.Env> {
   ran(): string[] {
     return this.sql<{
       id: string;
-    }>`SELECT id FROM facet_wake_runs WHERE id != 'start' ORDER BY at`.map(
-      (row) => row.id
-    );
-  }
-
-  /** When this object started, each time. */
-  starts(): number[] {
-    return this.sql<{ at: number }>`
-      SELECT at FROM facet_wake_runs WHERE id = 'start' ORDER BY at`.map(
-      (row) => row.at
-    );
+    }>`SELECT id FROM facet_wake_runs ORDER BY at`.map((row) => row.id);
   }
 
   pendingJobs(): string[] {
@@ -282,10 +270,6 @@ export class FacetWakeRoot extends WakeAgent {
   middleStartsSeen(name: string): number[] {
     const path = [...this.selfPath.map((step) => step.name), name].join("/");
     return startsByPath.get(path) ?? [];
-  }
-
-  async middleStarts(name: string): Promise<number[]> {
-    return (await this.subAgent(FacetWakeMiddle, name)).starts();
   }
 
   async middlePending(name: string): Promise<string[]> {
