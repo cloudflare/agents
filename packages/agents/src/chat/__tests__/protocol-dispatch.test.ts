@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Connection } from "agents";
 import type { ChatTurns } from "../chat-turns";
 import { CHAT_MESSAGE_TYPES } from "../protocol";
@@ -446,6 +446,86 @@ describe("dispatchChatProtocol", () => {
       ["resume.request", "c1", "p", ["r1"]],
       ["resume.ack", "c1", "r1"]
     ]);
+  });
+
+  it("answers a resume request only after a tool result still being applied", async () => {
+    const { host, calls } = recordingHost();
+    let applied: (scheduled: boolean) => void = () => {};
+    // A tool result's apply is running: it may schedule a continuation.
+    Object.assign(host.turns, {
+      pendingInteraction: new Promise<boolean>((resolve) => {
+        applied = resolve;
+      })
+    });
+    const before = sent.length;
+    const answered = dispatchChatProtocol(
+      connection,
+      send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST, probeId: "p" }),
+      host
+    );
+    // Give the dispatch every chance to answer early.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(calls).toEqual([]);
+    // The tab is told at once to keep waiting, so its probe does not give
+    // up while the apply runs.
+    expect(sent.slice(before).map((frame) => JSON.parse(frame))).toEqual([
+      { type: CHAT_MESSAGE_TYPES.STREAM_PENDING, probeId: "p" }
+    ]);
+
+    applied(true);
+    await answered;
+    expect(calls).toEqual([["resume.request", "c1", "p", undefined]]);
+  });
+
+  it("waits for a hung apply as long as the tab's extended probe does, then answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, calls } = recordingHost();
+      // An apply that never settles.
+      Object.assign(host.turns, {
+        pendingInteraction: new Promise<boolean>(() => {})
+      });
+      const answered = dispatchChatProtocol(
+        connection,
+        send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST }),
+        host
+      );
+      // Past the 5 s a probe waits before it is told to keep waiting.
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(calls).toEqual([]);
+      // At 60 s the tab's probe gives up: the handshake answers what it
+      // knows rather than nobody.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await answered;
+      expect(calls).toEqual([["resume.request", "c1", undefined, undefined]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends no keep-waiting frame for a resume request with nothing being applied", async () => {
+    const { host, calls } = recordingHost();
+    const before = sent.length;
+    await dispatchChatProtocol(
+      connection,
+      send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST, probeId: "p" }),
+      host
+    );
+    expect(sent.slice(before)).toEqual([]);
+    expect(calls).toEqual([["resume.request", "c1", "p", undefined]]);
+  });
+
+  it("answers a resume request although the apply before it failed", async () => {
+    const { host, calls } = recordingHost();
+    Object.assign(host.turns, {
+      pendingInteraction: Promise.reject(new Error("apply failed"))
+    });
+    await dispatchChatProtocol(
+      connection,
+      send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST }),
+      host
+    );
+    expect(calls).toEqual([["resume.request", "c1", undefined, undefined]]);
   });
 
   it("applies a tool result through the request context and the apply chain", async () => {

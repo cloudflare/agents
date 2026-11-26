@@ -3344,6 +3344,105 @@ describe("resume coordination during pending continuation", () => {
     await closeWS(ws);
   });
 
+  it("tells a tab that asks to resume while a tool result is still being applied to wait for its continuation", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const userMsg: UIMessage = {
+      id: "msg-resume-during-apply-user",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    } as UIMessage;
+    const initialDone = waitForDone(ws, 10000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: "req-resume-during-apply",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMsg] })
+        }
+      })
+    );
+    await initialDone;
+    await agent.persistToolCallMessage([
+      userMsg,
+      {
+        id: "assistant-resume-during-apply",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-resume-during-apply",
+            state: "input-available",
+            input: { action: "test" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    // Every frame the tab gets from here on, in order.
+    const frames: Array<{ type?: string; probeId?: string; id?: string }> = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      try {
+        frames.push(JSON.parse(event.data as string));
+      } catch {
+        // Not a protocol frame.
+      }
+    });
+    const answersToProbe = () =>
+      frames.filter((frame) => frame.probeId === "p-apply");
+
+    // The result's apply is slow (storage): it is still running when the
+    // tab asks whether there is a stream to resume.
+    await agent.holdNextInteractionApplyForTest();
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-resume-during-apply",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+    await vi.waitFor(async () => {
+      expect(await agent.interactionApplyHeldForTest()).toBe(true);
+    });
+    ws.send(
+      JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST, probeId: "p-apply" })
+    );
+
+    // While the apply is still held, the probe is told to keep waiting, and
+    // is not told there is nothing to resume.
+    await vi.waitFor(() => {
+      expect(answersToProbe().map((frame) => frame.type)).toEqual([
+        MSG_STREAM_PENDING
+      ]);
+    });
+    expect(await agent.interactionApplyHeldForTest()).toBe(true);
+
+    await agent.releaseInteractionApplyForTest();
+    await waitForDone(ws, 10000);
+    // The probe is then told which continuation it waits for, and that
+    // continuation's stream is the one offered: never "nothing to resume".
+    const resumeFrames = frames.filter(
+      (frame) =>
+        frame.type === MSG_STREAM_PENDING ||
+        frame.type === MSG_STREAM_RESUMING ||
+        frame.type === MSG_STREAM_RESUME_NONE
+    );
+    const continuationId = resumeFrames[1]?.id;
+    expect(continuationId).toEqual(expect.any(String));
+    expect(resumeFrames).toEqual([
+      { type: MSG_STREAM_PENDING, probeId: "p-apply" },
+      { type: MSG_STREAM_PENDING, probeId: "p-apply", id: continuationId },
+      { type: MSG_STREAM_RESUMING, id: continuationId }
+    ]);
+    await closeWS(ws);
+  });
+
   it("continues when the initiating connection closes before coalescing finishes", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
