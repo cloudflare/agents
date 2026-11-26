@@ -17,6 +17,7 @@ export const MT = {
   REQUEST: "cf_agent_use_chat_request",
   RESPONSE: "cf_agent_use_chat_response",
   CANCEL: "cf_agent_chat_request_cancel",
+  IDENTITY: "cf_agent_identity",
   RESUMING: "cf_agent_stream_resuming",
   RESUME_ACK: "cf_agent_stream_resume_ack",
   RESUME_REQUEST: "cf_agent_stream_resume_request",
@@ -71,7 +72,13 @@ export type ProbeState = {
     requestId?: string;
     error?: string;
   }[];
-  calls: { at: number; step?: string; end?: string; last?: string }[];
+  calls: {
+    at: number;
+    step?: string;
+    end?: string;
+    last?: string;
+    idx?: number;
+  }[];
   notes: Record<string, unknown>[];
 };
 

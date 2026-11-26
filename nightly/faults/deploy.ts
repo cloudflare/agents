@@ -15,11 +15,19 @@ declare module "vitest" {
 const CONFIG = path.join(import.meta.dirname, "wrangler.jsonc");
 
 function wrangler(args: string[]): string {
-  return execFileSync("npx", ["wrangler", ...args], {
-    cwd: import.meta.dirname,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+  try {
+    return execFileSync("npx", ["wrangler", ...args], {
+      cwd: import.meta.dirname,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, NO_COLOR: "1" }
+    });
+  } catch (e) {
+    // Keep the error short: wrangler's output repeats every bundling warning.
+    const { stderr } = e as { stderr?: string };
+    const tail = (stderr ?? String(e)).slice(-1500);
+    throw new Error(`wrangler ${args[0]} failed:\n${tail}`);
+  }
 }
 
 /**

@@ -1,9 +1,9 @@
 // The fault scenarios, from verify's tc-faults probe. Each sets the room's
-// script, drives one or more tabs (or RPC calls) through a fault, waits for
-// the object to settle and returns what the invariants read. The waits are
-// the script's own timings (a stall fires ~3 s after the last chunk, a 429
-// asks for N seconds): a scenario waits them out, then `finish` waits until
-// nothing changes.
+// script, drives one or more tabs (or RPC calls) through a fault and returns
+// what the invariants read. A scenario orders its own actions on what the
+// object reports: a frame on the tab, or a recovery event, note or model
+// call in the room's recorded state. It never orders them by time. `finish`
+// then waits until nothing changes.
 
 import {
   CLIENT_TOOLS,
@@ -14,6 +14,7 @@ import {
   rid,
   settle,
   sleep,
+  state,
   user,
   type Cls,
   type Frame,
@@ -35,9 +36,60 @@ async function setup(cls: Cls, cfg: Record<string, unknown>) {
   const room = rid(cls);
   const r = await ctl(cls, room, "probeSetConfig", cfg);
   if (!r.ok) throw new Error(`config: ${r.error}`);
-  const tab = await new Tab(cls, room).open();
-  await sleep(250);
+  const tab = await openTab(cls, room);
   return { room, tab };
+}
+
+/** A tab that has had the server's greeting, so the object has accepted it. */
+async function openTab(cls: Cls, room: string): Promise<Tab> {
+  const tab = await new Tab(cls, room).open();
+  await tab.waitFor((f) => f.type === MT.IDENTITY, 30_000, "identity");
+  return tab;
+}
+
+/** Poll the room's recorded state until `pred` holds. */
+async function until(
+  cls: Cls,
+  room: string,
+  pred: (s: ProbeState) => boolean,
+  label: string,
+  timeoutMs = 60_000
+): Promise<ProbeState> {
+  const start = Date.now();
+  for (;;) {
+    const s = await state(cls, room);
+    if (pred(s)) return s;
+    if (Date.now() - start > timeoutMs)
+      throw new Error(`timeout waiting for ${label}`);
+    await sleep(300);
+  }
+}
+
+const events = (s: ProbeState, type: string) =>
+  s.events.filter((e) => e.type === type).length;
+const hasNote = (s: ProbeState, key: string) => s.notes.some((n) => key in n);
+
+/** Until `n` recovery events of `type` are recorded. */
+function untilEvent(cls: Cls, room: string, type: string, n = 1) {
+  return until(cls, room, (s) => events(s, type) >= n, `${n} x ${type}`);
+}
+
+/** Every request the tab sent has ended (a hand-off to recovery is not an end). */
+function tabSettled(tab: Tab): boolean {
+  let handedOff = false;
+  const done = new Set<string>();
+  for (const f of tab.frames) {
+    if (f.type !== MT.RESPONSE || !f.done || !f.id) continue;
+    done.add(f.id);
+    handedOff = f.outcome === "recovering";
+  }
+  return !handedOff && tab.sent.every((id) => done.has(id));
+}
+
+/** A response frame of request `id` whose text reached `marker`. */
+function chunkOf(id: string | undefined, marker: string) {
+  return (f: Frame) =>
+    isResp(f) && f.id === id && f.body !== undefined && f.body.includes(marker);
 }
 
 async function finish(
@@ -48,9 +100,29 @@ async function finish(
   settleOpts?: { quietMs?: number; maxMs?: number }
 ): Promise<Run> {
   const s = await settle(cls, room, settleOpts);
-  const late = await new Tab(cls, room).open();
+  // The frames that end the tabs' requests may still be on the wire; the
+  // invariants judge what has not arrived within the bound.
+  const deadline = Date.now() + 10_000;
+  while (!tabs.every(tabSettled) && Date.now() < deadline) await sleep(200);
+  const late = await openTab(cls, room);
   late.send({ type: MT.RESUME_REQUEST });
-  await sleep(1500);
+  const offer = await late
+    .waitFor(
+      (f) => f.type === MT.RESUME_NONE || f.type === MT.RESUMING,
+      15_000,
+      "resume reply"
+    )
+    .catch(() => undefined);
+  // An offered stream (a settled one is replayed) ends with its done frame.
+  if (offer?.type === MT.RESUMING) {
+    await late
+      .waitFor(
+        (f) => isResp(f) && f.id === offer.id && f.done === true,
+        15_000,
+        "replayed end"
+      )
+      .catch(() => undefined);
+  }
   late.close();
   for (const t of tabs) t.close();
   return {
@@ -115,7 +187,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     const id = tab.request(rid("req"), [user("hello")], {
       clientTools: CLIENT_TOOLS
     });
-    await sleep(12000);
     return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
   },
   async stallPendingClientAnswered(cls: Cls) {
@@ -135,9 +206,9 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     const input = await waitToolInput(tab, "getUserLocation");
-    await sleep(5000); // past the stall
+    // Answer once the watchdog has called the stall and recovery has begun.
+    await untilEvent(cls, room, "chat:recovery:detected");
     tab.send(toolResult(input.toolCallId, "getUserLocation"));
-    await sleep(8000);
     return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
   },
   async stallPendingClientUnanswered(cls: Cls) {
@@ -158,7 +229,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     await waitToolInput(tab, "getUserLocation");
-    await sleep(20000);
     return finish(cls, room, [tab]);
   },
   async stallInContinuation(cls: Cls) {
@@ -174,10 +244,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     const input = await waitToolInput(tab, "getUserLocation");
-    await tab.done(id, 20000).catch(() => {});
-    await sleep(300);
+    await tab.done(id, 20000);
     tab.send(toolResult(input.toolCallId, "getUserLocation"));
-    await sleep(14000);
     return finish(cls, room, [tab]);
   },
 
@@ -187,7 +255,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       script: [STALL(5), TEXT(8)]
     });
     const r = await ctl(cls, room, "probeSave", "hello");
-    await sleep(8000);
     return finish(cls, room, [tab], { returned: r.value ?? r.error });
   },
   async stallChatRpc(cls: Cls) {
@@ -196,7 +263,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       script: [STALL(5), TEXT(8)]
     });
     const r = await ctl(cls, room, "probeRpcChat", "hello", {});
-    await sleep(8000);
     return finish(cls, room, [tab], { returned: r.value ?? r.error });
   },
   async stallChatRpcDeclined(cls: Cls) {
@@ -206,7 +272,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       script: [STALL(5), TEXT(8)]
     });
     const r = await ctl(cls, room, "probeRpcChat", "hello", {});
-    await sleep(3000);
     return finish(cls, room, [tab], { returned: r.value ?? r.error });
   },
   async stallDeclined(cls: Cls) {
@@ -219,7 +284,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     await tab.done(id, 20000).catch(() => {});
-    await sleep(2000);
     return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
   },
   async stallDeclinedAway(cls: Cls) {
@@ -229,10 +293,12 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       recoveryContinue: false,
       script: [STALL(5), TEXT(8)]
     });
-    tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
-    await sleep(400);
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    // Leave once the reply has started, before the stall.
+    await tab.waitFor(chunkOf(id, "w1 "), 20000, "w1");
     tab.close();
-    await sleep(8000);
     return finish(cls, room, []);
   },
 
@@ -249,7 +315,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     const id = tab.request(rid("req"), [user("hello")], {
       clientTools: CLIENT_TOOLS
     });
-    await sleep(14000);
     return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
   },
   async rl429RetryAfterMs(cls: Cls) {
@@ -262,7 +327,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
-    await sleep(13000);
     return finish(cls, room, [tab]);
   },
   async rl429Transient(cls: Cls) {
@@ -275,7 +339,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
-    await sleep(14000);
     return finish(cls, room, [tab]);
   },
   async rl429SdkRetries(cls: Cls) {
@@ -290,7 +353,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
-    await sleep(18000);
     return finish(cls, room, [tab]);
   },
   async rl429MidTurn(cls: Cls) {
@@ -305,7 +367,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       ]
     });
     tab.request(rid("req"), [user("weather")], { clientTools: CLIENT_TOOLS });
-    await sleep(14000);
     return finish(cls, room, [tab]);
   },
 
@@ -367,8 +428,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       "w3"
     );
     tab.send({ type: MT.CANCEL, id: b });
-    await tab.done(b, 20000).catch(() => {});
-    await sleep(800);
+    await tab.done(b, 20000);
     const r = await ctl(cls, room, "probeContinue");
     return finish(cls, room, [tab], { returned: r.value ?? r.error });
   },
@@ -390,10 +450,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     const input = await waitToolInput(tab, "getUserLocation");
-    await tab.done(b, 20000).catch(() => {});
-    await sleep(300);
+    await tab.done(b, 20000);
     tab.send(toolResult(input.toolCallId, "getUserLocation"));
-    await sleep(6000);
     return finish(cls, room, [tab]);
   },
   async ovRecoveryRetry(cls: Cls) {
@@ -414,7 +472,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await tab.done(i, 20000);
     }
     tab.request(rid("req"), [user("three")]);
-    await sleep(14000);
     return finish(cls, room, [tab]);
   },
   async ovRecoveryContinue(cls: Cls) {
@@ -428,7 +485,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await tab.done(i, 20000);
     }
     tab.request(rid("req"), [user("three")]);
-    await sleep(14000);
     return finish(cls, room, [tab]);
   },
   async ovUnrecoverableClient(cls: Cls) {
@@ -499,10 +555,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     const input = await waitToolInput(tab, "getUserLocation");
-    await tab.done(b, 20000).catch(() => {});
-    await sleep(300);
+    await tab.done(b, 20000);
     tab.send(toolResult(input.toolCallId, "getUserLocation"));
-    await sleep(6000);
     return finish(cls, room, [tab]);
   },
 
@@ -525,7 +579,6 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await tab.done(i, 20000);
     }
     tab.request(rid("req"), [user("three")]);
-    await sleep(14000);
     return finish(cls, room, [tab]);
   },
   async ovUnrecoverableContinueLast(cls: Cls) {
@@ -548,8 +601,7 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       "w3"
     );
     tab.send({ type: MT.CANCEL, id: b });
-    await tab.done(b, 20000).catch(() => {});
-    await sleep(800);
+    await tab.done(b, 20000);
     const r = await ctl(cls, room, "probeContinue");
     return finish(cls, room, [tab], { returned: r.value ?? r.error });
   },
@@ -564,10 +616,10 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await tab.done(i, 20000);
     }
     const id = tab.request(rid("req"), [user("three")]);
-    await sleep(1800);
+    // Stop while the compaction runs (it is held for 5 s).
+    await until(cls, room, (s) => hasNote(s, "compaction"), "compaction start");
     tab.send({ type: MT.CANCEL, id });
     await tab.done(id, 20000).catch(() => {});
-    await sleep(6000);
     return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
   },
   async ovStopDuringCompactionChat(cls: Cls) {
@@ -581,9 +633,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await tab.done(i, 20000);
     }
     const r = await ctl(cls, room, "probeRpcChat", "three", {
-      cancelAfterMs: 1800
+      stopOnCompaction: true
     });
-    await sleep(5000);
     return finish(cls, room, [tab], { returned: r.value ?? r.error });
   }
 };

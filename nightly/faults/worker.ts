@@ -696,16 +696,10 @@ async function save(
       o: SaveMessagesOptions
     ): Promise<SaveMessagesResult>;
   },
-  text: string,
-  opts: { cancelAfterMs?: number }
+  text: string
 ) {
-  const ac = new AbortController();
-  if (opts.cancelAfterMs !== undefined)
-    setTimeout(() => ac.abort(), opts.cancelAfterMs);
   try {
-    return summarizeResult(
-      await agent.saveMessages([userMessage(text)], { signal: ac.signal })
-    );
+    return summarizeResult(await agent.saveMessages([userMessage(text)], {}));
   } catch (e) {
     return { threw: String(e).slice(0, 160) };
   }
@@ -790,8 +784,8 @@ export class ProbeChat extends AIChatAgent<Env> {
   async probeAbort() {
     this.ctx.abort("probe: forced reset");
   }
-  async probeSave(text: string, opts: { cancelAfterMs?: number } = {}) {
-    return save(this, text, opts);
+  async probeSave(text: string) {
+    return save(this, text);
   }
   async probeContinue() {
     try {
@@ -858,6 +852,8 @@ export class ProbeThink extends Think<Env> {
     return session.onCompaction(async (messages: SessionMessage[]) => {
       const cfg = readConfig(this.s);
       note(this.s, { compaction: "start", n: messages.length });
+      this.onCompactionStart?.();
+      this.onCompactionStart = undefined;
       if (cfg.compactionDelayMs) await sleep(cfg.compactionDelayMs);
       if (cfg.compactionNoOp || messages.length < 2) {
         note(this.s, { compaction: "noop" });
@@ -923,8 +919,8 @@ export class ProbeThink extends Think<Env> {
   async probeAbort() {
     this.ctx.abort("probe: forced reset");
   }
-  async probeSave(text: string, opts: { cancelAfterMs?: number } = {}) {
-    return save(this, text, opts);
+  async probeSave(text: string) {
+    return save(this, text);
   }
   async probeContinue() {
     try {
@@ -951,12 +947,14 @@ export class ProbeThink extends Think<Env> {
       return { threw: String(e).slice(0, 160) };
     }
   }
-  /** Think.chat() with an in-isolate callback; cancel after a delay if asked. */
-  async probeRpcChat(text: string, opts: { cancelAfterMs?: number } = {}) {
+  /** Called once when a compaction starts; set by `probeRpcChat`. */
+  private onCompactionStart?: () => void;
+
+  /** Think.chat() with an in-isolate callback; cancel it when compaction starts if asked. */
+  async probeRpcChat(text: string, opts: { stopOnCompaction?: boolean } = {}) {
     const ac = new AbortController();
     const seen: string[] = [];
-    if (opts.cancelAfterMs != null)
-      setTimeout(() => ac.abort(), opts.cancelAfterMs);
+    if (opts.stopOnCompaction) this.onCompactionStart = () => ac.abort();
     const callback: StreamCallback = {
       onStart: () => {
         seen.push("<start>");
