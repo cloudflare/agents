@@ -6,8 +6,8 @@ const testsDir = import.meta.dirname;
 export default defineConfig({
   test: {
     name: "ai-chat-e2e",
-    // Retry flaky e2e runs (real `wrangler dev` + network) before failing.
-    retry: 3,
+    // No retries: a failure is a bug in the product or the test.
+    retry: 0,
     include: [path.join(testsDir, "**/*.test.ts")],
     // The deployed suite has its own config (`vitest.deployed.config.ts`); it
     // creates real billable Workers and must never run as part of the local
