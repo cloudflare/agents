@@ -31,7 +31,8 @@ export default defineConfig({
   // 30-minute hard cancel (which produces no actionable output). Deterministic
   // specs are fast, so 10 minutes is generous headroom.
   globalTimeout: 10 * 60_000,
-  retries: process.env.CI ? 1 : 0,
+  // No retries: a failure is a bug in the product or the test.
+  retries: 0,
   workers: 1, // Sequential — single wrangler dev instance
   reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
   use: {

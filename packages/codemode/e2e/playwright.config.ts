@@ -22,7 +22,8 @@ export default defineConfig({
   // silently killed by a CI job's hard cancel, which produces no actionable
   // output. Mirrors the ai-chat e2e config.
   globalTimeout: 15 * 60_000,
-  retries: 2,
+  // No retries: a failure is a bug in the product or the test.
+  retries: 0,
   workers: 1,
   use: {
     baseURL: `http://localhost:${PORT}`

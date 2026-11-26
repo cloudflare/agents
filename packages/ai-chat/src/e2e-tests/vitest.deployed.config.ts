@@ -9,8 +9,8 @@ const testsDir = import.meta.dirname;
 export default defineConfig({
   test: {
     name: "ai-chat-e2e-deployed",
-    // A retry re-runs the full deploy -> evict -> recover cycle, so keep it low.
-    retry: 1,
+    // No retries: a failure is a bug in the product or the test.
+    retry: 0,
     include: [path.join(testsDir, "deployed-recovery.test.ts")],
     testTimeout: 600_000,
     hookTimeout: 200_000,
