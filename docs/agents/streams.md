@@ -188,8 +188,8 @@ pay 42 to write and 3 to cut over.
 ## Chat runs on this
 
 `AIChatAgent` and `Think` store their in-flight turn output here:
-`ResumableStream` (from `agents/chat`) is a thin adapter over Streams that
-packs ~10 wire chunks into one stored segment for write economy, and ends
+their internal chat stream log, a thin layer over Streams, batches ~10
+wire chunks into one stored block for write economy, and ends
 every turn with the cutover: the assistant message, the stream's
 settlement and the deletion of its rows commit in one transaction. Nothing
 is swept on an alarm any more. A stream a crash left behind is either
