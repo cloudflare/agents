@@ -144,19 +144,42 @@ export interface ChatHost {
 /** The reason a chat clear cancels its turns with. */
 export const CHAT_CLEARED = "chat cleared";
 
+/** @internal A tab waiting for a turn's stream, and the probe it asked with. */
+export interface ParkedTab {
+  readonly connection: Connection;
+  readonly probeId?: string;
+}
+
 /** Tabs waiting for a turn's stream to start, by chat, in this isolate. */
-const parkedTabs = new WeakMap<Streams, Map<string, Map<string, Connection>>>();
+const parkedTabs = new WeakMap<Streams, Map<string, Map<string, ParkedTab>>>();
 
 /** @internal The tabs waiting for the next stream of chat `session`. */
 export function parkedIn(
   streams: Streams,
   session: string
-): Map<string, Connection> {
+): Map<string, ParkedTab> {
   let chats = parkedTabs.get(streams);
   if (!chats) parkedTabs.set(streams, (chats = new Map()));
   let tabs = chats.get(session);
   if (!tabs) chats.set(session, (tabs = new Map()));
   return tabs;
+}
+
+/**
+ * @internal Answer every parked tab with `frame`, each with the probe id it
+ * asked with, and forget them.
+ */
+export function releaseParked(
+  tabs: Map<string, ParkedTab>,
+  frame: Readonly<Record<string, unknown>>
+): void {
+  for (const { connection, probeId } of tabs.values()) {
+    sendIfOpen(
+      connection,
+      JSON.stringify({ ...frame, ...(probeId && { probeId }) })
+    );
+  }
+  tabs.clear();
 }
 
 /** The run's checkpoint key holding the reply a continuation extends. */
@@ -466,21 +489,16 @@ export function chatTurnDefinition(
     // Tabs that asked to resume before this turn streamed.
     const parked = parkedIn(deps.streams, sessionId);
     const offerStream = () => {
-      const frame = JSON.stringify({
+      if (parked.size === 0) return;
+      releaseParked(parked, {
         type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
         id: requestId
       });
-      for (const tab of parked.values()) sendIfOpen(tab, frame);
-      parked.clear();
     };
     const report = async (result: ChatTurnResult) => {
       // A tab still waiting learns there is no stream to resume.
       if (parked.size > 0) {
-        const none = JSON.stringify({
-          type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE
-        });
-        for (const tab of parked.values()) sendIfOpen(tab, none);
-        parked.clear();
+        releaseParked(parked, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
       }
       if (result.status !== "completed" && result.status !== "skipped") {
         send({

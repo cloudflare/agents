@@ -13,6 +13,7 @@ import type { UIMessage } from "ai";
 import {
   chatTurnStreamId,
   parkedIn,
+  releaseParked,
   type ChatDeps,
   type ChatTurnInput
 } from "./chat-host";
@@ -118,7 +119,23 @@ export async function answerTool(
   } finally {
     const left = (counts.get(key) ?? 1) - 1;
     if (left > 0) counts.set(key, left);
-    else counts.delete(key);
+    else {
+      counts.delete(key);
+      // A tab that waited on this answer, which started no turn, learns
+      // there is nothing to resume; a turn it started answers it instead.
+      const parked = parkedIn(deps.streams, key);
+      if (
+        parked.size > 0 &&
+        deps.tasks.peekList({
+          definition: lane.definition,
+          lane: lane.lane,
+          status: ["pending", "running"],
+          results: false
+        }).length === 0
+      ) {
+        releaseParked(parked, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
+      }
+    }
   }
 }
 
@@ -250,7 +267,15 @@ export async function resumeChat(
     order: "oldest"
   });
   if (waiting || (answeringIn(deps).get(deps.session ?? "") ?? 0) > 0) {
-    parkedIn(deps.streams, deps.session ?? "").set(connection.id, connection);
+    const parked = parkedIn(deps.streams, deps.session ?? "");
+    // A tab whose socket closed while it waited is dropped here; the rest
+    // are answered when the turn streams or ends, or the answer is applied.
+    for (const [id, tab] of parked) {
+      if ((tab.connection as { readyState?: number }).readyState === 3) {
+        parked.delete(id);
+      }
+    }
+    parked.set(connection.id, { connection, ...(probeId && { probeId }) });
     sendIfOpen(
       connection,
       JSON.stringify({

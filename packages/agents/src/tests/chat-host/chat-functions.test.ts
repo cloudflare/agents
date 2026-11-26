@@ -2,7 +2,12 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Connection } from "agents";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
-import { chatDispatch } from "../../chat/chat-functions";
+import {
+  answerTool,
+  chatDispatch,
+  resumeChat
+} from "../../chat/chat-functions";
+import { parkedIn } from "../../chat/chat-host";
 
 const tab = { id: "tab-1", send: () => {} } as unknown as Connection;
 
@@ -265,6 +270,154 @@ describe("chat functions over a minimal host", () => {
       );
       expect(sent[0]).toMatchObject({ id: "bad", done: true, error: true });
       expect(instance.calls).toEqual([]);
+    });
+  });
+
+  function recordingTab(id: string, sent: Array<Record<string, unknown>>) {
+    return {
+      id,
+      readyState: 1,
+      send: (text: string) => sent.push(JSON.parse(text))
+    } as unknown as Connection;
+  }
+
+  it("a parked tab gets its probe id back when it is offered the stream", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let called!: () => void;
+      const inRespond = new Promise<void>((resolve) => (called = resolve));
+      const respond = instance.host.respond;
+      instance.host.respond = async (call) => {
+        called();
+        await released;
+        return respond(call);
+      };
+      const sent: Array<Record<string, unknown>> = [];
+      const done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await inRespond;
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-p", sent),
+        JSON.stringify({
+          type: "cf_agent_stream_resume_request",
+          probeId: "p1"
+        })
+      );
+      release();
+      await done;
+      expect(sent[0]).toMatchObject({
+        type: "cf_agent_stream_pending",
+        probeId: "p1"
+      });
+      expect(sent[1]).toMatchObject({
+        type: "cf_agent_stream_resuming",
+        id: "r1",
+        probeId: "p1"
+      });
+      instance.host.respond = respond;
+    });
+  });
+
+  it("a tab parked on a tool answer that starts no turn is told there is nothing to resume", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      // The answer's apply waits until the tab has asked to resume.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      const sessionOf = instance.sessions.session.bind(instance.sessions);
+      (instance.sessions as { session: typeof sessionOf }).session = (id) => {
+        const handle = sessionOf(id);
+        const leaf = handle.getLatestLeaf.bind(handle);
+        handle.getLatestLeaf = async () => {
+          await released;
+          return leaf();
+        };
+        return handle;
+      };
+      const answered = answerTool(instance.deps, instance.lane, {
+        kind: "result",
+        toolCallId: "c1",
+        output: { ok: true }
+      });
+      const sent: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-a", sent),
+        "p2"
+      );
+      expect(sent).toEqual([
+        { type: "cf_agent_stream_pending", probeId: "p2" }
+      ]);
+      release();
+      await answered;
+      expect(sent[1]).toEqual({
+        type: "cf_agent_stream_resume_none",
+        probeId: "p2"
+      });
+      expect(parkedIn(instance.streams, "s1").size).toBe(0);
+    });
+  });
+
+  it("a tab whose socket closed while parked is dropped when another parks", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let called!: () => void;
+      const inRespond = new Promise<void>((resolve) => (called = resolve));
+      const respond = instance.host.respond;
+      instance.host.respond = async (call) => {
+        called();
+        await released;
+        return respond(call);
+      };
+      const done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await inRespond;
+      const closing = { id: "tab-c", readyState: 1, send: () => {} };
+      await resumeChat(instance.deps, instance.lane, closing as never);
+      closing.readyState = 3;
+      await resumeChat(instance.deps, instance.lane, recordingTab("tab-d", []));
+      expect([...parkedIn(instance.streams, "s1").keys()]).toEqual(["tab-d"]);
+      release();
+      await done;
+      instance.host.respond = respond;
     });
   });
 });
