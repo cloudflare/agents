@@ -157,17 +157,17 @@ describe("chat turn races", () => {
 
     // Tab A sends the first question; the turn starts and waits on the
     // model (onChatMessage ignores its abortSignal).
+    await agent.holdNextResponseForTest();
+    onTestFinished(() => agent.releaseResponseForTest());
     sendChatRequest(ws, "req-1", [user1], {
       format: "plaintext",
-      responseDelayMs: 300,
       chunkCount: 3,
       chunkDelayMs: 10
     });
-    await waitUntil(async () =>
-      (await agent.getStartedRequestIds()).includes("req-1")
-    );
+    await waitUntil(async () => await agent.isResponseHeldForTest());
     // A tab clears the chat; then the model answers.
-    send(ws, { type: MessageType.CF_AGENT_CHAT_CLEAR });
+    await sendHandled(agent, ws, { type: MessageType.CF_AGENT_CHAT_CLEAR });
+    await agent.releaseResponseForTest();
     await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
     await agent.waitForIdleForTest();
 
@@ -374,16 +374,17 @@ describe("chat turn races", () => {
     const seen = record(ws);
     const agent = await getAgentByName(env.SlowStreamAgent, room);
 
+    await agent.holdNextResponseForTest();
+    onTestFinished(() => agent.releaseResponseForTest());
     sendChatRequest(ws, "req-1", [user1], {
       format: "plaintext",
-      responseDelayMs: 300,
       chunkCount: 5,
       chunkDelayMs: 10
     });
-    await waitUntil(
-      async () => (await agent.getStartedRequestIds()).length === 1
-    );
+    await waitUntil(async () => await agent.isResponseHeldForTest());
     await agent.abortAllRequestsForTest();
+    // The model answers after the stop, ignoring its signal.
+    await agent.releaseResponseForTest();
     await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
     await agent.waitForIdleForTest();
 
@@ -398,16 +399,17 @@ describe("chat turn races", () => {
     await agent.persistMessages([user1, toolReply("assistant-1", "call-1")]);
     await agent.setTestBody({
       format: "plaintext",
-      responseDelayMs: 300,
       chunkCount: 5,
       chunkDelayMs: 10
     });
+    await agent.holdNextResponseForTest();
+    onTestFinished(() => agent.releaseResponseForTest());
 
     send(ws, toolResult("call-1"));
-    await waitUntil(
-      async () => (await agent.getStartedRequestIds()).length === 1
-    );
+    await waitUntil(async () => await agent.isResponseHeldForTest());
     await agent.abortAllRequestsForTest();
+    // The model answers after the stop, ignoring its signal.
+    await agent.releaseResponseForTest();
     // No armed continuation and idle: nothing more can start.
     await settled(agent);
 

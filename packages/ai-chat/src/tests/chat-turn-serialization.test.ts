@@ -346,11 +346,14 @@ describe("AIChatAgent chat turn serialization", () => {
 
     // The results arrive over the socket, not the RPC: wait until they
     // started a turn before waiting for idle.
-    await vi.waitFor(async () => {
-      expect((await agentStub.getStartedRequestIds()).length).toBeGreaterThan(
-        0
-      );
-    });
+    await vi.waitFor(
+      async () => {
+        expect((await agentStub.getStartedRequestIds()).length).toBeGreaterThan(
+          0
+        );
+      },
+      { timeout: 5000 }
+    );
     await agentStub.waitForIdleForTest();
 
     // With no prior active turn the coalesce window (10ms) starts

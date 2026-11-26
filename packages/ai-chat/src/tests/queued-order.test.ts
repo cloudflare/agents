@@ -5,7 +5,7 @@
  * A2`. Tabs are shown it at once, named in `queuedMessageIds`.
  */
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
@@ -64,6 +64,9 @@ type Stub = {
   getPersistedMessages(): Promise<ChatMessage[]>;
   getTranscriptsSeenForTest(): Promise<string[][]>;
   waitForIdleForTest(): Promise<void>;
+  holdStreamForTest(requestId: string): Promise<void>;
+  isStreamHeldForTest(requestId: string): Promise<boolean>;
+  releaseStreamForTest(requestId: string): Promise<void>;
 };
 
 const SLOW = { chunkCount: 20, chunkDelayMs: 50 };
@@ -82,10 +85,11 @@ describe("a message queued behind a running turn", () => {
       room
     )) as unknown as Stub;
 
+    // The first reply runs until the test releases it.
+    await stub.holdStreamForTest("r1");
+    onTestFinished(() => stub.releaseStreamForTest("r1"));
     sendChatRequest(tabA, "r1", [user("u1", "Count to 40.")], SLOW);
-    await waitFor(() =>
-      seenA.some((f) => isUseChatResponseMessage(f) && f.id === "r1")
-    );
+    await waitFor(async () => await stub.isStreamHeldForTest("r1"));
     sendChatRequest(
       tabB,
       "r2",
@@ -121,6 +125,7 @@ describe("a message queued behind a running turn", () => {
       "u2"
     ]);
 
+    await stub.releaseStreamForTest("r1");
     await waitFor(() =>
       seenA.some(
         (f) => isUseChatResponseMessage(f) && f.id === "r2" && f.done === true

@@ -6869,9 +6869,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       { prompt: "reset probe", chunkDelayMs: 60 },
       { runId }
     );
-    if (!(await this._waitForLiveTurnForTest(runId))) {
-      throw new Error("the run's turn never started streaming");
-    }
+    await this._waitForLiveTurnForTest(runId);
     this.resetTurnState();
     return this._waitForRunTerminalForTest(runId);
   }
@@ -7178,8 +7176,10 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
    */
   private async _waitForLiveTurnForTest(
     runId: string
-  ): Promise<{ requestId: string; streamId: string } | null> {
-    const deadline = Date.now() + 2000;
+  ): Promise<{ requestId: string; streamId: string }> {
+    // A bound for a slow machine, not an ordering: the turn comes up once
+    // the child's model call starts.
+    const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
       const requestId =
         this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
@@ -7190,7 +7190,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    return null;
+    // Injecting nothing would let the test pass without its race.
+    throw new Error(`The live child turn of ${runId} never came up`);
   }
 
   override async getAgentToolChunks(
@@ -7208,15 +7209,13 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       // the attach window. With the #1589 fix the forwarder is already attached,
       // so the chunk is buffered and replayed in order instead of being dropped.
       const live = await this._waitForLiveTurnForTest(runId);
-      if (live) {
-        await storeStreamChunk(this, live.streamId, race.body);
-        this["_frames"].broadcast({
-          body: race.body,
-          done: false,
-          id: live.requestId,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-        });
-      }
+      await storeStreamChunk(this, live.streamId, race.body);
+      this["_frames"].broadcast({
+        body: race.body,
+        done: false,
+        id: live.requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      });
     }
 
     const progress = this._progressInjection;
@@ -7229,20 +7228,18 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       // would collide them with the last stored chunk and the tail's high-water
       // dedupe would silently drop them — the regression this guards against.
       const live = await this._waitForLiveTurnForTest(runId);
-      if (live) {
-        this["_frames"].broadcast({
-          body: progress.progressBody,
-          done: false,
-          id: live.requestId,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-        });
-        this["_frames"].broadcast({
-          body: progress.milestoneBody,
-          done: false,
-          id: live.requestId,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-        });
-      }
+      this["_frames"].broadcast({
+        body: progress.progressBody,
+        done: false,
+        id: live.requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      });
+      this["_frames"].broadcast({
+        body: progress.milestoneBody,
+        done: false,
+        id: live.requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      });
     }
 
     return chunks;
