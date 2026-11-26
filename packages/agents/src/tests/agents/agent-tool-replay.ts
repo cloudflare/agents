@@ -39,6 +39,8 @@ type StubRunInput = {
   pendingChunkBodies?: string[];
   /** Stall every inspection for this long (an unresponsive child). */
   inspectDelayMs?: number;
+  /** The run stays `running` and its tail never sends or closes. */
+  tailHangs?: boolean;
 };
 
 /**
@@ -1201,6 +1203,60 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   /**
+   * A run a released version left open whose child is stuck (its tail never
+   * sends or closes), with a 3 s no-progress budget: how long one check of
+   * the recovered run takes, and what the run waits for after it.
+   */
+  async checkRecoveredRunWithStuckChildForTest(runId: string): Promise<{
+    elapsedMs: number;
+    status: string | null;
+    waitReason?: string;
+  }> {
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    await child.startAgentToolRun(
+      { chunkBodies: [], tailHangs: true },
+      { runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, agent_type, status, display_order, started_at, detached
+      ) VALUES (
+        ${runId}, 'TestAgentToolStubChild', 'running', 0, ${Date.now()}, 0
+      )
+    `;
+    await this._agentTool._carryForwardAgentToolRuns();
+    const resolved = (
+      this as unknown as {
+        _resolvedOptions: { agentToolReattachNoProgressTimeoutMs: number };
+      }
+    )._resolvedOptions;
+    const before = resolved.agentToolReattachNoProgressTimeoutMs;
+    resolved.agentToolReattachNoProgressTimeoutMs = 3_000;
+    const startedAt = Date.now();
+    try {
+      await this.tasks.runDue("__cf_agent_tool");
+    } finally {
+      resolved.agentToolReattachNoProgressTimeoutMs = before;
+    }
+    const record = this.tasks.peek(runId);
+    return {
+      elapsedMs: Date.now() - startedAt,
+      status: record?.status ?? null,
+      ...(record?.waitReason !== undefined
+        ? { waitReason: record.waitReason }
+        : {})
+    };
+  }
+
+  /** Make every waiting awaited run's next check due now. */
+  makeAgentToolRunsDueForTest(): void {
+    this.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now() - 1}
+      WHERE definition = '__cf_agent_tool' AND status = 'pending'
+    `;
+  }
+
+  /**
    * A child still running when the parent restarts: a connected client has
    * already seen the stored chunks, then parent recovery re-attaches and
    * forwards the chunks the child produces afterwards.
@@ -1235,6 +1291,11 @@ export class TestAgentToolReplayAgent extends Agent {
     await this._agentTool._carryForwardAgentToolRuns();
     const seen = await this._captureReplayForTest();
     const recovery = await this._captureBroadcastsForTest(async () => {
+      // The first check finds the child still running.
+      await this.tasks.runDue("__cf_agent_tool");
+      // The child produces the rest and ends; the next check follows it.
+      await child.flushPendingForTest(options.runId);
+      this.makeAgentToolRunsDueForTest();
       await this.tasks.runDue("__cf_agent_tool");
       await this.tasks.wait(options.runId);
     });
@@ -1319,7 +1380,8 @@ export class TestAgentToolStubChild extends Agent {
     const startedAt = Date.now();
     const chunkBodies = input?.chunkBodies ?? [];
     this._storeChunks(options.runId, chunkBodies, 0);
-    const pending = input?.pendingChunkBodies;
+    const pending =
+      input?.pendingChunkBodies ?? (input?.tailHangs ? [] : undefined);
     const status = pending ? "running" : "completed";
     const completedAt = pending ? null : Date.now();
     const summary = input?.summary ?? null;
@@ -1369,6 +1431,23 @@ export class TestAgentToolStubChild extends Agent {
     milestones.push({ beforeChunk: milestones.length, name });
     this.sql`
       UPDATE cf_test_stub_runs SET milestones_json = ${JSON.stringify(milestones)}
+      WHERE run_id = ${runId}
+    `;
+  }
+
+  /** Store a run's pending chunks and complete it, as its turn would. */
+  async flushPendingForTest(runId: string): Promise<void> {
+    this._ensureTables();
+    const run = this.sql<{ pending_json: string | null }>`
+      SELECT pending_json FROM cf_test_stub_runs WHERE run_id = ${runId}
+    `[0];
+    if (!run?.pending_json) return;
+    const stored = await this.getAgentToolChunks(runId);
+    this._storeChunks(runId, JSON.parse(run.pending_json), stored.length);
+    this.sql`
+      UPDATE cf_test_stub_runs
+      SET status = 'completed', completed_at = ${Date.now()},
+          pending_json = NULL
       WHERE run_id = ${runId}
     `;
   }
@@ -1458,6 +1537,10 @@ export class TestAgentToolStubChild extends Agent {
     const run = this.sql<{ pending_json: string | null }>`
       SELECT pending_json FROM cf_test_stub_runs WHERE run_id = ${runId}
     `[0];
+    if (run?.pending_json === "[]") {
+      // A child that is stuck: nothing is ever sent, and the tail stays open.
+      return new ReadableStream<AgentToolStoredChunk>();
+    }
     if (run?.pending_json) {
       const stored = await this.getAgentToolChunks(runId);
       this._storeChunks(runId, JSON.parse(run.pending_json), stored.length);

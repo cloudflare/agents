@@ -525,6 +525,40 @@ function storeStreamChunk(
   return streams.store(streamId, chunk, body, state);
 }
 
+/**
+ * Run a parent's awaited agent-tool runs' checks until each has settled:
+ * a re-attached run asks its child again on its next check, made due here
+ * instead of waiting for its wake. Paced, so the re-attach budgets (real
+ * time) still pass.
+ */
+async function runAgentToolChecksForTest(agent: unknown): Promise<void> {
+  const self = agent as {
+    tasks: {
+      runDue(definition: string): Promise<unknown>;
+      peekList(options: {
+        definition: string;
+        status: string[];
+      }): Array<{ runId: string }>;
+      wait(runId: string): Promise<unknown>;
+    };
+    sql: (strings: TemplateStringsArray, ...values: unknown[]) => unknown;
+  };
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    await self.tasks.runDue("__cf_agent_tool");
+    const open = self.tasks.peekList({
+      definition: "__cf_agent_tool",
+      status: ["pending", "running"]
+    });
+    if (open.length === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    self.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now() - 1}
+      WHERE definition = '__cf_agent_tool' AND status = 'pending'
+    `;
+  }
+}
+
 export class TestChatAgent extends AIChatAgent<Env> {
   /**
    * Stand in for a child restarted mid-run (#2298): a persisted in-flight
@@ -9007,13 +9041,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     try {
       await self._carryForwardAgentToolRuns();
       options?.afterStartup?.();
-      await this.tasks.runDue("__cf_agent_tool");
-      for (const record of this.tasks.peekList({
-        definition: "__cf_agent_tool",
-        status: ["pending", "running"]
-      })) {
-        await this.tasks.wait(record.runId);
-      }
+      await runAgentToolChecksForTest(this);
     } finally {
       self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = before;
     }

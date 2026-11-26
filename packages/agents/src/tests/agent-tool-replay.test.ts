@@ -193,6 +193,21 @@ describe("agent-tool results the run's record cannot hold", () => {
   });
 });
 
+describe("a recovered agent-tool run and the alarm that runs it", () => {
+  it("asks a stuck child and waits for its next check, instead of holding the alarm on the child's tail", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `recovered-stuck-${crypto.randomUUID()}`
+    );
+    const { elapsedMs, status, waitReason } =
+      await agent.checkRecoveredRunWithStuckChildForTest("run-stuck");
+    expect(status).toBe("pending");
+    expect(waitReason).toBe("retry");
+    // Well under the 3 s no-progress budget the old re-attach waited out.
+    expect(elapsedMs).toBeLessThan(2_000);
+  });
+});
+
 describe("agent-tool connect-time replay", () => {
   it("reads milestones without asking the child to reconcile its run", async () => {
     const agent = await getAgentByName(

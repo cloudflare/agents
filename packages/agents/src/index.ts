@@ -210,6 +210,7 @@ import type {
 import type { QueueItem } from "./queue/types";
 export type { QueueItem } from "./queue/types";
 import { MAX_SERIALIZED_BYTES } from "./tasks/serialization";
+import { TaskSettlement } from "./tasks/settlement";
 import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
 import type {
   TaskCallbacks,
@@ -401,6 +402,10 @@ const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 // An awaited agent-tool run is one run of this Task definition, keyed by the
 // run id. Its attempt follows the child; a reset re-runs it, which re-attaches.
 const AGENT_TOOL_TASK = "__cf_agent_tool";
+// How often a re-attached run asks its child, at most: it starts at 1 s and
+// doubles up to this. It asks, rather than holding the child's tail, so the
+// alarm that runs it is never held open by the child.
+const AGENT_TOOL_REATTACH_POLL_MAX_MS = 5_000;
 // How long a detached terminal-delivery claim is leased before another delivery
 // path (a backbone reconcile racing the warm fast path, or a re-delivery after
 // a crash mid-handler) may re-claim it. Guards against a double-fire on the
@@ -3887,7 +3892,9 @@ export class Agent<
    * it broadcasts the terminal event and returns the result; the terminal
    * report runs `onAgentToolFinish`.
    */
-  private async _agentToolAttempt(step: TaskStep): Promise<TaskJson> {
+  private async _agentToolAttempt(
+    step: TaskStep
+  ): Promise<TaskJson | TaskSettlement> {
     const runId = step.id;
     const local = step.local as AgentToolTaskLocal | undefined;
     const meta = local?.meta ?? this._agentToolTaskMeta(this.tasks.peek(runId));
@@ -3913,7 +3920,9 @@ export class Agent<
       const followed =
         local && !local.reissue
           ? await this._followLiveAgentToolRun(meta, runId, local.input, signal)
-          : await this._reattachAgentToolRun(meta, runId, signal);
+          : await this._reattachAgentToolRun(meta, runId, signal, step);
+      // Still running: the run asks the child again later.
+      if (followed instanceof TaskSettlement) return followed;
       result = followed.result;
       sequence = followed.sequence;
     } catch (error) {
@@ -4141,8 +4150,11 @@ export class Agent<
   private async _reattachAgentToolRun(
     meta: AgentToolTaskMeta,
     runId: string,
-    signal: AbortSignal
-  ): Promise<{ result: RunAgentToolResult; sequence: number }> {
+    signal: AbortSignal,
+    step: TaskStep
+  ): Promise<
+    { result: RunAgentToolResult; sequence: number } | TaskSettlement
+  > {
     // Bounded: a child that cannot be reached or does not answer must not
     // hold the parent's run for good.
     const reached = await this._settleWithinRecoveryTimeout(
@@ -4186,7 +4198,8 @@ export class Agent<
         runId,
         signal,
         adapter,
-        inspection
+        inspection,
+        step
       );
     } finally {
       signal.removeEventListener("abort", onAbort);
@@ -4198,8 +4211,11 @@ export class Agent<
     runId: string,
     signal: AbortSignal,
     adapter: AgentToolChildAdapter,
-    inspection: AgentToolRunInspection | null
-  ): Promise<{ result: RunAgentToolResult; sequence: number }> {
+    inspection: AgentToolRunInspection | null,
+    step: TaskStep
+  ): Promise<
+    { result: RunAgentToolResult; sequence: number } | TaskSettlement
+  > {
     if (signal.aborted) {
       await adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
       return {
@@ -4249,7 +4265,98 @@ export class Agent<
         sequence: 1
       };
     }
-    return this._reattachUntilGivenUp(adapter, meta, runId, 1);
+    return this._pollReattachedAgentToolRun(adapter, meta, runId, step);
+  }
+
+  /**
+   * One check of a re-attached run whose child is still running: forward
+   * the chunks it stored since the last check, then give up past a
+   * re-attach budget or ask again soon. The budgets keep their meaning:
+   * `agentToolReattachNoProgressTimeoutMs` since the child last stored a
+   * chunk, `agentToolReattachMaxWindowMs` since the first check (the child
+   * is torn down then).
+   */
+  private async _pollReattachedAgentToolRun(
+    adapter: AgentToolChildAdapter,
+    meta: AgentToolTaskMeta,
+    runId: string,
+    step: TaskStep
+  ): Promise<
+    { result: RunAgentToolResult; sequence: number } | TaskSettlement
+  > {
+    const now = Date.now();
+    const checkpoint = step.checkpoint;
+    const firstAt = checkpoint.get<number>("reattachFirstAt") ?? now;
+    let progressAt = checkpoint.get<number>("reattachProgressAt") ?? now;
+    const polls = checkpoint.get<number>("reattachPolls") ?? 0;
+    let lastSequence = checkpoint.get<number>("reattachLastSequence");
+    try {
+      if (lastSequence === undefined) {
+        // The first check: what the child stored so far reaches clients
+        // through the connect replay; follow from its end.
+        const stored = await this._readAgentToolChunks(adapter, runId);
+        lastSequence = stored.at(-1)?.sequence ?? -1;
+      } else {
+        const fresh = await adapter.getAgentToolChunks(runId, {
+          afterSequence: lastSequence
+        });
+        if (fresh.length > 0) {
+          // A stored chunk's event sequence is its store position plus one.
+          this._broadcastAgentToolChunks(
+            meta.parentToolCallId,
+            runId,
+            fresh,
+            lastSequence + 2
+          );
+          lastSequence = fresh[fresh.length - 1].sequence;
+          progressAt = now;
+        }
+      }
+    } catch {
+      // The chunks could not be read this time: the budgets still count.
+    }
+    const sequence = (lastSequence ?? -1) + 2;
+    const maxWindow = this._resolvedOptions.agentToolReattachMaxWindowMs;
+    const noProgress =
+      this._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
+    const windowed = maxWindow > 0 && Number.isFinite(maxWindow);
+    let reason: AgentToolInterruptedReason | undefined;
+    if (windowed && now - firstAt >= maxWindow) {
+      reason = "window-exceeded";
+    } else if (
+      !(noProgress > 0) ||
+      (Number.isFinite(noProgress) && now - progressAt >= noProgress)
+    ) {
+      reason = "no-progress";
+    }
+    if (reason) {
+      const childTornDown = await this._teardownGivenUpAgentToolChild(
+        adapter,
+        runId,
+        reason
+      );
+      return {
+        result: {
+          runId,
+          agentType: meta.agentType,
+          status: "interrupted",
+          error: this._interruptedMessageForReason(reason),
+          reason,
+          childStillRunning: !childTornDown
+        },
+        sequence
+      };
+    }
+    checkpoint.set("reattachFirstAt", firstAt);
+    checkpoint.set("reattachProgressAt", progressAt);
+    checkpoint.set("reattachPolls", polls + 1);
+    checkpoint.set("reattachLastSequence", lastSequence ?? -1);
+    const next = Math.min(
+      now + Math.min(1000 * 2 ** polls, AGENT_TOOL_REATTACH_POLL_MAX_MS),
+      Number.isFinite(noProgress) ? progressAt + noProgress : Infinity,
+      windowed ? firstAt + maxWindow : Infinity
+    );
+    return TaskSettlement.retry(next);
   }
 
   /**
