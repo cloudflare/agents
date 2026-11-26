@@ -159,6 +159,16 @@ describe("ChatTurns", () => {
     expect(host.fired).toBe(1);
   });
 
+  it("waits for an apply in flight even when the batch looks complete", async () => {
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    const release = await scheduleBehindHeldApply();
+    expect(host.keepAlives).toBe(1);
+    expect(host.fired).toBe(0);
+
+    await release();
+    expect(host.fired).toBe(1);
+  });
+
   it("absorbs a barrier check that re-enters during the drain", async () => {
     host.transcript = [user("u1"), halfAnswered()];
     const release = await scheduleBehindHeldApply();
