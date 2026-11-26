@@ -64,3 +64,4 @@ export {
   ThinkPromptCacheTestAgent,
   ThinkUpgradeTestAgent
 } from "./prompt-cache";
+export { ThinkPrefixChangedAgent } from "./prefix-changed";

@@ -189,8 +189,8 @@ export interface PreparedTurn extends PreparedContext {
   recordTools(
     tools: readonly { readonly name: string; readonly hash: string }[]
   ): Promise<{
-    /** The tools differ from the ones the model was last sent. */
-    readonly changed: boolean;
+    /** How the tools differ from the ones the model was last sent. */
+    readonly changed: ToolChanges | null;
     /** The notice when it could not be recorded: this request only. */
     readonly reminder: string | null;
   }>;
@@ -205,6 +205,18 @@ export interface PreparedContext {
    * `null` when there is nothing to place.
    */
   readonly reminder: string | null;
+  /**
+   * @internal Set when a refresh replaced the system prompt the earlier
+   * turns were sent, which a provider's prompt cache of them loses.
+   */
+  readonly refreshed?: true;
+}
+
+/** @internal Tool names that differ from the last turn's. */
+export interface ToolChanges {
+  readonly added: readonly string[];
+  readonly removed: readonly string[];
+  readonly changed: readonly string[];
 }
 
 /**
@@ -321,12 +333,12 @@ export class Context {
     return {
       ...prepared,
       recordTools: async (fingerprint) => {
-        if (options.retry) return { changed: false, reminder: null };
+        if (options.retry) return { changed: null, reminder: null };
         const tools = fingerprint.map(
           ({ name, hash }) => [name, hash] as const
         );
-        const notice = before ? toolNotice(before, tools) : null;
-        const changed = notice !== null;
+        const changed = before ? toolDiff(before, tools) : null;
+        const notice = changed && toolNotice(changed);
         if (!at) return { changed, reminder: notice };
         await this.#recordTools(history, at, tools, before, notice);
         return { changed, reminder: null };
@@ -462,7 +474,12 @@ export class Context {
         if (refresh) await this.#setRefresh(false);
         await this.#setChanged(null);
       }
-      return { system, reminder: null };
+      return {
+        system,
+        reminder: null,
+        // A first snapshot replaces nothing.
+        ...(delivered.system !== null && !unchanged && { refreshed: true })
+      };
     }
 
     const { changes, own } = await this.#changes(delivered, history);
@@ -1069,18 +1086,23 @@ function ownWrites(
 }
 
 /** What changed between two tool lists, for the model; `null` when nothing did. */
-function toolNotice(
+/** What differs between two tool lists, or null when nothing does. */
+function toolDiff(
   before: readonly (readonly [string, string])[],
   now: readonly (readonly [string, string])[]
-): string | null {
+): ToolChanges | null {
   const was = new Map(before);
   const is = new Map(now);
   const added = [...is.keys()].filter((name) => !was.has(name));
   const removed = [...was.keys()].filter((name) => !is.has(name));
-  const changed = [...is].filter(
-    ([name, hash]) => was.has(name) && was.get(name) !== hash
-  );
+  const changed = [...is]
+    .filter(([name, hash]) => was.has(name) && was.get(name) !== hash)
+    .map(([name]) => name);
   if (added.length + removed.length + changed.length === 0) return null;
+  return { added, removed, changed };
+}
+
+function toolNotice({ added, removed, changed }: ToolChanges): string {
   const lines = [
     "The tools you can call changed since earlier in this conversation."
   ];
@@ -1092,7 +1114,7 @@ function toolNotice(
   }
   if (changed.length > 0) {
     lines.push(
-      `Changed: ${changed.map(([name]) => name).join(", ")}. Use their current definitions.`
+      `Changed: ${changed.join(", ")}. Use their current definitions.`
     );
   }
   return lines.join("\n");

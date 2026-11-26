@@ -579,6 +579,29 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.kv.put(NOTE_IN_BEFORE_TURN_KEY, true);
   }
 
+  /** Each `prefix-changed` event, in order: its session and causes. */
+  readonly #prefixChanges: { session: string; causes: unknown }[] = [];
+  readonly unobservePrefix = this.harness.observe((session, event) => {
+    if (event.type === "prefix-changed") {
+      this.#prefixChanges.push({ session, causes: event.causes });
+    }
+  });
+
+  prefixChanges(): { session: string; causes: unknown }[] {
+    return this.#prefixChanges;
+  }
+
+  /** Edit a message on the Sessions handle, around the harness. */
+  async editMessage(session: string, id: string, text: string): Promise<void> {
+    const handle = this.#handles.get(session);
+    const message = (await handle?.getHistory())?.find((m) => m.id === id);
+    if (!handle || !message) throw new Error(`no message ${id}`);
+    await handle.updateMessage({
+      ...message,
+      parts: [{ type: "text", text }]
+    });
+  }
+
   addLateTool(): void {
     this.ctx.storage.kv.put(LATE_TOOL_KEY, true);
   }

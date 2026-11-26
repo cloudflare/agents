@@ -74,6 +74,7 @@ import {
   SessionEvents,
   Watcher,
   type ThinkHarnessListener,
+  type PrefixChangeCause,
   type ThinkSessionEvent,
   type ThinkSessionListener
 } from "./events";
@@ -536,6 +537,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly sessions: ThinkSessions;
   readonly #options: ThinkHarnessOptions<TOOLS>;
   readonly #events = new SessionEvents();
+  /**
+   * Per session, how history was rewritten since its last model call, for
+   * that call's `prefix-changed` event. The next call removes the entry;
+   * each holds at most three operations.
+   */
+  readonly #rewrites = new Map<
+    ThinkSessionId,
+    Set<"compaction" | "edit" | "delete">
+  >();
   readonly #live = new Map<ThinkSessionId, LiveRun>();
   readonly #configured = new Set<ThinkSessionId>();
   /** Each session's context, from the `context` option, built on first use. */
@@ -1545,6 +1555,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     let contextSystem = "";
     let recordTools: PreparedTurn["recordTools"] | undefined;
     let blockReminder: string | null = null;
+    let refreshed = false;
     let request = history;
     let optionsSystem = prompt.system;
     if (context) {
@@ -1557,6 +1568,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       contextSystem = prepared.system;
       recordTools = prepared.recordTools;
       blockReminder = prepared.reminder;
+      refreshed = prepared.refreshed === true;
       request = withReminder(
         asUIMessages(await context.project(history)),
         prepared.reminder
@@ -1583,6 +1595,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
     const offered = modelTools(tools, config.activeTools);
+    const causes: PrefixChangeCause[] = [];
     if (context && recordTools) {
       // The tools this request sends, now that `beforeTurn` chose which: a
       // change from the last turn's reaches the model once, as a notice
@@ -1595,7 +1608,23 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           asUIMessages(await context.project(history)),
           [blockReminder, tooled.reminder].filter(Boolean).join("\n\n") || null
         );
+        causes.push({ kind: "tools", ...tooled.changed });
       }
+    }
+    if (refreshed) causes.push({ kind: "system" });
+    const rewrites = this.#rewrites.get(session);
+    if (rewrites) {
+      this.#rewrites.delete(session);
+      for (const operation of rewrites) {
+        causes.push({ kind: "messages", operation });
+      }
+    }
+    if (causes.length > 0) {
+      this.#events.emit(session, {
+        type: "prefix-changed",
+        operationId,
+        causes
+      });
     }
     const effectiveSystem = config.system ?? system;
     const messages: ModelMessage[] =
@@ -2322,6 +2351,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         case "update":
         case "import":
           if (this.#takeOwn(session, change.message.id)) return;
+          // A message changed outside a turn: what earlier requests sent.
+          if (change.type === "update") this.#rewrote(session, "edit");
           this.#events.emit(session, {
             type: "message",
             message: asUIMessage(change.message)
@@ -2342,14 +2373,28 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             .catch((error: unknown) =>
               console.warn("ThinkHarness could not refresh the context", error)
             );
+          this.#rewrote(session, "compaction");
           this.#events.emit(session, { type: "transcript" });
           return;
         case "delete":
+          this.#rewrote(session, "delete");
           // No one message describes these: the active path changed.
           this.#events.emit(session, { type: "transcript" });
           return;
       }
     });
+  }
+
+  #rewrote(
+    session: ThinkSessionId,
+    operation: "compaction" | "edit" | "delete"
+  ): void {
+    let rewrites = this.#rewrites.get(session);
+    if (!rewrites) {
+      rewrites = new Set();
+      this.#rewrites.set(session, rewrites);
+    }
+    rewrites.add(operation);
   }
 
   /** Note messages the harness is about to write; returns the release. */
@@ -2887,6 +2932,9 @@ function toSessionEvents(
     case "transcript":
       // The shared interface has no "re-read" event; a watch sees the
       // change in its next state.
+      return [];
+    case "prefix-changed":
+      // Observability, not part of the conversation.
       return [];
   }
 }

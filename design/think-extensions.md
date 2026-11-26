@@ -74,7 +74,17 @@ The shell (`think/src/harness/think.ts`) takes Think's extension members as Thin
 
 ## Telling the model when the tools change
 
-On every model call, ThinkHarness gives the session's context the tools that call offers, each with a hash of its definition as the model sees it (description, input schema, provider fields), made once per build. The context's record for each user message keeps that list (no new row). When a turn's list differs from the previous record's, the model is told once, after that turn's user message: what was added, what is gone (not to be called, earlier description to be disregarded), what changed. A turn with the same tools writes nothing new. A session without a context gets no notice.
+On every model call, ThinkHarness gives the session's context the tools that call offers, each with a hash of its definition as the model sees it (description, input schema, input examples, provider fields), made once per tool object. The context's record for each user message keeps that list (no new row). When a turn's list differs from the previous record's, the model is told once, after that turn's user message: what was added, what is gone (not to be called, earlier description to be disregarded), what changed. A turn with the same tools writes nothing new. A session without a context gets no notice.
+
+## Saying when the prefix changed
+
+Before a model call whose prefix differs from the session's previous call, which loses a provider's prompt cache, ThinkHarness emits a `prefix-changed` session event with its causes:
+
+- `tools`: the names added, removed and changed, from the same comparison the notice uses;
+- `system`: a refresh recorded a new system prompt;
+- `messages`: history was compacted, or a message was edited or deleted around the harness.
+
+The harness-backed Think forwards it as the `chat:prefix:changed` observability event, on the `chat` channel. It is not named `think:`, because that prefix has no channel of its own. The `Think` class emits it from E4, when its turn runs on ThinkHarness. A changed block isn't a cause: it goes after the new message, so the prefix holds. The rewrites are kept in memory per session until that session's next call (at most three each), so a rewrite made before an eviction goes unreported. No row and no hashing of the transcript.
 
 ## Guarantees
 

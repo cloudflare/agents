@@ -46,7 +46,39 @@ export type ThinkSessionEvent =
    * The transcript changed in a way no single message describes: messages
    * were deleted, or a compaction changed what the model sees. Re-read it.
    */
-  | { readonly type: "transcript" };
+  | { readonly type: "transcript" }
+  /**
+   * What a model call sends before its new message differs from what the
+   * session's previous call sent, so a provider's prompt cache of it is
+   * lost. Emitted before the call, only on a change.
+   */
+  | {
+      readonly type: "prefix-changed";
+      readonly operationId: string;
+      readonly causes: readonly PrefixChangeCause[];
+    };
+
+/**
+ * Why a model call's prefix changed.
+ * - `tools`: the tools sent were added, removed or changed.
+ * - `system`: the context's system prompt was refreshed.
+ * - `messages`: history was rewritten: compacted, a message edited outside
+ *   a turn, or messages deleted.
+ *
+ * @experimental
+ */
+export type PrefixChangeCause =
+  | {
+      readonly kind: "tools";
+      readonly added: readonly string[];
+      readonly removed: readonly string[];
+      readonly changed: readonly string[];
+    }
+  | { readonly kind: "system" }
+  | {
+      readonly kind: "messages";
+      readonly operation: "compaction" | "edit" | "delete";
+    };
 
 /** A listener for a session's events. @experimental */
 export type ThinkSessionListener = (event: ThinkSessionEvent) => void;
