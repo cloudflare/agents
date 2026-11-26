@@ -26,8 +26,12 @@ class WakeProbe extends LifecycleCapability {
     this.host.sql`CREATE TABLE IF NOT EXISTS facet_wake_runs (
       id TEXT NOT NULL, at INTEGER NOT NULL
     )`;
-    this.host
-      .sql`INSERT INTO facet_wake_runs (id, at) VALUES ('start', ${Date.now()})`;
+    const at = Date.now();
+    this.host.sql`INSERT INTO facet_wake_runs (id, at) VALUES ('start', ${at})`;
+    // Also kept in this isolate, so a test can read when a facet started
+    // from its root without reaching the facet, which would start it.
+    const path = this.host.selfPath.map((step) => step.name).join("/");
+    startsByPath.set(path, [...(startsByPath.get(path) ?? []), at]);
   }
 
   /** `handoff-*` jobs' handed-off work, keyed by job id. */
@@ -167,6 +171,9 @@ abstract class WakeAgent extends Agent<Cloudflare.Env> {
   }
 }
 
+/** Each facet's start times, by its path of names, in this isolate. */
+const startsByPath = new Map<string, number[]>();
+
 /** Drive calls into a middle facet that fail before they reach it. */
 let failingDrives = 0;
 /** Set: a root's alarms do nothing, so a test can read what start left. */
@@ -269,6 +276,12 @@ export class FacetWakeRoot extends WakeAgent {
 
   async leafPending(middle: string, leaf: string): Promise<string[]> {
     return (await this.subAgent(FacetWakeMiddle, middle)).leafPending(leaf);
+  }
+
+  /** When middle facet `name` started, read without reaching it. */
+  middleStartsSeen(name: string): number[] {
+    const path = [...this.selfPath.map((step) => step.name), name].join("/");
+    return startsByPath.get(path) ?? [];
   }
 
   async middleStarts(name: string): Promise<number[]> {
