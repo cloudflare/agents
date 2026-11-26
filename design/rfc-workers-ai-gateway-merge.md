@@ -6,7 +6,7 @@ Status: accepted — implemented in [cloudflare/ai#573](https://github.com/cloud
 > repo (`packages/workers-ai-provider`, `packages/ai-gateway-provider`). This RFC
 > lives here because the motivation — resumable LLM streams in Think — is an
 > agents-repo concern, and the empirical groundwork is the
-> `experimental/gateway-resume` (a harness, since removed) harness.
+> [`experimental/gateway-resume`](https://github.com/cloudflare/agents/tree/49e9d3f86d8b7f92f1a43beb057608914b60ddfd/experimental/gateway-resume) (a harness, since removed; the link is pinned to the last commit that had it) harness.
 
 ## The problem
 
@@ -926,7 +926,7 @@ RFC-first otherwise.
 
 ## History
 
-- Empirical basis: `experimental/gateway-resume` (a harness, since removed)
+- Empirical basis: [`experimental/gateway-resume`](https://github.com/cloudflare/agents/tree/49e9d3f86d8b7f92f1a43beb057608914b60ddfd/experimental/gateway-resume) (a harness, since removed; the link is pinned to the last commit that had it)
   — verified native resume across OpenAI / Anthropic / Google catalog models.
 - Reference (not a dependency): [cloudflare/ai#409](https://github.com/cloudflare/ai/pull/409)
   — `createAIGateway` decorator rewrite (open; not expected to land soon). We
