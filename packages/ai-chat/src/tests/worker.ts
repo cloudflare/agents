@@ -7163,6 +7163,11 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     this._injectionHold = null;
   }
 
+  /** From the test, however it ends: an injection that never landed. */
+  releaseInjectionHoldForTest(): void {
+    this._releaseInjectionHold();
+  }
+
   private _progressInjection: {
     runId: string;
     progressBody: string;
@@ -8690,6 +8695,12 @@ export class AIChatAgentToolParent extends Agent<Env> {
    * return the forwarded agent-tool events so the test can assert the chunk
    * survives the stored-replay → live-forwarding handoff.
    */
+  /** Release the tool child's reply if its injection never landed. */
+  async releaseChildInjectionHoldForTest(runId: string): Promise<void> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    await child.releaseInjectionHoldForTest();
+  }
+
   async runChildWithAttachRaceForTest(
     input: AgentToolInput,
     raceBody: string,

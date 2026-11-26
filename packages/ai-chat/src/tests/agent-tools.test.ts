@@ -14,7 +14,7 @@ import {
   AGENT_TOOL_PROGRESS_PART,
   getAgentByName
 } from "agents";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, onTestFinished } from "vitest";
 import type { Env } from "./worker";
 import { connectChatWS } from "./test-utils";
 
@@ -156,6 +156,7 @@ type ParentStub = DurableObjectStub & {
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
     lifecycleOrder: string[];
   }>;
+  releaseChildInjectionHoldForTest(runId: string): Promise<void>;
   runChildWithAttachRaceForTest(
     input: {
       prompt: string;
@@ -861,6 +862,7 @@ describe("AIChatAgent as an agent-tool child", () => {
       output: "race-output-1589"
     });
 
+    onTestFinished(() => parent.releaseChildInjectionHoldForTest(runId));
     const { result, events } = await parent.runChildWithAttachRaceForTest(
       { prompt: "proxy remote tool output", chunkDelayMs: 30 },
       raceBody,
@@ -898,6 +900,7 @@ describe("AIChatAgent as an agent-tool child", () => {
       data: { name: "phase-1", sequence: 0, at: 1, data: { sources: 2 } }
     });
 
+    onTestFinished(() => parent.releaseChildInjectionHoldForTest(runId));
     const { result, events } =
       await parent.runChildWithProgressInjectionForTest(
         { prompt: "report progress while proxied", chunkDelayMs: 30 },
