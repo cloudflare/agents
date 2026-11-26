@@ -212,6 +212,50 @@ async function untilPending(cls: Cls, room: string): Promise<CtlResult> {
   }
 }
 
+/** The request (or continuation) `id` ended with `outcome` on the first tab. */
+function endedAs(run: Run, id: string | undefined, outcome: string): Run {
+  const end = [...(run.tabs[0]?.frames ?? [])]
+    .reverse()
+    .find(
+      (f) =>
+        isResp(f) &&
+        f.id === id &&
+        f.done === true &&
+        f.outcome !== "recovering"
+    );
+  if (end?.outcome !== outcome) {
+    run.checks.push(`${id} ended ${end?.outcome ?? "never"}, not ${outcome}`);
+  }
+  return run;
+}
+
+/** The transcript's roles, `u` and `a`, in order. */
+function roles(run: Run, expected: string): Run {
+  const got = run.state.messages.map((m) => m.role[0]).join("");
+  if (got !== expected)
+    run.checks.push(`transcript roles ${got}, not ${expected}`);
+  return run;
+}
+
+/** Every user message is followed by an assistant message. */
+function answered(run: Run): Run {
+  const got = run.state.messages.map((m) => m.role[0]).join("");
+  if (/u(?!a)/.test(got))
+    run.checks.push(`a user message has no reply: ${got}`);
+  return run;
+}
+
+/** The approval was found and the approved action ran. */
+function approvedRan(run: Run, approved: CtlResult): Run {
+  const out = (approved.value as { out?: string } | null)?.out;
+  if (!out?.includes("paused-exec")) {
+    run.checks.push(
+      `the approval did not run the action: ${JSON.stringify(approved).slice(0, 160)}`
+    );
+  }
+  return run;
+}
+
 function firstExecutionId(pending: CtlResult): string | undefined {
   return Array.isArray(pending.value)
     ? (pending.value[0] as { executionId?: string } | undefined)?.executionId
@@ -765,10 +809,11 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     // Stop mid-reply: once the recovered turn is a few chunks in.
     await tab.waitFor(chunkOf(f.id, "w5 "), 30000, "recovered w5");
     tab.send({ type: MT.CANCEL, id: f.id });
-    return finish(cls, room, [tab], {
+    const run = await finish(cls, room, [tab], {
       reqId: id.slice(0, 14),
       recoveredId: f.id?.slice(0, 14)
     });
+    return endedAs(run, f.id, "aborted");
   },
   async recStopOrigDuringStream(cls: Cls) {
     const { room, tab } = await setup(cls, {
@@ -786,10 +831,12 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     );
     await tab.waitFor(chunkOf(f.id, "w5 "), 30000, "recovered w5");
     tab.send({ type: MT.CANCEL, id });
-    return finish(cls, room, [tab], {
+    // Stopping the original request stops the recovered turn that carries it.
+    const run = await finish(cls, room, [tab], {
       reqId: id.slice(0, 14),
       recoveredId: f.id?.slice(0, 14)
     });
+    return endedAs(run, f.id, "aborted");
   },
   async recStopDuringBackoff(cls: Cls) {
     const { room, tab } = await setup(cls, {
@@ -830,10 +877,13 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     const id2 = tab.request(rid("req"), [user("second question")], {
       clientTools: CLIENT_TOOLS
     });
-    return finish(cls, room, [tab], {
+    const run = await finish(cls, room, [tab], {
       reqId: id.slice(0, 14),
       reqId2: id2.slice(0, 14)
     });
+    // Think answers the recovered request before the one sent during its
+    // backoff. AIChatAgent ended the first with an error.
+    return roles(run, cls === "think" ? "uaua" : "uua");
   },
   // Upgrade probes (D2): a recovery is live when the caller deploys a new version about 6 s after the start.
   async recStopDuringBackoffStall(cls: Cls) {
@@ -1039,7 +1089,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     tab.close();
     const tab2 = await openTab(cls, room);
     tab2.send({ type: MT.RESUME_REQUEST });
-    return finish(cls, room, [tab2], {}, { maxMs: 120000 });
+    // The request the reset cut off is still answered.
+    return answered(await finish(cls, room, [tab2], {}, { maxMs: 120000 }));
   },
   async vResetDuringBackoff(cls: Cls) {
     // Think: a 429 schedules a recovery with a 10 s backoff; a reset during the wait, then a second interruption detected on restart
@@ -1064,7 +1115,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     tab.close();
     const tab2 = await openTab(cls, room);
     tab2.send({ type: MT.RESUME_REQUEST });
-    return finish(cls, room, [tab2], {}, { maxMs: 120000 });
+    // The request the reset cut off is still answered.
+    return answered(await finish(cls, room, [tab2], {}, { maxMs: 120000 }));
   },
   async vDeclineInAttempt(cls: Cls) {
     const { room, tab } = await setup(cls, {
@@ -1132,7 +1184,11 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     );
     await tab.waitFor(chunkOf(r2.id, "w3 "), 30000, "R2 w3");
     tab.send({ type: MT.CANCEL, id: r2.id });
-    return finish(cls, room, [tab], { r2: r2.id?.slice(0, 14) });
+    return endedAs(
+      await finish(cls, room, [tab], { r2: r2.id?.slice(0, 14) }),
+      r2.id,
+      "aborted"
+    );
   },
   async vStopR1DuringR2(cls: Cls) {
     const { room, tab } = await setup(cls, {
@@ -1312,10 +1368,13 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     const approved = execId
       ? await ctl(cls, room, "probeApprove", execId)
       : { ok: false, error: "no pending" };
-    return finish(cls, room, [tab], {
-      pending: pending.value ?? pending.error,
-      approved: approved.value ?? approved.error
-    });
+    return approvedRan(
+      await finish(cls, room, [tab], {
+        pending: pending.value ?? pending.error,
+        approved: approved.value ?? approved.error
+      }),
+      approved
+    );
   },
   async approveRpcStop(cls: Cls) {
     // approve over RPC, then abortAllRequests while the connection-less continuation streams
@@ -1331,6 +1390,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     await tab.done(id, 20000);
     const pending = await untilPending(cls, room);
     const execId = firstExecutionId(pending);
+    // No tab: the approved action continues without a connection.
+    tab.close();
     const approvedP = execId
       ? ctl(cls, room, "probeApprove", execId)
       : Promise.resolve<CtlResult>({ ok: false, error: "no pending" });
@@ -1343,9 +1404,12 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     );
     await ctl(cls, room, "probeAbortAll");
     const approved = await approvedP;
-    return finish(cls, room, [tab], {
-      approved: approved.value ?? approved.error
-    });
+    return approvedRan(
+      await finish(cls, room, [tab], {
+        approved: approved.value ?? approved.error
+      }),
+      approved
+    );
   }
 };
 
