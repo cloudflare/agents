@@ -330,13 +330,16 @@ describe("chat turn races", () => {
     const seenB = record(tabB);
     const agent = await getAgentByName(env.SlowStreamAgent, room);
 
-    // Tab A's first reply streams; its second request waits in the queue.
+    // Tab A's first reply streams (held after its first chunk); its second
+    // request waits in the queue.
+    await agent.holdStreamForTest("req-1");
+    onTestFinished(() => agent.releaseStreamForTest("req-1"));
     sendChatRequest(tabA, "req-1", [user1], {
       format: "plaintext",
       chunkCount: 8,
       chunkDelayMs: 30
     });
-    await waitUntil(() => responses(seenA, "req-1").some((m) => m.body));
+    await waitUntil(async () => await agent.isStreamHeldForTest("req-1"));
     sendChatRequest(tabA, "req-2", [user1, user2], { format: "plaintext" });
     await waitUntil(async () =>
       ((await agent.getQueuedMessageIdsForTest()) as string[]).includes(
@@ -344,8 +347,12 @@ describe("chat turn races", () => {
       )
     );
 
-    // Tab A stops the queued request.
-    send(tabA, { type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, id: "req-2" });
+    // Tab A stops the queued request while the first reply still runs.
+    await sendHandled(agent, tabA, {
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: "req-2"
+    });
+    await agent.releaseStreamForTest("req-1");
     await waitUntil(() => responses(seenA, "req-2").some((m) => m.done));
     await agent.waitForIdleForTest();
 
@@ -527,8 +534,9 @@ describe("chat turn races", () => {
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const seen = record(ws);
     const agent = await getAgentByName(env.TestChatAgent, room);
-    // The app's persistMessages awaits before it stores an assistant message.
-    await agent.setPersistDelayForTest("assistant", 300);
+    // The app's persistMessages waits before it stores an assistant message.
+    await agent.holdPersistForTest("assistant");
+    onTestFinished(() => agent.releasePersistForTest());
 
     // Turn 1 streams a client tool call and finishes. Its reply has left the
     // stream and is not stored yet.
@@ -536,11 +544,13 @@ describe("chat turn races", () => {
     await waitUntil(() =>
       seen.some((m) => JSON.stringify(m).includes("tool-input-available"))
     );
-    await delay(100);
+    await waitUntil(async () => await agent.isPersistHeldForTest());
     expect(await agent.getPersistedMessages()).toHaveLength(1);
 
     // The tab's tool finishes and its result arrives in that window.
-    send(ws, toolResult("call-turn"));
+    await sendHandled(agent, ws, toolResult("call-turn"));
+    expect(await agent.isPersistHeldForTest()).toBe(true);
+    await agent.releasePersistForTest();
     await waitUntil(() => responses(seen, "req-tool").some((m) => m.done));
     // No armed continuation and idle: nothing more can start.
     await settled(agent);
