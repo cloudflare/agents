@@ -1,5 +1,4 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../index";
 
@@ -29,7 +28,8 @@ describe("detached agent-tool runs on Tasks", () => {
         summary: "done"
       })
     ).toEqual({ status: "running" });
-    expect(await agent.detachedStateForTest("run-once")).toEqual({
+    // `runAgentTool` never delivers itself; the run's next check does.
+    expect(await agent.checkDetachedForTest("run-once")).toEqual({
       status: "completed"
     });
     const log = await agent.getDetachedDeliveryLog();
@@ -241,13 +241,14 @@ describe("detached agent-tool runs on Tasks", () => {
       { chunkBodies: [], summary: "done" },
       { onFinish: "onDetachedFailsOnce" }
     );
-    // The report failed once and is retried by its job.
-    expect(statuses(await agent.getDetachedDeliveryLog(), "run-retry")).toEqual(
-      []
+    // The check's delivery failed: the run waits to deliver again.
+    expect(await agent.checkDetachedForTest("run-retry")).toMatchObject({
+      status: "pending",
+      waitReason: "park"
+    });
+    expect((await agent.checkDetachedForTest("run-retry")).status).toBe(
+      "completed"
     );
-    await agent.makeJobsDueForTest();
-    expect(await runDurableObjectAlarm(agent)).toBe(true);
-    await agent.detachedStateForTest("run-retry");
     expect(statuses(await agent.getDetachedDeliveryLog(), "run-retry")).toEqual(
       ["completed"]
     );
@@ -260,9 +261,9 @@ describe("detached agent-tool runs on Tasks", () => {
       { chunkBodies: [], staysRunning: true },
       { maxBudgetMs: 1, onFinish: "onDetachedFailsOnce" }
     );
-    // The first attempt gave up and its callback failed: it waits to give
-    // up again, instead of delivering the abort its cancel caused.
-    expect(await agent.detachedStateForTest("run-give-up-retry")).toMatchObject(
+    // The first check gave up and its callback failed: it waits to give up
+    // again, instead of delivering the abort its cancel caused.
+    expect(await agent.checkDetachedForTest("run-give-up-retry")).toMatchObject(
       { status: "pending", waitReason: "park" }
     );
     expect((await agent.checkDetachedForTest("run-give-up-retry")).status).toBe(
@@ -314,7 +315,7 @@ describe("detached agent-tool runs on Tasks", () => {
       { chunkBodies: [], summary: "done" },
       { notify: { source: "tray" } }
     );
-    await agent.detachedStateForTest("run-notify");
+    await agent.checkDetachedForTest("run-notify");
     expect(await agent.getDeliveredNotifySourcesForTest("run-notify")).toEqual([
       "tray"
     ]);

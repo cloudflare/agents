@@ -1084,6 +1084,7 @@ export class TestAgentToolReplayAgent extends Agent {
       { chunkBodies: [], tailHangs: true },
       { runId }
     );
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, agent_type, status, display_order, started_at, detached
@@ -1140,6 +1141,7 @@ export class TestAgentToolReplayAgent extends Agent {
       { chunkBodies: stored, tailHangs: true },
       { runId }
     );
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, status, display_order,
