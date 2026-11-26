@@ -311,4 +311,41 @@ describe("chatTurnDefinition", () => {
       expect(result).toMatchObject({ status: "completed" });
     });
   });
+
+  it("sends every chunk and the end to the tabs", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        instance.host
+      )({ trigger: "server" }, laterAttempt("run-4", 1));
+      expect(sent.map((frame) => frame.done)).toEqual([
+        false,
+        false,
+        false,
+        false,
+        false,
+        true
+      ]);
+      expect(sent[2]).toMatchObject({
+        type: "cf_agent_use_chat_response",
+        id: "run-4",
+        body: JSON.stringify({ type: "text-delta", id: "t1", delta: "Hello" })
+      });
+      expect(sent.at(-1)).toMatchObject({ done: true, outcome: "completed" });
+    });
+  });
 });

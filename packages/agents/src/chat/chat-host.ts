@@ -20,6 +20,9 @@ import type { ClientToolSchema } from "./client-tools";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
 import { chatRecoveryBackoffSeconds } from "./recovery-engine";
 import { TaskSettlement } from "../tasks/settlement";
+import { frameText } from "./chat-frames";
+import { sendIfOpen } from "./connection";
+import { CHAT_MESSAGE_TYPES } from "./protocol";
 
 /** The capabilities the chat functions are given. They own every row and job. */
 export interface ChatDeps {
@@ -338,7 +341,31 @@ export function chatTurnDefinition(
     const sessionId = deps.session ?? "";
     const session = deps.sessions.session(sessionId);
     const streamId = chatTurnStreamId(requestId);
+    // Every tab sees the reply as it streams, and how it ended.
+    const send = (fields: Record<string, unknown>) => {
+      if (!deps.webSockets) return;
+      const frame = {
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        id: requestId,
+        ...fields
+      };
+      const text = frameText(frame);
+      if (text === undefined) return;
+      for (const connection of deps.webSockets.getConnections()) {
+        sendIfOpen(connection, text);
+      }
+    };
     const report = async (result: ChatTurnResult) => {
+      if (result.status !== "completed" && result.status !== "skipped") {
+        send({
+          body: result.error ?? "",
+          done: true,
+          error: result.status === "error",
+          outcome: result.status
+        });
+      } else {
+        send({ body: "", done: true, outcome: result.status });
+      }
       await host.hooks?.onResponse?.(result);
       return result;
     };
@@ -464,6 +491,11 @@ export function chatTurnDefinition(
                 : chunk;
             const next = host.hooks?.transformChunk?.(own, parts) ?? own;
             out.append(next as never);
+            send({
+              body: JSON.stringify(next),
+              done: false,
+              ...(continuing && { continuation: true })
+            });
             controller.enqueue(next);
           }
         })
