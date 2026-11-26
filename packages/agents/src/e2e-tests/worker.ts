@@ -739,9 +739,9 @@ export class PoisonBackoffAgent extends RecoveryRecorderAgent {
 // ── Facet (sub-agent) multi-pass recovery ─────────────────────────────
 //
 // A facet child runs MANY orphaned fibers with a tiny scan deadline, so its
-// recovery cannot drain in one pass. The root parent owns the physical alarm
-// and re-drives the child's recovery across passes (the facet-run lease is
-// retained while the child still has rows). Covers the gap that the root-DO
+// recovery cannot drain in one pass. A facet has no alarm: the root holds
+// one wake job for it and drives the child's due jobs across passes while
+// the child still has fibers to recover. Covers the gap that the root-DO
 // tests don't exercise the facet recovery path under multi-pass churn.
 
 export class FacetRecoveryChild extends RecoveryRecorderAgent {

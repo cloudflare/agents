@@ -1,10 +1,10 @@
 /**
  * E2E test: multi-pass fiber recovery for a sub-agent (facet).
  *
- * The root parent owns the physical alarm; a facet child's orphaned fibers are
- * recovered by the parent re-driving the child's scan across alarm passes (the
- * facet-run lease is retained while the child still has rows). A tiny child
- * scan deadline forces several passes. Covers the gap that the root-DO recovery
+ * A facet has no alarm of its own: the root holds one wake job for the facet
+ * and drives the facet's due jobs from its alarm, pass after pass, while the
+ * child still has fibers to recover. A tiny child scan deadline forces
+ * several passes. Covers the gap that the root-DO recovery
  * tests don't exercise the facet recovery path under multi-pass churn.
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
