@@ -546,8 +546,10 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
   async probeReleasedHostAdapter(): Promise<{
     marker: number;
     legacyTables: string[];
+    legacyRows: number;
     originIds: string[] | undefined;
     errored: string | undefined;
+    afterCutover: { ids: string[] | undefined; outcome: string | undefined };
   }> {
     await this.lifecycle.start();
     const sql = this.ctx.storage.sql;
@@ -581,16 +583,33 @@ export class StreamBenchObject extends DurableObject<Cloudflare.Env> {
     stream.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "x" }));
     const originIds = stream.getOriginMessageIds("req-released");
     stream.markError(id);
+    const errored = stream.latestStreamInfoForRequest("req-released")?.status;
+    const marker = stream.progressMarker();
+    // A stopped reply's cutover deletes its rows; a late resume still reads
+    // how it ended.
+    const cut = stream.start("req-cut", { originMessageIds: ["u2"] });
+    stream.finish(cut, "aborted");
+    stream.cutover(cut, () => {});
+    const legacyTables = sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND (name = 'cf_agents_chat_progress' OR name LIKE 'cf_ai_chat_stream_%') ORDER BY name"
+      )
+      .toArray()
+      .map((row) => row.name);
+    let legacyRows = 0;
+    for (const table of legacyTables) {
+      legacyRows += sql.exec(`SELECT 1 FROM ${table}`).toArray().length;
+    }
     return {
-      marker: stream.progressMarker(),
-      legacyTables: sql
-        .exec<{ name: string }>(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cf_a%_chat_%'"
-        )
-        .toArray()
-        .map((row) => row.name),
+      marker,
+      legacyTables,
+      legacyRows,
       originIds,
-      errored: stream.latestStreamInfoForRequest("req-released")?.status
+      errored,
+      afterCutover: {
+        ids: stream.getOriginMessageIds("req-cut"),
+        outcome: stream.getOutcome("req-cut")
+      }
     };
   }
 
