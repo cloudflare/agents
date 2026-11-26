@@ -736,6 +736,7 @@ describe("the continuation turn", () => {
     // Recovery gave up on the reply: it ends without the finalize that
     // re-arms a held result.
     const second = makeConnection("c2");
+    let queuedWhileStreaming: boolean | undefined;
     host.model = async (continuation) => {
       if (continuation.requestId !== "cont-1") return;
       turns.streamStarted("cont-1", () => {});
@@ -743,7 +744,7 @@ describe("the continuation turn", () => {
       // Held by the live reply's stream gate.
       await result("a1", second);
       await fire();
-      expect(turns.aborts.has("cont-2")).toBe(false);
+      queuedWhileStreaming = turns.aborts.has("cont-2");
       // The reply ends with no finalize.
       host.replyStreaming = false;
     };
@@ -752,6 +753,8 @@ describe("the continuation turn", () => {
     await drain();
     await fire();
     await drain();
+    expect(queuedWhileStreaming).toBe(false);
+    expect(host.errors).toEqual([]);
     expect(host.ran).toEqual(["cont-1", "cont-2"]);
   });
 

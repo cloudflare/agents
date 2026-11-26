@@ -404,10 +404,12 @@ describe("a client tool call a reset cut off", () => {
       const frames = record(tab);
       tab.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
       const restarted = await agent(binding, room);
-      await waitFor(
-        () => restarted.getMessagesForTest(),
-        (m) => JSON.stringify(m).includes("Continuation after tool")
-      );
+      const stored = JSON.stringify(
+        await waitFor(
+          () => restarted.getMessagesForTest(),
+          (m) => JSON.stringify(m).includes("Continuation after tool")
+        )
+      ).includes("Continuation after tool");
       const done = (list: Array<Record<string, unknown>>) =>
         list.some(
           (frame) =>
@@ -422,14 +424,24 @@ describe("a client tool call a reset cut off", () => {
             frame.id !== "r1" &&
             frame.done !== true
         );
-      const seen = await waitFor(async () => frames, done, 10_000);
-      // A tab that got the stream gets its end.
-      return !streamed(seen) || done(seen);
+      const seen = streamed(frames)
+        ? await waitFor(async () => frames, done, 10_000)
+        : frames;
+      return {
+        stored,
+        streamed: streamed(seen),
+        // A tab that got the stream gets its end.
+        ended: !streamed(seen) || done(seen)
+      };
     };
     const results = await Promise.all(
       Array.from({ length: 16 }, (_, i) => once(i * 6))
     );
-    expect(results.every(Boolean)).toBe(true);
+    // Some tabs reconnect while the continuation streams.
+    expect(results.some((r) => r.streamed)).toBe(true);
+    // The reset never loses the answer's continuation.
+    expect(results.filter((r) => !r.stored)).toEqual([]);
+    expect(results.filter((r) => !r.ended)).toEqual([]);
   }, 120_000);
 
   it("continues with the client's answer, without waiting out recovery", async () => {
