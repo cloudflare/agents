@@ -612,6 +612,25 @@ export function dropWaitingContinuations<
 }
 
 /**
+ * A stop names the pending continuation `requestId` before it fired (in its
+ * coalesce window, or parked on an unanswered sibling): drop it, as
+ * {@link dropWaitingContinuations} would, so a later result schedules a new
+ * one and an earlier result's opt-in to continue is gone. A fired
+ * continuation has its abort signal and is left to it.
+ */
+export function dropPendingContinuation<
+  TConnection extends ContinuationConnection
+>(parts: ContinuationTurnParts<TConnection>, requestId: string): void {
+  const pending = parts.continuation.pending;
+  if (!pending || pending.pastCoalesce || pending.requestId !== requestId) {
+    return;
+  }
+  if (parts.aborts.has(requestId)) return;
+  releasePending(parts);
+  parts.dropped({ requestId, reason: "stopped", stoppedRequestId: requestId });
+}
+
+/**
  * Settle the continuation slots when the continuation turn `requestId`
  * ends, however it ended. A turn touches only what it owns:
  *

@@ -4353,6 +4353,67 @@ describe("Think — the continuation turn", () => {
     await closeWS(ws);
   });
 
+  async function stopParkedContinuation(siblingContinues: boolean) {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await agent.persistToolCallMessage([
+      makeUserMessage("use two tools"),
+      {
+        id: "assistant-pair",
+        role: "assistant",
+        parts: ["tc-a", "tc-b"].map((toolCallId) => ({
+          type: "tool-client_action",
+          toolCallId,
+          toolName: "client_action",
+          state: "input-available",
+          input: {}
+        }))
+      } as unknown as UIMessage
+    ]);
+    const result = (toolCallId: string, autoContinue: boolean) =>
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "done",
+        autoContinue
+      });
+
+    // The first result opts in; its continuation parks on the unanswered
+    // sibling, so it cannot fire before the stop.
+    ws.send(result("tc-a", true));
+    await handled(agent, MSG_TOOL_RESULT);
+    const continuationId = await agent.pendingContinuationRequestIdForTest();
+    expect(continuationId).not.toBeNull();
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_chat_request_cancel",
+        id: continuationId
+      })
+    );
+    await handled(agent, "cf_agent_chat_request_cancel");
+    expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();
+
+    const done = siblingContinues ? waitForDone(ws, 15000) : null;
+    ws.send(result("tc-b", siblingContinues));
+    await handled(agent, MSG_TOOL_RESULT, 2);
+    await done;
+    await settled(agent);
+    const turns = await agent.continuationTurnCountForTest();
+    await closeWS(ws);
+    return turns;
+  }
+
+  it("a stop for a continuation parked on a sibling drops it: the sibling's result alone does not continue", async () => {
+    expect(await stopParkedContinuation(false)).toBe(0);
+  });
+
+  it("a stop for a continuation parked on a sibling drops it: the sibling's own opt-in continues once", async () => {
+    expect(await stopParkedContinuation(true)).toBe(1);
+  });
+
   it("names the message a continuation is stored in on its chunk frames", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
