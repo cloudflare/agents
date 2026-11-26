@@ -1033,6 +1033,20 @@ describe("think messengers core", () => {
     expect(parseMessengerReplySnapshot({ type: "wrong" })).toBeNull();
   });
 
+  it("gives a snapshot kept as JSON its messages' dates back", () => {
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const event = {
+      ...baseEvent,
+      message: { ...baseEvent.message!, createdAt },
+      skipped: [{ ...baseEvent.message!, createdAt }]
+    };
+    const parsed = parseMessengerReplySnapshot(
+      JSON.parse(JSON.stringify(messengerReplySnapshot("accepted", event)))
+    );
+    expect(parsed?.event.message?.createdAt).toEqual(createdAt);
+    expect(parsed?.event.skipped?.[0]?.createdAt).toEqual(createdAt);
+  });
+
   it("carries an additive delivery tag without changing recovery classification", () => {
     const completed = messengerReplySnapshot("completed", baseEvent);
     expect(completed.tag).toEqual({
@@ -1645,6 +1659,20 @@ describe("think messengers core", () => {
       ]);
     }, 30_000);
 
+    it("answers a reply run think@0.24.0 left interrupted, from its stored snapshot", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `released-${crypto.randomUUID()}`
+      );
+      expect(await agent.replayReleasedReplyForTest()).toBe(true);
+      expect(await agent.getRecorded("prompt")).toContain("released hello");
+      // One message, edited as the answer streamed.
+      expect(await agent.getAdapterCalls()).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
+    });
+
     it("answers a webhook reply once after the object reset mid-reply", async () => {
       const name = `reset-${crypto.randomUUID()}`;
       // A reset stub stays broken: each call takes a new one.
@@ -1662,19 +1690,22 @@ describe("think messengers core", () => {
           method: "POST"
         })
         .catch(() => undefined);
-      let posted: string[] = [];
+      let posted: Array<{ kind: string; content: string }> = [];
       let open = 1;
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         const stub = await agent();
-        posted = (await stub.getAdapterCalls()).map((call) => call.content);
+        posted = await stub.getAdapterCalls();
         open = await stub.openReplyRunsForTest();
         if (open === 0 && posted.length > 0) break;
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       expect(open).toBe(0);
-      expect(posted.join("")).toContain("Got");
-      expect(posted).not.toContain(INTERRUPTED_MESSENGER_RESPONSE);
+      // One message, edited as the answer streamed.
+      expect(posted).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
       expect(
         (await (await agent()).getRecorded("prompt")).filter((prompt) =>
           prompt.includes("hello")

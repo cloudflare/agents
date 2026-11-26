@@ -6,6 +6,8 @@
  * `ThinkMessengerRuntime.handleFiberRecovery`.
  *
  * Durable: nothing of its own (the run and its checkpoint belong to Tasks).
+ * A run from think@0.24.0 kept its snapshot in a storage key instead; a
+ * replay of one reads that key and deletes it.
  * In memory: the live closure, for as long as the webhook waits on it.
  */
 
@@ -30,6 +32,10 @@ const MESSENGER_REPLY_TASK_DEFINITION = "__cf_internal_messenger_reply";
 
 /** The checkpoint key of a reply's re-entry snapshot. */
 const SNAPSHOT = "snapshot";
+
+/** Where a think@0.24.0 reply run (`msgr_<nonce>`) kept its snapshot. */
+const releasedSnapshotKey = (runId: string) =>
+  `__cf_messenger_recovery:${runId}`;
 
 /**
  * One reply the webhook that received its message is waiting on.
@@ -63,6 +69,7 @@ export type MessengerReplyRun = {
  */
 export function registerMessengerReplies(
   tasks: Tasks,
+  storage: DurableObjectStorage,
   runtime: () => ThinkMessengerRuntime | undefined
 ): (run: MessengerReplyRun) => Promise<{ accepted: boolean }> {
   tasks.register(MESSENGER_REPLY_TASK_DEFINITION, (_input, step) =>
@@ -79,10 +86,20 @@ export function registerMessengerReplies(
           // Replay after an unclean interruption: recover through the
           // runtime seam from the snapshot a prior attempt (live or
           // recovering) kept before being interrupted itself.
+          let snapshot = step.checkpoint.get(SNAPSHOT);
+          if (snapshot === undefined) {
+            // A run from think@0.24.0: move its snapshot into the checkpoint.
+            const released = releasedSnapshotKey(step.id);
+            snapshot = (await storage.get(released)) as TaskJson | undefined;
+            if (snapshot !== undefined) {
+              step.checkpoint.set(SNAPSHOT, snapshot);
+              await storage.delete(released);
+            }
+          }
           const ctx: FiberRecoveryContext = {
             id: step.id,
             name: MESSENGER_REPLY_FIBER_NAME,
-            snapshot: step.checkpoint.get(SNAPSHOT) ?? null,
+            snapshot: snapshot ?? null,
             createdAt: (await tasks.get(step.id))?.createdAt ?? Date.now(),
             recoveryReason: "interrupted"
           };

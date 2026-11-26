@@ -1574,6 +1574,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
     this.#runMessengerReply = registerMessengerReplies(
       this.tasks,
+      this.ctx.storage,
       () => this._messengerRuntime
     );
 

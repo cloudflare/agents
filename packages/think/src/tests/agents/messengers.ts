@@ -578,6 +578,52 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     };
   }
 
+  /**
+   * A reply run think@0.24.0 left interrupted: its snapshot in the storage
+   * key that release wrote, its run replayed with no live reply. Returns
+   * whether the key is gone afterwards.
+   */
+  async replayReleasedReplyForTest(): Promise<boolean> {
+    const nonce = crypto.randomUUID();
+    const threadId = "fake:dm-released";
+    const event: MessengerEvent = {
+      capabilities: {},
+      kind: "direct-message",
+      message: {
+        attachments: [],
+        author: { fullName: "Ada", userId: "user-ada" },
+        createdAt: new Date(0),
+        id: "rel1",
+        providerMessageId: "rel1",
+        text: "released hello"
+      },
+      messengerId: "fake",
+      provider: "fake",
+      thread: {
+        id: threadId,
+        isDirectMessage: true,
+        providerThreadId: threadId
+      }
+    };
+    const key = `__cf_messenger_recovery:msgr_${nonce}`;
+    await this.ctx.storage.put(
+      key,
+      messengerReplySnapshot("accepted", event, {
+        _type: "chat:Thread",
+        adapterName: "fake",
+        channelId: threadId,
+        id: threadId,
+        isDM: true
+      })
+    );
+    await this.tasks.run(
+      "__cf_internal_messenger_reply",
+      { nonce },
+      { runId: `msgr_${nonce}`, start: "now" }
+    );
+    return (await this.ctx.storage.get(key)) === undefined;
+  }
+
   /** Messenger reply runs not yet settled. */
   async openReplyRunsForTest(): Promise<number> {
     return (
