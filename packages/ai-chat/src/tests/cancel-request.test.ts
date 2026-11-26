@@ -5,7 +5,8 @@ import type { UIMessage as ChatMessage } from "ai";
 import {
   connectChatWS,
   isUseChatResponseMessage,
-  socketBarrier
+  socketBarrier,
+  waitUntilHandled
 } from "./test-utils";
 import { getAgentByName } from "agents";
 
@@ -123,7 +124,7 @@ describe("Cancel request", () => {
     ["before its response", { failOnAbort: "before-response" }]
   ])(
     "sends the stopping tab one terminal frame for a request stopped %s",
-    async (_when, body) => {
+    async (when, body) => {
       const room = crypto.randomUUID();
       const { ws } = await connectSlowStream(room);
       const requestId = "req-one-terminal";
@@ -146,13 +147,33 @@ describe("Cancel request", () => {
       const agent = await getAgentByName(env.SlowStreamAgent, room);
 
       sendChatRequest(ws, requestId, [userMessage], body);
-      // The request's turn has started before the stop is sent.
+      // The request's turn has started before the stop is sent; mid-stream,
+      // its text has reached the tab too.
       await vi.waitFor(async () => {
         expect(await agent.getStartedRequestIds()).toContain(requestId);
       });
+      if (when === "mid-stream") {
+        await vi.waitFor(() =>
+          expect(
+            seen.some(
+              (m) =>
+                isUseChatResponseMessage(m) &&
+                m.id === requestId &&
+                !!m.body &&
+                !m.done
+            )
+          ).toBe(true)
+        );
+      }
       sendCancel(ws, requestId);
+      // The stop's handler has finished, so all it sends is sent ...
+      await waitUntilHandled(
+        agent,
+        MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+        1
+      );
       await vi.waitFor(() => expect(terminals.length).toBeGreaterThan(0));
-      // Anything the stop's own work sends after it is in by the barrier.
+      // ... and by the barrier's reply it has arrived.
       await socketBarrier(ws, seen);
 
       expect(terminals).toHaveLength(1);
