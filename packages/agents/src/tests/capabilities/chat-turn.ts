@@ -20,7 +20,7 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
   readonly results: ChatTurnResult[] = [];
   /** What `respond` streams; `null` answers nothing. */
   reply: UIMessageChunk[] | null = [
-    { type: "start", messageId: "a1" },
+    { type: "start", messageId: "reply-1" },
     { type: "text-start", id: "t1" },
     { type: "text-delta", id: "t1", delta: "Hello" },
     { type: "text-end", id: "t1" },
@@ -41,8 +41,19 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
         }
       });
     },
-    hooks: { onResponse: (result) => void this.results.push(result) }
+    hooks: {
+      onResponse: (result) => {
+        this.results.push(result);
+        for (const waiter of this.#waiters.splice(0)) waiter(result);
+      }
+    }
   };
+  #waiters: Array<(result: ChatTurnResult) => void> = [];
+  /** The next turn result reported to `onResponse`. */
+  nextResult(): Promise<ChatTurnResult> {
+    return new Promise((resolve) => this.#waiters.push(resolve));
+  }
+  readonly lane = { definition: "__cf_chat_turn", lane: "chat:s1" };
   readonly tasks: Tasks = new Tasks();
   get deps() {
     return {
