@@ -156,9 +156,6 @@ export type ExtensionHooks = {
 };
 
 /** @internal */
-export type ExtensionHookName = keyof ExtensionHooks;
-
-/** @internal */
 export type ExtensionHookHandler<
   H extends keyof M & string,
   M extends HookMap = ExtensionHooks
