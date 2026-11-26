@@ -195,4 +195,76 @@ describe("chat functions over a minimal host", () => {
       delete hooks.transformChunk;
     });
   });
+
+  it("a resume while a turn is accepted but not streaming keeps the tab waiting, then offers the stream", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let called!: () => void;
+      const inRespond = new Promise<void>((resolve) => (called = resolve));
+      const respond = instance.host.respond;
+      instance.host.respond = async (call) => {
+        called();
+        await released;
+        return respond(call);
+      };
+      const sent: Array<Record<string, unknown>> = [];
+      const waiting = {
+        id: "tab-w",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      } as unknown as Connection;
+      const done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await inRespond;
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        waiting,
+        JSON.stringify({ type: "cf_agent_stream_resume_request" })
+      );
+      expect(sent[0]).toMatchObject({
+        type: "cf_agent_stream_pending",
+        id: "r1"
+      });
+      release();
+      await done;
+      expect(sent[1]).toMatchObject({
+        type: "cf_agent_stream_resuming",
+        id: "r1"
+      });
+      instance.host.respond = respond;
+    });
+  });
+
+  it("a chat request without messages ends at once with the reason", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        {
+          id: "tab-e",
+          readyState: 1,
+          send: (text: string) => sent.push(JSON.parse(text))
+        } as unknown as Connection,
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: "bad",
+          init: { method: "POST", body: JSON.stringify({ model: "m" }) }
+        })
+      );
+      expect(sent[0]).toMatchObject({ id: "bad", done: true, error: true });
+      expect(instance.calls).toEqual([]);
+    });
+  });
 });
