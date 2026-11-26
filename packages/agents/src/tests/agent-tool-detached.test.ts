@@ -321,6 +321,28 @@ describe("detached agent-tool runs on Tasks", () => {
     ]);
   });
 
+  it("never waits on a chat lane from a run's report: a check delivers serialized, a report only unserialized", async () => {
+    const agent = await parent("detached-delivery-context");
+    await agent.watchDetachedReportsForTest();
+    await agent.startDetachedForTest("run-checked", {
+      chunkBodies: [],
+      summary: "done"
+    });
+    await agent.checkDetachedForTest("run-checked");
+    await agent.startDetachedForTest("run-cancelled", {
+      chunkBodies: [],
+      staysRunning: true
+    });
+    await agent.cancelRunForTest("run-cancelled");
+    await agent.detachedStateForTest("run-cancelled");
+    // A report can run inside a job with no dispatch budget: what it
+    // delivers must not wait behind the chat lane.
+    expect(await agent.getDetachedDeliveryContextsForTest()).toEqual([
+      { serialize: true, inReport: false },
+      { serialize: false, inReport: true }
+    ]);
+  });
+
   it("does not deliver to a detached onFinish when an awaited run is cancelled", async () => {
     const agent = await parent("detached-awaited-cancel");
     await agent.runDeterministicAgentToolForTest({

@@ -4460,6 +4460,11 @@ export class Agent<
       reason instanceof Error
         ? reason.message
         : String(reason ?? "cancelled by parent");
+    // A detached run ends `aborted` first, and its report delivers that
+    // once: a check that would see the child's abort below finds the run
+    // cancelled. An awaited run is left to its attempt, which sees the
+    // child's abort.
+    if (row.detached === 1) await this.tasks.cancel(runId, message);
     try {
       const child = await this._cf_resolveSubAgent(row.agent_type, runId);
       const adapter = this._asAgentToolChildAdapter(child);
@@ -4467,9 +4472,6 @@ export class Agent<
     } catch {
       // Best-effort child teardown; the run still ends `aborted`.
     }
-    // A detached run ends `aborted` now, and its report delivers that once.
-    // An awaited run is left to its attempt, which sees the child's abort.
-    if (row.detached === 1) await this.tasks.cancel(runId, message);
   }
 
   /**
@@ -4645,7 +4647,8 @@ export class Agent<
     ) {
       return this._deliverDetachedFromAttempt(
         meta,
-        this._terminalResultFromInspection(agentType, inspection)
+        this._terminalResultFromInspection(agentType, inspection),
+        step.signal
       );
     }
 
@@ -4721,7 +4724,8 @@ export class Agent<
     ) {
       return this._deliverDetachedFromAttempt(
         meta,
-        this._terminalResultFromInspection(agentType, afterCancel)
+        this._terminalResultFromInspection(agentType, afterCancel),
+        step.signal
       );
     }
     const giveUp = this._detachedGiveUpResult(
@@ -4789,8 +4793,11 @@ export class Agent<
    */
   private async _deliverDetachedFromAttempt(
     meta: AgentToolTaskMeta,
-    result: RunAgentToolResult
+    result: RunAgentToolResult,
+    signal: AbortSignal
   ): Promise<TaskJson | TaskSettlement> {
+    // A run cancelled meanwhile ended `aborted`; its report delivers that.
+    if (signal.aborted) return result as unknown as TaskJson;
     try {
       await this._deliverDetachedOutcome(meta, result);
     } catch {

@@ -330,11 +330,25 @@ export class TestAgentToolReplayAgent extends Agent {
     waitReason?: string;
     nextInMs?: number;
   }> {
+    // An attempt the live tail woke may be running already: let it end.
+    await this.detachedAttemptEndedForTest(runId);
     if (this.tasks.peek(runId)?.waitReason === "park") {
       await this.tasks.settle(runId, TaskSettlement.retry(Date.now()));
     }
     await this.tasks.runDue("__cf_agent_tool_detached");
+    await this.detachedAttemptEndedForTest(runId);
     return this.detachedStateForTest(runId);
+  }
+
+  /** Wait while an attempt of the run is running (it parks or settles). */
+  private async detachedAttemptEndedForTest(runId: string): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    while (
+      this.tasks.peek(runId)?.status === "running" &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   /** A detached run's state; waits for its report once it settled. */
@@ -1228,6 +1242,47 @@ export class TestAgentToolReplayAgent extends Agent {
       afterNewStream,
       credits: this.streamProgressCredits
     };
+  }
+
+  /** Each detached delivery: serialized behind a lane, and from a report. */
+  detachedDeliveryContexts: { serialize: boolean; inReport: boolean }[] = [];
+  private _inDetachedReport = false;
+
+  protected override async _runDetachedDelivery(
+    invoke: () => Promise<void>,
+    options?: { serialize?: boolean }
+  ): Promise<void> {
+    this.detachedDeliveryContexts.push({
+      serialize: options?.serialize === true,
+      inReport: this._inDetachedReport
+    });
+    return super._runDetachedDelivery(invoke, options);
+  }
+
+  /**
+   * Mark deliveries made from a detached run's terminal report, which can
+   * run inside a job with no dispatch budget.
+   */
+  watchDetachedReportsForTest(): void {
+    const self = this as unknown as {
+      _onDetachedAgentToolStatus(record: unknown): Promise<void>;
+    };
+    const original = self._onDetachedAgentToolStatus.bind(this);
+    self._onDetachedAgentToolStatus = async (record) => {
+      this._inDetachedReport = true;
+      try {
+        await original(record);
+      } finally {
+        this._inDetachedReport = false;
+      }
+    };
+  }
+
+  getDetachedDeliveryContextsForTest(): {
+    serialize: boolean;
+    inReport: boolean;
+  }[] {
+    return this.detachedDeliveryContexts;
   }
 
   /** Make every waiting awaited run's next check due now. */
