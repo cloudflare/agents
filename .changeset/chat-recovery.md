@@ -16,3 +16,4 @@ Chat recovery after a restart or a dropped stream.
 - Recovery work units (`maxRecoveryWork`, `ctx.work`) now count ten stored chunks each. See [Recovery work units](https://developers.cloudflare.com/agents/api-reference/chat-agents/#recovery-work-units).
 - A reply cut off twice by resets a few seconds apart is recovered again before a request queued behind it runs, so that request no longer leaves it unanswered.
 - A stop issued while the stall watchdog aborts a reply (for example from an `abortRequest` override) is a stop: the stalled reply is not recovered.
+- A message sent while an interrupted reply waits to be recovered is answered after the recovered reply, not before it, so replies stay in the order their questions were sent.
