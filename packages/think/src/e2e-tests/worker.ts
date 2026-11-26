@@ -49,6 +49,11 @@ import type {
   TurnContext
 } from "../think";
 
+/** The agent's parent side of agent tools (an internal module). */
+function agentToolsOf(agent: unknown): unknown {
+  return (agent as { _agentTools: unknown })._agentTools;
+}
+
 /** The fiber run table of a release before fibers ran on Tasks. */
 function createLegacyFiberTableForTest(storage: DurableObjectStorage): void {
   // As a release before the one schema record left the Agent: its version
@@ -414,7 +419,7 @@ function agentToolRunRows(agent: unknown): Array<{
   error_message: string | null;
 }> {
   return (
-    agent as {
+    agentToolsOf(agent) as {
       _listAgentToolRuns(): Array<{
         run_id: string;
         status: string;

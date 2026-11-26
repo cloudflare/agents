@@ -49,6 +49,11 @@ import {
   turnSignal
 } from "agents/chat";
 
+/** The agent's parent side of agent tools (an internal module). */
+function agentToolsOf(agent: unknown): unknown {
+  return (agent as { _agentTools: unknown })._agentTools;
+}
+
 /** The fiber run table of a release before fibers ran on Tasks. */
 /**
  * This agent's non-terminal runs holding a scheduled recovery attempt for
@@ -5263,16 +5268,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     start: number;
     after: number;
   }> {
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _forwardAgentToolStream(
         stream: ReadableStream<{ body: string }>,
         parentToolCallId: string | undefined,
         runId: string,
         sequence: number
       ): Promise<number>;
-      _lastAgentToolStreamProgressAt: number;
     };
-    self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
       this._replyStreams.progressMarker();
     const start = await read();
@@ -8442,7 +8445,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
       new TextEncoder().encode(`${JSON.stringify({ sequence, body })}\n`);
     const chunk = (text: string) =>
       JSON.stringify({ type: "text-delta", id: "t", delta: text });
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _asAgentToolChildAdapter(child: unknown): unknown;
     };
     const asAdapter = self._asAgentToolChildAdapter;
@@ -8522,12 +8525,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
       status: "running",
       startedAt: Date.now()
     };
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _asAgentToolChildAdapter(child: unknown): unknown;
+    };
+    const { _resolvedOptions: options } = this as unknown as {
       _resolvedOptions: { agentToolReattachNoProgressTimeoutMs: number };
     };
     const asAdapter = self._asAgentToolChildAdapter;
-    const budget = self._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
+    const budget = options.agentToolReattachNoProgressTimeoutMs;
     let inspections = 0;
     self._asAgentToolChildAdapter = () => ({
       startAgentToolRun: async () => running,
@@ -8539,7 +8544,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
       getAgentToolChunks: async () => [],
       tailAgentToolRun: async () => new ReadableStream({})
     });
-    self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = 50;
+    options.agentToolReattachNoProgressTimeoutMs = 50;
     try {
       const result = await Promise.race([
         this.runAgentTool(AIChatAgentToolChild, {
@@ -8559,7 +8564,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
       };
     } finally {
       self._asAgentToolChildAdapter = asAdapter;
-      self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = budget;
+      options.agentToolReattachNoProgressTimeoutMs = budget;
     }
   }
 
@@ -8580,12 +8585,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
       status: "running",
       startedAt: Date.now()
     };
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _asAgentToolChildAdapter(child: unknown): unknown;
+    };
+    const { _resolvedOptions: options } = this as unknown as {
       _resolvedOptions: { agentToolReattachNoProgressTimeoutMs: number };
     };
     const asAdapter = self._asAgentToolChildAdapter;
-    const budget = self._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
+    const budget = options.agentToolReattachNoProgressTimeoutMs;
     self._asAgentToolChildAdapter = () => ({
       startAgentToolRun: async () => running,
       cancelAgentToolRun: async () => {},
@@ -8597,7 +8604,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
         );
       }
     });
-    self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = 50;
+    options.agentToolReattachNoProgressTimeoutMs = 50;
     try {
       const result = await this.runAgentTool(AIChatAgentToolChild, {
         runId,
@@ -8613,7 +8620,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
       };
     } finally {
       self._asAgentToolChildAdapter = asAdapter;
-      self._resolvedOptions.agentToolReattachNoProgressTimeoutMs = budget;
+      options.agentToolReattachNoProgressTimeoutMs = budget;
     }
   }
 
@@ -8628,7 +8635,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     parentRow: string | null;
   }> {
     const runId = crypto.randomUUID();
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _asAgentToolChildAdapter(child: unknown): unknown;
     };
     const asAdapter = self._asAgentToolChildAdapter;
@@ -9057,7 +9064,6 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }): Promise<void> {
     const self = this as unknown as {
       _resolvedOptions: { agentToolReattachNoProgressTimeoutMs: number };
-      _carryForwardAgentToolRuns(): Promise<void>;
     };
     const before = self._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
     if (options?.reattachTimeoutMs !== undefined) {
@@ -9065,7 +9071,9 @@ export class AIChatAgentToolParent extends Agent<Env> {
         options.reattachTimeoutMs;
     }
     try {
-      await self._carryForwardAgentToolRuns();
+      await (
+        agentToolsOf(this) as { _carryForwardAgentToolRuns(): Promise<void> }
+      )._carryForwardAgentToolRuns();
       options?.afterStartup?.();
       await runAgentToolChecksForTest(this);
     } finally {
@@ -9270,7 +9278,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
   getParentAgentToolStatusForTest(runId: string): string | null {
     return (
       (
-        this as unknown as {
+        agentToolsOf(this) as {
           _readAgentToolRun(runId: string): { status: string } | null;
         }
       )._readAgentToolRun(runId)?.status ?? null
@@ -9327,7 +9335,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     // threw. The job driver dispatches no job of an object whose start
     // failed, so the run's wake does not run: nothing settles, no hook.
     await (
-      this as unknown as { _carryForwardAgentToolRuns(): Promise<void> }
+      agentToolsOf(this) as { _carryForwardAgentToolRuns(): Promise<void> }
     )._carryForwardAgentToolRuns();
     this.lifecycleOrder.push("on-start-error");
     const statusAfterFailedStart = this.getParentAgentToolStatusForTest(runId);
@@ -9362,11 +9370,11 @@ export class AIChatAgentToolParent extends Agent<Env> {
       replay?: true,
       connection?: unknown
     ) => Promise<number>;
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _broadcastAgentToolStoredChunksFromAdapter: BroadcastStoredChunksFromAdapter;
     };
     const original = self._broadcastAgentToolStoredChunksFromAdapter.bind(
-      this
+      self
     ) as BroadcastStoredChunksFromAdapter;
     self._broadcastAgentToolStoredChunksFromAdapter = async () => {
       throw new Error("test replay failure");
@@ -9574,7 +9582,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     controller.abort("already aborted");
 
     await (
-      this as unknown as { _forwardAgentToolStream: ForwardAgentToolStream }
+      agentToolsOf(this) as { _forwardAgentToolStream: ForwardAgentToolStream }
     )._forwardAgentToolStream(
       stream,
       "test-tool-call",
@@ -9617,7 +9625,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     });
 
     await (
-      this as unknown as { _forwardAgentToolStream: ForwardAgentToolStream }
+      agentToolsOf(this) as { _forwardAgentToolStream: ForwardAgentToolStream }
     )._forwardAgentToolStream(
       stream as unknown as ReadableStream<AgentToolStoredChunk>,
       "test-tool-call",

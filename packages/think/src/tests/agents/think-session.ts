@@ -108,6 +108,11 @@ import { WorkspaceFiles } from "../../workspace-files";
 import type { TaskRecord } from "agents/internal";
 import type { TaskJson } from "agents/tasks";
 
+/** The agent's parent side of agent tools (an internal module). */
+function agentToolsOf(agent: unknown): unknown {
+  return (agent as { _agentTools: unknown })._agentTools;
+}
+
 /** The fiber run table of a release before fibers ran on Tasks. */
 function createLegacyFiberTableForTest(storage: DurableObjectStorage): void {
   // As a release before the one schema record left the Agent: its version
@@ -6240,7 +6245,7 @@ export class ThinkAgentToolParent extends Agent {
       }
     };
     await (
-      this as unknown as {
+      agentToolsOf(this) as {
         _replayAgentToolRuns(connection: unknown): Promise<void>;
       }
     )._replayAgentToolRuns(connection);
@@ -6547,10 +6552,10 @@ export class ThinkAgentToolParent extends Agent {
       200
     );
     const controller = new AbortController();
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _reattachAgentToolRunToTerminal(...args: unknown[]): Promise<unknown>;
     };
-    const original = self._reattachAgentToolRunToTerminal.bind(this);
+    const original = self._reattachAgentToolRunToTerminal.bind(self);
     self._reattachAgentToolRunToTerminal = (...args: unknown[]) => {
       // The parent is following the child's recovered turn: stop it once
       // this call has returned to its caller.
@@ -6957,7 +6962,7 @@ export class ThinkAgentToolParent extends Agent {
       // Intentionally NO `tailAgentToolRun`.
     };
     const reattach = await (
-      this as unknown as {
+      agentToolsOf(this) as {
         _reattachAgentToolRunToTerminal(
           adapter: unknown,
           row: {
@@ -7071,7 +7076,7 @@ export class ThinkAgentToolParent extends Agent {
     };
 
     const reattach = await (
-      this as unknown as {
+      agentToolsOf(this) as {
         _reattachAgentToolRunToTerminal(
           adapter: unknown,
           row: {
@@ -7246,7 +7251,7 @@ export class ThinkAgentToolParent extends Agent {
   getParentAgentToolStatusForTest(runId: string): string | null {
     return (
       (
-        this as unknown as {
+        agentToolsOf(this) as {
           _readAgentToolRun(runId: string): { status: string } | null;
         }
       )._readAgentToolRun(runId)?.status ?? null
@@ -7259,7 +7264,7 @@ function listAgentToolRunsForTest(
   agent: unknown
 ): Array<{ run_id: string; status: string }> {
   return (
-    agent as {
+    agentToolsOf(agent) as {
       _listAgentToolRuns(): Array<{ run_id: string; status: string }>;
     }
   )._listAgentToolRuns();
@@ -7268,7 +7273,7 @@ function listAgentToolRunsForTest(
 /** Carry the parent rows a released version left into their tasks. */
 async function carryForwardAgentToolRunsForTest(agent: unknown): Promise<void> {
   await (
-    agent as { _carryForwardAgentToolRuns(): Promise<void> }
+    agentToolsOf(agent) as { _carryForwardAgentToolRuns(): Promise<void> }
   )._carryForwardAgentToolRuns();
 }
 
@@ -12742,16 +12747,14 @@ export class ThinkRecoveryTestAgent extends Think {
     start: number;
     after: number;
   }> {
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _forwardAgentToolStream(
         stream: ReadableStream<{ body: string }>,
         parentToolCallId: string | undefined,
         runId: string,
         sequence: number
       ): Promise<number>;
-      _lastAgentToolStreamProgressAt: number;
     };
-    self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
       this._replyStreams.progressMarker();
     const start = await read();

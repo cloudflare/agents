@@ -96,7 +96,7 @@ function ensureReleasedAgentToolTable(sql: SqlStorage): void {
 
 export class TestAgentToolReplayAgent extends Agent {
   private get _agentTool(): AgentToolInternals {
-    return this as unknown as AgentToolInternals;
+    return (this as unknown as { _agentTools: AgentToolInternals })._agentTools;
   }
 
   /**
@@ -558,12 +558,12 @@ export class TestAgentToolReplayAgent extends Agent {
     before: "completes" | "is stopped" | "milestone and completes"
   ): Promise<void> {
     await this.detachedAttemptEndedForTest(runId);
-    const self = this as unknown as {
+    const self = (this as unknown as { _agentTools: unknown })._agentTools as {
       _asAgentToolChildAdapter(child: unknown): {
         cancelAgentToolRun(runId: string, reason?: unknown): Promise<void>;
       };
     };
-    const original = self._asAgentToolChildAdapter.bind(this);
+    const original = self._asAgentToolChildAdapter.bind(self);
     self._asAgentToolChildAdapter = (resolved) => {
       const adapter = original(resolved);
       return new Proxy(adapter, {
@@ -1269,10 +1269,10 @@ export class TestAgentToolReplayAgent extends Agent {
    * run inside a job with no dispatch budget.
    */
   watchDetachedReportsForTest(): void {
-    const self = this as unknown as {
+    const self = (this as unknown as { _agentTools: unknown })._agentTools as {
       _onDetachedAgentToolStatus(record: unknown): Promise<void>;
     };
-    const original = self._onDetachedAgentToolStatus.bind(this);
+    const original = self._onDetachedAgentToolStatus.bind(self);
     self._onDetachedAgentToolStatus = async (record) => {
       this._inDetachedReport = true;
       try {

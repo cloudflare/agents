@@ -5,6 +5,11 @@ import {
   Researcher
 } from "../server";
 
+/** The agent's parent side of agent tools (an internal module). */
+function agentToolsOf(agent: unknown): unknown {
+  return (agent as { _agentTools: unknown })._agentTools;
+}
+
 type ToolRunStatus =
   | "starting"
   | "running"
@@ -94,12 +99,12 @@ export class Assistant extends ProductionAssistant {
     `;
     // What the next start does with a released row: carry it into its run.
     await (
-      this as unknown as { _carryForwardAgentToolRuns(): Promise<void> }
+      agentToolsOf(this) as { _carryForwardAgentToolRuns(): Promise<void> }
     )._carryForwardAgentToolRuns();
   }
 
   async testReadAgentToolRuns(): Promise<ToolRunRow[]> {
-    return (this as unknown as { _listAgentToolRuns(): ToolRunRow[] })
+    return (agentToolsOf(this) as { _listAgentToolRuns(): ToolRunRow[] })
       ._listAgentToolRuns()
       .map((row) => ({
         run_id: row.run_id,

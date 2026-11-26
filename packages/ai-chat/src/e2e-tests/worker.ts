@@ -18,6 +18,11 @@ import {
 import { Agent, callable, routeAgentRequest } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 
+/** The agent's parent side of agent tools (an internal module). */
+function agentToolsOf(agent: unknown): unknown {
+  return (agent as { _agentTools: unknown })._agentTools;
+}
+
 type Env = {
   ChatRecoveryTestAgent: DurableObjectNamespace<ChatRecoveryTestAgent>;
   ChatNoProgressExhaustAgent: DurableObjectNamespace<ChatNoProgressExhaustAgent>;
@@ -576,7 +581,7 @@ export class ChatRecoveryHelperParent extends Agent<Env> {
   @callable()
   getAgentToolRuns(): AgentToolRunStatus[] {
     return (
-      this as unknown as {
+      agentToolsOf(this) as {
         _listAgentToolRuns(): Array<{
           run_id: string;
           status: string;
