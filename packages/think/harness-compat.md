@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**287 of the 1279 tests that construct Think pass (22%).** Across the whole suite, 580 of 1572.
+**290 of the 1290 tests that construct Think pass (22%).** Across the whole suite, 583 of 1583.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -37,13 +37,13 @@ supported by the harness-backed Think yet".
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
 | `deliver-notice.test.ts`               | 0 / 7    | 0%   |
-| `durable-admission.test.ts`            | 4 / 9    | 44%  |
+| `durable-admission.test.ts`            | 2 / 9    | 22%  |
 | `empty-reply.test.ts`                  | 0 / 10   | 0%   |
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
 | `execute-hitl.test.ts`                 | 0 / 16   | 0%   |
 | `execute-tool.test.ts`                 | 6 / 6    | 100% |
-| `extension-manager.test.ts`            | 48 / 48  | 100% |
+| `extension-manager.test.ts`            | 50 / 50  | 100% |
 | `facet-request-order.test.ts`          | 0 / 1    | 0%   |
 | `fetch-tools.test.ts`                  | 52 / 53  | 98%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
@@ -53,7 +53,7 @@ supported by the harness-backed Think yet".
 | `mcp-tool-materialization.test.ts`     | 5 / 5    | 100% |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
 | `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
-| `messengers.test.ts`                   | 80 / 107 | 74%  |
+| `messengers.test.ts`                   | 79 / 111 | 71%  |
 | `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
 | `onconnect-broadcast.test.ts`          | 4 / 17   | 23%  |
 | `onstart-degraded.test.ts`             | 1 / 5    | 20%  |
@@ -65,6 +65,7 @@ supported by the harness-backed Think yet".
 | `periphery-modules.test.ts`            | 11 / 19  | 57%  |
 | `periphery-transcript.test.ts`         | 12 / 12  | 100% |
 | `periphery-turn-policy.test.ts`        | 13 / 13  | 100% |
+| `prefix-changed.test.ts`               | 1 / 1    | 100% |
 | `prompt-cache.test.ts`                 | 4 / 10   | 40%  |
 | `queued-order.test.ts`                 | 0 / 5    | 0%   |
 | `rpc-chat-turns.test.ts`               | 0 / 5    | 0%   |
@@ -75,7 +76,7 @@ supported by the harness-backed Think yet".
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1    | 100% |
-| `submissions.test.ts`                  | 25 / 119 | 21%  |
+| `submissions.test.ts`                  | 28 / 123 | 22%  |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
 | `think-eviction.test.ts`               | 2 / 3    | 66%  |
