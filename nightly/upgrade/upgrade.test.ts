@@ -185,6 +185,14 @@ beforeAll(async () => {
   for (const n of [1, 2, 3])
     await ctl("think", "submits", "probeSubmit", `submission ${n}`);
   await ctl("agent", "fiber", "probeStartFiber", 60, 1000);
+  // Deploy only once the fiber has a checkpoint to be recovered from.
+  await until(
+    "agent",
+    "fiber",
+    (s) => runsOf(s, "step").length > 0,
+    "the first fiber step",
+    30_000
+  );
 
   // This repository's build over it, mid-turn.
   await deploy({
@@ -231,7 +239,11 @@ describe("an upgrade from the latest release, mid-turn", () => {
       expect(reply.slice(reply.lastIndexOf("w1 ")).trim()).toBe(
         Array.from({ length: 120 }, (_, i) => `w${i + 1}`).join(" ")
       );
-      expect(runsOf(p, "call").map((r) => r.id)).toContain("main");
+      // One model call on each build: the cut-off one and the recovery.
+      expect(runsOf(p, "call")).toEqual([
+        { kind: "call", id: "main", n: 1 },
+        { kind: "call", id: "release", n: 1 }
+      ]);
     });
 
     it(`${cls}: an approval asked for before the upgrade runs its tool once`, async () => {
@@ -285,8 +297,13 @@ describe("an upgrade from the latest release, mid-turn", () => {
       "submission 2",
       "submission 3"
     ]);
-    // Some of the queue ran on the new build: it crossed the deploy.
-    expect(runsOf(p, "call").map((r) => r.id)).toContain("main");
+    // Some of the queue ran on the new build: it crossed the deploy. One
+    // call per submission, plus at most one for the turn the deploy cut off.
+    const calls = runsOf(p, "call");
+    expect(calls.map((r) => r.id)).toContain("main");
+    const total = calls.reduce((sum, r) => sum + r.n, 0);
+    expect(total).toBeGreaterThanOrEqual(3);
+    expect(total).toBeLessThanOrEqual(4);
   });
 
   it("agent: the running fiber is recovered once, from its last checkpoint", async () => {
