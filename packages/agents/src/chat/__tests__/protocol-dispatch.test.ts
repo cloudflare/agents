@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Connection } from "agents";
 import type { ChatTurns } from "../chat-turns";
 import { CHAT_MESSAGE_TYPES } from "../protocol";
@@ -475,6 +475,32 @@ describe("dispatchChatProtocol", () => {
     applied(true);
     await answered;
     expect(calls).toEqual([["resume.request", "c1", "p", undefined]]);
+  });
+
+  it("waits for a hung apply as long as the tab's extended probe does, then answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, calls } = recordingHost();
+      // An apply that never settles.
+      Object.assign(host.turns, {
+        pendingInteraction: new Promise<boolean>(() => {})
+      });
+      const answered = dispatchChatProtocol(
+        connection,
+        send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST }),
+        host
+      );
+      // Past the 5 s a probe waits before it is told to keep waiting.
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(calls).toEqual([]);
+      // At 60 s the tab's probe gives up: the handshake answers what it
+      // knows rather than nobody.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await answered;
+      expect(calls).toEqual([["resume.request", "c1", undefined, undefined]]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sends no keep-waiting frame for a resume request with nothing being applied", async () => {
