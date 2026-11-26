@@ -1128,11 +1128,11 @@ export class ChatTurns<
         definition: this.#lane.definition,
         status: ["pending", "running"],
         results: false,
+        limit: Number.MAX_SAFE_INTEGER,
         ...(lane !== undefined && { lane })
       }).length;
     // A turn run off the lane: a recovered reply's, recovering.
-    const recovering =
-      this.#heldBy.size > 0 || open() > open(CHAT_TURN_LANE);
+    const recovering = this.#heldBy.size > 0 || open() > open(CHAT_TURN_LANE);
     if (recovering) {
       // Asked again until they are done.
       this.#parksCheck ??= setTimeout(() => {
@@ -1988,14 +1988,6 @@ export class ChatTurns<
     return this.#continuationParts.firing.size > 0;
   }
 
-  /** Resolves once {@link #continuationFired}, or never once `watch` is done. */
-  async #untilContinuationFires(watch: { done: boolean }): Promise<void> {
-    while (!this.#continuationFired()) {
-      if (watch.done) return new Promise(() => {});
-      await sleep(50);
-    }
-  }
-
   /**
    * Tear down turn state for a chat reset (clear): invalidate queued turns,
    * abort every request, drop the apply chain and the continuation slots and
@@ -2087,17 +2079,15 @@ export class ChatTurns<
     // before the attempt ends. That continuation settles the chat instead.
     const inLane = inLaneRecoveryAttempt();
     for (;;) {
-      const idle = this.queue.waitForIdle();
-      const watch = { done: false };
-      const waited = await awaitWithDeadline(
-        inLane
-          ? Promise.race([idle, this.#untilContinuationFires(watch)])
-          : idle,
-        deadline
-      ).finally(() => {
-        watch.done = true;
-      });
-      if (waited === TIMED_OUT) return false;
+      // Turns queued behind a lane run's recovery attempt cannot run before
+      // it ends, so it does not wait for them; its own run in place.
+      if (
+        !inLane &&
+        (await awaitWithDeadline(this.queue.waitForIdle(), deadline)) ===
+          TIMED_OUT
+      ) {
+        return false;
+      }
       if (inLane && this.#continuationFired()) return true;
 
       if (!hasPendingInteraction()) {

@@ -482,52 +482,72 @@ describe("a tool call a reset cut off", () => {
 });
 
 describe("two resets a few seconds apart", () => {
-  it("the request cut at the first reset is answered before the one queued behind it", async () => {
-    const room = crypto.randomUUID();
-    const binding = "RecoverySlowStreamAgent";
-    const path = `/agents/recovery-slow-stream-agent/${room}`;
-    const { ws } = await connectChatWS(path);
-    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(300);
-    sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(300);
+  it.each([
+    { name: "", sendAfter: false },
+    { name: ", and a new request sent after the second", sendAfter: true }
+  ])(
+    "the request cut at the first reset is answered before the one queued behind it$name",
+    async ({ sendAfter }) => {
+      const room = crypto.randomUUID();
+      const binding = "RecoverySlowStreamAgent";
+      const path = `/agents/recovery-slow-stream-agent/${room}`;
+      const { ws } = await connectChatWS(path);
+      sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
+      await delay(300);
+      sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
+      await delay(300);
 
-    await reset(binding, room);
-    // The recovered turn starts streaming the cut reply's continuation.
-    const { ws: tab } = await connectChatWS(path);
-    record(tab);
-    const second = await agent(binding, room);
-    await waitFor(
-      () => second.getTranscriptsSeenForTest(),
-      (seen) => seen.length >= 1
-    );
-    await delay(1500);
-    // The second reset cuts the recovered reply.
-    await reset(binding, room);
-    tab.close();
+      await reset(binding, room);
+      // The recovered turn starts streaming the cut reply's continuation.
+      const { ws: tab } = await connectChatWS(path);
+      record(tab);
+      const second = await agent(binding, room);
+      await waitFor(
+        () => second.getTranscriptsSeenForTest(),
+        (seen) => seen.length >= 1
+      );
+      await delay(1500);
+      // The second reset cuts the recovered reply.
+      await reset(binding, room);
+      tab.close();
 
-    const { ws: tab2 } = await connectChatWS(path);
-    record(tab2);
-    const third = await agent(binding, room);
-    const messages = await waitFor(
-      () => third.getPersistedMessages(),
-      (m) => m.filter((x) => x.role === "assistant").length >= 2,
-      30_000
-    );
-    // u1 is answered, before u2 and its reply.
-    expect(messages.map((m) => m.role)).toEqual([
-      "user",
-      "assistant",
-      "user",
-      "assistant"
-    ]);
-    expect(messages[0].id).toBe("u1");
-    expect(messages[2].id).toBe("u2");
-    expect(textOf(messages[3])).toBe(QUICK_REPLY);
-    // u1's reply was continued to its end, not left cut off.
-    expect(textOf(messages[1])).toContain("chunk-29");
-    tab2.close();
-  }, 60_000);
+      const { ws: tab2 } = await connectChatWS(path);
+      record(tab2);
+      const third = await agent(binding, room);
+      // A request the tab sends now waits behind the cut reply's recovery.
+      if (sendAfter) {
+        sendChatRequest(
+          tab2,
+          "r3",
+          [user("u1", "one"), user("u2", "two"), user("u3", "three")],
+          QUICK
+        );
+      }
+      const messages = (
+        await waitFor(
+          () => third.getPersistedMessages(),
+          (m) =>
+            m.filter((x) => x.role === "assistant").length >=
+            (sendAfter ? 3 : 2),
+          30_000
+        )
+      ).slice(0, 4);
+      // u1 is answered, before u2 and its reply.
+      expect(messages.map((m) => m.role)).toEqual([
+        "user",
+        "assistant",
+        "user",
+        "assistant"
+      ]);
+      expect(messages[0].id).toBe("u1");
+      expect(messages[2].id).toBe("u2");
+      expect(textOf(messages[3])).toBe(QUICK_REPLY);
+      // u1's reply was continued to its end, not left cut off.
+      expect(textOf(messages[1])).toContain("chunk-29");
+      tab2.close();
+    },
+    60_000
+  );
 });
 
 describe("a turn started from onStart", () => {
