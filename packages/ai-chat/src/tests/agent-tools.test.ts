@@ -136,7 +136,6 @@ type ParentStub = DurableObjectStub & {
   ): Promise<{
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
-    deferredHookCount: number;
     lifecycleOrder: string[];
   }>;
   reconcileCompletedChildWithReplayFailureForTest(
@@ -1209,7 +1208,8 @@ describe("AIChatAgent as an agent-tool child", () => {
     const { events, finishes, elapsedMs, status } =
       await parent.reconcileStuckChildWithTimeoutForTest(runId);
 
-    expect(elapsedMs).toBeLessThan(1000);
+    // The parent asks an unreachable child for at most 2 s.
+    expect(elapsedMs).toBeLessThan(4000);
     expect(status).toBe("interrupted");
     expect(finishes).toEqual([
       {
@@ -1293,19 +1293,20 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(lifecycleOrder).toEqual(["after-on-start", `finish:${runId}`]);
   });
 
-  it("skips recovered finish hooks when startup fails after internal recovery", async () => {
+  it("settles a recovered run and fires its finish hook once even when startup failed", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
 
-    const { events, finishes, deferredHookCount, lifecycleOrder } =
+    const { events, finishes, lifecycleOrder } =
       await parent.reconcileCompletedChildWithFailedStartupForTest(
         { prompt: "failed startup child" },
         runId
       );
 
-    expect(deferredHookCount).toBe(1);
-    expect(finishes).toHaveLength(0);
-    expect(lifecycleOrder).toEqual(["on-start-error"]);
+    // The run is a task: its attempt runs from its wake whatever the user's
+    // onStart did, and its terminal report fires the hook.
+    expect(finishes).toHaveLength(1);
+    expect(lifecycleOrder).toEqual(["on-start-error", `finish:${runId}`]);
     expect(events.at(-1)).toMatchObject({
       event: {
         kind: "finished",

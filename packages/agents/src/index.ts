@@ -210,7 +210,13 @@ import type {
 import type { QueueItem } from "./queue/types";
 export type { QueueItem } from "./queue/types";
 import { Tasks, setTaskDefinitionResolver } from "./tasks/tasks";
-import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
+import type {
+  TaskCallbacks,
+  TaskHandlers,
+  TaskJson,
+  TaskRecord,
+  TaskStep
+} from "./tasks/types";
 import type {
   Schedule,
   ScheduleCriteria,
@@ -346,7 +352,6 @@ type AgentToolRunStorageRow = {
   detached_on_milestones?: string | null;
 };
 
-type DeferredAgentToolFinish = () => Promise<void>;
 type DetachedReconcilePayload = { cadenceIndex?: number };
 
 export type {
@@ -392,7 +397,9 @@ export type {
 } from "./mcp/client/agent-servers";
 
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
-const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
+// An awaited agent-tool run is one run of this Task definition, keyed by the
+// run id. Its attempt follows the child; a reset re-runs it, which re-attaches.
+const AGENT_TOOL_TASK = "__cf_agent_tool";
 // How long a detached terminal-delivery claim is leased before another delivery
 // path (a backbone reconcile racing the warm fast path, or a re-delivery after
 // a crash mid-handler) may re-claim it. Guards against a double-fire on the
@@ -422,14 +429,22 @@ const DETACHED_SILENT_CANCEL_REASON =
 // receive `detached: { notify: true }` completions. Resolved by name so the
 // base Agent stays decoupled from the chat layer.
 const DETACHED_NOTIFY_CALLBACK = "_cfDetachedNotifyFinish";
-type AgentToolRecoveryInspection =
-  | {
-      status: "inspected";
-      adapter: AgentToolChildAdapter;
-      inspection: AgentToolRunInspection | null;
-    }
-  | { status: "failed" }
-  | { status: "timed-out" };
+/** What an awaited run's task keeps as metadata: today's display fields. */
+type AgentToolTaskMeta = {
+  agentType: string;
+  parentToolCallId?: string;
+  inputPreview?: TaskJson;
+  display?: TaskJson;
+  displayOrder: number;
+  eventDelivery?: "terminal";
+  startedAt: number;
+};
+/** Handed to the attempt in the isolate that started the run (`local`). */
+type AgentToolTaskLocal = {
+  input: unknown;
+  signal?: AbortSignal;
+  meta: AgentToolTaskMeta;
+};
 
 /**
  * Schema version for the Agent's internal SQLite tables.
@@ -727,8 +742,12 @@ export class Agent<
     return this._dynamicAgentsApi;
   }
 
-  /** @internal Single-flight background recovery for parent agent-tool rows. */
-  private _agentToolRunRecoveryPromise: Promise<void> | undefined;
+  /**
+   * @internal Awaited runs accepted by `runAgentTool` whose task row may not
+   * be written yet, so concurrent calls count them against
+   * `maxConcurrentAgentTools`. Each leaves when its call returns.
+   */
+  private readonly _agentToolRunsStarting = new Set<string>();
   /** @internal Serializes detached-backbone arming against concurrent dispatch. */
   private _detachedBackboneArming: Promise<void> = Promise.resolve();
   /** @internal Edge-trigger latch for the live-detached-count warning. */
@@ -1290,6 +1309,18 @@ export class Agent<
       createFiberTaskDefinition(fiberHost, true),
       { claimMs, keepCheckpoint: true }
     );
+    this.tasks.register(
+      AGENT_TOOL_TASK,
+      (_input, step) => this._agentToolAttempt(step),
+      {
+        claimMs,
+        // Started only by `runAgentTool`, which waits for the attempt: no
+        // wake job for the accept or the claim. A reset loses nothing; the
+        // next start makes the interrupted attempt due.
+        attached: true,
+        onStatus: (record) => this._onAgentToolTaskStatus(record)
+      }
+    );
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -1610,22 +1641,23 @@ export class Agent<
             mcpBroadcastReady = true;
             this.broadcastMcpServers();
 
-            const startupAgentToolRunIds = await this._withAgentSpan(
+            const openAgentToolRuns = await this._withAgentSpan(
               "recover_agent_work",
               "startup",
               {},
               async () => {
                 await this._recoverFibers();
-                // Interrupted Task runs (including chat turns) recover via
-                // the Lifecycle job queue: their mirror jobs are overdue and
-                // re-fire on the post-startup alarm derivation.
-                return this._agentToolRunRecoveryRunIds();
+                await this._carryForwardAgentToolRuns();
+                // Interrupted Task runs (chat turns and awaited agent-tool
+                // runs included) recover via the Lifecycle job queue: their
+                // mirror jobs are overdue and re-fire on the post-startup
+                // alarm derivation.
+                return this._activeAgentToolRunCount();
               }
             );
             update({
               "cloudflare.agents.start.facet": this._isFacet,
-              "cloudflare.agents.recovery.agent_tools.count":
-                startupAgentToolRunIds.length
+              "cloudflare.agents.recovery.agent_tools.count": openAgentToolRuns
             });
 
             // Chat recovery (above, in fiber recovery) evaluates its budgets
@@ -1670,9 +1702,16 @@ export class Agent<
               );
             }
 
-            this._scheduleAgentToolRunRecovery({
-              runIds: startupAgentToolRunIds
-            });
+            // The detached backbone's schedule survives eviction; this also
+            // arms it when a dispatching turn crashed after inserting the run
+            // row but before arming the schedule.
+            if (this._hasOutstandingDetachedRuns()) {
+              this.ctx.waitUntil(
+                this._armDetachedBackbone().catch((error: unknown) =>
+                  this._safeRunOnError(error)
+                )
+              );
+            }
 
             await this._dropFacetHostJobs();
             return result;
@@ -3522,7 +3561,32 @@ export class Agent<
       );
     }
 
-    const existing = this._readAgentToolRun(runId);
+    const task = this.tasks.peek(runId);
+    if (task?.definition === AGENT_TOOL_TASK && !detached) {
+      // A re-issue of an awaited run, typically chat recovery re-running the
+      // dispatching turn with the same run id. An open run is joined. A
+      // settled run returns its result, except `interrupted`, a SOFT
+      // terminal: the parent gave up following, but the child may have
+      // finished since, so the run starts again under the same id and
+      // re-attaches to the child instead of letting the model re-run work
+      // the child already did (#1630).
+      const settled = this._agentToolTaskResult<Output>(task);
+      if (settled && settled.status !== "interrupted") return settled;
+      if (settled) {
+        const meta = this._agentToolTaskMeta(task);
+        this.tasks.deleteRun(runId);
+        if (meta) {
+          return this._startAgentToolTask<Output>(runId, meta, {
+            input: options.input,
+            signal: options.signal,
+            meta
+          });
+        }
+      }
+      return this._waitAgentToolTask<Output>(runId);
+    }
+
+    const existing = this._readAgentToolRunRow(runId);
     if (existing) {
       // Detached re-dispatch (e.g. chat recovery re-running the dispatching
       // turn) is idempotent by runId: re-arm the durable backbone for a still
@@ -3536,85 +3600,7 @@ export class Agent<
         }
         return { runId, agentType, status: "running" };
       }
-      // HARD terminals (completed/error/aborted) are returned as-is. `interrupted`
-      // is a SOFT terminal — recovery gave up once, but the child may have
-      // reached its real terminal since — so it falls through to the re-attach
-      // path below (which can repair the row), exactly like a non-terminal run.
-      if (
-        existing.status === "completed" ||
-        existing.status === "error" ||
-        existing.status === "aborted"
-      ) {
-        if (existing.status === "completed" && existing.output_json == null) {
-          try {
-            const child = await this.subAgent(
-              cls as SubAgentClass<Agent>,
-              runId
-            );
-            const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
-            const inspection = await adapter.inspectAgentToolRun(runId);
-            if (inspection?.status === "completed") {
-              const result = this._terminalResultFromInspection<Output>(
-                agentType,
-                inspection
-              );
-              this._updateAgentToolTerminal(
-                runId,
-                result,
-                inspection.completedAt
-              );
-              return result;
-            }
-          } catch {
-            // Fall back to the retained parent row.
-          }
-        }
-        return this._resultFromAgentToolRow<Output>(existing);
-      }
-      // Non-terminal or soft-terminal (`interrupted`) runId: the child may still
-      // be in flight or may have reached terminal since we gave up (typically a
-      // re-issue after parent recovery re-runs the same turn with a stable
-      // runId — the documented "correct pattern"). Re-attach to the live child
-      // and tail it to terminal instead of abandoning it as `interrupted` and
-      // letting the model re-run already-completed child work (#1630). Falls
-      // back to replay+interrupt when there is no tail adapter or the bounded
-      // budget is exhausted.
-      let reattachReason: AgentToolInterruptedReason | undefined;
-      let childTornDown = false;
-      try {
-        const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
-        const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
-        const reattach = await this._reattachAgentToolRunToTerminal<Output>(
-          adapter,
-          existing,
-          1,
-          this._resolvedOptions.agentToolReattachNoProgressTimeoutMs,
-          this._resolvedOptions.agentToolReattachMaxWindowMs
-        );
-        if (reattach.result) {
-          await this._finishAgentToolRun(
-            this._agentToolRunInfoFromRow(existing),
-            reattach.result,
-            { sequence: reattach.sequence, completedAt: reattach.completedAt }
-          );
-          return reattach.result;
-        }
-        reattachReason = reattach.reason;
-        // The parent has genuinely given up re-attaching to this live child —
-        // tear it down so it stops consuming a fiber / keep-alive (#1630).
-        childTornDown = await this._teardownGivenUpAgentToolChild(
-          adapter,
-          runId,
-          reattach.reason
-        );
-      } catch {
-        // Fall through to the honest interrupted state below.
-      }
-      return await this._replayAndInterruptAgentToolRun<Output>(
-        existing,
-        this._interruptedMessageForReason(reattachReason),
-        { reason: reattachReason, childStillRunning: !childTornDown }
-      );
+      return this._resultFromAgentToolRow<Output>(existing);
     }
 
     const displayOrder = options.displayOrder ?? 0;
@@ -3626,19 +3612,38 @@ export class Agent<
       inputPreview !== undefined ? JSON.stringify(inputPreview) : null;
     const startedAt = Date.now();
 
+    const meta: AgentToolTaskMeta = {
+      agentType,
+      ...(options.parentToolCallId !== undefined
+        ? { parentToolCallId: options.parentToolCallId }
+        : {}),
+      ...(inputPreview !== undefined
+        ? { inputPreview: inputPreview as TaskJson }
+        : {}),
+      ...(options.display !== undefined
+        ? { display: options.display as TaskJson }
+        : {}),
+      displayOrder,
+      ...(eventDelivery === "terminal"
+        ? { eventDelivery: "terminal" as const }
+        : {}),
+      startedAt
+    };
+
     if (this._activeAgentToolRunCount() >= this.maxConcurrentAgentTools) {
       const error = `maxConcurrentAgentTools (${this.maxConcurrentAgentTools}) exceeded`;
-      this.sql`
-        INSERT INTO cf_agent_tool_runs (
-          run_id, parent_tool_call_id, agent_type, input_preview,
-          input_redacted, status, error_message, display_metadata,
-          display_order, started_at, completed_at
-        ) VALUES (
-          ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
-          ${inputPreviewJson}, 1, 'error', ${error}, ${displayJson},
-          ${displayOrder}, ${startedAt}, ${Date.now()}
-        )
-      `;
+      // Kept as a settled run, so a re-issue returns the same refusal.
+      await this.tasks.importRun({
+        runId,
+        definition: AGENT_TOOL_TASK,
+        status: "completed",
+        attempt: 0,
+        metadata: meta,
+        result: { runId, agentType, status: "error", error },
+        retain: true,
+        createdAt: startedAt,
+        settledAt: Date.now()
+      });
       this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
         kind: "started",
         runId,
@@ -3655,34 +3660,6 @@ export class Agent<
       return { runId, agentType, status: "error", error };
     }
 
-    const detachedMaxBudgetAt = detached
-      ? startedAt +
-        (detached.maxBudgetMs ?? this._resolvedOptions.detachedMaxBudgetMs)
-      : null;
-    const detachedNoProgressBudgetMs = detached
-      ? (detached.noProgressBudgetMs ??
-        this._resolvedOptions.detachedNoProgressBudgetMs)
-      : null;
-    const detachedOnMilestonesJson = detached?.onMilestones
-      ? JSON.stringify(detached.onMilestones)
-      : null;
-    this.sql`
-      INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, input_preview,
-        input_redacted, status, display_metadata, display_order, started_at,
-        detached, detached_on_finish, detached_notify_source,
-        detached_max_budget_at, detached_no_progress_budget_ms,
-        detached_on_milestones, event_delivery
-      ) VALUES (
-        ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
-        ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
-        ${startedAt}, ${detached ? 1 : 0}, ${detached?.onFinishName ?? null},
-        ${detached?.notifySource ?? null}, ${detachedMaxBudgetAt},
-        ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson},
-        ${eventDelivery === "terminal" ? "terminal" : null}
-      )
-    `;
-
     const runInfo: AgentToolRunInfo = {
       runId,
       parentToolCallId: options.parentToolCallId,
@@ -3696,6 +3673,55 @@ export class Agent<
       displayOrder,
       startedAt
     };
+
+    if (!detached) {
+      // Counted from here, before the first await, so runs started together
+      // all see each other against the cap.
+      this._agentToolRunsStarting.add(runId);
+      try {
+        await this.onAgentToolStart(runInfo);
+        this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
+          kind: "started",
+          runId,
+          agentType,
+          inputPreview,
+          order: displayOrder,
+          display: options.display
+        });
+        return await this._startAgentToolTask<Output>(runId, meta, {
+          input: options.input,
+          signal: options.signal,
+          meta
+        });
+      } finally {
+        this._agentToolRunsStarting.delete(runId);
+      }
+    }
+
+    const detachedMaxBudgetAt =
+      startedAt +
+      (detached.maxBudgetMs ?? this._resolvedOptions.detachedMaxBudgetMs);
+    const detachedNoProgressBudgetMs =
+      detached.noProgressBudgetMs ??
+      this._resolvedOptions.detachedNoProgressBudgetMs;
+    const detachedOnMilestonesJson = detached.onMilestones
+      ? JSON.stringify(detached.onMilestones)
+      : null;
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, display_metadata, display_order, started_at,
+        detached, detached_on_finish, detached_notify_source,
+        detached_max_budget_at, detached_no_progress_budget_ms,
+        detached_on_milestones, event_delivery
+      ) VALUES (
+        ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
+        ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
+        ${startedAt}, 1, ${detached.onFinishName ?? null},
+        ${detached.notifySource ?? null}, ${detachedMaxBudgetAt},
+        ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson}, ${null}
+      )
+    `;
     await this.onAgentToolStart(runInfo);
     this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
       kind: "started",
@@ -3707,76 +3733,250 @@ export class Agent<
     });
 
     const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
-    // Replaced with a fresh stub when the child's isolate goes away under
-    // the tail.
-    let adapter = this._asAgentToolChildAdapter<Input, Output>(child);
-    let childStart: AgentToolRunInspection<Output> | undefined;
-    // Set when the start call itself failed. The child may still have
-    // started the run (its isolate went away under the call): an awaited
-    // run asks the child below, like a run whose tail broke.
-    let startFailure: { error: unknown } | undefined;
-    try {
-      childStart = await adapter.startAgentToolRun(options.input, {
-        runId,
-        ...(eventDelivery === "terminal" ? { eventDelivery } : {})
-      });
-    } catch (error) {
-      if (detached) throw error;
-      startFailure = { error };
-    }
+    const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
+    await adapter.startAgentToolRun(options.input, { runId });
     this._markAgentToolRunning(runId);
 
-    if (detached) {
-      // The child must OUTLIVE the dispatching turn, so a detached run never
-      // inherits `options.signal` (which aborts when this turn ends). Cancel a
-      // detached run explicitly with `cancelAgentTool(runId)`.
-      if (options.signal) {
-        console.warn(
-          `[agents] runAgentTool: \`signal\` is ignored for a detached run (${runId}); a detached child must outlive the spawning turn. Use cancelAgentTool(runId) to cancel it.`
-        );
-      }
-      // Arm the durable backbone first so eviction between here and the fast
-      // path still finalizes the run, then kick the warm fast path that tails
-      // the child to terminal and delivers with low latency while alive.
-      await this._armDetachedBackbone({ resetCadence: true });
-      // Surface runaway accumulation: detached runs hold a slot for their whole
-      // life with no observer to notice a leak.
-      this._maybeWarnDetachedLiveCount();
-      this.ctx.waitUntil(
-        this._detachedFastPath<Input, Output>(runInfo, cls, runId)
-      );
-      return { runId, agentType, status: "running" };
-    }
-
-    let sequence = 1;
-    let parentAbortListener: (() => void) | undefined;
+    // The child must OUTLIVE the dispatching turn, so a detached run never
+    // inherits `options.signal` (which aborts when this turn ends). Cancel a
+    // detached run explicitly with `cancelAgentTool(runId)`.
     if (options.signal) {
-      if (options.signal.aborted) {
-        await adapter.cancelAgentToolRun(runId, options.signal.reason);
-        const reason =
-          options.signal.reason instanceof Error
-            ? options.signal.reason.message
-            : String(options.signal.reason ?? "cancelled");
-        const result: RunAgentToolResult<Output> = {
+      console.warn(
+        `[agents] runAgentTool: \`signal\` is ignored for a detached run (${runId}); a detached child must outlive the spawning turn. Use cancelAgentTool(runId) to cancel it.`
+      );
+    }
+    // Arm the durable backbone first so eviction between here and the fast
+    // path still finalizes the run, then kick the warm fast path that tails
+    // the child to terminal and delivers with low latency while alive.
+    await this._armDetachedBackbone({ resetCadence: true });
+    // Surface runaway accumulation: detached runs hold a slot for their whole
+    // life with no observer to notice a leak.
+    this._maybeWarnDetachedLiveCount();
+    this.ctx.waitUntil(
+      this._detachedFastPath<Input, Output>(runInfo, cls, runId)
+    );
+    return { runId, agentType, status: "running" };
+  }
+
+  /** Accept an awaited run's task, run its first attempt here, and wait for it. */
+  private async _startAgentToolTask<Output>(
+    runId: string,
+    metadata: AgentToolTaskMeta,
+    local: AgentToolTaskLocal
+  ): Promise<RunAgentToolResult<Output>> {
+    await this.tasks.run(AGENT_TOOL_TASK, null, {
+      runId,
+      metadata,
+      retain: true,
+      start: "now",
+      local
+    });
+    return this._waitAgentToolTask<Output>(runId);
+  }
+
+  /** The result of an awaited run's task, once its terminal report returned. */
+  private async _waitAgentToolTask<Output>(
+    runId: string
+  ): Promise<RunAgentToolResult<Output>> {
+    const record = await this.tasks.wait(runId);
+    const meta = this._agentToolTaskMeta(record);
+    return (
+      (record && this._agentToolTaskResult<Output>(record)) ?? {
+        runId,
+        agentType: meta?.agentType ?? "",
+        status: "error",
+        error: "Agent tool run was deleted before it finished."
+      }
+    );
+  }
+
+  /** An awaited run's metadata, or `undefined` for any other record. */
+  private _agentToolTaskMeta(
+    record: TaskRecord | null | undefined
+  ): AgentToolTaskMeta | undefined {
+    if (record?.definition !== AGENT_TOOL_TASK) return undefined;
+    // SAFETY: written by `runAgentTool` (or the carry-forward) in this shape.
+    return record.metadata as AgentToolTaskMeta | undefined;
+  }
+
+  /**
+   * The agent-tool result a settled run's task holds: the attempt's
+   * returned result, or the Task's own `error` or `aborted` ending.
+   * `undefined` while the run is open.
+   */
+  private _agentToolTaskResult<Output>(
+    record: TaskRecord
+  ): RunAgentToolResult<Output> | undefined {
+    const agentType = this._agentToolTaskMeta(record)?.agentType ?? "";
+    if (record.status === "completed") {
+      // SAFETY: the attempt returns a `RunAgentToolResult` as its value.
+      return record.result as unknown as RunAgentToolResult<Output>;
+    }
+    if (record.status === "aborted" || record.status === "skipped") {
+      return {
+        runId: record.runId,
+        agentType,
+        status: "aborted",
+        error: record.reason ?? "cancelled"
+      };
+    }
+    if (record.status === "error") {
+      return {
+        runId: record.runId,
+        agentType,
+        status: "error",
+        error: record.error?.message ?? "Agent tool run failed"
+      };
+    }
+    return undefined;
+  }
+
+  /**
+   * One attempt of an awaited run. The attempt in the isolate that started
+   * the run starts the child and follows its live tail. An attempt after a
+   * reset re-attaches to the child, within the re-attach budgets. Either way
+   * it broadcasts the terminal event and returns the result; the terminal
+   * report runs `onAgentToolFinish`.
+   */
+  private async _agentToolAttempt(step: TaskStep): Promise<TaskJson> {
+    const runId = step.id;
+    const local = step.local as AgentToolTaskLocal | undefined;
+    const meta = local?.meta ?? this._agentToolTaskMeta(this.tasks.peek(runId));
+    if (!meta) {
+      throw new Error(`Agent tool run ${runId} has no metadata`);
+    }
+    // The caller's signal (in the isolate that started the run) and the
+    // run's own (a cancel through Tasks) both stop the run.
+    const stop = new AbortController();
+    const sources = [local?.signal, step.signal].filter(
+      (source): source is AbortSignal => source !== undefined
+    );
+    const listeners = sources.map((source) => {
+      const listener = () => stop.abort(source.reason);
+      if (source.aborted) listener();
+      else source.addEventListener("abort", listener, { once: true });
+      return () => source.removeEventListener("abort", listener);
+    });
+    const signal = stop.signal;
+    let result: RunAgentToolResult;
+    let sequence = 1;
+    try {
+      const followed = local
+        ? await this._followLiveAgentToolRun(meta, runId, local.input, signal)
+        : await this._reattachAgentToolRun(meta, runId, signal);
+      result = followed.result;
+      sequence = followed.sequence;
+    } catch (error) {
+      result = {
+        runId,
+        agentType: meta.agentType,
+        status: "error",
+        error: error instanceof Error ? error.message : String(error)
+      };
+    } finally {
+      for (const remove of listeners) remove();
+    }
+    this._broadcastAgentToolTerminal(meta.parentToolCallId, sequence, result);
+    // SAFETY: a `RunAgentToolResult` is JSON (its output came over RPC).
+    return result as unknown as TaskJson;
+  }
+
+  /** The terminal report of an awaited run: `onAgentToolFinish`, once settled. */
+  private async _onAgentToolTaskStatus(record: TaskRecord): Promise<void> {
+    const result = this._agentToolTaskResult(record);
+    const meta = this._agentToolTaskMeta(record);
+    if (!result || !meta) return;
+    // Best-effort, like every recovered or detached finish: a hook that
+    // throws goes to `onError` and does not hold the run's report.
+    try {
+      await this.onAgentToolFinish(
+        {
+          ...this._agentToolRunInfoFromTask(meta, record.runId),
+          status: result.status,
+          completedAt: record.settledAt ?? Date.now()
+        },
+        result
+      );
+    } catch (error) {
+      await this._safeRunOnError(error);
+    }
+  }
+
+  private _agentToolRunInfoFromTask(
+    meta: AgentToolTaskMeta,
+    runId: string
+  ): AgentToolRunInfo {
+    return {
+      runId,
+      parentToolCallId: meta.parentToolCallId,
+      agentType: meta.agentType,
+      inputPreview: meta.inputPreview,
+      status: "running",
+      display: meta.display as AgentToolDisplayMetadata | undefined,
+      displayOrder: meta.displayOrder,
+      startedAt: meta.startedAt
+    };
+  }
+
+  /**
+   * Start the child's run and follow its live tail to its end, in the
+   * isolate that started the run.
+   */
+  private async _followLiveAgentToolRun(
+    meta: AgentToolTaskMeta,
+    runId: string,
+    input: unknown,
+    signal: AbortSignal
+  ): Promise<{ result: RunAgentToolResult; sequence: number }> {
+    const { agentType, parentToolCallId } = meta;
+    const resolveAdapter = async () =>
+      this._asAgentToolChildAdapter(
+        await this._cf_resolveSubAgent(agentType, runId)
+      );
+    // Replaced with a fresh stub when the child's isolate goes away under
+    // the tail.
+    let adapter = await resolveAdapter();
+    let sequence = 1;
+    const aborted = async (): Promise<{
+      result: RunAgentToolResult;
+      sequence: number;
+    }> => {
+      await adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      return {
+        result: {
           runId,
           agentType,
           status: "aborted",
-          error: reason
-        };
-        await this._finishAgentToolRun(runInfo, result, { sequence });
-        return result;
-      } else {
-        parentAbortListener = () => {
-          void adapter
-            .cancelAgentToolRun(runId, options.signal?.reason)
-            .catch(() => {});
-        };
-        options.signal.addEventListener("abort", parentAbortListener, {
-          once: true
-        });
-      }
+          error:
+            signal.reason instanceof Error
+              ? signal.reason.message
+              : String(signal.reason ?? "cancelled")
+        },
+        sequence
+      };
+    };
+    if (signal.aborted) return aborted();
+
+    let childStart: AgentToolRunInspection | undefined;
+    // Set when the start call itself failed. The child may still have
+    // started the run (its isolate went away under the call): ask the child
+    // below, like a run whose tail broke.
+    let startFailure: { error: unknown } | undefined;
+    try {
+      childStart = await adapter.startAgentToolRun(input, {
+        runId,
+        ...(meta.eventDelivery === "terminal"
+          ? { eventDelivery: "terminal" as const }
+          : {})
+      });
+    } catch (error) {
+      startFailure = { error };
     }
 
+    const onAbort = () => {
+      void adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
     try {
       // The tail is an RPC stream from the child. It breaks when the child's
       // isolate goes away under it (an eviction, a reset), which says
@@ -3801,12 +4001,10 @@ export class Agent<
           });
           await this._forwardAgentToolStream(
             stream,
-            options.parentToolCallId,
+            parentToolCallId,
             runId,
             sequence,
-            options.signal
-              ? AbortSignal.any([options.signal, watch.ended])
-              : watch.ended,
+            AbortSignal.any([signal, watch.ended]),
             undefined,
             cursor
           );
@@ -3814,39 +4012,23 @@ export class Agent<
         } else {
           const chunks = await this._readAgentToolChunks(adapter, runId);
           sequence = this._broadcastAgentToolChunks(
-            options.parentToolCallId,
+            parentToolCallId,
             runId,
             chunks,
             sequence
           );
         }
-      } catch (error) {
-        if (options.signal?.aborted) throw error;
+      } catch {
+        if (signal.aborted) return aborted();
         tailBroke = true;
         sequence = cursor.next;
         // The old stub may still name the instance that went away.
-        adapter = this._asAgentToolChildAdapter<Input, Output>(
-          await this.subAgent(cls as SubAgentClass<Agent>, runId)
-        );
+        adapter = await resolveAdapter();
       } finally {
         watch.stop();
       }
 
-      if (options.signal?.aborted) {
-        await adapter.cancelAgentToolRun(runId, options.signal.reason);
-        const reason =
-          options.signal.reason instanceof Error
-            ? options.signal.reason.message
-            : String(options.signal.reason ?? "cancelled");
-        const result: RunAgentToolResult<Output> = {
-          runId,
-          agentType,
-          status: "aborted",
-          error: reason
-        };
-        await this._finishAgentToolRun(runInfo, result, { sequence });
-        return result;
-      }
+      if (signal.aborted) return aborted();
 
       const inspected = await adapter.inspectAgentToolRun(runId);
       if (
@@ -3854,91 +4036,162 @@ export class Agent<
         (inspected?.status === "running" || inspected?.status === "starting")
       ) {
         // The child still has the run open: it is recovering the turn. Wait
-        // for it the way a recovered parent does, within the same budgets,
-        // and hand back the run's own terminal status.
-        const reattach = await this._reattachAgentToolRunToTerminal<Output>(
-          adapter,
-          {
-            run_id: runId,
-            agent_type: agentType,
-            parent_tool_call_id: options.parentToolCallId ?? null
-          },
-          sequence,
-          this._resolvedOptions.agentToolReattachNoProgressTimeoutMs,
-          this._resolvedOptions.agentToolReattachMaxWindowMs
-        );
-        if (reattach.result) {
-          await this._finishAgentToolRun(runInfo, reattach.result, {
-            sequence: reattach.sequence,
-            completedAt: reattach.completedAt
-          });
-          return reattach.result;
-        }
-        // Budget spent with the run still open: the parent gives up, and
-        // says so. `interrupted` is not the run's outcome, and a later
-        // `runAgentTool` with the same run id re-attaches.
-        const childTornDown = await this._teardownGivenUpAgentToolChild(
-          adapter,
-          runId,
-          reattach.reason
-        );
-        const result: RunAgentToolResult<Output> = {
-          runId,
-          agentType,
-          status: "interrupted",
-          error: this._interruptedMessageForReason(reattach.reason),
-          ...(reattach.reason !== undefined ? { reason: reattach.reason } : {}),
-          childStillRunning: !childTornDown
-        };
-        await this._finishAgentToolRun(runInfo, result, {
-          sequence: reattach.sequence
-        });
-        return result;
+        // for it the way a recovered parent does, within the same budgets.
+        return this._reattachUntilGivenUp(adapter, meta, runId, sequence);
       }
 
       const inspection = inspected ?? childStart;
       // The start failed and the child has no such run: the run never
       // began, and the failure is its error.
       if (!inspection) throw startFailure?.error;
-      const result = this._terminalResultFromInspection<Output>(
-        agentType,
-        inspection
-      );
-      await this._finishAgentToolRun(runInfo, result, {
-        sequence,
-        completedAt: inspection.completedAt
-      });
-      return result;
-    } catch (error) {
-      if (options.signal?.aborted) {
-        await adapter.cancelAgentToolRun(runId, options.signal.reason);
-        const reason =
-          options.signal.reason instanceof Error
-            ? options.signal.reason.message
-            : String(options.signal.reason ?? "cancelled");
-        const result: RunAgentToolResult<Output> = {
-          runId,
-          agentType,
-          status: "aborted",
-          error: reason
-        };
-        await this._finishAgentToolRun(runInfo, result, { sequence });
-        return result;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      const result: RunAgentToolResult<Output> = {
-        runId,
-        agentType,
-        status: "error",
-        error: message
+      return {
+        result: this._terminalResultFromInspection(agentType, inspection),
+        sequence
       };
-      await this._finishAgentToolRun(runInfo, result, { sequence });
-      return result;
+    } catch (error) {
+      if (signal.aborted) return aborted();
+      throw error;
     } finally {
-      if (parentAbortListener && options.signal) {
-        options.signal.removeEventListener("abort", parentAbortListener);
-      }
+      signal.removeEventListener("abort", onAbort);
     }
+  }
+
+  /**
+   * An attempt after a reset: the parent lost its tail. A child that ended
+   * meanwhile has its stored chunks replayed to the connected clients and
+   * its result returned; a child still running is re-attached to.
+   */
+  private async _reattachAgentToolRun(
+    meta: AgentToolTaskMeta,
+    runId: string,
+    signal: AbortSignal
+  ): Promise<{ result: RunAgentToolResult; sequence: number }> {
+    // Bounded: a child that cannot be reached or does not answer must not
+    // hold the parent's run for good.
+    const reached = await this._settleWithinRecoveryTimeout(
+      (async () => {
+        const adapter = this._asAgentToolChildAdapter(
+          await this._cf_resolveSubAgent(meta.agentType, runId)
+        );
+        return {
+          adapter,
+          inspection: await adapter.inspectAgentToolRun(runId)
+        };
+      })().then(
+        (value) => ({ ok: true as const, ...value }),
+        () => ({ ok: false as const })
+      ),
+      DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
+    );
+    if (!reached?.ok) {
+      const reason: AgentToolInterruptedReason = reached
+        ? "inspect-failed"
+        : "inspect-timeout";
+      return {
+        result: {
+          runId,
+          agentType: meta.agentType,
+          status: "interrupted",
+          reason,
+          error: this._interruptedMessageForReason(reason)
+        },
+        sequence: 1
+      };
+    }
+    const { adapter, inspection } = reached;
+    if (signal.aborted) {
+      await adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      return {
+        result: {
+          runId,
+          agentType: meta.agentType,
+          status: "aborted",
+          error: String(signal.reason ?? "cancelled")
+        },
+        sequence: 1
+      };
+    }
+    if (
+      inspection &&
+      inspection.status !== "running" &&
+      inspection.status !== "starting"
+    ) {
+      let sequence = 1;
+      try {
+        sequence = await this._broadcastAgentToolStoredChunksFromAdapter(
+          adapter,
+          {
+            run_id: runId,
+            parent_tool_call_id: meta.parentToolCallId ?? null
+          },
+          sequence
+        );
+      } catch {
+        // The result stands if the replay fails.
+      }
+      return {
+        result: this._terminalResultFromInspection(meta.agentType, inspection),
+        sequence
+      };
+    }
+    if (!inspection) {
+      // The child has no such run: the parent was reset before the child
+      // took it, and the input is not kept on the parent.
+      return {
+        result: {
+          runId,
+          agentType: meta.agentType,
+          status: "error",
+          error:
+            "Agent tool run was interrupted before its child started it. Run it again."
+        },
+        sequence: 1
+      };
+    }
+    return this._reattachUntilGivenUp(adapter, meta, runId, 1);
+  }
+
+  /**
+   * Follow a child that still has the run open within the re-attach budgets.
+   * A spent budget ends the run `interrupted`, a SOFT terminal: the child
+   * is torn down only when the hard ceiling was reached.
+   */
+  private async _reattachUntilGivenUp(
+    adapter: AgentToolChildAdapter,
+    meta: AgentToolTaskMeta,
+    runId: string,
+    sequence: number
+  ): Promise<{ result: RunAgentToolResult; sequence: number }> {
+    const reattach = await this._reattachAgentToolRunToTerminal(
+      adapter,
+      {
+        run_id: runId,
+        agent_type: meta.agentType,
+        parent_tool_call_id: meta.parentToolCallId ?? null
+      },
+      sequence,
+      this._resolvedOptions.agentToolReattachNoProgressTimeoutMs,
+      this._resolvedOptions.agentToolReattachMaxWindowMs
+    );
+    if (reattach.result) {
+      return { result: reattach.result, sequence: reattach.sequence };
+    }
+    const childTornDown = await this._teardownGivenUpAgentToolChild(
+      adapter,
+      runId,
+      reattach.reason
+    );
+    return {
+      result: {
+        runId,
+        agentType: meta.agentType,
+        status: "interrupted",
+        error: this._interruptedMessageForReason(reattach.reason),
+        ...(reattach.reason !== undefined ? { reason: reattach.reason } : {}),
+        childStillRunning: !childTornDown
+      },
+      sequence: reattach.sequence
+    };
   }
 
   /**
@@ -4666,41 +4919,36 @@ export class Agent<
   hasAgentToolRun(classOrName: SubAgentClass | string, runId: string): boolean {
     const agentType =
       typeof classOrName === "string" ? classOrName : classOrName.name;
-    const rows = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM cf_agent_tool_runs
-      WHERE run_id = ${runId} AND agent_type = ${agentType}
-    `;
-    return (rows[0]?.n ?? 0) > 0;
+    return this._readAgentToolRun(runId)?.agent_type === agentType;
   }
 
   async clearAgentToolRuns(options?: {
     olderThan?: number;
     status?: AgentToolRunStatus[];
   }): Promise<void> {
-    const rows = this.sql<{
-      run_id: string;
-      agent_type: string;
-      status: string;
-    }>`
-      SELECT run_id, agent_type, status FROM cf_agent_tool_runs
-      ORDER BY started_at ASC
-    `;
     const statusFilter = options?.status
       ? new Set<string>(options.status)
       : null;
-    const retained = rows.filter((row) => {
+    const retained = this._listAgentToolRuns().filter((row) => {
       if (statusFilter && !statusFilter.has(row.status)) return false;
-      if (options?.olderThan !== undefined) {
-        const full = this._readAgentToolRun(row.run_id);
-        if (!full || full.started_at >= options.olderThan) return false;
+      if (
+        options?.olderThan !== undefined &&
+        row.started_at >= options.olderThan
+      ) {
+        return false;
       }
       return true;
     });
 
     for (const row of retained) {
+      const task = this.tasks.peek(row.run_id);
+      const isTask = this._agentToolTaskMeta(task) !== undefined;
       try {
         const cls = this._agentToolClassByName(row.agent_type);
         if (row.status === "starting" || row.status === "running") {
+          // An awaited run's cancel aborts its attempt, which stops
+          // following the child.
+          if (isTask) await this.tasks.cancel(row.run_id, "cleared");
           const child = await this.subAgent(cls, row.run_id);
           const adapter = this._asAgentToolChildAdapter(child);
           await adapter.cancelAgentToolRun(
@@ -4712,9 +4960,13 @@ export class Agent<
       } catch {
         // Cleanup is intentionally idempotent.
       }
-      this.sql`
-        DELETE FROM cf_agent_tool_runs WHERE run_id = ${row.run_id}
-      `;
+      if (isTask) {
+        this.tasks.deleteRun(row.run_id);
+      } else {
+        this.sql`
+          DELETE FROM cf_agent_tool_runs WHERE run_id = ${row.run_id}
+        `;
+      }
     }
   }
 
@@ -4732,7 +4984,144 @@ export class Agent<
       SELECT COUNT(*) AS n FROM cf_agent_tool_runs
       WHERE status IN ('starting', 'running')
     `;
-    return rows[0]?.n ?? 0;
+    const awaited = new Set(this._agentToolRunsStarting);
+    for (const record of this.tasks.peekList({
+      definition: AGENT_TOOL_TASK,
+      status: ["pending", "running"],
+      results: false,
+      limit: Number.MAX_SAFE_INTEGER
+    })) {
+      awaited.add(record.runId);
+    }
+    return (rows[0]?.n ?? 0) + awaited.size;
+  }
+
+  /**
+   * Every run this agent keeps, oldest first: awaited runs from their tasks,
+   * detached runs from `cf_agent_tool_runs`.
+   */
+  private _listAgentToolRuns(): AgentToolRunStorageRow[] {
+    const detached = this.sql<AgentToolRunStorageRow>`
+      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
+             summary, output_json, error_message, interrupted_reason,
+             child_still_running, display_metadata, display_order,
+             started_at, completed_at, detached, detached_on_finish,
+             detached_notify_source, detached_max_budget_at,
+             finish_claimed_at, finish_delivered_at, give_up_claimed_at,
+             give_up_delivered_at
+      FROM cf_agent_tool_runs
+      ORDER BY started_at ASC
+    `;
+    const awaited = this.tasks
+      .peekList({
+        definition: AGENT_TOOL_TASK,
+        order: "oldest",
+        limit: Number.MAX_SAFE_INTEGER
+      })
+      .map((record) => this._agentToolRowFromTask(record))
+      .filter((row): row is AgentToolRunStorageRow => row !== null);
+    return [...detached, ...awaited].sort(
+      (left, right) => left.started_at - right.started_at
+    );
+  }
+
+  /** An awaited run's task, read in the shape of a `cf_agent_tool_runs` row. */
+  private _agentToolRowFromTask(
+    record: TaskRecord | undefined
+  ): AgentToolRunStorageRow | null {
+    const meta = this._agentToolTaskMeta(record);
+    if (!record || !meta) return null;
+    const result = this._agentToolTaskResult(record);
+    return {
+      run_id: record.runId,
+      parent_tool_call_id: meta.parentToolCallId ?? null,
+      agent_type: meta.agentType,
+      input_preview:
+        meta.inputPreview !== undefined
+          ? JSON.stringify(meta.inputPreview)
+          : null,
+      status: result?.status ?? "running",
+      summary: result?.summary ?? null,
+      output_json: this._stringifyAgentToolOutput(result?.output),
+      error_message: result?.error ?? null,
+      interrupted_reason: result?.reason ?? null,
+      child_still_running:
+        result?.childStillRunning === undefined
+          ? null
+          : result.childStillRunning
+            ? 1
+            : 0,
+      display_metadata:
+        meta.display !== undefined ? JSON.stringify(meta.display) : null,
+      display_order: meta.displayOrder,
+      started_at: meta.startedAt,
+      completed_at: record.settledAt ?? null,
+      detached: 0,
+      detached_on_finish: null,
+      detached_max_budget_at: null,
+      finish_claimed_at: null,
+      finish_delivered_at: null,
+      give_up_claimed_at: null,
+      give_up_delivered_at: null
+    };
+  }
+
+  /**
+   * Carry the awaited runs an earlier version kept in `cf_agent_tool_runs`
+   * into their tasks, once. A settled row becomes a settled run with its
+   * result; an open one becomes an interrupted run, which Tasks runs again:
+   * its attempt re-attaches to the child. Detached rows stay until their own
+   * move.
+   */
+  private async _carryForwardAgentToolRuns(): Promise<void> {
+    const rows = this.sql<
+      AgentToolRunStorageRow & { event_delivery: string | null }
+    >`
+      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
+             summary, output_json, error_message, interrupted_reason,
+             child_still_running, display_metadata, display_order,
+             started_at, completed_at, event_delivery
+      FROM cf_agent_tool_runs
+      WHERE detached = 0
+    `;
+    for (const row of rows) {
+      const inputPreview = this._parseAgentToolJson(row.input_preview);
+      const display = this._parseAgentToolJson(row.display_metadata);
+      const meta: AgentToolTaskMeta = {
+        agentType: row.agent_type,
+        ...(row.parent_tool_call_id !== null
+          ? { parentToolCallId: row.parent_tool_call_id }
+          : {}),
+        ...(inputPreview !== undefined
+          ? { inputPreview: inputPreview as TaskJson }
+          : {}),
+        ...(display !== undefined ? { display: display as TaskJson } : {}),
+        displayOrder: row.display_order,
+        ...(row.event_delivery === "terminal"
+          ? { eventDelivery: "terminal" as const }
+          : {}),
+        startedAt: row.started_at
+      };
+      const open = row.status === "starting" || row.status === "running";
+      // `importRun` writes a run once, so a reset between it and the delete
+      // carries nothing twice.
+      await this.tasks.importRun({
+        runId: row.run_id,
+        definition: AGENT_TOOL_TASK,
+        status: open ? "running" : "completed",
+        attempt: open ? 1 : 0,
+        metadata: meta,
+        ...(open
+          ? {}
+          : {
+              result: this._resultFromAgentToolRow(row) as unknown as TaskJson
+            }),
+        retain: true,
+        createdAt: row.started_at,
+        ...(open ? {} : { settledAt: row.completed_at ?? row.started_at })
+      });
+      this.sql`DELETE FROM cf_agent_tool_runs WHERE run_id = ${row.run_id}`;
+    }
   }
 
   private _defaultAgentToolPreview(input: unknown): unknown {
@@ -4746,7 +5135,16 @@ export class Agent<
     }
   }
 
+  /** A run, detached (its row) or awaited (its task, read as a row). */
   private _readAgentToolRun(runId: string): AgentToolRunStorageRow | null {
+    return (
+      this._readAgentToolRunRow(runId) ??
+      this._agentToolRowFromTask(this.tasks.peek(runId))
+    );
+  }
+
+  /** A run's `cf_agent_tool_runs` row: detached runs only, once carried. */
+  private _readAgentToolRunRow(runId: string): AgentToolRunStorageRow | null {
     const rows = this.sql<AgentToolRunStorageRow>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
              summary, output_json, error_message, interrupted_reason,
@@ -4852,51 +5250,6 @@ export class Agent<
       status: "error",
       error: inspection.error ?? "Agent tool run failed"
     };
-  }
-
-  private async _finishAgentToolRun<Output>(
-    run: AgentToolRunInfo,
-    result: RunAgentToolResult<Output>,
-    options?: {
-      sequence?: number;
-      completedAt?: number;
-      deferFinishHook?: boolean;
-    }
-  ): Promise<DeferredAgentToolFinish | undefined> {
-    const completedAt = options?.completedAt ?? Date.now();
-    this._updateAgentToolTerminal(run.runId, result, completedAt);
-    if (options?.sequence !== undefined) {
-      this._broadcastAgentToolTerminal(
-        run.parentToolCallId,
-        options.sequence,
-        result
-      );
-    }
-    const finish = () =>
-      this.onAgentToolFinish(
-        { ...run, status: result.status, completedAt },
-        result
-      );
-    if (options?.deferFinishHook) return finish;
-    await finish();
-    return undefined;
-  }
-
-  private async _runDeferredAgentToolFinishHooks(
-    hooks: DeferredAgentToolFinish[]
-  ): Promise<void> {
-    for (const hook of hooks) {
-      try {
-        await hook();
-      } catch (error) {
-        try {
-          await this.onError(error);
-        } catch {
-          // Recovery hooks are best-effort; one failed mirror write should not
-          // prevent the agent from starting or other recovered runs finalizing.
-        }
-      }
-    }
   }
 
   private _updateAgentToolTerminal<Output>(
@@ -5015,10 +5368,11 @@ export class Agent<
   }
 
   private _isTerminalOnlyAgentToolRun(runId: string): boolean {
-    const rows = this.sql<{ event_delivery: string | null }>`
-      SELECT event_delivery FROM cf_agent_tool_runs WHERE run_id = ${runId}
-    `;
-    return rows[0]?.event_delivery === "terminal";
+    // Detached runs are always delivered in full.
+    return (
+      this._agentToolTaskMeta(this.tasks.peek(runId))?.eventDelivery ===
+      "terminal"
+    );
   }
 
   private async _broadcastAgentToolStoredChunks(
@@ -5071,9 +5425,8 @@ export class Agent<
     timeoutMs?: number
   ): Promise<number> {
     const deadline = this._agentToolRecoveryDeadline(timeoutMs);
-    const chunks = await this._getAgentToolChunksForRecovery(
-      adapter,
-      row.run_id,
+    const chunks = await this._settleWithinRecoveryTimeout(
+      this._readAgentToolChunks(adapter, row.run_id),
       deadline?.()
     );
     const next = chunks
@@ -5567,33 +5920,6 @@ export class Agent<
     return cls as unknown as SubAgentClass<Agent>;
   }
 
-  private async _replayAndInterruptAgentToolRun<Output>(
-    row: AgentToolRunStorageRow,
-    message: string,
-    extra?: { reason?: AgentToolInterruptedReason; childStillRunning?: boolean }
-  ): Promise<RunAgentToolResult<Output>> {
-    let sequence = 1;
-    try {
-      sequence = await this._broadcastAgentToolStoredChunks(row, sequence);
-    } catch {
-      // Interruption is still the honest parent state if replay fails.
-    }
-    const result: RunAgentToolResult<Output> = {
-      runId: row.run_id,
-      agentType: row.agent_type,
-      status: "interrupted",
-      error: message,
-      ...(extra?.reason !== undefined ? { reason: extra.reason } : {}),
-      ...(extra?.childStillRunning !== undefined
-        ? { childStillRunning: extra.childStillRunning }
-        : {})
-    };
-    await this._finishAgentToolRun(this._agentToolRunInfoFromRow(row), result, {
-      sequence
-    });
-    return result;
-  }
-
   /**
    * Human-readable prose for an `interrupted` seal. Kept in sync with
    * {@link AgentToolInterruptedReason}; callers branch on the typed `reason`
@@ -5860,28 +6186,7 @@ export class Agent<
   }
 
   private async _replayAgentToolRuns(connection: Connection): Promise<void> {
-    const rows = this.sql<{
-      run_id: string;
-      parent_tool_call_id: string | null;
-      agent_type: string;
-      input_preview: string | null;
-      status: AgentToolRunStatus;
-      summary: string | null;
-      output_json: string | null;
-      error_message: string | null;
-      interrupted_reason: string | null;
-      child_still_running: number | null;
-      display_metadata: string | null;
-      display_order: number;
-    }>`
-      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, interrupted_reason,
-             child_still_running, display_metadata, display_order
-      FROM cf_agent_tool_runs
-      ORDER BY started_at ASC
-    `;
-
-    for (const row of rows) {
+    for (const row of this._listAgentToolRuns()) {
       const parentToolCallId = row.parent_tool_call_id ?? undefined;
       let sequence = 0;
       this._broadcastAgentToolEvent(
@@ -5933,351 +6238,6 @@ export class Agent<
         );
       }
     }
-  }
-
-  private async _reconcileAgentToolRuns(options?: {
-    deferFinishHooks?: boolean;
-    childInspectionTimeoutMs?: number;
-    totalRecoveryTimeoutMs?: number;
-    reattachTimeoutMs?: number;
-    reattachMaxWindowMs?: number;
-    runIds?: readonly string[];
-  }): Promise<DeferredAgentToolFinish[]> {
-    const reattachTimeoutMs =
-      options?.reattachTimeoutMs ??
-      this._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
-    const reattachMaxWindowMs =
-      options?.reattachMaxWindowMs ??
-      this._resolvedOptions.agentToolReattachMaxWindowMs;
-    const startedAt = Date.now();
-    const totalTimeoutMs =
-      options?.totalRecoveryTimeoutMs ??
-      DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS;
-    const deadlineAt =
-      totalTimeoutMs > 0
-        ? startedAt + totalTimeoutMs
-        : Number.POSITIVE_INFINITY;
-    const deferredFinishes: DeferredAgentToolFinish[] = [];
-    const rows = this.sql<AgentToolRunStorageRow>`
-      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, interrupted_reason,
-             child_still_running, display_metadata, display_order,
-             started_at, completed_at
-      FROM cf_agent_tool_runs
-      WHERE status IN ('starting', 'running') AND detached = 0
-      ORDER BY started_at ASC
-    `;
-    // NOTE: detached runs are deliberately excluded. The awaited reconcile seals
-    // a still-running, not-tailable run `interrupted` because a lost observer
-    // means the dispatching turn cannot continue. For a DETACHED run a lost
-    // observer is the NORMAL state — sealing it would defeat the feature — so
-    // detached runs are owned by the self-scheduling `_cfDetachedReconcileTick`
-    // backbone instead, which keeps them alive within budget and delivers on
-    // terminal. The backbone is (re-)armed on startup by
-    // `_scheduleAgentToolRunRecovery`.
-    const runIds =
-      options?.runIds !== undefined ? new Set(options.runIds) : undefined;
-    const recoveryRows = rows.filter(
-      (row) => !runIds || runIds.has(row.run_id)
-    );
-    this._emit("agent_tool:recovery:begin", {
-      runCount: recoveryRows.length,
-      totalTimeoutMs
-    });
-    const finalizeRow = async (
-      row: AgentToolRunStorageRow,
-      result: RunAgentToolResult,
-      sequence: number,
-      completedAt: number | undefined
-    ): Promise<void> => {
-      this._emit("agent_tool:recovery:row", {
-        runId: row.run_id,
-        agentType: row.agent_type,
-        status: result.status,
-        reason: result.error,
-        elapsedMs: Date.now() - startedAt
-      });
-      const deferredFinish = await this._finishAgentToolRun(
-        this._agentToolRunInfoFromRow(row),
-        result,
-        {
-          sequence,
-          completedAt,
-          deferFinishHook: options?.deferFinishHooks
-        }
-      );
-      if (deferredFinish) {
-        deferredFinishes.push(deferredFinish);
-      }
-    };
-
-    // Pass 1 — deadline-bounded inspect/classify sweep. Terminal and
-    // non-recoverable rows are finalized immediately; still-running tail-able
-    // children are queued for the parallel re-attach pass below. The shared
-    // `deadlineAt` only bounds this fast classification — re-attach (which can
-    // legitimately run for the child's lifetime) must NOT count against it, or
-    // one slow child would starve every later sibling of recovery (#1630).
-    const reattachQueue: Array<{
-      row: AgentToolRunStorageRow;
-      adapter: AgentToolChildAdapter;
-    }> = [];
-    for (const row of recoveryRows) {
-      const sequence = 1;
-      const remainingMs = deadlineAt - Date.now();
-      if (remainingMs <= 0) {
-        this._emit("agent_tool:recovery:deadline", {
-          runId: row.run_id,
-          agentType: row.agent_type,
-          elapsedMs: Date.now() - startedAt
-        });
-        await finalizeRow(
-          row,
-          {
-            runId: row.run_id,
-            agentType: row.agent_type,
-            status: "interrupted",
-            reason: "recovery-deadline",
-            error: this._interruptedMessageForReason("recovery-deadline")
-          },
-          sequence,
-          undefined
-        );
-        continue;
-      }
-      const childTimeout =
-        options?.childInspectionTimeoutMs ??
-        DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS;
-      const boundedChildTimeout =
-        childTimeout > 0 ? Math.min(childTimeout, remainingMs) : remainingMs;
-      const recovery = await this._inspectAgentToolRunForRecovery(
-        row,
-        sequence,
-        boundedChildTimeout
-      );
-      if (recovery.status !== "inspected") {
-        await finalizeRow(
-          row,
-          (() => {
-            const reason: AgentToolInterruptedReason =
-              recovery.status === "timed-out"
-                ? "inspect-timeout"
-                : "inspect-failed";
-            return {
-              runId: row.run_id,
-              agentType: row.agent_type,
-              status: "interrupted" as const,
-              reason,
-              error: this._interruptedMessageForReason(reason)
-            };
-          })(),
-          sequence,
-          undefined
-        );
-        continue;
-      }
-      const inspection = recovery.inspection;
-      const stillRunning =
-        !inspection ||
-        inspection.status === "running" ||
-        inspection.status === "starting";
-      if (
-        stillRunning &&
-        typeof recovery.adapter.tailAgentToolRun === "function"
-      ) {
-        // Defer to the parallel re-attach pass — keep the row non-terminal so
-        // re-attach can collect the child's real terminal result. No stored-chunk
-        // broadcast here: re-attach forwards only new chunks, and a reconnected
-        // client already replays stored chunks via `_replayAgentToolRuns`.
-        reattachQueue.push({ row, adapter: recovery.adapter });
-        continue;
-      }
-      let sequenceAfterReplay = sequence;
-      try {
-        sequenceAfterReplay =
-          await this._broadcastAgentToolStoredChunksFromAdapter(
-            recovery.adapter,
-            row,
-            sequence,
-            undefined,
-            undefined,
-            boundedChildTimeout
-          );
-      } catch {
-        // Terminal reconciliation should still complete if chunk replay fails.
-      }
-      if (stillRunning) {
-        await finalizeRow(
-          row,
-          {
-            runId: row.run_id,
-            agentType: row.agent_type,
-            status: "interrupted",
-            reason: "not-tailable",
-            // The child has no live-tail adapter, so it was never torn down and
-            // may still self-complete and be collected by a later inspect.
-            childStillRunning: true,
-            error: this._interruptedMessageForReason("not-tailable")
-          },
-          sequenceAfterReplay,
-          undefined
-        );
-      } else {
-        await finalizeRow(
-          row,
-          this._terminalResultFromInspection(row.agent_type, inspection),
-          sequenceAfterReplay,
-          inspection.completedAt
-        );
-      }
-    }
-
-    // Pass 2 — re-attach still-running children IN PARALLEL, each bounded by
-    // its own re-attach budget, so a slow/hung child only delays itself and can
-    // never cause a sibling run to be wrongly abandoned (#1630).
-    await Promise.all(
-      reattachQueue.map(async ({ row, adapter }) => {
-        const reattach = await this._reattachAgentToolRunToTerminal(
-          adapter,
-          row,
-          1,
-          reattachTimeoutMs,
-          reattachMaxWindowMs
-        );
-        if (reattach.result) {
-          await finalizeRow(
-            row,
-            reattach.result,
-            reattach.sequence,
-            reattach.completedAt
-          );
-          return;
-        }
-        // The parent has genuinely given up on this still-running child — tear
-        // it down so it stops consuming a fiber / keep-alive (#1630).
-        const tornDown = await this._teardownGivenUpAgentToolChild(
-          adapter,
-          row.run_id,
-          reattach.reason
-        );
-        await finalizeRow(
-          row,
-          {
-            runId: row.run_id,
-            agentType: row.agent_type,
-            status: "interrupted",
-            reason: reattach.reason,
-            childStillRunning: !tornDown,
-            error: this._interruptedMessageForReason(reattach.reason)
-          },
-          reattach.sequence,
-          reattach.completedAt
-        );
-      })
-    );
-    this._emit("agent_tool:recovery:complete", {
-      runCount: recoveryRows.length,
-      elapsedMs: Date.now() - startedAt
-    });
-    return deferredFinishes;
-  }
-
-  private async _inspectAgentToolRunForRecovery(
-    row: AgentToolRunStorageRow,
-    _sequence: number,
-    timeoutMs = DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
-  ): Promise<AgentToolRecoveryInspection> {
-    const inspect = (async (): Promise<AgentToolRecoveryInspection> => {
-      const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
-      const adapter = this._asAgentToolChildAdapter(child);
-      const inspection = await adapter.inspectAgentToolRun(row.run_id);
-      return { status: "inspected", adapter, inspection };
-    })().catch((): AgentToolRecoveryInspection => ({ status: "failed" }));
-
-    if (timeoutMs <= 0) return inspect;
-
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<AgentToolRecoveryInspection>((resolve) => {
-      timeoutId = setTimeout(() => {
-        resolve({ status: "timed-out" });
-      }, timeoutMs);
-    });
-
-    const result = await Promise.race([inspect, timeout]);
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
-    return result;
-  }
-
-  private _scheduleAgentToolRunRecovery(options?: {
-    childInspectionTimeoutMs?: number;
-    totalRecoveryTimeoutMs?: number;
-    reattachTimeoutMs?: number;
-    reattachMaxWindowMs?: number;
-    runIds?: readonly string[];
-  }): Promise<void> {
-    if (this._agentToolRunRecoveryPromise) {
-      return this._agentToolRunRecoveryPromise;
-    }
-
-    if (options?.runIds && options.runIds.length === 0) {
-      return Promise.resolve();
-    }
-
-    const recovery = (async () => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      const recoveredAgentToolFinishes = await this._reconcileAgentToolRuns({
-        deferFinishHooks: true,
-        childInspectionTimeoutMs: options?.childInspectionTimeoutMs,
-        totalRecoveryTimeoutMs: options?.totalRecoveryTimeoutMs,
-        reattachTimeoutMs: options?.reattachTimeoutMs,
-        reattachMaxWindowMs: options?.reattachMaxWindowMs,
-        runIds: options?.runIds
-      });
-      await this._runDeferredAgentToolFinishHooks(recoveredAgentToolFinishes);
-      // Re-arm the detached backbone if this DO woke with outstanding detached
-      // runs (the schedule row survives eviction, but this also recreates it if
-      // a dispatching turn crashed after inserting the run row but before
-      // arming the schedule).
-      if (this._hasOutstandingDetachedRuns()) {
-        await this._armDetachedBackbone();
-      }
-    })()
-      .catch(async (error) => {
-        this._emit("agent_tool:recovery:failed", {
-          error: error instanceof Error ? error.message : String(error)
-        });
-        try {
-          await this.onError(error);
-        } catch {
-          // Background recovery must never make a started agent unreachable.
-        }
-      })
-      .finally(() => {
-        this._agentToolRunRecoveryPromise = undefined;
-      });
-
-    this._agentToolRunRecoveryPromise = recovery;
-    this.ctx.waitUntil(recovery);
-    return recovery;
-  }
-
-  private _agentToolRunRecoveryRunIds(): string[] {
-    return this.sql<{ run_id: string }>`
-      SELECT run_id
-      FROM cf_agent_tool_runs
-      WHERE status IN ('starting', 'running')
-      ORDER BY started_at ASC
-    `.map((row) => row.run_id);
-  }
-
-  private async _getAgentToolChunksForRecovery(
-    adapter: AgentToolChildAdapter,
-    runId: string,
-    timeoutMs?: number
-  ): Promise<AgentToolStoredChunk[] | undefined> {
-    return this._settleWithinRecoveryTimeout(
-      this._readAgentToolChunks(adapter, runId),
-      timeoutMs
-    );
   }
 
   /**

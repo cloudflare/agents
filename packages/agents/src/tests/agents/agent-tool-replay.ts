@@ -54,7 +54,7 @@ type AgentToolInternals = {
   _readAgentToolRun(runId: string): unknown;
   _resultFromAgentToolRow(row: unknown): RunAgentToolResult;
   _replayAgentToolRuns(connection: Connection): Promise<void>;
-  _reconcileAgentToolRuns(): Promise<unknown>;
+  _carryForwardAgentToolRuns(): Promise<void>;
   _deliverDetachedTerminal(
     runId: string,
     kind: "finish" | "give_up",
@@ -922,6 +922,126 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   /**
+   * The settled rows a released version left in `cf_agent_tool_runs`
+   * (completed, error, interrupted) plus an open detached one, then the next
+   * start's carry-forward. Returns what a re-issue of each awaited run
+   * hands back, the connect-time replay, and the rows left in the table.
+   */
+  async carryForwardSettledReleasedRowsForTest(): Promise<{
+    reissued: Record<
+      string,
+      {
+        status: string;
+        summary?: string;
+        error?: string;
+        reason?: string;
+        childStillRunning?: boolean;
+      }
+    >;
+    replayKinds: Record<string, string[]>;
+    tableRows: Array<{ run_id: string; detached: number }>;
+    childStarts: number;
+  }> {
+    const now = Date.now();
+    const seed = (
+      runId: string,
+      status: string,
+      extra: {
+        summary?: string;
+        output?: unknown;
+        error?: string;
+        reason?: string;
+        childStillRunning?: number;
+      }
+    ) => {
+      this.sql`
+        INSERT INTO cf_agent_tool_runs (
+          run_id, parent_tool_call_id, agent_type, input_preview,
+          input_redacted, status, summary, output_json, error_message,
+          interrupted_reason, child_still_running, display_metadata,
+          display_order, started_at, completed_at, detached
+        ) VALUES (
+          ${runId}, ${`call-${runId}`}, 'TestAgentToolStubChild',
+          ${JSON.stringify(`preview ${runId}`)}, 1, ${status},
+          ${extra.summary ?? null},
+          ${extra.output === undefined ? null : JSON.stringify(extra.output)},
+          ${extra.error ?? null}, ${extra.reason ?? null},
+          ${extra.childStillRunning ?? null},
+          ${JSON.stringify({ name: runId })}, 0, ${now}, ${now}, 0
+        )
+      `;
+    };
+    seed("released-completed", "completed", {
+      summary: "done",
+      output: { answer: 42 }
+    });
+    seed("released-error", "error", { error: "child failed" });
+    seed("released-interrupted", "interrupted", {
+      error: "gave up",
+      reason: "no-progress",
+      childStillRunning: 1
+    });
+    this.seedDetachedRunForTest("released-detached");
+
+    await this._agentTool._carryForwardAgentToolRuns();
+
+    // The interrupted run's child finished meanwhile: a re-issue re-attaches.
+    const child = await this.subAgent(
+      TestAgentToolStubChild,
+      "released-interrupted"
+    );
+    await child.startAgentToolRun(
+      { chunkBodies: [], summary: "finished later" },
+      { runId: "released-interrupted" }
+    );
+    let childStarts = 0;
+    const reissued: Record<
+      string,
+      {
+        status: string;
+        summary?: string;
+        error?: string;
+        reason?: string;
+        childStillRunning?: boolean;
+      }
+    > = {};
+    for (const runId of ["released-completed", "released-error"]) {
+      const result = await this.runAgentTool(TestAgentToolStubChild, {
+        runId,
+        input: { chunkBodies: [], summary: "must not run" }
+      });
+      if (result.summary === "must not run") childStarts++;
+      reissued[runId] = {
+        status: result.status,
+        ...(result.summary !== undefined ? { summary: result.summary } : {}),
+        ...(result.error !== undefined ? { error: result.error } : {})
+      };
+    }
+    const frames = await this._captureReplayForTest();
+    const replayKinds: Record<string, string[]> = {};
+    for (const frame of frames) {
+      const runId = (frame.event as { runId: string }).runId;
+      (replayKinds[runId] ??= []).push(frame.event.kind);
+    }
+    const repaired = await this.runAgentTool(TestAgentToolStubChild, {
+      runId: "released-interrupted",
+      input: { chunkBodies: [], summary: "must not run" }
+    });
+    reissued["released-interrupted"] = {
+      status: repaired.status,
+      ...(repaired.summary !== undefined ? { summary: repaired.summary } : {})
+    };
+    return {
+      reissued,
+      replayKinds,
+      tableRows: this.sql<{ run_id: string; detached: number }>`
+        SELECT run_id, detached FROM cf_agent_tool_runs ORDER BY run_id
+      `,
+      childStarts
+    };
+  }
+
+  /**
    * A child still running when the parent restarts: a connected client has
    * already seen the stored chunks, then parent recovery re-attaches and
    * forwards the chunks the child produces afterwards.
@@ -951,10 +1071,14 @@ export class TestAgentToolReplayAgent extends Agent {
         'running', 0, ${Date.now()}, 0
       )
     `;
+    // The row is what a released version left: carry it into its task as
+    // the next start does, then run the interrupted attempt.
+    await this._agentTool._carryForwardAgentToolRuns();
     const seen = await this._captureReplayForTest();
-    const recovery = await this._captureBroadcastsForTest(() =>
-      this._agentTool._reconcileAgentToolRuns()
-    );
+    const recovery = await this._captureBroadcastsForTest(async () => {
+      await this.tasks.runDue("__cf_agent_tool");
+      await this.tasks.wait(options.runId);
+    });
     return { seen, recovery };
   }
 }
@@ -1020,6 +1144,18 @@ export class TestAgentToolStubChild extends Agent {
     options: { runId: string }
   ): Promise<AgentToolRunInspection> {
     this._ensureTables();
+    // Like Think / AIChat, a start of a run the child already has returns it.
+    const existing = this.sql<{ started_at: number; status: string }>`
+      SELECT started_at, status FROM cf_test_stub_runs
+      WHERE run_id = ${options.runId}
+    `[0];
+    if (existing) {
+      return {
+        runId: options.runId,
+        status: existing.status as AgentToolRunInspection["status"],
+        startedAt: existing.started_at
+      };
+    }
     const startedAt = Date.now();
     const chunkBodies = input?.chunkBodies ?? [];
     this._storeChunks(options.runId, chunkBodies, 0);

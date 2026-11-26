@@ -1316,7 +1316,8 @@ describe("Think agent tools", () => {
     const { events, finishes, elapsedMs, status } =
       await parent.reconcileStuckThinkChildWithTimeoutForTest(runId);
 
-    expect(elapsedMs).toBeLessThan(1000);
+    // The parent asks an unreachable child for at most 2 s.
+    expect(elapsedMs).toBeLessThan(4000);
     expect(status).toBe("interrupted");
     expect(finishes).toEqual([
       {

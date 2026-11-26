@@ -410,6 +410,23 @@ type RecoveryContextLogEntry = {
   partialText: string;
 };
 
+/** The agent-tool runs a parent keeps, oldest first. */
+function agentToolRunRows(agent: unknown): Array<{
+  run_id: string;
+  status: string;
+  error_message: string | null;
+}> {
+  return (
+    agent as {
+      _listAgentToolRuns(): Array<{
+        run_id: string;
+        status: string;
+        error_message: string | null;
+      }>;
+    }
+  )._listAgentToolRuns();
+}
+
 type AgentToolRunStatus = {
   runId: string;
   status: string;
@@ -925,17 +942,13 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
       hasFiberRows: boolean;
     } | null;
   }> {
-    const parentRunRows = this.sql<{ c: number }>`
-      SELECT COUNT(*) as c FROM cf_agent_tool_runs
-    `;
+    const parentRunRows = agentToolRunRows(this);
     // The status the PARENT collected for the child run (#1630 / N6): after a
     // real eviction the child self-heals its durable submission and the parent
     // re-attaches and collects `completed` — not `interrupted` (abandoned).
-    const parentChildRunRows = this.sql<{ status: string }>`
-      SELECT status FROM cf_agent_tool_runs
-      WHERE run_id = ${NATURAL_CHILD_TASK_RUN_ID}
-      LIMIT 1
-    `;
+    const parentChildRunRows = parentRunRows.filter(
+      (row) => row.run_id === NATURAL_CHILD_TASK_RUN_ID
+    );
     const fiberRows = this.sql<{ c: number }>`
       SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
@@ -967,7 +980,7 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
     return {
       // The agentTool() path doesn't write a parent_task_log; the parent run
       // row count is the closest analogue to "how many times the task ran".
-      parentTaskExecutions: parentRunRows[0]?.c ?? 0,
+      parentTaskExecutions: parentRunRows.length,
       parentRecoveries:
         (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
       parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
@@ -1118,14 +1131,9 @@ export class ThinkSlowChildParentE2EAgent extends Think<Env> {
       hasFiberRows: boolean;
     } | null;
   }> {
-    const parentChildRunRows = this.sql<{
-      status: string;
-      error_message: string | null;
-    }>`
-      SELECT status, error_message FROM cf_agent_tool_runs
-      WHERE run_id = ${NATURAL_CHILD_TASK_RUN_ID}
-      LIMIT 1
-    `;
+    const parentChildRunRows = agentToolRunRows(this).filter(
+      (row) => row.run_id === NATURAL_CHILD_TASK_RUN_ID
+    );
     const fiberRows = this.sql<{ c: number }>`
       SELECT (SELECT COUNT(*) FROM cf_agents_task_runs WHERE status IN ('pending', 'running') AND coalesce(wait_reason, '') != 'park') as c
     `;
@@ -1257,11 +1265,11 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
 
   @callable()
   getAgentToolRuns(): AgentToolRunStatus[] {
-    return this.sql<AgentToolRunStatus>`
-      SELECT run_id as runId, status, error_message as error
-      FROM cf_agent_tool_runs
-      ORDER BY started_at ASC
-    `;
+    return agentToolRunRows(this).map((row) => ({
+      runId: row.run_id,
+      status: row.status,
+      error: row.error_message
+    }));
   }
 
   @callable()

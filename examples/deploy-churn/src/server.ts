@@ -964,11 +964,7 @@ export class DeployChurnAgent extends Think<Env> {
     this.sql`DELETE FROM harness_config`;
     // Sub-agent harness: clear the parent's launched-run records + reset the
     // child facet so a fresh subagent run starts from zero.
-    try {
-      this.sql`DELETE FROM cf_agent_tool_runs`;
-    } catch {
-      // Table not created until the first agent-tool run.
-    }
+    await this.clearAgentToolRuns();
     try {
       const child = await this.subAgent(
         DeployChurnSubAgentChild,
@@ -1015,13 +1011,19 @@ export class DeployChurnAgent extends Think<Env> {
     let parentChildStatus: string | null = null;
     let childRunRowCount = 0;
     try {
-      const rows = this.sql<{ status: string }>`
-        SELECT status FROM cf_agent_tool_runs WHERE run_id = ${SUB_AGENT_CHILD_RUN_ID} LIMIT 1
-      `;
-      parentChildStatus = rows[0]?.status ?? null;
-      childRunRowCount =
-        this.sql<{ c: number }>`SELECT COUNT(*) AS c FROM cf_agent_tool_runs`[0]
-          ?.c ?? 0;
+      // The parent's run is a Task run keyed by the run id.
+      const run = this.tasks.peek(SUB_AGENT_CHILD_RUN_ID);
+      const result = run?.result as { status?: string } | undefined;
+      parentChildStatus = run
+        ? (result?.status ??
+          (run.status === "pending" ? "running" : run.status))
+        : null;
+      childRunRowCount = this.hasAgentToolRun(
+        "DeployChurnSubAgentChild",
+        SUB_AGENT_CHILD_RUN_ID
+      )
+        ? 1
+        : 0;
     } catch {
       // Parent agent-tool table not created until the first run.
     }

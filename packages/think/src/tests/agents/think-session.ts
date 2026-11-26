@@ -5721,10 +5721,10 @@ export class ThinkNestedMiddleAgent extends ThinkTestAgent {
 
   /** This facet's OWN parent registry rows (the grandchild runs it dispatched). */
   getAgentToolRunStatusesForTest(): Array<{ runId: string; status: string }> {
-    const rows = this.sql<{ run_id: string; status: string }>`
-      SELECT run_id, status FROM cf_agent_tool_runs ORDER BY started_at ASC
-    `;
-    return rows.map((r) => ({ runId: r.run_id, status: r.status }));
+    return listAgentToolRunsForTest(this).map((r) => ({
+      runId: r.run_id,
+      status: r.status
+    }));
   }
 
   /** Set THIS middle node's own concurrency cap (independent of its parent). */
@@ -5873,10 +5873,9 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   override onStart(): void {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_agent_tool_runs ORDER BY started_at ASC
-    `;
-    this.startupObservedStatuses.push(rows.map((row) => row.status));
+    this.startupObservedStatuses.push(
+      listAgentToolRunsForTest(this).map((row) => row.status)
+    );
     if (this.insertRunDuringOnStartId) {
       this.insertRecoverableParentRunForTest(
         this.insertRunDuringOnStartId,
@@ -6209,16 +6208,13 @@ export class ThinkAgentToolParent extends Agent {
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    const row = this.sql<{ status: string }>`
-      SELECT status FROM cf_agent_tool_runs WHERE run_id = ${runId}
-    `[0];
     return {
       result: {
         status: result.status,
         error: result.error,
         summary: result.summary
       },
-      parentRow: row?.status ?? null,
+      parentRow: this.getParentAgentToolStatusForTest(runId),
       child: inspection
         ? { status: inspection.status, error: inspection.error }
         : null
@@ -6271,6 +6267,10 @@ export class ThinkAgentToolParent extends Agent {
         ${started.startedAt}, ${Date.now()}
       )
     `;
+
+    // The row is what a released version left: the next start carries it
+    // into its task.
+    await carryForwardAgentToolRunsForTest(this);
 
     this.events = [];
     this.finishes = [];
@@ -6328,36 +6328,43 @@ export class ThinkAgentToolParent extends Agent {
     throw new Error("Timed out waiting for Think child completion");
   }
 
+  /**
+   * What a restart does with the parent rows a released version left: carry
+   * them into their tasks, then run the interrupted attempts (here at once,
+   * instead of from their wake) and wait for each to settle. `options`
+   * stand in for the agent's re-attach budgets meanwhile.
+   */
   private async reconcileAgentToolRunsForTest(options?: {
-    deferFinishHooks?: boolean;
-    childInspectionTimeoutMs?: number;
     reattachTimeoutMs?: number;
     reattachMaxWindowMs?: number;
-    totalRecoveryTimeoutMs?: number;
-  }): Promise<Array<() => Promise<void>>> {
-    return (
-      this as unknown as {
-        _reconcileAgentToolRuns(options?: {
-          deferFinishHooks?: boolean;
-          childInspectionTimeoutMs?: number;
-          reattachTimeoutMs?: number;
-          reattachMaxWindowMs?: number;
-          totalRecoveryTimeoutMs?: number;
-        }): Promise<Array<() => Promise<void>>>;
-      }
-    )._reconcileAgentToolRuns(options);
-  }
-
-  private async scheduleAgentToolRunRecoveryForTest(options?: {
-    childInspectionTimeoutMs?: number;
   }): Promise<void> {
-    await (
+    const resolved = (
       this as unknown as {
-        _scheduleAgentToolRunRecovery(options?: {
-          childInspectionTimeoutMs?: number;
-        }): Promise<void>;
+        _resolvedOptions: {
+          agentToolReattachNoProgressTimeoutMs: number;
+          agentToolReattachMaxWindowMs: number;
+        };
       }
-    )._scheduleAgentToolRunRecovery(options);
+    )._resolvedOptions;
+    const before = { ...resolved };
+    if (options?.reattachTimeoutMs !== undefined) {
+      resolved.agentToolReattachNoProgressTimeoutMs = options.reattachTimeoutMs;
+    }
+    if (options?.reattachMaxWindowMs !== undefined) {
+      resolved.agentToolReattachMaxWindowMs = options.reattachMaxWindowMs;
+    }
+    try {
+      await carryForwardAgentToolRunsForTest(this);
+      await this.tasks.runDue("__cf_agent_tool");
+      for (const record of this.tasks.peekList({
+        definition: "__cf_agent_tool",
+        status: ["pending", "running"]
+      })) {
+        await this.tasks.wait(record.runId);
+      }
+    } finally {
+      Object.assign(resolved, before);
+    }
   }
 
   async reconcileCompletedThinkChildForTest(
@@ -6594,10 +6601,7 @@ export class ThinkAgentToolParent extends Agent {
       // The re-attach budget is far above the fast child's 200 ms, so a
       // loaded machine cannot run it out, and far below the stuck child's
       // 60 s, which serially would still take all of it.
-      await this.reconcileAgentToolRunsForTest({
-        totalRecoveryTimeoutMs: 2000,
-        reattachTimeoutMs: 4000
-      });
+      await this.reconcileAgentToolRunsForTest({ reattachTimeoutMs: 4000 });
     } finally {
       await stuckChild.cancelAgentToolRun(stuckRunId, "test cleanup");
     }
@@ -6625,7 +6629,7 @@ export class ThinkAgentToolParent extends Agent {
     this.events = [];
     this.finishes = [];
     const startedAt = Date.now();
-    await this.reconcileAgentToolRunsForTest({ childInspectionTimeoutMs: 10 });
+    await this.reconcileAgentToolRunsForTest();
     return {
       events: this.events,
       finishes: this.finishes,
@@ -6832,9 +6836,7 @@ export class ThinkAgentToolParent extends Agent {
 
     this.events = [];
     this.finishes = [];
-    await this.scheduleAgentToolRunRecoveryForTest({
-      childInspectionTimeoutMs: 10
-    });
+    await this.reconcileAgentToolRunsForTest();
     return {
       events: this.events,
       finishes: this.finishes,
@@ -6858,12 +6860,8 @@ export class ThinkAgentToolParent extends Agent {
 
     this.events = [];
     this.finishes = [];
-    const first = this.scheduleAgentToolRunRecoveryForTest({
-      childInspectionTimeoutMs: 10
-    });
-    const second = this.scheduleAgentToolRunRecoveryForTest({
-      childInspectionTimeoutMs: 10
-    });
+    const first = this.reconcileAgentToolRunsForTest();
+    const second = this.reconcileAgentToolRunsForTest();
     await Promise.all([first, second]);
     return {
       events: this.events,
@@ -6955,11 +6953,32 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   getParentAgentToolStatusForTest(runId: string): string | null {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_agent_tool_runs WHERE run_id = ${runId} LIMIT 1
-    `;
-    return rows[0]?.status ?? null;
+    return (
+      (
+        this as unknown as {
+          _readAgentToolRun(runId: string): { status: string } | null;
+        }
+      )._readAgentToolRun(runId)?.status ?? null
+    );
   }
+}
+
+/** Every agent-tool run a parent keeps, oldest first, as rows. */
+function listAgentToolRunsForTest(
+  agent: unknown
+): Array<{ run_id: string; status: string }> {
+  return (
+    agent as {
+      _listAgentToolRuns(): Array<{ run_id: string; status: string }>;
+    }
+  )._listAgentToolRuns();
+}
+
+/** Carry the parent rows a released version left into their tasks. */
+async function carryForwardAgentToolRunsForTest(agent: unknown): Promise<void> {
+  await (
+    agent as { _carryForwardAgentToolRuns(): Promise<void> }
+  )._carryForwardAgentToolRuns();
 }
 
 type ThinkPropsTestProps = {

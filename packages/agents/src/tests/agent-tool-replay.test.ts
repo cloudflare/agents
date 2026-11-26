@@ -102,6 +102,44 @@ describe("agent-tool live/replay sequencing", () => {
   });
 });
 
+describe("agent-tool runs from a released version", () => {
+  it("carries settled awaited rows into task runs, and leaves detached rows", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `carry-forward-${crypto.randomUUID()}`
+    );
+    const { reissued, replayKinds, tableRows, childStarts } =
+      await agent.carryForwardSettledReleasedRowsForTest();
+
+    // A re-issue of a hard terminal returns the stored result; the child is
+    // not run again.
+    expect(childStarts).toBe(0);
+    expect(reissued["released-completed"]).toEqual({
+      status: "completed",
+      summary: "done"
+    });
+    expect(reissued["released-error"]).toEqual({
+      status: "error",
+      error: "child failed"
+    });
+    // `interrupted` stays soft: a re-issue re-attaches and collects the
+    // child's real result.
+    expect(reissued["released-interrupted"]).toEqual({
+      status: "completed",
+      summary: "finished later"
+    });
+    // Replay still shows every carried run with its terminal.
+    expect(replayKinds["released-completed"]).toEqual(["started", "finished"]);
+    expect(replayKinds["released-error"]).toEqual(["started", "error"]);
+    expect(replayKinds["released-interrupted"]).toEqual([
+      "started",
+      "interrupted"
+    ]);
+    // Only the detached row is left in the old table.
+    expect(tableRows).toEqual([{ run_id: "released-detached", detached: 1 }]);
+  });
+});
+
 describe("agent-tool connect-time replay", () => {
   it("reads milestones without asking the child to reconcile its run", async () => {
     const agent = await getAgentByName(
