@@ -9491,6 +9491,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       ...chatRecoveryStorageAdapter(this.ctx.storage),
       turns: {
         label: "[Think]",
+        startAttemptRun: (attempt, reason, dedupeKey) =>
+          this._turns.startAttemptRun(attempt, reason, dedupeKey),
         beginRecoveryAttempt: (rootRequestId) =>
           this._turns.beginRecoveryAttempt(rootRequestId),
         waitUntilStable: (timeout) => this.waitUntilStable({ timeout }),
@@ -9566,12 +9568,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._settleMessengerRecovery(event.incidentId, "interrupted");
         }
       },
-      scheduleRecovery: (callback, data, reason, delaySeconds, dedupeKey) =>
-        this._turns.startAttemptRun(
-          { callback, data, delaySeconds },
-          reason,
-          dedupeKey
-        ),
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
