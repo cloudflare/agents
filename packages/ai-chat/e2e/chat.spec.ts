@@ -1617,12 +1617,16 @@ test.describe("Large tool output e2e", () => {
     expect(hugeMsg).toBeTruthy();
 
     // Sessions splits a message over the row budget across continuation
-    // rows: the output comes back whole, not truncated.
+    // rows: the output comes back whole, not truncated. Compare without
+    // printing it: a failure message holding megabytes of output is what used
+    // to stall this nightly job until GitHub cancelled it, with no log kept.
     const toolPart = hugeMsg.parts.find(
       (p: { toolCallId?: string }) => p.toolCallId === "call_3mb"
     );
     expect(toolPart).toBeTruthy();
-    expect(toolPart.output).toBe(hugeOutput);
+    const output = toolPart.output as string;
+    expect(output.length).toBe(hugeOutput.length);
+    expect(output === hugeOutput, "the stored output differs").toBe(true);
 
     // The text part should be preserved (it was small)
     const textPart = hugeMsg.parts.find(
