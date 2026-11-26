@@ -509,6 +509,62 @@ describe("pi-ai: onResponse sees every response, failures included", () => {
     });
   }
 
+  const failures = [
+    [
+      "the gateway's own failure",
+      () => jsonResponse(billingError(), { status: 402 })
+    ],
+    [
+      "a vendor's error response",
+      () =>
+        jsonResponse(
+          { error: { message: "slow down", type: "rate_limit_error" } },
+          { status: 429 }
+        )
+    ]
+  ] as const;
+  for (const [wire, model] of wires) {
+    for (const [failure, answer] of failures) {
+      it(`aborts when onResponse throws an AbortError on ${failure} on the ${wire} wire`, async () => {
+        const binding = fakeBinding(answer);
+        const ai = createAI({ binding: asAi(binding) });
+        const { message } = await collectEvents(
+          ai.stream(ai(model), userContext("hi"), {
+            maxRetries: 0,
+            onResponse: () => {
+              throw new DOMException("Stop", "AbortError");
+            }
+          })
+        );
+        expect(message.stopReason).toBe("aborted");
+      });
+    }
+  }
+
+  it("tries no fallback leg once onResponse throws an AbortError", async () => {
+    const binding = fakeBinding(() =>
+      jsonResponse(
+        { error: { message: "slow down", type: "rate_limit_error" } },
+        { status: 429 }
+      )
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const model = ai(anthropicModel("claude-sonnet-4-5"), {
+      fallback: ["@cf/deepseek-ai/deepseek-v4.1-flash-1017"]
+    });
+    const { message } = await collectEvents(
+      ai.stream(model, userContext("hi"), {
+        maxRetries: 0,
+        onResponse: () => {
+          throw new DOMException("Stop", "AbortError");
+        }
+      })
+    );
+    expect(message.stopReason).toBe("aborted");
+    expect(binding.native.map((call) => call.provider)).toEqual(["anthropic"]);
+    expect(binding.calls).toHaveLength(0);
+  });
+
   it("reports a /run failure for a catalog model", async () => {
     const seen = await reported("anthropic/claude-opus-4.8", () =>
       jsonResponse(billingError(), { status: 402 })

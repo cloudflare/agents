@@ -331,7 +331,9 @@ const cloudflare = message.diagnostics?.find(
 A failed dispatch ends the stream with an `error` event whose message carries a
 `cloudflare-error` diagnostic (`status`, `code`, `logId`). `onResponse` fires with the raw status
 and headers of every response, as it does in pi-ai: a vendor's error response and the gateway's own
-failure included, so a caller can read headers such as `retry-after` off a failed request.
+failure included, so a caller can read headers such as `retry-after` off a failed request. It
+reports each request the provider sends, once: the reconnects of a [resumed stream](#stream-resume)
+continue that request and are not reported again.
 
 ## Stream resume
 
