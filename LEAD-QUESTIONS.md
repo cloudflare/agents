@@ -1,0 +1,1 @@
+- (dur-sched, 26 Nov) Who rebuilds the four durable-chat-recovery backoff tests that block ai-chat's retry: 0 (#3280)? turn-task is PARKED. Details in report-dur-sched.md under Needs from the lead.
