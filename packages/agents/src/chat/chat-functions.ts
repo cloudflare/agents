@@ -22,6 +22,10 @@ import { frameText } from "./chat-frames";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { parseChatRequest } from "./protocol-dispatch";
+import {
+  CHAT_REQUEST_CONTEXT_KEY as REQUEST_CONTEXT_KEY,
+  storableRequestContext
+} from "./chat-turns";
 import { parseProtocolMessage } from "./parse-protocol";
 import {
   applyToolUpdate,
@@ -50,7 +54,40 @@ export async function submitTurn(
   for (const message of input.messages ?? []) {
     await session.upsertMessage(message as never);
   }
-  const { messages: _messages, ...run } = input;
+  const { messages: _messages, ...given } = input;
+  // A client's request sets the tools and body later turns that no client
+  // sent (a server turn, a tool answer's continuation) run with.
+  let run: ChatTurnInput = given;
+  if (
+    given.trigger === "submit-message" ||
+    given.trigger === "regenerate-message"
+  ) {
+    await session.internal_setConfig(
+      REQUEST_CONTEXT_KEY,
+      // One past the row budget is not kept (a later server turn runs
+      // without it), as the hosts do today.
+      storableRequestContext(
+        given.clientTools?.length ||
+          (given.body && Object.keys(given.body).length)
+          ? JSON.stringify({
+              ...(given.clientTools?.length && {
+                clientTools: given.clientTools
+              }),
+              ...(given.body && { body: given.body })
+            })
+          : null
+      )
+    );
+  } else if (given.clientTools === undefined && given.body === undefined) {
+    const stored = await session.internal_config(REQUEST_CONTEXT_KEY);
+    if (stored) {
+      const context = JSON.parse(stored) as Pick<
+        ChatTurnInput,
+        "clientTools" | "body"
+      >;
+      run = { ...given, ...context };
+    }
+  }
   const receipt = await deps.tasks.run(lane.definition, run as never, {
     lane: lane.lane,
     retain: false,

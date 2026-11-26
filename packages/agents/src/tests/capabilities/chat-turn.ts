@@ -49,6 +49,14 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
     }
   };
   #waiters: Array<(result: ChatTurnResult) => void> = [];
+  /** The result of turn `requestId`, now or when it is reported. */
+  async resultFor(requestId: string): Promise<ChatTurnResult> {
+    for (;;) {
+      const found = this.results.find((r) => r.requestId === requestId);
+      if (found) return found;
+      await this.nextResult();
+    }
+  }
   /** The next turn result reported to `onResponse`. */
   nextResult(): Promise<ChatTurnResult> {
     return new Promise((resolve) => this.#waiters.push(resolve));
