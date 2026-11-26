@@ -1,8 +1,12 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import {
+  connectChatWS,
+  isUseChatResponseMessage,
+  socketBarrier
+} from "./test-utils";
 import { getAgentByName } from "agents";
 
 /**
@@ -135,11 +139,21 @@ describe("Cancel request", () => {
         }
       });
 
+      const seen: unknown[] = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        seen.push(JSON.parse(e.data as string));
+      });
+      const agent = await getAgentByName(env.SlowStreamAgent, room);
+
       sendChatRequest(ws, requestId, [userMessage], body);
-      await new Promise((r) => setTimeout(r, 300));
+      // The request's turn has started before the stop is sent.
+      await vi.waitFor(async () => {
+        expect(await agent.getStartedRequestIds()).toContain(requestId);
+      });
       sendCancel(ws, requestId);
-      // Long enough for anything sent after the stop's own work to arrive.
-      await new Promise((r) => setTimeout(r, 1000));
+      await vi.waitFor(() => expect(terminals.length).toBeGreaterThan(0));
+      // Anything the stop's own work sends after it is in by the barrier.
+      await socketBarrier(ws, seen);
 
       expect(terminals).toHaveLength(1);
       expect(terminals[0]).toMatchObject({ outcome: "aborted" });
