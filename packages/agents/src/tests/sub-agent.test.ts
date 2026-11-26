@@ -669,8 +669,10 @@ describe("SubAgent", () => {
       "2",
       110_000
     );
+    // Due now, so the alarm runs on its own. No runDurableObjectAlarm here:
+    // a second drive alongside it can adopt the first item while the first
+    // drive is failing it.
     await agent.makeRootQueueDueForTest();
-    await runDurableObjectAlarm(agent);
 
     // The second item waits behind the first, not ahead of it.
     await vi.waitFor(async () => {
