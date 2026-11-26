@@ -1,0 +1,37 @@
+// The fault suite: every scenario against both agents on one deployment,
+// each checked by the invariants. A scenario's full outcome is written to
+// `results/` for whoever reads a failure.
+
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { beforeAll, describe, expect, inject, it } from "vitest";
+import { violations } from "./invariants";
+import type { Cls } from "./lib";
+import { CHAT_ONLY, SCENARIOS, THINK_ONLY } from "./scenarios";
+
+const RESULTS = path.join(import.meta.dirname, "results");
+
+beforeAll(() => {
+  process.env.FAULTS_URL = inject("faultsUrl");
+  mkdirSync(RESULTS, { recursive: true });
+});
+
+const only = process.env.FAULTS_ONLY?.split(",");
+
+for (const cls of ["chat", "think"] as Cls[]) {
+  describe.concurrent(cls, () => {
+    for (const [name, run] of Object.entries(SCENARIOS)) {
+      if (only && !only.includes(name)) continue;
+      if (cls === "chat" && THINK_ONLY.has(name)) continue;
+      if (cls === "think" && CHAT_ONLY.has(name)) continue;
+      it(name, async () => {
+        const result = await run(cls);
+        writeFileSync(
+          path.join(RESULTS, `${cls}-${name}.json`),
+          JSON.stringify(result, null, 1)
+        );
+        expect(violations(result)).toEqual([]);
+      });
+    }
+  });
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@cloudflare/agents-nightly",
+  "description": "Long end-to-end suites the nightly workflow runs against real deployments",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "faults": "vitest run -c faults/vitest.config.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.0",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/think": "*",
+    "agents": "*",
+    "ai": "^7.0.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261014.1",
+    "vitest": "4.1.11",
+    "wrangler": "^4.145.0"
+  }
+}

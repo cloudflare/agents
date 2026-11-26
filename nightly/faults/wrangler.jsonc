@@ -1,0 +1,20 @@
+{
+  // The fault suite's Worker. The suite deploys it under a unique name
+  // (`nightly-faults-<id>`) and deletes it when it ends.
+  "name": "nightly-faults",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": {
+    // A deploy resets a busy object at once instead of after up to 300 s.
+    "code_update_strategy": { "mode": "immediate" },
+    "bindings": [
+      { "class_name": "ProbeChat", "name": "ProbeChat" },
+      { "class_name": "ProbeThink", "name": "ProbeThink" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ProbeChat", "ProbeThink"] }
+  ]
+}
