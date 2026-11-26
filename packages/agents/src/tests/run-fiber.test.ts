@@ -1,6 +1,6 @@
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "..";
 import { subscribe, type ObservabilityEvent } from "../observability";
 import type { FiberInspection, FiberRecoveryContext } from "..";
@@ -186,19 +186,23 @@ describe("runFiber", () => {
     it("should route this.stash() to the correct fiber via ALS with concurrent fibers", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,
-        "stash-concurrent-this"
+        `stash-concurrent-this-${crypto.randomUUID()}`
       );
 
       await agent.runConcurrentWithThisStash();
 
-      await new Promise((r) => setTimeout(r, 300));
-
-      const log = (await agent.getExecutionLog()) as unknown as string[];
-      expect(log).toContain("this-a-done");
-      expect(log).toContain("this-b-done");
-
-      const count = (await agent.getRunningFiberCount()) as unknown as number;
-      expect(count).toBe(0);
+      // Both fibers finish on their own; wait for that, not a time.
+      await vi.waitFor(
+        async () => {
+          const log = (await agent.getExecutionLog()) as unknown as string[];
+          expect(log).toContain("this-a-done");
+          expect(log).toContain("this-b-done");
+          const count =
+            (await agent.getRunningFiberCount()) as unknown as number;
+          expect(count).toBe(0);
+        },
+        { timeout: 5000, interval: 10 }
+      );
     });
 
     it("should apply internal stash wrappers to initial and user checkpoints", async () => {
@@ -872,7 +876,15 @@ describe("runFiber", () => {
       });
 
       await agent.releaseIgnoredCancelManagedFiber();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Once the released body has finished, a late completion would have
+      // been written.
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await agent.getExecutionLog()) as unknown as string[]
+          ).toContain("managed-wait-ignore-cancel-done:ignore"),
+        { timeout: 5000, interval: 10 }
+      );
       await expect(
         agent.inspectManagedFiber(active.fiberId)
       ).resolves.toMatchObject({
