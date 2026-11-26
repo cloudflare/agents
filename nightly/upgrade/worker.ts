@@ -76,7 +76,7 @@ function lastUserText(prompt: Prompt): string {
 }
 
 /** A model that streams `w1 … wN`, or asks to delete a file when told "[approve]". */
-function fakeModel(sql: Sql): LanguageModel {
+function fakeModel(sql: Sql, build: string): LanguageModel {
   const usage = {
     inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
     outputTokens: { total: 1, text: 1, reasoning: 0 }
@@ -92,6 +92,9 @@ function fakeModel(sql: Sql): LanguageModel {
     async doStream(options: { prompt: Prompt; abortSignal?: AbortSignal }) {
       const pace = getPace(sql);
       const prompt = options.prompt;
+      // Which build made each model call: work in flight at the deploy must
+      // reach the new build.
+      countRun(sql, "call", build);
       const callTool =
         prompt.at(-1)?.role === "user" &&
         lastUserText(prompt).includes("[approve]");
@@ -160,7 +163,7 @@ export class ProbeChat extends AIChatAgent<Env> {
   }
   async onChatMessage() {
     return streamText({
-      model: fakeModel(this.s),
+      model: fakeModel(this.s, this.env.BUILD),
       messages: await convertToModelMessages(this.messages),
       tools: tools(this.s),
       stopWhen: isStepCount(4)
@@ -179,7 +182,7 @@ export class ProbeThink extends Think<Env> {
     return this.sql.bind(this) as Sql;
   }
   override getModel() {
-    return fakeModel(this.s);
+    return fakeModel(this.s, this.env.BUILD);
   }
   override getSystemPrompt() {
     return "fake";
@@ -231,7 +234,7 @@ export class ProbeAgent extends Agent<Env> {
     await this.schedule(seconds, "tick");
   }
   async tick() {
-    countRun(this.s, "tick", "1");
+    countRun(this.s, "tick", this.env.BUILD);
   }
   async probeState() {
     return { runs: runs(this.s) };

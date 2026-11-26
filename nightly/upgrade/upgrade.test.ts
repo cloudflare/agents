@@ -225,7 +225,13 @@ describe("an upgrade from the latest release, mid-turn", () => {
       const p = await quiet(cls, "stream");
       expect(roles(p)).toBe("ua");
       expect(starts(p)).toBe(2);
-      expect(text(p.messages[1])).toContain("w120 ");
+      // The recovered part is the whole reply, every chunk in order, made by
+      // the new build.
+      const reply = text(p.messages[1]);
+      expect(reply.slice(reply.lastIndexOf("w1 ")).trim()).toBe(
+        Array.from({ length: 120 }, (_, i) => `w${i + 1}`).join(" ")
+      );
+      expect(runsOf(p, "call").map((r) => r.id)).toContain("main");
     });
 
     it(`${cls}: an approval asked for before the upgrade runs its tool once`, async () => {
@@ -279,6 +285,8 @@ describe("an upgrade from the latest release, mid-turn", () => {
       "submission 2",
       "submission 3"
     ]);
+    // Some of the queue ran on the new build: it crossed the deploy.
+    expect(runsOf(p, "call").map((r) => r.id)).toContain("main");
   });
 
   it("agent: the running fiber is recovered once, from its last checkpoint", async () => {
@@ -289,9 +297,15 @@ describe("an upgrade from the latest release, mid-turn", () => {
       "fiber recovery"
     );
     const settled = await quiet("agent", "fiber");
-    expect(runsOf(settled, "recovered")).toHaveLength(1);
-    expect(runsOf(settled, "recovered")[0].n).toBe(1);
-    expect(runsOf(p, "step").every((r) => r.n === 1)).toBe(true);
+    const recovered = runsOf(settled, "recovered");
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].n).toBe(1);
+    // The checkpoint it was handed is the last step that ran.
+    const steps = runsOf(settled, "step");
+    expect(steps.length).toBeGreaterThan(0);
+    expect(steps.every((r) => r.n === 1)).toBe(true);
+    expect(JSON.parse(recovered[0].id)).toEqual({ step: steps.length });
+    expect(runsOf(p, "recovered")).toHaveLength(1);
   });
 
   it("agent: a schedule set by the release fires once", async () => {
@@ -302,8 +316,9 @@ describe("an upgrade from the latest release, mid-turn", () => {
       "the tick",
       300_000
     );
+    // It fired once, on the new build.
     expect(runsOf(await quiet("agent", "schedule"), "tick")).toEqual([
-      { kind: "tick", id: "1", n: 1 }
+      { kind: "tick", id: "main", n: 1 }
     ]);
   });
 });
