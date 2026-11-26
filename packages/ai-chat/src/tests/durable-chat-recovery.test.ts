@@ -267,6 +267,7 @@ interface ChatRecoveryTestStub {
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
   getScheduledRecoveryDelayForTest(): Promise<number | null>;
   endRecoveryBackoffsForTest(): Promise<number>;
+  backingOffChatTurnRunsForTest(): Promise<number>;
   getFailingReaderCallsForTest(): Promise<number>;
   setStashData(data: unknown): Promise<void>;
   trackRecoveryTaskKeysForTest(): Promise<void>;
@@ -291,6 +292,21 @@ async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
  * `endRecoveryBackoffsForTest()` when the recovery is to run.
  */
 const HELD_BACKOFF = { responseHeaders: { "retry-after": "60" } };
+
+/**
+ * Wait until the cut-off turn's run is waiting out its recovery's backoff:
+ * the turn's result comes back before its run gets there.
+ */
+async function recoveryBacksOff(agentStub: {
+  backingOffChatTurnRunsForTest(): Promise<number>;
+}): Promise<void> {
+  await vi.waitFor(
+    async () => {
+      expect(await agentStub.backingOffChatTurnRunsForTest()).toBe(1);
+    },
+    { timeout: 10_000, interval: 20 }
+  );
+}
 
 describe("onChatRecovery", () => {
   function makeChunks(
@@ -3071,39 +3087,45 @@ describe("onChatRecovery", () => {
       `/agents/chat-recovery-test-agent/${room}`
     );
     const received: Array<Record<string, unknown>> = [];
-    // The handshake's answer: the terminal frame, or "nothing to resume".
-    const answered = new Promise<void>((resolve) => {
-      ws.addEventListener("message", (e) => {
-        let frame: Record<string, unknown>;
-        try {
-          frame = JSON.parse(e.data as string) as Record<string, unknown>;
-        } catch {
-          return;
-        }
-        received.push(frame);
-        if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
-          ws.send(
-            JSON.stringify({
-              type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-              id: frame.id
-            })
-          );
-        }
-        if (
-          frame.type === MessageType.CF_AGENT_STREAM_RESUME_NONE ||
-          (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-            frame.done === true)
-        ) {
-          resolve();
-        }
-      });
+    ws.addEventListener("message", (e) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(e.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
     });
 
     ws.send(
       JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
     );
 
-    await answered;
+    // The handshake's answer: the terminal frame, or "nothing to resume".
+    // If neither comes, the expectation below says which frames did.
+    await vi
+      .waitFor(
+        () => {
+          expect(
+            received.some(
+              (frame) =>
+                frame.type === MessageType.CF_AGENT_STREAM_RESUME_NONE ||
+                (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+                  frame.done === true)
+            )
+          ).toBe(true);
+        },
+        { timeout: 10_000, interval: 20 }
+      )
+      .catch(() => {});
     ws.close(1000);
 
     // EXPECTATION (#1645): the reconnecting client learns the turn failed —
@@ -3121,7 +3143,7 @@ describe("onChatRecovery", () => {
       )}`
     ).toBeTruthy();
     expect(terminal?.body).toBe(TERMINAL);
-  });
+  }, 30_000);
 
   // #1645 (clear-on-success): the durable terminal record must be superseded
   // when a LATER turn succeeds — including a turn driven purely server-side via
@@ -3982,6 +4004,7 @@ describe("platform-transient reader errors (#1964)", () => {
         HELD_BACKOFF
       )
     ).toBe("aborted");
+    await recoveryBacksOff(agentStub);
     const [incident] =
       (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
         requestId: string;
@@ -4038,7 +4061,7 @@ describe("platform-transient reader errors (#1964)", () => {
     await agentStub.waitForIdleForTest();
     expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-  }, 10_000);
+  }, 30_000);
 
   it("answers a question sent while a stalled reply's recovery backs off from a transient throw after the recovered reply", async () => {
     const room = `stall-throw-question-${crypto.randomUUID()}`;
@@ -4233,7 +4256,9 @@ describe("platform-transient reader errors (#1964)", () => {
         HELD_BACKOFF
       )
     ).toBe("aborted");
-    // The turn's own run keeps the attempt and sleeps out its backoff.
+    // The turn's own run keeps the attempt and sleeps out its backoff. The
+    // stop ends a run that is sleeping, so it is sent once the run is.
+    await recoveryBacksOff(agentStub);
     expect(await agentStub.openChatTurnRunsForTest()).toBe(1);
     const [incident] =
       (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
@@ -4273,13 +4298,16 @@ describe("platform-transient reader errors (#1964)", () => {
     // Nothing holds the lane for the stopped recovery: a question sent now
     // does not wait for its backoff. The stop ends the run beside sending
     // the terminal frame, so wait for the run to go.
-    await vi.waitFor(async () => {
-      expect(await agentStub.openChatTurnRunsForTest()).toBe(0);
-    });
+    await vi.waitFor(
+      async () => {
+        expect(await agentStub.openChatTurnRunsForTest()).toBe(0);
+      },
+      { timeout: 10_000, interval: 20 }
+    );
     expect(
       (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
     ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
-  }, 10_000);
+  }, 30_000);
 
   // Replays of paths the chat recovery model (verify-chat) found.
   it("stops a recovery the user cancels while it waits on the model", async () => {
@@ -4465,6 +4493,7 @@ describe("platform-transient reader errors (#1964)", () => {
           HELD_BACKOFF
         )
       ).toBe("aborted");
+      await recoveryBacksOff(agentStub);
       const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
 
       // A tab sends a second question during the backoff. It waits in the
@@ -4508,9 +4537,12 @@ describe("platform-transient reader errors (#1964)", () => {
       );
       // The question is queued behind the turn whose recovery still backs
       // off: its lane run is open beside that turn's, and nothing ran.
-      await vi.waitFor(async () => {
-        expect(await agentStub.openChatTurnRunsForTest()).toBe(2);
-      });
+      await vi.waitFor(
+        async () => {
+          expect(await agentStub.openChatTurnRunsForTest()).toBe(2);
+        },
+        { timeout: 10_000, interval: 20 }
+      );
       expect(answered).toBe(false);
       expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
 
@@ -4539,7 +4571,7 @@ describe("platform-transient reader errors (#1964)", () => {
       ).toContain("Continued response.");
       expect(after.at(-1)?.role).toBe("assistant");
     },
-    15_000
+    30_000
   );
 
   it("delivers a terminal error when routing into recovery throws", async () => {

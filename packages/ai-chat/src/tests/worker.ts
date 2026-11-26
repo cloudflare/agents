@@ -4508,6 +4508,17 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
+  /** How many chat-turn runs are waiting out a recovery's backoff. */
+  backingOffChatTurnRunsForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_chat_turn'
+          AND status = 'pending' AND wait_reason = 'sleep'
+      `[0]?.count ?? 0
+    );
+  }
+
   /**
    * End the backoff of every chat-turn run that is waiting one out, and run
    * it, as its wake would once the time had passed. A test holds a
