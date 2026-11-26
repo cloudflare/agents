@@ -1695,8 +1695,9 @@ describe("think messengers core", () => {
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         const stub = await agent();
-        posted = await stub.getAdapterCalls();
+        // Settled first: posts read after it are all there will be.
         open = await stub.openReplyRunsForTest();
+        posted = await stub.getAdapterCalls();
         if (open === 0 && posted.length > 0) break;
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
