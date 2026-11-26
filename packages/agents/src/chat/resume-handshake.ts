@@ -106,7 +106,7 @@ export interface ResumeHandshakeHost {
 /**
  * Drives the server side of the stream-resume protocol over a
  * {@link ResumeHandshakeHost}. Construct once per agent (the host wires its
- * `ReplyStreams` / `ContinuationState` / pending set in) and call the three
+ * `ReplyStreams` / `ContinuationSlots` / pending set in) and call the three
  * public methods from the host's existing onConnect / onMessage wiring, so
  * handler registration timing stays host-owned.
  */
