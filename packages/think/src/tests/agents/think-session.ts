@@ -6856,12 +6856,10 @@ export class ThinkAgentToolParent extends Agent {
     this.events = [];
     this.finishes = [];
     try {
-      // Tiny inspect deadline + a re-attach budget larger than it: the serial
-      // design would let the stuck child's re-attach blow the deadline and
-      // starve the fast child; the parallel design collects the fast child.
-      // The re-attach budget is far above the fast child's 200 ms, so a
-      // loaded machine cannot run it out, and far below the stuck child's
-      // 60 s, which serially would still take all of it.
+      // Each recovered run follows its own child with its own re-attach
+      // budget: far above the fast child's 200 ms, so a loaded machine cannot
+      // run it out, and far below the stuck child's 60 s, so the stuck one
+      // gives up on its own and does not take the fast one down with it.
       await this.reconcileAgentToolRunsForTest({ reattachTimeoutMs: 4000 });
     } finally {
       await stuckChild.cancelAgentToolRun(stuckRunId, "test cleanup");
