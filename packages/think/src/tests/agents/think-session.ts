@@ -14237,15 +14237,16 @@ export class ThinkRecoveryTestAgent extends Think {
     // `payload` as `never`. The scheduled payload only needs its recovery-link
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
-    // A recovery Task run's input, or the attempt a replayed turn's run
-    // journaled to run itself.
+    // The attempt a replayed turn's run journaled to run itself, the input
+    // of a run started only for an attempt, or a recovery Task run's input.
     const runId = pendingRecoveryRunIds(this, callback)[0];
     const taskRows = this.sql<{ payload: string }>`
       SELECT COALESCE(
         (SELECT json_extract(result, '$.data') FROM cf_agents_task_steps
          WHERE run_id = ${runId ?? ""} AND step_name = 'model-turn'),
-        (SELECT json_extract(input, '$.data') FROM cf_agents_task_runs
-         WHERE run_id = ${runId ?? ""})
+        (SELECT coalesce(json_extract(input, '$.attempt.data'),
+                         json_extract(input, '$.data'))
+         FROM cf_agents_task_runs WHERE run_id = ${runId ?? ""})
       ) AS payload
     `.filter((row) => row.payload != null);
     const scheduledRows = this.sql<{ payload: string }>`
