@@ -5,7 +5,8 @@ import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
   answerTool,
   chatDispatch,
-  resumeChat
+  resumeChat,
+  submitTurn
 } from "../../chat/chat-functions";
 import { parkedIn } from "../../chat/chat-host";
 
@@ -553,6 +554,41 @@ describe("chat functions over a minimal host", () => {
       expect(reply).toContain("Lisbon");
       instance.host.respond = respond;
       delete hooks.transformChunk;
+    });
+  });
+
+  it("a server turn runs with the tools and body of the last client request", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const first = instance.resultFor("r1");
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: "r1",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [{ id: "u1", role: "user", parts: [] }],
+              clientTools: [{ name: "askUser" }],
+              model: "m"
+            })
+          }
+        })
+      );
+      await first;
+      const { requestId } = await submitTurn(instance.deps, instance.lane, {
+        trigger: "server"
+      });
+      await instance.resultFor(requestId);
+      expect(instance.calls[1]).toMatchObject({
+        trigger: "server",
+        clientTools: [{ name: "askUser" }],
+        body: { model: "m" }
+      });
     });
   });
 });
