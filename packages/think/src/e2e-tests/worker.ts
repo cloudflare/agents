@@ -2039,12 +2039,16 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
     // Tasks, inference, cutover, submission settlement, and restart stay real.
     const internals = this as unknown as {
       _chatRecoveryEngine(): unknown;
-      _enqueueChatRecovery(
-        callback: "_chatRecoveryRetry",
-        data: Record<string, unknown>,
-        reason: "initial",
-        delay: number
-      ): Promise<void>;
+      _turns: {
+        startAttemptRun(
+          attempt: {
+            callback: "_chatRecoveryRetry";
+            data: Record<string, unknown>;
+            delaySeconds: number;
+          },
+          reason: "initial"
+        ): Promise<void>;
+      };
     };
     const recoveryEngine = internals._chatRecoveryEngine() as {
       updateIncident(
@@ -2062,16 +2066,18 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
       }
       return updateIncident(id, status, reason);
     };
-    await internals._enqueueChatRecovery(
-      "_chatRecoveryRetry",
+    await internals._turns.startAttemptRun(
       {
-        incidentId,
-        originalRequestId: submissionId,
-        recoveredRequestId: submissionId,
-        targetUserId: userMessage.id
+        callback: "_chatRecoveryRetry",
+        data: {
+          incidentId,
+          originalRequestId: submissionId,
+          recoveredRequestId: submissionId,
+          targetUserId: userMessage.id
+        },
+        delaySeconds: 0
       },
-      "initial",
-      0
+      "initial"
     );
   }
 
@@ -2114,8 +2120,9 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   /** Report a production-scheduled retry parked in its durable backoff. */
   @callable()
   async hasWaitingRecoveryRetry(submissionId: string): Promise<boolean> {
+    // The retry runs in a chat-turn run started only for it.
     const runs = await this.tasks.list({
-      definition: CHAT_RECOVERY_TASK_NAME,
+      definition: ThinkSubmissionRecoveryE2EAgent.CHAT_FIBER_NAME,
       status: ["pending"],
       limit: Number.MAX_SAFE_INTEGER
     });

@@ -105,12 +105,10 @@ import {
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
   runAppStart,
-  enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
   recordRecentChatTerminal,
   storedAsFacet,
-  type ChatRecoveryTaskReason,
   type StreamInterruptionOutcome
 } from "agents/chat";
 import {
@@ -136,7 +134,6 @@ import {
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
-  type ChatRecoveryScheduleCallback,
   type ChatRecoveryAttemptScope,
   type ChatRecoveryIncident
 } from "agents/chat";
@@ -887,26 +884,11 @@ export class AIChatAgent<
         attempts
       })
     );
-    // The recovery Task: attempts scheduled outside a replayed turn's run.
+    // The recovery Task, which only finishes runs an earlier version
+    // enqueued.
     this.tasks.register(
       CHAT_RECOVERY_TASK_NAME,
       createChatRecoveryTaskDefinition(attempts)
-    );
-  }
-
-  /** Enqueue one recovery attempt on the shared Tasks transport. */
-  private _enqueueChatRecovery(
-    callback: ChatRecoveryScheduleCallback,
-    data: Record<string, unknown>,
-    reason: ChatRecoveryTaskReason,
-    delaySeconds: number,
-    dedupeKey?: string
-  ): Promise<void> {
-    return enqueueChatRecoveryTask(
-      this.tasks,
-      { callback, data, delaySeconds },
-      reason,
-      dedupeKey
     );
   }
 
@@ -3365,11 +3347,9 @@ export class AIChatAgent<
           ...(event.reason ? { reason: event.reason } : {})
         }),
       scheduleRecovery: (callback, data, reason, delaySeconds, dedupeKey) =>
-        this._enqueueChatRecovery(
-          callback,
-          data,
+        this._turns.startAttemptRun(
+          { callback, data, delaySeconds },
           reason,
-          delaySeconds,
           dedupeKey
         ),
       setRecovering: (active, requestId) =>

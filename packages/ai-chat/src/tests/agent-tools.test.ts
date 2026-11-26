@@ -775,7 +775,7 @@ describe("AIChatAgent as an agent-tool child", () => {
       await parent.driveFacetChatRecoveryDetectionForTest(childName);
 
     // Real fiber-interruption detection on a facet must reach
-    // `_enqueueChatRecovery`'s single Tasks transport — not just a test
+    // the attempt's run on Tasks — not just a test
     // that seeds a schedule row directly and never exercises the path
     // itself. The run and step journal stay on the child; only its wake
     // mirrors to this root's queue, and the retired Scheduler bridge stays

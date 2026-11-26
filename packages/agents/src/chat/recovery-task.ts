@@ -1,25 +1,25 @@
 /**
- * Chat recovery transport on the Tasks capability.
- *
- * Each continuation attempt is one short Task run. The Task waits for any
- * requested backoff, dispatches the bounded host callback through model
- * handoff, then disappears after terminal settlement. The durable recovery
- * incident remains the source of truth for attempt and work budgets.
+ * Running one chat recovery attempt as steps of a Task run: the run waits
+ * for any requested backoff, then dispatches the bounded host callback
+ * through model handoff. The durable recovery incident remains the source
+ * of truth for attempt and work budgets. The run is a chat-turn run: the
+ * one of the turn being recovered, or one started only for the attempt.
+ * The recovery Task's own definition only finishes runs an earlier version
+ * enqueued.
  *
  * @internal Sibling-package support for AI Chat and Think.
  */
 
 import {
+  holdLaneForReplacement,
   holdLaneForReply,
-  inLaneRecoveryAttempt,
-  runHoldingLane
+  inLaneRecoveryAttempt
 } from "./turn-task";
-import { isTaskSuspension } from "../tasks/replay";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isPlatformFailure, tryN } from "../retries";
 import type { TaskJson } from "../tasks";
 import { MAX_SERIALIZED_BYTES } from "../tasks/serialization";
-import type { TaskRunOptions, TaskStep } from "../tasks/types";
+import type { TaskStep } from "../tasks/types";
 import type {
   ChatRecoveryAttemptInput,
   ChatRecoveryScheduleCallback
@@ -30,13 +30,6 @@ export const CHAT_RECOVERY_TASK_NAME = "__cf_internal_chat_recovery";
 
 /** Input persisted for one recovery continuation attempt. */
 export type ChatRecoveryTaskInput = ChatRecoveryAttemptInput;
-
-/** Why a recovery attempt is being enqueued. */
-export type ChatRecoveryTaskReason =
-  | "initial"
-  | "stable_timeout_retry"
-  | "chained_retry"
-  | "redefer";
 
 /** The host's bounded entry point for each continuation callback. */
 export type ChatRecoveryTaskHooks = Record<
@@ -53,8 +46,6 @@ export type ChatRecoveryHandoff = {
   readonly detached: (onTurnStarted: () => void) => Promise<void>;
   /** Keep the detached turn inside the current alarm's breaker domain. */
   readonly track: (turn: Promise<void>) => void;
-  /** The incident the attempt recovers: a replacement holds its lane. */
-  readonly incidentId?: string;
   /**
    * Enqueue exactly one replacement attempt for a detached platform
    * failure. `dedupeKey` is stable across every retried call for the same
@@ -97,8 +88,7 @@ export async function dispatchChatRecoveryToHandoff(
   const tracked = reachedTurn.then(() => handoff.track(turn));
   // In a lane run's recovery attempt, a replacement attempt keeps the lane
   // the recovered reply held, until it ends as well.
-  const incidentId = handoff.incidentId;
-  const holding = inLaneRecoveryAttempt() && incidentId !== undefined;
+  const holding = inLaneRecoveryAttempt();
   let releaseReplacement = () => {};
   const replaced = new Promise<void>((resolve) => {
     releaseReplacement = resolve;
@@ -106,7 +96,6 @@ export async function dispatchChatRecoveryToHandoff(
   turn.catch((error) => {
     if (!handedOff) return;
     if (isPlatformFailure(error)) {
-      if (holding) replacementHolds.set(incidentId, releaseReplacement);
       // A failed attempt may still have durably created the run before
       // throwing — acceptance can fail on the wake-mirror push after the
       // insert already committed — so every retry reuses the SAME key
@@ -115,14 +104,15 @@ export async function dispatchChatRecoveryToHandoff(
       // same way an unowned detached error already is, rather than
       // swallowing it: no Task run is left to report through.
       const dedupeKey = crypto.randomUUID();
+      // The replacement's run id is the key: the hold is found by it.
+      const dropHold = holding
+        ? holdLaneForReplacement(dedupeKey, releaseReplacement)
+        : undefined;
       void tryN(3, () => handoff.redefer(dedupeKey), {
         baseDelayMs: 50,
         maxDelayMs: 500
       }).catch((redeferError) => {
-        if (holding) {
-          replacementHolds.delete(incidentId);
-          releaseReplacement();
-        }
+        dropHold?.();
         handoff.onDetachedError(redeferError);
       });
       return;
@@ -171,133 +161,29 @@ function parseChatRecoveryTaskInput(input: unknown): ChatRecoveryTaskInput {
 }
 
 /**
- * Build run options for one recovery attempt.
- *
- * Initial detection joins an existing in-flight attempt for the same incident,
- * callback and schedule number, so a retried enqueue of one schedule creates
- * one run. A later schedule of the same incident carries a newer number and
- * gets its own run: the older run is stale by then and returns without a
- * turn. Chained retries are otherwise unkeyed because each one is
- * enqueued while the preceding run still exists — a genuinely new attempt,
- * not a retry of this same enqueue. `dedupeKey`, when supplied, keys this
- * specific enqueue call by `runId` instead: every retry of one failed
- * `redefer` (see {@link dispatchChatRecoveryToHandoff}) reuses the same key,
- * so a rejected-but-already-inserted attempt is joined rather than
- * duplicated. Non-retention releases the initial key when the run settles.
+ * Build the recovery Task's handler. Nothing enqueues this Task any more:
+ * an attempt no turn's run keeps runs in a chat-turn run of its own
+ * (`ChatTurns.startAttemptRun`). The definition stays registered to finish
+ * the runs an earlier version enqueued, each of which is one attempt, and
+ * is removed once no version that enqueued it is supported.
  */
-export function chatRecoveryTaskRunOptions(
-  input: ChatRecoveryTaskInput,
-  reason: ChatRecoveryTaskReason,
-  dedupeKey?: string
-): TaskRunOptions {
-  const incidentId =
-    typeof input.data.incidentId === "string"
-      ? input.data.incidentId
-      : undefined;
-  const recoveredRequestId =
-    typeof input.data.recoveredRequestId === "string"
-      ? input.data.recoveredRequestId
-      : undefined;
-  // The schedule's number is part of the key. A second schedule of the same
-  // incident has a newer number, which makes the run it would join stale
-  // (`recoveryDelivery`), so it must get its own run.
-  const delivery =
-    typeof input.data.delivery === "number" ? input.data.delivery : undefined;
-
-  return {
-    retain: false,
-    ...(dedupeKey !== undefined ? { runId: dedupeKey } : {}),
-    ...(reason === "initial" && incidentId
-      ? {
-          idempotencyKey: `chat-recovery:${input.callback}:${incidentId}${
-            delivery === undefined ? "" : `:${delivery}`
-          }`
-        }
-      : {}),
-    metadata: {
-      callback: input.callback,
-      ...(incidentId ? { incidentId } : {}),
-      ...(recoveredRequestId ? { recoveredRequestId } : {})
-    }
-  };
-}
-
-/**
- * Enqueue one recovery attempt on the Tasks transport. Tasks mirrors a routed
- * dynamic agent's wake to the root's alarm. The run itself, and the
- * continuation's replay, still execute on the host.
- *
- * @param tasks - The host's Tasks capability.
- * @param dedupeKey - Keys a retried enqueue so it joins its own earlier try.
- *   See {@link chatRecoveryTaskRunOptions}.
- */
-export async function enqueueChatRecoveryTask(
-  tasks: {
-    run(
-      name: string,
-      input: ChatRecoveryTaskInput,
-      options: TaskRunOptions
-    ): Promise<unknown>;
-  },
-  input: ChatRecoveryTaskInput,
-  reason: ChatRecoveryTaskReason,
-  dedupeKey?: string
-): Promise<void> {
-  // From the alarm, where `trackAlarmWork` keeps the continuation's model
-  // turn inside the memory-limit breaker.
-  await tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
-    ...chatRecoveryTaskRunOptions(input, reason, dedupeKey),
-    start: "alarm"
-  });
-}
-
-/**
- * The release of a lane held for a recovered reply that failed on the
- * platform after its handoff, by incident id: its replacement attempt
- * ({@link dispatchChatRecoveryToHandoff}'s `redefer`) runs holding that
- * lane and releases it when its own recovered reply ends. A reset loses it
- * with the park it holds, which the turn's run then recovers.
- */
-const replacementHolds = new Map<string, () => void>();
-
-/** Build the shared recovery Task handler for one chat host. */
 export function createChatRecoveryTaskDefinition(
   hooks: ChatRecoveryTaskHooks
 ): (input: unknown, step: TaskStep) => Promise<void> {
   return async (unknownInput, step) => {
-    const input = parseChatRecoveryTaskInput(unknownInput);
-    const incidentId = input.data?.incidentId;
-    const release =
-      typeof incidentId === "string"
-        ? replacementHolds.get(incidentId)
-        : undefined;
-    if (!release || typeof incidentId !== "string") {
-      await runChatRecoveryAttempt(step, hooks, input);
-      return;
-    }
-    let reply: Promise<void> | undefined;
-    try {
-      ({ reply } = await runHoldingLane(() =>
-        runChatRecoveryAttempt(step, hooks, input)
-      ));
-    } catch (error) {
-      // Tasks keeps the run for a later wake (a suspension, or a platform
-      // failure past the step's retries): so does the hold.
-      if (isTaskSuspension(error) || isPlatformFailure(error)) throw error;
-      replacementHolds.delete(incidentId);
-      release();
-      throw error;
-    }
-    replacementHolds.delete(incidentId);
-    if (reply) void reply.finally(release);
-    else release();
+    await runChatRecoveryAttempt(
+      step,
+      hooks,
+      parseChatRecoveryTaskInput(unknownInput)
+    );
   };
 }
 
 /**
  * Run one recovery attempt as steps of `step`'s run: wait out its backoff,
- * then dispatch the host callback. Shared by the recovery Task and the
- * chat-turn run that recovers its own interrupted turn.
+ * then dispatch the host callback. `step`'s run is the chat-turn run that
+ * recovers its own turn, one started only for the attempt, or a recovery
+ * Task run an earlier version enqueued.
  */
 export async function runChatRecoveryAttempt(
   step: TaskStep,
@@ -349,8 +235,8 @@ const utf8 = new TextEncoder();
 
 /**
  * Whether a recovery attempt fits in a step result (at most 1 MiB). One
- * carrying a larger request body goes to the recovery Task, whose input is
- * parted.
+ * carrying a larger request body gets a run of its own, whose input is
+ * parted (`ChatTurns.startAttemptRun`).
  */
 export function journalableAttempt(attempt: ChatRecoveryAttemptInput): boolean {
   return (

@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  chatRecoveryTaskRunOptions,
   dispatchChatRecoveryToHandoff,
-  type ChatRecoveryHandoff,
-  type ChatRecoveryTaskInput
+  type ChatRecoveryHandoff
 } from "../recovery-task";
 import { runHoldingLane } from "../turn-task";
 
@@ -93,53 +91,6 @@ describe("dispatchChatRecoveryToHandoff — post-handoff redefer failure", () =>
 
     expect(dedupeKeysSeen).toHaveLength(3);
     expect(new Set(dedupeKeysSeen).size).toBe(1);
-  });
-});
-
-describe("chatRecoveryTaskRunOptions — dedupeKey", () => {
-  const input: ChatRecoveryTaskInput = {
-    callback: "_chatRecoveryContinue",
-    data: { incidentId: "incident-1" },
-    delaySeconds: 30
-  };
-
-  it("keys the run by dedupeKey when supplied, joining a retry to its own prior attempt", () => {
-    const options = chatRecoveryTaskRunOptions(input, "redefer", "dedupe-1");
-    expect(options.runId).toBe("dedupe-1");
-  });
-
-  it("leaves redefer unkeyed when no dedupeKey is supplied, unchanged from before this fix", () => {
-    const options = chatRecoveryTaskRunOptions(input, "redefer");
-    expect(options.runId).toBeUndefined();
-  });
-});
-
-describe("chatRecoveryTaskRunOptions — the initial key", () => {
-  const input = (delivery?: number): ChatRecoveryTaskInput => ({
-    callback: "_chatRecoveryContinue",
-    data: {
-      incidentId: "incident-1",
-      ...(delivery !== undefined && { delivery })
-    },
-    delaySeconds: 0
-  });
-
-  it("keys one schedule, so a retried enqueue of it joins its run", () => {
-    expect(chatRecoveryTaskRunOptions(input(2), "initial").idempotencyKey).toBe(
-      chatRecoveryTaskRunOptions(input(2), "initial").idempotencyKey
-    );
-  });
-
-  it("gives a later schedule of the same incident its own run", () => {
-    expect(
-      chatRecoveryTaskRunOptions(input(2), "initial").idempotencyKey
-    ).not.toBe(chatRecoveryTaskRunOptions(input(1), "initial").idempotencyKey);
-  });
-
-  it("keeps the old key for a payload with no schedule number", () => {
-    expect(chatRecoveryTaskRunOptions(input(), "initial").idempotencyKey).toBe(
-      "chat-recovery:_chatRecoveryContinue:incident-1"
-    );
   });
 });
 

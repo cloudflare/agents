@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TaskJson, TaskStep } from "../../tasks";
 import { unwrapChatFiberSnapshot } from "../recovery";
+import { dispatchChatRecoveryToHandoff } from "../recovery-task";
 import {
   createChatTurnTaskDefinition,
   currentChatRun,
   currentTurnAttempt,
+  runHoldingLane,
   type ChatLaneEntry,
   type ChatTurnClosureEntry
 } from "../turn-task";
@@ -438,6 +440,145 @@ describe("createChatTurnTaskDefinition", () => {
     })({ requestId: "r9", nonce: "n9" }, step);
     expect(recover).not.toHaveBeenCalled();
     expect(continued).toEqual([{ incidentId: "i9" }]);
+  });
+
+  it("runs the attempt of a run started only to run it, without journaling it", async () => {
+    const steps: string[] = [];
+    const { step } = fakeStep(undefined);
+    Object.assign(step, {
+      do: async (
+        name: string,
+        _config: unknown,
+        fn: () => Promise<unknown>
+      ) => {
+        steps.push(name);
+        return fn();
+      },
+      sleep: async (name: string, ms: number) =>
+        void steps.push(`${name}:${ms}`)
+    });
+    const continued: unknown[] = [];
+    const recover = vi.fn(async () => {});
+    const run = () =>
+      createChatTurnTaskDefinition({
+        ...hooks,
+        recover,
+        attempts: {
+          _chatRecoveryContinue: async (data) => void continued.push(data),
+          _chatRecoveryRetry: async () => {}
+        }
+      })(
+        {
+          requestId: "r6",
+          nonce: "n6",
+          attempt: {
+            callback: "_chatRecoveryContinue",
+            data: { incidentId: "i6" },
+            delaySeconds: 3
+          }
+        },
+        step
+      );
+    await run();
+    // No turn is recovered and no `model-turn` step journals the attempt
+    // (it may be too large for one): the run waits out the attempt's own
+    // delay, then dispatches it.
+    expect(recover).not.toHaveBeenCalled();
+    expect(steps).toEqual(["backoff:3000", "continuation"]);
+    expect(continued).toEqual([{ incidentId: "i6" }]);
+
+    // With no delay it dispatches at once: the run starts from the alarm.
+    steps.length = 0;
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      attempts: {
+        _chatRecoveryContinue: async () => {},
+        _chatRecoveryRetry: async () => {}
+      }
+    })(
+      {
+        requestId: "r5",
+        nonce: "n5",
+        attempt: {
+          callback: "_chatRecoveryContinue",
+          data: { incidentId: "i5" },
+          delaySeconds: 0
+        }
+      },
+      step
+    );
+    expect(steps).toEqual(["continuation"]);
+  });
+
+  it("holds the lane of a reply that failed on the platform until its replacement's own reply ends", async () => {
+    // A lane run's recovery attempt hands off, and its reply then fails on
+    // the platform: the replacement gets a run of its own.
+    let replacementRunId: string | undefined;
+    let failReply: () => void = () => {};
+    const replyFails = new Promise<void>((resolve) => {
+      failReply = resolve;
+    });
+    const { reply: held } = await runHoldingLane(() =>
+      dispatchChatRecoveryToHandoff({
+        detached: async (onTurnStarted) => {
+          onTurnStarted();
+          await replyFails;
+          throw new Error("Network connection lost.");
+        },
+        track: () => {},
+        redefer: async (dedupeKey) => {
+          replacementRunId = dedupeKey;
+        },
+        onDetachedError: () => {}
+      })
+    );
+    let released = false;
+    void held?.then(() => {
+      released = true;
+    });
+    failReply();
+    await vi.waitFor(() => expect(replacementRunId).toBeDefined());
+
+    // The replacement's run runs its attempt, whose reply is still going.
+    let finishReply: () => void = () => {};
+    const replyEnds = new Promise<void>((resolve) => {
+      finishReply = resolve;
+    });
+    const { step } = fakeStep(undefined);
+    Object.assign(step, { id: replacementRunId });
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      attempts: {
+        _chatRecoveryContinue: () =>
+          dispatchChatRecoveryToHandoff({
+            detached: async (onTurnStarted) => {
+              onTurnStarted();
+              await replyEnds;
+            },
+            track: () => {},
+            redefer: async () => {},
+            onDetachedError: () => {}
+          }),
+        _chatRecoveryRetry: async () => {}
+      }
+    })(
+      {
+        requestId: "r4",
+        nonce: "n4",
+        attempt: {
+          callback: "_chatRecoveryContinue",
+          data: { incidentId: "i4" },
+          delaySeconds: 0
+        }
+      },
+      step
+    );
+    // The run returned at the handoff; the lane is still held for the reply.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(released).toBe(false);
+    finishReply();
+    await held;
+    expect(released).toBe(true);
   });
 
   it("keeps a live turn's planned attempt in the checkpoint at once", async () => {

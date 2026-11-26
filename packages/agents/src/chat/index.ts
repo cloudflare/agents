@@ -105,14 +105,11 @@ export {
 } from "./turn-fiber";
 export {
   CHAT_RECOVERY_TASK_NAME,
-  chatRecoveryTaskRunOptions,
   createChatRecoveryTaskDefinition,
   dispatchChatRecoveryToHandoff,
-  enqueueChatRecoveryTask,
   type ChatRecoveryHandoff,
   type ChatRecoveryTaskHooks,
-  type ChatRecoveryTaskInput,
-  type ChatRecoveryTaskReason
+  type ChatRecoveryTaskInput
 } from "./recovery-task";
 
 /**
