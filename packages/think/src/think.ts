@@ -263,6 +263,7 @@ import {
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
+  recordRecentChatTerminal,
   storedAsFacet,
   type StreamInterruptionOutcome,
   createChatFiberSnapshot,
@@ -11316,7 +11317,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         this._turns.liveReply.ended,
       ended: this._frames.ended,
       recentTerminal: (requestIds) =>
-        recentChatTerminal(this.ctx.storage.kv, requestIds)
+        recentChatTerminal(this.ctx.storage.kv, requestIds),
+      recordTerminal: (frame) =>
+        recordRecentChatTerminal(this.ctx.storage.kv, frame)
     }));
   }
 

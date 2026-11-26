@@ -111,6 +111,7 @@ import {
   enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
+  recordRecentChatTerminal,
   storedAsFacet,
   type ChatRecoveryTaskReason,
   type StreamInterruptionOutcome
@@ -1264,7 +1265,9 @@ export class AIChatAgent<
         this._turns.liveReply.ended,
       ended: this._frames.ended,
       recentTerminal: (requestIds) =>
-        recentChatTerminal(this.ctx.storage.kv, requestIds)
+        recentChatTerminal(this.ctx.storage.kv, requestIds),
+      recordTerminal: (frame) =>
+        recordRecentChatTerminal(this.ctx.storage.kv, frame)
     }));
   }
 

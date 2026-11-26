@@ -1942,6 +1942,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * _activeStreamId, but _isLive remains false (no live LLM reader).
    * This mimics the DO constructor running after eviction.
    */
+  /** The recorded end of `requestId` (the recent terminals), or null. */
+  recentTerminalForTest(requestId: string): unknown {
+    return recentChatTerminal(this.ctx.storage.kv, [requestId]);
+  }
+
   testSimulateHibernationWake(): void {
     this._resumableStream = new ResumableStream(
       this.streams,
