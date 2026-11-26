@@ -5,6 +5,7 @@ import { Think } from "../../think";
 import { releaseDelivery, sendDelivery } from "agents/internal";
 import { recoveredReplyId } from "../../messengers/recovered-reply";
 import { recoverMessengerReply } from "../../messengers/reply-task";
+import { telegramMessenger } from "../../messengers/telegram";
 import {
   chatSdkMessenger,
   type MessengerEvent,
@@ -169,7 +170,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     const mode = this._recoveryMode();
     const nextCall = () => ++this._streamCalls;
     // An agent named `reset-…` resets in its first model call, mid-reply.
-    const resetOnce = this.name.startsWith("reset-")
+    const resetOnce = /^(tg-)?reset-/.test(this.name)
       ? async () => {
           if (this.ctx.storage.kv.get("reset-done")) return;
           this.ctx.storage.kv.put("reset-done", true);
@@ -259,6 +260,18 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
   override getMessengers(): ThinkMessengers {
     // #2313: an agent named `queue-…` answers each message as it arrives.
     if (this.name.startsWith("queue-")) this.messengerConcurrency = "queue";
+    // An agent named `tg-…` talks to the fake Telegram Bot API (the test
+    // config's outbound service), with its name as the bot token.
+    if (this.name.startsWith("tg-")) {
+      return {
+        telegram: telegramMessenger({
+          apiBaseUrl: "https://fake-telegram.test",
+          token: this.name,
+          userName: "probe_bot",
+          verifyWebhook: false
+        })
+      };
+    }
     return {
       fake: chatSdkMessenger({
         adapter: this._recordingAdapter(),
