@@ -575,7 +575,8 @@ function createSequentialApprovalMockModel(): LanguageModel {
 
 function createSlowMockModel(
   delayMs: number,
-  chunkCount: number
+  chunkCount: number,
+  hold?: () => Promise<void>
 ): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -591,6 +592,7 @@ function createSlowMockModel(
         async start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
           controller.enqueue({ type: "text-start", id: "t-slow" });
+          await hold?.();
           for (let i = 0; i < chunkCount; i++) {
             await new Promise((r) => setTimeout(r, delayMs));
             chunkIndex++;
@@ -1239,7 +1241,11 @@ export class ThinkClientToolsAgent extends Think {
     if (this._useExecutableClientTool)
       return createExecutableClientToolMockModel();
     if (this._useSlowStream)
-      return createSlowMockModel(this._slowDelayMs, this._slowChunkCount);
+      return createSlowMockModel(
+        this._slowDelayMs,
+        this._slowChunkCount,
+        this._slowStreamHold ? () => this._slowStreamHold!.wait() : undefined
+      );
     if (this._useSlowClientToolStream)
       return createSlowClientToolMockModel(
         this._slowClientToolDelayMs,
@@ -1446,6 +1452,17 @@ export class ThinkClientToolsAgent extends Think {
 
   async setServerApprovalToolFailure(value: boolean): Promise<void> {
     this._serverApprovalToolFails = value;
+  }
+
+  private _slowStreamHold: LatchForTest | null = null;
+
+  /** Hold slow streams before their first chunk until released. */
+  async holdSlowStreamForTest(): Promise<void> {
+    this._slowStreamHold = new LatchForTest();
+  }
+
+  async releaseSlowStreamForTest(): Promise<void> {
+    this._slowStreamHold?.open();
   }
 
   async setSlowStreamMode(
