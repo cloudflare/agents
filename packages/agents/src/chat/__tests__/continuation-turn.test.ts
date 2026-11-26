@@ -105,9 +105,7 @@ class FakeHost implements ChatTurnsHost {
   streamingReply() {
     return null;
   }
-  clientToolNames() {
-    return new Set<string>();
-  }
+  saveRequestContext() {}
   hasActiveStream() {
     return this.replyStreaming;
   }

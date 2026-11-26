@@ -7180,3 +7180,48 @@ describe("Think — async onChatResponse", () => {
     expect(messages).toHaveLength(4);
   });
 });
+
+describe("Think request context from an earlier release", () => {
+  async function legacyAgent(lastClientTools: string, lastBody: string) {
+    const name = crypto.randomUUID();
+    await (
+      await freshRecoveryAgent(name)
+    ).seedLegacyRequestContextForTest(lastClientTools, lastBody);
+    await (
+      await freshRecoveryAgent(name)
+    )
+      .resetIsolateForTest()
+      .catch(() => {});
+    return () => freshRecoveryAgent(name);
+  }
+
+  it("is read on a cold start, carried into the session value once, and the old keys deleted", async () => {
+    const agent = await legacyAgent(
+      JSON.stringify([{ name: "pick" }]),
+      JSON.stringify({ theme: "dark" })
+    );
+    const state = await (await agent()).requestContextStateForTest();
+    expect(state.clientTools).toEqual(["pick"]);
+    expect(JSON.parse(state.body ?? "null")).toEqual({ theme: "dark" });
+    expect(JSON.parse(state.stored ?? "null")).toEqual({
+      clientTools: [{ name: "pick" }],
+      body: { theme: "dark" }
+    });
+    expect(state.legacyLeft).toBe(false);
+  });
+
+  it("deletes the old keys even when they are over the row budget together, so they cannot come back", async () => {
+    const agent = await legacyAgent(
+      JSON.stringify([{ name: "pick" }]),
+      JSON.stringify({ big: "x".repeat(8_000_000) })
+    );
+    const carried = await (await agent()).requestContextStateForTest();
+    expect(carried.clientTools).toEqual(["pick"]);
+    expect(carried.stored).toBeNull();
+    expect(carried.legacyLeft).toBe(false);
+    await (await agent()).resetIsolateForTest().catch(() => {});
+    const after = await (await agent()).requestContextStateForTest();
+    expect(after.clientTools).toBeNull();
+    expect(after.body).toBe("null");
+  });
+});

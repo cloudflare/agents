@@ -40,12 +40,12 @@ class FakeHost implements ChatTurnsHost {
     return this.replyStreaming;
   }
   streaming: ChatTurnMessage | null = null;
-  clientTools = new Set<string>();
+  saved: Array<string | null> = [];
   streamingReply() {
     return this.streaming;
   }
-  clientToolNames() {
-    return this.clientTools;
+  saveRequestContext(json: string | null) {
+    this.saved.push(json);
   }
   hasActiveStream() {
     return this.activeStream;
@@ -515,11 +515,11 @@ describe("ChatTurns", () => {
     // A server tool sits at input-available while it runs.
     expect(turns.hasPendingInteraction()).toBe(false);
 
-    host.clientTools = new Set(["x"]);
+    turns.lastClientTools = [{ name: "x" }];
     expect(turns.hasPendingInteraction()).toBe(true);
 
     // A stored snapshot of the streaming reply defers to the live copy.
-    host.clientTools = new Set();
+    turns.lastClientTools = undefined;
     host.transcript = [user("u1"), toolReply("a1", "input-available")];
     expect(turns.hasPendingInteraction()).toBe(false);
   });
@@ -533,10 +533,10 @@ describe("ChatTurns", () => {
     ];
     expect(turns.hasPendingInteraction()).toBe(false);
 
-    host.clientTools = new Set(["x"]);
+    turns.lastClientTools = [{ name: "x" }];
     expect(turns.hasPendingInteraction()).toBe(true);
 
-    host.clientTools = new Set();
+    turns.lastClientTools = undefined;
     host.transcript = [
       user("u1"),
       toolReply("a1", "approval-requested"),
@@ -985,7 +985,7 @@ describe("ChatTurns", () => {
       );
 
     it("settles a known client's call in a reply the conversation moved past", async () => {
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       const messages = [
         user("u1"),
         toolReply("a1", "input-available"),
@@ -999,7 +999,7 @@ describe("ChatTurns", () => {
     });
 
     it("a continuation turn keeps the host's known client call in the message it continues", async () => {
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       const messages = [
         user("u1"),
         toolReply("a1", "input-available")
@@ -1009,14 +1009,14 @@ describe("ChatTurns", () => {
         "input-available"
       );
       // The same call for a tool no client sent a schema for is dead.
-      host.clientTools = new Set();
+      turns.lastClientTools = undefined;
       expect(stateOf((await repair(messages, true)).messages[1])).toBe(
         "output-error"
       );
     });
 
     it("reports the calls a continuation turn kept for a client, and says so before the turn", async () => {
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       const messages = [
         user("u1"),
         toolReply("a1", "input-available")
@@ -1034,12 +1034,12 @@ describe("ChatTurns", () => {
       expect(turns.continuationWaitsOnClient()).toBe(true);
       host.transcript = [...messages, user("u2")];
       expect(turns.continuationWaitsOnClient()).toBe(false);
-      host.clientTools = new Set();
+      turns.lastClientTools = undefined;
       expect(turns.continuationWaitsOnClient(messages)).toBe(false);
     });
 
     it("settleBeforeTurn stores what the repair changed and reports it", async () => {
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       const messages = [
         user("u1"),
         toolReply("a1", "input-available"),
@@ -1082,7 +1082,7 @@ describe("ChatTurns", () => {
       expect(stateOf(turns.settleInterruptedReply(reply, flip))).toBe(
         "output-error"
       );
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       expect(turns.settleInterruptedReply(reply, flip)).toBe(reply);
     });
 
@@ -1094,7 +1094,7 @@ describe("ChatTurns", () => {
       );
       // And the reverse: a call the stored tools name, which the pinned
       // ones do not, is settled.
-      host.clientTools = new Set(["x"]);
+      turns.lastClientTools = [{ name: "x" }];
       expect(
         stateOf(turns.settleInterruptedReply(reply, flip, new Set()))
       ).toBe("output-error");
@@ -1208,5 +1208,87 @@ describe("ChatTurns", () => {
       expect(turns.replyToContinueIsEmpty([answered])).toBe(false);
       expect(turns.replyToContinueIsEmpty([])).toBe(false);
     });
+  });
+});
+
+describe("ChatTurns request context", () => {
+  const changed = { status: "changed", messageId: "m" } as const;
+  const setup = () => {
+    const host = new FakeHost();
+    const turns = new ChatTurns(host, {
+      defaultDebounceMs: 750,
+      lane: memoryLane()
+    });
+    return { host, turns };
+  };
+
+  it("stores a request's tools and body as one value, again for an equal request (a Sessions clear may have deleted it)", () => {
+    const { host, turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "x" }], body: { a: 1 } });
+    turns.setRequestContext({ clientTools: [{ name: "x" }], body: { a: 1 } });
+    const json = JSON.stringify({
+      clientTools: [{ name: "x" }],
+      body: { a: 1 }
+    });
+    expect(host.saved).toEqual([json, json]);
+    expect([...turns.clientToolNames()]).toEqual(["x"]);
+  });
+
+  it("a request with no tools and an empty body clears the value", () => {
+    const { host, turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "x" }] });
+    turns.setRequestContext({ clientTools: [], body: {} });
+    expect(host.saved).toEqual([
+      JSON.stringify({ clientTools: [{ name: "x" }] }),
+      null
+    ]);
+    expect(turns.lastClientTools).toBeUndefined();
+  });
+
+  it("restores the stored value without writing it, and reads a malformed one as none", () => {
+    const { host, turns } = setup();
+    const json = JSON.stringify({
+      clientTools: [{ name: "x" }],
+      body: { b: 2 }
+    });
+    turns.restoreRequestContext(json);
+    expect(turns.lastBody).toEqual({ b: 2 });
+    expect(host.saved).toEqual([]);
+    turns.restoreRequestContext("{not json");
+    expect(turns.lastClientTools).toBeUndefined();
+    expect(turns.lastBody).toBeUndefined();
+  });
+
+  it("a tool result's tools replace the stored ones only when it changed a message and no request came in meanwhile", async () => {
+    const { turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "old" }] });
+    await turns.applyingToolResult([{ name: "new" }], async () => changed)();
+    expect([...turns.clientToolNames()]).toEqual(["new"]);
+    await turns.applyingToolResult([{ name: "skip" }], async () => ({
+      status: "unchanged"
+    }))();
+    expect([...turns.clientToolNames()]).toEqual(["new"]);
+    const late = turns.applyingToolResult([{ name: "late" }], async () => {
+      turns.setRequestContext({ clientTools: [{ name: "fresh" }] });
+      return changed;
+    });
+    await late();
+    expect([...turns.clientToolNames()]).toEqual(["fresh"]);
+  });
+
+  it("a clear drops both, and a value past the row budget stays in memory only", () => {
+    const { host, turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "x" }], body: { a: 1 } });
+    turns.clearRequestContext();
+    expect(host.saved.at(-1)).toBeNull();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // An oversized replacement deletes the older stored value, so a restart
+    // runs without a context rather than with the older one.
+    turns.setRequestContext({ body: { model: "fast" } });
+    turns.setRequestContext({ body: { big: "x".repeat(8_000_000) } });
+    expect(host.saved.at(-1)).toBeNull();
+    expect(turns.lastBody).toBeDefined();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

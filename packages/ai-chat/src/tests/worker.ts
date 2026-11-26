@@ -1378,13 +1378,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   setTestBody(body: Record<string, unknown>): void {
-    const context = (
-      this as unknown as {
-        _requestContext: { body: typeof body; persist(): void };
-      }
-    )._requestContext;
-    context.body = body;
-    context.persist();
+    this["_turns"].lastBody = body;
+    this["_turns"].storeRequestContext();
   }
 
   resetTurnStateForTest(): void {
@@ -4693,13 +4688,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     status: string | undefined;
     body: Record<string, unknown> | undefined;
   }> {
-    const self = this as unknown as {
-      _requestContext: {
-        set(context: { body: Record<string, unknown> | undefined }): void;
-      };
-      _lastBody: Record<string, unknown> | undefined;
-    };
-    self._requestContext.set({ body: { theme: "dark" } });
+    this["_turns"].setRequestContext({ body: { theme: "dark" } });
     const runId = crypto.randomUUID();
     if (recovered) {
       this._failingTurn = {
@@ -4716,7 +4705,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       inspection = await this.inspectAgentToolRun(runId);
     }
     await this["_turns"].waitForIdle();
-    return { status: inspection?.status, body: self._lastBody };
+    return { status: inspection?.status, body: this._lastBody };
   }
 
   /** The request id of the turn `onChatResponse` last started. */
@@ -5239,6 +5228,59 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   ): void {
     this._lastBody = body;
     this._lastClientTools = clientTools;
+  }
+
+  /**
+   * Leave the request context the way an earlier release did: rows in
+   * `cf_ai_chat_request_context` and no session value. Reset the isolate
+   * next, so the start reads them the way it does after an upgrade.
+   */
+  async seedLegacyRequestContextForTest(
+    lastClientTools: string | null,
+    lastBody: string | null
+  ): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS cf_ai_chat_request_context (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    );
+    // Null for both: the empty table every earlier release created.
+    if (lastClientTools !== null && lastBody !== null)
+      sql.exec(
+        "INSERT OR REPLACE INTO cf_ai_chat_request_context (key, value) VALUES ('lastClientTools', ?), ('lastBody', ?)",
+        lastClientTools,
+        lastBody
+      );
+    await this.sessions
+      .session()
+      .internal_setConfig("transcript:chat:request", null);
+  }
+
+  /** Reset this agent's isolate, as an eviction does. */
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
+
+  /** What this isolate holds, what is stored, and whether the old table is left. */
+  async requestContextStateForTest(): Promise<{
+    clientTools: string[] | null;
+    body: string | null;
+    stored: string | null;
+    tableLeft: boolean;
+  }> {
+    await this["_requestContextCarried"];
+    return {
+      clientTools: this._lastClientTools?.map((tool) => tool.name) ?? null,
+      body: JSON.stringify(this._lastBody ?? null),
+      stored: await this.sessions
+        .session()
+        .internal_config("transcript:chat:request"),
+      tableLeft:
+        this.ctx.storage.sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE name = 'cf_ai_chat_request_context'"
+          )
+          .toArray().length > 0
+    };
   }
 
   /** The next turn's response reader throws `message` after a partial. */
@@ -6193,6 +6235,46 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 
   /** Create the pre-capability chat stream tables with one stream in them. */
+  /** Old request-context rows, as an earlier release kept them, and no session value. */
+  async seedLegacyRequestContextForTest(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS cf_ai_chat_request_context (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    );
+    sql.exec(
+      "INSERT OR REPLACE INTO cf_ai_chat_request_context (key, value) VALUES ('lastBody', ?)",
+      JSON.stringify({ theme: "dark" })
+    );
+    await this.sessions
+      .session()
+      .internal_setConfig("transcript:chat:request", null);
+  }
+
+  /** Whether the old request-context table is left, the rows in it, and the stored value. */
+  async legacyRequestContextForTest(): Promise<{
+    tableLeft: boolean;
+    rowsLeft: number;
+    stored: string | null;
+  }> {
+    await this["_requestContextCarried"];
+    const sql = this.ctx.storage.sql;
+    const tableLeft =
+      sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE name = 'cf_ai_chat_request_context'"
+        )
+        .toArray().length > 0;
+    return {
+      tableLeft,
+      rowsLeft: tableLeft
+        ? sql.exec("SELECT 1 FROM cf_ai_chat_request_context").toArray().length
+        : 0,
+      stored: await this.sessions
+        .session()
+        .internal_config("transcript:chat:request")
+    };
+  }
+
   seedLegacyChatTablesForTest(): void {
     const sql = this.ctx.storage.sql;
     sql.exec(
@@ -7769,6 +7851,20 @@ type AgentToolFinishForTest = {
 };
 
 export class AIChatAgentToolParent extends Agent<Env> {
+  async seedChildLegacyRequestContextForTest(childName: string): Promise<void> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    await child.seedLegacyRequestContextForTest();
+  }
+
+  async childLegacyRequestContextForTest(childName: string): Promise<{
+    tableLeft: boolean;
+    rowsLeft: number;
+    stored: string | null;
+  }> {
+    const child = await this.subAgent(AIChatAgentToolChild, childName);
+    return child.legacyRequestContextForTest();
+  }
+
   async seedChildLegacyChatTablesForTest(childName: string): Promise<void> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);
     await child.seedLegacyChatTablesForTest();

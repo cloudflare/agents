@@ -39,7 +39,9 @@ import {
 import {
   classifyProviderError,
   reconcileOrphanPartial,
-  ChatRequestContext,
+  CHAT_REQUEST_CONTEXT_KEY,
+  requestContextFromLegacy,
+  storableRequestContext,
   interruptedToolPartAsError,
   type RepairedTranscriptSink,
   createChatFiberSnapshot,
@@ -398,7 +400,16 @@ export class AIChatAgent<
       isReplyStreaming: () => this._turns.liveReply !== null,
       streamingReply: () =>
         this._turns.liveReply?.accumulator.toMessage() ?? null,
-      clientToolNames: () => this._requestContext.clientToolNames(),
+      saveRequestContext: (json) => {
+        this.#session
+          .internal_setConfig(CHAT_REQUEST_CONTEXT_KEY, json)
+          .catch((error: unknown) => {
+            console.error(
+              "[AIChatAgent] Failed to store the request context:",
+              error
+            );
+          });
+      },
       hasActiveStream: () => this._resumableStream.hasActiveStream(),
       generateRequestId: () => nanoid(),
       keepAliveWhile: (fn) => this.keepAliveWhile(fn),
@@ -670,47 +681,89 @@ export class AIChatAgent<
   });
 
   /**
-   * The stored request context (the shared `ChatRequestContext`): the client
-   * tools and custom body of the most recent chat request, which tool
-   * continuations and `continueLastTurn` pass to `onChatMessage`. It owns
-   * when they change and writes them to SQLite so they survive hibernation.
+   * Load the last request context (the session's `transcript:chat:request`
+   * value). An agent from an earlier release kept it in
+   * `cf_ai_chat_request_context`: those rows are carried over once and the
+   * table dropped.
    */
-  private readonly _requestContext = new ChatRequestContext({
-    get: (key) =>
-      this.sql<{ value: string }>`
-        select value from cf_ai_chat_request_context where key = ${key}
-      `[0]?.value,
-    set: (key, json) => {
-      this.sql`
-        insert or replace into cf_ai_chat_request_context (key, value)
-        values (${key}, ${json})
-      `;
-    },
-    delete: (key) => {
-      this.sql`delete from cf_ai_chat_request_context where key = ${key}`;
+  /** The carry-forward of an earlier release's rows, while it runs (tests await it). */
+  private _requestContextCarried: Promise<void> | undefined;
+
+  private _restoreRequestContext(): void {
+    const stored = this.#session.internal_configNow(CHAT_REQUEST_CONTEXT_KEY);
+    if (stored !== null) {
+      this._turns.restoreRequestContext(stored);
+      return;
     }
-  });
+    let rows: Array<{ key: string; value: string }>;
+    try {
+      rows = this.ctx.storage.sql
+        .exec<{ key: string; value: string }>(
+          "SELECT key, value FROM cf_ai_chat_request_context"
+        )
+        .toArray();
+    } catch {
+      return; // No table: nothing kept by an earlier release.
+    }
+    // Nothing to carry: an earlier release created the table on every
+    // start. The root drops it; a sub-agent keeps it empty (no DROP there).
+    if (rows.length === 0) {
+      if (!storedAsFacet(this.ctx.storage.kv)) {
+        this.ctx.storage.sql.exec("DROP TABLE cf_ai_chat_request_context");
+      }
+      return;
+    }
+    const value = (key: string) => rows.find((row) => row.key === key)?.value;
+    const json = requestContextFromLegacy(
+      value("lastClientTools"),
+      value("lastBody")
+    );
+    this._turns.restoreRequestContext(json);
+    // Written through the session once it is ready (one over the row budget
+    // stays in memory only); the old rows go either way, so a later clear
+    // cannot bring them back.
+    this._requestContextCarried = this.#session
+      .internal_setConfig(
+        CHAT_REQUEST_CONTEXT_KEY,
+        storableRequestContext(json)
+      )
+      .catch((error: unknown) => {
+        console.error(
+          "[AIChatAgent] Failed to carry the request context forward:",
+          error
+        );
+      })
+      .finally(() => {
+        // A sub-agent empties the table instead: a DROP at a facet's start
+        // after an upgrade can reset its tree's storage.
+        this.ctx.storage.sql.exec(
+          storedAsFacet(this.ctx.storage.kv)
+            ? "DELETE FROM cf_ai_chat_request_context"
+            : "DROP TABLE IF EXISTS cf_ai_chat_request_context"
+        );
+      });
+  }
 
   /**
    * Client tool schemas from the most recent chat request.
-   * @internal
+   * @internal Kept for subclasses written against earlier releases.
    */
   protected get _lastClientTools(): ClientToolSchema[] | undefined {
-    return this._requestContext.clientTools;
+    return this._turns.lastClientTools;
   }
   protected set _lastClientTools(clientTools: ClientToolSchema[] | undefined) {
-    this._requestContext.clientTools = clientTools;
+    this._turns.lastClientTools = clientTools;
   }
 
   /**
    * Custom body data from the most recent chat request.
-   * @internal
+   * @internal Kept for subclasses written against earlier releases.
    */
   protected get _lastBody(): Record<string, unknown> | undefined {
-    return this._requestContext.body;
+    return this._turns.lastBody;
   }
   protected set _lastBody(body: Record<string, unknown> | undefined) {
-    this._requestContext.body = body;
+    this._turns.lastBody = body;
   }
 
   /** Default wait for trailing-edge debounced overlapping submits. */
@@ -883,10 +936,10 @@ export class AIChatAgent<
             this._chatRecoveryEngine().activeRootRequestId ?? requestId,
           continuation,
           messages: this.messages,
-          lastBody: context ? context.body : this._lastBody,
+          lastBody: context ? context.body : this._turns.lastBody,
           lastClientTools: context
             ? context.clientTools
-            : this._lastClientTools,
+            : this._turns.lastClientTools,
           originMessageIds: this._frames.originIds(requestId)
         })
       },
@@ -933,28 +986,15 @@ export class AIChatAgent<
             // capability `onStart`; the constructor never reads or writes the
             // transcript. Legacy lift and hydration happen in `onStart`.
 
-            // Key-value table for request context that must survive hibernation
-            // (e.g., custom body fields, client tools from the last chat request).
-            this.sql`create table if not exists cf_ai_chat_request_context (
-              key text primary key,
-              value text not null
-            )`;
-
             // Created here, as always, so the run table exists on every
             // agent whether or not it ever runs as a tool.
             this._agentToolRuns.store.ensure();
           }
         );
 
-        // Restore request context from SQLite (survives hibernation)
-        this._withAgentSpan(
-          "restore_chat_request_context",
-          "initialization",
-          { "cloudflare.agents.component": "ai_chat" },
-          () => {
-            this._requestContext.restore();
-          }
-        );
+        // The last request context, read now: boot recovery runs before
+        // onStart and needs the client tools.
+        this._restoreRequestContext();
 
         // Initialize resumable stream manager (creates its own tables + restores state)
         this._withAgentSpan(
@@ -1073,7 +1113,6 @@ export class AIChatAgent<
     const _onMessage = this.onMessage.bind(this);
     const protocol: ChatProtocolHost<Connection> = {
       turns: this._turns,
-      requestContext: this._requestContext,
       resumeHandshake: () => this._resumeHandshake(),
       emit: (type, payload) => this._emit(type, payload),
       chatRequest: (connection, request) =>
@@ -1141,7 +1180,7 @@ export class AIChatAgent<
         this._pendingResumeConnections.clear();
         this._preStream.releaseAwaiting();
         this._preStream.reset();
-        this._requestContext.clear();
+        this._turns.clearRequestContext();
         // `clearMessages()` above emptied `this.messages` through the
         // change feed.
         this._frames.broadcast({ type: MessageType.CF_AGENT_CHAT_CLEAR }, [
@@ -1265,7 +1304,7 @@ export class AIChatAgent<
         ? undefined
         : this._chatTurnFibers.requestContext(requestId);
     const pinned =
-      live !== undefined && live.lastClientTools !== this._lastClientTools
+      live !== undefined && live.lastClientTools !== this._turns.lastClientTools
         ? clientResolvableToolNames(live.lastClientTools ?? undefined)
         : undefined;
     return this._turns.settleInterruptedReply(
@@ -1370,7 +1409,7 @@ export class AIChatAgent<
     part: UIMessage["parts"][number]
   ): UIMessage["parts"][number] {
     return interruptedToolPartAsError(part, {
-      clientToolNames: this._requestContext.clientToolNames()
+      clientToolNames: this._turns.clientToolNames()
     });
   }
 
@@ -1907,7 +1946,7 @@ export class AIChatAgent<
         // a regenerate skipped above never ran, and leaves the
         // context that continuations and `continueLastTurn` read.
         const { clientTools: requestClientTools, body: requestBody } =
-          this._requestContext.set({ clientTools, body: customBody });
+          this._turns.setRequestContext({ clientTools, body: customBody });
 
         this._emit("message:request");
 
@@ -2353,8 +2392,8 @@ export class AIChatAgent<
       // read now that the turn starts.
       run: (continuation, abortSignal) =>
         this._runServerTurnReply(continuation.requestId, abortSignal, {
-          clientTools: this._lastClientTools,
-          body: this._lastBody,
+          clientTools: this._turns.lastClientTools,
+          body: this._turns.lastBody,
           continuation: true,
           connection: continuation.connection
         }),
@@ -2525,9 +2564,12 @@ export class AIChatAgent<
     }
   ): Promise<StreamResultStatus | undefined> {
     const { continuation } = turn;
-    const clientTools = pinnedOr(turn.clientTools, () => this._lastClientTools);
-    const body = pinnedOr(turn.body, () => this._lastBody);
-    if (turn.storeContext) this._requestContext.set({ clientTools, body });
+    const clientTools = pinnedOr(
+      turn.clientTools,
+      () => this._turns.lastClientTools
+    );
+    const body = pinnedOr(turn.body, () => this._turns.lastBody);
+    if (turn.storeContext) this._turns.setRequestContext({ clientTools, body });
     return this._runServerTurnReply(requestId, abortSignal, {
       clientTools,
       body,
@@ -3595,9 +3637,9 @@ export class AIChatAgent<
           partialParts: input.partial.parts as MessagePart[],
           recoveryData: input.recoveryData,
           messages: [...this.messages],
-          lastBody: input.snapshot?.lastBody ?? this._lastBody,
+          lastBody: input.snapshot?.lastBody ?? this._turns.lastBody,
           lastClientTools:
-            input.snapshot?.lastClientTools ?? this._lastClientTools,
+            input.snapshot?.lastClientTools ?? this._turns.lastClientTools,
           createdAt: input.createdAt
         }),
       // Only persist while the stream is still active. The ACK handler (client
@@ -3748,8 +3790,8 @@ export class AIChatAgent<
     const turnContext = this._chatTurnFibers.requestContext(
       input.requestId
     ) ?? {
-      lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastBody: this._turns.lastBody,
+      lastClientTools: this._turns.lastClientTools
     };
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;

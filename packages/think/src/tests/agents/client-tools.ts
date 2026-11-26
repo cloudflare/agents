@@ -1006,10 +1006,12 @@ export class ThinkClientToolsAgent extends Think {
     storedBody: Record<string, unknown>,
     lastBody: Record<string, unknown>
   ): Promise<{ ranWith: string; storedAfter: string }> {
-    const internals = this as unknown as {
-      _lastBody: Record<string, unknown> | undefined;
-    };
-    internals._lastBody = storedBody;
+    const internals = (
+      this as unknown as {
+        _turns: { lastBody: Record<string, unknown> | undefined };
+      }
+    )._turns;
+    internals.lastBody = storedBody;
     await this.startRecoveryContinueForTest({
       lastBody,
       lastClientTools: null
@@ -1018,7 +1020,7 @@ export class ThinkClientToolsAgent extends Think {
     // JSON text: an RPC return type cannot carry `unknown` values.
     return {
       ranWith: JSON.stringify(this._turnBodies.at(-1) ?? null),
-      storedAfter: JSON.stringify(internals._lastBody ?? null)
+      storedAfter: JSON.stringify(internals.lastBody ?? null)
     };
   }
 
@@ -1554,8 +1556,10 @@ export class ThinkClientToolsAgent extends Think {
 
   async getCapturedClientTools(): Promise<ClientToolSchema[] | undefined> {
     return (
-      this as unknown as { _lastClientTools: ClientToolSchema[] | undefined }
-    )._lastClientTools;
+      this as unknown as {
+        _turns: { lastClientTools: ClientToolSchema[] | undefined };
+      }
+    )._turns.lastClientTools;
   }
 
   /**
@@ -1572,18 +1576,18 @@ export class ThinkClientToolsAgent extends Think {
     polluteRegistry: boolean;
   }): Promise<boolean> {
     const internal = this as unknown as {
-      _lastClientTools: ClientToolSchema[] | undefined;
+      _turns: { lastClientTools: ClientToolSchema[] | undefined };
       _persistAssistantMessage: (msg: UIMessage) => Promise<void>;
       _settleInterruptedReply: (msg: UIMessage) => UIMessage;
       hasPendingInteraction: () => boolean;
     };
 
     if (opts.polluteRegistry) {
-      internal._lastClientTools = [
+      internal._turns.lastClientTools = [
         { name: "client_action", description: "A client tool" }
       ];
     } else {
-      internal._lastClientTools = undefined;
+      internal._turns.lastClientTools = undefined;
     }
 
     // The reply was cut off, so it is stored the way a cut-off reply is:

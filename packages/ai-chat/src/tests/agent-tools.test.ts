@@ -20,6 +20,12 @@ import { connectChatWS } from "./test-utils";
 
 type ParentStub = DurableObjectStub & {
   resetChildForTest(childName: string): Promise<void>;
+  seedChildLegacyRequestContextForTest(childName: string): Promise<void>;
+  childLegacyRequestContextForTest(childName: string): Promise<{
+    tableLeft: boolean;
+    rowsLeft: number;
+    stored: string | null;
+  }>;
   seedChildLegacyChatTablesForTest(childName: string): Promise<void>;
   childLegacyChatTablesForTest(
     childName: string
@@ -366,6 +372,19 @@ function getParent(name = crypto.randomUUID()) {
 }
 
 describe("AIChatAgent as an agent-tool child", () => {
+  it("a chat sub-agent empties the old request-context table at its next start instead of dropping it", async () => {
+    const parent = await getParent();
+    const childName = `legacy-context-${crypto.randomUUID()}`;
+    await parent.seedChildLegacyRequestContextForTest(childName);
+    await parent.resetChildForTest(childName);
+    const state = await parent.childLegacyRequestContextForTest(childName);
+    expect(state.tableLeft).toBe(true);
+    expect(state.rowsLeft).toBe(0);
+    expect(JSON.parse(state.stored ?? "null")).toEqual({
+      body: { theme: "dark" }
+    });
+  });
+
   it("a chat sub-agent empties the old chat stream tables at its next start instead of dropping them", async () => {
     // A facet that drops old indexed tables at its first start after an
     // upgrade can reset its tree's storage on a deployment. The facet is

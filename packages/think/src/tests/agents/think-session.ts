@@ -9863,8 +9863,10 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setLastBodyForTest(body: Record<string, unknown>): Promise<void> {
     (
-      this as unknown as { _lastBody: Record<string, unknown> | undefined }
-    )._lastBody = body;
+      this as unknown as {
+        _turns: { lastBody: Record<string, unknown> | undefined };
+      }
+    )._turns.lastBody = body;
   }
 
   async setWorkflowEventFailuresForTest(count: number): Promise<void> {
@@ -12993,44 +12995,107 @@ export class ThinkRecoveryTestAgent extends Think {
     await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
+  /**
+   * Leave the request context the way an earlier release did: the
+   * `think_config` keys `lastClientTools` and `lastBody`, and no session
+   * value. Reset the isolate next, so the start reads them as after an
+   * upgrade.
+   */
+  async seedLegacyRequestContextForTest(
+    lastClientTools: string,
+    lastBody: string
+  ): Promise<void> {
+    const config = (
+      this as unknown as {
+        _cfConfig: { set(key: string, value: string): void };
+      }
+    )._cfConfig;
+    config.set("lastClientTools", lastClientTools);
+    config.set("lastBody", lastBody);
+    await this.sessions
+      .session(this.session.sessionId)
+      .internal_setConfig("transcript:chat:request", null);
+  }
+
+  /** Reset this agent's isolate, as an eviction does. */
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
+
+  /** What this isolate holds, what is stored, and whether the old keys are left. */
+  async requestContextStateForTest(): Promise<{
+    clientTools: string[] | null;
+    body: string | null;
+    stored: string | null;
+    legacyLeft: boolean;
+  }> {
+    await (this as unknown as { _requestContextCarried?: Promise<void> })
+      ._requestContextCarried;
+    const internals = this as unknown as {
+      _cfConfig: { get(key: string): string | undefined };
+      _turns: {
+        lastClientTools?: ClientToolSchema[];
+        lastBody?: Record<string, unknown>;
+      };
+    };
+    return {
+      clientTools:
+        internals._turns.lastClientTools?.map((tool) => tool.name) ?? null,
+      body: JSON.stringify(internals._turns.lastBody ?? null),
+      stored: await this.sessions
+        .session(this.session.sessionId)
+        .internal_config("transcript:chat:request"),
+      legacyLeft:
+        internals._cfConfig.get("lastClientTools") !== undefined ||
+        internals._cfConfig.get("lastBody") !== undefined
+    };
+  }
+
   async setRequestContextForTest(
     body?: Record<string, unknown>,
     clientTools?: ClientToolSchema[]
   ): Promise<void> {
-    const internals = this as unknown as {
-      _lastBody?: Record<string, unknown>;
-      _lastClientTools?: ClientToolSchema[];
-    };
-    internals._lastBody = body;
-    internals._lastClientTools = clientTools;
+    const internals = (
+      this as unknown as {
+        _turns: {
+          lastBody?: Record<string, unknown>;
+          lastClientTools?: ClientToolSchema[];
+        };
+      }
+    )._turns;
+    internals.lastBody = body;
+    internals.lastClientTools = clientTools;
   }
 
   /**
    * Simulate the durable state a HITL turn leaves before a Durable Object
-   * restart: the client tools are persisted to the `think_config` store (where
-   * onStart's `_restoreClientTools()` reads them), while the IN-MEMORY cache is
+   * restart: the client tools are stored as the session's request-context
+   * value (where `_restoreRequestContext()` reads them), while the IN-MEMORY cache is
    * cleared to mimic a fresh wake whose onStart has not run yet. Used to
    * exercise the hibernation ordering guard in `_beginChatRecoveryIncident`.
    */
   async seedDurableClientToolsForTest(
     clientTools: ClientToolSchema[]
   ): Promise<void> {
-    const internals = this as unknown as {
-      _lastClientTools?: ClientToolSchema[];
-      _requestContext: { persist(): void };
-    };
-    internals._lastClientTools = clientTools;
-    internals._requestContext.persist();
-    internals._lastClientTools = undefined;
+    await this.sessions
+      .session(this.session.sessionId)
+      .internal_setConfig(
+        "transcript:chat:request",
+        JSON.stringify({ clientTools })
+      );
+    await this.clearInMemoryClientToolsForTest();
   }
 
-  /** Clear the in-memory client-tool cache (without touching the durable
-   *  `think_config` store) to simulate a fresh post-hibernation wake whose
-   *  onStart `_restoreClientTools()` has not run yet. */
+  /** Clear the in-memory client-tool cache (without touching the stored
+   *  session value) to simulate a fresh post-hibernation wake whose
+   *  `_restoreRequestContext()` has not run yet. */
   async clearInMemoryClientToolsForTest(): Promise<void> {
-    (
-      this as unknown as { _lastClientTools?: ClientToolSchema[] }
-    )._lastClientTools = undefined;
+    const internals = this as unknown as {
+      _turns: { lastClientTools?: ClientToolSchema[] };
+      _requestContextLoaded: boolean;
+    };
+    internals._turns.lastClientTools = undefined;
+    internals._requestContextLoaded = false;
   }
 
   async insertInterruptedStream(
