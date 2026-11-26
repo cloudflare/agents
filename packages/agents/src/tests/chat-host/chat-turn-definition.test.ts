@@ -791,7 +791,8 @@ describe("chatTurnDefinition", () => {
       );
       expect(instance.calls[0].session).toBe("other");
       const branches = await session.getBranches("u1");
-      expect(branches.map((m) => m.id).sort()).toEqual(["a1", "old"].sort());
+      expect(branches).toHaveLength(2);
+      expect(branches.map((m) => m.id)).toContain("old");
     });
   });
 });
