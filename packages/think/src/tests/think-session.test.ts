@@ -3171,7 +3171,7 @@ describe("Think — saveMessages with external AbortSignal", () => {
     );
 
     const { result, persistedMessageCount, lastResponseStatus } =
-      await agent.testSaveMessagesAbortMidStream("Long response", 100);
+      await agent.testSaveMessagesAbortMidStream("Long response", 2);
 
     expect(result.status).toBe("aborted");
     // The caller stopped it.
@@ -3216,7 +3216,7 @@ describe("Think — saveMessages with external AbortSignal", () => {
 
     await agent.testSaveMessagesWithSignal("Pre-abort 1", { preAbort: true });
     await agent.testSaveMessagesWithSignal("Pre-abort 2", { preAbort: true });
-    await agent.testSaveMessagesAbortMidStream("Mid abort", 50);
+    await agent.testSaveMessagesAbortMidStream("Mid abort", 1);
 
     const count = await agent.getAbortControllerCount();
     expect(count).toBe(0);
@@ -3226,7 +3226,7 @@ describe("Think — saveMessages with external AbortSignal", () => {
     const agent = await freshProgrammaticAgent("ext-abort-recover");
     await agent.setDelayedChunkResponse(["1 ", "2 ", "3 ", "4 "], 50);
 
-    const aborted = await agent.testSaveMessagesAbortMidStream("Abort me", 75);
+    const aborted = await agent.testSaveMessagesAbortMidStream("Abort me", 1);
     expect(aborted.result.status).toBe("aborted");
 
     await agent.clearDelayedChunkResponse();
