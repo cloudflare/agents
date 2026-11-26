@@ -237,16 +237,36 @@ function roles(run: Run, expected: string): Run {
   return run;
 }
 
-/** Every user message is followed by an assistant message. */
-function answered(run: Run): Run {
+/**
+ * Every user message is followed by an assistant message, and when
+ * `finalText` is given the last reply carries it (the recovered turn's
+ * text, not only what streamed before the reset).
+ */
+function answered(run: Run, finalText?: string): Run {
   const got = run.state.messages.map((m) => m.role[0]).join("");
-  if (/u(?!a)/.test(got))
-    run.checks.push(`a user message has no reply: ${got}`);
+  if (!got || /u(?!a)/.test(got))
+    run.checks.push(`a user message has no reply: ${got || "(empty)"}`);
+  const last = run.state.messages[run.state.messages.length - 1];
+  const text = (last?.parts ?? [])
+    .map((p) => (p.type === "text" ? p.text : ""))
+    .join("");
+  if (finalText && !text.includes(finalText)) {
+    run.checks.push(`the last reply lacks "${finalText}": ${text.slice(-80)}`);
+  }
   return run;
 }
 
-/** The approval was found and the approved action ran. */
-function approvedRan(run: Run, approved: CtlResult): Run {
+/**
+ * The approval was found, the approved action ran, and the continuation it
+ * started ended with `continuation` (`completed`, or `aborted` when stopped).
+ */
+function approvedRan(run: Run, approved: CtlResult, continuation: string): Run {
+  const cont = run.state.responses.filter((r) => r.continuation);
+  if (cont.length !== 1 || cont[0].status !== continuation) {
+    run.checks.push(
+      `approval continuation: ${JSON.stringify(cont.map((r) => r.status))}, not one ${continuation}`
+    );
+  }
   const out = (approved.value as { out?: string } | null)?.out;
   if (!out?.includes("paused-exec")) {
     run.checks.push(
@@ -854,7 +874,15 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     // Stop inside the 10 s backoff the 429 asked for.
     await untilEvent(cls, room, "chat:recovery:scheduled");
     tab.send({ type: MT.CANCEL, id });
-    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+    // The stop closes the incident at once; stay quiet past the 10 s the
+    // backoff asked for, so a retry that ignored the stop is seen.
+    return finish(
+      cls,
+      room,
+      [tab],
+      { reqId: id.slice(0, 14) },
+      { quietMs: 12_000 }
+    );
   },
   // #3241: a request sent while a recovery waits out its backoff is answered after the recovered reply.
   async recNewDuringBackoff(cls: Cls) {
@@ -925,8 +953,9 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     await waitToolInput(tab, "getUserLocation");
-    // The stall is called and the attempt waits for the client's answer.
-    await untilEvent(cls, room, "chat:recovery:attempt");
+    // The attempt is scheduled and then waits for the client's answer; no
+    // event marks the wait itself.
+    await untilEvent(cls, room, "chat:recovery:scheduled");
     tab.send({ type: MT.CANCEL, id });
     return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
   },
@@ -948,7 +977,9 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       clientTools: CLIENT_TOOLS
     });
     const input = await waitToolInput(tab, "getUserLocation");
-    await untilEvent(cls, room, "chat:recovery:attempt");
+    // The attempt is scheduled and then waits for the client's answer; no
+    // event marks the wait itself.
+    await untilEvent(cls, room, "chat:recovery:scheduled");
     tab.send({ type: MT.CANCEL, id });
     // Answer after the stop has ended the request.
     await tab.waitFor(
@@ -1090,7 +1121,11 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     const tab2 = await openTab(cls, room);
     tab2.send({ type: MT.RESUME_REQUEST });
     // The request the reset cut off is still answered.
-    return answered(await finish(cls, room, [tab2], {}, { maxMs: 120000 }));
+    // Recovery's next turn is the script's TEXT(8).
+    return answered(
+      await finish(cls, room, [tab2], {}, { maxMs: 120000 }),
+      "w8 "
+    );
   },
   async vResetDuringBackoff(cls: Cls) {
     // Think: a 429 schedules a recovery with a 10 s backoff; a reset during the wait, then a second interruption detected on restart
@@ -1116,7 +1151,11 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     const tab2 = await openTab(cls, room);
     tab2.send({ type: MT.RESUME_REQUEST });
     // The request the reset cut off is still answered.
-    return answered(await finish(cls, room, [tab2], {}, { maxMs: 120000 }));
+    // Think retries after its backoff; AIChatAgent ends the turn on the 429.
+    return answered(
+      await finish(cls, room, [tab2], {}, { maxMs: 120000 }),
+      cls === "think" ? "w8 " : undefined
+    );
   },
   async vDeclineInAttempt(cls: Cls) {
     const { room, tab } = await setup(cls, {
@@ -1266,7 +1305,14 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
     // R1's model call got the 429: stop R1 inside its backoff.
     await untilEvent(cls, room, "chat:recovery:scheduled", 2);
     tab.send({ type: MT.CANCEL, id: f.id });
-    return finish(cls, room, [tab], { r1: f.id?.slice(0, 14) });
+    // As above: quiet past the 10 s backoff.
+    return finish(
+      cls,
+      room,
+      [tab],
+      { r1: f.id?.slice(0, 14) },
+      { quietMs: 12_000 }
+    );
   },
 
   // ── 5. D32, D21, connection-less continuation ──
@@ -1373,7 +1419,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
         pending: pending.value ?? pending.error,
         approved: approved.value ?? approved.error
       }),
-      approved
+      approved,
+      "completed"
     );
   },
   async approveRpcStop(cls: Cls) {
@@ -1408,7 +1455,8 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       await finish(cls, room, [tab], {
         approved: approved.value ?? approved.error
       }),
-      approved
+      approved,
+      "aborted"
     );
   }
 };
