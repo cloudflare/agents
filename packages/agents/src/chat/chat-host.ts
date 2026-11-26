@@ -140,6 +140,79 @@ export function chatTurnStreamId(requestId: string): string {
   return `chat-turn:${requestId}`;
 }
 
+/** The chunks a stream holds now, without waiting for more. */
+async function storedChunks(
+  streams: Streams,
+  streamId: string
+): Promise<UIMessageChunk[]> {
+  const chunks: UIMessageChunk[] = [];
+  const stop = new AbortController();
+  try {
+    for await (const batch of streams.readBatches(streamId, {
+      signal: stop.signal,
+      onUpToDate: () => stop.abort()
+    })) {
+      for (const item of batch) {
+        chunks.push(item.chunk as unknown as UIMessageChunk);
+      }
+      if (stop.signal.aborted) break;
+    }
+  } catch (error) {
+    if (!stop.signal.aborted) throw error;
+  }
+  return chunks;
+}
+
+/** The message a list of chunks builds, continuing `message` when given. */
+async function messageOf(
+  chunks: ReadableStream<UIMessageChunk>,
+  message?: UIMessage,
+  each?: (snapshot: UIMessage) => void
+): Promise<UIMessage | undefined> {
+  let last = message;
+  for await (const snapshot of readUIMessageStream({
+    stream: chunks,
+    ...(message && { message })
+  })) {
+    last = snapshot;
+    each?.(snapshot);
+  }
+  return last;
+}
+
+/** A tool part whose call the interruption cut off before its output. */
+function isCutOffTool(part: UIMessage["parts"][number]): boolean {
+  const type = (part as { type?: unknown }).type;
+  const state = (part as { state?: unknown }).state;
+  return (
+    typeof type === "string" &&
+    (type.startsWith("tool-") || type === "dynamic-tool") &&
+    (state === "input-streaming" || state === "input-available")
+  );
+}
+
+/**
+ * Settle each tool part the interruption cut off: through the host's hook,
+ * or reported to the model as interrupted.
+ */
+function repairCutOffTools(message: UIMessage, hooks?: ChatHooks): UIMessage {
+  return {
+    ...message,
+    parts: message.parts.map((part) => {
+      if (!isCutOffTool(part)) return part;
+      const toolPart = part as InterruptedToolPart;
+      return (
+        hooks?.repairInterruptedToolPart?.(toolPart) ??
+        ({
+          ...toolPart,
+          state: "output-error",
+          errorText: "The tool call was interrupted before it finished."
+        } as InterruptedToolPart)
+      );
+    })
+  };
+}
+
 /** Read what `respond` returned as UI message chunks. */
 function chunksOf(source: ChatModelStream): ReadableStream<UIMessageChunk> {
   if (source instanceof ReadableStream) return source;
@@ -182,14 +255,47 @@ export function chatTurnDefinition(
     const requestId = step.id;
     const sessionId = deps.session ?? "";
     const session = deps.sessions.session(sessionId);
+    const streamId = chatTurnStreamId(requestId);
+    const report = async (result: ChatTurnResult) => {
+      await host.hooks?.onResponse?.(result);
+      return result;
+    };
+
+    // An earlier attempt of this run was cut off: what it streamed is the
+    // reply this attempt continues.
+    const earlier = await deps.streams.status(streamId);
+    if (earlier && earlier.state !== "streaming") {
+      return report({
+        requestId,
+        status: earlier.state === "completed" ? "completed" : "error"
+      });
+    }
+    let partial: UIMessage | undefined;
+    if (earlier) {
+      const stored = await storedChunks(deps.streams, streamId);
+      const built = await messageOf(
+        new ReadableStream({
+          start(controller) {
+            for (const chunk of stored) controller.enqueue(chunk);
+            controller.close();
+          }
+        })
+      );
+      if (built && built.parts.length > 0) {
+        partial = repairCutOffTools(built, host.hooks);
+        await session.upsertMessage(partial as never);
+      }
+    }
+
     const messages = (await session.getHistory()) as unknown as UIMessage[];
     const call: ChatModelCall = {
       session: sessionId,
       requestId,
       attempt: step.attempt,
-      mode: "answer",
+      mode: partial ? "continue" : "answer",
       trigger: run.trigger ?? "submit-message",
       ...(run.questionId !== undefined && { questionId: run.questionId }),
+      ...(partial && { replyId: partial.id }),
       messages,
       clientTools: run.clientTools ?? [],
       ...(run.body !== undefined && { body: run.body }),
@@ -198,19 +304,19 @@ export function chatTurnDefinition(
         step.do(name, () => fn() as Promise<TaskValue>) as Promise<T>
     };
     const source = await host.respond(call);
-    if (!source) {
-      const skipped: ChatTurnResult = { requestId, status: "skipped" };
-      await host.hooks?.onResponse?.(skipped);
-      return skipped;
-    }
-    const writer = await deps.streams.open(chatTurnStreamId(requestId), {
-      tag: requestId
-    });
-    let parts: UIMessage["parts"] = [];
+    if (!source) return report({ requestId, status: "skipped" });
+
+    const writer = await deps.streams.open(streamId, { tag: requestId });
+    let parts: UIMessage["parts"] = partial?.parts ?? [];
     const recorded = chunksOf(source).pipeThrough(
       new TransformStream<UIMessageChunk, UIMessageChunk>({
         transform(chunk, controller) {
-          const out = host.hooks?.transformChunk?.(chunk, parts) ?? chunk;
+          // A continuation keeps the reply's id.
+          const own =
+            partial && chunk.type === "start"
+              ? ({ ...chunk, messageId: partial.id } as UIMessageChunk)
+              : chunk;
+          const out = host.hooks?.transformChunk?.(own, parts) ?? own;
           writer.append(out as never);
           controller.enqueue(out);
         }
@@ -218,32 +324,27 @@ export function chatTurnDefinition(
     );
     let reply: UIMessage | undefined;
     try {
-      for await (const snapshot of readUIMessageStream({ stream: recorded })) {
-        reply = snapshot;
+      reply = await messageOf(recorded, partial, (snapshot) => {
         parts = snapshot.parts;
-      }
+      });
     } catch (error) {
-      writer.error(error instanceof Error ? error.message : String(error));
-      const failed: ChatTurnResult = {
+      const text = error instanceof Error ? error.message : String(error);
+      writer.error(text);
+      return report({
         requestId,
         status: step.signal.aborted ? "aborted" : "error",
-        error: error instanceof Error ? error.message : String(error)
-      };
-      await host.hooks?.onResponse?.(failed);
-      return failed;
+        error: text
+      });
     }
     if (reply && reply.parts.length > 0) {
-      const stored = host.hooks?.sanitizeForPersistence?.(reply) ?? reply;
-      await session.appendMessage(stored as never);
-      reply = stored;
+      reply = host.hooks?.sanitizeForPersistence?.(reply) ?? reply;
+      await session.upsertMessage(reply as never);
     }
     writer.close();
-    const result: ChatTurnResult = {
+    return report({
       requestId,
       status: "completed",
       ...(reply && reply.parts.length > 0 && { messageId: reply.id })
-    };
-    await host.hooks?.onResponse?.(result);
-    return result;
+    });
   };
 }
