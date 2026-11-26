@@ -12,6 +12,7 @@ import type { Connection } from "agents";
 import type { UIMessage } from "ai";
 import {
   chatTurnStreamId,
+  liveTurnsOf,
   parkedIn,
   releaseParked,
   type ChatDeps,
@@ -183,6 +184,30 @@ async function applyAnswer(
           answer.approved,
           answer.approvalId
         );
+  // The call is in the reply streaming now: the answer joins that stream.
+  const live = liveTurnsOf(deps.streams).get(deps.session ?? "");
+  if (live && answer.kind === "result") {
+    if (live.waitsOn(answer.toolCallId)) {
+      live.inject(
+        (answer.state === "output-error"
+          ? {
+              type: "tool-output-error",
+              toolCallId: answer.toolCallId,
+              errorText: answer.errorText ?? "The tool failed."
+            }
+          : {
+              type: "tool-output-available",
+              toolCallId: answer.toolCallId,
+              output: answer.output
+            }) as never
+      );
+      // The continuation waits behind the streaming turn in the lane.
+      if (options.autoContinue) {
+        await submitTurn(deps, lane, { trigger: "tool-answer" });
+      }
+      return true;
+    }
+  }
   const session = deps.sessions.session(deps.session ?? "");
   // The call is almost always in the latest reply: read the whole path only
   // when it is not there.

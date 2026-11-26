@@ -484,4 +484,75 @@ describe("chat functions over a minimal host", () => {
       instance.host.respond = respond;
     });
   });
+
+  it("a tool result that arrives while the reply streams joins it, and continues after it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let asked!: () => void;
+      const toolAsked = new Promise<void>((resolve) => (asked = resolve));
+      const respond = instance.host.respond;
+      let first = true;
+      instance.host.respond = async (call) => {
+        if (!first) return respond(call);
+        first = false;
+        return new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "start", messageId: "a1" });
+            controller.enqueue({
+              type: "tool-input-available",
+              toolCallId: "c1",
+              toolName: "locate",
+              input: {}
+            });
+            await released;
+            controller.close();
+          }
+        });
+      };
+      const hooks = instance.host.hooks as {
+        transformChunk?: (chunk: { type: string }) => unknown;
+      };
+      hooks.transformChunk = (chunk) => {
+        if (chunk.type === "tool-input-available") asked();
+        return chunk;
+      };
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Where?")
+      );
+      await toolAsked;
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "c1",
+          toolName: "locate",
+          output: { city: "Lisbon" },
+          autoContinue: true
+        })
+      );
+      release();
+      await instance.resultFor("r1");
+      // The continuation ran after the reply, in lane order.
+      while (instance.results.length < 2) await instance.nextResult();
+      const continued = instance.calls[0];
+      expect(continued?.trigger).toBe("tool-answer");
+      const reply = JSON.stringify(
+        (await instance.sessions.session("s1").getHistory()).find(
+          (m) => m.id === "a1"
+        )
+      );
+      expect(reply).toContain("output-available");
+      expect(reply).toContain("Lisbon");
+      instance.host.respond = respond;
+      delete hooks.transformChunk;
+    });
+  });
 });
