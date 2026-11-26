@@ -522,6 +522,18 @@ export class TestAgentToolReplayAgent extends Agent {
     );
   }
 
+  /**
+   * A facet (the stub child) carries a released awaited row forward; what
+   * is left of its released table, and the run it became.
+   */
+  async carryForwardReleasedInFacetForTest(childName: string): Promise<{
+    tableRows: number | null;
+    status: string | null;
+  }> {
+    const child = await this.subAgent(TestAgentToolStubChild, childName);
+    return child.carryForwardReleasedRowForTest();
+  }
+
   /** Stands in for the released backbone callback a schedule row names. */
   async _cfDetachedReconcileTick(): Promise<void> {}
 
@@ -1355,6 +1367,47 @@ export class TestAgentToolReplayAgent extends Agent {
  * wakes a hibernated DO can still replay them via `getAgentToolChunks`.
  */
 export class TestAgentToolStubChild extends Agent {
+  /**
+   * Seed one settled awaited row the way a released version kept it, carry
+   * it forward, and report the table (`null` once dropped) and the run.
+   */
+  async carryForwardReleasedRowForTest(): Promise<{
+    tableRows: number | null;
+    status: string | null;
+  }> {
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, agent_type, status, summary, display_order, started_at,
+        completed_at, detached
+      ) VALUES (
+        'released-in-facet', 'TestAgentToolStubChild', 'completed', 'done', 0,
+        ${Date.now()}, ${Date.now()}, 0
+      )
+    `;
+    const agentTools = (
+      this as unknown as {
+        _agentTools: { _carryForwardAgentToolRuns(): Promise<void> };
+      }
+    )._agentTools;
+    await agentTools._carryForwardAgentToolRuns();
+    const table =
+      this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM sqlite_master
+        WHERE type = 'table' AND name = 'cf_agent_tool_runs'
+      `[0]?.n === 1;
+    return {
+      tableRows: table
+        ? Number(
+            this.ctx.storage.sql
+              .exec("SELECT COUNT(*) AS n FROM cf_agent_tool_runs")
+              .one().n
+          )
+        : null,
+      status: this.tasks.peek("released-in-facet")?.status ?? null
+    };
+  }
+
   private _ensureTables(): void {
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_test_stub_chunks (

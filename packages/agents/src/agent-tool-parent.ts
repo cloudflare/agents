@@ -154,6 +154,8 @@ export interface AgentToolParentHost {
   options(): Agent["_resolvedOptions"];
   maxConcurrentAgentTools(): number;
   readonly className: string;
+  /** Whether the agent runs as a facet (read once its start knows). */
+  isFacet(): boolean;
   /** A method of the agent by name, bound to it; `undefined` if none. */
   method(name: string): ((...args: never[]) => unknown) | undefined;
   resolveChild: Agent["_cf_resolveSubAgent"];
@@ -1386,7 +1388,9 @@ export class AgentToolParent {
       // holds the chat lane a delivery waits for: it never delivers. The
       // tail's end, or the first check, wakes the run.
       return TaskSettlement.park("child", {
-        until: this._detachedNextCheck(step, budget)
+        until: this._detachedNextCheck(step, budget, {
+          lastSignalAt: meta.startedAt
+        })
       });
     }
 
@@ -1415,7 +1419,7 @@ export class AgentToolParent {
         return this._detachedGiveUpResult(meta, runId, false, true);
       }
       return TaskSettlement.park("child", {
-        until: this._detachedNextCheck(step, budget)
+        until: this._detachedNextCheck(step, budget, { gaveUp: true })
       });
     }
 
@@ -1441,13 +1445,7 @@ export class AgentToolParent {
       now - lastSignalAt >= noProgress;
     if (!overAbsolute && !overNoProgress) {
       return TaskSettlement.park("child", {
-        until: this._detachedNextCheck(
-          step,
-          budget,
-          typeof noProgress === "number" && Number.isFinite(noProgress)
-            ? lastSignalAt + noProgress
-            : undefined
-        )
+        until: this._detachedNextCheck(step, budget, { lastSignalAt })
       });
     }
 
@@ -1503,7 +1501,7 @@ export class AgentToolParent {
     // result is delivered too (#1752).
     step.checkpoint.set("gaveUp", true);
     return TaskSettlement.park("child", {
-      until: this._detachedNextCheck(step, budget)
+      until: this._detachedNextCheck(step, budget, { gaveUp: true })
     });
   }
 
@@ -1586,21 +1584,39 @@ export class AgentToolParent {
 
   /**
    * When a waiting detached run checks on its child next: the backbone's
-   * escalating cadence, never past the run's next budget deadline.
+   * escalating cadence, never past a budget deadline (the absolute one, and
+   * the no-progress one counted from `lastSignalAt` when the window is on).
+   * A run that already gave up, still following a child whose teardown was
+   * unconfirmed, has no deadline left: it keeps to the cadence.
    */
   private _detachedNextCheck(
     step: TaskStep,
     budget: NonNullable<AgentToolTaskMeta["detached"]>,
-    noProgressAt?: number
+    {
+      lastSignalAt,
+      gaveUp = false
+    }: { lastSignalAt?: number; gaveUp?: boolean }
   ): number {
+    const now = Date.now();
     const index = Math.min(
       Math.max(0, step.attempt - 1),
       DETACHED_BACKBONE_CADENCE_S.length - 1
     );
+    const window = budget.noProgressBudgetMs;
+    const deadlines = gaveUp
+      ? []
+      : [
+          budget.maxBudgetAt,
+          lastSignalAt !== undefined &&
+          typeof window === "number" &&
+          window > 0 &&
+          Number.isFinite(window)
+            ? lastSignalAt + window
+            : Number.POSITIVE_INFINITY
+        ];
     return Math.min(
-      Date.now() + DETACHED_BACKBONE_CADENCE_S[index] * 1000,
-      budget.maxBudgetAt,
-      noProgressAt ?? Number.POSITIVE_INFINITY
+      now + DETACHED_BACKBONE_CADENCE_S[index] * 1000,
+      ...deadlines
     );
   }
 
@@ -1864,8 +1880,8 @@ export class AgentToolParent {
 
   /**
    * Carry the runs an earlier version kept in `cf_agent_tool_runs` into
-   * their tasks, once, then drop the table and the released backbone's
-   * schedule rows.
+   * their tasks, once, then drop the table (a facet empties it instead) and
+   * the released backbone's schedule rows.
    *
    * - A settled awaited row becomes a settled run with its result; a result
    *   too large for a Task value goes in the run's input (parted), and its
@@ -1903,6 +1919,12 @@ export class AgentToolParent {
         event_delivery?: string | null;
       }
     >;
+    // A facet empties the table instead of dropping it: a facet dropping
+    // old indexed tables at its first start after an upgrade can reset its
+    // tree's storage on a deployment (RUNTIME-FACTS). An emptied table is
+    // skipped at the next start.
+    const facet = this.host.isFacet();
+    if (facet && rows.length === 0) return;
     for (const row of rows) {
       try {
         await this.host.tasks.importRun(this._agentToolRunFromLegacyRow(row));
@@ -1924,7 +1946,7 @@ export class AgentToolParent {
     const left = sql
       .exec("SELECT COUNT(*) AS n FROM cf_agent_tool_runs")
       .one() as { n: number };
-    if (left.n === 0) sql.exec("DROP TABLE cf_agent_tool_runs");
+    if (left.n === 0 && !facet) sql.exec("DROP TABLE cf_agent_tool_runs");
   }
 
   /** The Task run a released `cf_agent_tool_runs` row becomes. */

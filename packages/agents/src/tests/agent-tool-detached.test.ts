@@ -231,6 +231,43 @@ describe("detached agent-tool runs on Tasks", () => {
     expect(await agent.getDetachedDeliveryLog()).toEqual([]);
   });
 
+  it("checks first at its no-progress deadline when that comes before the cadence", async () => {
+    const agent = await parent("detached-short-window");
+    await agent.startDetachedForTest(
+      "run-short",
+      { chunkBodies: [], staysRunning: true, tailHangs: true },
+      { noProgressBudgetMs: 1_000 }
+    );
+    const first = await agent.detachedStateForTest("run-short");
+    expect(first).toMatchObject({ status: "pending", waitReason: "park" });
+    expect(first.nextInMs).toBeLessThanOrEqual(1_000);
+  });
+
+  it("keeps to the cadence with the no-progress window off (0)", async () => {
+    const agent = await parent("detached-window-off");
+    await agent.startDetachedForTest(
+      "run-window-off",
+      { chunkBodies: [], staysRunning: true },
+      { noProgressBudgetMs: 0 }
+    );
+    const state = await agent.checkDetachedForTest("run-window-off");
+    expect(state).toMatchObject({ status: "pending", waitReason: "park" });
+    expect(state.nextInMs).toBeGreaterThan(1_000);
+    expect(await agent.getDetachedDeliveryLog()).toEqual([]);
+  });
+
+  it("keeps to the cadence after a give-up whose teardown is unconfirmed", async () => {
+    const agent = await parent("detached-gave-up-cadence");
+    await agent.startDetachedForTest(
+      "run-gave-up",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
+    );
+    const state = await agent.checkDetachedForTest("run-gave-up");
+    expect(state).toMatchObject({ status: "pending", waitReason: "park" });
+    expect(state.nextInMs).toBeGreaterThan(1_000);
+  });
+
   it("delivers a finish again after its callback failed once", async () => {
     const agent = await parent("detached-finish-retry");
     await agent.startDetachedForTest(
@@ -354,6 +391,13 @@ describe("detached agent-tool runs on Tasks", () => {
 });
 
 describe("detached agent-tool runs a released version left", () => {
+  it("in a facet carries the rows and empties the table instead of dropping it", async () => {
+    const agent = await parent("facet-carry");
+    expect(
+      await agent.carryForwardReleasedInFacetForTest("facet-carry-child")
+    ).toEqual({ tableRows: 0, status: "completed" });
+  });
+
   it("carries every ledger state into task runs, drops the table, and cancels the backbone's schedule", async () => {
     const agent = await parent("detached-carry");
     await agent.seedReleasedDetachedRowsForTest();

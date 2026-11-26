@@ -1102,6 +1102,7 @@ export class Agent<
       options: () => this._resolvedOptions,
       maxConcurrentAgentTools: () => this.maxConcurrentAgentTools,
       className: this.constructor.name,
+      isFacet: () => this._isFacet,
       method: (name) => {
         const value = (this as unknown as Record<string, unknown>)[name];
         return typeof value === "function"
