@@ -71,7 +71,10 @@ describe("Streams instances", () => {
         "cf_agents_streams",
         "idx_cf_agents_streams_tag"
       ]);
-      expect(storage.kv.get("cf_agents:streams_schema_version")).toBe(2);
+      expect(
+        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
+          ?.streams
+      ).toBe(2);
     });
   });
 
@@ -221,7 +224,9 @@ describe("Streams instances", () => {
       resumed.close();
       expect(await collect(plain.read("live"))).toHaveLength(2);
       expect(
-        storage.kv.get("cf_agents:streams/audit:streams_schema_version")
+        storage.kv.get<Record<string, number>>("cf_agents:schema_versions")?.[
+          "streams/audit"
+        ]
       ).toBe(2);
     });
   });
