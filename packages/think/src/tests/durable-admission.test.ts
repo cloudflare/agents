@@ -424,9 +424,9 @@ describe("a client tool call a reset cut off", () => {
             frame.id !== "r1" &&
             frame.done !== true
         );
-      const seen = streamed(frames)
-        ? await waitFor(async () => frames, done, 10_000)
-        : frames;
+      // A replay can arrive after the transcript read: give it time, then
+      // judge what the tab got.
+      const seen = await waitFor(async () => frames, done, 5_000);
       return {
         stored,
         streamed: streamed(seen),
