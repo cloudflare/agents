@@ -264,11 +264,12 @@ async onImportDone(run: AgentToolRunInfo, result: AgentToolLifecycleResult) {
 
 Key behaviors:
 
-- **Durable completion.** Delivery survives eviction and deploys: a warm fast
-  path delivers with low latency while the isolate is alive, and a
-  self-scheduling reconcile backbone finalizes anything the fast path missed.
-  Delivery is exactly-once on the happy path; under a crash it is at-least-once,
-  so `onFinish` handlers must be idempotent.
+- **Durable completion.** Delivery survives eviction and deploys: while the
+  isolate is alive the parent follows the child's stream and delivers as soon
+  as it ends, and after an eviction the run checks on the child on a cadence
+  that starts at 5 seconds and rises to 2 minutes. Delivery is exactly-once on
+  the happy path; under a crash it is at-least-once, so `onFinish` handlers
+  must be idempotent.
 - **Give-up vs. finish are independent.** A budget give-up is delivered as
   `status: "interrupted"`, `reason: "budget-exceeded"`. Because `interrupted` is
   soft, a child that completes after the give-up still re-fires `onFinish` with
@@ -323,7 +324,7 @@ or `null`. **`null` does not mean "failed"** — it means the child has no recor
 of that run _yet_. This is normal immediately after dispatch (the child may
 still be persisting its first row) and is also what a freshly-rehydrated child
 returns before it has lazily reconciled a stale `running` row. Callers — and the
-framework's own reconcile backbone — treat `null` as "not terminal, keep
+framework's own checks — treat `null` as "not terminal, keep
 watching within budget", never as a terminal failure. Only a non-`null`
 inspection with a terminal `status` (`completed` / `error` / `aborted`)
 finalizes a run.
@@ -492,12 +493,13 @@ a human turn.
 
 ### Resetting no-progress budget for detached runs
 
-Once a detached child has reported at least one signal, the reconcile backbone
-gives up if the run then goes silent for `detachedNoProgressBudgetMs` (default 1
-hour; per-run override via `detached: { noProgressBudgetMs }`). This surfaces as
-`status: "interrupted"`, `reason: "no-progress"`. A child that never reports is
-bounded only by the absolute `detachedMaxBudgetMs` ceiling — a run is never
-given up on merely for being slow. Set `noProgressBudgetMs` to `0` or `Infinity`
+The parent gives up on a detached run that goes silent for
+`detachedNoProgressBudgetMs` (default 1 hour; per-run override via
+`detached: { noProgressBudgetMs }`), counted from the child's latest progress
+report or milestone, or from the start of the run if the child has not reported
+yet. This surfaces as `status: "interrupted"`, `reason: "no-progress"`. A child
+that keeps reporting is bounded only by the absolute `detachedMaxBudgetMs`
+ceiling — a run is never given up on merely for being slow. Set `noProgressBudgetMs` to `0` or `Infinity`
 to disable the resetting window for a run.
 
 ### Deliver only progress and the final result

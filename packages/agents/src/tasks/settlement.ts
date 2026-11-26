@@ -28,11 +28,18 @@ export class TaskSettlement {
   }
 
   /**
-   * Leave the run `pending` with wait reason `park` and no deadline, its
-   * lane held by it, until `Tasks.settle()` ends it.
+   * Leave the run `pending` with wait reason `park`, its lane held by it,
+   * until `Tasks.settle()` ends it, or, with `until` (epoch ms), until then:
+   * its next attempt runs at `until` if nothing settled it first.
    */
-  static park(reason?: string): TaskSettlement {
-    return new TaskSettlement("park", reason, undefined);
+  static park(reason?: string, options?: { until?: number }): TaskSettlement {
+    const until = options?.until;
+    if (until !== undefined && !Number.isFinite(until)) {
+      throw new TypeError(
+        `TaskSettlement.park: \`until\` must be finite, got ${until}`
+      );
+    }
+    return new TaskSettlement("park", reason, undefined, until);
   }
 
   /**

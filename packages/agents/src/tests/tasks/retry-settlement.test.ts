@@ -117,4 +117,67 @@ describe("Tasks retry settlement", () => {
       });
     });
   });
+
+  it("runs a run parked with a deadline again when the deadline passes", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    const until = Date.now() - 1;
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        instance.tasks.register(retrying, async (_input, step) =>
+          step.attempt === 1
+            ? TaskSettlement.park("child", { until })
+            : `attempt ${step.attempt}`
+        );
+        await instance.tasks.run(retrying, undefined as never, {
+          runId: "d",
+          start: "now"
+        });
+        expect(runRow(state.storage, "d")).toEqual({
+          status: "pending",
+          wait_reason: "park",
+          next_at: until
+        });
+        expect(await state.storage.getAlarm()).not.toBeNull();
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      expect(await instance.tasks.get("d")).toMatchObject({
+        status: "completed",
+        result: "attempt 2"
+      });
+    });
+  });
+
+  it("lets a settle wake a run parked with a deadline before the deadline", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      instance.tasks.register(retrying, async (_input, step) =>
+        step.attempt === 1
+          ? TaskSettlement.park("child", { until: Date.now() + 60_000 })
+          : `attempt ${step.attempt}`
+      );
+      await instance.tasks.run(retrying, undefined as never, {
+        runId: "e",
+        start: "now"
+      });
+      expect(
+        await instance.tasks.settle("e", TaskSettlement.retry(Date.now()))
+      ).toBe(true);
+      await instance.tasks.runDue(retrying);
+      expect(await instance.tasks.get("e")).toMatchObject({
+        status: "completed",
+        result: "attempt 2"
+      });
+    });
+  });
+
+  it("refuses a park deadline that is not finite", () => {
+    expect(() =>
+      TaskSettlement.park("child", { until: Number.POSITIVE_INFINITY })
+    ).toThrow(TypeError);
+  });
 });

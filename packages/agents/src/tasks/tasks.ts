@@ -1254,9 +1254,15 @@ export class Tasks<
       return;
     }
     if (row.next_at !== null && row.next_at > now) return;
-    // A parked run waits for settle(); a wake that raced its park (a
-    // facet's routed dispatch, say) must not run it again.
-    if (row.status === "pending" && row.wait_reason === "park") return;
+    // A parked run waits for settle(), or for its `until`; a wake that
+    // raced its park (a facet's routed dispatch, say) must not run it again.
+    if (
+      row.status === "pending" &&
+      row.wait_reason === "park" &&
+      row.next_at === null
+    ) {
+      return;
+    }
 
     const handler = this.#resolveDefinition(row.definition);
     if (!handler) {
@@ -1561,16 +1567,16 @@ export class Tasks<
       generation,
       `UPDATE ${this.#tables.runs}
        SET status = 'pending', wait_reason = 'park', cancel_reason = ?,
-           generation = NULL, next_at = NULL, updated_at = ?
+           generation = NULL, next_at = ?, updated_at = ?
        WHERE run_id = ? AND generation = ? AND status = 'running'`,
-      [settlement.reason ?? null, now]
+      [settlement.reason ?? null, settlement.wakeAt ?? null, now]
     );
     if (parked) {
       this.#emit("task:waiting", {
         runId,
         definition: row.definition,
         reason: "park",
-        wakeAt: null
+        wakeAt: settlement.wakeAt ?? null
       });
       await this.#syncWake(runId);
       await this.#report(runId);

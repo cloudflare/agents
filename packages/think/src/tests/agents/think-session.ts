@@ -107,6 +107,11 @@ import { WorkspaceFiles } from "../../workspace-files";
 import type { TaskRecord } from "agents/internal";
 import type { TaskJson } from "agents/tasks";
 
+/** The agent's parent side of agent tools (an internal module). */
+function agentToolsOf(agent: unknown): unknown {
+  return (agent as { _agentTools: unknown })._agentTools;
+}
+
 /** The fiber run table of a release before fibers ran on Tasks. */
 function createLegacyFiberTableForTest(storage: DurableObjectStorage): void {
   // As a release before the one schema record left the Agent: its version
@@ -1231,6 +1236,30 @@ async function runAgentToolChecksForTest(agent: unknown): Promise<void> {
       WHERE definition = '__cf_agent_tool' AND status = 'pending'
     `;
   }
+}
+
+/**
+ * The `cf_agent_tool_runs` table a released version kept, for tests that
+ * seed its rows; the next start carries them into Task runs.
+ */
+function ensureReleasedAgentToolTable(sql: SqlStorage): void {
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS cf_agent_tool_runs (
+      run_id TEXT PRIMARY KEY, parent_tool_call_id TEXT,
+      agent_type TEXT NOT NULL, input_preview TEXT,
+      input_redacted INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL,
+      summary TEXT, output_json TEXT, error_message TEXT,
+      interrupted_reason TEXT, child_still_running INTEGER,
+      display_metadata TEXT, display_order INTEGER NOT NULL DEFAULT 0,
+      started_at INTEGER NOT NULL, completed_at INTEGER,
+      detached INTEGER NOT NULL DEFAULT 0, detached_on_finish TEXT,
+      detached_notify_source TEXT, detached_max_budget_at INTEGER,
+      finish_claimed_at INTEGER, finish_delivered_at INTEGER,
+      give_up_claimed_at INTEGER, give_up_delivered_at INTEGER,
+      detached_no_progress_budget_ms INTEGER, last_progress_at INTEGER,
+      detached_on_milestones TEXT, event_delivery TEXT
+    )
+  `);
 }
 
 export class ThinkTestAgent extends Think {
@@ -3122,44 +3151,46 @@ export class ThinkTestAgent extends Think {
     this._detachedTestDeliveries.push(run.runId);
   }
 
+  private _heldTurnForTest: Promise<void> | undefined;
+
   /**
-   * A detached run whose child has finished, collected by the reconcile
-   * tick while a chat turn holds the chat lane. The delivery is serialized
-   * behind the lane: the tick must not wait on it for good. Returns how
-   * long the tick took, and the deliveries before and after the turn ends.
+   * A detached run started while a chat turn holds the chat lane. The run's
+   * first attempt parks; its next check is made due for the alarm. Returns
+   * the run id.
    */
-  async reconcileDetachedWhileLaneBusyForTest(): Promise<{
-    elapsedMs: number;
-    deliveredBefore: number;
-    deliveredAfter: number;
-  }> {
+  async startDetachedWhileLaneBusyForTest(): Promise<string> {
     const runId = crypto.randomUUID();
-    const child = await this.subAgent(ThinkTestAgent, runId);
-    await child.startAgentToolRun("detached work", { runId });
+    const { turn } = await this._holdActiveRpcTurnForTest();
+    this._heldTurnForTest = turn;
+    await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      input: "detached work",
+      detached: { onFinish: "onDetachedTestDoneForTest" }
+    });
     const ready = Date.now() + 10_000;
+    const child = await this.subAgent(ThinkTestAgent, runId);
     while (Date.now() < ready) {
       const inspection = await child.inspectAgentToolRun(runId);
       if (inspection?.status === "completed") break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     this.sql`
-      INSERT INTO cf_agent_tool_runs (
-        run_id, agent_type, status, display_order, started_at, detached,
-        detached_on_finish, detached_max_budget_at
-      ) VALUES (
-        ${runId}, 'ThinkTestAgent', 'running', 0, ${Date.now()}, 1,
-        'onDetachedTestDoneForTest', ${Date.now() + 3_600_000}
-      )
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now() - 1}
+      WHERE run_id = ${runId}
     `;
-    const { turn } = await this._holdActiveRpcTurnForTest();
-    const startedAt = Date.now();
-    await (
-      this as unknown as { _cfDetachedReconcileTick(): Promise<void> }
-    )._cfDetachedReconcileTick();
-    const elapsedMs = Date.now() - startedAt;
-    const deliveredBefore = this._detachedTestDeliveries.length;
+    this.sql`UPDATE cf_agents_jobs SET time = ${Date.now() - 1000}`;
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+    return runId;
+  }
+
+  /** Release the held turn; then the deliveries that landed. */
+  async releaseHeldTurnForTest(): Promise<{
+    before: number;
+    after: number;
+  }> {
+    const before = this._detachedTestDeliveries.length;
     await this.releaseBeforeStepForTest();
-    await turn;
+    await this._heldTurnForTest;
     const delivered = Date.now() + 10_000;
     while (
       this._detachedTestDeliveries.length === 0 &&
@@ -3167,11 +3198,7 @@ export class ThinkTestAgent extends Think {
     ) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    return {
-      elapsedMs,
-      deliveredBefore,
-      deliveredAfter: this._detachedTestDeliveries.length
-    };
+    return { before, after: this._detachedTestDeliveries.length };
   }
 
   /**
@@ -6088,6 +6115,8 @@ export class ThinkAgentToolParent extends Agent {
     const now = Date.now();
     const completedAt =
       status === "starting" || status === "running" ? null : now;
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
+
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
@@ -6097,7 +6126,8 @@ export class ThinkAgentToolParent extends Agent {
         ${runId}, 'seed-tool-call', 'ThinkTestAgent', ${JSON.stringify("seed")},
         1, ${status}, ${JSON.stringify({ name: "seed" })}, 0, ${now}, ${completedAt}
       )
-    `;
+    `; // What a released version left, carried into its run as a start does.
+    await carryForwardAgentToolRunsForTest(this);
   }
 
   /** Launch a single real Think child against the current cap. */
@@ -6224,7 +6254,7 @@ export class ThinkAgentToolParent extends Agent {
       }
     };
     await (
-      this as unknown as {
+      agentToolsOf(this) as {
         _replayAgentToolRuns(connection: unknown): Promise<void>;
       }
     )._replayAgentToolRuns(connection);
@@ -6357,6 +6387,8 @@ export class ThinkAgentToolParent extends Agent {
 
     // Seal the parent row `interrupted`, as a prior recovery that exhausted its
     // re-attach budget would have.
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
+
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
@@ -6400,6 +6432,8 @@ export class ThinkAgentToolParent extends Agent {
     const child = await this.subAgent(ThinkTestAgent, runId);
     await child.setBeforeStepAsyncDelay(60_000);
     const started = await child.startAgentToolRun("silent child", { runId });
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
+
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
@@ -6456,6 +6490,7 @@ export class ThinkAgentToolParent extends Agent {
     const child = await this.subAgent(ThinkTestAgent, runId);
     await child.setBeforeStepAsyncDelay(60_000);
     const started = await child.startAgentToolRun("silent child", { runId });
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
@@ -6526,10 +6561,10 @@ export class ThinkAgentToolParent extends Agent {
       200
     );
     const controller = new AbortController();
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _reattachAgentToolRunToTerminal(...args: unknown[]): Promise<unknown>;
     };
-    const original = self._reattachAgentToolRunToTerminal.bind(this);
+    const original = self._reattachAgentToolRunToTerminal.bind(self);
     self._reattachAgentToolRunToTerminal = (...args: unknown[]) => {
       // The parent is following the child's recovered turn: stop it once
       // this call has returned to its caller.
@@ -6571,6 +6606,8 @@ export class ThinkAgentToolParent extends Agent {
     startedAt: number,
     status: "starting" | "running" = "running"
   ): void {
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
+
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
@@ -6934,7 +6971,7 @@ export class ThinkAgentToolParent extends Agent {
       // Intentionally NO `tailAgentToolRun`.
     };
     const reattach = await (
-      this as unknown as {
+      agentToolsOf(this) as {
         _reattachAgentToolRunToTerminal(
           adapter: unknown,
           row: {
@@ -7048,7 +7085,7 @@ export class ThinkAgentToolParent extends Agent {
     };
 
     const reattach = await (
-      this as unknown as {
+      agentToolsOf(this) as {
         _reattachAgentToolRunToTerminal(
           adapter: unknown,
           row: {
@@ -7223,7 +7260,7 @@ export class ThinkAgentToolParent extends Agent {
   getParentAgentToolStatusForTest(runId: string): string | null {
     return (
       (
-        this as unknown as {
+        agentToolsOf(this) as {
           _readAgentToolRun(runId: string): { status: string } | null;
         }
       )._readAgentToolRun(runId)?.status ?? null
@@ -7236,7 +7273,7 @@ function listAgentToolRunsForTest(
   agent: unknown
 ): Array<{ run_id: string; status: string }> {
   return (
-    agent as {
+    agentToolsOf(agent) as {
       _listAgentToolRuns(): Array<{ run_id: string; status: string }>;
     }
   )._listAgentToolRuns();
@@ -7245,7 +7282,7 @@ function listAgentToolRunsForTest(
 /** Carry the parent rows a released version left into their tasks. */
 async function carryForwardAgentToolRunsForTest(agent: unknown): Promise<void> {
   await (
-    agent as { _carryForwardAgentToolRuns(): Promise<void> }
+    agentToolsOf(agent) as { _carryForwardAgentToolRuns(): Promise<void> }
   )._carryForwardAgentToolRuns();
 }
 
@@ -12726,16 +12763,14 @@ export class ThinkRecoveryTestAgent extends Think {
     start: number;
     after: number;
   }> {
-    const self = this as unknown as {
+    const self = agentToolsOf(this) as {
       _forwardAgentToolStream(
         stream: ReadableStream<{ body: string }>,
         parentToolCallId: string | undefined,
         runId: string,
         sequence: number
       ): Promise<number>;
-      _lastAgentToolStreamProgressAt: number;
     };
-    self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
       this._replyStreams.progressMarker();
     const start = await read();

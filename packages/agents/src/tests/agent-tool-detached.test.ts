@@ -1,517 +1,531 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../index";
 
-/**
- * Detached ("background") agent-tool delivery ledger (#1752).
- *
- * These exercise the two-slot claim+lease delivery funnel directly (via the
- * test agent's internals helpers) — the crux of the reporter's production
- * incidents:
- *  - delivery is exactly-once on the happy path (a fast-path push racing a
- *    backbone tick must fire the hook once), and
- *  - give-up and finish are INDEPENDENT slots, so a premature budget give-up
- *    can never dedupe a child's real late completion away.
- *
- * They also confirm the ledger's guarded CAS (`UPDATE ... RETURNING`) works on
- * the Workers SQLite runtime.
- */
-describe("detached agent-tool delivery (#1752)", () => {
-  it("fires onFinish (and the global hook) exactly once on terminal", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-once-${crypto.randomUUID()}`
-    );
+async function parent(label: string) {
+  return getAgentByName(
+    env.TestAgentToolReplayAgent,
+    `${label}-${crypto.randomUUID()}`
+  );
+}
 
-    agent.seedDetachedRunForTest("run-once");
-    await agent.deliverFinishForTest("run-once", "completed", "done");
-    // A second delivery (e.g. the durable backbone after the warm fast path
-    // already delivered) must be a no-op — the slot is already delivered.
-    await agent.deliverFinishForTest("run-once", "completed", "done again");
+type Log = Awaited<
+  ReturnType<Awaited<ReturnType<typeof parent>>["getDetachedDeliveryLog"]>
+>;
 
+function statuses(log: Log, runId: string, hook = "onDetachedDone") {
+  return log
+    .filter((entry) => entry.runId === runId && entry.hook === hook)
+    .map((entry) => entry.status);
+}
+
+describe("detached agent-tool runs on Tasks", () => {
+  it("delivers a child's terminal once: the global hook and onFinish", async () => {
+    const agent = await parent("detached-once");
+    expect(
+      await agent.startDetachedForTest("run-once", {
+        chunkBodies: [],
+        summary: "done"
+      })
+    ).toEqual({ status: "running" });
+    // `runAgentTool` never delivers itself; the run's next check does.
+    expect(await agent.checkDetachedForTest("run-once")).toEqual({
+      status: "completed"
+    });
     const log = await agent.getDetachedDeliveryLog();
-    const forRun = log.filter((e) => e.runId === "run-once");
-    expect(forRun).toEqual([
-      { hook: "onAgentToolFinish", runId: "run-once", status: "completed" },
-      { hook: "onDetachedDone", runId: "run-once", status: "completed" }
+    expect(statuses(log, "run-once")).toEqual(["completed"]);
+    expect(statuses(log, "run-once", "onAgentToolFinish")).toEqual([
+      "completed"
     ]);
-    expect(await agent.readRunStatusForTest("run-once")).toBe("completed");
   });
 
-  it("dedupes concurrent deliveries to a single fire (the fast-path vs backbone race)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-race-${crypto.randomUUID()}`
+  it("re-dispatching the same run id starts nothing and delivers once", async () => {
+    const agent = await parent("detached-redispatch");
+    await agent.startDetachedForTest("run-again", {
+      chunkBodies: [],
+      staysRunning: true
+    });
+    expect(
+      await agent.startDetachedForTest("run-again", {
+        chunkBodies: [],
+        summary: "must not run"
+      })
+    ).toEqual({ status: "running" });
+    await agent.finishChildForTest("run-again", "completes");
+    expect((await agent.checkDetachedForTest("run-again")).status).toBe(
+      "completed"
     );
-
-    agent.seedDetachedRunForTest("run-race");
-    await Promise.all([
-      agent.deliverFinishForTest("run-race", "completed", "a"),
-      agent.deliverFinishForTest("run-race", "completed", "b")
-    ]);
-
-    const onDone = (await agent.getDetachedDeliveryLog()).filter(
-      (e) => e.runId === "run-race" && e.hook === "onDetachedDone"
+    expect(statuses(await agent.getDetachedDeliveryLog(), "run-again")).toEqual(
+      ["completed"]
     );
-    expect(onDone).toHaveLength(1);
   });
 
-  it("delivers a give-up AND a later real completion (two independent slots)", async () => {
-    // The exact #1752 incident: a premature give-up must not consume the
-    // success delivery's slot. `interrupted` is soft, so a child that completes
-    // after the give-up still repairs the row and re-fires onFinish.
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-${crypto.randomUUID()}`
+  it("waits for a running child, checking on the backbone's cadence", async () => {
+    const agent = await parent("detached-cadence");
+    await agent.startDetachedForTest("run-wait", {
+      chunkBodies: [],
+      staysRunning: true
+    });
+    const waits: number[] = [];
+    for (let check = 0; check < 5; check++) {
+      const state = await agent.checkDetachedForTest("run-wait");
+      expect(state).toMatchObject({ status: "pending", waitReason: "park" });
+      waits.push(Math.round((state.nextInMs ?? 0) / 1000));
+    }
+    // Escalates and caps at the slow end (5, 15, 30, 120 s).
+    expect(waits.every((wait, i) => i === 0 || wait >= waits[i - 1])).toBe(
+      true
     );
+    expect(waits.at(-1)).toBe(120);
+    expect(await agent.getDetachedDeliveryLog()).toEqual([]);
+  });
 
-    agent.seedDetachedRunForTest("run-giveup");
-    await agent.deliverGiveUpForTest("run-giveup");
-    expect(await agent.readRunStatusForTest("run-giveup")).toBe("interrupted");
-
-    // The child actually finished after we gave up — the finish slot is still
-    // open, so the real result is delivered and the row is repaired.
-    await agent.deliverFinishForTest("run-giveup", "completed", "late finish");
-    expect(await agent.readRunStatusForTest("run-giveup")).toBe("completed");
-
-    const forRun = (await agent.getDetachedDeliveryLog()).filter(
-      (e) => e.runId === "run-giveup" && e.hook === "onDetachedDone"
+  it("gives up past its budget, tears the child down, and delivers the give-up once (#2768)", async () => {
+    const agent = await parent("detached-give-up");
+    await agent.startDetachedForTest(
+      "run-budget",
+      { chunkBodies: [], staysRunning: true },
+      { maxBudgetMs: 1 }
     );
-    expect(forRun).toEqual([
+    expect((await agent.checkDetachedForTest("run-budget")).status).toBe(
+      "completed"
+    );
+    // The child's abort from the give-up's own cancel is not a second finish.
+    await agent.checkDetachedForTest("run-budget");
+    const log = await agent.getDetachedDeliveryLog();
+    expect(
+      log.filter(
+        (entry) =>
+          entry.runId === "run-budget" && entry.hook === "onDetachedDone"
+      )
+    ).toEqual([
       {
         hook: "onDetachedDone",
-        runId: "run-giveup",
+        runId: "run-budget",
         status: "interrupted",
         reason: "budget-exceeded"
-      },
-      { hook: "onDetachedDone", runId: "run-giveup", status: "completed" }
+      }
+    ]);
+    expect(statuses(log, "run-budget", "onAgentToolFinish")).toEqual([
+      "interrupted"
     ]);
   });
 
-  it("does not re-deliver a give-up twice", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-dedupe-${crypto.randomUUID()}`
+  it("delivers a give-up AND a later real completion when the teardown is unconfirmed (#1752)", async () => {
+    const agent = await parent("detached-two-slots");
+    await agent.startDetachedForTest(
+      "run-late",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
     );
-
-    agent.seedDetachedRunForTest("run-gd");
-    await agent.deliverGiveUpForTest("run-gd");
-    await agent.deliverGiveUpForTest("run-gd");
-
-    const giveUps = (await agent.getDetachedDeliveryLog()).filter(
-      (e) => e.runId === "run-gd" && e.hook === "onDetachedDone"
+    expect(await agent.checkDetachedForTest("run-late")).toMatchObject({
+      status: "pending",
+      waitReason: "park"
+    });
+    await agent.finishChildForTest("run-late", "completes");
+    expect((await agent.checkDetachedForTest("run-late")).status).toBe(
+      "completed"
     );
-    expect(giveUps).toHaveLength(1);
-  });
-
-  it("treats a given-up run as settled only when its child was torn down (#2768)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-settled-${crypto.randomUUID()}`
-    );
-
-    agent.seedDetachedRunForTest("run-torn-down");
-    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
-    await agent.deliverGiveUpForTest("run-torn-down", false);
-    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
-    // A backbone tick over the settled row does not re-arm itself.
-    await agent.detachedReconcileTickForTest();
-    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
-
-    // A child that may still be running can deliver a late finish.
-    agent.seedDetachedRunForTest("run-still-running");
-    await agent.deliverGiveUpForTest("run-still-running", true);
-    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
-  });
-
-  it("keeps retrying a late finish whose callback failed after a give-up (#2768)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-retry-${crypto.randomUUID()}`
-    );
-
-    agent.seedDetachedRunForTest(
-      "run-late-retry",
-      undefined,
-      undefined,
-      "onDetachedFinishFailsOnce"
-    );
-    // The child survives the give-up, then completes; its callback fails once.
-    await agent.deliverGiveUpForTest("run-late-retry", true);
-    await expect(
-      agent.deliverFinishCatchingForTest("run-late-retry", "completed", "late")
-    ).resolves.toBe("detached finish callback failed once");
-
-    // The finish is still undelivered, so the backbone must keep it.
-    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
-    agent.expireDetachedFinishClaimForTest("run-late-retry");
-    await agent.deliverFinishForTest("run-late-retry", "completed", "late");
-    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
-    const delivered = (await agent.getDetachedDeliveryLog()).filter(
-      (e) => e.runId === "run-late-retry" && e.hook === "onDetachedDone"
-    );
-    expect(delivered.map((e) => e.status)).toEqual([
+    expect(statuses(await agent.getDetachedDeliveryLog(), "run-late")).toEqual([
       "interrupted",
       "completed"
     ]);
   });
 
-  it("delivers the real result when the child finishes before the give-up cancel lands (#2768)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-race-${crypto.randomUUID()}`
+  it("replays an unconfirmed give-up to a reconnecting client while it follows the child", async () => {
+    const agent = await parent("detached-gave-up-replay");
+    await agent.startDetachedForTest(
+      "run-gave-up-replay",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
     );
-
-    const result =
-      await agent.giveUpRacingChildCompletionForTest("run-giveup-race");
-    expect(result.status).toBe("completed");
-    expect(result.log).toEqual([
-      {
-        hook: "onAgentToolFinish",
-        runId: "run-giveup-race",
-        status: "completed"
-      },
-      { hook: "onDetachedDone", runId: "run-giveup-race", status: "completed" }
+    expect(
+      await agent.checkDetachedForTest("run-gave-up-replay")
+    ).toMatchObject({ status: "pending", waitReason: "park" });
+    const replay = await agent.captureReplayTerminalEventsForTest();
+    expect(
+      replay.filter(
+        (event) => "runId" in event && event.runId === "run-gave-up-replay"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        kind: "interrupted",
+        reason: "budget-exceeded"
+      })
     ]);
-    expect(result.outstanding).toBe(false);
-    expect(result.schedules).toBe(0);
   });
 
-  it("delivers the child's own abort when it is stopped before the give-up cancel lands (#2768)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-stopped-${crypto.randomUUID()}`
+  it("clears a run that gave up while its child may still finish, freeing its slot", async () => {
+    const agent = await parent("detached-gave-up-clear");
+    await agent.startDetachedForTest(
+      "run-gave-up-clear",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
     );
+    await agent.checkDetachedForTest("run-gave-up-clear");
+    expect(await agent.clearRunsForTest("run-gave-up-clear")).toEqual({
+      task: null,
+      open: 0,
+      child: false
+    });
+  });
 
-    const result = await agent.giveUpRacingChildCompletionForTest(
-      "run-giveup-stopped",
-      undefined,
-      "is stopped"
+  it("settles an unconfirmed give-up once a later check reads the give-up's own abort (#2769)", async () => {
+    const agent = await parent("detached-unconfirmed");
+    await agent.startDetachedForTest(
+      "run-unconfirmed",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
     );
-    expect(result.status).toBe("aborted");
-    expect(result.log).toEqual([
-      {
-        hook: "onAgentToolFinish",
-        runId: "run-giveup-stopped",
-        status: "aborted"
-      },
-      {
-        hook: "onDetachedDone",
-        runId: "run-giveup-stopped",
-        status: "aborted"
-      }
+    await agent.checkDetachedForTest("run-unconfirmed");
+    // The cancel had landed after all: the child is aborted with the
+    // give-up's reason.
+    await agent.abortChildWithGiveUpReasonForTest("run-unconfirmed");
+    expect((await agent.checkDetachedForTest("run-unconfirmed")).status).toBe(
+      "completed"
+    );
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "run-unconfirmed")
+    ).toEqual(["interrupted"]);
+  });
+
+  it("delivers the real result when the child finishes before the give-up's cancel lands (#2768)", async () => {
+    const agent = await parent("detached-race");
+    await agent.startDetachedForTest("run-race", {
+      chunkBodies: [],
+      staysRunning: true,
+      summary: "real result"
+    });
+    await agent.checkWithChildBeforeCancelForTest("run-race", "completes");
+    await agent.detachedStateForTest("run-race");
+    expect(statuses(await agent.getDetachedDeliveryLog(), "run-race")).toEqual([
+      "completed"
     ]);
-    expect(result.outstanding).toBe(false);
-    expect(result.schedules).toBe(0);
+  });
+
+  it("delivers the child's own abort when it is stopped before the give-up's cancel lands (#2769)", async () => {
+    const agent = await parent("detached-stopped");
+    await agent.startDetachedForTest("run-stopped", {
+      chunkBodies: [],
+      staysRunning: true
+    });
+    await agent.checkWithChildBeforeCancelForTest("run-stopped", "is stopped");
+    await agent.detachedStateForTest("run-stopped");
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "run-stopped")
+    ).toEqual(["aborted"]);
   });
 
   it("delivers a milestone only the post-cancel inspection reports (#2768)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-milestone-${crypto.randomUUID()}`
+    const agent = await parent("detached-milestone");
+    await agent.startDetachedForTest(
+      "run-ms",
+      { chunkBodies: [], staysRunning: true },
+      { onMilestones: ["sources-gathered"] }
     );
-
-    const result = await agent.giveUpRacingChildCompletionForTest(
-      "run-giveup-milestone",
+    await agent.checkWithChildBeforeCancelForTest(
+      "run-ms",
+      "milestone and completes"
+    );
+    await agent.detachedStateForTest("run-ms");
+    expect(await agent.getDetachedMilestonesForTest("run-ms")).toEqual([
       "sources-gathered"
-    );
-    expect(result.status).toBe("completed");
-    expect(result.milestones).toEqual(["sources-gathered"]);
-    expect(result.outstanding).toBe(false);
+    ]);
+    expect(statuses(await agent.getDetachedDeliveryLog(), "run-ms")).toEqual([
+      "completed"
+    ]);
   });
 
-  it.each(["during-give-up", "after-give-up"] as const)(
-    "delivers a budget give-up once when the warm tail sees the child's aborted %s (#2768)",
-    async (tail) => {
-      const agent = await getAgentByName(
-        env.TestAgentToolReplayAgent,
-        `detached-giveup-warm-${tail}-${crypto.randomUUID()}`
-      );
-
-      const result = await agent.giveUpWithWarmTailForTest(
-        `run-warm-${tail}`,
-        tail
-      );
-      // The warm tail did read the child's `aborted`.
-      expect(result.inspected).toContain("fast:aborted");
-      // The same callbacks as a cold parent: the give-up, and no `aborted`
-      // finish for the cancel the give-up itself made.
-      expect(result.statuses).toEqual(["interrupted"]);
-      expect(result.outstanding).toBe(false);
-      expect(result.schedules).toBe(0);
-    }
-  );
-
-  it("retries a failed give-up callback instead of delivering the aborted it caused (#2768)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-retry-cold-${crypto.randomUUID()}`
-    );
-
-    const result = await agent.giveUpCallbackFailsOnceForTest(
-      "run-giveup-retry-cold"
-    );
-    expect(result.statuses).toEqual(["interrupted"]);
-    expect(result.outstanding).toBe(false);
-  });
-
-  it("settles an unconfirmed give-up once a later tick reads the child's abort (#2768)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-unconfirmed-${crypto.randomUUID()}`
-    );
-
-    // The give-up goes out, but the teardown is unconfirmed: keep polling.
-    const first = await agent.giveUpWithFailedPostCancelInspectionForTest(
-      "run-giveup-unconfirmed"
-    );
-    expect(first).toEqual({ outstanding: true, schedules: 1 });
-
-    // The re-armed backbone reads the child's abort: settled, not re-armed,
-    // and no second callback.
-    await agent.makeDetachedBackboneDueForTest();
-    expect(await runDurableObjectAlarm(agent)).toBe(true);
-    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
-    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
-    const delivered = (await agent.getDetachedDeliveryLog()).filter(
-      (e) => e.runId === "run-giveup-unconfirmed" && e.hook === "onDetachedDone"
-    );
-    expect(delivered.map((e) => e.status)).toEqual(["interrupted"]);
-  });
-
-  it("arms the backbone when a fast-path finish fails after polling stopped (#2768)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-fastpath-retry-${crypto.randomUUID()}`
-    );
-
-    const result =
-      await agent.fastPathFailsAfterGiveUpForTest("run-fastpath-retry");
-    expect(result.outstanding).toBe(true);
-    expect(result.schedules).toBe(1);
-
-    // The armed backbone's own alarm retries the claim once its lease expires.
-    agent.expireDetachedFinishClaimForTest("run-fastpath-retry");
-    await agent.makeDetachedBackboneDueForTest();
-    expect(await runDurableObjectAlarm(agent)).toBe(true);
-    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
-    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([]);
-    const delivered = (await agent.getDetachedDeliveryLog()).filter(
-      (e) => e.runId === "run-fastpath-retry" && e.hook === "onDetachedDone"
-    );
-    expect(delivered.map((e) => e.status)).toEqual(["completed"]);
-  });
-
-  it("gives up a silent detached run once its no-progress window elapses (reason: no-progress)", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-no-progress-${crypto.randomUUID()}`
-    );
-
-    // Reported progress 5s ago, a 1s no-progress budget, and NO absolute
-    // ceiling: the only thing that can trip a give-up is the silence.
-    agent.seedDetachedRunWithStaleProgressForTest(
+  it("gives up on a child that never signals once its no-progress window passes (#2467)", async () => {
+    const agent = await parent("detached-no-progress");
+    await agent.startDetachedForTest(
       "run-silent",
-      1000,
-      Date.now() - 5000
+      { chunkBodies: [], staysRunning: true },
+      { noProgressBudgetMs: 1 }
     );
-    await agent.detachedReconcileTickForTest();
-
-    expect(await agent.readRunStatusForTest("run-silent")).toBe("interrupted");
-    const forRun = (await agent.getDetachedDeliveryLog()).filter(
-      (e) => e.runId === "run-silent" && e.hook === "onDetachedDone"
+    expect((await agent.checkDetachedForTest("run-silent")).status).toBe(
+      "completed"
     );
-    expect(forRun).toEqual([
-      {
-        hook: "onDetachedDone",
-        runId: "run-silent",
-        status: "interrupted",
-        reason: "no-progress"
-      }
-    ]);
-  });
-
-  it("does not give up a detached run that is still within its no-progress window", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-progress-fresh-${crypto.randomUUID()}`
-    );
-
-    // Reported progress just now with a generous 1h budget: still healthy.
-    agent.seedDetachedRunWithStaleProgressForTest(
-      "run-fresh",
-      60 * 60 * 1000,
-      Date.now()
-    );
-    await agent.detachedReconcileTickForTest();
-
-    expect(await agent.readRunStatusForTest("run-fresh")).toBe("running");
-    const forRun = (await agent.getDetachedDeliveryLog()).filter(
-      (e) => e.runId === "run-fresh"
-    );
-    expect(forRun).toEqual([]);
-  });
-
-  it("retries finish delivery after a callback failure and lease expiry", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-callback-retry-${crypto.randomUUID()}`
-    );
-
-    agent.seedDetachedRunForTest(
-      "run-callback-retry",
-      undefined,
-      undefined,
-      "onDetachedFailsOnce"
-    );
-
-    await expect(
-      agent.deliverFinishCatchingForTest(
-        "run-callback-retry",
-        "completed",
-        "done"
+    const log = await agent.getDetachedDeliveryLog();
+    expect(
+      log.find(
+        (entry) =>
+          entry.runId === "run-silent" && entry.hook === "onDetachedDone"
       )
-    ).resolves.toBe("detached callback failed once");
-    expect(await agent.getDetachedDeliveryLog()).toEqual([
-      {
-        hook: "onAgentToolFinish",
-        runId: "run-callback-retry",
-        status: "completed"
-      }
-    ]);
-
-    // The failed claim is still leased, so an immediate duplicate delivery
-    // should not double-fire. Once the lease expires, the backbone may reclaim
-    // and retry the callback.
-    await agent.deliverFinishForTest("run-callback-retry", "completed", "done");
-    expect(await agent.getDetachedDeliveryLog()).toHaveLength(1);
-
-    agent.expireDetachedFinishClaimForTest("run-callback-retry");
-    await agent.deliverFinishForTest("run-callback-retry", "completed", "done");
-
-    expect(await agent.getDetachedDeliveryLog()).toEqual([
-      {
-        hook: "onAgentToolFinish",
-        runId: "run-callback-retry",
-        status: "completed"
-      },
-      {
-        hook: "onAgentToolFinish",
-        runId: "run-callback-retry",
-        status: "completed"
-      },
-      {
-        hook: "onDetachedDone",
-        runId: "run-callback-retry",
-        status: "completed"
-      }
-    ]);
+    ).toMatchObject({ status: "interrupted", reason: "no-progress" });
   });
 
-  it("escalates the detached backbone cadence and caps at the slow end", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-cadence-${crypto.randomUUID()}`
+  it("does not give up on a child within its no-progress window", async () => {
+    const agent = await parent("detached-within-window");
+    await agent.startDetachedForTest(
+      "run-patient",
+      { chunkBodies: [], staysRunning: true },
+      { noProgressBudgetMs: 60_000 }
     );
-
-    agent.seedDetachedRunForTest("run-cadence");
-    await agent.detachedReconcileTickForTest(0);
-    expect(await agent.detachedBackboneSchedulesForTest()).toEqual([
-      { delayInSeconds: 15, payload: { cadenceIndex: 1 } }
-    ]);
-
-    const capped = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-cadence-cap-${crypto.randomUUID()}`
-    );
-    capped.seedDetachedRunForTest("run-cadence-cap");
-    await capped.detachedReconcileTickForTest(2);
-    expect(await capped.detachedBackboneSchedulesForTest()).toEqual([
-      { delayInSeconds: 120, payload: { cadenceIndex: 3 } }
-    ]);
-  });
-
-  it("does not deliver through the detached ledger when cancelling an awaited run", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `awaited-cancel-${crypto.randomUUID()}`
-    );
-
-    agent.seedAwaitedRunForTest("run-awaited-cancel");
-    await agent.cancelRunForTest("run-awaited-cancel");
-
-    expect(await agent.readRunStatusForTest("run-awaited-cancel")).toBe(
-      "running"
-    );
+    expect(await agent.checkDetachedForTest("run-patient")).toMatchObject({
+      status: "pending",
+      waitReason: "park"
+    });
     expect(await agent.getDetachedDeliveryLog()).toEqual([]);
   });
 
-  it("persists a caller-controlled notify source for durable completion", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-notify-source-${crypto.randomUUID()}`
+  it("checks first at its no-progress deadline when that comes before the cadence", async () => {
+    const agent = await parent("detached-short-window");
+    await agent.startDetachedForTest(
+      "run-short",
+      { chunkBodies: [], staysRunning: true, tailHangs: true },
+      { noProgressBudgetMs: 1_000 }
     );
+    const first = await agent.detachedStateForTest("run-short");
+    expect(first).toMatchObject({ status: "pending", waitReason: "park" });
+    expect(first.nextInMs).toBeLessThanOrEqual(1_000);
+  });
 
-    agent.seedDetachedRunForTest(
-      "run-notify-source",
-      undefined,
-      "app-background-task"
+  it("keeps to the cadence with the no-progress window off (0)", async () => {
+    const agent = await parent("detached-window-off");
+    await agent.startDetachedForTest(
+      "run-window-off",
+      { chunkBodies: [], staysRunning: true },
+      { noProgressBudgetMs: 0 }
     );
+    const state = await agent.checkDetachedForTest("run-window-off");
+    expect(state).toMatchObject({ status: "pending", waitReason: "park" });
+    expect(state.nextInMs).toBeGreaterThan(1_000);
+    expect(await agent.getDetachedDeliveryLog()).toEqual([]);
+  });
 
-    expect(await agent.readRunNotifySourceForTest("run-notify-source")).toBe(
-      "app-background-task"
+  it("keeps to the cadence after a give-up whose teardown is unconfirmed", async () => {
+    const agent = await parent("detached-gave-up-cadence");
+    await agent.startDetachedForTest(
+      "run-gave-up",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
+    );
+    const state = await agent.checkDetachedForTest("run-gave-up");
+    expect(state).toMatchObject({ status: "pending", waitReason: "park" });
+    expect(state.nextInMs).toBeGreaterThan(1_000);
+  });
+
+  it("settles a run whose output is too large for a Task value, delivering once", async () => {
+    const agent = await parent("detached-large-output");
+    await agent.startDetachedForTest("run-large", {
+      chunkBodies: [],
+      summary: "large",
+      output: "x".repeat(1_200_000)
+    });
+    expect((await agent.checkDetachedForTest("run-large")).status).toBe(
+      "completed"
+    );
+    const log = await agent.getDetachedDeliveryLog();
+    expect(statuses(log, "run-large")).toEqual(["completed"]);
+    expect(statuses(log, "run-large", "onAgentToolFinish")).toEqual([
+      "completed"
+    ]);
+  });
+
+  it("delivers a finish again after its callback failed once", async () => {
+    const agent = await parent("detached-finish-retry");
+    await agent.startDetachedForTest(
+      "run-retry",
+      { chunkBodies: [], summary: "done" },
+      { onFinish: "onDetachedFailsOnce" }
+    );
+    // The check's delivery failed: the run waits to deliver again.
+    expect(await agent.checkDetachedForTest("run-retry")).toMatchObject({
+      status: "pending",
+      waitReason: "park"
+    });
+    expect((await agent.checkDetachedForTest("run-retry")).status).toBe(
+      "completed"
+    );
+    expect(statuses(await agent.getDetachedDeliveryLog(), "run-retry")).toEqual(
+      ["completed"]
     );
   });
 
-  it("broadcasts a terminal frame when a detached run is cancelled", async () => {
-    // Regression: cancel delivers through the ledger without a tail sequence, so
-    // the terminal `agent-tool-event` was previously dropped and the
-    // background-runs tray never flipped to "cancelled" live.
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-cancel-broadcast-${crypto.randomUUID()}`
+  it("gives up again after a give-up callback failed, not delivering the abort it caused (#2769)", async () => {
+    const agent = await parent("detached-give-up-retry");
+    await agent.startDetachedForTest(
+      "run-give-up-retry",
+      { chunkBodies: [], staysRunning: true },
+      { maxBudgetMs: 1, onFinish: "onDetachedFailsOnce" }
     );
-
-    agent.seedDetachedRunForTest("run-cancel-broadcast");
-    const events = await agent.captureDeliveryTerminalBroadcastsForTest(
-      "cancel",
-      "run-cancel-broadcast"
+    // The first check gave up and its callback failed: it waits to give up
+    // again, instead of delivering the abort its cancel caused.
+    expect(await agent.checkDetachedForTest("run-give-up-retry")).toMatchObject(
+      { status: "pending", waitReason: "park" }
     );
+    expect((await agent.checkDetachedForTest("run-give-up-retry")).status).toBe(
+      "completed"
+    );
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "run-give-up-retry")
+    ).toEqual(["interrupted"]);
+  });
 
-    expect(events).toHaveLength(1);
-    expect(events[0].kind).toBe("aborted");
-    expect(events[0].runId).toBe("run-cancel-broadcast");
+  it("ends a cancelled detached run aborted and delivers it once, with its terminal frame", async () => {
+    const agent = await parent("detached-cancel");
+    await agent.startDetachedForTest("run-cancel", {
+      chunkBodies: [],
+      staysRunning: true
+    });
+    const frames = await agent.captureTerminalBroadcastsForTest(
+      "run-cancel",
+      "cancel"
+    );
+    expect(frames).toEqual([
+      expect.objectContaining({ kind: "aborted", runId: "run-cancel" })
+    ]);
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "run-cancel")
+    ).toEqual(["aborted"]);
   });
 
   it("broadcasts a terminal frame when a detached run is given up", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-giveup-broadcast-${crypto.randomUUID()}`
+    const agent = await parent("detached-give-up-frame");
+    await agent.startDetachedForTest("run-frame", {
+      chunkBodies: [],
+      staysRunning: true
+    });
+    await agent.expireDetachedBudgetForTest("run-frame");
+    const frames = await agent.captureTerminalBroadcastsForTest(
+      "run-frame",
+      "check"
     );
-
-    agent.seedDetachedRunForTest("run-giveup-broadcast");
-    const events = await agent.captureDeliveryTerminalBroadcastsForTest(
-      "giveUp",
-      "run-giveup-broadcast"
-    );
-
-    expect(events).toHaveLength(1);
-    expect(events[0].kind).toBe("interrupted");
-    expect(events[0].runId).toBe("run-giveup-broadcast");
+    expect(frames).toEqual([
+      expect.objectContaining({ kind: "interrupted", runId: "run-frame" })
+    ]);
   });
 
-  it("collapses a concurrent backbone-arm fan-out to a single schedule", async () => {
-    const agent = await getAgentByName(
-      env.TestAgentToolReplayAgent,
-      `detached-arm-race-${crypto.randomUUID()}`
+  it("hands the notify source to the delivery", async () => {
+    const agent = await parent("detached-notify-source");
+    await agent.startDetachedForTest(
+      "run-notify",
+      { chunkBodies: [], summary: "done" },
+      { notify: { source: "tray" } }
     );
-
-    agent.seedDetachedRunForTest("run-arm-race");
-    const schedules = await agent.armDetachedBackboneConcurrentlyForTest(5);
-
-    expect(schedules).toEqual([
-      { delayInSeconds: 5, payload: { cadenceIndex: 0 } }
+    await agent.checkDetachedForTest("run-notify");
+    expect(await agent.getDeliveredNotifySourcesForTest("run-notify")).toEqual([
+      "tray"
     ]);
+  });
+
+  it("never waits on a chat lane from a run's report: a check delivers serialized, a report only unserialized", async () => {
+    const agent = await parent("detached-delivery-context");
+    await agent.watchDetachedReportsForTest();
+    await agent.startDetachedForTest("run-checked", {
+      chunkBodies: [],
+      summary: "done"
+    });
+    await agent.checkDetachedForTest("run-checked");
+    await agent.startDetachedForTest("run-cancelled", {
+      chunkBodies: [],
+      staysRunning: true
+    });
+    await agent.cancelRunForTest("run-cancelled");
+    await agent.detachedStateForTest("run-cancelled");
+    // A report can run inside a job with no dispatch budget: what it
+    // delivers must not wait behind the chat lane.
+    expect(await agent.getDetachedDeliveryContextsForTest()).toEqual([
+      { serialize: true, inReport: false },
+      { serialize: false, inReport: true }
+    ]);
+  });
+
+  it("does not deliver to a detached onFinish when an awaited run is cancelled", async () => {
+    const agent = await parent("detached-awaited-cancel");
+    await agent.runDeterministicAgentToolForTest({
+      runId: "run-awaited",
+      chunkBodies: []
+    });
+    await agent.cancelRunForTest("run-awaited");
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "run-awaited")
+    ).toEqual([]);
+  });
+});
+
+describe("detached agent-tool runs a released version left", () => {
+  it("delivers the outcome a released version recorded but had not delivered, with its child gone", async () => {
+    const agent = await parent("detached-owed-no-child");
+    // Configured for milestones, so only the missing child stops the ask.
+    await agent.carryForwardReleasedOwedWithoutChildForTest(
+      "released-owed-gone",
+      { onMilestones: "sources-gathered" }
+    );
+    expect(
+      (await agent.checkDetachedForTest("released-owed-gone")).status
+    ).toBe("completed");
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "released-owed-gone")
+    ).toEqual(["completed"]);
+    // Delivering it does not bring the child back.
+    expect(await agent.hasChildForTest("released-owed-gone")).toBe(false);
+  });
+
+  it("delivers the milestones the child still has before a released recorded outcome", async () => {
+    const agent = await parent("detached-owed-milestone");
+    await agent.carryForwardReleasedOwedWithoutChildForTest(
+      "released-owed-ms",
+      {
+        childWithMilestone: "sources-gathered"
+      }
+    );
+    expect((await agent.checkDetachedForTest("released-owed-ms")).status).toBe(
+      "completed"
+    );
+    expect(
+      await agent.getDetachedEventOrderForTest("released-owed-ms")
+    ).toEqual(["milestone:sources-gathered", "finish:completed"]);
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "released-owed-ms")
+    ).toEqual(["completed"]);
+  });
+
+  it("does not recreate the child of a run cleared while a replay was under way", async () => {
+    const agent = await parent("detached-replay-cleared");
+    expect(await agent.replayClearedRunForTest("run-cleared")).toBe(false);
+  });
+
+  it("in a facet carries the rows and empties the table instead of dropping it", async () => {
+    const agent = await parent("facet-carry");
+    expect(
+      await agent.carryForwardReleasedInFacetForTest("facet-carry-child")
+    ).toEqual({ tableRows: 0, status: "completed" });
+  });
+
+  it("carries every ledger state into task runs, drops the table, and cancels the backbone's schedule", async () => {
+    const agent = await parent("detached-carry");
+    await agent.seedReleasedDetachedRowsForTest();
+    const {
+      statuses: carried,
+      tableLeft,
+      legacySchedules
+    } = await agent.carryForwardReleasedDetachedForTest();
+    expect(carried).toEqual({
+      "released-delivered": "completed",
+      "released-owed": "running",
+      "released-open": "running",
+      "released-torn-down": "completed",
+      "released-may-run": "running"
+    });
+    expect(tableLeft).toBe(false);
+    expect(legacySchedules).toBe(0);
+
+    // What is owed is delivered once; what went out is not sent again.
+    for (const runId of [
+      "released-owed",
+      "released-open",
+      "released-may-run"
+    ]) {
+      await agent.checkDetachedForTest(runId);
+    }
+    const log = await agent.getDetachedDeliveryLog();
+    expect(statuses(log, "released-delivered")).toEqual([]);
+    expect(statuses(log, "released-torn-down")).toEqual([]);
+    expect(statuses(log, "released-owed")).toEqual(["completed"]);
+    expect(statuses(log, "released-open")).toEqual(["completed"]);
+    // Its give-up went out before the upgrade: it waits for the child.
+    expect(statuses(log, "released-may-run")).toEqual([]);
   });
 });

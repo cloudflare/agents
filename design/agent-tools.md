@@ -4,9 +4,22 @@ Agent tools are the orchestration layer that lets a parent agent run a
 chat-capable sub-agent as part of a larger operation. The shipped V1 follows
 [`rfc-helper-sub-agent-orchestration.md`](./rfc-helper-sub-agent-orchestration.md).
 
-The parent owns a framework table, `cf_agent_tool_runs`, that records each
-logical run by `runId`: parent tool call id, child class, safe input preview,
-display order, status, summary, and terminal error metadata. The child remains a
+The parent records each logical run as a Task run keyed by `runId`:
+`__cf_agent_tool` for an awaited run, `__cf_agent_tool_detached` for a detached
+one. The run's metadata holds the parent tool call id, child class, safe input
+preview and display order (and, for a detached run, its `onFinish`, notify
+source, budgets and milestone names); its result is the `RunAgentToolResult`.
+The attempt in the calling isolate starts the child and follows its stream. An
+attempt after a reset, or a detached run's later check, asks the child with a
+bounded call and checks again on a cadence instead of holding the child's
+stream, because it runs from the alarm. A detached run delivers its outcome
+from one of those checks (serialized behind a chat host's lane), never from
+`runAgentTool`, so no job waits on the lane. The run's terminal report delivers
+only what no check could: a cancel, or a child that could not take the run. It
+does so unserialized, as an explicit cancel always has, because a report may run
+inline in a job, or before `runAgentTool` returns.
+Released `cf_agent_tool_runs` rows are carried into Task runs on the first start
+and the table is dropped (a facet empties it instead); its reconcile backbone and schedule go with it. The child remains a
 normal sub-agent facet and owns the full chat transcript plus resumable stream
 chunks. Think children use `cf_agent_tool_child_runs` to map `runId` to the
 underlying Think request and stream ids; AIChatAgent children use
