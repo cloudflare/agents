@@ -2301,6 +2301,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     if (responseDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, responseDelayMs));
     }
+    const responseGate = this._responseGate;
+    if (responseGate && !responseGate.reached) await responseGate.pass();
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -2396,6 +2398,22 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   /** How many turns the queue holds, the running one included. */
   queuedTurnCountForTest(): number {
     return queuedTurnCountForTest(this);
+  }
+
+  /** Holds the next response (before any chunk) until released. */
+  private _responseGate: TestGate | null = null;
+
+  holdNextResponseForTest(): void {
+    this._responseGate = new TestGate();
+  }
+
+  isResponseHeldForTest(): boolean {
+    return this._responseGate?.reached ?? false;
+  }
+
+  releaseResponseForTest(): void {
+    this._responseGate?.release();
+    this._responseGate = null;
   }
 
   holdStreamForTest(requestId = "next"): void {
