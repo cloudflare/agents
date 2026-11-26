@@ -4571,7 +4571,8 @@ describe("platform-transient reader errors (#1964)", () => {
       ).toContain("Continued response.");
       expect(after.at(-1)?.role).toBe("assistant");
     },
-    30_000
+    // Above the three bounded waits (10 s each) taken together.
+    60_000
   );
 
   it("delivers a terminal error when routing into recovery throws", async () => {
