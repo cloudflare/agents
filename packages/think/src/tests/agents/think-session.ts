@@ -9563,7 +9563,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     const hold = this._statusHookHold;
-    if (hold) {
+    if (hold && (hold.status === undefined || hold.status === result.status)) {
       this._statusHookHold = null;
       hold.reached = true;
       await hold.released;
@@ -9591,19 +9591,22 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   private _statusHookHold: {
+    status?: ThinkSubmissionStatus;
     reached: boolean;
     released: Promise<void>;
     open: () => void;
   } | null = null;
   private _heldStatusHook: { reached: boolean; open: () => void } | null = null;
 
-  /** Hold the next `onSubmissionStatus` call until released. */
-  async holdSubmissionStatusHookForTest(): Promise<void> {
+  /** Hold the next `onSubmissionStatus` call (for `status`) until released. */
+  async holdSubmissionStatusHookForTest(
+    status?: ThinkSubmissionStatus
+  ): Promise<void> {
     let open = () => {};
     const released = new Promise<void>((resolve) => {
       open = resolve;
     });
-    this._statusHookHold = { reached: false, released, open };
+    this._statusHookHold = { status, reached: false, released, open };
     this._heldStatusHook = this._statusHookHold;
   }
 

@@ -305,6 +305,27 @@ const terminalStatuses = new Set<ThinkSubmissionStatus>([
 ]);
 const workflowPromptMetadataKey = "__thinkWorkflowPrompt";
 
+/** Wait until the held delayed-chunk stream has sent its chunks. */
+async function chunkStreamHeld(agent: ThinkSubmissionTestStub): Promise<void> {
+  await vi.waitFor(
+    async () => expect(await agent.isChunkStreamHeldForTest()).toBe(true),
+    { timeout: 5000, interval: 10 }
+  );
+}
+
+/** Wait until a turn's (partial) reply is stored. */
+async function partialStored(agent: ThinkSubmissionTestStub): Promise<void> {
+  await vi.waitFor(
+    async () =>
+      expect(
+        (await agent.getStoredMessages()).some(
+          (message) => message.role === "assistant"
+        )
+      ).toBe(true),
+    { timeout: 5000, interval: 10 }
+  );
+}
+
 /** Wait until the held `onSubmissionStatus` call is running. */
 async function statusHookHeld(agent: ThinkSubmissionTestStub): Promise<void> {
   await vi.waitFor(
@@ -960,16 +981,14 @@ describe("Think durable submissions", () => {
   it("aborts a running submission without letting late completion overwrite it", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+    // The stream waits after one chunk, so the cancel lands mid-turn.
+    await agent.holdChunksAfterForTest(1);
+    onTestFinished(() => agent.releaseChunksForTest());
 
     const accepted = await agent.testSubmitMessages("cancel me", {
       submissionId: "sub-cancel"
     });
-
-    await waitForSubmission(
-      agent,
-      accepted.submissionId,
-      (submission) => submission.status === "running"
-    );
+    await chunkStreamHeld(agent);
     await agent.cancelSubmissionForTest(accepted.submissionId, "stop");
 
     const aborted = await waitForSubmission(
@@ -979,7 +998,10 @@ describe("Think durable submissions", () => {
     );
 
     expect(aborted.error).toBe("stop");
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // The stream finishes after the abort; once the turn's partial is stored,
+    // a late completion would have been written.
+    await agent.releaseChunksForTest();
+    await partialStored(agent);
     await expect(
       agent.inspectSubmissionForTest(accepted.submissionId)
     ).resolves.toMatchObject({ status: "aborted" });
@@ -1299,20 +1321,22 @@ describe("Think durable submissions", () => {
   it("emits a cancelled running submission's terminal status once", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+    // The stream waits after one chunk, so the cancel lands mid-turn.
+    await agent.holdChunksAfterForTest(1);
+    onTestFinished(() => agent.releaseChunksForTest());
     const accepted = await agent.testSubmitMessages("cancel me once", {
       submissionId: "sub-cancel-once"
     });
-    await waitForSubmission(
-      agent,
-      accepted.submissionId,
-      (submission) => submission.status === "running"
-    );
+    await chunkStreamHeld(agent);
 
     await agent.cancelSubmissionForTest(accepted.submissionId, "stop");
     await expect(
       agent.waitForSubmissionForTest(accepted.submissionId)
     ).resolves.toMatchObject({ status: "aborted" });
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Once the turn's partial is stored, the turn has ended: a second
+    // terminal status would have been emitted by then.
+    await agent.releaseChunksForTest();
+    await partialStored(agent);
 
     const statuses = (await agent.getSubmissionLog())
       .filter((entry) => entry.submissionId === accepted.submissionId)
