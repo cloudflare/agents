@@ -991,7 +991,13 @@ describe("Think — a sandboxed extension's turn controls", () => {
 
   it("keeps a message an extension sends from beforeTurn on the conversation", async () => {
     const agent = await turn("turn-message");
-    expect(await agent.activeTexts()).toContain("user: from the extension");
+    const texts = await agent.activeTexts();
+    // Before the reply, as Think places it.
+    expect(texts.slice(0, 2)).toEqual([
+      "user: start",
+      "user: from the extension"
+    ]);
+    expect(texts[2]?.startsWith("assistant: ")).toBe(true);
   });
 
   it("gives onChunk the streamed text", async () => {

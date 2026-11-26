@@ -399,7 +399,6 @@ export class Think<
         this.#running = undefined;
         this.#extensionTurn = undefined;
         this.#turnMaxSteps = undefined;
-        void this.#appendHeldHostMessages();
       }
     });
     this.lifecycle.use(this.harness);
@@ -440,11 +439,7 @@ export class Think<
       await this.#skills.start(() => this.getSkills());
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
-        if (event.type === "reset") {
-          this.#messages = [];
-          // A cleared conversation keeps nothing an extension sent during it.
-          this.#heldHostMessages = [];
-        }
+        if (event.type === "reset") this.#messages = [];
         if (event.type === "message") {
           // Apply it now, so a synchronous read right after a turn sees it;
           // the re-read that follows picks up compaction and branching.
@@ -702,9 +697,6 @@ export class Think<
     await this.#sync();
   }
 
-  /** Messages extensions sent during a turn, appended when it ends. */
-  #heldHostMessages: UIMessage[] = [];
-
   /** The extensions' `onChunk` calls, chained so they run in order. */
   #chunkHooks: Promise<void> = Promise.resolve();
 
@@ -716,34 +708,15 @@ export class Think<
     | { readonly operationId: string; readonly changes: TurnConfig }
     | undefined;
 
-  async #appendHeldHostMessages(): Promise<void> {
-    // A reply waiting for an approval or a client's result stays the last
-    // message, so the answer resumes it: the messages wait for a turn that
-    // settles.
-    if (awaitsInput(this.#messages.at(-1))) return;
-    const held = this.#heldHostMessages;
-    this.#heldHostMessages = [];
-    for (const message of held) {
-      try {
-        await this.appendMessageToHistory(message);
-      } catch (error) {
-        console.error("[Think] Could not append an extension's message", error);
-      }
-    }
-  }
-
   /** What a sandboxed extension can reach on this agent, as on Think. */
   readonly #hostApi = createThinkHostApi({
     workspace: () => this.workspace,
     context: () => this.context,
     messages: () => this.#messages,
     // Not a submission: a tool calling this during a turn would wait on
-    // its own turn. During a turn it is kept until the turn ends, so it
-    // follows the reply on the conversation, as Think queues it.
-    appendMessage: async (message) => {
-      if (this.#running) this.#heldHostMessages.push(message);
-      else await this.appendMessageToHistory(message);
-    }
+    // its own turn. One appended from `beforeTurn` comes before the reply,
+    // as in Think: the harness attaches the reply to it.
+    appendMessage: (message) => this.appendMessageToHistory(message)
   });
 
   /**
@@ -1185,17 +1158,4 @@ function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
   }
   // SAFETY: every key is one of `folded`'s, a TurnConfig's.
   return changes as TurnConfig;
-}
-
-/** Whether a message is a reply waiting for an approval or a client. */
-function awaitsInput(message: UIMessage | undefined): boolean {
-  return (
-    message?.role === "assistant" &&
-    message.parts.some(
-      (part) =>
-        "state" in part &&
-        (part.state === "approval-requested" ||
-          part.state === "input-available")
-    )
-  );
 }
