@@ -4361,6 +4361,37 @@ importers:
         specifier: ^5.6.2
         version: 5.6.2
 
+  nightly:
+    dependencies:
+      '@ai-sdk/openai':
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.6.7)
+      '@cloudflare/ai-chat':
+        specifier: '*'
+        version: link:../packages/ai-chat
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../packages/think
+      agents:
+        specifier: '*'
+        version: link:../packages/agents
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.6.7)
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20261014.1
+        version: 5.20261014.1
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.4.0)(@vitest/browser-playwright@4.1.11)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.4.0)(typescript@6.0.3))(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      wrangler:
+        specifier: ^4.145.0
+        version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.4.0)
+
   openai-sdk/basic: {}
 
   openai-sdk/call-my-agent: {}
