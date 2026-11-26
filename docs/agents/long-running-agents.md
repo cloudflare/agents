@@ -569,8 +569,6 @@ The right recovery strategy depends on the LLM provider:
 | Anthropic              | Synthetic continuation              | Persist partial, send a synthetic user message asking the model to continue   | Medium     |
 | Other                  | Try prefill, fall back to synthetic | `continueLastTurn()` if the provider supports it, synthetic message otherwise | Varies     |
 
-For a complete multi-provider implementation with full code for each strategy, see the [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) and the [`forever.md` design doc](https://github.com/cloudflare/agents/tree/main/experimental/forever.md).
-
 `AIChatAgent` and [Think](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) always enable durable recovery. The default path persists partial output and auto-continues or retries the turn when safe, so many apps do not need a custom hook. Override `onChatRecovery` when a provider has a better recovery strategy, or configure `chatRecovery = { maxAttempts, terminalMessage, onExhausted }` to tune the terminal user experience.
 
 If the agent is interrupted before any assistant stream chunks are written, there is no partial assistant message to continue. When the latest persisted message is still the unanswered user message from that turn, chat recovery retries the turn automatically unless `onChatRecovery` returns `{ continue: false }`.
@@ -725,4 +723,3 @@ The agent does not need to run continuously to do any of this. It just needs to 
 - [Webhooks](./webhooks.md) — receiving external events
 - [Human in the Loop](./human-in-the-loop.md) — approval flows
 - [Resumable Streaming](./resumable-streaming.md) — client-side stream resumption on disconnect
-- [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) — multi-provider LLM recovery demo

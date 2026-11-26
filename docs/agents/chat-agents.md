@@ -917,7 +917,7 @@ The right strategy depends on whether the provider supports assistant prefill an
 | OpenAI (Responses API) | Retrieve completed response by ID — zero wasted tokens       | Zero       |
 | Anthropic              | Persist partial, send a synthetic user message to continue   | Medium     |
 
-For a complete multi-provider implementation, see the [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) and the [`forever.md` design doc](https://github.com/cloudflare/agents/tree/main/experimental/forever.md). For how chat recovery fits into the broader long-running agents story, see [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams).
+For how chat recovery fits into the broader long-running agents story, see [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams).
 
 ## Client API
 

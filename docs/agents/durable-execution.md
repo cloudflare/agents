@@ -469,7 +469,7 @@ Key points:
 
 ### Chat recovery
 
-`AIChatAgent` and `Think` build on fibers for LLM streaming recovery. Every chat turn is wrapped in a fiber automatically. The framework handles the internal recovery path and exposes `onChatRecovery` for provider-specific strategies. See [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams) and the [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat).
+`AIChatAgent` and `Think` build on fibers for LLM streaming recovery. Every chat turn is wrapped in a fiber automatically. The framework handles the internal recovery path and exposes `onChatRecovery` for provider-specific strategies. See [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams).
 
 ## Concurrent fibers
 
@@ -536,5 +536,3 @@ Run an async function while keeping the DO alive. Heartbeat starts before `fn` a
 - [Scheduling](./scheduling.md) — `keepAlive` details and the alarm system
 - [Workflows](./workflows.md) — durable multi-step execution outside the agent
 - [Chat Agents](./chat-agents.md) — `chatRecovery` and `onChatRecovery`
-- [`forever-chat` example](https://github.com/cloudflare/agents/tree/main/experimental/forever-chat) — multi-provider LLM recovery demo
-- [`forever.md` design doc](https://github.com/cloudflare/agents/tree/main/experimental/forever.md) — internal design details, tradeoffs, and architecture
