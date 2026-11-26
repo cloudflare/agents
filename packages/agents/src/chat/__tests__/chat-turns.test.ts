@@ -1289,6 +1289,45 @@ describe("ChatTurns request context", () => {
     expect([...turns.clientToolNames()]).toEqual(["fresh"]);
   });
 
+  it("ignores a clientTools value that is not a list, from a request or a stored value", () => {
+    const { turns } = setup();
+    turns.setRequestContext({ clientTools: "pick" as unknown as [] });
+    expect(turns.lastClientTools).toBeUndefined();
+    turns.restoreRequestContext(JSON.stringify({ clientTools: { name: "x" } }));
+    expect(turns.lastClientTools).toBeUndefined();
+  });
+
+  it("a failed apply leaves the stored tools", async () => {
+    const { host, turns } = setup();
+    turns.setRequestContext({ clientTools: [{ name: "pick" }] });
+    const writes = host.saved.length;
+    await expect(
+      turns.applyingToolResult([{ name: "choose" }], async () => {
+        throw new Error("storage failed");
+      })()
+    ).rejects.toThrow("storage failed");
+    expect(turns.lastClientTools).toEqual([{ name: "pick" }]);
+    expect(host.saved).toHaveLength(writes);
+  });
+
+  it("holds what an interrupted turn is recovered with, and a clear empties it", () => {
+    const { turns } = setup();
+    turns.setRequestContext({
+      clientTools: [{ name: "pick" }],
+      body: { model: "fast" }
+    });
+    expect({
+      lastClientTools: turns.lastClientTools,
+      lastBody: turns.lastBody
+    }).toEqual({
+      lastClientTools: [{ name: "pick" }],
+      lastBody: { model: "fast" }
+    });
+    turns.clearRequestContext();
+    expect(turns.lastClientTools).toBeUndefined();
+    expect(turns.lastBody).toBeUndefined();
+  });
+
   it("a clear drops both, and a value past the row budget stays in memory only", () => {
     const { host, turns } = setup();
     turns.setRequestContext({ clientTools: [{ name: "x" }], body: { a: 1 } });
