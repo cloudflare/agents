@@ -30,6 +30,12 @@ export type LifecycleSchemaSteps<Step> = {
    * record nor `legacyKey` has one. It removes what it read.
    */
   readonly legacyVersion?: () => number | undefined;
+  /**
+   * Whether `legacyKey` must stay after it is folded in: a released version
+   * still reads it (a rollback would). The capability deletes it itself
+   * once nothing released depends on it.
+   */
+  readonly keepLegacyKey?: () => boolean;
 };
 
 /** @internal A capability's handle on the shared schema record. */
@@ -130,7 +136,11 @@ export class SchemaVersions {
       legacyKey === undefined
         ? undefined
         : this.#storage.kv.get<number>(legacyKey);
-    if (legacy !== undefined && legacyKey !== undefined) {
+    if (
+      legacy !== undefined &&
+      legacyKey !== undefined &&
+      !schema.keepLegacyKey?.()
+    ) {
       this.#folded.set(id, legacyKey);
     }
     const version = legacy ?? schema.legacyVersion?.();
