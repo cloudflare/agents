@@ -133,6 +133,11 @@ export interface ChatOptions {
   readonly recovery?:
     | false
     | { readonly maxAttempts?: number; readonly stallTimeoutMs?: number };
+  /**
+   * The most bytes of transcript a model call reads: the newest messages
+   * that fit (always at least the latest). Unset reads the whole path.
+   */
+  readonly hydrationByteBudget?: number;
 }
 
 /** What a host supplies. */
@@ -846,16 +851,23 @@ export function chatTurnDefinition(
 
     // The transcript up to this turn's question (a regenerate of an older
     // question sees nothing after it), or to the reply it continues.
-    const history = async () =>
-      (await session.getHistory(
+    const history = async (): Promise<UIMessage[]> => {
+      const leaf =
         run.trigger === "tool-answer" && run.replyId !== undefined
           ? { leafId: run.replyId }
           : run.questionId !== undefined &&
               !partial &&
               run.trigger !== "tool-answer"
             ? { leafId: run.questionId }
-            : {}
-      )) as unknown as UIMessage[];
+            : {};
+      // A byte budget reads only the newest messages that fit it.
+      const budget = host.options?.hydrationByteBudget;
+      if (budget !== undefined && Number.isFinite(budget)) {
+        return (await session.getRecentHistory(budget, leaf))
+          .messages as unknown as UIMessage[];
+      }
+      return (await session.getHistory(leaf)) as unknown as UIMessage[];
+    };
     const messages = await history();
     // A tool answer continues the reply that asked for it (named, or the
     // latest).
