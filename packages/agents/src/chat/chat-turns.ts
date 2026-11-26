@@ -1071,25 +1071,79 @@ export class ChatTurns<
       .finally(() => this.#parked.delete(runId));
   }
 
-  /** End parks an earlier isolate left: their replies ended with it. */
-  async #endOrphanedParks(): Promise<void> {
+  /** Recovered replies that keep the parks an earlier isolate left. */
+  readonly #heldBy = new Set<Promise<void>>();
+  #parksCheck: ReturnType<typeof setTimeout> | null = null;
+
+  /** The parked lane runs an earlier isolate left. */
+  #orphanedParks(): Array<{ runId: string }> {
     const tasks = this.#lane.tasks();
-    let parked: ReturnType<typeof tasks.peekList>;
     try {
-      parked = tasks.peekList({
-        definition: this.#lane.definition,
-        lane: CHAT_TURN_LANE,
-        status: ["pending"],
-        parked: true,
-        results: false
-      });
+      return tasks
+        .peekList({
+          definition: this.#lane.definition,
+          lane: CHAT_TURN_LANE,
+          status: ["pending"],
+          parked: true,
+          results: false
+        })
+        .filter((run) => !this.#parked.has(run.runId));
     } catch {
       // Tasks has not started.
+      return [];
+    }
+  }
+
+  /**
+   * Whether a lane run an earlier isolate left parked holds the lane. Its
+   * recovered reply was cut off with that isolate, and the turn's own run
+   * recovers it: until it has, nothing queued behind may start.
+   */
+  laneHeldForRecovery(): boolean {
+    return this.#orphanedParks().length > 0;
+  }
+
+  /** Keep the parks an earlier isolate left until `reply` ends as well. */
+  holdParksUntil(reply: Promise<void>): void {
+    this.#heldBy.add(reply);
+    void reply
+      .catch(() => {})
+      .finally(() => {
+        this.#heldBy.delete(reply);
+        void this.#endOrphanedParks();
+      });
+  }
+
+  /**
+   * End the parks an earlier isolate left, once no turn run of theirs is
+   * open and no reply holds them: a recovered reply cut off with that
+   * isolate is recovered by its own run first, holding the lane.
+   */
+  async #endOrphanedParks(): Promise<void> {
+    const parked = this.#orphanedParks();
+    if (parked.length === 0) return;
+    const tasks = this.#lane.tasks();
+    const open = (lane?: string) =>
+      tasks.peekList({
+        definition: this.#lane.definition,
+        status: ["pending", "running"],
+        results: false,
+        limit: Number.MAX_SAFE_INTEGER,
+        ...(lane !== undefined && { lane })
+      }).length;
+    // A turn run off the lane: a recovered reply's, recovering.
+    const recovering = this.#heldBy.size > 0 || open() > open(CHAT_TURN_LANE);
+    if (recovering) {
+      // Asked again until they are done.
+      if (this.#parksCheck === null) {
+        this.#parksCheck = setTimeout(() => {
+          this.#parksCheck = null;
+          void this.#endOrphanedParks();
+        }, 100);
+      }
       return;
     }
-    for (const run of parked) {
-      if (!this.#parked.has(run.runId)) await tasks.settle(run.runId, null);
-    }
+    for (const run of parked) await tasks.settle(run.runId, null);
   }
 
   /**
@@ -1936,14 +1990,6 @@ export class ChatTurns<
     return this.#continuationParts.firing.size > 0;
   }
 
-  /** Resolves once {@link #continuationFired}, or never once `watch` is done. */
-  async #untilContinuationFires(watch: { done: boolean }): Promise<void> {
-    while (!this.#continuationFired()) {
-      if (watch.done) return new Promise(() => {});
-      await sleep(50);
-    }
-  }
-
   /**
    * Tear down turn state for a chat reset (clear): invalidate queued turns,
    * abort every request, drop the apply chain and the continuation slots and
@@ -2035,17 +2081,15 @@ export class ChatTurns<
     // before the attempt ends. That continuation settles the chat instead.
     const inLane = inLaneRecoveryAttempt();
     for (;;) {
-      const idle = this.queue.waitForIdle();
-      const watch = { done: false };
-      const waited = await awaitWithDeadline(
-        inLane
-          ? Promise.race([idle, this.#untilContinuationFires(watch)])
-          : idle,
-        deadline
-      ).finally(() => {
-        watch.done = true;
-      });
-      if (waited === TIMED_OUT) return false;
+      // Turns queued behind a lane run's recovery attempt cannot run before
+      // it ends, so it does not wait for them; its own run in place.
+      if (
+        !inLane &&
+        (await awaitWithDeadline(this.queue.waitForIdle(), deadline)) ===
+          TIMED_OUT
+      ) {
+        return false;
+      }
       if (inLane && this.#continuationFired()) return true;
 
       if (!hasPendingInteraction()) {

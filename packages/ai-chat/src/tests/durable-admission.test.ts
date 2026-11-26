@@ -481,6 +481,73 @@ describe("a tool call a reset cut off", () => {
   );
 });
 
+describe("two resets a few seconds apart", () => {
+  it.each([
+    { name: "", sendAfter: false },
+    { name: ", and a new request sent after the second", sendAfter: true }
+  ])(
+    "the request cut at the first reset is answered before the one queued behind it$name",
+    async ({ sendAfter }) => {
+      const room = crypto.randomUUID();
+      const binding = "RecoverySlowStreamAgent";
+      const path = `/agents/recovery-slow-stream-agent/${room}`;
+      const { ws } = await connectChatWS(path);
+      sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
+      await delay(300);
+      sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
+      await delay(300);
+
+      await reset(binding, room);
+      // The recovered turn starts streaming the cut reply's continuation.
+      const { ws: tab } = await connectChatWS(path);
+      record(tab);
+      const second = await agent(binding, room);
+      await waitFor(
+        () => second.getTranscriptsSeenForTest(),
+        (seen) => seen.length >= 1
+      );
+      await delay(1500);
+      // The second reset cuts the recovered reply.
+      await reset(binding, room);
+      tab.close();
+
+      const { ws: tab2 } = await connectChatWS(path);
+      record(tab2);
+      const third = await agent(binding, room);
+      // A request the tab sends now waits behind the cut reply's recovery.
+      if (sendAfter) {
+        sendChatRequest(
+          tab2,
+          "r3",
+          [user("u1", "one"), user("u2", "two"), user("u3", "three")],
+          QUICK
+        );
+      }
+      const messages = await waitFor(
+        () => third.getPersistedMessages(),
+        (m) =>
+          m.filter((x) => x.role === "assistant").length >= (sendAfter ? 3 : 2),
+        30_000
+      );
+      // u1 is answered, then each later question in turn.
+      const asked = sendAfter ? ["u1", "u2", "u3"] : ["u1", "u2"];
+      expect(messages.map((m) => m.role)).toEqual(
+        asked.flatMap(() => ["user", "assistant"])
+      );
+      expect(
+        messages.filter((m) => m.role === "user").map((m) => m.id)
+      ).toEqual(asked);
+      for (let i = 3; i < messages.length; i += 2) {
+        expect(textOf(messages[i])).toBe(QUICK_REPLY);
+      }
+      // u1's reply was continued to its end, not left cut off.
+      expect(textOf(messages[1])).toContain("chunk-29");
+      tab2.close();
+    },
+    60_000
+  );
+});
+
 describe("a turn started from onStart", () => {
   it("runs while onStart waits for it", async () => {
     const stub = await getAgentByName(

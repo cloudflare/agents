@@ -14,3 +14,4 @@ Chat recovery after a restart or a dropped stream.
 - A rebuilt orphaned reply no longer repeats its parts (#2979).
 - Provider rate-limit, transient and context-overflow errors are recognised without `classifyChatError`. `AIChatAgent` recovers a rate-limited or transient error like a dropped stream when the error reaches it with its status (a `toUIMessageStreamResponse()` whose `onError` rethrows; the default masks it).
 - Recovery work units (`maxRecoveryWork`, `ctx.work`) now count ten stored chunks each. See [Recovery work units](https://developers.cloudflare.com/agents/api-reference/chat-agents/#recovery-work-units).
+- A reply cut off twice by resets a few seconds apart is recovered again before a request queued behind it runs, so that request no longer leaves it unanswered.

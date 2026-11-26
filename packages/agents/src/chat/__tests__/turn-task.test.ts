@@ -55,7 +55,9 @@ const hooks = {
     _chatRecoveryRetry: async () => {}
   },
   replay: async () => {},
-  parkUntil: () => {}
+  parkUntil: () => {},
+  laneHeldForRecovery: () => false,
+  holdParksUntil: () => {}
 };
 
 describe("createChatTurnTaskDefinition", () => {
