@@ -6438,7 +6438,12 @@ export class ThinkAgentToolParent extends Agent {
    */
   async abortReissuedRunWhileItWaitsForTest(
     runId = crypto.randomUUID()
-  ): Promise<{ result: string; child: string | null; terminals: string[] }> {
+  ): Promise<{
+    result: string;
+    child: string | null;
+    terminals: string[];
+    waitedForCheck: boolean;
+  }> {
     const child = await this.subAgent(ThinkTestAgent, runId);
     await child.setBeforeStepAsyncDelay(60_000);
     const started = await child.startAgentToolRun("silent child", { runId });
@@ -6472,6 +6477,8 @@ export class ThinkAgentToolParent extends Agent {
     ) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    // The abort must land while the run waits for its next check.
+    const waitedForCheck = this.tasks.peek(runId)?.waitReason === "retry";
     controller.abort("stopped by the user");
     const result = await running;
     const inspection = await this.waitForTerminalInspectionForTest(
@@ -6489,7 +6496,8 @@ export class ThinkAgentToolParent extends Agent {
     return {
       result: result.status,
       child: inspection?.status ?? null,
-      terminals
+      terminals,
+      waitedForCheck
     };
   }
 

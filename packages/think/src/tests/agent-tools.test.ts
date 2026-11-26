@@ -217,6 +217,7 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     result: string;
     child: string | null;
     terminals: string[];
+    waitedForCheck: boolean;
   }>;
   abortWhileReattachingThinkChildForTest(): Promise<{
     result: string;
@@ -1334,8 +1335,9 @@ describe("Think agent tools", () => {
 
   it("cancels a re-issued run and its child when the caller stops while it waits for its next check", async () => {
     const parent = await freshParent();
-    const { result, child, terminals } =
+    const { result, child, terminals, waitedForCheck } =
       await parent.abortReissuedRunWhileItWaitsForTest();
+    expect(waitedForCheck).toBe(true);
     expect(result).toBe("aborted");
     expect(child).toBe("aborted");
     // Connected clients see the run end, once.
