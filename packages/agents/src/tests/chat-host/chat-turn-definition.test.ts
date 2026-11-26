@@ -163,6 +163,8 @@ describe("chatTurnDefinition", () => {
       expect(history.map((m) => m.id)).toEqual(["u1", "a1"]);
       expect(JSON.stringify(history[1])).toContain("Hel");
       expect(JSON.stringify(history[1])).toContain("lo");
+      // The text the cut left mid-stream is stored finished.
+      expect(JSON.stringify(history[1])).not.toContain('"state":"streaming"');
       expect(result).toEqual({
         requestId: "run-1",
         status: "completed",
@@ -498,6 +500,273 @@ describe("chatTurnDefinition", () => {
       expect(result).toMatchObject({ status: "aborted", messageId: "a1" });
       const history = await instance.sessions.session("s1").getHistory();
       expect(JSON.stringify(history)).toContain("Part");
+    });
+  });
+
+  const stream = (chunks: unknown[]) =>
+    new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk as never);
+        controller.close();
+      }
+    });
+
+  it("gives every plain-text reply its own message", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let n = 0;
+      const host: ChatHost = {
+        respond: async () => new Response(++n === 1 ? "First" : "Second")
+      };
+      await definitionOf(instance, host)(
+        { trigger: "server" },
+        laterAttempt("p1", 1)
+      );
+      await definitionOf(instance, host)(
+        { trigger: "server" },
+        laterAttempt("p2", 1)
+      );
+      const replies = (
+        await instance.sessions.session("s1").getHistory()
+      ).filter((m) => m.role === "assistant");
+      expect(replies).toHaveLength(2);
+      expect(JSON.stringify(replies)).toContain("First");
+      expect(JSON.stringify(replies)).toContain("Second");
+    });
+  });
+
+  it("a tool-answer turn cut off and continued keeps the answered tool and earlier text", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Where am I?" }]
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: { city: "Lisbon" }
+          }
+        ]
+      } as never);
+      const checkpoint = new Map<string, unknown>();
+      const signal = new AbortController().signal;
+      let calls = 0;
+      const host: ChatHost = {
+        respond: async () =>
+          ++calls === 1
+            ? stream([
+                { type: "text-start", id: "t1" },
+                { type: "text-delta", id: "t1", delta: "You are in" },
+                { type: "error", errorText: "overloaded" }
+              ])
+            : stream([
+                { type: "text-start", id: "t2" },
+                { type: "text-delta", id: "t2", delta: " Lisbon." },
+                { type: "text-end", id: "t2" }
+              ]),
+        hooks: { classifyError: () => "transient" }
+      };
+      const first = await definitionOf(instance, host)(
+        { trigger: "tool-answer" },
+        laterAttempt("ta-1", 1, signal, checkpoint)
+      );
+      expect(first).toBeInstanceOf(TaskSettlement);
+      await definitionOf(instance, host)(
+        { trigger: "tool-answer" },
+        laterAttempt("ta-1", 2, signal, checkpoint)
+      );
+      const reply = JSON.stringify(
+        (await session.getHistory()).find((m) => m.id === "a1")
+      );
+      expect(reply).toContain('"city":"Lisbon"');
+      expect(reply).toContain("You are in");
+      expect(reply).toContain(" Lisbon.");
+    });
+  });
+
+  it("a turn whose model stream closes on a stop ends stopped, not completed", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const stop = new AbortController();
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({ type: "text-start", id: "t1" });
+              controller.enqueue({
+                type: "text-delta",
+                id: "t1",
+                delta: "The answer is"
+              });
+              stop.abort();
+              // The model honours the signal by closing, not throwing.
+              controller.close();
+            }
+          })
+      })({ trigger: "server" }, laterAttempt("c-1", 1, stop.signal));
+      expect(result).toMatchObject({ status: "aborted" });
+    });
+  });
+
+  it("asks again after an overflow with the transcript the hook shortened", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      for (const id of ["u1", "u2", "u3"]) {
+        await session.appendMessage({
+          id,
+          role: "user",
+          parts: [{ type: "text", text: id }]
+        } as never);
+      }
+      const seen: string[][] = [];
+      await definitionOf(instance, {
+        respond: async (call) => {
+          seen.push(call.messages.map((m) => m.id));
+          if (seen.length === 1) {
+            return new ReadableStream({
+              start(controller) {
+                controller.error(new Error("too long"));
+              }
+            });
+          }
+          return instance.host.respond(call);
+        },
+        hooks: {
+          classifyError: () => "overflow",
+          onContextOverflow: async () => {
+            await session.deleteMessages(["u1"]);
+            return true;
+          }
+        }
+      })({ trigger: "server" }, laterAttempt("o-1", 1));
+      expect(seen[0]).toEqual(["u1", "u2", "u3"]);
+      expect(seen[1]).toEqual(["u2", "u3"]);
+    });
+  });
+
+  it("a regenerate of an older question sees nothing after it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "u2",
+        role: "user",
+        parts: []
+      } as never);
+      await definitionOf(instance, instance.host)(
+        { trigger: "regenerate-message", questionId: "u1" },
+        laterAttempt("g-1", 1)
+      );
+      expect(instance.calls[0].messages.map((m) => m.id)).toEqual(["u1"]);
+    });
+  });
+
+  it("continues without the partial when onRecovery keeps going but says not to keep it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-p");
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: { onRecovery: () => ({ continue: true, persist: false }) }
+      })({ trigger: "submit-message" }, laterAttempt("run-p", 2));
+      // The cut-off reply is gone before the model is asked again.
+      expect(instance.calls[0]).toMatchObject({ mode: "answer" });
+      expect(instance.calls[0].messages.map((m) => m.id)).not.toContain("a1");
+    });
+  });
+
+  it("a stopped turn settles its server tool call and leaves a client tool call waiting", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const stop = new AbortController();
+      let passed!: () => void;
+      const bothPassed = new Promise<void>((resolve) => (passed = resolve));
+      let count = 0;
+      await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            async start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({
+                type: "tool-input-available",
+                toolCallId: "s1",
+                toolName: "lookupOrder",
+                input: {}
+              });
+              controller.enqueue({
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "askUser",
+                input: {}
+              });
+              await bothPassed;
+              stop.abort();
+              controller.error(new Error("stopped"));
+            }
+          }),
+        hooks: {
+          transformChunk: (chunk) => {
+            if (chunk.type === "tool-input-available" && ++count === 2)
+              passed();
+            return chunk;
+          }
+        }
+      })(
+        { trigger: "server", clientTools: [{ name: "askUser" }] },
+        laterAttempt("st-1", 1, stop.signal)
+      );
+      const reply = (await instance.sessions.session("s1").getHistory()).find(
+        (m) => m.id === "a1"
+      ) as unknown as { parts: Array<{ toolCallId?: string; state?: string }> };
+      expect(reply.parts.find((p) => p.toolCallId === "s1")?.state).toBe(
+        "output-error"
+      );
+      expect(reply.parts.find((p) => p.toolCallId === "c1")?.state).toBe(
+        "input-available"
+      );
+    });
+  });
+
+  it("a reply continued after a reset stores the cut text part finished", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-s");
+      await definitionOf(instance, instance.host)(
+        { trigger: "submit-message" },
+        laterAttempt("run-s", 2)
+      );
+      const text = JSON.stringify(
+        await instance.sessions.session("s1").getHistory()
+      );
+      expect(text).toContain("Hel");
+      expect(text).not.toContain('"state":"streaming"');
     });
   });
 });

@@ -139,6 +139,12 @@ export interface ChatHost {
   readonly options?: ChatOptions;
 }
 
+/** The reason a chat clear cancels its turns with. */
+export const CHAT_CLEARED = "chat cleared";
+
+/** The run's checkpoint key holding the reply a continuation extends. */
+const BASE_CHECKPOINT = "chat:base";
+
 /** The run's checkpoint key holding the id of the reply it stored. */
 const REPLY_CHECKPOINT = "chat:reply";
 
@@ -281,11 +287,30 @@ function isCutOffTool(part: UIMessage["parts"][number]): boolean {
  * Settle each tool part the interruption cut off: through the host's hook,
  * or reported to the model as interrupted.
  */
-function repairCutOffTools(message: UIMessage, hooks?: ChatHooks): UIMessage {
+function repairCutOffTools(
+  message: UIMessage,
+  hooks: ChatHooks | undefined,
+  clientTools: readonly ClientToolSchema[]
+): UIMessage {
+  const answeredByClient = new Set(clientTools.map((tool) => tool.name));
   return {
     ...message,
     parts: message.parts.map((part) => {
+      // Text or reasoning the cut left mid-stream is finished as it is.
+      if (
+        (part.type === "text" || part.type === "reasoning") &&
+        (part as { state?: unknown }).state === "streaming"
+      ) {
+        return { ...part, state: "done" } as typeof part;
+      }
       if (!isCutOffTool(part)) return part;
+      // A client tool call waits for the tab's answer, not on the turn.
+      const name =
+        (part as { toolName?: unknown }).toolName ??
+        ((part as { type: string }).type.startsWith("tool-")
+          ? (part as { type: string }).type.slice(5)
+          : undefined);
+      if (typeof name === "string" && answeredByClient.has(name)) return part;
       const toolPart = part as InterruptedToolPart;
       return (
         hooks?.repairInterruptedToolPart?.(toolPart) ??
@@ -455,6 +480,14 @@ export function chatTurnDefinition(
     let partial: UIMessage | undefined;
     if (earlier) {
       const stored = await storedChunks(deps.streams, streamId);
+      // A reply this run continues (a tool answer's) is the base the stream
+      // extends: its first `parts` parts as they were when the run began.
+      const base = step.checkpoint.get<{ id: string; parts: number }>(
+        BASE_CHECKPOINT
+      );
+      const baseMessage = base
+        ? ((await session.getMessage(base.id)) as unknown as UIMessage | null)
+        : null;
       const built = await messageOf(
         new ReadableStream({
           start(controller) {
@@ -464,10 +497,13 @@ export function chatTurnDefinition(
             }
             controller.close();
           }
-        })
+        }),
+        baseMessage && base
+          ? { ...baseMessage, parts: baseMessage.parts.slice(0, base.parts) }
+          : undefined
       );
       if (built && built.parts.length > 0) {
-        partial = repairCutOffTools(built, host.hooks);
+        partial = repairCutOffTools(built, host.hooks, run.clientTools ?? []);
         await session.upsertMessage(partial as never);
       }
       const partialParts = (partial?.parts ?? []) as never[];
@@ -495,6 +531,18 @@ export function chatTurnDefinition(
         step.attempt > maxAttempts ||
         decision?.continue === false
       ) {
+        // falls through below
+      } else if (partial && decision?.persist === false) {
+        // Continue without what was streamed: the question is answered
+        // again.
+        await session.deleteMessages([partial.id]);
+        partial = undefined;
+      }
+      if (
+        recovery === false ||
+        step.attempt > maxAttempts ||
+        decision?.continue === false
+      ) {
         // Given up: what was streamed stays stored (unless the app said
         // not to keep it), and the turn ends as an error.
         if (partial && decision?.persist === false) {
@@ -510,13 +558,31 @@ export function chatTurnDefinition(
       }
     }
 
-    const messages = (await session.getHistory()) as unknown as UIMessage[];
+    // The transcript up to this turn's question (a regenerate of an older
+    // question sees nothing after it), or to the reply it continues.
+    const history = async () =>
+      (await session.getHistory(
+        run.questionId !== undefined &&
+          !partial &&
+          run.trigger !== "tool-answer"
+          ? { leafId: run.questionId }
+          : {}
+      )) as unknown as UIMessage[];
+    const messages = await history();
     // A tool answer continues the reply that asked for it.
     if (!partial && run.trigger === "tool-answer") {
       const last = messages.at(-1);
-      if (last?.role === "assistant") partial = last;
+      if (last?.role === "assistant") {
+        partial = last;
+        if (step.checkpoint.get(BASE_CHECKPOINT) === undefined) {
+          step.checkpoint.set(BASE_CHECKPOINT, {
+            id: last.id,
+            parts: last.parts.length
+          });
+        }
+      }
     }
-    const call: ChatModelCall = {
+    let call: ChatModelCall = {
       session: sessionId,
       requestId,
       attempt: step.attempt,
@@ -531,6 +597,7 @@ export function chatTurnDefinition(
       step: <T>(name: string, fn: () => Promise<T>) =>
         step.do(name, () => fn() as Promise<TaskValue>) as Promise<T>
     };
+    const fallbackId = `${requestId}-reply`;
     let writer: StreamWriter | undefined;
     let parts: UIMessage["parts"] = partial?.parts ?? [];
     let reply: UIMessage | undefined;
@@ -545,16 +612,33 @@ export function chatTurnDefinition(
         tag: requestId
       }));
       const continuing = partial;
+      let started = false;
       const recorded = watchStall(
         chunksOf(source, requestId),
         recovery === false ? undefined : recovery?.stallTimeoutMs
       ).pipeThrough(
         new TransformStream<UIMessageChunk, UIMessageChunk>({
           transform(chunk, controller) {
-            // A continuation keeps the reply's id.
+            // Every reply has an id: a continuation keeps the reply's, a new
+            // reply keeps the model's or gets one from the run.
+            if (!started && chunk.type !== "start") {
+              started = true;
+              const start = {
+                type: "start",
+                messageId: continuing?.id ?? fallbackId
+              } as UIMessageChunk;
+              out.append(start as never);
+              seen.push(start);
+              send({ body: JSON.stringify(start), done: false });
+              controller.enqueue(start);
+            }
+            started = true;
             const own =
-              continuing && chunk.type === "start"
-                ? ({ ...chunk, messageId: continuing.id } as UIMessageChunk)
+              chunk.type === "start" && (continuing || !chunk.messageId)
+                ? ({
+                    ...chunk,
+                    messageId: continuing?.id ?? fallbackId
+                  } as UIMessageChunk)
                 : chunk;
             const next = host.hooks?.transformChunk?.(own, parts) ?? own;
             // An in-band error is stored only if it ends the turn.
@@ -575,13 +659,25 @@ export function chatTurnDefinition(
         reply = await messageOf(recorded, continuing, (snapshot) => {
           parts = snapshot.parts;
         });
+        // A model stream that closed when the turn was stopped did not
+        // finish: the turn ends stopped, as a thrown stop does.
+        if (step.signal.aborted)
+          throw step.signal.reason ?? new Error("stopped");
         break;
       } catch (error) {
         if (step.signal.aborted) {
+          // A cleared chat keeps nothing of the turn.
+          if (String(step.signal.reason).includes(CHAT_CLEARED)) {
+            out.close({ discard: true });
+            return report({ requestId, status: "aborted" });
+          }
           // A stopped turn keeps what it streamed, as a stored reply.
+          const soFar = await messageOf(streamOf(seen), continuing).catch(
+            () => continuing
+          );
           const kept = await storeReply(
             out,
-            await messageOf(streamOf(seen), continuing).catch(() => continuing)
+            soFar && repairCutOffTools(soFar, host.hooks, run.clientTools ?? [])
           );
           return report({
             requestId,
@@ -601,8 +697,10 @@ export function chatTurnDefinition(
           !overflowTried &&
           (await host.hooks?.onContextOverflow?.(call))
         ) {
-          // Room was made: ask the model again, once.
+          // Room was made: ask the model again, once, with the transcript
+          // as it is now.
           overflowTried = true;
+          call = { ...call, messages: await history() };
           continue;
         }
         if (verdict === "transient" && recovery !== false) {
