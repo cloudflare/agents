@@ -17,6 +17,7 @@ import {
   liveTurnsOf,
   parkedIn,
   releaseParked,
+  retryingTurn,
   type ChatDeps,
   type ChatTurnInput
 } from "./chat-host";
@@ -225,12 +226,24 @@ export async function cancelTurn(
       [STOPPED_METADATA.field]: true
     });
   }
-  return deps.tasks.cancel(requestId, "chat turn cancelled");
+  const retrying = retryingTurn(deps, requestId);
+  const cancelled = await deps.tasks.cancel(requestId, "chat turn cancelled");
+  if (cancelled && retrying) await retrying.settle(true);
+  return cancelled;
 }
 
 /** Clear the chat: no waiting or running turn goes on, and the transcript is emptied. */
 export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
+  const retrying = deps.tasks
+    .peekList({
+      definition: lane.definition,
+      lane: lane.lane,
+      status: ["pending"],
+      results: false
+    })
+    .flatMap((run) => retryingTurn(deps, run.runId) ?? []);
   await deps.tasks.clear(lane.lane, "chat cleared");
+  for (const turn of retrying) await turn.settle(false);
   await deps.sessions.session(deps.session ?? "").clearMessages();
   continueRequestsOf(deps.streams).clear();
 }
