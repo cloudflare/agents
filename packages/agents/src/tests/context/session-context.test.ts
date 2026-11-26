@@ -111,6 +111,24 @@ async function modelWrites(
   } as SessionMessage);
 }
 
+/** Prepare a turn and record its tools at once, as a host that knows them. */
+async function prepareWithTools(
+  context: Context,
+  options: {
+    tools: readonly { readonly name: string; readonly hash: string }[];
+    retry?: boolean;
+    messages?: SessionMessage[];
+  }
+): Promise<{ system: string; reminder: string | null }> {
+  const { tools, ...rest } = options;
+  const turn = await context.prepareTurn(rest);
+  const { reminder } = await turn.recordSent(tools);
+  return {
+    system: turn.system,
+    reminder: [turn.reminder, reminder].filter(Boolean).join("\n\n") || null
+  };
+}
+
 describe("Context", () => {
   it("records the first prompt on the user message and reuses it", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
@@ -1226,13 +1244,13 @@ describe("Context", () => {
       const a = { name: "search", hash: "1" };
       const b = { name: "fetch", hash: "1" };
       await session.appendMessage(user("u1", "hello"));
-      const first = await context.prepare({ tools: [a, b] });
+      const first = await prepareWithTools(context, { tools: [a, b] });
       expect(first.reminder).toBeNull();
       await session.appendMessage(assistant("a1", "hi"));
 
       // Same tools: nothing.
       await session.appendMessage(user("u2", "again"));
-      await context.prepare({ tools: [a, b] });
+      await prepareWithTools(context, { tools: [a, b] });
       expect(
         texts((await context.project(await session.getHistory())).at(-1))
       ).toHaveLength(1);
@@ -1240,7 +1258,7 @@ describe("Context", () => {
 
       // fetch gone, search changed, write added.
       await session.appendMessage(user("u3", "now"));
-      const third = await context.prepare({
+      const third = await prepareWithTools(context, {
         tools: [
           { name: "search", hash: "2" },
           { name: "write", hash: "1" }
@@ -1257,7 +1275,7 @@ describe("Context", () => {
 
       // Next turn: the notice stays on u3 and is not sent again.
       await session.appendMessage(user("u4", "next"));
-      await context.prepare({
+      await prepareWithTools(context, {
         tools: [
           { name: "search", hash: "2" },
           { name: "write", hash: "1" }
@@ -1277,14 +1295,16 @@ describe("Context", () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context } = await setup(storage, (s) => install(s));
       await session.appendMessage(user("u1", "hello"));
-      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await prepareWithTools(context, {
+        tools: [{ name: "search", hash: "1" }]
+      });
       await session.appendMessage(assistant("a1", "partial"));
-      const continued = await context.prepare({ tools: [] });
+      const continued = await prepareWithTools(context, { tools: [] });
       expect(continued.reminder).toContain("Removed: search.");
       // A retry sends nothing new.
       await session.appendMessage(user("u2", "again"));
       expect(
-        (await context.prepare({ tools: [], retry: true })).reminder
+        (await prepareWithTools(context, { tools: [], retry: true })).reminder
       ).toBeNull();
     });
   });
@@ -1299,8 +1319,11 @@ describe("Context", () => {
       // The first turn with tools records them and says nothing.
       await session.appendMessage(user("u2", "again"));
       expect(
-        (await context.prepare({ tools: [{ name: "search", hash: "1" }] }))
-          .reminder
+        (
+          await prepareWithTools(context, {
+            tools: [{ name: "search", hash: "1" }]
+          })
+        ).reminder
       ).toBeNull();
       expect(
         JSON.stringify(await context.project(await session.getHistory()))
@@ -1311,7 +1334,7 @@ describe("Context", () => {
       // A summary hides the record that holds the fingerprint.
       await session.addCompaction("earlier turns", "u1", "a3");
       await session.appendMessage(user("u4", "next"));
-      await context.prepare({ tools: [] });
+      await prepareWithTools(context, { tools: [] });
       const last = texts(
         (await context.project(await session.getHistory())).at(-1)
       );
@@ -1329,10 +1352,12 @@ describe("Context", () => {
         blocks: []
       });
       await session.appendMessage(user("u1", "hello"));
-      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await prepareWithTools(context, {
+        tools: [{ name: "search", hash: "1" }]
+      });
       await session.appendMessage(assistant("a1", "hi"));
       await session.appendMessage(user("u2", "again"));
-      const second = await context.prepare({ tools: [] });
+      const second = await prepareWithTools(context, { tools: [] });
       expect(second.system).toBe("");
       const last = texts(
         (await context.project(await session.getHistory())).at(-1)
@@ -1347,14 +1372,20 @@ describe("Context", () => {
         { label: "todo", whenChanged: "remind" }
       ]);
       await session.appendMessage(user("u1", "plan it"));
-      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await prepareWithTools(context, {
+        tools: [{ name: "search", hash: "1" }]
+      });
       await modelWrites(context, session, "a1", "todo", "1. draft");
       // Only the tools change on this turn.
       await session.appendMessage(user("u2", "next"));
-      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      await prepareWithTools(context, {
+        tools: [{ name: "search", hash: "2" }]
+      });
       await session.appendMessage(assistant("a2", "ok"));
       await session.appendMessage(user("u3", "more"));
-      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      await prepareWithTools(context, {
+        tools: [{ name: "search", hash: "2" }]
+      });
       const sent = JSON.stringify(
         await context.project(await session.getHistory())
       );
@@ -1401,7 +1432,7 @@ describe("Context", () => {
       const u1 = (await session.getMessage("u1"))!;
       // A regeneration of a1 that passes tools stops inside prepare...
       hold = true;
-      const regeneration = context.prepare({
+      const regeneration = prepareWithTools(context, {
         messages: [u1],
         tools: [{ name: "search", hash: "1" }]
       });
@@ -1439,11 +1470,15 @@ describe("Context", () => {
         }
       ]);
       await session.appendMessage(user("u1", "hello"));
-      await context.prepare({ tools: [{ name: "search", hash: "1" }] });
+      await prepareWithTools(context, {
+        tools: [{ name: "search", hash: "1" }]
+      });
       await session.appendMessage(assistant("a1", "hi"));
       await session.appendMessage(user("u2", "again"));
       reads = 0;
-      await context.prepare({ tools: [{ name: "search", hash: "2" }] });
+      await prepareWithTools(context, {
+        tools: [{ name: "search", hash: "2" }]
+      });
       expect(reads).toBe(1);
     });
   });
