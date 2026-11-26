@@ -474,50 +474,50 @@ describe("@callable decorator", () => {
       const room = `callable-concurrent-async-${crypto.randomUUID()}`;
       const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
       await skipInitialMessages(ws);
+      const agent = await getAgentByName(env.TestCallableAgent, room);
 
-      // Call async methods with different delays
       const id1 = createId();
       const id2 = createId();
+      const responses: Map<string, RPCResponse> = new Map();
+      const responseOrder: string[] = [];
+      const arrived = (count: number) =>
+        vi.waitFor(() => expect(responses.size).toBe(count), {
+          timeout: 5000,
+          interval: 10
+        });
+      ws.addEventListener("message", (e: MessageEvent) => {
+        const msg = JSON.parse(e.data as string) as RPCResponse;
+        if (msg.type === MessageType.RPC) {
+          responseOrder.push(msg.id);
+          responses.set(msg.id, msg);
+        }
+      });
 
+      // Two calls in flight, each held by a gate the test opens.
       ws.send(
         JSON.stringify({
           type: MessageType.RPC,
           id: id1,
-          method: "asyncMethod",
-          args: [50]
+          method: "gatedMethod",
+          args: ["first"]
         })
       );
       ws.send(
         JSON.stringify({
           type: MessageType.RPC,
           id: id2,
-          method: "asyncMethod",
-          args: [10]
+          method: "gatedMethod",
+          args: ["second"]
         })
       );
 
-      // Collect responses in order received
-      const responseOrder: string[] = [];
-      const responses: Map<string, RPCResponse> = new Map();
-
-      await new Promise<void>((resolve) => {
-        const handler = (e: MessageEvent) => {
-          const msg = JSON.parse(e.data as string) as RPCResponse;
-          if (msg.type === MessageType.RPC) {
-            responseOrder.push(msg.id);
-            responses.set(msg.id, msg);
-            if (responses.size === 2) {
-              ws.removeEventListener("message", handler);
-              resolve();
-            }
-          }
-        };
-        ws.addEventListener("message", handler);
-      });
-
-      // The shorter delay should complete first
-      expect(responseOrder[0]).toBe(id2);
-      expect(responseOrder[1]).toBe(id1);
+      // The second call completes while the first still waits.
+      await agent.openGateForTest("second");
+      await arrived(1);
+      expect(responseOrder).toEqual([id2]);
+      await agent.openGateForTest("first");
+      await arrived(2);
+      expect(responseOrder).toEqual([id2, id1]);
 
       // Both should succeed
       expect(responses.get(id1)?.success).toBe(true);
