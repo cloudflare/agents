@@ -29,6 +29,7 @@ type AdmissionStub = {
   >;
   seedAdmissionForTest(requestId: string, messageIds: string[]): Promise<void>;
   ageAdmissionsForTest(ms: number): Promise<void>;
+  isIdleForTest(): Promise<boolean>;
   getModelRequestsForTest(): Promise<
     Array<Array<{ role: string; text: string }>>
   >;
@@ -158,6 +159,19 @@ async function queueBehindSlowTurn(binding: Binding, room: string) {
   return ws;
 }
 
+/**
+ * Wait until the agent has nothing left to run, so a check that nothing
+ * more happens reads the final state.
+ */
+async function idle(stub: AdmissionStub) {
+  const done = await waitFor(
+    () => stub.isIdleForTest(),
+    (yes) => yes,
+    20_000
+  );
+  if (!done) throw new Error("the agent never went idle");
+}
+
 async function reset(binding: Binding, room: string) {
   await (await agent(binding, room)).resetIsolateForTest().catch(() => {});
 }
@@ -179,7 +193,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => restarted.getMessagesForTest(),
       (m) => m.some((x) => x.role === "assistant" && textOf(x) === QUICK_REPLY)
     );
-    await delay(500);
+    await idle(restarted);
     const final = await restarted.getMessagesForTest();
     const assistants = final.filter((m) => m.role === "assistant");
     expect(
@@ -259,7 +273,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => restarted.getMessagesForTest(),
       (m) => m.some((x) => x.role === "assistant")
     );
-    await delay(1000);
+    await idle(restarted);
     const messages = await restarted.getMessagesForTest();
     expect(messages.some((m) => textOf(m) === QUICK_REPLY)).toBe(false);
     // The stopped request's question is kept, after the reply before it,
@@ -283,7 +297,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       (r) => r.length === 0,
       5000
     );
-    await delay(5000);
+    await idle(restarted);
     const messages = await restarted.getMessagesForTest();
     expect(messages.some((m) => textOf(m) === QUICK_REPLY)).toBe(false);
     tab.close();
@@ -314,11 +328,16 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => restarted.getMessagesForTest(),
       (m) => m.some((x) => textOf(x) === "t0 t1 t2 ")
     );
-    await delay(500);
+    await idle(restarted);
     const messages = await restarted.getMessagesForTest();
     expect(messages.some((m) => textOf(m) === QUICK_REPLY)).toBe(false);
     // Skipped on the lane when r3 arrived, before the reset: it does not
-    // come back.
+    // come back. Its frame went to the first tab; wait for it there.
+    await waitFor(
+      async () => doneFrame(sent, "r2"),
+      (f) => f !== undefined,
+      5000
+    );
     expect(doneFrame(sent, "r2")?.outcome).toBe("skipped");
     expect(doneFrame(frames, "r2")).toBeUndefined();
     // The superseded question is kept, and answered with the latest.
@@ -352,7 +371,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => restarted.getMessagesForTest(),
       (m) => m.some((x) => x.role === "assistant")
     );
-    await delay(4000);
+    await idle(restarted);
     const messages = await restarted.getMessagesForTest();
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);

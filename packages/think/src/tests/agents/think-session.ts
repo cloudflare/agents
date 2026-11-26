@@ -16098,6 +16098,18 @@ export class ThinkAdmissionTestAgent extends Think {
     return this.messages;
   }
 
+  /**
+   * Whether nothing is left to run: no turn active and no Tasks run pending
+   * or running (queued requests, recoveries, submissions).
+   */
+  async isIdleForTest(): Promise<boolean> {
+    const queue = (this as unknown as { _turnQueue?: { isActive: boolean } })
+      ._turnQueue;
+    if (queue?.isActive) return false;
+    const open = await this.tasks.list({ status: ["pending", "running"] });
+    return open.length === 0;
+  }
+
   /** Every recovery incident's status and reason. */
   async getIncidentsForTest(): Promise<string[]> {
     const incidents = await this.ctx.storage.list<{
