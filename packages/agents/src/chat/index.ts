@@ -11,15 +11,7 @@ export {
   type StreamChunkData
 } from "./message-builder";
 
-/** @internal Kept for released `@cloudflare/think` 0.24.0, which imports it. */
-export { buildInClauseStrings } from "./sql-batch";
-
-export {
-  sanitizeMessage,
-  enforceRowSizeLimit,
-  byteLength,
-  type EnforceRowSizeLimitOptions
-} from "./sanitize";
+export { sanitizeMessage, byteLength } from "../sessions/sanitize";
 export {
   KV_DELETE_MAX_KEYS,
   MAX_BOUND_PARAMS,
@@ -35,8 +27,6 @@ export {
 } from "./stream-accumulator";
 
 export { TurnLane, type TurnResult, type EnqueueOptions } from "./turn-lane";
-// Released `@cloudflare/ai-chat` 0.12 and `@cloudflare/think` 0.24 import it.
-export { TurnQueue } from "./turn-queue";
 
 export { originMessageIds, withOriginMessageIds } from "./origin-message-ids";
 
@@ -70,11 +60,7 @@ export {
   type TextSegmentEvent
 } from "./text-segment-joiner";
 
-export {
-  SubmitConcurrencyController,
-  type NormalizedMessageConcurrency,
-  type SubmitConcurrencyDecision
-} from "./submit-concurrency";
+export type { NormalizedMessageConcurrency } from "./lifecycle";
 
 export {
   transition as broadcastTransition,
@@ -84,7 +70,6 @@ export {
 } from "./broadcast-state";
 
 export { createChatStreams, type SqlTaggedTemplate } from "./reply-stream";
-export { ResumableStream } from "./resumable-stream";
 export { storedAsFacet } from "../dynamic-agents/facet-flag";
 export {
   createChatTurnTaskDefinition,
@@ -171,12 +156,11 @@ export {
 } from "./agent-tools";
 
 export {
-  ContinuationState,
+  ContinuationSlots,
   addContinuationTarget,
   continuationTargetIsLatest,
   type ContinuationConnection,
-  type ContinuationPending,
-  type ContinuationDeferred
+  type ContinuationPending
 } from "./continuation-state";
 
 /**
@@ -188,14 +172,6 @@ export {
  */
 export { PreStreamTurns } from "./pre-stream-turns";
 
-/**
- * @internal @deprecated `ChatTurns` runs the barrier itself. Kept only for
- * released `@cloudflare/ai-chat` 0.12.3 and `@cloudflare/think` 0.24.0.
- */
-export {
-  AutoContinuationController,
-  type AutoContinuationHost
-} from "./auto-continuation-controller";
 export type {
   ContinuationSource,
   ContinuationSpec,
@@ -296,8 +272,6 @@ export {
   type AgentToolSql,
   type AgentToolTableNames
 } from "./agent-tool-run-store";
-
-export { AbortRegistry } from "./abort-registry";
 
 /**
  * @internal Small async control-flow helpers shared by the chat hosts

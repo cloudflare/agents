@@ -179,7 +179,6 @@ describe("ChatTurns", () => {
       requestId: "cont-0",
       errorPrefix: "[test]",
       prerequisite: null,
-      pastCoalesce: false,
       targetMessageIds: ["a1"]
     };
     host.transcript = [user("u1"), toolReply("a1", "output-available")];

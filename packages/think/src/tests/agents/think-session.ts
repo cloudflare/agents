@@ -5031,7 +5031,7 @@ export class ThinkTestAgent extends Think {
         cancelCoalesce(): void;
       };
     };
-    // Seed a pending auto-continuation with `pastCoalesce: false` so the buggy
+    // Seed a pending auto-continuation so the buggy
     // re-arm path (`ChatTurns.rearmContinuation`) would reset the
     // coalesce timer in the recovery `finally`.
     internal._turns.continuation.pending = {
@@ -5041,8 +5041,7 @@ export class ThinkTestAgent extends Think {
       clientTools: undefined,
       body: undefined,
       errorPrefix: "[Think] Auto-continuation failed:",
-      prerequisite: null,
-      pastCoalesce: false
+      prerequisite: null
     };
     this._stallAfterChunks = afterChunks;
     this._stallAttemptsRemaining = 1;

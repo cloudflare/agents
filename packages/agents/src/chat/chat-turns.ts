@@ -1411,7 +1411,6 @@ export class ChatTurns<
       requestId,
       errorPrefix: null,
       prerequisite: null,
-      pastCoalesce: false,
       targetMessageIds
     };
     // Queued at once, in replay order: a request that woke the agent must
@@ -1550,7 +1549,6 @@ export class ChatTurns<
         requestId: this.host.generateRequestId(),
         errorPrefix: spec.errorPrefix,
         prerequisite: null,
-        pastCoalesce: false,
         targetMessageIds: [spec.targetMessageId]
       };
     }

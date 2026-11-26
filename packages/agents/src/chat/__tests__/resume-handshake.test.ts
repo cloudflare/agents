@@ -11,7 +11,7 @@ import {
   type ResumeHandshakeHost
 } from "../resume-handshake";
 import { EndedRequests } from "../chat-frames";
-import { ContinuationSlots, ContinuationState } from "../continuation-state";
+import { ContinuationSlots } from "../continuation-state";
 import type { ReplyStreams } from "../reply-stream";
 import { PreStreamTurns } from "../pre-stream-turns";
 import { STREAM_RESUME_NONE_REASONS } from "../protocol";
@@ -178,7 +178,7 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
 
 function makeHost(opts: {
   resumableStream: ReplyStreams;
-  continuation?: ResumeHandshakeHost["continuation"];
+  continuation?: ContinuationSlots<Connection>;
   preStream?: PreStreamTurns<Connection>;
   pendingTerminal?: PendingChatTerminal | null;
   pendingResumeConnections?: Set<string>;
@@ -368,27 +368,6 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       connectionId: null,
       requestId: "cont-1"
     } as ContinuationSlots<Connection>["running"];
-    const handshake = new ResumeHandshake(
-      makeHost({ resumableStream, continuation })
-    );
-    const conn = makeConnection("c1", frames);
-
-    await handshake.handleResumeRequest(conn);
-
-    expect(frames).toEqual([streamPendingFrame("cont-1")]);
-    expect(continuation.awaitingConnections.get("c1")).toBe(conn);
-  });
-
-  it("still parks on the pending continuation of a released host's ContinuationState", async () => {
-    // Released ai-chat 0.12.3 and Think 0.24.0 pass their own
-    // `ContinuationState`, which has no `running` slot.
-    const frames: SentFrame[] = [];
-    const { resumableStream } = makeStream({ active: false });
-    const continuation = new ContinuationState<Connection>();
-    continuation.pending = {
-      connectionId: null,
-      requestId: "cont-1"
-    } as ContinuationState<Connection>["pending"];
     const handshake = new ResumeHandshake(
       makeHost({ resumableStream, continuation })
     );
