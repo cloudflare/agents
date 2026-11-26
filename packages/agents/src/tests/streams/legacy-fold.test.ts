@@ -148,6 +148,10 @@ describe("v1 chunk rows fold into blocks lazily", () => {
         ctx.storage.kv.get<Record<string, number>>("cf_agents:schema_versions")
           ?.streams
       ).toBe(2);
+      // The released key is folded in once, then deleted.
+      expect(await ctx.storage.get("cf_agents:streams_schema_version")).toBe(
+        undefined
+      );
     });
     await evictDurableObject(stub);
     stub = env.CutoverHarnessObject.getByName(name);
