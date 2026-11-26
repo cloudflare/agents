@@ -854,6 +854,46 @@ describe("ResumeHandshake (driver → golden frames)", () => {
       ]);
     });
 
+    it("leaves the announced pending error to the ACK and ends the other requests at once", async () => {
+      const kv = kvStore();
+      // req-a ended in an error the tab missed; its last recorded frame is
+      // the empty done frame that followed the error.
+      recordRecentChatTerminal(kv, { id: "req-a", done: true, body: "" });
+      recordRecentChatTerminal(kv, {
+        id: "req-b",
+        done: true,
+        body: "",
+        outcome: "completed"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream();
+      const handshake = new ResumeHandshake({
+        ...makeHost({
+          resumableStream,
+          pendingTerminal: { requestId: "req-a", body: "boom" }
+        }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended: new EndedRequests()
+      });
+
+      await handshake.handleResumeRequest(
+        makeConnection("c1", frames),
+        "probe-1",
+        ["req-a", "req-b"]
+      );
+      expect(frames).toEqual([
+        streamResumingFrame("req-a", "probe-1"),
+        {
+          body: "",
+          done: true,
+          id: "req-b",
+          type: RESPONSE_TYPE,
+          replay: true,
+          outcome: "completed"
+        }
+      ]);
+    });
+
     it("follows a stream that closed into recovery with the end a stop recorded since", async () => {
       const kv = kvStore();
       recordRecentChatTerminal(kv, {
