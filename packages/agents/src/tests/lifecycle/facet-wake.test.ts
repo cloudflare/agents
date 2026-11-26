@@ -214,7 +214,7 @@ describe("facet wake", () => {
       { timeout: 10_000, interval: 20 }
     );
     expect(Date.now() - resetAt).toBeLessThan(10_000);
-  });
+  }, 20_000);
 
   it("keeps the back-off of a facet whose drives keep dying when the root starts again", async () => {
     const name = crypto.randomUUID();
