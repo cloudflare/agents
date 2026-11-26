@@ -59,7 +59,9 @@ type ThinkSubmissionTestStub = {
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   holdSubmissionStatusHookForTest(): Promise<void>;
+  cancelInSubmissionStatusHookForTest(): Promise<void>;
   isSubmissionStatusHookHeldForTest(): Promise<boolean>;
+  statusReportsQueuedForTest(submissionId: string): Promise<number>;
   releaseSubmissionStatusHookForTest(): Promise<void>;
   setProgrammaticResponseForTest(response: string): Promise<void>;
   useRecoveryToolModelForTest(): Promise<void>;
@@ -1301,6 +1303,54 @@ describe("Think durable submissions", () => {
 
     const statuses = (await agent.getSubmissionLog())
       .filter((entry) => entry.submissionId === accepted.submissionId)
+      .map((entry) => entry.status);
+    expect(statuses).toEqual(["pending", "running", "aborted"]);
+  });
+
+  it("runs a submission's status hooks in order: a held one holds the next", async () => {
+    const agent = await freshAgent();
+    // Its own id each run: the queue counts are per isolate, and a retry
+    // may share it.
+    const id = `sub-status-order-${crypto.randomUUID()}`;
+    await agent.holdSubmissionStatusHookForTest();
+    // The first report (pending) is held, so acceptance waits on it.
+    const accepting = agent.testSubmitMessages("held status", {
+      submissionId: id
+    });
+    await vi.waitFor(async () => {
+      expect(await agent.isSubmissionStatusHookHeldForTest()).toBe(true);
+    });
+    // Reported while the pending hook is still running: the submission is
+    // aborted before the held hook returns, so the reports overlap.
+    const cancelling = agent.cancelSubmissionForTest(id, "stop");
+    await vi.waitFor(async () => {
+      // The aborted report has reached the queue: pending, then aborted.
+      expect(await agent.statusReportsQueuedForTest(id)).toBeGreaterThanOrEqual(
+        2
+      );
+    });
+    await agent.releaseSubmissionStatusHookForTest();
+    await accepting;
+    await cancelling;
+    await agent.waitForSubmissionForTest(id);
+
+    const statuses = (await agent.getSubmissionLog())
+      .filter((entry) => entry.submissionId === id)
+      .map((entry) => entry.status);
+    expect(statuses[0]).toBe("pending");
+    expect(statuses.at(-1)).toBe("aborted");
+  });
+
+  it("lets a status hook cancel its own submission", async () => {
+    const agent = await freshAgent();
+    await agent.cancelInSubmissionStatusHookForTest();
+    const accepted = await agent.testSubmitMessages("cancel myself", {
+      submissionId: "sub-self-cancel"
+    });
+    const settled = await agent.waitForSubmissionForTest(accepted.submissionId);
+    expect(settled).toMatchObject({ status: "aborted" });
+    const statuses = (await agent.getSubmissionLog())
+      .filter((entry) => entry.submissionId === "sub-self-cancel")
       .map((entry) => entry.status);
     expect(statuses).toEqual(["pending", "running", "aborted"]);
   });

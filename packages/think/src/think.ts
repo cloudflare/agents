@@ -342,6 +342,7 @@ import {
   cancelReason,
   isTerminalSubmissionStatus,
   legacySubmissionImport,
+  SubmissionStatusQueue,
   SUBMISSION_KIND,
   SUBMISSION_LANE,
   SUBMISSION_PROGRESS_KEY,
@@ -1266,6 +1267,9 @@ export class Think<
 
   /** Skills loaded from `getSkills()`. */
   readonly #skills = new ThinkSkills();
+
+  /** Each submission's status reports, run one at a time in order. */
+  readonly #submissionStatuses = new SubmissionStatusQueue();
   private _loggedProtocolWarnings = new Set<string>();
 
   /**
@@ -5398,7 +5402,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       (input, step) => this._runSubmission(input as SubmissionPayload, step),
       {
         maxAttempts: 3,
-        onStatus: (record) => this._onSubmissionStatus(record)
+        // One submission's reports in order: each waits for the last.
+        onStatus: (record) =>
+          this.#submissionStatuses.run(record.runId, () =>
+            this._onSubmissionStatus(record)
+          )
       }
     );
   }

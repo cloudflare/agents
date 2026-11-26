@@ -1,4 +1,5 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import { SubmissionStatusQueue } from "../../submissions";
 import { hasToolCall, Output, tool } from "ai";
 import { action, skills, Think, type ThinkSession } from "../../think";
 import { createSlowClientToolMockModel } from "./client-tools";
@@ -1173,6 +1174,21 @@ type TurnIdentityLogEntry = {
   messengerThreadId: string | null;
   getMessengerThreadId: string | null;
 };
+
+// Each submission's status reports as they reach Think's queue, counted
+// before they wait there: a test can tell a report arrived while an earlier
+// hook is still held.
+const statusReportsQueued = new Map<string, number>();
+{
+  const run = SubmissionStatusQueue.prototype.run;
+  SubmissionStatusQueue.prototype.run = function (submissionId, report) {
+    statusReportsQueued.set(
+      submissionId,
+      (statusReportsQueued.get(submissionId) ?? 0) + 1
+    );
+    return run.call(this, submissionId, report);
+  };
+}
 
 export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
@@ -9526,6 +9542,10 @@ export class ThinkProgrammaticTestAgent extends Think {
       await hold.released;
     }
     this._submissionLog.push(result);
+    if (this._cancelInSubmissionStatusHook && result.status === "running") {
+      this._cancelInSubmissionStatusHook = false;
+      await this.cancelSubmission(result.submissionId, "from the hook");
+    }
     if (
       this._waitInSubmissionStatusHook &&
       ["completed", "aborted", "skipped", "error"].includes(result.status)
@@ -9560,6 +9580,11 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._heldStatusHook = this._statusHookHold;
   }
 
+  /** How many status reports of a submission have reached Think's queue. */
+  async statusReportsQueuedForTest(submissionId: string): Promise<number> {
+    return statusReportsQueued.get(submissionId) ?? 0;
+  }
+
   /** Whether the held `onSubmissionStatus` call is waiting. */
   async isSubmissionStatusHookHeldForTest(): Promise<boolean> {
     return this._heldStatusHook?.reached ?? false;
@@ -9568,6 +9593,13 @@ export class ThinkProgrammaticTestAgent extends Think {
   async releaseSubmissionStatusHookForTest(): Promise<void> {
     this._heldStatusHook?.open();
     this._heldStatusHook = null;
+  }
+
+  private _cancelInSubmissionStatusHook = false;
+
+  /** Cancel the submission from its own `running` status hook, once. */
+  async cancelInSubmissionStatusHookForTest(): Promise<void> {
+    this._cancelInSubmissionStatusHook = true;
   }
 
   /** Call `waitForSubmission` from `onSubmissionStatus` on terminal statuses. */
