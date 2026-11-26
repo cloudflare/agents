@@ -3642,6 +3642,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     if (this.recoveryShouldThrow) {
       throw new Error("onChatRecovery boom");
     }
+
     if (this.recoveryOverride) return this.recoveryOverride;
     return {};
   }
@@ -4678,6 +4679,68 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       }
     ]);
     return result.status;
+  }
+
+  private _transientInRecoveryOnce = false;
+  private _throwsBeforeHandoff = 0;
+  private _transientThrown = false;
+
+  /**
+   * Make the next recovery's `continueLastTurn` throw a transient error,
+   * then its replacement attempt's `onChatRecovery` throw one
+   * `throwsBeforeHandoff` times, before it hands off.
+   */
+  armTransientInRecoveryForTest(throwsBeforeHandoff = 0): void {
+    this._transientInRecoveryOnce = true;
+    this._throwsBeforeHandoff = throwsBeforeHandoff;
+    // The replacement's leaf check, before its handoff, throws.
+    const self = this as unknown as { _recoveryLeaf(): unknown };
+    const leaf = self._recoveryLeaf.bind(this);
+    self._recoveryLeaf = () => {
+      if (this._transientThrown && this._throwsBeforeHandoff > 0) {
+        this._throwsBeforeHandoff--;
+        throw new Error("Network connection lost.");
+      }
+      return leaf();
+    };
+  }
+
+  /** How many of the replacement's throws before its handoff are left. */
+  throwsBeforeHandoffLeftForTest(): number {
+    return this._throwsBeforeHandoff;
+  }
+
+  /** The recovery Task's open runs, as `status` or `status:waitReason`. */
+  openRecoveryTaskRunsForTest(): string[] {
+    return this.sql<{ status: string; wait_reason: string | null }>`
+      SELECT status, wait_reason FROM cf_agents_task_runs
+      WHERE definition = '__cf_internal_chat_recovery'
+        AND status IN ('pending', 'running')
+    `.map((row) =>
+      row.wait_reason ? `${row.status}:${row.wait_reason}` : row.status
+    );
+  }
+
+  /** Run every open recovery Task run now, as its later wake would. */
+  async runOpenRecoveryTaskRunsForTest(): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_task_runs SET next_at = ${Date.now() - 1_000}
+      WHERE definition = '__cf_internal_chat_recovery'
+        AND status IN ('pending', 'running')
+    `;
+    await this.tasks.runDue("__cf_internal_chat_recovery");
+  }
+
+  protected override async continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: { signal?: AbortSignal }
+  ): Promise<SaveMessagesResult> {
+    if (this._transientInRecoveryOnce && options?.signal) {
+      this._transientInRecoveryOnce = false;
+      this._transientThrown = true;
+      throw new Error("Network connection lost.");
+    }
+    return super.continueLastTurn(body, options);
   }
 
   getFailingReaderCallsForTest(): number {

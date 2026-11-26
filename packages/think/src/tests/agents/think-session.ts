@@ -411,20 +411,52 @@ async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
  * `callback`, oldest first: a recovery Task run, or a replayed chat-turn run
  * whose `model-turn` step journaled the attempt it runs itself.
  */
+/**
+ * The attempt a turn's own run waits to dispatch: the result of the step
+ * before its waiting backoff (`model-turn` for `backoff`, `continuation` for
+ * `backoff-2`, `continuation-N` for `backoff-N+1`).
+ */
+function waitingRunAttemptsForTest(
+  agent: Think
+): Array<{ runId: string; callback: string; delay: number; at: number }> {
+  return agent.sql<{
+    runId: string;
+    callback: string;
+    delay: number;
+    at: number;
+  }>`
+    SELECT r.run_id AS runId,
+           json_extract(p.result, '$.callback') AS callback,
+           json_extract(p.result, '$.delaySeconds') AS delay,
+           p.updated_at AS at
+    FROM cf_agents_task_runs r
+    JOIN cf_agents_task_steps b
+      ON b.run_id = r.run_id AND b.kind = 'sleep' AND b.state = 'waiting'
+         AND b.step_name LIKE 'backoff%'
+    JOIN cf_agents_task_steps p
+      ON p.run_id = r.run_id AND p.step_name = CASE
+        WHEN b.step_name = 'backoff' THEN 'model-turn'
+        WHEN b.step_name = 'backoff-2' THEN 'continuation'
+        ELSE 'continuation-' || (CAST(substr(b.step_name, 9) AS INTEGER) - 1)
+      END
+    WHERE r.status IN ('pending', 'running')
+      AND json_extract(p.result, '$.callback') IS NOT NULL
+    ORDER BY r.created_at ASC
+  `;
+}
+
 function pendingRecoveryRunIds(agent: Think, callback: string): string[] {
-  return agent.sql<{ run_id: string }>`
-    SELECT run_id, created_at FROM cf_agents_task_runs
+  const tasks = agent.sql<{ run_id: string }>`
+    SELECT run_id FROM cf_agents_task_runs
     WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
       AND status IN ('pending', 'running')
       AND json_extract(metadata, '$.callback') = ${callback}
-    UNION ALL
-    SELECT r.run_id, r.created_at FROM cf_agents_task_runs r
-    JOIN cf_agents_task_steps s
-      ON s.run_id = r.run_id AND s.step_name = 'model-turn'
-    WHERE r.status IN ('pending', 'running')
-      AND json_extract(s.result, '$.callback') = ${callback}
     ORDER BY created_at ASC
   `.map((row) => row.run_id);
+  const runs = waitingRunAttemptsForTest(agent)
+    .filter((attempt) => attempt.callback === callback)
+    .map((attempt) => attempt.runId);
+  return [...tasks, ...runs];
 }
 
 /**
@@ -472,35 +504,41 @@ function latestRecoveryAttemptForTest(
   agent: Think,
   pendingOnly = false
 ): { delay: number | null; keyed: boolean } | undefined {
-  const row = agent.sql<{
+  const task = agent.sql<{
     delay: number | null;
     key: string | null;
-    turn: number;
+    at: number;
   }>`
-    SELECT delay, key, turn FROM (
-      SELECT json_extract(input, '$.delaySeconds') AS delay,
-             idempotency_key AS key, 0 AS turn, created_at AS at
-      FROM cf_agents_task_runs
-      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-        AND (${pendingOnly ? 1 : 0} = 0 OR status = 'pending')
-      UNION ALL
-      SELECT json_extract(s.result, '$.delaySeconds'), NULL, 1, s.updated_at
-      FROM cf_agents_task_steps s
-      JOIN cf_agents_task_runs r ON r.run_id = s.run_id
-      WHERE s.step_name = 'model-turn'
-        AND json_extract(s.result, '$.callback') IS NOT NULL
-        AND (${pendingOnly ? 1 : 0} = 0 OR r.status IN ('pending', 'running'))
-    )
-    ORDER BY at DESC
+    SELECT json_extract(input, '$.delaySeconds') AS delay,
+           idempotency_key AS key, created_at AS at
+    FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND (${pendingOnly ? 1 : 0} = 0 OR status = 'pending')
+    ORDER BY created_at DESC
     LIMIT 1
   `[0];
-  if (!row) return undefined;
-  return {
-    delay: row.delay,
-    keyed: row.turn
-      ? turnAttemptReasons.get(agent)?.at(-1) === "initial"
-      : row.key != null
-  };
+  const inRun = (
+    pendingOnly
+      ? waitingRunAttemptsForTest(agent)
+      : agent.sql<{ delay: number; at: number }>`
+          SELECT json_extract(result, '$.delaySeconds') AS delay,
+                 updated_at AS at
+          FROM cf_agents_task_steps
+          WHERE (step_name = 'model-turn' OR step_name LIKE 'continuation%')
+            AND json_extract(result, '$.callback') IS NOT NULL
+        `
+  ).reduce<{ delay: number; at: number } | undefined>(
+    (latest, row) => (!latest || row.at >= latest.at ? row : latest),
+    undefined
+  );
+  if (!task && !inRun) return undefined;
+  if (inRun && (!task || inRun.at >= task.at)) {
+    return {
+      delay: inRun.delay,
+      keyed: turnAttemptReasons.get(agent)?.at(-1) === "initial"
+    };
+  }
+  return { delay: task!.delay, keyed: task!.key != null };
 }
 
 function recoveryTransportCountsForTest(
@@ -528,6 +566,15 @@ async function runQueuedRecoveryTaskForTest(
 ): Promise<boolean> {
   const runId = pendingRecoveryRunIds(agent, callback)[0];
   if (!runId) return false;
+  // A turn's own run that kept the attempt suspends in its backoff once the
+  // turn's step has ended: wait for that, so the wake below is its own.
+  for (let i = 0; i < 200; i++) {
+    const [run] = agent.sql<{ status: string }>`
+      SELECT status FROM cf_agents_task_runs WHERE run_id = ${runId}
+    `;
+    if (run?.status !== "running") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   const past = Date.now() - 1_000;
   agent.sql`
     UPDATE cf_agents_task_runs
@@ -552,12 +599,30 @@ async function waitForThinkIdleForTest(agent: Think): Promise<void> {
   )._turnQueue.waitForIdle();
 }
 
+/**
+ * Wait until no task run has a step running: a recovered turn's run keeps
+ * its next attempt once its step ends, and suspends in that attempt's
+ * backoff.
+ */
+async function waitForRunStepsForTest(agent: Think): Promise<void> {
+  for (let i = 0; i < 300; i++) {
+    const [row] = agent.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_task_steps s
+      JOIN cf_agents_task_runs r ON r.run_id = s.run_id
+      WHERE r.status = 'running' AND s.state = 'running'
+    `;
+    if ((row?.count ?? 0) === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 async function runRecoveryWorkForTest(
   agent: Think,
   callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
 ): Promise<void> {
   if (await runQueuedRecoveryTaskForTest(agent, callback)) {
     await waitForThinkIdleForTest(agent);
+    await waitForRunStepsForTest(agent);
     return;
   }
   const rows = agent.sql<{ payload: string }>`

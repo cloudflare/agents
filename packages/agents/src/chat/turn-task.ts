@@ -13,6 +13,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { TaskJson, TaskStep } from "../tasks";
+import { isTaskSuspension } from "../tasks/replay";
 import { TaskSettlement } from "../tasks/settlement";
 import type { TaskCheckpoint } from "../tasks/types";
 import type { ChatAdmissionInput, ChatAdmissionRecord } from "./admissions";
@@ -370,55 +371,132 @@ export function createChatTurnTaskDefinition(
               )
             )
           );
+          // A recovered reply cut off again keeps its next attempt in this
+          // run; the lane that waits for the reply waits for that too.
+          if (scheduled && !lane) continueHeldLane(step.id, requestId);
           entry.settle.resolve(value);
         } catch (error) {
           entry.settle.reject(error);
           throw error;
         } finally {
           open = false;
+          heldTurns.delete(requestId);
         }
         // SAFETY: the attempt is the recovery engine's JSON payload.
         return (scheduled ?? null) as TaskJson;
       }
     );
-    if (attempt) {
-      const scheduled = attempt as unknown as ChatRecoveryAttemptInput;
-      const run = () =>
-        runChatRecoveryAttempt(step, hooks.attempts, {
-          ...scheduled,
-          // Always suspend first, even with no backoff: the attempt then
-          // runs from the alarm, where the host keeps the continuation's
-          // model turn inside the memory-limit breaker, as the recovery
-          // Task did.
-          delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
-        });
-      if (!lane) {
-        // The recovered turn of an earlier isolate's lane run, cut off by a
-        // second reset: it recovers holding the lane that run still holds,
-        // so nothing queued behind starts ahead of it.
-        if (hooks.laneHeldForRecovery()) {
-          const { reply } = await runHoldingLane(run);
-          if (reply) hooks.holdParksUntil(reply);
-          return;
-        }
-        await run();
-        return;
-      }
-      // A lane turn replayed after a reset recovers holding the lane, so the
-      // requests its isolate left behind it wait for it (ChatOrder), as
-      // their records did; the attempt's own turns run in place. The run
-      // stays parked at the lane's head until the recovered reply ends: an
-      // attempt awaiting it would hold the job loop the reply needs.
-      const { reply } = await runHoldingLane(run);
-      if (reply) {
-        hooks.parkUntil(step.id, reply);
-        return TaskSettlement.park("recovered reply");
-      }
-    }
+    if (attempt) return runKeptAttempt(hooks, step, attempt, lane);
   };
 }
 
-type LaneAttempt = { reply?: Promise<void> };
+/**
+ * Run the recovery attempt a turn's run kept, in that run: after a live
+ * turn's interruption, or after a replay's. A lane turn's attempt holds the
+ * lane, so what was sent meanwhile waits for the recovered reply
+ * (ChatOrder); the run stays parked at the lane's head until that reply
+ * ends, since an attempt awaiting it would hold the job loop the reply
+ * needs.
+ */
+async function runKeptAttempt(
+  hooks: ChatTurnTaskHooks,
+  step: TaskStep,
+  attempt: TaskJson,
+  lane: boolean | undefined
+): Promise<void | TaskSettlement> {
+  const scheduled = attempt as unknown as ChatRecoveryAttemptInput;
+  const run = () =>
+    runChatRecoveryAttempt(step, hooks.attempts, {
+      ...scheduled,
+      // Always suspend first, even with no backoff: the attempt then
+      // runs from the alarm, where the host keeps the continuation's
+      // model turn inside the memory-limit breaker, as the recovery
+      // Task did.
+      delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
+    });
+  if (!lane) {
+    const release = continuedHolds.get(step.id);
+    if (release) {
+      // A recovered reply cut off again: its lane is still held for it, and
+      // is released when this attempt's own recovered reply ends.
+      let reply: Promise<void> | undefined;
+      try {
+        ({ reply } = await runHoldingLane(run));
+      } catch (error) {
+        if (isTaskSuspension(error)) throw error;
+        continuedHolds.delete(step.id);
+        release();
+        throw error;
+      }
+      continuedHolds.delete(step.id);
+      if (reply) void reply.finally(release);
+      else release();
+      return;
+    }
+    // The recovered turn of an earlier isolate's lane run, cut off by a
+    // second reset: it recovers holding the lane that run still holds,
+    // so nothing queued behind starts ahead of it.
+    if (hooks.laneHeldForRecovery()) {
+      const { reply } = await runHoldingLane(run);
+      if (reply) hooks.holdParksUntil(reply);
+      return;
+    }
+    await run();
+    return;
+  }
+  // A lane turn replayed after a reset recovers holding the lane, so the
+  // requests its isolate left behind it wait for it (ChatOrder), as
+  // their records did; the attempt's own turns run in place. The run
+  // stays parked at the lane's head until the recovered reply ends: an
+  // attempt awaiting it would hold the job loop the reply needs.
+  const { reply } = await runHoldingLane(run);
+  if (reply) {
+    hooks.parkUntil(step.id, reply);
+    return TaskSettlement.park("recovered reply");
+  }
+}
+
+type LaneAttempt = {
+  reply?: Promise<void>;
+  /** Holds a recovered reply cut off again adds ({@link continueHeldLane}). */
+  more: Array<Promise<void>>;
+};
+
+/**
+ * The release of a held lane, by the run id of the recovered turn that was
+ * cut off again and keeps its next attempt. Removed when that attempt ends;
+ * a reset loses it with the park it holds, which the turn's run then
+ * recovers as an earlier isolate's ({@link ChatTurnTaskHooks.laneHeldForRecovery}).
+ */
+const continuedHolds = new Map<string, () => void>();
+
+/**
+ * The held lanes of the recovered turns a lane run's recovery attempt
+ * started, by request id: the turn's run may run in another async context
+ * (the alarm's). Removed when the turn's model call ends.
+ */
+const heldTurns = new Map<string, LaneAttempt>();
+
+/**
+ * @internal Note that the turn `requestId` starts in a lane run's recovery
+ * attempt, so a cut-off of it keeps that lane ({@link continueHeldLane}).
+ */
+export function noteHeldTurn(requestId: string): void {
+  const held = laneAttempt.getStore();
+  if (held) heldTurns.set(requestId, held);
+}
+
+/**
+ * Keep the lane held for the recovered turn `requestId` after its reply
+ * ends, until the attempt its run `runId` kept ends as well.
+ */
+function continueHeldLane(runId: string, requestId: string): void {
+  const held = heldTurns.get(requestId) ?? laneAttempt.getStore();
+  if (!held) return;
+  held.more.push(
+    new Promise<void>((resolve) => continuedHolds.set(runId, resolve))
+  );
+}
 
 /** Set while the app's `onStart` runs. */
 const appStart = new AsyncLocalStorage<true>();
@@ -442,7 +520,7 @@ const laneAttempt = new AsyncLocalStorage<LaneAttempt>();
 export async function runHoldingLane(
   fn: () => Promise<void>
 ): Promise<LaneAttempt> {
-  const held: LaneAttempt = {};
+  const held: LaneAttempt = { more: [] };
   await laneAttempt.run(held, fn);
   return held;
 }
@@ -454,10 +532,15 @@ export async function runHoldingLane(
 export function holdLaneForReply(reply: Promise<unknown>): boolean {
   const held = laneAttempt.getStore();
   if (!held) return false;
-  held.reply = reply.then(
-    () => {},
-    () => {}
-  );
+  held.reply = (async () => {
+    await reply.then(
+      () => {},
+      () => {}
+    );
+    for (let next = held.more.shift(); next; next = held.more.shift()) {
+      await next;
+    }
+  })();
   return true;
 }
 
@@ -484,8 +567,8 @@ async function runLaneTurn(
   step: TaskStep,
   input: ChatTurnTaskInput,
   entry: ChatLaneEntry
-): Promise<void> {
-  await step.do(
+): Promise<void | TaskSettlement> {
+  const attempt = await step.do(
     "model-turn",
     { retries: { limit: 1 }, timeout: "1 day" },
     async ({ signal }) => {
@@ -541,22 +624,34 @@ async function runLaneTurn(
           )
         );
       };
-      // A live turn's interruption hands its recovery attempt to the
-      // recovery Task, which does not hold the lane: a request sent during
-      // its backoff runs, as it did before. A turn replayed after a reset
-      // runs its attempt in this run instead (the handler, below).
-      await hooks.keepAliveWhile(() =>
-        entry.run((fn) =>
-          turnAttempt.run(
-            () => false,
-            () => laneRun.run(begin, fn)
-          )
-        )
-      );
+      // A live turn's interruption keeps its recovery attempt here, and
+      // this run runs it after the turn, holding the lane, as a replay's.
+      let scheduled: ChatRecoveryAttemptInput | undefined;
+      let open = true;
+      const take = (next: ChatRecoveryAttemptInput): boolean => {
+        if (!open || scheduled || !journalableAttempt(next)) return false;
+        try {
+          // SAFETY: the attempt is the recovery engine's JSON payload.
+          step.checkpoint.set(ATTEMPT, next as unknown as TaskJson);
+        } catch {
+          return false;
+        }
+        scheduled = next;
+        return true;
+      };
+      try {
+        await hooks.keepAliveWhile(() =>
+          entry.run((fn) => turnAttempt.run(take, () => laneRun.run(begin, fn)))
+        );
+      } finally {
+        open = false;
+      }
       if (failed) throw failed.error;
-      return null;
+      // SAFETY: the attempt is the recovery engine's JSON payload.
+      return (scheduled ?? null) as TaskJson;
     }
   );
+  if (attempt) return runKeptAttempt(hooks, step, attempt, true);
 }
 
 /**
