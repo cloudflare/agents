@@ -112,4 +112,87 @@ describe("chat functions over a minimal host", () => {
       expect(JSON.stringify(answered)).toContain("Lisbon");
     });
   });
+
+  it("a resume request is offered the streaming turn, and its ack replays what it streamed", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const reconnected = {
+        id: "tab-2",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      } as unknown as Connection;
+
+      // Nothing streams yet.
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        reconnected,
+        JSON.stringify({ type: "cf_agent_stream_resume_request" })
+      );
+      expect(sent.at(-1)).toMatchObject({
+        type: "cf_agent_stream_resume_none"
+      });
+
+      // A turn streams one chunk, then waits until the test lets it end.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let streaming!: () => void;
+      const started = new Promise<void>((resolve) => (streaming = resolve));
+      const respond = instance.host.respond;
+      instance.host.respond = async () =>
+        new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "start", messageId: "reply-1" });
+            controller.enqueue({ type: "text-start", id: "t1" });
+            controller.enqueue({ type: "text-delta", id: "t1", delta: "Hel" });
+            await released;
+            controller.enqueue({ type: "text-end", id: "t1" });
+            controller.close();
+          }
+        });
+      // The turn has stored the delta once the hook sees it pass.
+      const hooks = instance.host.hooks as {
+        transformChunk?: (chunk: { type: string }) => unknown;
+      };
+      hooks.transformChunk = (chunk) => {
+        if (chunk.type === "text-delta") streaming();
+        return chunk;
+      };
+      const done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await started;
+
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        reconnected,
+        JSON.stringify({ type: "cf_agent_stream_resume_request" })
+      );
+      expect(sent.at(-1)).toMatchObject({
+        type: "cf_agent_stream_resuming",
+        id: "r1"
+      });
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        reconnected,
+        JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "r1" })
+      );
+      const replayed = sent.filter((frame) => frame.replay === true);
+      expect(
+        replayed.map((frame) => JSON.parse(frame.body as string).type)
+      ).toContain("text-delta");
+      release();
+      await done;
+      instance.host.respond = respond;
+      delete hooks.transformChunk;
+    });
+  });
 });

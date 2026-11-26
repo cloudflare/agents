@@ -10,7 +10,14 @@
 
 import type { Connection } from "agents";
 import type { UIMessage } from "ai";
-import type { ChatDeps, ChatTurnInput } from "./chat-host";
+import {
+  chatTurnStreamId,
+  type ChatDeps,
+  type ChatTurnInput
+} from "./chat-host";
+import { frameText } from "./chat-frames";
+import { sendIfOpen } from "./connection";
+import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { parseChatRequest } from "./protocol-dispatch";
 import { parseProtocolMessage } from "./parse-protocol";
 import {
@@ -137,6 +144,84 @@ function waitsOnAnswer(message: UIMessage): boolean {
   });
 }
 
+/** The turn of `lane` that is running now, and whose stream is open, if any. */
+async function streamingTurn(
+  deps: ChatDeps,
+  lane: ChatLane
+): Promise<string | null> {
+  const [running] = deps.tasks.peekList({
+    definition: lane.definition,
+    lane: lane.lane,
+    status: ["running"],
+    results: false
+  });
+  if (!running) return null;
+  const status = await deps.streams.status(chatTurnStreamId(running.runId));
+  return status?.state === "streaming" ? running.runId : null;
+}
+
+/**
+ * Answer a tab's resume request: offer it the turn that is streaming now
+ * (`STREAM_RESUMING`), or tell it nothing streams (`STREAM_RESUME_NONE`).
+ */
+export async function resumeChat(
+  deps: ChatDeps,
+  lane: ChatLane,
+  connection: Connection,
+  probeId?: string
+): Promise<void> {
+  const requestId = await streamingTurn(deps, lane);
+  sendIfOpen(
+    connection,
+    JSON.stringify(
+      requestId
+        ? {
+            type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
+            id: requestId,
+            ...(probeId && { probeId })
+          }
+        : {
+            type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
+            ...(probeId && { probeId })
+          }
+    )
+  );
+}
+
+/**
+ * The tab acknowledged the offer: replay what the turn `requestId` has
+ * streamed so far. Its later chunks reach the tab as they are sent.
+ */
+export async function replayTurn(
+  deps: ChatDeps,
+  connection: Connection,
+  requestId: string
+): Promise<void> {
+  const streamId = chatTurnStreamId(requestId);
+  if ((await deps.streams.status(streamId))?.state !== "streaming") return;
+  const stop = new AbortController();
+  try {
+    for await (const batch of deps.streams.readBatches(streamId, {
+      signal: stop.signal,
+      onUpToDate: () => stop.abort()
+    })) {
+      for (const item of batch) {
+        const text = frameText({
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+          id: requestId,
+          body: JSON.stringify(item.chunk),
+          done: false,
+          replay: true
+        } as { type: string });
+        if (text !== undefined) sendIfOpen(connection, text);
+      }
+      if (stop.signal.aborted) break;
+    }
+  } catch (error) {
+    if (!stop.signal.aborted) throw error;
+  }
+}
+
 /**
  * Handle one inbound WebSocket message if it is a chat protocol frame that
  * starts, stops, clears or answers a turn.
@@ -146,7 +231,7 @@ function waitsOnAnswer(message: UIMessage): boolean {
 export async function chatDispatch(
   deps: ChatDeps,
   lane: ChatLane,
-  _connection: Connection,
+  connection: Connection,
   message: unknown
 ): Promise<boolean> {
   if (typeof message !== "string") return false;
@@ -207,6 +292,12 @@ export async function chatDispatch(
         },
         { autoContinue: event.autoContinue === true }
       );
+      return true;
+    case "stream-resume-request":
+      await resumeChat(deps, lane, connection, event.probeId);
+      return true;
+    case "stream-resume-ack":
+      await replayTurn(deps, connection, event.id);
       return true;
     default:
       return false;
