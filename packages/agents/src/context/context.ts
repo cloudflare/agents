@@ -77,7 +77,19 @@ type ContextRecord = {
   readonly tools?: readonly (readonly [string, string])[];
   /** A change in the tools, delivered after this message (see `prepare`). */
   readonly toolNotice?: string;
+  /** A hash of the system prompt the turn was sent, when the host gave it. */
+  readonly systemHash?: string;
 };
+
+/** What a record says its turn was sent, carried to later records. */
+type Sent = Pick<ContextRecord, "tools" | "systemHash">;
+
+function sentOf(from: Sent): Sent {
+  return {
+    ...(from.tools && { tools: from.tools }),
+    ...(from.systemHash !== undefined && { systemHash: from.systemHash })
+  };
+}
 
 /**
  * The session operations Context uses. A Sessions `Session` handle fits.
@@ -186,11 +198,14 @@ export interface ContextPrepareOptions extends ContextReadOptions {
  */
 /** @internal See {@link Context.prepareTurn}. */
 export interface PreparedTurn extends PreparedContext {
-  recordTools(
-    tools: readonly { readonly name: string; readonly hash: string }[]
+  recordSent(
+    tools: readonly { readonly name: string; readonly hash: string }[],
+    systemHash?: string
   ): Promise<{
     /** How the tools differ from the ones the model was last sent. */
     readonly changed: ToolChanges | null;
+    /** The system prompt's hash differs from the one last sent. */
+    readonly system: boolean;
     /** The notice when it could not be recorded: this request only. */
     readonly reminder: string | null;
   }>;
@@ -205,11 +220,6 @@ export interface PreparedContext {
    * `null` when there is nothing to place.
    */
   readonly reminder: string | null;
-  /**
-   * @internal Set when a refresh replaced the system prompt the earlier
-   * turns were sent, which a provider's prompt cache of them loses.
-   */
-  readonly refreshed?: true;
 }
 
 /** @internal Tool names that differ from the last turn's. */
@@ -297,7 +307,7 @@ export class Context {
       return this.#prepareBlocks(options, await this.#history(options));
     }
     const turn = await this.prepareTurn(options);
-    const notice = (await turn.recordTools(options.tools)).reminder;
+    const notice = (await turn.recordSent(options.tools)).reminder;
     if (!notice) return { system: turn.system, reminder: turn.reminder };
     return {
       system: turn.system,
@@ -307,11 +317,13 @@ export class Context {
 
   /**
    * @internal {@link prepare} in two steps, for a host that decides the
-   * request's tools after it has the system prompt: the blocks now, then
-   * `recordTools` with the tools the request sends, once. When they
-   * changed, the notice is recorded at the turn's user message (project
-   * the history again), or, when it cannot be, returned to send after this
-   * request's cached prefix only, as `reminder` is.
+   * request's tools and system prompt after it has the context's: the
+   * blocks now, then `recordSent` with the tools the request sends and a
+   * hash of its system prompt, once. It says whether either differs from
+   * what the turn before was sent. A tool notice is recorded at the turn's
+   * user message (project the history again), or, when it cannot be,
+   * returned to send after this request's cached prefix only, as
+   * `reminder` is.
    */
   async prepareTurn(
     options: ContextPrepareOptions = {}
@@ -319,7 +331,7 @@ export class Context {
     const history = await this.#history(options);
     // Both read before the blocks are recorded, so a record this turn
     // writes neither hides the earlier tools nor moves the turn's target.
-    const before = (await this.#delivered(history)).tools;
+    const before = sentOf(await this.#delivered(history));
     const tail = history.at(-1);
     const at =
       !options.retry &&
@@ -327,47 +339,59 @@ export class Context {
       (await this.#session.getLatestLeaf())?.id === tail.id
         ? tail
         : undefined;
-    // A record the blocks write carries the earlier tools forward, so it
-    // is rewritten only when the request's tools differ.
+    // A record the blocks write carries what the earlier turn was sent
+    // forward, so it is rewritten only when this request's differs.
     const prepared = await this.#prepareBlocks(options, history, before);
     return {
       ...prepared,
-      recordTools: async (fingerprint) => {
-        if (options.retry) return { changed: null, reminder: null };
+      recordSent: async (fingerprint, systemHash) => {
+        if (options.retry) {
+          return { changed: null, system: false, reminder: null };
+        }
         const tools = fingerprint.map(
           ({ name, hash }) => [name, hash] as const
         );
-        const changed = before ? toolDiff(before, tools) : null;
+        const changed = before.tools ? toolDiff(before.tools, tools) : null;
         const notice = changed && toolNotice(changed);
-        if (!at) return { changed, reminder: notice };
-        await this.#recordTools(history, at, tools, before, notice);
-        return { changed, reminder: null };
+        const system =
+          systemHash !== undefined &&
+          before.systemHash !== undefined &&
+          before.systemHash !== systemHash;
+        if (!at) return { changed, system, reminder: notice };
+        const sent: Sent = {
+          tools,
+          ...(systemHash !== undefined && { systemHash })
+        };
+        await this.#recordSent(history, at, sent, before, notice);
+        return { changed, system, reminder: null };
       }
     };
   }
 
   /** Record the turn's tools at its user message, and the notice if any. */
-  async #recordTools(
+  async #recordSent(
     history: readonly SessionMessage[],
     at: SessionMessage,
-    tools: readonly (readonly [string, string])[],
-    before: readonly (readonly [string, string])[] | undefined,
+    sent: Sent,
+    before: Sent,
     notice: string | null
   ): Promise<void> {
     // Unchanged: the newest record holds them, carried forward by any
     // record this turn wrote.
-    if (!notice && before) return;
+    const same =
+      before.tools !== undefined &&
+      !notice &&
+      (sent.systemHash === undefined || sent.systemHash === before.systemHash);
+    if (same) return;
     const existing = (await this.#records([at.id])).get(at.id);
-    // Written this turn: it holds this turn's tools, or (when the blocks
-    // were prepared in an earlier call of the turn) gets them now.
+    // Written this turn: it carries the earlier turn's; this turn's replace
+    // them.
     if (existing) {
-      if (notice || !existing.tools) {
-        await this.#put(at.id, {
-          ...existing,
-          tools,
-          ...(notice && { toolNotice: notice })
-        });
-      }
+      await this.#put(at.id, {
+        ...existing,
+        ...sent,
+        ...(notice && { toolNotice: notice })
+      });
       return;
     }
     // Nothing recorded this turn: one record holds the new fingerprint
@@ -378,7 +402,7 @@ export class Context {
       // sent is the snapshot the fingerprint rides on.
       await this.#put(at.id, {
         system: [],
-        tools,
+        ...sent,
         ...(notice && { toolNotice: notice })
       });
       return;
@@ -400,7 +424,7 @@ export class Context {
     await this.#put(at.id, {
       base: delivered.base,
       delivered: [...values],
-      tools,
+      ...sent,
       ...(notice && { toolNotice: notice })
     });
   }
@@ -409,7 +433,7 @@ export class Context {
   async #prepareBlocks(
     options: ContextPrepareOptions,
     history: readonly SessionMessage[],
-    tools?: readonly (readonly [string, string])[]
+    sent: Sent = {}
   ): Promise<PreparedContext> {
     const refresh = await this.#refreshPending();
     let delivered = await this.#delivered(history);
@@ -468,18 +492,13 @@ export class Context {
         if (!unchanged) {
           await this.#put(at.id, {
             system: sections,
-            ...(tools && { tools })
+            ...sent
           });
         }
         if (refresh) await this.#setRefresh(false);
         await this.#setChanged(null);
       }
-      return {
-        system,
-        reminder: null,
-        // A first snapshot replaces nothing.
-        ...(delivered.system !== null && !unchanged && { refreshed: true })
-      };
+      return { system, reminder: null };
     }
 
     const { changes, own } = await this.#changes(delivered, history);
@@ -491,7 +510,7 @@ export class Context {
       await this.#put(at.id, {
         system: delivered.system,
         delivered: [...delivered.values].filter(([label]) => label !== CARRIED),
-        ...(tools && { tools })
+        ...sent
       });
       delivered = { ...delivered, base: at.id };
     }
@@ -517,7 +536,7 @@ export class Context {
       changes: mergeSections(existing?.changes ?? [], changes),
       ...(delivered.base !== at.id && { base: delivered.base }),
       delivered: [...values],
-      ...(tools && { tools })
+      ...sent
     });
     await this.#setChanged(null);
     return { system, reminder: null };
@@ -762,7 +781,7 @@ export class Context {
         values,
         base: id,
         at: id,
-        ...(record.tools && { tools: record.tools })
+        ...sentOf(record)
       };
     }
     const baseId = record.base;
@@ -775,7 +794,7 @@ export class Context {
       values: new Map([...system, ...(record.delivered ?? [])]),
       base: baseId,
       at: id,
-      ...(record.tools && { tools: record.tools })
+      ...sentOf(record)
     };
   }
 
@@ -1036,6 +1055,8 @@ type Delivered = {
   at?: string;
   /** The tools on the newest record, when it holds them. */
   tools?: readonly (readonly [string, string])[];
+  /** The system prompt's hash on the newest record, when it holds one. */
+  systemHash?: string;
   /** The snapshot is a prompt frozen before Context, not yet recorded. */
   carried?: boolean;
 };

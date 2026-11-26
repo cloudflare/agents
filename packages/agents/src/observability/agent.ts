@@ -408,7 +408,7 @@ export type AgentObservabilityEvent =
          * Why what the call sends before its new message differs from the
          * session's previous call, so a provider's prompt cache of it is
          * lost: the tools sent (`tools`, with the names added, removed and
-         * changed), a refreshed system prompt (`system`), or history
+         * changed), the system prompt sent (`system`), or history
          * rewritten (`messages`: compacted, edited or deleted).
          */
         causes: readonly (

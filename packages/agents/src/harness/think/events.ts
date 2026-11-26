@@ -61,7 +61,8 @@ export type ThinkSessionEvent =
 /**
  * Why a model call's prefix changed.
  * - `tools`: the tools sent were added, removed or changed.
- * - `system`: the context's system prompt was refreshed.
+ * - `system`: the system prompt sent differs (a context refresh, or one
+ *   `beforeTurn` returns).
  * - `messages`: history was rewritten: compacted, a message edited outside
  *   a turn, or messages deleted.
  *

@@ -1241,6 +1241,18 @@ describe("ThinkHarness context", () => {
     ]);
   });
 
+  it("reports a beforeTurn system prompt that changes between turns", async () => {
+    const stub = fresh();
+    await stub.setSystem("Fixed.");
+    await stub.prompt("hello", session);
+    await stub.prompt("same", session);
+    await stub.setSystem("Fixed, then changed.");
+    await stub.prompt("changed", session);
+    expect(await stub.prefixChanges()).toEqual([
+      { session, causes: [{ kind: "system" }] }
+    ]);
+  });
+
   it("reports no refresh a beforeTurn system prompt replaces", async () => {
     const stub = fresh();
     await stub.setSystem("Fixed.");
@@ -1249,6 +1261,18 @@ describe("ThinkHarness context", () => {
     await stub.refreshContext(session);
     await stub.prompt("refreshed", session);
     expect(await stub.prefixChanges()).toEqual([]);
+  });
+
+  it("reports a refresh a beforeTurn system prompt extends", async () => {
+    const stub = fresh();
+    await stub.setSystem("+Profile: Ana.");
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.refreshContext(session);
+    await stub.prompt("refreshed", session);
+    expect(await stub.prefixChanges()).toEqual([
+      { session, causes: [{ kind: "system" }] }
+    ]);
   });
 
   it("reports history rewritten around the harness as the next call's cause", async () => {

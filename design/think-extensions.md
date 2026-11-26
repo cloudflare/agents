@@ -81,10 +81,10 @@ On every model call, ThinkHarness gives the session's context the tools that cal
 Before a model call whose prefix differs from the session's previous call, which loses a provider's prompt cache, ThinkHarness emits a `prefix-changed` session event with its causes:
 
 - `tools`: the names added, removed and changed, from the same comparison the notice uses;
-- `system`: a refresh recorded a new system prompt;
+- `system`: the system prompt sent differs from the previous turn's, compared by a hash on the same record as the tools (a refresh, or a `beforeTurn` prompt that changed);
 - `messages`: history was compacted, or a message was edited or deleted around the harness.
 
-The harness-backed Think forwards it as the `chat:prefix:changed` observability event, on the `chat` channel. It is not named `think:`, because that prefix has no channel of its own. The `Think` class emits it from E4, when its turn runs on ThinkHarness. `tools` and `system` need a context in the session (as the notice does), and compare with what the branch being answered was sent, so a regeneration compares with its own branch. A refresh that a `beforeTurn` `system` replaces isn't reported. `messages` names the operation without checking which branch it touched. A changed block isn't a cause: it goes after the new message, so the prefix holds. The rewrites are kept in memory per session until that session's next call (at most three each), so a rewrite made before an eviction goes unreported. No row and no hashing of the transcript.
+The harness-backed Think forwards it as the `chat:prefix:changed` observability event, on the `chat` channel. It is not named `think:`, because that prefix has no channel of its own. The `Think` class emits it from E4, when its turn runs on ThinkHarness. `tools` and `system` need a context in the session (as the notice does), and compare with what the branch being answered was sent, so a regeneration compares with its own branch. `messages` names the operation without checking which branch it touched. A changed block isn't a cause: it goes after the new message, so the prefix holds. The rewrites are kept in memory per session until that session's next call (at most three each), so a rewrite made before an eviction goes unreported. No row and no hashing of the transcript.
 
 ## Guarantees
 
