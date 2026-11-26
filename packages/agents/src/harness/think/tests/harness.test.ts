@@ -1241,7 +1241,8 @@ describe("ThinkHarness context", () => {
         }
       ]
     });
-    await stub.wait(receipt.operationId);
+    const result = await stub.wait(receipt.operationId, session);
+    expect(result.status).toBe("done");
     const [, second] = await stub.promptTexts();
     expect(second).toMatch(
       /\|user:again[^|]*The tools you can call changed[^|]*Added: pick_color\./
