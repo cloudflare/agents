@@ -457,6 +457,7 @@ describe("dispatchChatProtocol", () => {
         applied = resolve;
       })
     });
+    const before = sent.length;
     const answered = dispatchChatProtocol(
       connection,
       send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST, probeId: "p" }),
@@ -465,9 +466,26 @@ describe("dispatchChatProtocol", () => {
     // Give the dispatch every chance to answer early.
     for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(calls).toEqual([]);
+    // The tab is told at once to keep waiting, so its probe does not give
+    // up while the apply runs.
+    expect(sent.slice(before).map((frame) => JSON.parse(frame))).toEqual([
+      { type: CHAT_MESSAGE_TYPES.STREAM_PENDING, probeId: "p" }
+    ]);
 
     applied(true);
     await answered;
+    expect(calls).toEqual([["resume.request", "c1", "p", undefined]]);
+  });
+
+  it("sends no keep-waiting frame for a resume request with nothing being applied", async () => {
+    const { host, calls } = recordingHost();
+    const before = sent.length;
+    await dispatchChatProtocol(
+      connection,
+      send({ type: CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST, probeId: "p" }),
+      host
+    );
+    expect(sent.slice(before)).toEqual([]);
     expect(calls).toEqual([["resume.request", "c1", "p", undefined]]);
   });
 

@@ -3383,14 +3383,17 @@ describe("resume coordination during pending continuation", () => {
       } as unknown as UIMessage
     ]);
 
-    const resumeResponse = Promise.race([
-      waitForMessageOfType(ws, MSG_STREAM_RESUMING, 5000).then(
-        () => "resuming" as const
-      ),
-      waitForMessageOfType(ws, MSG_STREAM_RESUME_NONE, 5000).then(
-        () => "none" as const
-      )
-    ]);
+    // Every frame the tab gets from here on, in order.
+    const frames: Array<{ type?: string; probeId?: string; id?: string }> = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      try {
+        frames.push(JSON.parse(event.data as string));
+      } catch {
+        // Not a protocol frame.
+      }
+    });
+    const answersToProbe = () =>
+      frames.filter((frame) => frame.probeId === "p-apply");
 
     // The result's apply is slow (storage): it is still running when the
     // tab asks whether there is a stream to resume.
@@ -3407,22 +3410,36 @@ describe("resume coordination during pending continuation", () => {
     await vi.waitFor(async () => {
       expect(await agent.interactionApplyHeldForTest()).toBe(true);
     });
-    const received = await agent.receivedMessageCountForTest(
-      MSG_STREAM_RESUME_REQUEST
+    ws.send(
+      JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST, probeId: "p-apply" })
     );
-    ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
-    // The request has reached the agent while the apply is still held.
-    await vi.waitFor(async () => {
-      expect(
-        await agent.receivedMessageCountForTest(MSG_STREAM_RESUME_REQUEST)
-      ).toBeGreaterThan(received);
+
+    // While the apply is still held, the probe is told to keep waiting, and
+    // is not told there is nothing to resume.
+    await vi.waitFor(() => {
+      expect(answersToProbe().map((frame) => frame.type)).toEqual([
+        MSG_STREAM_PENDING
+      ]);
     });
     expect(await agent.interactionApplyHeldForTest()).toBe(true);
-    await agent.releaseInteractionApplyForTest();
 
-    // The continuation the result schedules is the stream to resume.
-    expect(await resumeResponse).toBe("resuming");
+    await agent.releaseInteractionApplyForTest();
     await waitForDone(ws, 10000);
+    // The probe is then told which continuation it waits for, and that
+    // continuation's stream is the one offered: never "nothing to resume".
+    const resumeFrames = frames.filter(
+      (frame) =>
+        frame.type === MSG_STREAM_PENDING ||
+        frame.type === MSG_STREAM_RESUMING ||
+        frame.type === MSG_STREAM_RESUME_NONE
+    );
+    const continuationId = resumeFrames[1]?.id;
+    expect(continuationId).toEqual(expect.any(String));
+    expect(resumeFrames).toEqual([
+      { type: MSG_STREAM_PENDING, probeId: "p-apply" },
+      { type: MSG_STREAM_PENDING, probeId: "p-apply", id: continuationId },
+      { type: MSG_STREAM_RESUMING, id: continuationId }
+    ]);
     await closeWS(ws);
   });
 

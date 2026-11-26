@@ -73,10 +73,11 @@ export type ToolApprovalEvent = Extract<
 
 /**
  * How long a resume request waits for a tool result or approval that is
- * still being applied. A tab's resume probe gives up after 5 s
- * (`ws-chat-transport.ts`), so a longer wait would answer nobody.
+ * still being applied. The tab is told to keep waiting first, and from then
+ * on its resume probe gives up after 60 s (`ws-chat-transport.ts`), so a
+ * longer wait would answer nobody.
  */
-const RESUME_APPLY_WAIT_MS = 5_000;
+const RESUME_APPLY_WAIT_MS = 60_000;
 
 /**
  * What a host supplies to {@link dispatchChatProtocol}.
@@ -239,9 +240,15 @@ export async function dispatchChatProtocol<TConnection extends Connection>(
       // Sent once the tab's handler is registered, so a resume notice sent
       // from onConnect cannot arrive before the tab can read it. A tool
       // result or approval still being applied may be about to schedule a
-      // continuation: wait for it, so the tab is told to wait for that
-      // stream and not that there is nothing to resume.
+      // continuation: tell the tab to keep waiting (its probe would give up
+      // after 5 s otherwise), and answer once the apply has ended, so the
+      // tab is told to wait for that stream and not that there is nothing
+      // to resume.
       if (host.turns.pendingInteraction) {
+        host.frames.send(connection, {
+          type: CHAT_MESSAGE_TYPES.STREAM_PENDING,
+          ...(event.probeId !== undefined && { probeId: event.probeId })
+        });
         await awaitWithDeadline(
           host.turns.pendingInteraction.catch(() => false),
           Date.now() + RESUME_APPLY_WAIT_MS
