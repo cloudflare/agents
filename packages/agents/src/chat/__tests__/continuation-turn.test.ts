@@ -706,6 +706,32 @@ describe("the continuation turn", () => {
     expect(turns.continuation.running).toBeNull();
   });
 
+  it("holds the next continuation until the running one streams or settles", async () => {
+    // The model may still add tool calls to the reply the running one
+    // answers, so a result that arrives before its stream does not fire.
+    const second = makeConnection("c2");
+    let release!: () => void;
+    host.model = async (continuation) => {
+      if (continuation.requestId !== "cont-1") return;
+      await result("a1", second);
+      await new Promise<void>((resolve) => (release = resolve));
+    };
+    await result("a1");
+    await fire();
+    await drain();
+    await fire();
+    await drain();
+    expect(turns.continuation.pending?.requestId).toBe("cont-2");
+    expect(turns.aborts.has("cont-2")).toBe(false);
+
+    // It settles without a stream: the held one fires now.
+    release();
+    await drain();
+    await fire();
+    await drain();
+    expect(host.ran).toEqual(["cont-1", "cont-2"]);
+  });
+
   it("runs the next result after a continuation that failed before it streamed", async () => {
     const second = makeConnection("c2");
     host.model = async (continuation) => {
@@ -1724,6 +1750,25 @@ describe("what a continuation turn runs", () => {
   });
 
   describe("a tab that stops while it waits for a continuation", () => {
+    it("stops the reply it was just told to resume, though it already waits on the next one", async () => {
+      let stopped: boolean | undefined;
+      host.model = async (continuation, signal) => {
+        if (continuation.requestId !== "cont-1") return;
+        // The same tab answers again before the stream starts, then stops
+        // before it hears that the stream did.
+        await result("a1");
+        turns.streamStarted("cont-1", () => {});
+        turns.cancelWaitingContinuation("c1");
+        stopped = signal.aborted;
+      };
+      await result("a1");
+      await fire();
+      await drain();
+
+      expect(stopped).toBe(true);
+      expect(host.droppedEvents).toContain("cont-2:stopped<cont-1");
+    });
+
     it("drops a continuation that has not fired", async () => {
       await result("a1");
       turns.cancelWaitingContinuation("c1");

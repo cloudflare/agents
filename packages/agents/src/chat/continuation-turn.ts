@@ -17,7 +17,8 @@
  * - {@link replyFinalized}: any reply finished, so a continuation its
  *   stream held can fire.
  * - {@link settleContinuationTurn}: the turn ended. Release what it still
- *   owns and start the follow-up a result deferred while it ran.
+ *   owns. A result that arrived while it ran is the next pending
+ *   continuation, held until this one streams or settles.
  *
  * The rules these keep, each with a broken variant in the `ChatTurns` TLA+
  * model (`.claude/skills/verify-chat`):
@@ -104,8 +105,8 @@ export interface ContinuationTurnParts<
 export interface ContinuationDropped {
   /**
    * The request id the continuation would have run under. `null` for a
-   * result a stop dropped before it had a continuation of its own: one that
-   * waited behind a running continuation, or one still being applied.
+   * result a stop dropped while it was still being applied, before it had
+   * a continuation of its own.
    */
   requestId: string | null;
   /**
@@ -485,8 +486,8 @@ async function runContinuationBody<
  * happens when the pending continuation is another's or none.
  *
  * A turn that never started uses only this. It does not settle: by the time
- * it runs, later turns may have started, and after a reset the deferred slot
- * belongs to the chat that came after it.
+ * it runs, later turns may have started, and after a reset the slots
+ * belong to the chat that came after it.
  */
 function releaseOwnPending<TConnection extends ContinuationConnection>(
   parts: ContinuationTurnParts<TConnection>,
@@ -514,8 +515,9 @@ function releasePending<TConnection extends ContinuationConnection>(
  * `STREAM_RESUMING`). From here on the reply pipeline reports the turn's
  * failures.
  *
- * A result deferred while the turn ran stays deferred until the turn
- * settles: only then is it known whether the reply answered it.
+ * A result that arrived while the turn ran is the next pending
+ * continuation. The stream gate holds it from here until the reply is
+ * finalized, and its turn decides whether the reply answered it.
  */
 export function continuationStreamStarted<
   TConnection extends ContinuationConnection
@@ -574,7 +576,6 @@ export function replyFinalized<TConnection extends ContinuationConnection>(
  *   unanswered sibling. The connections waiting on it get
  *   `STREAM_RESUME_NONE`. One whose turn already waits in the queue finds
  *   nothing to claim when the turn starts.
- * - The deferred result: it arrived while the stopped continuation ran.
  * - A continuation turn no pending continuation stands for (`Think`'s
  *   connection-less one) that has not started: it is aborted, and reports
  *   itself when its turn starts.
@@ -657,6 +658,8 @@ export function settleContinuationTurn<
   continuation.sendResumeNone();
   parts.released?.(requestId);
   continuation.awaitPending();
+  // A result that arrived while it ran was held for it: run its barrier.
+  parts.rearmForBatch();
 }
 
 /**

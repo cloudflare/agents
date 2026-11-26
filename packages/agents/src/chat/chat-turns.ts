@@ -1598,6 +1598,10 @@ export class ChatTurns<
   fireContinuationWhenStable(): void {
     const pending = this.continuation.pending;
     if (!pending || this.barrierActive) return;
+    // A continuation runs and has not streamed: the model may still add
+    // tool calls to the reply this one answers. Its stream's finalize, or
+    // its settle without a stream, re-arms.
+    if (this.continuation.running) return;
     // While the reply streams the batch can still grow. The finalize
     // re-arms ({@link replyFinalized}).
     if (this.host.isReplyStreaming()) return;
@@ -1985,6 +1989,12 @@ export class ChatTurns<
   cancelWaitingContinuation(connectionId: string, reason?: unknown): void {
     const { pending, running, activeRequestId, activeConnectionId } =
       this.continuation;
+    // The reply this tab was just told to resume: its stop is for that
+    // reply, also when the tab already waits on the next continuation.
+    if (activeRequestId !== null && activeConnectionId === connectionId) {
+      void this.cancel(activeRequestId, reason);
+      return;
+    }
     const waits = this.continuation.awaitingConnections.has(connectionId);
     if (running && waits) {
       void this.cancel(running.requestId, reason);
@@ -1993,10 +2003,6 @@ export class ChatTurns<
     if (pending && waits) {
       // Fired and queued, or not fired yet: its turn finds nothing to claim.
       this.#dropWaiting(null);
-      return;
-    }
-    if (activeRequestId !== null && activeConnectionId === connectionId) {
-      void this.cancel(activeRequestId, reason);
       return;
     }
     // This tab's result, whose frame arrived before the stop and is still
