@@ -4680,6 +4680,24 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return result.status;
   }
 
+  private _transientInRecoveryOnce = false;
+
+  /** Make the next recovery's `continueLastTurn` throw a transient error. */
+  armTransientInRecoveryForTest(): void {
+    this._transientInRecoveryOnce = true;
+  }
+
+  protected override async continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: { signal?: AbortSignal }
+  ): Promise<SaveMessagesResult> {
+    if (this._transientInRecoveryOnce && options?.signal) {
+      this._transientInRecoveryOnce = false;
+      throw new Error("Network connection lost.");
+    }
+    return super.continueLastTurn(body, options);
+  }
+
   getFailingReaderCallsForTest(): number {
     return this._failingReaderCalls;
   }

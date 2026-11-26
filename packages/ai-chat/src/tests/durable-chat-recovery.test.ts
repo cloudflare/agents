@@ -32,6 +32,7 @@ interface ChatRecoveryTestStub {
   ): Promise<void>;
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   openChatTurnRunsForTest(): Promise<number>;
+  armTransientInRecoveryForTest(): Promise<void>;
   armFailingReaderTurnForTest(
     message: string,
     prelude: "partial"
@@ -3843,6 +3844,94 @@ describe("platform-transient reader errors (#1964)", () => {
       expect.objectContaining({ status: "scheduled" })
     ]);
     expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const done = new Promise<void>((resolve) => {
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const frame = JSON.parse(event.data as string) as {
+          type?: string;
+          id?: string;
+          done?: boolean;
+        };
+        if (
+          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.id === "req-second" &&
+          frame.done
+        ) {
+          resolve();
+        }
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-second",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              ...stored,
+              {
+                id: "user-second",
+                role: "user",
+                parts: [{ type: "text", text: "Never mind, something else" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    await done;
+    await agentStub.waitForIdleForTest();
+    ws.close(1000);
+
+    expect(
+      await agentStub.getChatRecoveryIncidentsForTest()
+    ).not.toContainEqual(expect.objectContaining({ status: "skipped" }));
+    const after = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const at = after.findIndex((m) => m.id === "user-second");
+    expect(at).toBeGreaterThan(0);
+    expect(
+      after
+        .slice(0, at)
+        .flatMap((m) => m.parts)
+        .map((p) => (p as { text?: string }).text ?? "")
+        .join("")
+    ).toContain("Continued response.");
+    expect(after.at(-1)?.role).toBe("assistant");
+  }, 20_000);
+
+  it("answers a question sent while a stalled reply's recovery backs off from a transient throw after the recovered reply", async () => {
+    const room = `stall-throw-question-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // The turn stalls; its recovery's attempt then fails on the platform
+    // after its handoff, and a replacement attempt is scheduled.
+    await agentStub.armTransientInRecoveryForTest();
+    await agentStub.driveStallingTurnForTest();
+    for (let i = 0; i < 400; i++) {
+      const incidents =
+        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+          status: string;
+          deferredError?: string;
+        }>;
+      if (
+        incidents[0]?.status === "scheduled" &&
+        incidents[0].deferredError !== undefined
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The recovery's attempt failed on the platform after its handoff,
+    // and its replacement waits out its delay.
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([
+      expect.objectContaining({ status: "scheduled" })
+    ]);
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
     const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
 
     const { ws } = await connectChatWS(
