@@ -112,7 +112,9 @@ export function createSlowClientToolMockModel(
   delayMs: number,
   trailingGaps: number,
   finishReason: "tool-calls" | "stop" = "tool-calls",
-  onPrompt?: (prompt: unknown[]) => void
+  onPrompt?: (prompt: unknown[]) => void,
+  /** Awaited after the tool call, before the trailing text: a test's gate. */
+  hold?: () => Promise<void>
 ): LanguageModel {
   let callCount = 0;
   return {
@@ -167,6 +169,7 @@ export function createSlowClientToolMockModel(
             // Streaming real chunks (not silent gaps) keeps the stall watchdog
             // happy and guarantees the tool call is already in the accumulator.
             controller.enqueue({ type: "text-start", id: "t-trail" });
+            await hold?.();
             for (let i = 0; i < trailingGaps; i++) {
               await new Promise((r) => setTimeout(r, delayMs));
               controller.enqueue({
@@ -916,6 +919,11 @@ export class ThinkClientToolsAgent extends Think {
   private _slowClientToolGaps = 12;
   private _slowClientToolFinishReason: "tool-calls" | "stop" = "tool-calls";
   private _slowClientToolPromptTails: string[] = [];
+  /** Holds the slow client-tool reply after its tool call until released. */
+  private _slowClientToolHold: {
+    promise: Promise<void>;
+    release: () => void;
+  } | null = null;
   private _textOnlyPrompts: unknown[][] = [];
   private _useMidStreamParallelToolStream = false;
   private _midStreamParallelGapMs = 40;
@@ -1240,7 +1248,8 @@ export class ThinkClientToolsAgent extends Think {
         (prompt) => {
           const last = prompt.at(-1) as { role?: string } | undefined;
           this._slowClientToolPromptTails.push(last?.role ?? "");
-        }
+        },
+        () => this._slowClientToolHold?.promise ?? Promise.resolve()
       );
     if (this._useMidStreamParallelToolStream)
       return createMidStreamParallelToolModel(
@@ -1423,6 +1432,18 @@ export class ThinkClientToolsAgent extends Think {
     if (finishReason !== undefined) {
       this._slowClientToolFinishReason = finishReason;
     }
+  }
+
+  /** Hold the slow client-tool reply open after its tool call. */
+  async holdSlowClientToolStreamForTest(): Promise<void> {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => (release = resolve));
+    this._slowClientToolHold = { promise, release };
+  }
+
+  async releaseSlowClientToolStreamForTest(): Promise<void> {
+    this._slowClientToolHold?.release();
+    this._slowClientToolHold = null;
   }
 
   /** Role of the last prompt message of each slow client-tool model call. */

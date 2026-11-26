@@ -4693,6 +4693,10 @@ describe("Think — stop means stop for continuations", () => {
     onTestFinished(unsubscribe);
     const agent = await freshAgent(room);
     await agent.setSlowClientToolStreamMode(true, 25, 40);
+    // The reply stays open after its tool call until the stop has landed, so
+    // the continuation is still held by the stream gate when it does (std
+    // race 5: a late stop used to land after the continuation had started).
+    await agent.holdSlowClientToolStreamForTest();
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
@@ -4719,6 +4723,9 @@ describe("Think — stop means stop for continuations", () => {
     );
     // The app stops everything, not through the WebSocket cancel.
     await agent.cancelAllChats();
+    // Its effect: the held continuation is dropped.
+    await waitUntil(async () => dropped.length > 0, 8000);
+    await agent.releaseSlowClientToolStreamForTest();
     await done;
     await settled(agent);
 
