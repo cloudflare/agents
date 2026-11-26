@@ -23,6 +23,7 @@ import { TaskSettlement } from "../tasks/settlement";
 import { frameText } from "./chat-frames";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
+import { responseSource } from "./reply-source";
 
 /** The capabilities the chat functions are given. They own every row and job. */
 export interface ChatDeps {
@@ -296,15 +297,22 @@ function repairCutOffTools(message: UIMessage, hooks?: ChatHooks): UIMessage {
 }
 
 /** Read what `respond` returned as UI message chunks. */
-function chunksOf(source: ChatModelStream): ReadableStream<UIMessageChunk> {
+function chunksOf(
+  source: ChatModelStream,
+  requestId: string
+): ReadableStream<UIMessageChunk> {
   if (source instanceof ReadableStream) return source;
-  if (source instanceof Response) {
-    throw new Error(
-      "chatTurnDefinition: a Response from respond() is not read yet"
-    );
-  }
   if ("toUIMessageStream" in source) return source.toUIMessageStream();
-  const iterator = source[Symbol.asyncIterator]();
+  // A `text/event-stream` body is a UI message stream; any other body is
+  // plain text, one text part.
+  const iterable: AsyncIterable<UIMessageChunk> =
+    source instanceof Response
+      ? source.body
+        ? (responseSource(source, source.body, requestId)
+            .chunks as AsyncIterable<UIMessageChunk>)
+        : (async function* () {})()
+      : source;
+  const iterator = iterable[Symbol.asyncIterator]();
   return new ReadableStream<UIMessageChunk>({
     async pull(controller) {
       const next = await iterator.next();
@@ -479,7 +487,7 @@ export function chatTurnDefinition(
       }));
       const continuing = partial;
       const recorded = watchStall(
-        chunksOf(source),
+        chunksOf(source, requestId),
         recovery === false ? undefined : recovery?.stallTimeoutMs
       ).pipeThrough(
         new TransformStream<UIMessageChunk, UIMessageChunk>({

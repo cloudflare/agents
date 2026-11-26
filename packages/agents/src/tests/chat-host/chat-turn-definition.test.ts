@@ -348,4 +348,33 @@ describe("chatTurnDefinition", () => {
       expect(sent.at(-1)).toMatchObject({ done: true, outcome: "completed" });
     });
   });
+
+  it("reads a Response from respond: an event stream as UI chunks, plain text as one text part", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sse = [
+        { type: "start", messageId: "sse-1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "From SSE" },
+        { type: "text-end", id: "t1" }
+      ]
+        .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+        .join("");
+      await definitionOf(instance, {
+        respond: async () =>
+          new Response(sse, {
+            headers: { "content-type": "text/event-stream" }
+          })
+      })({ trigger: "server" }, laterAttempt("run-5", 1));
+      await definitionOf(instance, {
+        respond: async () => new Response("Plain words")
+      })({ trigger: "server" }, laterAttempt("run-6", 1));
+      const text = JSON.stringify(
+        await instance.sessions.session("s1").getHistory()
+      );
+      expect(text).toContain("From SSE");
+      expect(text).toContain("Plain words");
+    });
+  });
 });
