@@ -281,7 +281,9 @@ export function createChatRecoveryTaskDefinition(
         runChatRecoveryAttempt(step, hooks, input)
       ));
     } catch (error) {
-      if (isTaskSuspension(error)) throw error;
+      // Tasks keeps the run for a later wake (a suspension, or a platform
+      // failure past the step's retries): so does the hold.
+      if (isTaskSuspension(error) || isPlatformFailure(error)) throw error;
       replacementHolds.delete(incidentId);
       release();
       throw error;

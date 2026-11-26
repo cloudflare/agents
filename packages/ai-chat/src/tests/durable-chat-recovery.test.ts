@@ -32,7 +32,10 @@ interface ChatRecoveryTestStub {
   ): Promise<void>;
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   openChatTurnRunsForTest(): Promise<number>;
-  armTransientInRecoveryForTest(): Promise<void>;
+  armTransientInRecoveryForTest(throwsBeforeHandoff?: number): Promise<void>;
+  throwsBeforeHandoffLeftForTest(): Promise<number>;
+  openRecoveryTaskRunsForTest(): Promise<string[]>;
+  runOpenRecoveryTaskRunsForTest(): Promise<void>;
   armFailingReaderTurnForTest(
     message: string,
     prelude: "partial"
@@ -3901,6 +3904,95 @@ describe("platform-transient reader errors (#1964)", () => {
     ).toContain("Continued response.");
     expect(after.at(-1)?.role).toBe("assistant");
   }, 20_000);
+
+  it("keeps the lane for a replacement attempt the platform defers before its handoff", async () => {
+    const room = `stall-throw-defer-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // The turn stalls; its recovery fails on the platform after its handoff.
+    // The replacement then fails on the platform before its handoff past its
+    // step's retries (a first try and 3 retries), so Tasks defers its run.
+    await agentStub.armTransientInRecoveryForTest(3);
+    await agentStub.driveStallingTurnForTest();
+    for (let i = 0; i < 1000; i++) {
+      if (
+        (await agentStub.throwsBeforeHandoffLeftForTest()) === 0 &&
+        (await agentStub.openRecoveryTaskRunsForTest()).length === 1
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await agentStub.throwsBeforeHandoffLeftForTest()).toBe(0);
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    let answered = false;
+    const done = new Promise<void>((resolve) => {
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const frame = JSON.parse(event.data as string) as {
+          type?: string;
+          id?: string;
+          done?: boolean;
+        };
+        if (
+          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.id === "req-second" &&
+          frame.done
+        ) {
+          answered = true;
+          resolve();
+        }
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-second",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              ...stored,
+              {
+                id: "user-second",
+                role: "user",
+                parts: [{ type: "text", text: "Never mind, something else" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    // The question is admitted (its lane run exists) or already answered.
+    for (let i = 0; i < 400; i++) {
+      if (answered || (await agentStub.openChatTurnRunsForTest()) > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The platform recovers: the deferred replacement runs again.
+    await agentStub.runOpenRecoveryTaskRunsForTest();
+    await done;
+    await agentStub.waitForIdleForTest();
+    ws.close(1000);
+
+    expect(
+      await agentStub.getChatRecoveryIncidentsForTest()
+    ).not.toContainEqual(expect.objectContaining({ status: "skipped" }));
+    const after = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const at = after.findIndex((m) => m.id === "user-second");
+    expect(at).toBeGreaterThan(0);
+    expect(
+      after
+        .slice(0, at)
+        .flatMap((m) => m.parts)
+        .map((p) => (p as { text?: string }).text ?? "")
+        .join("")
+    ).toContain("Continued response.");
+    expect(after.at(-1)?.role).toBe("assistant");
+  }, 30_000);
 
   it("ends the turn's run when the user stops a recovery waiting out its backoff", async () => {
     const room = `transient-cancel-run-${crypto.randomUUID()}`;
