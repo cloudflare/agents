@@ -9723,35 +9723,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       backoff: input.backoff,
       error: input.error,
       retryAfterSeconds: input.retryAfterSeconds,
-      latestUserMessageId:
-        [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null,
+      messages: () => this.messages,
       originMessageIds: this._frames.originIds(input.requestId),
+      turnContext,
+      liveTurn,
       // A stall before the first chunk leaves the user's message as the
       // leaf (#1941). A regeneration retries the message it branches from.
       retryTargetUserId: async () =>
         input.branchParentId ?? (await this._latestUserLeafId()),
-      onChatRecovery: (context) =>
-        this.onChatRecovery({
-          incidentId: context.incidentId,
-          recoveryRootRequestId: context.recoveryRootRequestId,
-          attempt: context.attempt,
-          maxAttempts: context.maxAttempts,
-          recoveryKind: context.recoveryKind,
-          streamId: context.streamId,
-          requestId: context.requestId,
-          partialText: context.partialText,
-          partialParts: context.partialParts,
-          recoveryData: liveTurn?.recoveryData ?? null,
-          messages: [...this.messages],
-          ...turnContext,
-          createdAt: liveTurn?.createdAt ?? context.firstSeenAt
-        }),
+      onChatRecovery: (context) => this.onChatRecovery(context),
       resolvePartial: async (keep) => {
         if (keep) return input.persistPartial();
         input.onPartialDropped();
         return undefined;
       },
-      requestContext: () => turnContext,
       // The turn then ends as its stream error, which the caller sends.
       onDeclined: (errorText) =>
         this._markRecoveredSubmissionInterrupted(

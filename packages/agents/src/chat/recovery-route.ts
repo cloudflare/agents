@@ -20,7 +20,9 @@
  * @internal Sibling-package support for AI Chat and Think.
  */
 
-import type { ChatRecoveryOptions } from "./lifecycle";
+import type { UIMessage } from "ai";
+import type { ClientToolSchema } from "./client-tools";
+import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
 import { partialHasSettledToolResults } from "./recovery-codec";
 import { currentTurnAttempt } from "./turn-task";
 import type {
@@ -63,23 +65,13 @@ export type StreamInterruptionOutcome =
    */
   | "stopped";
 
-/** What the engine knows when it asks the app about a live interruption. */
-export type StreamInterruptionRecoveryContext = {
-  incidentId: string;
-  recoveryRootRequestId: string;
-  attempt: number;
-  maxAttempts: number;
-  recoveryKind: ChatRecoveryKind;
-  streamId: string;
-  requestId: string;
-  partialText: string;
-  partialParts: MessagePart[];
-  /** When the incident was first seen: the fallback for the turn's start. */
-  firstSeenAt: number;
-};
-
-/** What a host supplies to route one interruption. */
-export interface StreamInterruptionHost {
+/**
+ * One live stream interruption to route: the interrupted reply, the chat
+ * state the app's `onChatRecovery` reads, and what is the host's own (where
+ * a dropped or kept partial goes, what a retry targets, and Think's
+ * submission bookkeeping).
+ */
+export type StreamInterruptionRoute = {
   /** The interrupted turn's request id. */
   requestId: string;
   /** Its stream. */
@@ -100,28 +92,32 @@ export interface StreamInterruptionHost {
    * backoff, up to its cap.
    */
   retryAfterSeconds?: number;
-  /** The latest user message, for the incident's identity. */
-  latestUserMessageId: string | null;
+  /** The stored transcript, read when the route needs it. */
+  messages(): UIMessage[];
   /** The message ids the interrupted request came from (#2280). */
   originMessageIds?: string[];
-
+  /** The tools and body the interrupted request ran with. */
+  turnContext: {
+    lastBody?: Record<string, unknown>;
+    lastClientTools?: ClientToolSchema[];
+  };
+  /** The live turn's checkpoint and start, when this isolate ran it. */
+  liveTurn?: { recoveryData: unknown; createdAt: number };
+  /** The app's `onChatRecovery`. */
+  onChatRecovery(
+    context: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions | void>;
   /**
    * The unanswered user message to retry when no part of the reply is
    * stored, or `null` when there is none and recovery continues the reply.
    * Read before the incident opens and again after a partial was dropped.
    */
   retryTargetUserId(): Promise<string | null>;
-  /** Call the app's `onChatRecovery` with the rest of its context. */
-  onChatRecovery(
-    context: StreamInterruptionRecoveryContext
-  ): Promise<ChatRecoveryOptions | void>;
   /**
    * Store the partial reply (`keep`) or drop it. Returns the id of the
    * stored assistant message recovery should continue, if there is one.
    */
   resolvePartial(keep: boolean): Promise<string | undefined>;
-  /** The tools and body the interrupted request ran with. */
-  requestContext(): { lastBody: unknown; lastClientTools: unknown };
   /**
    * The app declined to continue. Runs after the incident is marked and
    * before the terminal error is recorded. `errorText` is what the client is
@@ -137,7 +133,7 @@ export interface StreamInterruptionHost {
    * was itself a recovery attempt.
    */
   afterSchedule?(chained: boolean): void;
-}
+};
 
 /** What to schedule for an interrupted turn. */
 export type RecoveredTurnSchedule = {
@@ -217,7 +213,7 @@ export async function scheduleRecoveredTurn(
  */
 export async function routeStreamInterruption(
   engine: ChatRecoveryEngine,
-  host: StreamInterruptionHost
+  host: StreamInterruptionRoute
 ): Promise<StreamInterruptionOutcome> {
   try {
     return await route(engine, host);
@@ -232,12 +228,16 @@ export async function routeStreamInterruption(
 
 async function route(
   engine: ChatRecoveryEngine,
-  host: StreamInterruptionHost
+  host: StreamInterruptionRoute
 ): Promise<StreamInterruptionOutcome> {
   const { requestId, streamId, partialParts } = host;
   // Inside a recovery attempt the interrupted turn belongs to that attempt's
   // chain, and the next attempt must not join the run that schedules it.
   const chained = engine.activeRootRequestId !== undefined;
+  // Read before anything awaits, so the incident's identity is the
+  // transcript as it was when the stream was interrupted.
+  const latestUserMessageId =
+    [...host.messages()].reverse().find((m) => m.role === "user")?.id ?? null;
   const recoveryRootRequestId = engine.activeRootRequestId ?? requestId;
 
   // A turn that failed before it produced any part has nothing to continue.
@@ -250,7 +250,7 @@ async function route(
   const { incident, config, exhausted, stopped } = await engine.beginIncident({
     requestId,
     recoveryRootRequestId,
-    latestUserMessageId: host.latestUserMessageId,
+    latestUserMessageId,
     recoveryKind,
     trigger: "stalled"
   });
@@ -301,7 +301,10 @@ async function route(
         requestId,
         partialText,
         partialParts,
-        firstSeenAt: incident.firstSeenAt
+        recoveryData: host.liveTurn?.recoveryData ?? null,
+        messages: [...host.messages()],
+        ...host.turnContext,
+        createdAt: host.liveTurn?.createdAt ?? incident.firstSeenAt
       })) ?? {};
   } catch (error) {
     console.error(
@@ -365,7 +368,7 @@ async function route(
     recoveryRootRequestId,
     retryUserId,
     targetAssistantId,
-    requestContext: host.requestContext(),
+    requestContext: host.turnContext,
     originMessageIds: host.originMessageIds,
     extra: await host.scheduleData?.(kind),
     delaySeconds,

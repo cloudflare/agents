@@ -477,9 +477,8 @@ export {
   routeStreamInterruption,
   scheduleRecoveredTurn,
   type RecoveredTurnSchedule,
-  type StreamInterruptionHost,
   type StreamInterruptionOutcome,
-  type StreamInterruptionRecoveryContext
+  type StreamInterruptionRoute
 } from "./recovery-route";
 
 export {

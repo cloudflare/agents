@@ -33,7 +33,7 @@ import {
 } from "./recovery-route";
 import type {
   RecoveredTurnSchedule,
-  StreamInterruptionHost,
+  StreamInterruptionRoute,
   StreamInterruptionOutcome
 } from "./recovery-route";
 import {
@@ -1542,7 +1542,7 @@ export class ChatRecoveryEngine {
    * into bounded recovery. See `recovery-route.ts`.
    */
   routeStreamInterruption(
-    host: StreamInterruptionHost
+    host: StreamInterruptionRoute
   ): Promise<StreamInterruptionOutcome> {
     return routeStreamInterruption(this, host);
   }

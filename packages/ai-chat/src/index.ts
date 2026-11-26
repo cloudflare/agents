@@ -3748,45 +3748,29 @@ export class AIChatAgent<
       lastBody: this._turns.lastBody,
       lastClientTools: this._turns.lastClientTools
     };
-    const latestUserMessageId =
-      [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
     return this._chatRecoveryEngine().routeStreamInterruption({
       requestId: input.requestId,
       streamId: input.streamId,
       partialParts: input.partialParts,
       backoff: input.backoff,
       error: input.error,
-      latestUserMessageId,
+      messages: () => this.messages,
       originMessageIds: this._frames.originIds(input.requestId),
+      turnContext,
+      liveTurn,
       // A new turn (not a continuation) whose question is still the latest
       // message has nothing stored to continue.
       retryTargetUserId: async () => {
         const leaf = this.messages.at(-1);
         return !input.continuation && leaf?.role === "user" ? leaf.id : null;
       },
-      onChatRecovery: (context) =>
-        this.onChatRecovery({
-          incidentId: context.incidentId,
-          recoveryRootRequestId: context.recoveryRootRequestId,
-          attempt: context.attempt,
-          maxAttempts: context.maxAttempts,
-          recoveryKind: context.recoveryKind,
-          streamId: context.streamId,
-          requestId: context.requestId,
-          partialText: context.partialText,
-          partialParts: context.partialParts,
-          recoveryData: liveTurn?.recoveryData ?? null,
-          messages: [...this.messages],
-          ...turnContext,
-          createdAt: liveTurn?.createdAt ?? context.firstSeenAt
-        }),
+      onChatRecovery: (context) => this.onChatRecovery(context),
       resolvePartial: async (keep) => {
         if (keep) return input.keepPartial();
         input.dropPartial();
         // A continuation's message was there before this turn and stays.
         return input.continuation ? input.messageId : undefined;
-      },
-      requestContext: () => turnContext
+      }
     });
   }
 
