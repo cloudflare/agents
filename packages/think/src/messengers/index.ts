@@ -30,27 +30,21 @@ export type {
 } from "./chat-sdk";
 
 export {
-  defaultDeliveryTag,
   deliverMessengerReply,
   EMPTY_MESSENGER_RESPONSE,
   ERROR_MESSENGER_RESPONSE,
   INTERRUPTED_MESSENGER_RESPONSE,
-  MESSENGER_REPLY_FIBER_NAME,
   messengerReplyFailureMode,
   messengerReplyRecoveryMode,
-  messengerReplySnapshot,
-  parseMessengerReplySnapshot,
   TextStreamCallback
 } from "./delivery";
 
 export type {
   DeliverMessengerReplyOptions,
   DeliveryKind,
-  DeliveryTag,
   MessengerDeliveryPolicy,
   MessengerDeliverySurface,
   MessengerDeliveryTarget,
-  MessengerReplySnapshot,
   MessengerReplyStage,
   TextStreamCallbackOptions
 } from "./delivery";

@@ -5,9 +5,13 @@ import { Think } from "../../think";
 import { releaseDelivery, sendDelivery } from "agents/internal";
 import { recoveredReplyId } from "../../messengers/recovered-reply";
 import {
+  messengerReplySink,
+  recoverMessengerReply,
+  sendMessengerReply
+} from "../../messengers/reply-task";
+import { telegramMessenger } from "../../messengers/telegram";
+import {
   chatSdkMessenger,
-  MESSENGER_REPLY_FIBER_NAME,
-  messengerReplySnapshot,
   type MessengerEvent,
   type ThinkMessengerRuntime,
   type ThinkMessengers
@@ -170,7 +174,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     const mode = this._recoveryMode();
     const nextCall = () => ++this._streamCalls;
     // An agent named `reset-…` resets in its first model call, mid-reply.
-    const resetOnce = this.name.startsWith("reset-")
+    const resetOnce = /^(tg-)?reset-/.test(this.name)
       ? async () => {
           if (this.ctx.storage.kv.get("reset-done")) return;
           this.ctx.storage.kv.put("reset-done", true);
@@ -260,6 +264,18 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
   override getMessengers(): ThinkMessengers {
     // #2313: an agent named `queue-…` answers each message as it arrives.
     if (this.name.startsWith("queue-")) this.messengerConcurrency = "queue";
+    // An agent named `tg-…` talks to the fake Telegram Bot API (the test
+    // config's outbound service), with its name as the bot token.
+    if (this.name.startsWith("tg-")) {
+      return {
+        telegram: telegramMessenger({
+          apiBaseUrl: "https://fake-telegram.test",
+          token: this.name,
+          userName: "probe_bot",
+          verifyWebhook: false
+        })
+      };
+    }
     return {
       fake: chatSdkMessenger({
         adapter: this._recordingAdapter(),
@@ -306,7 +322,9 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     enqueue?: boolean;
     failPost?: boolean;
     retried?: boolean;
-    stage?: "accepted" | "streaming";
+    stage?: "accepted" | "streaming" | "completed";
+    /** The reply's delivery gives up instead of recovering. */
+    giveUp?: boolean;
   }): Promise<string | null> {
     const runtime = (
       this as unknown as { _messengerRuntime: ThinkMessengerRuntime }
@@ -347,28 +365,35 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       }
     };
     try {
-      await runtime.handleFiberRecovery(
-        {
-          createdAt: Date.now(),
-          id: "msgr_recovered",
-          name: MESSENGER_REPLY_FIBER_NAME,
-          recoveryReason: "interrupted",
-          snapshot: messengerReplySnapshot(
-            options?.stage ?? "accepted",
-            event,
-            {
-              _type: "chat:Thread",
-              adapterName: "fake",
-              channelId: threadId,
-              id: threadId,
-              isDM: true
-            }
-          )
-        },
-        {
-          persistRecoverySnapshot: () => {},
-          retriesAfter: () => options?.retried ?? false
+      const payload = {
+        event,
+        thread: {
+          _type: "chat:Thread",
+          adapterName: "fake",
+          channelId: threadId,
+          id: threadId,
+          isDM: true
         }
+      };
+      if (options?.giveUp) {
+        // What the delivery module hands its hook: the attempts' checkpoint,
+        // where the reply was kept.
+        await messengerReplySink(() => runtime).onGiveUp?.(
+          new Error("gave up"),
+          {},
+          {
+            get: <T>(key: string) =>
+              (key === "reply" ? payload : undefined) as T | undefined
+          }
+        );
+        return null;
+      }
+      await recoverMessengerReply(
+        runtime,
+        payload,
+        options?.stage ?? "accepted",
+        () => {},
+        () => options?.retried ?? false
       );
       return null;
     } catch (error) {
@@ -595,7 +620,9 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
    * key that release wrote, its run replayed with no live reply. Returns
    * whether the key is gone afterwards.
    */
-  async replayReleasedReplyForTest(): Promise<boolean> {
+  async replayReleasedReplyForTest(
+    stage: "accepted" | "completed" = "accepted"
+  ): Promise<boolean> {
     const nonce = crypto.randomUUID();
     const threadId = "fake:dm-released";
     const event: MessengerEvent = {
@@ -620,13 +647,20 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     const key = `__cf_messenger_recovery:msgr_${nonce}`;
     await this.ctx.storage.put(
       key,
-      messengerReplySnapshot("accepted", event, {
-        _type: "chat:Thread",
-        adapterName: "fake",
-        channelId: threadId,
-        id: threadId,
-        isDM: true
-      })
+      // The snapshot as think@0.24.0 wrote it.
+      {
+        type: "think:messenger-reply",
+        stage,
+        tag: { stage, kind: "interim", turnEnded: false },
+        event,
+        thread: {
+          _type: "chat:Thread",
+          adapterName: "fake",
+          channelId: threadId,
+          id: threadId,
+          isDM: true
+        }
+      }
     );
     await this.tasks.run(
       "__cf_internal_messenger_reply",
@@ -636,12 +670,43 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return (await this.ctx.storage.get(key)) === undefined;
   }
 
+  /**
+   * Sends the same reply id twice, the second after the first was
+   * answered; returns how many times it was answered.
+   */
+  async sendReplyTwiceForTest(): Promise<number> {
+    let answered = 0;
+    const id = `repeat-${crypto.randomUUID()}`;
+    const send = () =>
+      sendMessengerReply(this.tasks, id, {
+        payload: { event: {} as MessengerEvent, thread: null },
+        answer: async () => {
+          answered++;
+        }
+      });
+    await send();
+    await send();
+    return answered;
+  }
+
+  /** Whether any kept reply run's row still holds `text`. */
+  async replyRowsHoldForTest(text: string): Promise<boolean> {
+    const rows = this.sql<Record<string, unknown>>`
+      SELECT * FROM cf_agents_task_runs
+      WHERE definition = '__cf_delivery:messenger-reply'
+    `;
+    if (rows.length === 0) throw new Error("no reply run kept");
+    return JSON.stringify(rows).includes(text);
+  }
+
   /** Messenger reply runs not yet settled. */
   async openReplyRunsForTest(): Promise<number> {
     return (
       this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM cf_agents_task_runs
-        WHERE definition = '__cf_internal_messenger_reply'
+        WHERE definition IN (
+          '__cf_internal_messenger_reply', '__cf_delivery:messenger-reply'
+        )
           AND status IN ('pending', 'running')
       `[0]?.n ?? 0
     );

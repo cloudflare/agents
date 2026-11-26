@@ -17,7 +17,11 @@ export default defineConfig({
   test: {
     name: "workers",
     include: [path.join(testsDir, "**/*.test.ts")],
-    exclude: [path.join(testsDir, "../e2e-tests/**")],
+    exclude: [
+      path.join(testsDir, "../e2e-tests/**"),
+      // Runs under vitest.replay.config.ts, with the fake Bot API.
+      path.join(testsDir, "messenger-replay.test.ts")
+    ],
     setupFiles: [path.join(testsDir, "setup.ts")],
     testTimeout: 10000,
     retry: 0,

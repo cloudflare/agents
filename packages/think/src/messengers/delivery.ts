@@ -1,5 +1,4 @@
 import { RpcTarget } from "cloudflare:workers";
-import type { FiberContext } from "agents";
 import { TextSegmentJoiner } from "agents/chat";
 import type { UIMessage } from "ai";
 import type {
@@ -9,8 +8,6 @@ import type {
 } from "../think";
 import type { MessengerEvent, MessengerMessage } from "./events";
 import { toMessengerUserMessage } from "./events";
-
-export const MESSENGER_REPLY_FIBER_NAME = "think:messenger-reply";
 
 export const EMPTY_MESSENGER_RESPONSE =
   "I couldn't produce a text response. Please try again.";
@@ -255,78 +252,12 @@ export type MessengerReplyStage = "accepted" | "streaming" | "completed";
 export type DeliveryKind = "final" | "interim" | "notice" | "command";
 
 /**
- * Explicit delivery lifecycle tag carried on the wire/snapshot. Orthogonal to,
- * and additive on top of, {@link MessengerReplyStage}: recovery still switches
- * on `stage`, while `kind`/`turnEnded` give non-streaming-text surfaces
- * (voice/CLI) an explicit signal instead of inferring from text shape.
+ * A messenger event kept as JSON (a reply's delivery input) holds its
+ * messages' `createdAt` as strings: give them back as `Date`s.
+ *
+ * @internal
  */
-export interface DeliveryTag {
-  stage: MessengerReplyStage;
-  kind: DeliveryKind;
-  turnEnded: boolean;
-}
-
-/** Derive a sensible default tag from a reply stage. */
-export function defaultDeliveryTag(stage: MessengerReplyStage): DeliveryTag {
-  return {
-    stage,
-    kind: stage === "completed" ? "final" : "interim",
-    turnEnded: stage === "completed"
-  };
-}
-
-export interface MessengerReplySnapshot {
-  event: MessengerEvent;
-  stage: MessengerReplyStage;
-  tag?: DeliveryTag;
-  thread?: unknown;
-  type: typeof MESSENGER_REPLY_FIBER_NAME;
-}
-
-export function messengerReplySnapshot(
-  stage: MessengerReplyStage,
-  event: MessengerEvent,
-  thread?: unknown,
-  tag?: DeliveryTag
-): MessengerReplySnapshot {
-  return {
-    event,
-    stage,
-    tag: tag ?? defaultDeliveryTag(stage),
-    thread,
-    type: MESSENGER_REPLY_FIBER_NAME
-  };
-}
-
-export function parseMessengerReplySnapshot(
-  snapshot: unknown
-): MessengerReplySnapshot | null {
-  if (snapshot === null || typeof snapshot !== "object") {
-    return null;
-  }
-
-  const candidate = snapshot as Partial<MessengerReplySnapshot>;
-  if (
-    candidate.type !== MESSENGER_REPLY_FIBER_NAME ||
-    (candidate.stage !== "accepted" &&
-      candidate.stage !== "streaming" &&
-      candidate.stage !== "completed") ||
-    candidate.event === undefined
-  ) {
-    return null;
-  }
-
-  return {
-    event: withDates(candidate.event),
-    stage: candidate.stage,
-    tag: candidate.tag ?? defaultDeliveryTag(candidate.stage),
-    thread: candidate.thread,
-    type: MESSENGER_REPLY_FIBER_NAME
-  };
-}
-
-/** A snapshot kept as JSON holds its messages' `createdAt` as strings. */
-function withDates(event: MessengerEvent): MessengerEvent {
+export function reviveMessengerEvent(event: MessengerEvent): MessengerEvent {
   const revive = (message: MessengerMessage): MessengerMessage =>
     typeof message.createdAt === "string"
       ? { ...message, createdAt: new Date(message.createdAt) }
@@ -338,13 +269,14 @@ function withDates(event: MessengerEvent): MessengerEvent {
   };
 }
 
+/** What a reply cut off at `stage` does on its next attempt. */
 export function messengerReplyRecoveryMode(
-  snapshot: MessengerReplySnapshot
+  stage: MessengerReplyStage
 ): "answer" | "apologize" | null {
-  if (snapshot.stage === "accepted") {
+  if (stage === "accepted") {
     return "answer";
   }
-  if (snapshot.stage === "streaming") {
+  if (stage === "streaming") {
     return "apologize";
   }
   return null;
@@ -431,12 +363,16 @@ async function settleTyping(pending: Promise<void> | undefined) {
 }
 
 export interface DeliverMessengerReplyOptions {
-  checkpoint?: (snapshot: MessengerReplySnapshot) => Promise<void> | void;
   event: MessengerEvent;
-  fiber?: FiberContext;
+  /**
+   * Records how far the reply got, for the attempt after a reset:
+   * `"streaming"` once text is visible, `"completed"` once nothing more
+   * should be posted for it.
+   */
+  onStage?: (stage: "streaming" | "completed") => Promise<void> | void;
   policy?: MessengerDeliveryPolicy;
+  /** The event in its JSON form, handed to `chatWithMessengerContext`. */
   snapshotEvent?: MessengerEvent;
-  snapshotThread?: unknown;
   surface: MessengerDeliverySurface;
   target: MessengerDeliveryTarget;
   userMessage?: UIMessage;
@@ -453,22 +389,12 @@ export async function deliverMessengerReply(
     options.policy?.interruptedResponseText ?? INTERRUPTED_MESSENGER_RESPONSE;
   let completedModelTurn = false;
   const snapshotEvent = options.snapshotEvent ?? options.event;
-  const checkpoint =
-    options.checkpoint ??
-    ((snapshot: MessengerReplySnapshot) => {
-      options.fiber?.stash(snapshot);
-    });
+  const onStage = options.onStage ?? (() => undefined);
 
   const callback = new TextStreamCallback({
     emptyText: emptyResponseText,
     onVisibleStart: async () => {
-      await checkpoint(
-        messengerReplySnapshot(
-          "streaming",
-          snapshotEvent,
-          options.snapshotThread
-        )
-      );
+      await onStage("streaming");
     },
     visibleSoftLimit: options.policy?.visibleSoftLimit
   });
@@ -561,14 +487,8 @@ export async function deliverMessengerReply(
         () => true
       );
       // Checkpoint before the post: a reset after it must not let recovery
-      // (which apologizes for a `streaming` snapshot) post a second apology.
-      await checkpoint(
-        messengerReplySnapshot(
-          "completed",
-          snapshotEvent,
-          options.snapshotThread
-        )
-      );
+      // (which apologizes for a reply cut off while streaming) post a second apology.
+      await onStage("completed");
       if (callback.targetDeliversRecoveredReply()) {
         // The target subtracts every streamed character from the recovered
         // reply, including any past `visibleSoftLimit` or in a rejected
@@ -592,9 +512,7 @@ export async function deliverMessengerReply(
       []) {
       await options.surface.post(chunk);
     }
-    await checkpoint(
-      messengerReplySnapshot("completed", snapshotEvent, options.snapshotThread)
-    );
+    await onStage("completed");
   } catch (error) {
     callback.fail(error);
     await post.catch(() => undefined);
@@ -605,19 +523,11 @@ export async function deliverMessengerReply(
     );
 
     if (failureMode === null) {
-      await checkpoint(
-        messengerReplySnapshot(
-          "completed",
-          snapshotEvent,
-          options.snapshotThread
-        )
-      );
+      await onStage("completed");
       return;
     }
 
-    await checkpoint(
-      messengerReplySnapshot("completed", snapshotEvent, options.snapshotThread)
-    );
+    await onStage("completed");
     if (failureMode === "apologize") {
       await options.surface
         .post(interruptedResponseText)

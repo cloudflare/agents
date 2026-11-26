@@ -273,6 +273,14 @@ export interface TaskRunOptions {
   retain?: boolean;
 
   /**
+   * @internal Checkpoint entries the run starts with, written with its row,
+   * so they are durable before any attempt runs. Cleared at settle like
+   * the rest of the checkpoint. Ignored on a join: the existing run's
+   * checkpoint stands.
+   */
+  checkpoint?: Record<string, TaskJson>;
+
+  /**
    * @internal Runs of one lane run one at a time, in the order they were
    * accepted; a run queued behind another waits with no deadline of its own.
    */

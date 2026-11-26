@@ -7,7 +7,6 @@ import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { Agent, callable, routeAgentRequest } from "agents";
-import type { FiberContext } from "agents";
 import {
   CHAT_RECOVERY_TASK_NAME,
   createChatFiberSnapshot,
@@ -24,8 +23,6 @@ import { agentTool } from "agents/agent-tools";
 import type { Adapter } from "chat";
 import {
   chatSdkMessenger,
-  messengerReplySnapshot,
-  MESSENGER_REPLY_FIBER_NAME,
   type MessengerEvent,
   type ThinkMessengers
 } from "../messengers";
@@ -2180,17 +2177,16 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
 
 // ── Messenger reply fiber recovery ──────────────────────────────────
 //
-// Exercises the MESSENGER_REPLY_FIBER_NAME recovery delegation: a messenger
-// reply fiber interrupted by an eviction is recovered on restart through
-// `_handleInternalFiberRecovery` → `ThinkMessengerRuntime.handleFiberRecovery`.
-//  - `accepted` snapshot → "answer" mode: the reply is resumed (the model turn
-//    re-runs and posts the answer to the thread).
-//  - `streaming` snapshot → "apologize" mode: an interrupted message is posted.
+// A messenger reply (one delivery run) interrupted by an eviction is
+// recovered on restart by its next attempt, by the stage it recorded:
+//  - no stage ("accepted") → "answer": the model turn re-runs and the answer
+//    is posted to the thread.
+//  - "streaming" → "apologize": an interrupted message is posted.
 //
-// The reply fiber is seeded by genuinely starting it (it stashes the target
-// stage and parks), then a real mid-fiber SIGKILL leaves the orphaned run row.
-// On restart, the boot fiber-recovery sweep drives the messenger recovery, which
-// posts through an in-memory fake `chat` adapter that records into agent SQL.
+// The reply is started for real (it records the target stage and parks),
+// then a real SIGKILL leaves its run open. On restart the delivery wakes
+// and recovers it, posting through an in-memory fake `chat` adapter that
+// records into agent SQL.
 
 const FAKE_MESSENGER_ID = "fake";
 const FAKE_THREAD_ID = "fake:thread";
@@ -2321,21 +2317,25 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
     const stage = mode === "answer" ? "accepted" : "streaming";
     const event = makeMessengerReplyEvent();
     const thread = makeMessengerThreadSnapshot();
-    const result = await this.startFiber(
-      MESSENGER_REPLY_FIBER_NAME,
-      async (fiber: FiberContext) => {
-        // Stash the target stage, then park so a SIGKILL captures exactly this
-        // stage (the real reply work is performed by recovery on restart).
-        fiber.stash(messengerReplySnapshot(stage, event, thread));
+    const id = `messenger:fake:${mode}`;
+    // Not awaited: the reply records the target stage, then parks so a
+    // SIGKILL captures exactly this stage (recovery does the real work on
+    // restart).
+    let recorded!: () => void;
+    const stageKept = new Promise<void>((resolve) => (recorded = resolve));
+    void this._sendMessengerReply(id, {
+      payload: { event, thread },
+      answer: async (record) => {
+        if (stage === "streaming") record("streaming");
+        recorded();
         await new Promise((resolve) => setTimeout(resolve, 60_000));
-      },
-      {
-        idempotencyKey: `messenger:fake:${mode}`,
-        metadata: { messengerId: FAKE_MESSENGER_ID, threadId: FAKE_THREAD_ID },
-        waitForCompletion: false
       }
-    );
-    return result.fiberId;
+    });
+    // Returns once the stage is in the run's row: the reply's answer is
+    // running and its checkpoint written (this call's response waits for
+    // the write to be durable).
+    await stageKept;
+    return id;
   }
 
   @callable()

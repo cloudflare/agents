@@ -27,6 +27,11 @@ export interface DeliveryAttempt {
    * attempt. A write after the attempt timed out throws.
    */
   readonly checkpoint: TaskCheckpoint;
+  /**
+   * What the sender passed as `local` to {@link sendDelivery}, on the first
+   * attempt in the isolate that sent it; `undefined` on any later attempt.
+   */
+  readonly local: unknown;
 }
 
 /**
@@ -61,7 +66,12 @@ export interface DeliverySink<Payload> {
    * Told once that a delivery gave up. Not awaited: the run ends `error`
    * whatever it does, and a throw or rejection is logged.
    */
-  onGiveUp?(error: Error, payload: Payload): void | Promise<void>;
+  onGiveUp?(
+    error: Error,
+    payload: Payload,
+    /** What the delivery's attempts kept, as they left it. */
+    progress: Pick<TaskCheckpoint, "get">
+  ): void | Promise<void>;
 }
 
 /** The wait after the first failure, doubled after each one. */
@@ -143,15 +153,31 @@ export async function sendDelivery<Payload>(
     sentAt: number;
     attempts: number;
     progress?: Record<string, TaskJson>;
-  }
+  },
+  options: {
+    /** Handed to the first attempt in this isolate as `attempt.local`. */
+    local?: unknown;
+    /**
+     * Checkpoint entries the delivery starts with, durable with its row
+     * (before any attempt can be cut off). Keys must not be reserved.
+     */
+    progress?: Record<string, TaskJson>;
+    /**
+     * Keep the run's row once delivered, so the same id later is still
+     * taken as a repeat. Default: deleted on acknowledgement.
+     */
+    retain?: boolean;
+  } = {}
 ): Promise<void> {
   if (!resume) {
     // The first attempt runs here and now: its claim arms the run's only
     // wake, so the accept writes none.
     await tasks.run(deliveryDefinition(sink), payload, {
       runId: id,
-      retain: false,
-      start: "now"
+      retain: options.retain ?? false,
+      start: "now",
+      ...(options.local !== undefined && { local: options.local }),
+      ...(options.progress && { checkpoint: options.progress })
     });
     return;
   }
@@ -161,7 +187,7 @@ export async function sendDelivery<Payload>(
     status: "pending",
     attempt: resume.attempts,
     input: payload as TaskJson,
-    retain: false,
+    retain: options.retain ?? false,
     createdAt: resume.sentAt,
     // Its earlier attempts ended (they were the released version's), so
     // none of them counts as lost.
@@ -206,7 +232,7 @@ async function attemptDelivery<Payload>(
     console.error(`[agents] ${error.message}`);
     // Not awaited: a hook that never returns must not hold the run open.
     void Promise.resolve()
-      .then(() => sink.onGiveUp?.(error, payload))
+      .then(() => sink.onGiveUp?.(error, payload, step.checkpoint))
       .catch((hookError: unknown) => {
         console.error(`[agents] delivery ${step.id} onGiveUp threw`, hookError);
       });
@@ -283,7 +309,7 @@ async function attemptDelivery<Payload>(
   };
   try {
     const outcome = await Promise.race([
-      sink.deliver(payload, { checkpoint }),
+      sink.deliver(payload, { checkpoint, local: step.local }),
       timedOut
     ]);
     if (outcome === "hold") {

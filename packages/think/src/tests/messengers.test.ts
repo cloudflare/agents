@@ -1,9 +1,5 @@
 import { env } from "cloudflare:workers";
-import type {
-  FiberContext,
-  FiberRecoveryContext,
-  FiberRecoveryResult
-} from "agents";
+import type { FiberRecoveryResult } from "agents";
 import { getAgentByName } from "agents";
 import { Chat } from "chat";
 import type { Adapter } from "chat";
@@ -18,12 +14,9 @@ import {
   ERROR_MESSENGER_RESPONSE,
   INTERRUPTED_MESSENGER_RESPONSE,
   idempotencyKeyForEvent,
-  MESSENGER_REPLY_FIBER_NAME,
   messengerReplyFailureMode,
   messengerReplyRecoveryMode,
-  messengerReplySnapshot,
   normalizeMessengers,
-  parseMessengerReplySnapshot,
   serializableMessengerEvent,
   TextStreamCallback,
   ThinkMessengerRuntime,
@@ -33,6 +26,7 @@ import {
   type MessengerMessage,
   type MessengerThinkHost
 } from "../messengers";
+import { reviveMessengerEvent } from "../messengers/delivery";
 import { mentionsBot, withMessengerQueueTtl } from "../messengers/chat-sdk";
 import telegramMessenger, {
   isExpectedTelegramFinalEditNoop,
@@ -789,13 +783,16 @@ describe("think messengers core", () => {
         raw: { providerMessage: true }
       }
     });
-    const snapshot = messengerReplySnapshot("accepted", event, {
-      _type: "chat:Thread",
-      adapterName: "fake",
-      channelId: "fake:thread",
-      id: "fake:thread",
-      isDM: false
-    });
+    const snapshot = {
+      event,
+      thread: {
+        _type: "chat:Thread",
+        adapterName: "fake",
+        channelId: "fake:thread",
+        id: "fake:thread",
+        isDM: false
+      }
+    };
     const cloned = JSON.parse(JSON.stringify(snapshot));
 
     expect(cloned.event.raw).toBeUndefined();
@@ -1013,72 +1010,25 @@ describe("think messengers core", () => {
     expect(attachment.id).toBeUndefined();
   });
 
-  it("parses and classifies messenger recovery snapshots", () => {
-    const accepted = messengerReplySnapshot("accepted", baseEvent, {
-      _type: "chat:Thread",
-      adapterName: "telegram",
-      channelId: "telegram:-100123",
-      id: "telegram:-100123:42",
-      isDM: false
-    });
-
-    expect(parseMessengerReplySnapshot(accepted)).toEqual(accepted);
-    expect(messengerReplyRecoveryMode(accepted)).toBe("answer");
-    expect(
-      messengerReplyRecoveryMode(messengerReplySnapshot("streaming", baseEvent))
-    ).toBe("apologize");
-    expect(
-      messengerReplyRecoveryMode(messengerReplySnapshot("completed", baseEvent))
-    ).toBeNull();
-    expect(parseMessengerReplySnapshot({ type: "wrong" })).toBeNull();
+  it("classifies what a reply cut off at each stage does next", () => {
+    expect(messengerReplyRecoveryMode("accepted")).toBe("answer");
+    expect(messengerReplyRecoveryMode("streaming")).toBe("apologize");
+    expect(messengerReplyRecoveryMode("completed")).toBeNull();
   });
 
-  it("gives a snapshot kept as JSON its messages' dates back", () => {
+  it("gives an event kept as JSON its messages' dates back", () => {
     const createdAt = new Date("2026-01-01T00:00:00.000Z");
     const event = {
       ...baseEvent,
       message: { ...baseEvent.message!, createdAt },
       skipped: [{ ...baseEvent.message!, createdAt }]
     };
-    const parsed = parseMessengerReplySnapshot(
-      JSON.parse(JSON.stringify(messengerReplySnapshot("accepted", event)))
-    );
-    expect(parsed?.event.message?.createdAt).toEqual(createdAt);
-    expect(parsed?.event.skipped?.[0]?.createdAt).toEqual(createdAt);
+    const revived = reviveMessengerEvent(JSON.parse(JSON.stringify(event)));
+    expect(revived.message?.createdAt).toEqual(createdAt);
+    expect(revived.skipped?.[0]?.createdAt).toEqual(createdAt);
   });
 
-  it("carries an additive delivery tag without changing recovery classification", () => {
-    const completed = messengerReplySnapshot("completed", baseEvent);
-    expect(completed.tag).toEqual({
-      stage: "completed",
-      kind: "final",
-      turnEnded: true
-    });
-    expect(messengerReplyRecoveryMode(completed)).toBeNull();
-
-    const streaming = messengerReplySnapshot("streaming", baseEvent);
-    expect(streaming.tag).toEqual({
-      stage: "streaming",
-      kind: "interim",
-      turnEnded: false
-    });
-    expect(messengerReplyRecoveryMode(streaming)).toBe("apologize");
-
-    const tagged = messengerReplySnapshot("accepted", baseEvent, undefined, {
-      stage: "accepted",
-      kind: "command",
-      turnEnded: false
-    });
-    const parsed = parseMessengerReplySnapshot(tagged);
-    expect(parsed?.tag).toEqual({
-      stage: "accepted",
-      kind: "command",
-      turnEnded: false
-    });
-    expect(messengerReplyRecoveryMode(tagged)).toBe("answer");
-  });
-
-  it("recovers interrupted messenger reply fibers through the shared Chat runtime", async () => {
+  it("apologizes for a reply a reset cut off while it streamed", async () => {
     const posted: string[] = [];
     const resolved: FiberRecoveryResult[] = [];
     const runtime = new ThinkMessengerRuntime(
@@ -1114,23 +1064,24 @@ describe("think messengers core", () => {
         providerThreadId: "fake:thread"
       }
     };
-    const handled = await runtime.handleFiberRecovery({
-      createdAt: Date.now(),
-      id: "fiber-1",
-      name: MESSENGER_REPLY_FIBER_NAME,
-      recoveryReason: "interrupted",
-      snapshot: messengerReplySnapshot("streaming", fakeEvent, {
-        _type: "chat:Thread",
-        adapterName: "fake",
-        channelId: "fake:thread",
-        id: "fake:thread",
-        isDM: false
-      })
-    } satisfies FiberRecoveryContext);
+    const stages: string[] = [];
+    await runtime.recoverReply(
+      {
+        event: fakeEvent,
+        thread: {
+          _type: "chat:Thread",
+          adapterName: "fake",
+          channelId: "fake:thread",
+          id: "fake:thread",
+          isDM: false
+        }
+      },
+      "streaming",
+      (stage) => stages.push(stage)
+    );
 
-    expect(handled).toBe(true);
     expect(posted).toEqual(["interrupted"]);
-    expect(resolved).toEqual([{ status: "completed" }]);
+    expect(stages).toEqual(["completed"]);
   });
 
   describe("streamed replies on adapters without native streaming", () => {
@@ -1197,19 +1148,22 @@ describe("think messengers core", () => {
           providerThreadId: "fake:thread"
         }
       };
-      return runtime.handleFiberRecovery({
-        createdAt: Date.now(),
-        id: "fiber-1",
-        name: MESSENGER_REPLY_FIBER_NAME,
-        recoveryReason: "interrupted",
-        snapshot: messengerReplySnapshot("accepted", event, {
-          _type: "chat:Thread",
-          adapterName: "fake",
-          channelId: "fake:thread",
-          id: "fake:thread",
-          isDM: false
-        })
-      } satisfies FiberRecoveryContext);
+      return runtime
+        .recoverReply(
+          {
+            event,
+            thread: {
+              _type: "chat:Thread",
+              adapterName: "fake",
+              channelId: "fake:thread",
+              id: "fake:thread",
+              isDM: false
+            }
+          },
+          "accepted",
+          () => {}
+        )
+        .then(() => true);
     }
 
     it("posts real reply text first instead of a `...` placeholder (#2310)", async () => {
@@ -1667,6 +1621,13 @@ describe("think messengers core", () => {
         `released-${crypto.randomUUID()}`
       );
       expect(await agent.replayReleasedReplyForTest()).toBe(true);
+      // The released run became a reply delivery, answered on its own wake.
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        if ((await agent.openReplyRunsForTest()) === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(await agent.openReplyRunsForTest()).toBe(0);
       expect(await agent.getRecorded("prompt")).toContain("released hello");
       // One message, edited as the answer streamed.
       expect(await agent.getAdapterCalls()).toEqual([
@@ -1739,6 +1700,79 @@ describe("think messengers core", () => {
         prompts = await agent.getRecorded("prompt");
       }
       expect(prompts).toEqual(["hello", "follow up"]);
+    });
+
+    it.each([
+      ["a reply given up", { giveUp: true }],
+      ["a completed reply", { stage: "completed" as const }]
+    ])("answers messages queued behind %s", async (_label, options) => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `drain-${crypto.randomUUID()}`
+      );
+      expect(await agent.recoverWithQueuedFollowUpForTest(options)).toBeNull();
+      let prompts: string[] = [];
+      for (let i = 0; i < 50 && prompts.length < 1; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["follow up"]);
+    });
+
+    it("keeps no message text with a reply once it is answered", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `private-${crypto.randomUUID()}`
+      );
+      const response = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            id: "p1",
+            text: "my address is 42 Main Street",
+            threadId: "fake:dm-private"
+          }),
+          method: "POST"
+        }
+      );
+      await response.text();
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const asked = (await agent.getRecorded("prompt")).length > 0;
+        if (asked && (await agent.openReplyRunsForTest()) === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      // Answered (one message, edited as it streamed), and the kept run
+      // holds no text of it.
+      expect(await agent.openReplyRunsForTest()).toBe(0);
+      expect(await agent.getAdapterCalls()).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
+      expect(await agent.replyRowsHoldForTest("42 Main Street")).toBe(false);
+    });
+
+    it("answers a repeated reply id once, after the first was answered", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `repeat-${crypto.randomUUID()}`
+      );
+      expect(await agent.sendReplyTwiceForTest()).toBe(1);
+    });
+
+    it("lets a completed reply think@0.24.0 left open post nothing more", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `released-done-${crypto.randomUUID()}`
+      );
+      expect(await agent.replayReleasedReplyForTest("completed")).toBe(true);
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        if ((await agent.openReplyRunsForTest()) === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(await agent.openReplyRunsForTest()).toBe(0);
+      expect(await agent.getAdapterCalls()).toEqual([]);
     });
 
     it("keeps queued messages behind a recovered reply that will be retried", async () => {
@@ -1838,13 +1872,9 @@ describe("think messengers core", () => {
 
     await deliverMessengerReply({
       event: baseEvent,
-      fiber: {
-        stash(snapshot: unknown) {
-          stages.push(
-            parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"
-          );
-        }
-      } as unknown as FiberContext,
+      onStage: (stage) => {
+        stages.push(stage);
+      },
       surface: {
         async post(message) {
           if (isAsyncIterable(message)) {
@@ -1876,13 +1906,9 @@ describe("think messengers core", () => {
 
     await deliverMessengerReply({
       event: baseEvent,
-      fiber: {
-        stash(snapshot: unknown) {
-          stages.push(
-            parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"
-          );
-        }
-      } as unknown as FiberContext,
+      onStage: (stage) => {
+        stages.push(stage);
+      },
       surface: {
         async post(message) {
           if (isAsyncIterable(message)) {
@@ -2086,13 +2112,9 @@ describe("think messengers core", () => {
 
     await deliverMessengerReply({
       event: baseEvent,
-      fiber: {
-        stash(snapshot: unknown) {
-          stages.push(
-            parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"
-          );
-        }
-      } as unknown as FiberContext,
+      onStage: (stage) => {
+        stages.push(stage);
+      },
       surface: {
         async post(message) {
           if (isAsyncIterable(message)) {
@@ -2126,7 +2148,6 @@ describe("think messengers core", () => {
 
     await deliverMessengerReply({
       event: baseEvent,
-      fiber: { stash() {} } as unknown as FiberContext,
       policy: { splitText: (text) => (text ? [text] : []) },
       surface: {
         async post(message) {
@@ -2160,7 +2181,6 @@ describe("think messengers core", () => {
 
     await deliverMessengerReply({
       event: baseEvent,
-      fiber: { stash() {} } as unknown as FiberContext,
       policy: {
         visibleSoftLimit: 7,
         splitText: (text) => (text ? [text] : [])
@@ -2204,13 +2224,9 @@ describe("think messengers core", () => {
 
       await deliverMessengerReply({
         event: baseEvent,
-        fiber: {
-          stash(snapshot: unknown) {
-            log.push(
-              `stage:${parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"}`
-            );
-          }
-        } as unknown as FiberContext,
+        onStage: (stage) => {
+          log.push(`stage:${stage}`);
+        },
         surface: {
           async post(message) {
             if (isAsyncIterable(message)) {
@@ -2525,8 +2541,8 @@ function fakeHost(resolved: FiberRecoveryResult[]): MessengerThinkHost {
     startFiber() {
       throw new Error("startFiber is not used by this test");
     },
-    _runMessengerReplyTask() {
-      throw new Error("_runMessengerReplyTask is not used by this test");
+    _sendMessengerReply() {
+      throw new Error("_sendMessengerReply is not used by this test");
     },
     subAgent() {
       throw new Error("subAgent is not used by this test");

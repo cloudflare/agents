@@ -1132,14 +1132,15 @@ export class Tasks<
       INSERT INTO ${this.#tables.runs}
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, next_at, wait_reason, cancel_requested, created_at,
-         updated_at, lane, seq, input_parts)
+         updated_at, lane, seq, input_parts, checkpoint)
       VALUES
         (${runId}, ${definition}, ${placed.input}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
          0, ${debounceUntil ?? (queued ? null : now)},
          ${debounceUntil !== null ? "debounce" : policy === "queue" || policy === "drop" ? null : "overlap"},
          0, ${now}, ${now},
-         ${lane}, ${place?.seq ?? null}, ${placed.parts})
+         ${lane}, ${place?.seq ?? null}, ${placed.parts},
+         ${options.checkpoint ? JSON.stringify(options.checkpoint) : null})
     `;
     // Before the wake is published: an attempt this isolate starts from it
     // (the alarm can win the claim) still gets the caller's `local`.

@@ -16,7 +16,6 @@ import { Chat, Message, ThreadImpl } from "chat";
 import type {
   Agent,
   FiberContext,
-  FiberRecoveryContext,
   FiberRecoveryResult,
   StartFiberOptions,
   SubAgentClass,
@@ -26,7 +25,11 @@ import { createChatSdkState, defaultKeyShard } from "agents/chat-sdk";
 import type { ChatSdkStateAdapterOptions } from "agents/chat-sdk";
 import { ChatSdkStateAgent } from "agents/chat-sdk";
 import type { StreamCallback } from "../think";
-import type { MessengerReplyRun } from "./reply-task";
+import type {
+  LiveMessengerReply,
+  MessengerReplyPayload,
+  RecordReplyStage
+} from "./reply-task";
 import type {
   MessengerAttachment,
   MessengerAction,
@@ -46,11 +49,9 @@ import {
   deliverMessengerReply,
   EMPTY_MESSENGER_RESPONSE,
   INTERRUPTED_MESSENGER_RESPONSE,
-  MESSENGER_REPLY_FIBER_NAME,
   messengerReplyRecoveryMode,
-  messengerReplySnapshot,
-  parseMessengerReplySnapshot,
-  type MessengerReplySnapshot,
+  reviveMessengerEvent,
+  type MessengerReplyStage,
   type MessengerDeliveryPolicy,
   type MessengerDeliverySurface,
   type MessengerDeliveryTarget
@@ -252,13 +253,10 @@ export interface MessengerThinkHost extends MessengerThinkTarget {
   ): Promise<MessengerFiberStartResult>;
   resolveFiber(id: string, result: FiberRecoveryResult): Promise<boolean>;
   /**
-   * Durably accept one messenger reply run on the host's Tasks capability
-   * and execute it inline while this isolate lives. The same idempotency key
-   * joins the existing run (`accepted: false`).
+   * Durably accept one messenger reply as a delivery and answer it inline
+   * while this isolate lives. The same id joins a reply still running.
    */
-  _runMessengerReplyTask(
-    run: MessengerReplyRun
-  ): Promise<{ accepted: boolean }>;
+  _sendMessengerReply(id: string, live: LiveMessengerReply): Promise<void>;
   subAgent<T extends Agent>(
     agentClass: SubAgentClass<T>,
     name: string
@@ -358,115 +356,49 @@ export class ThinkMessengerRuntime {
     return chat.webhooks[definition.adapterName](request);
   }
 
-  async handleFiberRecovery(
-    ctx: FiberRecoveryContext,
-    options?: {
-      /**
-       * Capability-run recovery: persist re-entry checkpoints here instead
-       * of the legacy managed-fiber ledger, whose row does not exist for
-       * runs on the Tasks capability. Terminal settlement is implied by the
-       * caller's recovery decision, so the legacy `resolveFiber` completion
-       * calls are skipped when this hook is present.
-       */
-      persistRecoverySnapshot?: (
-        snapshot: ReturnType<typeof messengerReplySnapshot>
-      ) => Promise<void> | void;
-      /**
-       * Whether the caller replays this recovery after it throws `error`.
-       * Messages queued behind the reply are drained only once it settles,
-       * so they are never answered ahead of it. Default: no replay.
-       */
-      retriesAfter?: (error: unknown) => boolean;
-    }
-  ): Promise<boolean> {
-    if (ctx.name !== MESSENGER_REPLY_FIBER_NAME) {
-      return false;
-    }
-
-    const snapshot = parseMessengerReplySnapshot(ctx.snapshot);
-    if (!snapshot) {
-      return false;
-    }
-
-    const definition = this.definitionsById.get(snapshot.event.messengerId);
+  /**
+   * Answer again, or apologize, for a reply a reset cut off at `stage`.
+   *
+   * @internal
+   */
+  async recoverReply(
+    payload: MessengerReplyPayload,
+    stage: MessengerReplyStage,
+    record: RecordReplyStage
+  ): Promise<void> {
+    const event = reviveMessengerEvent(payload.event);
+    const definition = this.definitionsById.get(event.messengerId);
     if (!definition) {
       throw new Error(
-        `No messenger definition found for recovered messenger ${snapshot.event.messengerId}`
+        `No messenger definition found for recovered messenger ${event.messengerId}`
       );
     }
-
-    const thread = this.reviveThread(definition, snapshot.thread);
-    let handled: boolean;
-    try {
-      handled = await this.recoverReply(
-        ctx,
-        definition,
-        thread,
-        snapshot,
-        options
-      );
-    } catch (error) {
-      if (!options?.retriesAfter?.(error)) {
-        this.drainQueuedMessagesInBackground(definition, thread.id);
-      }
-      throw error;
-    }
-    this.drainQueuedMessagesInBackground(definition, thread.id);
-    return handled;
-  }
-
-  private async recoverReply(
-    ctx: FiberRecoveryContext,
-    definition: NormalizedMessengerDefinition,
-    thread: ChatThread,
-    snapshot: MessengerReplySnapshot,
-    options:
-      | {
-          persistRecoverySnapshot?: (
-            snapshot: ReturnType<typeof messengerReplySnapshot>
-          ) => Promise<void> | void;
-        }
-      | undefined
-  ): Promise<boolean> {
-    const mode = messengerReplyRecoveryMode(snapshot);
-
+    const thread = this.reviveThread(definition, payload.thread);
+    const mode = messengerReplyRecoveryMode(stage);
     if (mode === "answer") {
-      await this.answer(
-        definition,
-        snapshot.event,
-        thread,
-        undefined,
-        snapshot.event,
-        async (nextSnapshot) => {
-          if (options?.persistRecoverySnapshot) {
-            await options.persistRecoverySnapshot(nextSnapshot);
-            return;
-          }
-          await this.host.resolveFiber(ctx.id, {
-            snapshot: nextSnapshot,
-            status:
-              nextSnapshot.stage === "completed" ? "completed" : "interrupted"
-          });
-        }
-      );
-      return true;
+      await this.answer(definition, event, thread, record, event);
+      return;
     }
-
     if (mode === "apologize") {
       await thread.post(
         definition.delivery?.interruptedResponseText ??
           INTERRUPTED_MESSENGER_RESPONSE
       );
-      if (!options?.persistRecoverySnapshot) {
-        await this.host.resolveFiber(ctx.id, { status: "completed" });
-      }
-      return true;
+      record("completed");
     }
+  }
 
-    if (!options?.persistRecoverySnapshot) {
-      await this.host.resolveFiber(ctx.id, { status: "completed" });
-    }
-    return true;
+  /**
+   * After a recovered reply ended or gave up, answer the messages queued
+   * behind it.
+   *
+   * @internal
+   */
+  drainAfterRecovery(payload: MessengerReplyPayload): void {
+    const definition = this.definitionsById.get(payload.event.messengerId);
+    if (!definition) return;
+    const thread = this.reviveThread(definition, payload.thread);
+    this.drainQueuedMessagesInBackground(definition, thread.id);
   }
 
   /**
@@ -667,27 +599,13 @@ export class ThinkMessengerRuntime {
     thread: ChatThread
   ): Promise<void> {
     const snapshotEvent = serializableMessengerEvent(event);
-    // Durable acceptance plus inline execution on the host's Tasks
-    // capability. A duplicate webhook joins the existing run (`accepted:
-    // false`) and returns; an interrupted run is recovered on wake from the
-    // snapshot in its checkpoint.
-    await this.host._runMessengerReplyTask({
-      reply: {
-        snapshot: messengerReplySnapshot(
-          "accepted",
-          snapshotEvent,
-          thread.toJSON()
-        ),
-        answer: (fiber) =>
-          this.answer(definition, event, thread, fiber, snapshotEvent)
-      },
-      idempotencyKey: idempotencyKeyForEvent(event),
-      metadata: {
-        messengerId: event.messengerId,
-        messageId: event.message?.id,
-        provider: event.provider,
-        threadId: event.thread.id
-      }
+    // Durable acceptance plus inline execution, as one delivery. A
+    // duplicate webhook joins a reply still running; a reply a reset cut
+    // off is answered again or apologized for on wake, by its stage.
+    await this.host._sendMessengerReply(idempotencyKeyForEvent(event), {
+      payload: { event: snapshotEvent, thread: thread.toJSON() },
+      answer: (record) =>
+        this.answer(definition, event, thread, record, snapshotEvent)
     });
   }
 
@@ -695,20 +613,15 @@ export class ThinkMessengerRuntime {
     definition: NormalizedMessengerDefinition,
     event: MessengerEvent,
     thread: ChatThread,
-    fiber?: FiberContext,
-    snapshotEvent = serializableMessengerEvent(event),
-    checkpoint?: (
-      snapshot: ReturnType<typeof messengerReplySnapshot>
-    ) => Promise<void> | void
+    record?: RecordReplyStage,
+    snapshotEvent = serializableMessengerEvent(event)
   ): Promise<void> {
     const target = await this.resolveTarget(definition, event);
     await deliverMessengerReply({
       event,
-      checkpoint,
-      fiber,
+      ...(record && { onStage: record }),
       policy: definition.delivery,
       snapshotEvent,
-      snapshotThread: thread.toJSON(),
       surface: thread satisfies MessengerDeliverySurface,
       target,
       userMessage: toMessengerUserMessage(event, definition.channelSpeakerLabel)
