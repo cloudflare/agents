@@ -1197,6 +1197,74 @@ describe("ThinkHarness context", () => {
     );
   });
 
+  it("tells the model once when the tools change between turns", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+
+    const [first, second, third] = await stub.promptTexts();
+    expect(first).not.toContain("The tools you can call changed");
+    // After the user message of the turn that noticed it.
+    expect(second).toMatch(
+      /\|user:again[^|]*The tools you can call changed[^|]*Added: late\./
+    );
+    // Recorded there: every later request carries it in place, once.
+    expect(third.startsWith(second)).toBe(true);
+    // And not again: the next turn's user message is as written. (The
+    // fixture's model echoes its input, so the reply repeats it.)
+    expect(third.endsWith("|user:thanks")).toBe(true);
+  });
+
+  it("counts a tool's input examples in its definition", async () => {
+    const stub = fresh();
+    await stub.addLateTool();
+    await stub.prompt("hello", session);
+    await stub.addLateExamples();
+    await stub.prompt("again", session);
+    const [, second] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Changed: late\./);
+  });
+
+  it("counts only the tools a turn sends, after its activeTools", async () => {
+    const stub = fresh();
+    await stub.setActiveTools(["multiply", "set_context", "search_context"]);
+    await stub.prompt("hello", session);
+    // A tool added but not offered by turn 2's activeTools is not announced.
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    // Turn 3 offers everything: what it adds is announced.
+    await stub.setActiveTools(null);
+    await stub.prompt("thanks", session);
+    const [, second, third] = await stub.promptTexts();
+    expect(second).not.toContain("The tools you can call changed");
+    expect(third).toMatch(/\|user:thanks[^|]*Added: [^|]*late/);
+    expect(third).toMatch(/\|user:thanks[^|]*Added: [^|]*gate/);
+  });
+
+  it("tells the model once when a client declares a tool between turns", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    // A client tool arrives with the submission, not from the options.
+    const receipt = await stub.submit("again", {
+      session,
+      clientTools: [
+        {
+          name: "pick_color",
+          description: "Ask the user for a color",
+          parameters: { type: "object", properties: {} }
+        }
+      ]
+    });
+    const result = await stub.wait(receipt.operationId, session);
+    expect(result.status).toBe("done");
+    const [, second] = await stub.promptTexts();
+    expect(second).toMatch(
+      /\|user:again[^|]*The tools you can call changed[^|]*Added: pick_color\./
+    );
+  });
+
   it("delivers a changed remind block once and keeps every request a prefix of the next", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);
@@ -1239,6 +1307,43 @@ describe("ThinkHarness context", () => {
     const prompt = await stub.lastPromptText();
     expect(prompt.split("|")[0]).toContain("Monday");
     expect(prompt).toMatch(/\|user:[^|]*Today is Tuesday\.[^|]*$/);
+    // Once: the tools' step adds no second copy of the blocks' reminder.
+    expect(prompt.split("Today is Tuesday.")).toHaveLength(2);
+  });
+
+  it("sends a changed block and changed tools before the same message, each once", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+    const [, second, third] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Today is Tuesday\./);
+    expect(second).toMatch(/\|user:again[^|]*Added: late\./);
+    expect(third.split("Today is Tuesday.")).toHaveLength(3); // echoed once
+    expect(third.split("Added: late.")).toHaveLength(3);
+    expect(third.startsWith(second)).toBe(true);
+  });
+
+  it("sends a regenerated answer a block changed since once", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    const receipt = await stub.regenerate(session);
+    await stub.wait(receipt.operationId, session);
+    const prompt = await stub.lastPromptText();
+    expect(prompt.split("Today is Tuesday.")).toHaveLength(2);
+  });
+
+  it("records the tools at the user message when beforeTurn adds a message", async () => {
+    const stub = fresh();
+    await stub.noteInBeforeTurn();
+    await stub.prompt("hello", session);
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    const [, second] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Added: late\./);
   });
 
   it("sends a call recovered after an eviction as its first attempt; a change since waits", async () => {

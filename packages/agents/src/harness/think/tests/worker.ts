@@ -34,6 +34,9 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
+const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
+const ACTIVE_TOOLS_KEY = "test:active-tools";
+const LATE_EXAMPLES_KEY = "test:late-examples";
 const ENVIRONMENT_KEY = "test:environment";
 const REMIND_SECTION_KEY = "test:remind-section";
 const REMIND_LABEL_KEY = "test:remind-label";
@@ -226,7 +229,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         ...(this.ctx.storage.kv.get<boolean>(LATE_TOOL_KEY) && {
           late: tool({
             description: "Runs on the client, added later",
-            inputSchema: z.object({})
+            inputSchema: z.object({}),
+            // Examples only once a test adds them.
+            ...(this.ctx.storage.kv.get<boolean>(LATE_EXAMPLES_KEY) && {
+              inputExamples: [{ input: {} }]
+            })
           })
         })
       };
@@ -255,13 +262,26 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
-      beforeTurn: ({ toolSet }) => {
+      beforeTurn: async ({ toolSet, session }) => {
+        // As an extension's `sendMessage` from this hook does.
+        if (this.ctx.storage.kv.get<boolean>(NOTE_IN_BEFORE_TURN_KEY)) {
+          await this.#handles.get(session)?.appendMessage({
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: "note" }]
+          });
+        }
         // A hook that edits the tools it is shown changes nothing offered.
         if (this.ctx.storage.kv.get<boolean>(EDIT_TOOLSET_KEY)) {
           delete toolSet.multiply;
         }
         const system = this.ctx.storage.kv.get<string>(SYSTEM_KEY);
-        return system ? { system } : undefined;
+        const activeTools = this.ctx.storage.kv.get<string[]>(ACTIVE_TOOLS_KEY);
+        if (!system && !activeTools) return undefined;
+        return {
+          ...(system && { system }),
+          ...(activeTools && { activeTools })
+        };
       },
       beforeToolCall: ({ toolName }) => {
         const blocked = this.ctx.storage.kv.get<string>(BLOCK_KEY);
@@ -546,6 +566,19 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return session.wait(operationId);
   }
 
+  addLateExamples(): void {
+    this.ctx.storage.kv.put(LATE_EXAMPLES_KEY, true);
+  }
+
+  setActiveTools(names: string[] | null): void {
+    if (names) this.ctx.storage.kv.put(ACTIVE_TOOLS_KEY, names);
+    else this.ctx.storage.kv.delete(ACTIVE_TOOLS_KEY);
+  }
+
+  noteInBeforeTurn(): void {
+    this.ctx.storage.kv.put(NOTE_IN_BEFORE_TURN_KEY, true);
+  }
+
   addLateTool(): void {
     this.ctx.storage.kv.put(LATE_TOOL_KEY, true);
   }
@@ -666,8 +699,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.session(session).reset();
   }
 
-  regenerate(): Promise<ThinkReceipt> {
-    return this.harness.session().regenerate();
+  regenerate(session?: string): Promise<ThinkReceipt> {
+    return this.harness.session(session).regenerate();
   }
 
   /** Write on the Sessions handle directly; the event types a listener saw. */

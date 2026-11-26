@@ -1,4 +1,5 @@
 import {
+  asSchema,
   convertToModelMessages,
   stepCountIs,
   streamText,
@@ -55,7 +56,11 @@ import type {
 } from "../../experimental/channels/harness";
 import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
-import { CONTEXT_RECORD_KIND, type Context } from "../../context/context";
+import {
+  CONTEXT_RECORD_KIND,
+  type Context,
+  type PreparedTurn
+} from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
@@ -1538,16 +1543,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // from an answered message) rides on this request alone.
     const context = this.#context(session);
     let contextSystem = "";
+    let recordTools: PreparedTurn["recordTools"] | undefined;
+    let blockReminder: string | null = null;
     let request = history;
     let optionsSystem = prompt.system;
     if (context) {
       await this.#remindBlocks(context, prompt.remind);
-      const prepared = await context.prepare({
+      const prepared = await context.prepareTurn({
         messages: history,
         // A call after an interruption is sent as the first attempt was.
         retry: start.interruptions > 0
       });
       contextSystem = prepared.system;
+      recordTools = prepared.recordTools;
+      blockReminder = prepared.reminder;
       request = withReminder(
         asUIMessages(await context.project(history)),
         prepared.reminder
@@ -1574,6 +1583,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
     const offered = modelTools(tools, config.activeTools);
+    if (context && recordTools) {
+      // The tools this request sends, now that `beforeTurn` chose which: a
+      // change from the last turn's reaches the model once, as a notice
+      // after the user message. The blocks were prepared above.
+      const tooled = await recordTools(
+        await toolFingerprint(tools, Object.keys(offered))
+      );
+      if (tooled.changed) {
+        request = withReminder(
+          asUIMessages(await context.project(history)),
+          [blockReminder, tooled.reminder].filter(Boolean).join("\n\n") || null
+        );
+      }
+    }
     const effectiveSystem = config.system ?? system;
     const messages: ModelMessage[] =
       config.messages ??
@@ -2750,6 +2773,52 @@ async function appendedAfter(
   return after.length > 0 && after.every((message) => message.role === "user")
     ? leaf.id
     : undefined;
+}
+
+/** Each tool's hash, made once per tool object. */
+const toolHashes = new WeakMap<object, Promise<string>>();
+
+/**
+ * The tools `names` names in `tools`, the ones a request sends, each with
+ * a hash of its definition as the model sees it (description, input
+ * schema, input examples, provider fields).
+ */
+function toolFingerprint(
+  tools: ToolSet,
+  names: readonly string[]
+): Promise<readonly { readonly name: string; readonly hash: string }[]> {
+  return Promise.all(
+    names.map(async (name) => ({ name, hash: await toolHash(tools[name]) }))
+  );
+}
+
+function toolHash(tool: ToolSet[string] | undefined): Promise<string> {
+  if (!tool) return Promise.resolve("");
+  let made = toolHashes.get(tool);
+  if (!made) {
+    made = (async () => {
+      const definition = JSON.stringify({
+        type: tool.type,
+        description:
+          typeof tool.description === "string" ? tool.description : undefined,
+        inputSchema: await asSchema(tool.inputSchema).jsonSchema,
+        id: "id" in tool ? tool.id : undefined,
+        args: "args" in tool ? tool.args : undefined,
+        providerOptions: tool.providerOptions,
+        strict: "strict" in tool ? tool.strict : undefined,
+        inputExamples: "inputExamples" in tool ? tool.inputExamples : undefined
+      });
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(definition)
+      );
+      return [...new Uint8Array(digest).slice(0, 8)]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    })();
+    toolHashes.set(tool, made);
+  }
+  return made;
 }
 
 function toolRecovery(tool: object): ToolRecovery {
