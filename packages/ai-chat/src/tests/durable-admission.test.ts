@@ -523,25 +523,23 @@ describe("two resets a few seconds apart", () => {
           QUICK
         );
       }
-      const messages = (
-        await waitFor(
-          () => third.getPersistedMessages(),
-          (m) =>
-            m.filter((x) => x.role === "assistant").length >=
-            (sendAfter ? 3 : 2),
-          30_000
-        )
-      ).slice(0, 4);
-      // u1 is answered, before u2 and its reply.
-      expect(messages.map((m) => m.role)).toEqual([
-        "user",
-        "assistant",
-        "user",
-        "assistant"
-      ]);
-      expect(messages[0].id).toBe("u1");
-      expect(messages[2].id).toBe("u2");
-      expect(textOf(messages[3])).toBe(QUICK_REPLY);
+      const messages = await waitFor(
+        () => third.getPersistedMessages(),
+        (m) =>
+          m.filter((x) => x.role === "assistant").length >= (sendAfter ? 3 : 2),
+        30_000
+      );
+      // u1 is answered, then each later question in turn.
+      const asked = sendAfter ? ["u1", "u2", "u3"] : ["u1", "u2"];
+      expect(messages.map((m) => m.role)).toEqual(
+        asked.flatMap(() => ["user", "assistant"])
+      );
+      expect(
+        messages.filter((m) => m.role === "user").map((m) => m.id)
+      ).toEqual(asked);
+      for (let i = 3; i < messages.length; i += 2) {
+        expect(textOf(messages[i])).toBe(QUICK_REPLY);
+      }
       // u1's reply was continued to its end, not left cut off.
       expect(textOf(messages[1])).toContain("chunk-29");
       tab2.close();

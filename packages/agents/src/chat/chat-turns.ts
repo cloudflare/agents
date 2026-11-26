@@ -1135,10 +1135,12 @@ export class ChatTurns<
     const recovering = this.#heldBy.size > 0 || open() > open(CHAT_TURN_LANE);
     if (recovering) {
       // Asked again until they are done.
-      this.#parksCheck ??= setTimeout(() => {
-        this.#parksCheck = null;
-        void this.#endOrphanedParks();
-      }, 100);
+      if (this.#parksCheck === null) {
+        this.#parksCheck = setTimeout(() => {
+          this.#parksCheck = null;
+          void this.#endOrphanedParks();
+        }, 100);
+      }
       return;
     }
     for (const run of parked) await tasks.settle(run.runId, null);
