@@ -112,6 +112,21 @@ export function streamAnthropic(
   // failed request, which would lose the typed Cloudflare error. Holding it
   // here lets the wire report it instead.
   let transportError: unknown;
+  // What the caller's `onResponse` threw, if it did. It outranks the
+  // transport's error: a hook that throws an `AbortError` on a failed
+  // response means stop, so a fallback chain must not try its next leg.
+  let hookError: { error: unknown } | undefined;
+  const onResponse: typeof options.onResponse =
+    options.onResponse === undefined
+      ? undefined
+      : async (response, responseModel) => {
+          try {
+            await options.onResponse?.(response, responseModel);
+          } catch (error) {
+            hookError = { error };
+            throw error;
+          }
+        };
 
   // pi-ai builds its own Anthropic SDK client and sends through this fetch,
   // which routes the SDK's request through the gateway. The SDK turns a
@@ -125,6 +140,7 @@ export function streamAnthropic(
     // Only the newest request's failure is the stream's: a fallback that
     // resends after one is answered on its own.
     transportError = undefined;
+    hookError = undefined;
     const sdkRequest = new Request(input, init);
     const { model: _sdkModel, ...vendorParams } =
       (await sdkRequest.json()) as Record<string, unknown>;
@@ -170,7 +186,7 @@ export function streamAnthropic(
     } catch (error) {
       transportError = error;
       if (raw !== undefined) {
-        await options.onResponse?.(responseInfo(raw), model);
+        await onResponse?.(responseInfo(raw), model);
       }
       throw error;
     }
@@ -179,6 +195,7 @@ export function streamAnthropic(
   const anthropicOptions: AnthropicOptions = {
     ...options,
     ...(request.simple ? thinkingOptions(model, options) : {}),
+    onResponse,
     // pi-ai requires a credential; the gateway holds the real one, and this
     // placeholder never leaves the fetch above.
     apiKey: GATEWAY_HELD_KEY,
@@ -206,7 +223,10 @@ export function streamAnthropic(
         // A transport failure is ours to report: pi-ai's own error event knows
         // nothing of the gateway's status, code or log id, so the message it
         // built is re-failed here with that diagnostic attached.
-        if (event.type === "error" && transportError !== undefined) {
+        if (
+          event.type === "error" &&
+          (hookError !== undefined || transportError !== undefined)
+        ) {
           failFrom(event.error);
           return;
         }
@@ -219,20 +239,30 @@ export function streamAnthropic(
         }
         outer.push(event);
       }
-      if (transportError !== undefined) {
+      if (hookError !== undefined || transportError !== undefined) {
         failFrom(placeholder);
         return;
       }
       outer.end(await inner.result());
     } catch (error) {
-      failStream(outer, placeholder, transportError ?? error, options.signal);
+      failStream(
+        outer,
+        placeholder,
+        hookError !== undefined ? hookError.error : (transportError ?? error),
+        options.signal
+      );
     }
   })();
 
   /** Ends the stream with the transport's own error, keeping any content. */
   function failFrom(message: typeof placeholder): void {
     if (correlation !== undefined) attachCorrelation(message, correlation);
-    failStream(outer, message, transportError, options.signal);
+    failStream(
+      outer,
+      message,
+      hookError !== undefined ? hookError.error : transportError,
+      options.signal
+    );
   }
 
   return outer;
