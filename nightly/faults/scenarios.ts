@@ -17,6 +17,7 @@ import {
   state,
   user,
   type Cls,
+  type CtlResult,
   type Frame,
   type ProbeState
 } from "./lib";
@@ -198,6 +199,23 @@ async function waitToolInput(
     `tool-input ${name}`
   );
   return JSON.parse(f.body ?? "{}") as { toolCallId: string };
+}
+
+/** Until the approval the action asked for is listed as pending. */
+async function untilPending(cls: Cls, room: string): Promise<CtlResult> {
+  const start = Date.now();
+  for (;;) {
+    const r = await ctl(cls, room, "probePending");
+    if (Array.isArray(r.value) && r.value.length > 0) return r;
+    if (Date.now() - start > 30_000) return r;
+    await sleep(300);
+  }
+}
+
+function firstExecutionId(pending: CtlResult): string | undefined {
+  return Array.isArray(pending.value)
+    ? (pending.value[0] as { executionId?: string } | undefined)?.executionId
+    : undefined;
 }
 
 const TEXT = (n = 6, delayMs = 20): Step => ({
@@ -691,6 +709,643 @@ export const SCENARIOS: Record<string, (cls: Cls) => Promise<Run>> = {
       stopOnCompaction: true
     });
     return finish(cls, room, [tab], { returned: r.value ?? r.error });
+  },
+
+  // ── 4. recovery fault paths ──
+  async recThrows(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      throwInRecoveryContinue: true,
+      script: [STALL(5), TEXT(8)]
+    });
+    tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
+    return finish(cls, room, [tab], {}, { maxMs: 60000 });
+  },
+  async recBudget(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 2500,
+      maxAttempts: 2,
+      script: [STALL(3), STALL(3), STALL(3), STALL(3), STALL(3), STALL(3)]
+    });
+    tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
+    return finish(cls, room, [tab], {}, { maxMs: 60000 });
+  },
+  async recBudgetNoProgress(cls: Cls) {
+    // every attempt stalls before any text: no progress at all
+    const { room, tab } = await setup(cls, {
+      stallMs: 2500,
+      maxAttempts: 2,
+      script: [
+        STALL(3),
+        ...Array.from({ length: 8 }, () => ({
+          kind: "text",
+          tokens: 10,
+          stallAfter: 0
+        }))
+      ]
+    });
+    tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
+    return finish(cls, room, [tab], {}, { maxMs: 60000 });
+  },
+  async recStopOwnId(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      script: [STALL(3), { kind: "text", tokens: 60, delayMs: 80 }, TEXT(8)]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    // wait for a text chunk under another request id: the recovered turn
+    const f = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) && x.id !== id && x.body?.includes('"text-delta"'),
+      30000,
+      "recovered text"
+    );
+    // Stop mid-reply: once the recovered turn is a few chunks in.
+    await tab.waitFor(chunkOf(f.id, "w5 "), 30000, "recovered w5");
+    tab.send({ type: MT.CANCEL, id: f.id });
+    return finish(cls, room, [tab], {
+      reqId: id.slice(0, 14),
+      recoveredId: f.id?.slice(0, 14)
+    });
+  },
+  async recStopOrigDuringStream(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      script: [STALL(3), { kind: "text", tokens: 60, delayMs: 80 }, TEXT(8)]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const f = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) && x.id !== id && x.body?.includes('"text-delta"'),
+      30000,
+      "recovered text"
+    );
+    await tab.waitFor(chunkOf(f.id, "w5 "), 30000, "recovered w5");
+    tab.send({ type: MT.CANCEL, id });
+    return finish(cls, room, [tab], {
+      reqId: id.slice(0, 14),
+      recoveredId: f.id?.slice(0, 14)
+    });
+  },
+  async recStopDuringBackoff(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      classify: "rate_limit",
+      maxRetries: 0,
+      stallMs: 3000,
+      script: [
+        { kind: "status", status: 429, headers: { "retry-after": "10" } },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    // Stop inside the 10 s backoff the 429 asked for.
+    await untilEvent(cls, room, "chat:recovery:scheduled");
+    tab.send({ type: MT.CANCEL, id });
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  // #3241: a request sent while a recovery waits out its backoff is answered after the recovered reply.
+  async recNewDuringBackoff(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      classify: "rate_limit",
+      maxRetries: 0,
+      stallMs: 3000,
+      script: [
+        { kind: "status", status: 429, headers: { "retry-after": "10" } },
+        TEXT(8),
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("first question")], {
+      clientTools: CLIENT_TOOLS
+    });
+    // Think waits out the 429's 10 s backoff; AIChatAgent ends the request.
+    if (cls === "think") await untilEvent(cls, room, "chat:recovery:scheduled");
+    else await tab.done(id, 20000);
+    const id2 = tab.request(rid("req"), [user("second question")], {
+      clientTools: CLIENT_TOOLS
+    });
+    return finish(cls, room, [tab], {
+      reqId: id.slice(0, 14),
+      reqId2: id2.slice(0, 14)
+    });
+  },
+  // Upgrade probes (D2): a recovery is live when the caller deploys a new version about 6 s after the start.
+  async recStopDuringBackoffStall(cls: Cls) {
+    // AIChatAgent has no backoff for stalls; a second stall inside a recovery
+    // is chained. Stop by the original id just after the first stall.
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      script: [STALL(3), { kind: "text", tokens: 60, delayMs: 80 }]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    await tab.waitFor(
+      (x: Frame) => isResp(x) && x.id === id && x.body?.includes("w3 "),
+      20000,
+      "w3"
+    );
+    // Stop by the original id once the watchdog has called the stall.
+    await untilEvent(cls, room, "chat:recovery:detected");
+    tab.send({ type: MT.CANCEL, id });
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  async recStopDuringStableWait(cls: Cls) {
+    // stall with a client call pending: the attempt waits for stable state
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      stableTimeoutMs: 15000,
+      script: [
+        {
+          kind: "tool",
+          name: "getUserLocation",
+          textBefore: 2,
+          stallAfterTool: true
+        },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("where am I")], {
+      clientTools: CLIENT_TOOLS
+    });
+    await waitToolInput(tab, "getUserLocation");
+    // The stall is called and the attempt waits for the client's answer.
+    await untilEvent(cls, room, "chat:recovery:attempt");
+    tab.send({ type: MT.CANCEL, id });
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  async recStopDuringStableWaitThenAnswer(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      stableTimeoutMs: 15000,
+      script: [
+        {
+          kind: "tool",
+          name: "getUserLocation",
+          textBefore: 2,
+          stallAfterTool: true
+        },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("where am I")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const input = await waitToolInput(tab, "getUserLocation");
+    await untilEvent(cls, room, "chat:recovery:attempt");
+    tab.send({ type: MT.CANCEL, id });
+    // Answer after the stop has ended the request.
+    await tab.waitFor(
+      (f) =>
+        isResp(f) &&
+        f.id === id &&
+        f.done === true &&
+        f.outcome !== "recovering",
+      20000,
+      "stopped"
+    );
+    tab.send(toolResult(input.toolCallId, "getUserLocation"));
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+
+  // ── verification round: new recovery rules ──
+  async vTransientRunsAgain(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      transientInRecoveryOnce: true,
+      script: [STALL(3), TEXT(8)]
+    });
+    tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
+    return finish(cls, room, [tab], {}, { maxMs: 90000 });
+  },
+
+  async vTransientThenStopOrig(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      transientInRecoveryOnce: true,
+      script: [STALL(3), TEXT(8)]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    // Stop once the attempt has thrown its transient error.
+    await until(
+      cls,
+      room,
+      (s) => hasNote(s, "threwTransient"),
+      "transient thrown"
+    );
+    tab.send({ type: MT.CANCEL, id });
+    return finish(
+      cls,
+      room,
+      [tab],
+      { reqId: id.slice(0, 14) },
+      { maxMs: 90000 }
+    );
+  },
+  async vStableTransientThenStop(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      transientInStableWaitOnce: true,
+      stableTimeoutMs: 15000,
+      script: [
+        {
+          kind: "tool",
+          name: "getUserLocation",
+          textBefore: 2,
+          stallAfterTool: true
+        },
+        TEXT(8),
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("where am I")], {
+      clientTools: CLIENT_TOOLS
+    });
+    await waitToolInput(tab, "getUserLocation");
+    await until(
+      cls,
+      room,
+      (s) => hasNote(s, "threwTransientInStableWait"),
+      "transient in the stable wait"
+    );
+    tab.send({ type: MT.CANCEL, id });
+    return finish(
+      cls,
+      room,
+      [tab],
+      { reqId: id.slice(0, 14) },
+      { maxMs: 90000 }
+    );
+  },
+  async vStableTransientThenAnswer(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      transientInStableWaitOnce: true,
+      stableTimeoutMs: 15000,
+      script: [
+        {
+          kind: "tool",
+          name: "getUserLocation",
+          textBefore: 2,
+          stallAfterTool: true
+        },
+        TEXT(8),
+        TEXT(8)
+      ]
+    });
+    tab.request(rid("req"), [user("where am I")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const input = await waitToolInput(tab, "getUserLocation");
+    await until(
+      cls,
+      room,
+      (s) => hasNote(s, "threwTransientInStableWait"),
+      "transient in the stable wait"
+    );
+    tab.send(toolResult(input.toolCallId, "getUserLocation"));
+    return finish(cls, room, [tab], {}, { maxMs: 90000 });
+  },
+
+  async vResetDuringRecoveredTurn(cls: Cls) {
+    // a reset cuts off the recovery attempt's own turn: the Task redelivers schedule 1 and the wake schedules again
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      script: [
+        STALL(3),
+        { kind: "text", tokens: 40, delayMs: 80 },
+        TEXT(8),
+        TEXT(8),
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    await tab.waitFor(
+      (x: Frame) => isResp(x) && x.id !== id && x.body?.includes("w5 "),
+      30000,
+      "recovered text"
+    );
+    await ctl(cls, room, "probeAbort");
+    tab.close();
+    const tab2 = await openTab(cls, room);
+    tab2.send({ type: MT.RESUME_REQUEST });
+    return finish(cls, room, [tab2], {}, { maxMs: 120000 });
+  },
+  async vResetDuringBackoff(cls: Cls) {
+    // Think: a 429 schedules a recovery with a 10 s backoff; a reset during the wait, then a second interruption detected on restart
+    const { room, tab } = await setup(cls, {
+      classify: "rate_limit",
+      maxRetries: 0,
+      stallMs: 3000,
+      script: [
+        { kind: "tool", name: "getWeather", args: { city: "Paris" } },
+        { kind: "status", status: 429, headers: { "retry-after": "10" } },
+        TEXT(8),
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("weather")], {
+      clientTools: CLIENT_TOOLS
+    });
+    // Reset inside Think's 10 s backoff; AIChatAgent ends the request first.
+    if (cls === "think") await untilEvent(cls, room, "chat:recovery:scheduled");
+    else await tab.done(id, 20000);
+    await ctl(cls, room, "probeAbort");
+    tab.close();
+    const tab2 = await openTab(cls, room);
+    tab2.send({ type: MT.RESUME_REQUEST });
+    return finish(cls, room, [tab2], {}, { maxMs: 120000 });
+  },
+  async vDeclineInAttempt(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      declineFromCall: 2,
+      script: [STALL(3), STALL(3), TEXT(8)]
+    });
+    tab.request(rid("req"), [user("hello")], { clientTools: CLIENT_TOOLS });
+    return finish(cls, room, [tab]);
+  },
+  async vStopR1DuringSecondWait(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      stableTimeoutMs: 15000,
+      script: [
+        STALL(3),
+        {
+          kind: "tool",
+          name: "getUserLocation",
+          textBefore: 1,
+          stallAfterTool: true
+        },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const f = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) && x.id !== id && x.body?.includes("tool-input-available"),
+      30000,
+      "R1 tool"
+    );
+    // R1 stalls too, and the next attempt waits on the client's answer.
+    await untilEvent(cls, room, "chat:recovery:attempt", 2);
+    tab.send({ type: MT.CANCEL, id: f.id });
+    return finish(cls, room, [tab], {
+      reqId: id.slice(0, 14),
+      r1: f.id?.slice(0, 14)
+    });
+  },
+  async vStopR2Own(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      script: [STALL(3), STALL(3), { kind: "text", tokens: 60, delayMs: 80 }]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const r1 = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) && x.id !== id && x.body?.includes('"text-delta"'),
+      30000,
+      "R1"
+    );
+    const r2 = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) &&
+        x.id !== id &&
+        x.id !== r1.id &&
+        x.body?.includes('"text-delta"'),
+      30000,
+      "R2"
+    );
+    await tab.waitFor(chunkOf(r2.id, "w3 "), 30000, "R2 w3");
+    tab.send({ type: MT.CANCEL, id: r2.id });
+    return finish(cls, room, [tab], { r2: r2.id?.slice(0, 14) });
+  },
+  async vStopR1DuringR2(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      script: [STALL(3), STALL(3), { kind: "text", tokens: 60, delayMs: 80 }]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const r1 = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) && x.id !== id && x.body?.includes('"text-delta"'),
+      30000,
+      "R1"
+    );
+    const r2 = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) &&
+        x.id !== id &&
+        x.id !== r1.id &&
+        x.body?.includes('"text-delta"'),
+      30000,
+      "R2"
+    );
+    await tab.waitFor(chunkOf(r2.id, "w3 "), 30000, "R2 w3");
+    tab.send({ type: MT.CANCEL, id: r1.id });
+    return finish(cls, room, [tab], { r1: r1.id?.slice(0, 14) });
+  },
+  async vStopOrigDuringR2(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      script: [STALL(3), STALL(3), { kind: "text", tokens: 60, delayMs: 80 }]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const r1 = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) && x.id !== id && x.body?.includes('"text-delta"'),
+      30000,
+      "R1"
+    );
+    const r2 = await tab.waitFor(
+      (x: Frame) =>
+        isResp(x) &&
+        x.id !== id &&
+        x.id !== r1.id &&
+        x.body?.includes('"text-delta"'),
+      30000,
+      "R2"
+    );
+    await tab.waitFor(chunkOf(r2.id, "w3 "), 30000, "R2 w3");
+    tab.send({ type: MT.CANCEL, id });
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  async vStopR1DuringBackoff(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      stallMs: 3000,
+      classify: "rate_limit",
+      maxRetries: 0,
+      script: [
+        STALL(3),
+        { kind: "status", status: 429, headers: { "retry-after": "10" } },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("hello")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const f = await tab.waitFor(
+      (x: Frame) => isResp(x) && x.id !== id,
+      30000,
+      "R1 frame"
+    );
+    // R1's model call got the 429: stop R1 inside its backoff.
+    await untilEvent(cls, room, "chat:recovery:scheduled", 2);
+    tab.send({ type: MT.CANCEL, id: f.id });
+    return finish(cls, room, [tab], { r1: f.id?.slice(0, 14) });
+  },
+
+  // ── 5. D32, D21, connection-less continuation ──
+  async d32StopWaitingContinuation(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      script: [
+        {
+          kind: "tool",
+          name: "getUserLocation",
+          textBefore: 2,
+          textAfter: 40,
+          delayMs: 60
+        },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("where")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const input = await waitToolInput(tab, "getUserLocation");
+    tab.send(toolResult(input.toolCallId, "getUserLocation"));
+    // Stop while the step still streams its text after the call, so the
+    // continuation is waiting.
+    await tab.waitFor(chunkOf(id, "a3 "), 20000, "a3");
+    tab.send({ type: MT.CANCEL, id });
+    await tab.done(id, 20000).catch(() => {});
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  async d32ResultAfterStop(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      script: [
+        {
+          kind: "tool",
+          name: "getUserLocation",
+          textBefore: 2,
+          textAfter: 40,
+          delayMs: 60
+        },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("where")], {
+      clientTools: CLIENT_TOOLS
+    });
+    const input = await waitToolInput(tab, "getUserLocation");
+    await tab.waitFor(chunkOf(id, "a3 "), 20000, "a3");
+    tab.send({ type: MT.CANCEL, id });
+    await tab.done(id, 20000);
+    tab.send(toolResult(input.toolCallId, "getUserLocation"));
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  async d21AbortAllNoSignal(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      abortAllInOnChatMessageMs: 300,
+      passSignal: false,
+      script: [{ kind: "text", tokens: 40, delayMs: 60 }]
+    });
+    const id = tab.request(rid("req"), [user("hello")]);
+    await tab.done(id, 20000).catch(() => {});
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  async d21AbortAllSignal(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      abortAllInOnChatMessageMs: 300,
+      script: [{ kind: "text", tokens: 40, delayMs: 60 }]
+    });
+    const id = tab.request(rid("req"), [user("hello")]);
+    await tab.done(id, 20000).catch(() => {});
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  async d21AbortAllRpcDuring(cls: Cls) {
+    // abortAllRequests() over RPC while the stream runs (not inside onChatMessage)
+    const { room, tab } = await setup(cls, {
+      passSignal: false,
+      script: [{ kind: "text", tokens: 40, delayMs: 60 }]
+    });
+    const id = tab.request(rid("req"), [user("hello")]);
+    await tab.waitFor(
+      (f: Frame) => isResp(f) && f.id === id && f.body?.includes("w3 "),
+      20000,
+      "w3"
+    );
+    await ctl(cls, room, "probeAbortAll");
+    await tab.done(id, 20000).catch(() => {});
+    return finish(cls, room, [tab], { reqId: id.slice(0, 14) });
+  },
+  async approveRpc(cls: Cls) {
+    const { room, tab } = await setup(cls, {
+      script: [
+        { kind: "tool", name: "pauseAction", args: { message: "hi" } },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("pause please")]);
+    await tab.done(id, 20000);
+    const pending = await untilPending(cls, room);
+    const execId = firstExecutionId(pending);
+    tab.close();
+    const approved = execId
+      ? await ctl(cls, room, "probeApprove", execId)
+      : { ok: false, error: "no pending" };
+    return finish(cls, room, [tab], {
+      pending: pending.value ?? pending.error,
+      approved: approved.value ?? approved.error
+    });
+  },
+  async approveRpcStop(cls: Cls) {
+    // approve over RPC, then abortAllRequests while the connection-less continuation streams
+    const { room, tab } = await setup(cls, {
+      script: [
+        { kind: "tool", name: "pauseAction", args: { message: "hi" } },
+        TEXT(3),
+        { kind: "text", tokens: 60, delayMs: 80 },
+        TEXT(8)
+      ]
+    });
+    const id = tab.request(rid("req"), [user("pause please")]);
+    await tab.done(id, 20000);
+    const pending = await untilPending(cls, room);
+    const execId = firstExecutionId(pending);
+    const approvedP = execId
+      ? ctl(cls, room, "probeApprove", execId)
+      : Promise.resolve<CtlResult>({ ok: false, error: "no pending" });
+    // Stop while the continuation streams its slow reply (script step 2).
+    await until(
+      cls,
+      room,
+      (s) => s.calls.some((c) => c.idx === 2),
+      "the slow reply"
+    );
+    await ctl(cls, room, "probeAbortAll");
+    const approved = await approvedP;
+    return finish(cls, room, [tab], {
+      approved: approved.value ?? approved.error
+    });
   }
 };
 
