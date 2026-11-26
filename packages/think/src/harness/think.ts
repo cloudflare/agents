@@ -65,6 +65,7 @@ import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
 import {
   admittedSubmissionMetadata,
   isTerminalSubmissionStatus,
+  SubmissionStatusQueue,
   TERMINAL_SUBMISSION_STATUSES,
   type DeleteSubmissionsOptions,
   type ListSubmissionsOptions,
@@ -270,6 +271,8 @@ export class Think<
   #messages: UIMessage[] = [];
   #context: Context | undefined;
   #handle: Session | undefined;
+  /** Each submission's status reports, run one at a time in order. */
+  readonly #submissionStatuses = new SubmissionStatusQueue();
   /** Skills from `getSkills()`, loaded in onStart as Think loads them. */
   readonly #skills = new ThinkSkills();
   #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
@@ -357,7 +360,11 @@ export class Think<
       get maxSteps() {
         return self.#turnMaxSteps ?? self.maxSteps;
       },
-      onSubmissionStatus: (status) => this.#submissionStatus(status),
+      // One submission's reports in order, as on Think.
+      onSubmissionStatus: (status) =>
+        this.#submissionStatuses.run(status.operationId, () =>
+          this.#submissionStatus(status)
+        ),
       hooks: {
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
