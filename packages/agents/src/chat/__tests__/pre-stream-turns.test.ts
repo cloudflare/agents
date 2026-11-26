@@ -63,6 +63,25 @@ describe("PreStreamTurns (#1784)", () => {
     });
   });
 
+  it("tells a parked tab the next request in line when the first settles without streaming", () => {
+    const frames: SentFrame[] = [];
+    const pre = new PreStreamTurns();
+    pre.begin("req-1");
+    pre.begin("req-2");
+    pre.park(makeConnection("c1", frames));
+
+    // req-1 ends with no stream; req-2 is still queued.
+    expect(pre.settle("req-1")).toBe(false);
+    expect(frames).toEqual([
+      { type: "cf_agent_stream_pending", id: "req-1" },
+      { type: "cf_agent_stream_pending", id: "req-2" }
+    ]);
+    // A later request settling first changes nothing for the tab.
+    pre.begin("req-3");
+    pre.settle("req-3");
+    expect(frames).toHaveLength(2);
+  });
+
   it("flushOnStreamStart notifies each parked connection then clears the map (keeps accepted)", () => {
     const pre = new PreStreamTurns();
     pre.begin("req-1");

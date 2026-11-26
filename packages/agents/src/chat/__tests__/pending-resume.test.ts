@@ -39,6 +39,21 @@ describe("accepted pre-stream resume turns", () => {
     expect(transport.handleStreamPending({ id: "late" })).toBe(false);
   });
 
+  it("cancels the next turn in line once the server names it", async () => {
+    const { agent, transport } = setup();
+    const probe = transport.reconnectToStream({ chatId: "chat" });
+    transport.handleStreamPending({ id: "first" });
+    // The first turn ended without a stream; the server names the next.
+    transport.handleStreamPending({ id: "second" });
+    expect(transport.pendingServerTurnId).toBe("second");
+    agent.send.mockClear();
+    expect(transport.cancelActiveServerTurn()).toBe(true);
+    await expect(probe).resolves.toBeNull();
+    expect(
+      agent.send.mock.calls.map(([frame]) => JSON.parse(frame).id)
+    ).toEqual(["second"]);
+  });
+
   it("cancels both an attached turn and an unrelated queued turn", async () => {
     const { agent, transport } = setup();
     const firstProbe = transport.reconnectToStream({ chatId: "chat" });

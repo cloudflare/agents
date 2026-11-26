@@ -59,8 +59,18 @@ export class PreStreamTurns<
    * stream is active).
    */
   settle(requestId: string): boolean {
+    const wasFirst = this.firstRequestId === requestId;
     this._accepted.delete(requestId);
-    return this._accepted.size === 0;
+    if (this._accepted.size === 0) return true;
+    // The next in line is now the one a parked tab's Stop should cancel.
+    const next = this.firstRequestId;
+    if (wasFirst && next) {
+      const frame = JSON.stringify({ type: MSG_STREAM_PENDING, id: next });
+      for (const connection of this.awaitingConnections.values()) {
+        sendIfOpen(connection, frame);
+      }
+    }
+    return false;
   }
 
   /** Whether any accepted turn is still pre-stream. */
