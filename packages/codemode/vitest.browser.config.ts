@@ -4,7 +4,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     name: "browser",
-    retry: 3,
+    retry: 0,
     include: ["src/tests/**/*.browser.test.ts"],
     browser: {
       enabled: true,
