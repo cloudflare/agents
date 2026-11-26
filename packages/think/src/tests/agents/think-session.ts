@@ -9563,7 +9563,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     const hold = this._statusHookHold;
-    if (hold && (hold.status === undefined || hold.status === result.status)) {
+    if (hold) {
       this._statusHookHold = null;
       hold.reached = true;
       await hold.released;
@@ -9591,22 +9591,19 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   private _statusHookHold: {
-    status?: ThinkSubmissionStatus;
     reached: boolean;
     released: Promise<void>;
     open: () => void;
   } | null = null;
   private _heldStatusHook: { reached: boolean; open: () => void } | null = null;
 
-  /** Hold the next `onSubmissionStatus` call (for `status`) until released. */
-  async holdSubmissionStatusHookForTest(
-    status?: ThinkSubmissionStatus
-  ): Promise<void> {
+  /** Hold the next `onSubmissionStatus` call until released. */
+  async holdSubmissionStatusHookForTest(): Promise<void> {
     let open = () => {};
     const released = new Promise<void>((resolve) => {
       open = resolve;
     });
-    this._statusHookHold = { status, reached: false, released, open };
+    this._statusHookHold = { reached: false, released, open };
     this._heldStatusHook = this._statusHookHold;
   }
 
@@ -9774,6 +9771,11 @@ export class ThinkProgrammaticTestAgent extends Think {
       open = resolve;
     });
     this._chunkHold = { after, reached: false, released, open };
+  }
+
+  /** Resolve once no turn runs or waits. */
+  async waitForIdleForTest(): Promise<void> {
+    await waitForThinkIdleForTest(this);
   }
 
   /** Whether a held stream has sent its chunks and is waiting. */

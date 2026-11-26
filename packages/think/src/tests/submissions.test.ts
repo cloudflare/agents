@@ -60,6 +60,7 @@ type ThinkSubmissionTestStub = {
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   holdSubmissionStatusHookForTest(): Promise<void>;
   cancelInSubmissionStatusHookForTest(): Promise<void>;
+  waitForIdleForTest(): Promise<void>;
   isSubmissionStatusHookHeldForTest(): Promise<boolean>;
   statusReportsQueuedForTest(submissionId: string): Promise<number>;
   releaseSubmissionStatusHookForTest(): Promise<void>;
@@ -309,19 +310,6 @@ const workflowPromptMetadataKey = "__thinkWorkflowPrompt";
 async function chunkStreamHeld(agent: ThinkSubmissionTestStub): Promise<void> {
   await vi.waitFor(
     async () => expect(await agent.isChunkStreamHeldForTest()).toBe(true),
-    { timeout: 5000, interval: 10 }
-  );
-}
-
-/** Wait until a turn's (partial) reply is stored. */
-async function partialStored(agent: ThinkSubmissionTestStub): Promise<void> {
-  await vi.waitFor(
-    async () =>
-      expect(
-        (await agent.getStoredMessages()).some(
-          (message) => message.role === "assistant"
-        )
-      ).toBe(true),
     { timeout: 5000, interval: 10 }
   );
 }
@@ -998,10 +986,10 @@ describe("Think durable submissions", () => {
     );
 
     expect(aborted.error).toBe("stop");
-    // The stream finishes after the abort; once the turn's partial is stored,
-    // a late completion would have been written.
+    // The stream finishes after the abort; once the turn has ended, a late
+    // completion would have been written.
     await agent.releaseChunksForTest();
-    await partialStored(agent);
+    await agent.waitForIdleForTest();
     await expect(
       agent.inspectSubmissionForTest(accepted.submissionId)
     ).resolves.toMatchObject({ status: "aborted" });
@@ -1333,10 +1321,10 @@ describe("Think durable submissions", () => {
     await expect(
       agent.waitForSubmissionForTest(accepted.submissionId)
     ).resolves.toMatchObject({ status: "aborted" });
-    // Once the turn's partial is stored, the turn has ended: a second
-    // terminal status would have been emitted by then.
+    // Once the turn has ended, a second terminal status would have been
+    // emitted.
     await agent.releaseChunksForTest();
-    await partialStored(agent);
+    await agent.waitForIdleForTest();
 
     const statuses = (await agent.getSubmissionLog())
       .filter((entry) => entry.submissionId === accepted.submissionId)
