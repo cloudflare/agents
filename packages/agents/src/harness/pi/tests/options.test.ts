@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 /**
  * `PiHarnessOptions` requires only the `harness` factory. Without
@@ -19,7 +19,12 @@ describe("a harness without defaults", () => {
 
     expect(response.status).toBe("unanswered");
     expect(response.reason).toBe("no_model");
-    expect(await harness.alarmTime()).toBeNull();
+    // Nothing stays scheduled. The prompt's own wake can still be armed when
+    // the response returns, and clears once that wake has run.
+    await vi.waitFor(async () => expect(await harness.alarmTime()).toBeNull(), {
+      timeout: 5000,
+      interval: 20
+    });
   });
 
   it("answers once the session's model is set", async () => {
