@@ -140,6 +140,8 @@ export interface ChatOptions {
    * that fit (always at least the latest). Unset reads the whole path.
    */
   readonly hydrationByteBudget?: number;
+  /** Keep at most this many messages: the oldest go after each reply. */
+  readonly maxPersistedMessages?: number;
 }
 
 /** What a host supplies. */
@@ -690,6 +692,15 @@ export function chatTurnDefinition(
       else {
         await session.upsertMessage(stored as never, placement);
         step.checkpoint.set(REPLY_CHECKPOINT, stored.id);
+      }
+      const max = host.options?.maxPersistedMessages;
+      if (max !== undefined && max > 0) {
+        const kept = await session.getHistory();
+        if (kept.length > max) {
+          await session.deleteMessages(
+            kept.slice(0, kept.length - max).map((m) => m.id)
+          );
+        }
       }
       return stored.id;
     };

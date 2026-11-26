@@ -1408,4 +1408,22 @@ describe("chatTurnDefinition", () => {
       });
     }
   });
+
+  it("keeps at most maxPersistedMessages, dropping the oldest after a reply", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      for (const id of ["u1", "u2", "u3"]) {
+        await session.appendMessage({ id, role: "user", parts: [] } as never);
+      }
+      await definitionOf(instance, {
+        ...instance.host,
+        options: { maxPersistedMessages: 2 }
+      })({ trigger: "server" }, laterAttempt("m-1", 1));
+      const ids = (await session.getHistory()).map((m) => m.id);
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).toBe("u3");
+    });
+  });
 });
