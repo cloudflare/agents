@@ -504,6 +504,74 @@ function trackTurnAttemptReasons(agent: Think): void {
   };
 }
 
+/** How long a held recovery attempt would wait by itself: never, in a test. */
+const HELD_ATTEMPT_SECONDS = 3600;
+
+/**
+ * The recovery attempts a turn's own run took while they were held, per
+ * agent, with the delay each was scheduled with.
+ */
+const heldAttempts = new WeakMap<
+  Think,
+  Array<{ callback: string; delaySeconds: number }>
+>();
+
+/**
+ * Hold every recovery attempt a turn's own run takes from now on: its
+ * backoff becomes an hour, so only the fixture that runs it
+ * ({@link runRecoveryWorkForTest}) ends the wait. An attempt with no backoff
+ * (a stall before the first chunk) otherwise runs by itself before a test
+ * can look at it.
+ */
+function holdTurnAttemptsForTest(agent: Think): void {
+  if (heldAttempts.has(agent)) return;
+  const held: Array<{ callback: string; delaySeconds: number }> = [];
+  heldAttempts.set(agent, held);
+  const engine = (
+    agent as unknown as { _chatRecoveryEngine(): unknown }
+  )._chatRecoveryEngine() as {
+    scheduleRecovery(input: {
+      into?: (attempt: { callback: string; delaySeconds: number }) => boolean;
+    }): Promise<boolean>;
+  };
+  const schedule = engine.scheduleRecovery.bind(engine);
+  engine.scheduleRecovery = (input) => {
+    const into = input.into;
+    return schedule(
+      into
+        ? {
+            ...input,
+            into: (attempt) => {
+              const taken = into({
+                ...attempt,
+                delaySeconds: HELD_ATTEMPT_SECONDS
+              });
+              if (taken) {
+                held.push({
+                  callback: attempt.callback,
+                  delaySeconds: attempt.delaySeconds
+                });
+              }
+              return taken;
+            }
+          }
+        : input
+    );
+  };
+}
+
+/** Wait until a run is recorded as waiting out an attempt of `callback`. */
+async function waitForHeldAttemptForTest(
+  agent: Think,
+  callback: string
+): Promise<void> {
+  for (let i = 0; i < 500; i++) {
+    if (pendingRecoveryRunIds(agent, callback).length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`no run waits out a held ${callback} attempt`);
+}
+
 /**
  * The latest scheduled recovery attempt: a recovery Task run's, or one a
  * turn's run journaled. `keyed` is whether the Task would key it.
@@ -4653,6 +4721,9 @@ export class ThinkTestAgent extends Think {
   }
 
   async armStallForTest(afterChunks: number, timeoutMs: number): Promise<void> {
+    // The test looks at the attempt from another event: it must still be
+    // there.
+    holdTurnAttemptsForTest(this);
     this._stallAfterChunks = afterChunks;
     this._stallAttemptsRemaining = 1;
     this.chatStreamStallTimeoutMs = timeoutMs;
@@ -4664,7 +4735,17 @@ export class ThinkTestAgent extends Think {
     delaySeconds: number | null;
     finalRoles: string[];
   }> {
-    const delaySeconds = latestRecoveryAttemptForTest(this)?.delay ?? null;
+    // Attempts held for the test: counted as they were scheduled, and each
+    // waited for until its run is recorded as waiting, so the count does
+    // not depend on when this is called.
+    const held = heldAttempts.get(this)?.splice(0) ?? [];
+    for (const attempt of held) {
+      await waitForHeldAttemptForTest(this, attempt.callback);
+    }
+    const delaySeconds =
+      held.at(-1)?.delaySeconds ??
+      latestRecoveryAttemptForTest(this)?.delay ??
+      null;
     const scheduledContinues = recoveryWorkCountForTest(
       this,
       "_chatRecoveryContinue"
