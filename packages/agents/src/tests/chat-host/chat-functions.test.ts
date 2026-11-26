@@ -1628,4 +1628,34 @@ describe("chat functions over a minimal host", () => {
       expect(instance.calls.map((c) => c.requestId)).toEqual(["r1", "g1"]);
     });
   });
+
+  it("saveMessages and continueLastTurn are submitTurn calls", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      // saveMessages: store the messages, then a server turn answers them.
+      const saved = await submitTurn(instance.deps, instance.lane, {
+        trigger: "server",
+        messages: [
+          { id: "u1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+        ]
+      });
+      await instance.resultFor(saved.requestId);
+      const replyId = instance.results[0].messageId;
+      // continueLastTurn: extend the last reply.
+      const continued = await submitTurn(instance.deps, instance.lane, {
+        trigger: "server",
+        mode: "continue"
+      });
+      await instance.resultFor(continued.requestId);
+      expect(instance.calls[1]).toMatchObject({
+        mode: "continue",
+        replyId
+      });
+      const replies = (
+        await instance.sessions.session("s1").getHistory()
+      ).filter((m) => m.role === "assistant");
+      expect(replies).toHaveLength(1);
+    });
+  });
 });
