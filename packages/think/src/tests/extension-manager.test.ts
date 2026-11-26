@@ -1000,6 +1000,25 @@ describe("Think — a sandboxed extension's turn controls", () => {
     expect(texts[2]?.startsWith("assistant: ")).toBe(true);
   });
 
+  it("applies them in a sub-agent, through the root", async () => {
+    const parent = await getAgentByName(
+      env.ThinkExtensionTurnParent,
+      `turn-facet-${crypto.randomUUID()}`
+    );
+    expect((await parent.kidChat("start")).done).toBe(true);
+    const { count, toolChoices } = await parent.kidCalls();
+    expect(count).toBe(1);
+    expect(toolChoices[0]).toEqual({ type: "required" });
+    const texts = await parent.kidTexts();
+    expect(texts.slice(0, 2)).toEqual([
+      "user: start",
+      "user: from the extension"
+    ]);
+    await vi.waitFor(async () =>
+      expect(await parent.kidStreamed()).toBe("hello")
+    );
+  });
+
   it("gives onChunk the streamed text", async () => {
     const agent = await turn("turn-chunks");
     await vi.waitFor(async () =>

@@ -8,6 +8,7 @@
 
 import type { LanguageModel, UIMessage, ToolSet } from "ai";
 import { tool } from "ai";
+import { Agent } from "agents";
 import { z } from "zod";
 import { Think } from "../../think";
 import { WorkspaceFiles } from "../../workspace-files";
@@ -423,5 +424,28 @@ export class ThinkExtensionTurnAgent extends Think {
           .map((part) => (part.type === "text" ? part.text : ""))
           .join("")}`
     );
+  }
+}
+
+/** Holds a ThinkExtensionTurnAgent as a sub-agent (a facet). */
+export class ThinkExtensionTurnParent extends Agent<Cloudflare.Env> {
+  #kid() {
+    return this.subAgent(ThinkExtensionTurnAgent, "kid");
+  }
+
+  async kidChat(message: string) {
+    return (await this.#kid()).testChat(message);
+  }
+
+  async kidCalls() {
+    return (await this.#kid()).modelCalls();
+  }
+
+  async kidTexts() {
+    return (await this.#kid()).activeTexts();
+  }
+
+  async kidStreamed() {
+    return (await this.#kid()).streamedText();
   }
 }

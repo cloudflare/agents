@@ -39,6 +39,12 @@ type ThinkHostBridgeAgent = {
 export type HostBridgeLoopbackProps = {
   agentClassName: string;
   agentId: string;
+  /**
+   * @internal For an agent that is a sub-agent (a facet): its path from
+   * the root, root first. A facet has no namespace of its own, so calls go
+   * through the root.
+   */
+  agentPath?: readonly { className: string; name: string }[];
   permissions: ExtensionPermissions;
   /** Namespaced context labels this extension declared (for "own" write validation). */
   ownContextLabels?: string[];
@@ -50,11 +56,34 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
 > {
   private _permissions = this.ctx.props.permissions;
 
-  private _getAgent() {
-    const { agentClassName, agentId } = this.ctx.props;
-    // @ts-expect-error — experimental: ctx.exports on WorkerEntrypoint
-    const ns = this.ctx.exports[agentClassName] as DurableObjectNamespace;
-    return ns.get(ns.idFromString(agentId));
+  private _getAgent(): ThinkHostBridgeAgent {
+    const { agentClassName, agentId, agentPath } = this.ctx.props;
+    // Experimental: ctx.exports on WorkerEntrypoint.
+    const exports = (
+      this.ctx as unknown as {
+        exports: Record<string, DurableObjectNamespace>;
+      }
+    ).exports;
+    const [root] = agentPath ?? [];
+    if (agentPath && root && agentPath.length > 1) {
+      const ns = exports[root.className];
+      const stub = ns.get(ns.idFromName(root.name)) as unknown as {
+        _cf_invokeSubAgentPath(
+          path: readonly { className: string; name: string }[],
+          method: string,
+          args: unknown[]
+        ): Promise<unknown>;
+      };
+      return {
+        _cfHostBridge: (operation, args) =>
+          stub._cf_invokeSubAgentPath(agentPath, "_cfHostBridge", [
+            operation,
+            args
+          ]) as never
+      };
+    }
+    const ns = exports[agentClassName];
+    return ns.get(ns.idFromString(agentId)) as unknown as ThinkHostBridgeAgent;
   }
 
   // ── Permission checks ──────────────────────────────────────────
@@ -128,10 +157,7 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
     operation: K,
     ...args: Parameters<ThinkHostApi[K]>
   ): Promise<Awaited<ReturnType<ThinkHostApi[K]>>> {
-    return (this._getAgent() as unknown as ThinkHostBridgeAgent)._cfHostBridge(
-      operation,
-      args
-    );
+    return this._getAgent()._cfHostBridge(operation, args);
   }
 
   // ── Workspace ──────────────────────────────────────────────────
