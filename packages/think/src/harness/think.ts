@@ -1007,15 +1007,17 @@ export class Think<
     // differ only for a submission that settled before an older one).
     // Matched on Think's status, so a run the harness counts as completed
     // but which ended unanswered is not taken for a completed submission.
-    // Records that do not match stay at the front of the list, so a page
-    // with too few matches is read again twice as long, until `limit` are
-    // deleted or the list ends: each record is read at most about twice.
+    // Read a page of `limit` at a time, each after the last one read, so a
+    // long run of submissions that do not match is passed over, never
+    // read twice, and no more than a page is in memory.
     let deleted = 0;
-    for (let page = limit; deleted < limit; page *= 2) {
+    let after: string | undefined;
+    while (deleted < limit) {
       const listed = await this.harness.submissions(session, {
         status: taskStatusesFor(wanted),
         order: "oldest",
-        limit: page
+        ...(after !== undefined && { after }),
+        limit
       });
       for (const submission of listed.map(submissionInspection)) {
         if (deleted >= limit) break;
@@ -1026,7 +1028,8 @@ export class Think<
           deleted++;
         }
       }
-      if (listed.length < page) break;
+      if (listed.length < limit) break;
+      after = listed[listed.length - 1].operationId;
     }
     return deleted;
   }
