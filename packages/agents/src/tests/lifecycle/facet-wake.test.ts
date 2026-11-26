@@ -186,12 +186,16 @@ describe("facet wake", () => {
     // can start it now.
     const again = await getAgentByName(env.FacetWakeRoot, name);
     await again.rootJobs();
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    // The facet started (its own start recovers what the reset cut off)
-    // before this test reached it, so the root's restart drove it.
-    const before = Date.now();
-    const starts = await again.middleStarts("m");
-    expect(starts.some((at) => at > resetAt && at < before)).toBe(true);
+    // The facet starts again (its own start recovers what the reset cut
+    // off) with nothing but the root's restart to start it. The start is
+    // read from the root, so reading it starts nothing.
+    await vi.waitFor(
+      async () => {
+        const starts = await again.middleStartsSeen("m");
+        expect(starts.some((at) => at > resetAt)).toBe(true);
+      },
+      { timeout: 8000, interval: 20 }
+    );
   });
 
   it("drives a facet at once when the root starts again after one unreplied drive", async () => {
