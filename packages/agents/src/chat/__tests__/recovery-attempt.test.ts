@@ -90,6 +90,7 @@ function setup(scenario: Scenario = {}) {
       controller = new AbortController();
       return {
         signal: controller.signal,
+        continuationWaiting: () => false,
         end: () => {
           log.push("end");
         }

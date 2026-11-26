@@ -108,7 +108,7 @@ function createClientToolMockModel(): LanguageModel {
 // the client — which can resolve the tool and send `cf_agent_tool_result` —
 // but the assistant message hasn't been persisted yet. On the continuation
 // invocation it emits plain text.
-function createSlowClientToolMockModel(
+export function createSlowClientToolMockModel(
   delayMs: number,
   trailingGaps: number,
   finishReason: "tool-calls" | "stop" = "tool-calls",

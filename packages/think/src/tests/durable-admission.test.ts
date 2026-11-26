@@ -23,6 +23,7 @@ type AdmissionStub = {
   ): Promise<{ status: string }>;
   listSubmissions(): Promise<Array<{ submissionId: string; status: string }>>;
   getMessagesForTest(): Promise<UIMessage[]>;
+  getIncidentsForTest(): Promise<string[]>;
   getAdmissionsForTest(): Promise<
     Array<{ requestId: string; stopped: boolean }>
   >;
@@ -365,4 +366,68 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     expect(messages[2].id).toBe("u2");
     expect(textOf(messages[3])).toBe(QUICK_REPLY);
   }, 60_000);
+});
+
+describe("a client tool call a reset cut off", () => {
+  it("continues with the client's answer, without waiting out recovery", async () => {
+    const binding = "ThinkAdmissionTestAgent";
+    const room = crypto.randomUUID();
+    const ws = await connect(binding, room);
+    const sent = record(ws);
+    send(ws, "r1", [user("u1", "one")], {
+      clientToolThenHang: true,
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    // The call reached the tab before the reset cut the reply.
+    await waitFor(
+      async () => sent,
+      (frames) => JSON.stringify(frames).includes("tc-client-1")
+    );
+    await reset(binding, room);
+
+    const tab = await connect(binding, room);
+    const frames = record(tab);
+    const restarted = await agent(binding, room);
+    // Recovery stores the cut-off reply, its call waiting on the client.
+    await waitFor(
+      () => restarted.getMessagesForTest(),
+      (messages) => JSON.stringify(messages).includes("tc-client-1")
+    );
+    const answeredAt = Date.now();
+    tab.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+    const messages = await waitFor(
+      () => restarted.getMessagesForTest(),
+      (m) => JSON.stringify(m).includes("Continuation after tool")
+    );
+    expect(JSON.stringify(messages)).toContain("Continuation after tool");
+    expect(Date.now() - answeredAt).toBeLessThan(15_000);
+    // The answer's continuation took the reply; recovery stepped aside.
+    expect(await restarted.getIncidentsForTest()).toEqual([
+      "skipped:continued_by_interaction"
+    ]);
+    // Its done frame is sent after the reply is stored.
+    const completed = (list: Array<Record<string, unknown>>) =>
+      list.some(
+        (frame) =>
+          frame.type === MSG_CHAT_RESPONSE &&
+          frame.done === true &&
+          frame.id !== "r1" &&
+          frame.error !== true &&
+          (frame.outcome ?? "completed") === "completed"
+      );
+    expect(completed(await waitFor(async () => frames, completed))).toBe(true);
+    // The cut-off request is not reported as failed.
+    expect(JSON.stringify(doneFrame(frames, "r1") ?? {})).not.toContain(
+      "interrupted"
+    );
+    tab.close();
+  }, 40_000);
 });
