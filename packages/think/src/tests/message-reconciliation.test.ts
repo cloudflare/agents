@@ -39,10 +39,6 @@ async function connectWS(room: string) {
   return ws;
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function waitForDone(ws: WebSocket, timeout = 10_000): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
@@ -165,6 +161,26 @@ function assistantToolPart(
   return null;
 }
 
+/**
+ * Wait until no interaction is being applied, no turn runs and no
+ * continuation waits: the reply's writes after its done frame are in.
+ */
+async function settled(agent: {
+  isChatTurnActiveForTest(): Promise<boolean>;
+  pendingContinuationRequestIdForTest(): Promise<string | null>;
+  hasPendingInteractionForTest(): Promise<boolean>;
+}): Promise<void> {
+  const deadline = Date.now() + 8000;
+  while (
+    (await agent.hasPendingInteractionForTest()) ||
+    (await agent.isChatTurnActiveForTest()) ||
+    (await agent.pendingContinuationRequestIdForTest()) !== null
+  ) {
+    if (Date.now() > deadline) throw new Error("the agent never settled");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("Think — message reconciliation on incoming submits", () => {
   it("collapses a client's optimistic in-flight assistant into the existing server-owned row", async () => {
     const room = crypto.randomUUID();
@@ -192,7 +208,7 @@ describe("Think — message reconciliation on incoming submits", () => {
     const done = waitForDone(ws);
     sendChatRequest(ws, [userA, optimistic, userB]);
     await done;
-    await delay(200);
+    await settled(agent);
 
     const messages = (await agent.getMessages()) as UIMessage[];
 
@@ -254,7 +270,7 @@ describe("Think — message reconciliation on incoming submits", () => {
       makeUserMessage("user-b", "continue")
     ]);
     await done;
-    await delay(200);
+    await settled(agent);
 
     const ids = ((await agent.getMessages()) as UIMessage[]).map((m) => m.id);
     expect(ids).toContain("server-large");
@@ -281,7 +297,7 @@ describe("Think — message reconciliation on incoming submits", () => {
       makeUserMessage("user-b", "create a dog")
     ]);
     await done;
-    await delay(200);
+    await settled(agent);
 
     const ids = ((await agent.getMessages()) as UIMessage[]).map((m) => m.id);
     expect(ids).toContain("server-cat-assistant");
@@ -320,7 +336,7 @@ describe("Think — message reconciliation on incoming submits", () => {
     const done = waitForDone(ws);
     sendChatRequest(ws, [userA, firstAssistant, userB, secondAssistant, userC]);
     await done;
-    await delay(200);
+    await settled(agent);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     const assistantsWithTool = messages.filter(
@@ -361,7 +377,7 @@ describe("Think — message reconciliation on incoming submits", () => {
     const done = waitForDone(ws);
     sendChatRequest(ws, [userA, stale, userB]);
     await done;
-    await delay(200);
+    await settled(agent);
 
     const messages = (await agent.getMessages()) as UIMessage[];
     const sharedAsst = messages.find((m) => m.id === sharedAssistantId);

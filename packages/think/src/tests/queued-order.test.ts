@@ -192,10 +192,16 @@ describe("a message queued behind a running turn", () => {
       "assistant",
       "user"
     ]);
-    // The tab that sent it is never left drawing it as queued.
-    await delay(300);
-    const lists = seenB.filter((f) => f.type === "cf_agent_chat_messages");
-    expect(lists.at(-1)?.queuedMessageIds).toBeUndefined();
+    // The tab that sent it is never left drawing it as queued: its last
+    // message list, once the final one has arrived, holds no queued ids.
+    const lastList = () =>
+      seenB.filter((f) => f.type === "cf_agent_chat_messages").at(-1);
+    await waitFor(
+      async () => lastList(),
+      (list) => list !== undefined && list.queuedMessageIds === undefined,
+      5000
+    );
+    expect(lastList()?.queuedMessageIds).toBeUndefined();
     tabA.close();
     tabB.close();
     tabC.close();
@@ -218,7 +224,13 @@ describe("a message queued behind a running turn", () => {
         (ok) => ok
       );
       send(tabA, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-      await delay(100);
+      // r2 waits in the queue: its admission record exists.
+      const admitted = await waitFor(
+        async () => (await agent(binding, room)).getAdmissionsForTest(),
+        (records) => records.some((r) => r.requestId === "r2"),
+        5000
+      );
+      expect(admitted.some((r) => r.requestId === "r2")).toBe(true);
       if (end === "stopped") {
         tabA.send(JSON.stringify({ type: MSG_CHAT_CANCEL, id: "r2" }));
       } else {
