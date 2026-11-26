@@ -1,5 +1,7 @@
 # RFC: Detached ("background") agent-tool runs with a durable completion hook
 
+> Since the agent-runs work (R1, R2), a detached run is a `__cf_agent_tool_detached` Task run: its checks replace the reconcile backbone and the claim/lease ledger described below. See `agent-tools.md`. The delivery guarantees here still hold.
+
 Status: proposed
 
 Related:
