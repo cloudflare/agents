@@ -6,6 +6,7 @@ import {
   type ChatLane,
   answerTool,
   chatDispatch,
+  connectChat,
   resumeChat,
   submitTurn
 } from "../../chat/chat-functions";
@@ -915,6 +916,29 @@ describe("chat functions over a minimal host", () => {
         await instance.sessions.session("s1").getHistory()
       ).filter((m) => m.role === "assistant");
       expect(replies).toHaveLength(1);
+    });
+  });
+
+  it("a connecting tab is sent the transcript", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await instance.sessions.session("s1").appendMessage({
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Hi" }]
+      } as never);
+      const sent: Array<Record<string, unknown>> = [];
+      await connectChat(instance.deps, {
+        id: "tab-3",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      } as unknown as Connection);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ type: "cf_agent_chat_messages" });
+      expect(
+        (sent[0].messages as Array<{ id: string }>).map((m) => m.id)
+      ).toEqual(["u1"]);
     });
   });
 });

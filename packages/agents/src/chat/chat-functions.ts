@@ -370,6 +370,28 @@ function waitsOnAnswer(message: UIMessage): boolean {
   });
 }
 
+/**
+ * A tab connected: send it the transcript (`cf_agent_chat_messages`), the
+ * newest messages that fit `hydrationByteBudget` when one is set.
+ */
+export async function connectChat(
+  deps: ChatDeps,
+  connection: Connection,
+  options: { hydrationByteBudget?: number } = {}
+): Promise<void> {
+  const session = deps.sessions.session(deps.session ?? "");
+  const budget = options.hydrationByteBudget;
+  const messages =
+    budget !== undefined && Number.isFinite(budget)
+      ? (await session.getRecentHistory(budget)).messages
+      : await session.getHistory();
+  const text = frameText({
+    type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
+    messages
+  } as { type: string });
+  if (text !== undefined) sendIfOpen(connection, text);
+}
+
 /** The turn of `lane` that is running now, and whose stream is open, if any. */
 async function streamingTurn(
   deps: ChatDeps,
