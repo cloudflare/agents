@@ -3967,7 +3967,11 @@ export class Agent<
     } finally {
       for (const remove of listeners) remove();
     }
-    this._broadcastAgentToolTerminal(meta.parentToolCallId, sequence, result);
+    // A run cancelled through Tasks meanwhile ends `aborted` without this
+    // result, and its report sends that terminal frame instead.
+    if (!step.signal.aborted) {
+      this._broadcastAgentToolTerminal(meta.parentToolCallId, sequence, result);
+    }
     return this._agentToolResultForRecord(result, local);
   }
 
@@ -4003,6 +4007,15 @@ export class Agent<
     const result = this._agentToolTaskResult(record);
     const meta = this._agentToolTaskMeta(record);
     if (!result || !meta) return;
+    // A run that ended without an attempt's result (cancelled while it
+    // waited for its next check, say): no attempt sent its terminal frame.
+    if (record.status !== "completed") {
+      this._broadcastAgentToolTerminal(
+        meta.parentToolCallId,
+        Date.now(),
+        result
+      );
+    }
     // Best-effort, like every recovered or detached finish: a hook that
     // throws goes to `onError` and does not hold the run's report.
     try {

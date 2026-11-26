@@ -6438,7 +6438,7 @@ export class ThinkAgentToolParent extends Agent {
    */
   async abortReissuedRunWhileItWaitsForTest(
     runId = crypto.randomUUID()
-  ): Promise<{ result: string; child: string | null }> {
+  ): Promise<{ result: string; child: string | null; terminals: string[] }> {
     const child = await this.subAgent(ThinkTestAgent, runId);
     await child.setBeforeStepAsyncDelay(60_000);
     const started = await child.startAgentToolRun("silent child", { runId });
@@ -6456,6 +6456,7 @@ export class ThinkAgentToolParent extends Agent {
       )
     `;
     await carryForwardAgentToolRunsForTest(this);
+    this.events = [];
     const controller = new AbortController();
     const running = this.runAgentTool(ThinkTestAgent, {
       runId,
@@ -6477,7 +6478,19 @@ export class ThinkAgentToolParent extends Agent {
       child,
       runId
     ).catch(() => null);
-    return { result: result.status, child: inspection?.status ?? null };
+    const terminals = this.events
+      .map((message) => message.event)
+      .filter(
+        (event) =>
+          event.runId === runId &&
+          ["finished", "error", "aborted", "interrupted"].includes(event.kind)
+      )
+      .map((event) => event.kind);
+    return {
+      result: result.status,
+      child: inspection?.status ?? null,
+      terminals
+    };
   }
 
   /**
