@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
@@ -344,14 +344,26 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    // The results arrive over the socket, not the RPC: wait until they
-    // started a turn before waiting for idle.
-    await vi.waitFor(async () => {
-      expect((await agentStub.getStartedRequestIds()).length).toBeGreaterThan(
-        0
-      );
-    });
+    // The results arrive over the socket, not the RPC: wait until the agent
+    // has handled both, then until their updates and continuations settle.
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 2);
+    // Up to two continuation turns of the default 20 x 50 ms reply.
+    expect(await agentStub.waitUntilStableForTest({ timeout: 10_000 })).toBe(
+      true
+    );
     await agentStub.waitForIdleForTest();
+
+    // Both results are applied.
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    for (const toolCallId of ["call_idle_tool_1", "call_idle_tool_2"]) {
+      expect(
+        stored
+          .flatMap((message) => message.parts)
+          .find(
+            (part) => "toolCallId" in part && part.toolCallId === toolCallId
+          )
+      ).toMatchObject({ state: "output-available" });
+    }
 
     // With no prior active turn the coalesce window (10ms) starts
     // immediately. Both results coalesce into 1 turn when the second
@@ -366,7 +378,7 @@ describe("AIChatAgent chat turn serialization", () => {
     expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
 
     ws.close(1000);
-  });
+  }, 20_000);
 
   it("queues a follow-up continuation when a tool result arrives after coalesce but before stream start", async () => {
     const room = crypto.randomUUID();

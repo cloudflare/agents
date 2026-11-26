@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import type { Env } from "./worker";
 import { MessageType } from "../types";
 import { connectChatWS } from "./test-utils";
@@ -103,7 +103,9 @@ describe("AIChatAgent detached notify / milestones (parity with Think)", () => {
     const parent = await getParent(room);
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-    // A turn is running: the reaction queues behind it.
+    // A turn is running, held on the model: the reaction queues behind it.
+    await parent.holdNextModelCallForTest();
+    onTestFinished(() => parent.releaseModelCallForTest());
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
@@ -113,15 +115,14 @@ describe("AIChatAgent detached notify / milestones (parity with Think)", () => {
           body: JSON.stringify({
             messages: [
               { id: "u1", role: "user", parts: [{ type: "text", text: "Hi" }] }
-            ],
-            delayMs: 400
+            ]
           })
         }
       })
     );
     await expect
-      .poll(() => parent.getChatMessageCallCountForTest(), { timeout: 3000 })
-      .toBe(1);
+      .poll(() => parent.isModelCallHeldForTest(), { timeout: 5000 })
+      .toBe(true);
     await parent.notifyDetachedMilestoneForTest({
       runId: "ms-stopped",
       name: "preview-ready",
@@ -130,7 +131,7 @@ describe("AIChatAgent detached notify / milestones (parity with Think)", () => {
     });
 
     await parent.abortAllRequestsForTest();
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await parent.releaseModelCallForTest();
     await parent.waitForIdleForTest();
 
     // The reaction's turn existed when the stop came, so it never ran.
