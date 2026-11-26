@@ -14,7 +14,7 @@ export default defineConfig({
   ],
   test: {
     name: "workers",
-    retry: 3,
+    retry: 0,
     testTimeout: 30_000,
     hookTimeout: 30_000,
     include: [path.join(testsDir, "**/*.test.ts")],

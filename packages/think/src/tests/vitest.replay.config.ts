@@ -72,7 +72,7 @@ export default defineConfig({
     include: [path.join(testsDir, "messenger-replay.test.ts")],
     setupFiles: [path.join(testsDir, "setup.ts")],
     testTimeout: 10000,
-    retry: 3,
+    retry: 0,
     // Under the full parallel matrix, tearing down the workers-pool isolates can
     // overrun vitest's 10s default and surface as "Worker exited unexpectedly"
     // (an infra teardown race, not a test failure that `retry` can catch). Give

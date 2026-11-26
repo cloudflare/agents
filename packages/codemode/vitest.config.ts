@@ -11,7 +11,7 @@ export default defineConfig({
   ],
   test: {
     name: "workers",
-    retry: 3,
+    retry: 0,
     include: ["src/tests/**/*.test.ts"],
     exclude: ["src/tests/**/*.browser.test.ts"]
   }

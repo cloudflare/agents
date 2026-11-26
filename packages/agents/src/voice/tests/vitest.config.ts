@@ -16,7 +16,7 @@ export default defineConfig({
   ],
   test: {
     name: "voice-workers",
-    retry: 3,
+    retry: 0,
     include: [path.join(testsDir, "**/*.test.ts")],
     exclude: [
       // SFU integration tests need real API credentials via process.env.
