@@ -180,8 +180,9 @@ attempt — preventing startup reconciliation from undoing queue backoff. At its
 five-second job handoff it registers the still-running attempt with Lifecycle.
 AI Chat and Think register the post-handoff model dispatch when the callback
 runs under the alarm owner's dispatch — root Task runs and legacy root-owned
-Scheduler rows. Root chat recovery uses the reserved
-`__cf_internal_chat_recovery` definition. A facet's chat recovery runs as a Task run in the facet, under
+Scheduler rows. Chat recovery attempts run in chat-turn Task runs
+(`__cf_internal_chat_turn`); the reserved `__cf_internal_chat_recovery`
+definition only finishes runs an earlier version enqueued. A facet's chat recovery runs as a Task run in the facet, under
 the facet's own alarm pass (driven by its root), so `trackAlarmWork` and the
 breaker apply there as at a root.
 
