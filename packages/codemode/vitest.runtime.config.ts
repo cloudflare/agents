@@ -15,7 +15,7 @@ export default defineConfig({
   ],
   test: {
     name: "runtime",
-    retry: 3,
+    retry: 0,
     include: ["src/runtime-tests/**/*.test.ts"]
   }
 });
