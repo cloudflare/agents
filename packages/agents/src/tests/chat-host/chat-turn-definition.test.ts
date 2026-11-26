@@ -1,9 +1,14 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
-import { chatTurnDefinition, chatTurnStreamId } from "../../chat/chat-host";
+import {
+  CHAT_CLEARED,
+  chatTurnDefinition,
+  chatTurnStreamId
+} from "../../chat/chat-host";
 import type { TaskStep } from "../../tasks/types";
 import { TaskSettlement } from "../../tasks/settlement";
+import { TaskCancellation } from "../../tasks/replay";
 import type { ChatHost } from "../../chat/chat-host";
 
 /** A later attempt of run `id`, as Tasks hands it after a reset. */
@@ -793,6 +798,239 @@ describe("chatTurnDefinition", () => {
       const branches = await session.getBranches("u1");
       expect(branches).toHaveLength(2);
       expect(branches.map((m) => m.id)).toContain("old");
+    });
+  });
+
+  it("a tool-answer turn that recovery restarts without its partial keeps the tool answer", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: { city: "Lisbon" }
+          }
+        ]
+      } as never);
+      // The first attempt continued a1, then the object reset.
+      const checkpoint = new Map<string, unknown>([
+        ["chat:base", { id: "a1", parts: 1 }]
+      ]);
+      const cut = await instance.streams.open(chatTurnStreamId("ta-2"), {
+        tag: "ta-2"
+      });
+      for (const chunk of [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "You are in" }
+      ]) {
+        cut.append(chunk as never);
+      }
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: { onRecovery: () => ({ continue: true, persist: false }) }
+      })(
+        { trigger: "tool-answer" },
+        laterAttempt("ta-2", 2, new AbortController().signal, checkpoint)
+      );
+      const reply = JSON.stringify(await session.getMessage("a1"));
+      expect(reply).toContain('"city":"Lisbon"');
+      expect(reply).not.toContain("You are in");
+    });
+  });
+
+  it("text recovery discarded does not come back when the next attempt is cut off too", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-d");
+      const checkpoint = new Map<string, unknown>();
+      const signal = new AbortController().signal;
+      let recoveries = 0;
+      let calls = 0;
+      const host: ChatHost = {
+        respond: async () =>
+          ++calls === 1
+            ? stream([
+                { type: "start", messageId: "b1" },
+                { type: "text-start", id: "t2" },
+                { type: "text-delta", id: "t2", delta: "Option B" },
+                { type: "error", errorText: "overloaded" }
+              ])
+            : stream([
+                { type: "text-start", id: "t3" },
+                { type: "text-delta", id: "t3", delta: " done" },
+                { type: "text-end", id: "t3" }
+              ]),
+        hooks: {
+          classifyError: () => "transient",
+          onRecovery: () =>
+            ++recoveries === 1
+              ? { continue: true, persist: false }
+              : { continue: true }
+        }
+      };
+      const second = await definitionOf(instance, host)(
+        { trigger: "submit-message" },
+        laterAttempt("run-d", 2, signal, checkpoint)
+      );
+      expect(second).toBeInstanceOf(TaskSettlement);
+      await definitionOf(instance, host)(
+        { trigger: "submit-message" },
+        laterAttempt("run-d", 3, signal, checkpoint)
+      );
+      const history = JSON.stringify(
+        await instance.sessions.session("s1").getHistory()
+      );
+      expect(history).toContain("Option B");
+      expect(history).not.toContain("Hel");
+    });
+  });
+
+  it("a chat clear delivered through Tasks keeps nothing of the turn", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const stop = new AbortController();
+      let passed!: () => void;
+      const deltaPassed = new Promise<void>((resolve) => (passed = resolve));
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            async start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({ type: "text-start", id: "t1" });
+              controller.enqueue({
+                type: "text-delta",
+                id: "t1",
+                delta: "Part"
+              });
+              await deltaPassed;
+              // How Tasks.cancel aborts a live attempt.
+              stop.abort(new TaskCancellation(CHAT_CLEARED));
+              controller.error(new Error("stopped"));
+            }
+          }),
+        hooks: {
+          transformChunk: (chunk) => {
+            if (chunk.type === "text-delta") passed();
+            return chunk;
+          }
+        }
+      })({ trigger: "server" }, laterAttempt("clr-1", 1, stop.signal));
+      expect(result).toMatchObject({ status: "aborted" });
+      expect(await instance.sessions.session("s1").getHistory()).toEqual([]);
+    });
+  });
+
+  it("a regenerate continued after a reset stays on its question's new branch", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "old",
+        role: "assistant",
+        parts: [{ type: "text", text: "Old" }]
+      } as never);
+      await cutOff(instance, "rg-2");
+      await definitionOf(instance, instance.host)(
+        { trigger: "regenerate-message", questionId: "u1" },
+        laterAttempt("rg-2", 2)
+      );
+      const branches = await session.getBranches("u1");
+      expect(branches.map((m) => m.id).sort()).toEqual(["a1", "old"]);
+    });
+  });
+
+  it("a client tool call cut off before its input finished is settled, not left waiting", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const cut = await instance.streams.open(chatTurnStreamId("ct-1"), {
+        tag: "ct-1"
+      });
+      for (const chunk of [
+        { type: "start", messageId: "a1" },
+        { type: "tool-input-start", toolCallId: "c1", toolName: "askUser" },
+        { type: "tool-input-delta", toolCallId: "c1", inputTextDelta: '{"q' }
+      ]) {
+        cut.append(chunk as never);
+      }
+      await definitionOf(instance, instance.host)(
+        { trigger: "server", clientTools: [{ name: "askUser" }] },
+        laterAttempt("ct-1", 2)
+      );
+      const reply = (await instance.sessions
+        .session("s1")
+        .getMessage("a1")) as unknown as {
+        parts: Array<{ toolCallId?: string; state?: string }>;
+      };
+      expect(reply.parts.find((p) => p.toolCallId === "c1")?.state).toBe(
+        "output-error"
+      );
+    });
+  });
+
+  it("marks the first frame of a continuation that sent no start as a continuation", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Asked" }]
+      } as never);
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            stream([
+              { type: "text-start", id: "t2" },
+              { type: "text-delta", id: "t2", delta: " more" },
+              { type: "text-end", id: "t2" }
+            ])
+        }
+      )({ trigger: "tool-answer" }, laterAttempt("cf-1", 1));
+      expect(sent[0]).toMatchObject({ continuation: true });
+      expect(JSON.parse(String(sent[0].body))).toMatchObject({
+        type: "start",
+        messageId: "a1"
+      });
     });
   });
 });

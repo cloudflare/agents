@@ -20,6 +20,7 @@ import type { ClientToolSchema } from "./client-tools";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
 import { chatRecoveryBackoffSeconds } from "./recovery-engine";
 import { TaskSettlement } from "../tasks/settlement";
+import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
@@ -144,6 +145,8 @@ export const CHAT_CLEARED = "chat cleared";
 
 /** The run's checkpoint key holding the reply a continuation extends. */
 const BASE_CHECKPOINT = "chat:base";
+/** The run's checkpoint key counting the stream chunks recovery discarded. */
+const DISCARDED_CHECKPOINT = "chat:discarded";
 
 /** The run's checkpoint key holding the id of the reply it stored. */
 const REPLY_CHECKPOINT = "chat:reply";
@@ -306,13 +309,20 @@ function repairCutOffTools(
         return { ...part, state: "done" } as typeof part;
       }
       if (!isCutOffTool(part)) return part;
-      // A client tool call waits for the tab's answer, not on the turn.
+      // A client tool call with its whole input waits for the tab's answer;
+      // one cut off mid-input can never be answered, so it is settled.
       const name =
         (part as { toolName?: unknown }).toolName ??
         ((part as { type: string }).type.startsWith("tool-")
           ? (part as { type: string }).type.slice(5)
           : undefined);
-      if (typeof name === "string" && answeredByClient.has(name)) return part;
+      if (
+        typeof name === "string" &&
+        answeredByClient.has(name) &&
+        (part as { state?: unknown }).state === "input-available"
+      ) {
+        return part;
+      }
       const toolPart = part as InterruptedToolPart;
       return (
         hooks?.repairInterruptedToolPart?.(toolPart) ??
@@ -324,6 +334,13 @@ function repairCutOffTools(
       );
     })
   };
+}
+
+/** The reason a stop carries: Tasks' cancellation, an Error, or a string. */
+function cancelReason(reason: unknown): string {
+  if (reason instanceof TaskCancellation) return reason.reason ?? "";
+  if (reason instanceof Error) return reason.message;
+  return String(reason);
 }
 
 /** Read what `respond` returned as UI message chunks. */
@@ -393,6 +410,11 @@ export function chatTurnDefinition(
         sendIfOpen(connection, text);
       }
     };
+    // A regenerated reply is a new branch under its question.
+    const placement =
+      run.trigger === "regenerate-message" && run.questionId !== undefined
+        ? { parentId: run.questionId }
+        : {};
     const report = async (result: ChatTurnResult) => {
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
@@ -422,11 +444,6 @@ export function chatTurnDefinition(
         return undefined;
       }
       const stored = host.hooks?.sanitizeForPersistence?.(message) ?? message;
-      // A regenerated reply is a new branch under its question.
-      const placement =
-        run.trigger === "regenerate-message" && run.questionId !== undefined
-          ? { parentId: run.questionId }
-          : {};
       const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
       let after: (() => Promise<void>) | undefined;
       try {
@@ -486,7 +503,14 @@ export function chatTurnDefinition(
     }
     let partial: UIMessage | undefined;
     if (earlier) {
-      const stored = await storedChunks(deps.streams, streamId);
+      // Chunks an earlier attempt streamed and recovery discarded are not
+      // part of the reply.
+      const stored = (await storedChunks(deps.streams, streamId)).slice(
+        step.checkpoint.get<number>(DISCARDED_CHECKPOINT) ?? 0
+      );
+      const streamedCount =
+        (step.checkpoint.get<number>(DISCARDED_CHECKPOINT) ?? 0) +
+        stored.length;
       // A reply this run continues (a tool answer's) is the base the stream
       // extends: its first `parts` parts as they were when the run began.
       const base = step.checkpoint.get<{ id: string; parts: number }>(
@@ -511,8 +535,22 @@ export function chatTurnDefinition(
       );
       if (built && built.parts.length > 0) {
         partial = repairCutOffTools(built, host.hooks, run.clientTools ?? []);
-        await session.upsertMessage(partial as never);
+        await session.upsertMessage(partial as never, placement);
       }
+      // Drop what this run streamed: a reply it continues goes back to how
+      // it was when the run began; a new reply is removed.
+      const dropPartial = async () => {
+        step.checkpoint.set(DISCARDED_CHECKPOINT, streamedCount);
+        if (!partial) return;
+        if (baseMessage && base) {
+          await session.upsertMessage({
+            ...baseMessage,
+            parts: baseMessage.parts.slice(0, base.parts)
+          } as never);
+        } else {
+          await session.deleteMessages([partial.id]);
+        }
+      };
       const partialParts = (partial?.parts ?? []) as never[];
       let decision: ChatRecoveryOptions | void = undefined;
       if (recovery !== false && step.attempt <= maxAttempts) {
@@ -539,10 +577,10 @@ export function chatTurnDefinition(
         decision?.continue === false
       ) {
         // falls through below
-      } else if (partial && decision?.persist === false) {
+      } else if (decision?.persist === false) {
         // Continue without what was streamed: the question is answered
         // again.
-        await session.deleteMessages([partial.id]);
+        await dropPartial();
         partial = undefined;
       }
       if (
@@ -552,9 +590,7 @@ export function chatTurnDefinition(
       ) {
         // Given up: what was streamed stays stored (unless the app said
         // not to keep it), and the turn ends as an error.
-        if (partial && decision?.persist === false) {
-          await session.deleteMessages([partial.id]);
-        }
+        if (decision?.persist === false) await dropPartial();
         const writer = await deps.streams.open(streamId, { tag: requestId });
         writer.error("interrupted");
         return report({
@@ -636,7 +672,11 @@ export function chatTurnDefinition(
               } as UIMessageChunk;
               out.append(start as never);
               seen.push(start);
-              send({ body: JSON.stringify(start), done: false });
+              send({
+                body: JSON.stringify(start),
+                done: false,
+                ...(continuing && { continuation: true })
+              });
               controller.enqueue(start);
             }
             started = true;
@@ -674,7 +714,7 @@ export function chatTurnDefinition(
       } catch (error) {
         if (step.signal.aborted) {
           // A cleared chat keeps nothing of the turn.
-          if (String(step.signal.reason).includes(CHAT_CLEARED)) {
+          if (cancelReason(step.signal.reason) === CHAT_CLEARED) {
             out.close({ discard: true });
             return report({ requestId, status: "aborted" });
           }
