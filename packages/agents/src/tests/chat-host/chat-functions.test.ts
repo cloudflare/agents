@@ -7,11 +7,13 @@ import {
   answerTool,
   cancelTurn,
   chatDispatch,
+  clearChat,
   replayTurn,
   resumeChat,
   submitTurn
 } from "../../chat/chat-functions";
 import {
+  type ChatHooks,
   chatTurnDefinition,
   chatTurnStreamId,
   parkedIn
@@ -1496,6 +1498,7 @@ describe("chat functions over a minimal host", () => {
   });
 
   /** Start r1 and hold it in respond until the returned release is called. */
+
   async function holdFirstTurn(instance: ChatTurnHostObject, lane: ChatLane) {
     let release!: () => void;
     const released = new Promise<void>((resolve) => (release = resolve));
@@ -1816,6 +1819,64 @@ describe("chat functions over a minimal host", () => {
         status: "aborted"
       });
       instance.host.respond = respond;
+    });
+  });
+
+  async function cutOffIntoBackoff(instance: ChatTurnHostObject) {
+    await instance.lifecycle.start();
+    // The model streams some text, then fails transiently: the turn waits
+    // out its retry backoff with its stream open.
+    instance.reply = [
+      { type: "start", messageId: "a1" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "Part" },
+      { type: "error", errorText: "overloaded" }
+    ];
+    const hooks = instance.host.hooks;
+    (instance.host as { hooks?: ChatHooks }).hooks = {
+      ...hooks,
+      classifyError: () => "transient"
+    };
+    await instance.sessions.session("s1").appendMessage({
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "Hi" }]
+    } as never);
+    // `start: "now"` returns after the first attempt settles.
+    const { runId: requestId } = await instance.tasks.run(
+      instance.lane.definition,
+      { trigger: "submit-message", questionId: "u1" } as never,
+      { lane: instance.lane.lane, start: "now", retain: false }
+    );
+    expect(instance.tasks.peek(requestId)).toMatchObject({
+      status: "pending",
+      waitReason: "retry"
+    });
+    return requestId;
+  }
+
+  it("a stop while a turn waits out its retry backoff stores what it streamed and settles its stream", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const requestId = await cutOffIntoBackoff(instance);
+      expect(await cancelTurn(instance.deps, requestId)).toBe(true);
+      expect(
+        (await instance.streams.status(chatTurnStreamId(requestId)))?.state
+      ).not.toBe("streaming");
+      const reply = await instance.sessions.session("s1").getMessage("a1");
+      expect(JSON.stringify(reply)).toContain("Part");
+    });
+  });
+
+  it("a clear while a turn waits out its retry backoff keeps nothing and settles its stream", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const requestId = await cutOffIntoBackoff(instance);
+      await clearChat(instance.deps, instance.lane);
+      expect(
+        (await instance.streams.status(chatTurnStreamId(requestId)))?.state
+      ).not.toBe("streaming");
+      expect(await instance.sessions.session("s1").getHistory()).toEqual([]);
     });
   });
 });

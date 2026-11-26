@@ -545,6 +545,76 @@ function cancelReason(reason: unknown): string {
   return String(reason);
 }
 
+/**
+ * @internal A turn waiting out its retry backoff, read before a cancel or a
+ * clear: its handler does not run again, so whoever ends it settles its
+ * stream. A stop keeps what it streamed as a stored reply, as a stop while
+ * streaming does; a clear keeps nothing. `undefined` for any other turn.
+ */
+export function retryingTurn(
+  deps: ChatDeps,
+  requestId: string
+): { settle(keep: boolean): Promise<void> } | undefined {
+  const record = deps.tasks.peek(requestId);
+  if (record?.status !== "pending" || record.waitReason !== "retry") {
+    return undefined;
+  }
+  const base = deps.tasks.checkpointOf<{ id: string; parts: number }>(
+    requestId,
+    BASE_CHECKPOINT
+  );
+  const discarded =
+    deps.tasks.checkpointOf<number>(requestId, DISCARDED_CHECKPOINT) ?? 0;
+  const input = deps.tasks.inputOf<ChatTurnInput>(requestId);
+  return {
+    async settle(keep) {
+      const streamId = chatTurnStreamId(requestId);
+      if ((await deps.streams.status(streamId))?.state !== "streaming") return;
+      const session = deps.sessions.session(
+        input?.session ?? deps.session ?? ""
+      );
+      let message: UIMessage | undefined;
+      if (keep) {
+        const stored = (await storedChunks(deps.streams, streamId))
+          .slice(discarded)
+          .filter((chunk) => chunk.type !== "error");
+        const baseMessage = base
+          ? ((await session.getMessage(base.id)) as unknown as UIMessage | null)
+          : null;
+        const built = await messageOf(
+          new ReadableStream({
+            start(controller) {
+              for (const chunk of stored) controller.enqueue(chunk);
+              controller.close();
+            }
+          }),
+          baseMessage && base
+            ? { ...baseMessage, parts: baseMessage.parts.slice(0, base.parts) }
+            : undefined
+        ).catch(() => undefined);
+        if (built && built.parts.length > 0) {
+          message = repairCutOffTools(
+            built,
+            undefined,
+            input?.clientTools ?? []
+          );
+        }
+      }
+      if (message) {
+        await session.upsertMessage(
+          message as never,
+          input?.trigger === "regenerate-message" &&
+            input.questionId !== undefined
+            ? { parentId: input.questionId }
+            : {}
+        );
+      }
+      const out = await deps.streams.open(streamId, { tag: requestId });
+      out.close({ discard: true });
+    }
+  };
+}
+
 /** Read what `respond` returned as UI message chunks. */
 function chunksOf(
   source: ChatModelStream,
