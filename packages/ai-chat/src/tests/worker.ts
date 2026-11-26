@@ -5651,7 +5651,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   async triggerInterruptedStreamCheck(): Promise<void> {
-    if (!this._replyStreams.hasActiveStream() || this._replyStreams.isLive) {
+    // SAFETY: a test reads whether the restored stream has a reader.
+    const live = (this._replyStreams as unknown as { _isLive: boolean })
+      ._isLive;
+    if (!this._replyStreams.hasActiveStream() || live) {
       return;
     }
 

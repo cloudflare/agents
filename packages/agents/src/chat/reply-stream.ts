@@ -613,14 +613,6 @@ export class ReplyStreams implements ReplyStreamLog {
     return this._activeStreamId !== null;
   }
 
-  /**
-   * Whether the active stream has a live LLM reader (started in this
-   * instance) vs being restored from SQLite after hibernation (orphaned).
-   */
-  get isLive(): boolean {
-    return this._isLive;
-  }
-
   // ── Stream lifecycle ───────────────────────────────────────────────
 
   /**
