@@ -6318,7 +6318,9 @@ function delayWithAbort(ms: number, signal?: AbortSignal) {
 function makeDelayedSSEChunkResponse(
   chunks: ReadonlyArray<Record<string, unknown>>,
   delayMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Held before the stream ends, so it stays live until released. */
+  beforeEnd?: TestGate | null
 ) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -6330,6 +6332,7 @@ function makeDelayedSSEChunkResponse(
             encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
           );
         }
+        if (beforeEnd) await beforeEnd.pass();
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       } catch (error) {
@@ -6718,7 +6721,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         { type: "finish" }
       ],
       Number(input?.chunkDelayMs ?? 0),
-      options?.abortSignal
+      options?.abortSignal,
+      this._injectionHold
     );
   }
 
@@ -7144,6 +7148,19 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
    */
   armAttachRaceInjectionForTest(runId: string, body: string): void {
     this._attachRaceInjection = { runId, body };
+    this._injectionHold = new TestGate();
+  }
+
+  /**
+   * Keeps the child's reply live (before its end) until an armed injection
+   * has landed: a reply that ended first would have closed the parent's
+   * tail, and the injected frames would reach no one.
+   */
+  private _injectionHold: TestGate | null = null;
+
+  private _releaseInjectionHold(): void {
+    this._injectionHold?.release();
+    this._injectionHold = null;
   }
 
   private _progressInjection: {
@@ -7166,6 +7183,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     milestoneBody: string
   ): void {
     this._progressInjection = { runId, progressBody, milestoneBody };
+    this._injectionHold = new TestGate();
   }
 
   /**
@@ -7216,6 +7234,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         id: live.requestId,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
       });
+      this._releaseInjectionHold();
     }
 
     const progress = this._progressInjection;
@@ -7240,6 +7259,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         id: live.requestId,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
       });
+      this._releaseInjectionHold();
     }
 
     return chunks;
