@@ -7,7 +7,7 @@ import {
 } from "../recovery-engine";
 import type { ChatRecoveryOptions } from "../lifecycle";
 import type { MessagePart } from "../message-builder";
-import type { StreamInterruptionHost } from "../recovery-route";
+import type { StreamInterruptionRoute } from "../recovery-route";
 import {
   resolveChatRecoveryConfig,
   type ChatRecoveryIncident
@@ -131,12 +131,14 @@ function setup(scenario: Scenario = {}) {
     onGiveUpBookkeepingError: () => {}
   };
   const engine = new ChatRecoveryEngine(adapter);
-  const host: StreamInterruptionHost = {
+  const host: StreamInterruptionRoute = {
     requestId: "request-1",
     streamId: "stream-1",
     partialParts: scenario.partialParts ?? [text("Partial")],
     error: scenario.error ?? new Error("upstream reset"),
-    latestUserMessageId: "user-1",
+    messages: () => [
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "q" }] }
+    ],
     retryTargetUserId: async () => {
       log.push("retry-target");
       return scenario.retryTarget ?? null;
@@ -151,10 +153,7 @@ function setup(scenario: Scenario = {}) {
       statusAtResolve.push([...storage.values()][0]?.status ?? "none");
       return keep ? scenario.storedReplyId : undefined;
     },
-    requestContext: () => ({
-      lastBody: { model: "m" },
-      lastClientTools: undefined
-    }),
+    turnContext: { lastBody: { model: "m" }, lastClientTools: undefined },
     onDeclined: async (errorText) => {
       log.push(`declined: ${errorText}`);
     },
@@ -246,6 +245,27 @@ describe("routeStreamInterruption", () => {
     expect(t.log).not.toContain("after-schedule");
     // The tab's last frame for it said "recovering": it is ended.
     expect(t.log).toContain("end-aborted:request-1");
+  });
+
+  it("hands the app its full recovery context: transcript, turn context and the live turn", async () => {
+    const t = setup({ storedReplyId: "assistant-1" });
+    t.host.liveTurn = { recoveryData: { step: 3 }, createdAt: 1234 };
+    let seen: Record<string, unknown> | undefined;
+    t.host.onChatRecovery = async (context) => {
+      seen = context as unknown as Record<string, unknown>;
+      return {};
+    };
+
+    await t.run();
+    expect(seen).toMatchObject({
+      requestId: "request-1",
+      streamId: "stream-1",
+      partialText: "Partial",
+      recoveryData: { step: 3 },
+      createdAt: 1234,
+      lastBody: { model: "m" },
+      messages: [{ id: "user-1", role: "user" }]
+    });
   });
 
   it("retries the question when the turn produced nothing", async () => {
