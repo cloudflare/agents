@@ -89,6 +89,7 @@ export function registerMessengerReplies(
           let snapshot = step.checkpoint.get(SNAPSHOT);
           if (snapshot === undefined) {
             // A run from think@0.24.0: move its snapshot into the checkpoint.
+            // TEMPORARY: remove in the next minor after this ships.
             const released = releasedSnapshotKey(step.id);
             snapshot = (await storage.get(released)) as TaskJson | undefined;
             if (snapshot !== undefined) {
