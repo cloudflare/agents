@@ -1872,12 +1872,18 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   /** Counts the client requests that arrive under a superseding strategy. */
-  private readonly _overlappingSubmits = ((turns: {
-    runClientRequest(request: {
-      onDecision?(decision: { strategy: unknown }): void;
-    }): Promise<void>;
-  }) => {
+  private readonly _overlappingSubmits = ((
+    turns:
+      | {
+          runClientRequest(request: {
+            onDecision?(decision: { strategy: unknown }): void;
+          }): Promise<void>;
+        }
+      | undefined
+  ) => {
     const counter = { count: 0 };
+    // The harness-backed Think has no `_turns`: nothing to count there.
+    if (!turns) return counter;
     const run = turns.runClientRequest.bind(turns);
     turns.runClientRequest = (request) =>
       run({
