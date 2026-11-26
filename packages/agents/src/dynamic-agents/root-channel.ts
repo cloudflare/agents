@@ -99,45 +99,67 @@ export class RootFacetChannel extends RpcTarget implements RootFacetRpcSurface {
 
   _cf_sendToSubAgentConnection(
     connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
+    message: string | ArrayBuffer | ArrayBufferView,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ) {
     return this.#run(() =>
-      this.#root._cf_sendToSubAgentConnection(connectionId, message)
+      this.#root._cf_sendToSubAgentConnection(connectionId, message, ownerPath)
     );
   }
 
   _cf_sendManyToSubAgentConnection(
     connectionId: string,
-    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ) {
     return this.#run(() =>
-      this.#root._cf_sendManyToSubAgentConnection(connectionId, messages)
+      this.#root._cf_sendManyToSubAgentConnection(
+        connectionId,
+        messages,
+        ownerPath
+      )
     );
   }
 
   _cf_closeSubAgentConnection(
     connectionId: string,
     code?: number,
-    reason?: string
+    reason?: string,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ) {
     return this.#run(() =>
-      this.#root._cf_closeSubAgentConnection(connectionId, code, reason)
+      this.#root._cf_closeSubAgentConnection(
+        connectionId,
+        code,
+        reason,
+        ownerPath
+      )
     );
   }
 
-  _cf_setSubAgentConnectionState(connectionId: string, state: unknown) {
+  _cf_setSubAgentConnectionState(
+    connectionId: string,
+    state: unknown,
+    ownerPath?: ReadonlyArray<AgentPathStep>
+  ) {
     return this.#run(() =>
-      this.#root._cf_setSubAgentConnectionState(connectionId, state)
+      this.#root._cf_setSubAgentConnectionState(connectionId, state, ownerPath)
     );
   }
 
   _cf_setSubAgentConnectionFlag(
     connectionId: string,
     key: string,
-    value: unknown
+    value: unknown,
+    ownerPath?: ReadonlyArray<AgentPathStep>
   ) {
     return this.#run(() =>
-      this.#root._cf_setSubAgentConnectionFlag(connectionId, key, value)
+      this.#root._cf_setSubAgentConnectionFlag(
+        connectionId,
+        key,
+        value,
+        ownerPath
+      )
     );
   }
 
