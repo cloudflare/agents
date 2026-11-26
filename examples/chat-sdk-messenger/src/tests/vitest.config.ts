@@ -18,7 +18,7 @@ export default defineConfig({
   ],
   test: {
     name: "chat-sdk-messenger-example",
-    retry: 3,
+    retry: 0,
     include: [path.join(testsDir, "**/*.test.ts")],
     testTimeout: 15_000
   }

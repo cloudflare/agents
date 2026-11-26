@@ -10,7 +10,7 @@ export default defineConfig({
     }
   },
   test: {
-    retry: 3,
+    retry: 0,
     environment: "node",
     include: ["tests/**/*.test.ts"]
   }
