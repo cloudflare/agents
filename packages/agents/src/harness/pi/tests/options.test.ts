@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 
 /**
@@ -25,6 +25,9 @@ describe("a harness without defaults", () => {
       timeout: 5000,
       interval: 20
     });
+    // And nothing re-armed: there is no alarm left to run.
+    expect(await runDurableObjectAlarm(harness)).toBe(false);
+    expect(await harness.alarmTime()).toBeNull();
   });
 
   it("answers once the session's model is set", async () => {
