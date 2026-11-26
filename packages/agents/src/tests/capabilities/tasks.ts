@@ -439,6 +439,12 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   stepGate: Promise<void> | null = null;
   /** `__cf_reported` parks on this when set. */
   reportedGate: Promise<void> | null = null;
+  /** `__cf_reported` runs whose handler started, by run id. */
+  readonly reportedStarts: string[] = [];
+  /** Holds every `pending` report of `__cf_reported` while set. */
+  pendingReportGate: Promise<void> | null = null;
+  /** Runs whose `pending` report waits on {@link pendingReportGate}. */
+  readonly pendingReportsHeld: string[] = [];
   /** `__cf_reported` terminal reports wait on this when set. */
   terminalReportGate: Promise<void> | null = null;
   #owedReports = 0;
@@ -456,7 +462,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
     );
     this.tasks.register(
       "__cf_reported",
-      async () => {
+      async (_input, step) => {
+        this.reportedStarts.push(step.id);
         await this.reportedGate;
         return "ok";
       },
@@ -464,6 +471,10 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         maxAttempts: 2,
         onStatus: async (snapshot) => {
           const terminal = !["pending", "running"].includes(snapshot.status);
+          if (snapshot.status === "pending" && this.pendingReportGate) {
+            this.pendingReportsHeld.push(snapshot.runId);
+            await this.pendingReportGate;
+          }
           if (terminal && snapshot.runId === "owed") this.#owedReports++;
           if (terminal) await this.terminalReportGate;
           if (terminal && this.failReports > 0) {

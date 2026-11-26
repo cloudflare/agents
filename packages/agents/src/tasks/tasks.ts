@@ -1090,24 +1090,56 @@ export class Tasks<
     }
 
     const runId = options.runId ?? `task_${nanoid()}`;
-    const now = Date.now();
     const lane = options.lane ?? null;
+    const policy = options.policy ?? "queue";
+    const debounceMs = typeof policy === "object" ? policy.debounceMs : 0;
+    if (options.policy !== undefined && lane === null) {
+      throw new Error("A Task run's policy needs a lane");
+    }
+    if (!Number.isFinite(debounceMs) || debounceMs < 0) {
+      throw new Error("A Task run's debounceMs must be a finite number >= 0");
+    }
+    let skipped: TaskRunRow[] = [];
+    let busy = false;
+    if (lane !== null && policy !== "queue") {
+      busy = this.#store.laneHead(lane) !== undefined;
+      if (busy && policy === "drop") {
+        return {
+          runId,
+          definition,
+          accepted: false,
+          dropped: true,
+          status: "skipped",
+          createdAt: Date.now()
+        };
+      }
+      // From here to the insert nothing awaits, so a second arrival sees
+      // this one's skip and its run together.
+      if (busy)
+        skipped = this.#skipLaneRows(lane, `superseded by ${runId}`, false);
+    }
+    const superseded = skipped.map((row) => row.run_id);
+    const now = Date.now();
     const placed = this.#store.placeInput(runId, inputJson);
     // A run queued behind its lane's open run waits with no deadline (and
-    // no wake job) until that run settles.
+    // no wake job) until that run settles. A debounced arrival at a busy
+    // lane keeps its quiet period as its deadline, wait reason `debounce`:
+    // it starts when it is the head and the period is over.
     const place = lane === null ? null : this.#store.lanePlace(lane);
     const queued = place?.open ?? false;
+    const debounceUntil = busy && debounceMs > 0 ? now + debounceMs : null;
     this.#store.sql`
       INSERT INTO ${this.#tables.runs}
         (run_id, definition, input, status, metadata, idempotency_key, retain,
-         attempt, next_at, cancel_requested, created_at, updated_at, lane, seq,
-         input_parts)
+         attempt, next_at, wait_reason, cancel_requested, created_at,
+         updated_at, lane, seq, input_parts)
       VALUES
         (${runId}, ${definition}, ${placed.input}, 'pending', ${metadataJson},
          ${options.idempotencyKey ?? null}, ${options.retain === false ? 0 : 1},
-         0, ${queued ? null : now}, 0, ${now}, ${now}, ${lane},
-         ${place?.seq ?? null},
-         ${placed.parts})
+         0, ${debounceUntil ?? (queued ? null : now)},
+         ${debounceUntil !== null ? "debounce" : policy === "queue" || policy === "drop" ? null : "overlap"},
+         0, ${now}, ${now},
+         ${lane}, ${place?.seq ?? null}, ${placed.parts})
     `;
     // Before the wake is published: an attempt this isolate starts from it
     // (the alarm can win the claim) still gets the caller's `local`.
@@ -1118,6 +1150,11 @@ export class Tasks<
     // published after it (a reset in between leaves the row's deadline,
     // which the next start mirrors).
     await this.#report(runId);
+    // The runs it replaced settle after its `pending` report: settling them
+    // can move the lane on to this run and start it.
+    if (skipped.length > 0) {
+      await this.#finishSkipped(skipped, `superseded by ${runId}`);
+    }
     // A run started now outside a lane, or a lane's free head that this
     // isolate starts at once for a caller holding its `local`, gets its first
     // wake from the claim that follows; until then its row's deadline is the
@@ -1126,7 +1163,8 @@ export class Tasks<
     const noWakeYet =
       lane === null
         ? startMode === "attached"
-        : queued || (startMode === "warm" && options.local !== undefined);
+        : debounceUntil === null &&
+          (queued || (startMode === "warm" && options.local !== undefined));
     if (!noWakeYet) {
       try {
         await this.#syncWake(runId);
@@ -1164,7 +1202,8 @@ export class Tasks<
       definition,
       accepted: true,
       status: "pending",
-      createdAt: now
+      createdAt: now,
+      ...(superseded.length ? { superseded } : {})
     };
   }
 
@@ -1189,7 +1228,24 @@ export class Tasks<
     // the lane again; a run since queued behind another has no deadline.
     const known =
       laneHead && row.next_at !== null && !this.#heldLanes.has(row.lane ?? "");
-    if (!known && !this.#laneAllows(row)) return;
+    if (!known && !this.#laneAllows(row)) {
+      // A debounced run still queued when its quiet period ends just waits
+      // its turn from now on: no deadline, no wake, until the lane moves;
+      // a later latest or debounced arrival still replaces it.
+      if (
+        row.wait_reason === "debounce" &&
+        row.next_at !== null &&
+        row.next_at <= Date.now()
+      ) {
+        this.#store.sql`
+          UPDATE ${this.#tables.runs}
+          SET next_at = NULL, wait_reason = 'overlap', updated_at = ${Date.now()}
+          WHERE run_id = ${runId} AND status = 'pending' AND attempt = 0
+        `;
+        await this.#syncWake(runId);
+      }
+      return;
+    }
 
     const now = Date.now();
     if (row.cancel_requested === 1) {
@@ -2444,32 +2500,69 @@ export class Tasks<
    */
   async clear(lane: string, reason?: string): Promise<void> {
     if (this.lifecycle.status() !== "started") await this.lifecycle.ready();
+    await this.#skipLane(lane, reason ?? null, true);
+  }
+
+  /**
+   * End a lane's open runs `skipped`: those that have not started, and the
+   * started one (running, or waiting to retry or wake) too when `running`
+   * is set. Returns their ids in lane order.
+   */
+  async #skipLane(
+    lane: string,
+    reason: string | null,
+    running: boolean
+  ): Promise<string[]> {
+    const rows = this.#skipLaneRows(lane, reason, running);
+    await this.#finishSkipped(rows, reason);
+    return rows.map((row) => row.run_id);
+  }
+
+  /**
+   * The synchronous half of {@link #skipLane}: end the runs and abort their
+   * attempts, in one statement, with no await, so a caller that inserts
+   * right after it does so before any other arrival can look at the lane.
+   */
+  #skipLaneRows(
+    lane: string,
+    reason: string | null,
+    running: boolean
+  ): TaskRunRow[] {
     const now = Date.now();
     const query = `UPDATE ${this.#tables.runs}
       SET status = 'skipped', cancel_reason = ?, generation = NULL,
           ${this.#clearCheckpointSql()}, next_at = NULL, settled_at = ?,
           updated_at = ?
-      WHERE lane = ? AND status IN ('pending', 'running')
+      WHERE lane = ? AND ${running ? "status IN ('pending', 'running')" : "status = 'pending' AND attempt = 0 AND wait_reason IN ('overlap', 'debounce')"}
       RETURNING *`;
     let rows: TaskRunRow[];
     try {
       // SAFETY: RETURNING * from Tasks' own schema.
       rows = this.lifecycle.storage.sql
-        .exec(query, reason ?? null, now, now, lane)
+        .exec(query, reason, now, now, lane)
         .toArray() as unknown as TaskRunRow[];
     } catch (cause) {
       throw new SqlError(query, cause);
     }
+    rows.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     for (const row of rows) {
       this.#active
         .get(row.run_id)
-        ?.controller.abort(new TaskCancellation(reason));
+        ?.controller.abort(new TaskCancellation(reason ?? undefined));
     }
+    return rows;
+  }
+
+  /** Report and settle the runs {@link #skipLaneRows} ended. */
+  async #finishSkipped(
+    rows: readonly TaskRunRow[],
+    reason: string | null
+  ): Promise<void> {
     for (const row of rows) {
       this.#emit("task:skipped", {
         runId: row.run_id,
         definition: row.definition,
-        reason: reason ?? null
+        reason
       });
       await this.#finishTerminalSettlement(row.run_id, row);
     }
