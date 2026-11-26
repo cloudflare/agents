@@ -342,7 +342,7 @@ export class BrowserConnector extends CodemodeConnector {
         execute: async (args, ctx) => {
           const { method, params, sessionId, timeoutMs } = args as {
             method: string;
-            params?: unknown;
+            params?: Record<string, unknown>;
             sessionId?: string;
             timeoutMs?: number;
           };

@@ -350,9 +350,9 @@ A `CdpConnection`, from any of these or from `browser.connect()`, also delivers 
 ```ts
 const { cdp } = await this.browser.connect();
 try {
-  const { targetId } = (await cdp.send("Target.createTarget", {
+  const { targetId } = await cdp.send("Target.createTarget", {
     url: "about:blank"
-  })) as { targetId: string };
+  });
   try {
     const sessionId = await cdp.attachToTarget(targetId);
     await cdp.send("Page.enable", {}, { sessionId });
@@ -382,7 +382,7 @@ try {
 }
 ```
 
-Events are typed from the [`devtools-protocol`](https://www.npmjs.com/package/devtools-protocol) package: a handler for `Page.frameNavigated` gets that event's `params`, and so do `waitFor()` and its `predicate`. Any other event name, such as Browser Run's own `Cloudflare.handoffComplete`, works too, with untyped `params`. A `CdpEventHandler` with no type argument handles any event, so one handler can listen for several.
+Commands and events are typed from the [`devtools-protocol`](https://www.npmjs.com/package/devtools-protocol) package. `send()` checks a command's params, requires the ones the protocol requires, and resolves with its typed result; any other command name takes any object and resolves with `unknown`. For events, a handler for `Page.frameNavigated` gets that event's `params`, and so do `waitFor()` and its `predicate`. Any other event name, such as Browser Run's own `Cloudflare.handoffComplete`, works too, with untyped `params`. A `CdpEventHandler` with no type argument handles any event, so one handler can listen for several.
 
 Without `sessionId`, a listener hears the event from every CDP session on the connection and from the browser itself. `sessionId: null` hears browser-level events only. Browser Run sends `Cloudflare.handoffComplete` once at browser level and once per attached session on any connection, tagged with that connection's session id, so listen for it with `sessionId: null` to hear it once.
 

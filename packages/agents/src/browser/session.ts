@@ -919,10 +919,17 @@ export class BrowserSession {
   }
 
   async #pages(cdp: CdpConnection): Promise<TargetInfo[]> {
-    const result = (await cdp.send("Target.getTargets")) as {
-      targetInfos?: TargetInfo[];
-    };
-    return (result?.targetInfos ?? []).filter((info) => info.type === "page");
+    const result = await cdp.send("Target.getTargets");
+    // The reply is typed, not checked: no list is no pages.
+    return (result?.targetInfos ?? [])
+      .filter((info) => info.type === "page")
+      .map(({ targetId, openerId, ...info }) => ({
+        ...info,
+        // SAFETY: TargetId brands the browser's own target ids, and these
+        // came from the browser.
+        targetId: targetId as TargetId,
+        ...(openerId === undefined ? {} : { openerId: openerId as TargetId })
+      }));
   }
 
   async #resolveSessionId(
@@ -954,10 +961,11 @@ export class BrowserSession {
       state.report.tabClosed = true;
     }
     if (!targetId) {
-      const created = (await connected.cdp.send("Target.createTarget", {
+      const created = await connected.cdp.send("Target.createTarget", {
         url: "about:blank"
-      })) as { targetId: TargetId };
-      targetId = created.targetId;
+      });
+      // SAFETY: the browser's own target id, which TargetId brands.
+      targetId = created.targetId as TargetId;
     }
     this.#setActive(state, targetId);
     return targetId;

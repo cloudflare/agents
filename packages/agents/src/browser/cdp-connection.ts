@@ -20,6 +20,76 @@ export interface CdpSendOptions {
   sessionId?: string;
 }
 
+/**
+ * A CDP command's name. The protocol's commands, from the
+ * `devtools-protocol` package, autocomplete; any other name, such as
+ * Browser Run's `Cloudflare.*` commands, is allowed too.
+ */
+export type CdpCommandMethod =
+  | keyof ProtocolMapping.Commands
+  | (string & Record<never, never>);
+
+/**
+ * The parameters of the command named `M`: the protocol's type for its own
+ * commands, an empty object for one that takes none, and any object for
+ * any other name. `object`, not `Record<string, unknown>`, so a value typed
+ * with an interface fits.
+ */
+export type CdpCommandParams<M extends string> =
+  M extends keyof ProtocolMapping.Commands
+    ? ProtocolMapping.Commands[M]["paramsType"] extends []
+      ? Record<string, never>
+      : ProtocolMapping.Commands[M]["paramsType"] extends [(infer Params)?]
+        ? Exclude<Params, undefined>
+        : never
+    : object;
+
+/**
+ * What the command named `M` resolves with: the protocol's type for its own
+ * commands, and `unknown` for any other name. A command the protocol says
+ * returns nothing resolves with `{}`, as the browser sends it. Unlike event
+ * params these stay the protocol's interfaces: the fallback is `unknown`,
+ * which every result fits.
+ */
+export type CdpCommandResult<M extends string> =
+  M extends keyof ProtocolMapping.Commands
+    ? ProtocolMapping.Commands[M]["returnType"] extends void
+      ? Record<string, never>
+      : ProtocolMapping.Commands[M]["returnType"]
+    : unknown;
+
+/** Whether the command named `M` requires params. */
+type CdpCommandNeedsParams<M extends string> =
+  M extends keyof ProtocolMapping.Commands
+    ? ProtocolMapping.Commands[M]["paramsType"] extends [unknown]
+      ? true
+      : false
+    : false;
+
+/** One type that is every member of the union `U` at once. */
+type AllOf<U> = (U extends unknown ? (value: U) => void : never) extends (
+  value: infer All
+) => void
+  ? All
+  : never;
+
+/**
+ * `send()`'s arguments after the method. A command whose params the
+ * protocol requires takes them; any other may leave them out, or pass `{}`
+ * to reach the options. For a union of names, the params must fit every
+ * one of them, and are required if any of them requires them, since which
+ * one it is is only known at runtime. A name typed as `string` takes any
+ * object.
+ */
+export type CdpSendArgs<
+  M extends string,
+  Options = CdpSendOptions
+> = string extends M
+  ? [params?: object, options?: Options]
+  : true extends CdpCommandNeedsParams<M>
+    ? [params: AllOf<CdpCommandParams<M>>, options?: Options]
+    : [params?: AllOf<CdpCommandParams<M>>, options?: Options];
+
 export interface CdpAttachOptions {
   timeoutMs?: number;
 }
@@ -358,9 +428,19 @@ export class CdpConnection {
     });
   }
 
+  /**
+   * Send a CDP command and resolve with its result. For the protocol's own
+   * commands the params and result are typed from `devtools-protocol`, and
+   * params it requires are required; any other name takes any object and
+   * resolves with `unknown`. Pass `options.sessionId` to send it to a tab.
+   */
+  send<M extends CdpCommandMethod>(
+    method: M,
+    ...args: CdpSendArgs<M>
+  ): Promise<CdpCommandResult<M>>;
   send(
     method: string,
-    params?: unknown,
+    params?: object,
     options: CdpSendOptions = {}
   ): Promise<unknown> {
     this.#onActivity?.();
@@ -426,15 +506,17 @@ export class CdpConnection {
       );
     }
 
-    const result = (await this.send(
+    const result = await this.send(
       "Target.attachToTarget",
       {
         targetId,
         flatten: true
       },
       { timeoutMs: options.timeoutMs }
-    )) as { sessionId?: string };
+    );
 
+    // The reply is typed, not checked: a provider that leaves sessionId out
+    // fails here, clearly.
     const sessionId = result?.sessionId ?? "";
     if (!sessionId) {
       throw new Error(
