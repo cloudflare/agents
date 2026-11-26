@@ -16,6 +16,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { TaskReceipt, TaskRunOptions } from "../tasks";
 import { runsInPlace, type ChatLaneEntry } from "./turn-task";
 
 export type TurnResult<T> =
@@ -31,17 +32,30 @@ export interface EnqueueOptions {
   generation?: number;
 }
 
-/** Accept one turn's run on the chat lane, `entry` as its `local`. */
+/** What the lane says when it took a turn's run. */
+export type TurnLaneReceipt = Pick<
+  TaskReceipt,
+  "runId" | "superseded" | "dropped"
+>;
+
+/**
+ * Accept one turn's run on the chat lane, `entry` as its `local`, arriving
+ * under `policy`.
+ */
 export type TurnLaneRun = (
   requestId: string,
   entry: ChatLaneEntry,
-  input?: Record<string, unknown>
-) => Promise<{ runId: string }>;
+  input?: Record<string, unknown>,
+  policy?: TaskRunOptions["policy"]
+) => Promise<TurnLaneReceipt>;
 
 /** A turn's place in the lane, taken before its work is ready. */
 export interface TurnReservation {
-  /** The run's id, once it is durably accepted; rejects if it was not. */
-  readonly accepted: Promise<string>;
+  /**
+   * The lane's receipt, once the run is durably accepted (or, under the
+   * `drop` policy, `dropped`); rejects if it was not.
+   */
+  readonly accepted: Promise<TurnLaneReceipt>;
   enqueue<T>(
     fn: () => Promise<T>,
     options?: EnqueueOptions
@@ -171,7 +185,7 @@ export class TurnLane {
    */
   reserveInline(requestId: string, onDone?: () => void): void {
     this.#reserved.set(requestId, {
-      accepted: Promise.resolve(""),
+      accepted: Promise.resolve({ runId: "" }),
       release: () => {
         this.#reserved.delete(requestId);
         onDone?.();
@@ -197,9 +211,14 @@ export class TurnLane {
   /**
    * Take the turn `requestId` its place in the lane now, with `input` on its
    * run, and hand it its work later: `enqueue` runs it there, `release`
-   * ends its run without a turn.
+   * ends its run without a turn. It counts as queued from now until it is
+   * released or its turn settled, under the generation it was taken in.
    */
-  reserve(requestId: string, input?: Record<string, unknown>): TurnReservation {
+  reserve(
+    requestId: string,
+    input?: Record<string, unknown>,
+    policy?: TaskRunOptions["policy"]
+  ): TurnReservation {
     // Set once the work is handed over: a run that starts after it begins
     // at once, one that starts before waits for it.
     let handed: (() => Promise<void>) | null | undefined;
@@ -234,18 +253,31 @@ export class TurnLane {
         handOver(null);
       }
     };
-    const accepted = this.accept(requestId, entry, input);
+    const taken = this.#generation;
+    this.#counts.set(taken, (this.#counts.get(taken) ?? 0) + 1);
+    let counted = true;
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      finish = () => {
+        if (counted) this.#decrement(taken);
+        counted = false;
+        resolve();
+      };
+    });
+    const previous = this.#tail;
+    this.#tail = previous.then(() => finished);
+    const accepted = this.accept(requestId, entry, input, policy);
     const reservation: TurnReservation = {
-      accepted: accepted.then((receipt) => receipt.runId),
+      accepted,
       release: () => {
         if (this.#reserved.get(requestId) === reservation) {
           this.#reserved.delete(requestId);
         }
         handOver(null);
+        finish();
       },
       enqueue: <T>(fn: () => Promise<T>, options?: EnqueueOptions) => {
-        const generation = options?.generation ?? this.#generation;
-        this.#counts.set(generation, (this.#counts.get(generation) ?? 0) + 1);
+        const generation = options?.generation ?? taken;
         inCaller = AsyncLocalStorage.snapshot();
         let settled = false;
         let resolve!: (result: TurnResult<T>) => void;
@@ -257,7 +289,7 @@ export class TurnLane {
         const settle = (end: () => void) => {
           if (settled) return;
           settled = true;
-          this.#decrement(generation);
+          finish();
           end();
         };
         handOver(async () => {
@@ -279,12 +311,6 @@ export class TurnLane {
         });
         void ended.then(() => settle(() => resolve({ status: "stale" })));
         accepted.catch((error: unknown) => settle(() => reject(error)));
-        const done = result.then(
-          () => {},
-          () => {}
-        );
-        const previous = this.#tail;
-        this.#tail = previous.then(() => done);
         return result;
       }
     };

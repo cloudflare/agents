@@ -17,8 +17,8 @@
  * The rules, checked in `ChatAdmission.tla` and `ChatOrder.tla`:
  *
  * - every accepted request writes a record when it is accepted: its request
- *   id, the user messages it holds, its concurrency decision, and what the
- *   host needs to run it again (tools, body, trigger);
+ *   id, the user messages it holds, the concurrency strategy it overlapped
+ *   other turns under, and what the host needs to run it again (tools, body, trigger);
  * - the held messages join the transcript at the front of the queue, once:
  *   a message already stored (a reset after the join) is not stored again;
  * - the record goes when the request's turn has a fiber (recovery owns the
@@ -47,7 +47,7 @@
 import type { Tasks } from "../tasks";
 import { CHAT_TURN_LANE } from "./turn-task";
 import type { AgentToolSql } from "./agent-tool-run-store";
-import type { NormalizedMessageConcurrency } from "./submit-concurrency";
+import type { NormalizedMessageConcurrency } from "./lifecycle";
 
 /**
  * The new user messages a client request holds until its turn starts: the
@@ -74,18 +74,6 @@ export function newUserMessageIds(
   return ids;
 }
 
-/** The concurrency decision a request was accepted with, as stored. */
-export interface StoredSubmitDecision {
-  strategy: NormalizedMessageConcurrency | null;
-  /**
-   * Whether the request overlapped a queued turn under a policy that can
-   * supersede it (`latest`, `merge`, `debounce`). A replay gives it a new
-   * sequence number, in record order.
-   */
-  overlapping: boolean;
-  debounceUntilMs: number | null;
-}
-
 /** A message a request holds until its turn starts. JSON. */
 export interface HeldChatMessage {
   id: string;
@@ -110,7 +98,11 @@ export interface ChatAdmissionRecord {
    * on came after it.
    */
   afterUserId: string | null;
-  decision: StoredSubmitDecision;
+  /**
+   * The `messageConcurrency` strategy the request arrived under while other
+   * turns were queued; `null` when none were.
+   */
+  strategy: NormalizedMessageConcurrency | null;
   /** What the host needs to run the request again. JSON. */
   payload: unknown;
   /** A stop by the request id landed while it had no fiber. */
@@ -186,11 +178,7 @@ export function takeReleasedChatAdmissions(sql: () => AgentToolSql): {
       ),
       afterUserId:
         typeof row.after_user_id === "string" ? row.after_user_id : null,
-      decision: parseJson<StoredSubmitDecision>(row.decision) ?? {
-        strategy: null,
-        overlapping: false,
-        debounceUntilMs: null
-      },
+      strategy: releasedStrategy(row.decision),
       payload,
       stopped: Number(row.stopped) === 1,
       createdAt: Number(row.created_at)
@@ -345,7 +333,8 @@ export interface ChatAdmissionInput {
   order?: number;
   messages: HeldChatMessage[];
   afterUserId: string | null;
-  decision: StoredSubmitDecision;
+  /** The strategy it overlapped other turns under, when it did. */
+  strategy?: NormalizedMessageConcurrency;
   payload: unknown;
 }
 
@@ -355,7 +344,7 @@ export const CHAT_CONTINUATION_KEY_PREFIX = "cf:chat:continuation:";
 /** What {@link ChatAdmissions} needs from the host. */
 export interface ChatAdmissionsHost {
   /** The chat lane's runs: the client requests that wait. */
-  tasks(): Pick<Tasks, "peekList" | "inputOf" | "patchMetadata">;
+  tasks(): Pick<Tasks, "peekList" | "inputOf" | "patchMetadata" | "cancel">;
   /** The chat-turn definition the lane's runs are of. */
   definition: string;
   /** Where continuations' records are kept. */
@@ -372,10 +361,19 @@ export interface ChatAdmissionsHost {
  * earlier isolate left, read once), removed when its turn starts or it ends.
  */
 export class ChatAdmissions {
-  /** Waiting client requests: their run and the messages they hold. */
+  /**
+   * Waiting client requests: their run, the messages they hold, and whether
+   * a later arrival can supersede it (it arrived under a strategy that can).
+   */
   readonly #held = new Map<
     string,
-    { runId: string | null; messages: HeldChatMessage[] }
+    {
+      runId: string | null;
+      messages: HeldChatMessage[];
+      supersedable: boolean;
+      /** A request an earlier isolate left: what its replay would run. */
+      seeded?: ChatAdmissionRecord;
+    }
   >();
   /** Stops of requests no run was known for, by request id. */
   readonly #stoppedUnseen = new Set<string>();
@@ -385,20 +383,6 @@ export class ChatAdmissions {
   #continuationsRead = false;
 
   constructor(private readonly host: ChatAdmissionsHost) {}
-
-  /**
-   * The decisions of the runs an earlier isolate left waiting, in lane
-   * order, once: nothing after the first call.
-   */
-  takeSeeded(): Array<{ requestId: string; decision: StoredSubmitDecision }> {
-    this.#seed();
-    return this.#seededDecisions.splice(0);
-  }
-
-  readonly #seededDecisions: Array<{
-    requestId: string;
-    decision: StoredSubmitDecision;
-  }> = [];
 
   /** Read, once, the runs an earlier isolate left waiting. */
   #seed(): void {
@@ -441,8 +425,22 @@ export class ChatAdmissions {
     }
     found.sort((a, b) => (a.admission.order ?? 0) - (b.admission.order ?? 0));
     for (const { requestId, runId, admission } of found) {
-      this.#held.set(requestId, { runId, messages: admission.messages });
-      this.#seededDecisions.push({ requestId, decision: admission.decision });
+      this.#held.set(requestId, {
+        runId,
+        messages: admission.messages,
+        supersedable: supersedes(admission.strategy ?? null),
+        seeded: {
+          requestId,
+          seq: admission.order ?? 0,
+          messageIds: admission.messages.map((message) => message.id),
+          messages: admission.messages,
+          afterUserId: admission.afterUserId,
+          strategy: admission.strategy ?? null,
+          payload: admission.payload,
+          stopped: false,
+          createdAt: Date.now()
+        }
+      });
     }
   }
 
@@ -453,12 +451,30 @@ export class ChatAdmissions {
   hold(
     requestId: string,
     runId: string | null,
-    messages: HeldChatMessage[]
+    messages: HeldChatMessage[],
+    supersedable = false
   ): void {
-    this.#held.set(requestId, { runId, messages });
+    this.#held.set(requestId, { runId, messages, supersedable });
     if (runId !== null && this.#stoppedUnseen.delete(requestId)) {
       this.#mark(runId, { stopped: true });
     }
+  }
+
+  /**
+   * The messages the waiting requests a superseding arrival can skip hold,
+   * in admission order. The arrival holds them ahead of its own: a
+   * superseded request never runs, and its question is still answered.
+   * Some may not be skipped (one that started meanwhile); their messages
+   * are stored by their own turn first, and a join leaves out what is
+   * stored.
+   */
+  supersedableMessages(): HeldChatMessage[] {
+    this.#seed();
+    const messages: HeldChatMessage[] = [];
+    for (const held of this.#held.values()) {
+      if (held.supersedable) messages.push(...held.messages);
+    }
+    return messages;
   }
 
   /**
@@ -510,6 +526,31 @@ export class ChatAdmissions {
     for (const requestId of requestIds) this.#continuations.delete(requestId);
   }
 
+  /** Whether any client request waits in the lane. */
+  waiting(): boolean {
+    this.#seed();
+    return this.#held.size > 0;
+  }
+
+  /**
+   * The runs `runIds` were superseded: their requests wait no more.
+   *
+   * @returns The records of those an earlier isolate left: no request here
+   *   ends them.
+   */
+  endRuns(runIds: readonly string[]): ChatAdmissionRecord[] {
+    const seeded: ChatAdmissionRecord[] = [];
+    if (runIds.length === 0) return seeded;
+    const ended = new Set(runIds);
+    for (const [requestId, held] of this.#held) {
+      if (held.runId !== null && ended.has(held.runId)) {
+        this.#held.delete(requestId);
+        if (held.seeded) seeded.push(held.seeded);
+      }
+    }
+    return seeded;
+  }
+
   /** A request's turn started, or it ended: it waits no more. */
   end(requestId: string): void {
     this.#held.delete(requestId);
@@ -554,11 +595,22 @@ export class ChatAdmissions {
     }
   }
 
-  /** A clear: no waiting request runs, and its messages are discarded. */
+  /**
+   * A clear: no waiting request runs, and its messages are discarded. Their
+   * runs end now, so none holds the lane (a quiet period, say) for the
+   * requests after the clear.
+   */
   clear(): void {
     this.#seed();
+    const tasks = this.host.tasks();
     for (const held of this.#held.values()) {
-      if (held.runId) this.#mark(held.runId, { cleared: true });
+      if (!held.runId) continue;
+      this.#mark(held.runId, { cleared: true });
+      void tasks
+        .cancel(held.runId, "chat cleared")
+        .catch((error: unknown) =>
+          console.error("[chat] a cleared request's run did not end:", error)
+        );
     }
     this.#held.clear();
     for (const requestId of [...this.#continuations]) this.end(requestId);
@@ -586,4 +638,26 @@ export class ChatAdmissions {
     }
     return waiting;
   }
+}
+
+/**
+ * Whether a request that arrived under `strategy` while other turns were
+ * queued supersedes the waiting ones that arrived so too, and can be
+ * superseded itself (`latest`, `merge`, debounce).
+ */
+export function supersedes(
+  strategy: NormalizedMessageConcurrency | null
+): boolean {
+  return strategy !== null && strategy !== "queue" && strategy !== "drop";
+}
+
+/** The strategy a released record overlapped other turns under. */
+function releasedStrategy(
+  column: unknown
+): NormalizedMessageConcurrency | null {
+  const decision = parseJson<{
+    strategy?: NormalizedMessageConcurrency | null;
+    overlapping?: boolean;
+  }>(column);
+  return decision?.overlapping ? (decision.strategy ?? null) : null;
 }

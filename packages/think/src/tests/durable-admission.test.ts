@@ -267,6 +267,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const binding = "ThinkLatestAdmissionTestAgent";
     const room = crypto.randomUUID();
     const ws = await connect(binding, room);
+    const sent = record(ws);
     send(ws, "r1", [user("u1", "one")], SLOW);
     await delay(400);
     send(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
@@ -290,7 +291,10 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     await delay(500);
     const messages = await restarted.getMessagesForTest();
     expect(messages.some((m) => textOf(m) === QUICK_REPLY)).toBe(false);
-    expect(doneFrame(frames, "r2")?.outcome).toBe("skipped");
+    // Skipped on the lane when r3 arrived, before the reset: it does not
+    // come back.
+    expect(doneFrame(sent, "r2")?.outcome).toBe("skipped");
+    expect(doneFrame(frames, "r2")).toBeUndefined();
     // The superseded question is kept, and answered with the latest.
     expect(messages.filter((m) => m.role === "user").map((m) => m.id)).toEqual([
       "u1",

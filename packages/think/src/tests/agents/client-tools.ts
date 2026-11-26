@@ -1868,8 +1868,29 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   getOverlappingSubmitCountForTest(): number {
-    return this["_turns"].submits.overlappingSubmitCount;
+    return this._overlappingSubmits.count;
   }
+
+  /** Counts the client requests that arrive under a superseding strategy. */
+  private readonly _overlappingSubmits = ((turns: {
+    runClientRequest(request: {
+      onDecision?(decision: { strategy: unknown }): void;
+    }): Promise<void>;
+  }) => {
+    const counter = { count: 0 };
+    const run = turns.runClientRequest.bind(turns);
+    turns.runClientRequest = (request) =>
+      run({
+        ...request,
+        onDecision: (decision) => {
+          const { strategy } = decision;
+          if (strategy !== null && strategy !== "queue" && strategy !== "drop")
+            counter.count++;
+          request.onDecision?.(decision);
+        }
+      });
+    return counter;
+  })(this["_turns"] as never);
 
   private _interactionAppliesSeen = 0;
 

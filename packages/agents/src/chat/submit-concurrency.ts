@@ -1,14 +1,18 @@
-import type { MessageConcurrency } from "./lifecycle";
+/**
+ * Kept for released `@cloudflare/ai-chat` (0.12) and `@cloudflare/think`
+ * (0.24), which import `SubmitConcurrencyController` from `agents/chat` and
+ * may run against a newer `agents`. This release's hosts decide overlapping
+ * submits on the chat lane instead: a client request's run arrives under a
+ * Tasks lane policy (`chat-turns.ts`).
+ *
+ * @internal Sibling-package support, not a public API.
+ */
+import type {
+  MessageConcurrency,
+  NormalizedMessageConcurrency
+} from "./lifecycle";
 
-export type NormalizedMessageConcurrency =
-  | "queue"
-  | "latest"
-  | "merge"
-  | "drop"
-  | {
-      strategy: "debounce";
-      debounceMs: number;
-    };
+export type { NormalizedMessageConcurrency };
 
 export type SubmitConcurrencyDecision = {
   action: "execute" | "drop";

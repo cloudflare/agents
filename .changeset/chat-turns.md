@@ -15,3 +15,4 @@
 - New events: `chat:request:failed`, `chat:stream:stalled`, and in `Think` `tool:result`, `tool:approval` and `message:cancel`.
 - A reply whose store fails runs `onChatResponse` with `error`.
 - An `experimental_steering` message stays in the transcript (#3143).
+- Under `latest`, `merge` and debounce, a request a newer one superseded stays superseded across a restart. Its question is stored with the newer request's, and a `merge` turn already at the front of the queue is no longer cancelled by a newer message.
