@@ -293,6 +293,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const binding = "LatestMessageConcurrencyAgent";
     const path = `/agents/latest-message-concurrency-agent/${room}`;
     const { ws } = await connectChatWS(path);
+    const sent = record(ws);
     sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
     await delay(300);
     sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
@@ -323,7 +324,10 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       messages[4].id
     ]);
     expect(textOf(messages[4])).toBe(QUICK_REPLY);
-    expect(doneFrame(frames, "r2")?.outcome).toBe("skipped");
+    // Skipped on the lane when r3 arrived, before the reset: it does not
+    // come back.
+    expect(doneFrame(sent, "r2")?.outcome).toBe("skipped");
+    expect(doneFrame(frames, "r2")).toBeUndefined();
     tab.close();
   }, 40_000);
 

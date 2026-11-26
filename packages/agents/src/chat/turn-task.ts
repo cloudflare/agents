@@ -224,7 +224,7 @@ export function createChatTurnTaskDefinition(
         messageIds: admission.messages.map((message) => message.id),
         messages: admission.messages,
         afterUserId: admission.afterUserId,
-        decision: admission.decision,
+        strategy: admission.strategy ?? null,
         payload: admission.payload,
         stopped: false,
         createdAt: step.createdAt

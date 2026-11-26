@@ -2558,31 +2558,37 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   /**
-   * Number of *overlapping* submits the agent has observed past
-   * `_getSubmitConcurrencyDecision` — i.e. submits that arrived while a
-   * turn was already queued or in-flight under `latest` / `merge` /
-   * `debounce` concurrency policies. The very first submit on an empty
-   * queue is NOT counted (it isn't overlapping with anything), nor are
-   * submits under `queue` / `drop` policies or `regenerate-message`
-   * triggers.
+   * Number of submits that arrived while a turn was queued or running,
+   * under `latest`, `merge` or debounce. Regenerations, and submits under
+   * `queue` or `drop`, are not counted.
    *
-   * Used as a deterministic barrier in concurrency tests to wait for the
-   * agent to have registered every overlapping submit before asserting
-   * on which turns ran — otherwise assertions race the DO's
-   * webSocketMessage dispatch under CPU pressure and can observe
-   * intermediate state where the most recent submit hasn't yet bumped
-   * `_latestOverlappingSubmitSequence`.
-   *
-   * Returns `_latestOverlappingSubmitSequence`, which equals the total
-   * count of overlapping submits observed so far.
+   * A barrier in concurrency tests: wait until the agent took every
+   * overlapping submit before asserting on which turns ran.
    */
   getOverlappingSubmitCountForTest(): number {
-    return (
-      this as unknown as {
-        _submitConcurrency: { overlappingSubmitCount: number };
-      }
-    )._submitConcurrency.overlappingSubmitCount;
+    return this._overlappingSubmits.count;
   }
+
+  /** Counts the client requests that arrive under a superseding strategy. */
+  private readonly _overlappingSubmits = ((turns: {
+    runClientRequest(request: {
+      onDecision?(decision: { strategy: unknown }): void;
+    }): Promise<void>;
+  }) => {
+    const counter = { count: 0 };
+    const run = turns.runClientRequest.bind(turns);
+    turns.runClientRequest = (request) =>
+      run({
+        ...request,
+        onDecision: (decision) => {
+          const { strategy } = decision;
+          if (strategy !== null && strategy !== "queue" && strategy !== "drop")
+            counter.count++;
+          request.onDecision?.(decision);
+        }
+      });
+    return counter;
+  })((this as unknown as { _turns: never })._turns);
 
   resetTurnStateForTest(): void {
     this.resetTurnState();

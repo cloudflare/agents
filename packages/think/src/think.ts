@@ -2299,13 +2299,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         if (prepared === null) forget();
         return prepared;
       },
-      enqueue: async (
-        turn: () => Promise<void>,
-        generation: number,
-        onQueued: () => void
-      ) => {
+      enqueue: async (turn: () => Promise<void>, generation: number) => {
         try {
-          return await enqueue(turn, generation, onQueued);
+          return await enqueue(turn, generation);
         } finally {
           forget();
         }
@@ -7344,7 +7340,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }
         return joined;
       },
-      enqueue: (turn, generation, onQueued) =>
+      enqueue: (turn, generation) =>
         this.keepAliveWhile(async () => {
           const result = await this._admitTurn({
             admission: "queue",
@@ -7353,7 +7349,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             generation,
             continuation: false,
             channel: "web",
-            onQueued,
             execute: turn
           });
           return result.status;
@@ -10626,10 +10621,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
-    // earliest "successor exists" signal (`SubmitConcurrencyController.decide`)
-    // fires before the successor's `_turns.preStream.begin()`, so releasing here would
-    // race a `begin()` that hasn't run yet and cut a parked client loose right
-    // before the successor streams. Leave it parked: the successor flushes it on
+    // lane skips a superseded run while it accepts the successor's, after the
+    // successor's `preStream.begin()`, and releasing here would still cut a
+    // parked client loose right before the successor streams. Leave it parked: the successor flushes it on
     // stream start, or the final surviving turn's settle releases it. (Chat
     // clear releases parked connections explicitly via `resetTurnState`.)
     this._turns.settlePreStreamTurn(requestId, { releaseParked: false });

@@ -79,7 +79,7 @@ import {
   type TurnResult,
   type MessagePart,
   type ServerChatTurn,
-  type SubmitConcurrencyDecision
+  type NormalizedMessageConcurrency
 } from "agents/chat";
 import {
   ChatFrames,
@@ -581,7 +581,6 @@ export class AIChatAgent<
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
 
   /** Shared admission policy state for overlapping submit-message requests. */
-  private readonly _submitConcurrency = this._turns.submits;
 
   /**
    * Set of connection IDs that are pending stream resume.
@@ -1495,9 +1494,9 @@ export class AIChatAgent<
   }
 
   /** Remember where a merge strategy's queued user messages start. */
-  private _noteMergeStart(decision: SubmitConcurrencyDecision): void {
+  private _noteMergeStart(strategy: NormalizedMessageConcurrency | null): void {
     if (
-      decision.strategy === "merge" &&
+      strategy === "merge" &&
       !this._mergeQueuedUserStartIndexByEpoch.has(this._turnQueue.generation)
     ) {
       this._mergeQueuedUserStartIndexByEpoch.set(
@@ -1642,9 +1641,9 @@ export class AIChatAgent<
         if (prepared === null) forget();
         return prepared;
       },
-      enqueue: async (turn, generation, onQueued) => {
+      enqueue: async (turn, generation) => {
         try {
-          return await enqueue(turn, generation, onQueued);
+          return await enqueue(turn, generation);
         } finally {
           forget();
         }
@@ -1689,7 +1688,7 @@ export class AIChatAgent<
       )
     );
     const held = sent.filter((message) => heldIds.has(message.id));
-    let concurrencyDecision!: SubmitConcurrencyDecision;
+    let strategy: NormalizedMessageConcurrency | null = null;
     let epoch!: number;
     // Lists naming queued messages once this request was shown to the
     // other tabs.
@@ -1712,7 +1711,7 @@ export class AIChatAgent<
       isSubmitMessage: requestTrigger === "submit-message",
       concurrency: this.messageConcurrency,
       onDecision: (decision) => {
-        concurrencyDecision = decision;
+        strategy = decision.strategy;
       },
       onDropped: () => {
         if (connection) {
@@ -1791,7 +1790,7 @@ export class AIChatAgent<
       // it waited behind), and the other tabs are told.
       join: async ({ messages, generation, isCurrent }) => {
         epoch = generation;
-        this._noteMergeStart(concurrencyDecision);
+        this._noteMergeStart(strategy);
         // Stored already, by a join before a reset.
         if (messages.length === 0) return isCurrent();
         await this._withAgentSpan(
@@ -1816,22 +1815,20 @@ export class AIChatAgent<
         );
         return isCurrent();
       },
-      enqueue: async (turn, generation, onQueued) => {
+      enqueue: async (turn, generation) => {
         let stale = false;
-        const done = this._runExclusiveChatTurn(chatMessageId, turn, {
+        await this._runExclusiveChatTurn(chatMessageId, turn, {
           epoch: generation,
           onStale: () => {
             stale = true;
           }
         });
-        onQueued();
-        await done;
         return stale ? "stale" : "completed";
       },
       beforeStart: async () => {
         // Re-merge inside the lock: more overlapping submits may have
         // persisted additional user messages while this turn was queued.
-        if (concurrencyDecision.strategy === "merge") {
+        if (strategy === "merge") {
           await this._withAgentSpan(
             "merge_queued_messages",
             "turn",
@@ -1849,14 +1846,6 @@ export class AIChatAgent<
           this._mergeQueuedUserStartIndexByEpoch.delete(epoch);
 
           if (this._turnQueue.generation !== epoch) {
-            return false;
-          }
-
-          if (
-            this._submitConcurrency.isSuperseded(
-              concurrencyDecision.submitSequence
-            )
-          ) {
             return false;
           }
         }
@@ -2074,10 +2063,9 @@ export class AIChatAgent<
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
-    // earliest "successor exists" signal (`SubmitConcurrencyController.decide`)
-    // fires before the successor's `_preStream.begin()`, so releasing here would
-    // race a `begin()` that hasn't run yet and cut a parked client loose right
-    // before the successor streams. Leave it parked: the successor flushes it on
+    // lane skips a superseded run while it accepts the successor's, after the
+    // successor's `preStream.begin()`, and releasing here would still cut a
+    // parked client loose right before the successor streams. Leave it parked: the successor flushes it on
     // `_startStream`, or the final surviving turn's settle releases it. (Chat
     // clear releases parked connections explicitly via `resetTurnState`.)
     this._turns.settlePreStreamTurn(requestId, { releaseParked: false });

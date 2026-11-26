@@ -106,8 +106,7 @@ export {
   takeReleasedChatAdmissions,
   type ChatAdmissionRecord,
   type ChatAdmissionsHost,
-  type HeldChatMessage,
-  type StoredSubmitDecision
+  type HeldChatMessage
 } from "./admissions";
 
 /**

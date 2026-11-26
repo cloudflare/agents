@@ -37,6 +37,7 @@ import type { UIMessage } from "ai";
 import { AbortRegistry } from "./abort-registry";
 import {
   ChatAdmissions,
+  supersedes,
   type ChatAdmissionInput,
   type ChatAdmissionRecord,
   type HeldChatMessage
@@ -74,7 +75,10 @@ import {
   type ContinuationTurn,
   type ContinuationTurnParts
 } from "./continuation-turn";
-import type { MessageConcurrency } from "./lifecycle";
+import type {
+  MessageConcurrency,
+  NormalizedMessageConcurrency
+} from "./lifecycle";
 import { PreStreamTurns } from "./pre-stream-turns";
 import type { LiveReply } from "./reply-pump";
 import {
@@ -91,10 +95,6 @@ import {
   type ReplyRemoval,
   type RepairInterruptedToolPartsOptions
 } from "./repair-transcript";
-import {
-  SubmitConcurrencyController,
-  type SubmitConcurrencyDecision
-} from "./submit-concurrency";
 import {
   clientResolvableToolNames,
   hasIncompleteToolBatch,
@@ -113,7 +113,7 @@ import {
   inLaneRecoveryAttempt,
   type ChatTurnTaskInput
 } from "./turn-task";
-import type { Tasks } from "../tasks";
+import type { TaskRunOptions, Tasks } from "../tasks";
 
 const utf8 = new TextEncoder();
 
@@ -250,7 +250,13 @@ export interface ChatTurnsOptions {
   lane: {
     tasks(): Pick<
       Tasks,
-      "run" | "peek" | "peekList" | "inputOf" | "patchMetadata" | "settle"
+      | "run"
+      | "peek"
+      | "peekList"
+      | "inputOf"
+      | "patchMetadata"
+      | "settle"
+      | "cancel"
     >;
     definition: string;
   };
@@ -299,8 +305,13 @@ export interface ClientChatRequest<TPrepared> {
   isSubmitMessage: boolean;
   /** The host's `messageConcurrency` setting. */
   concurrency: MessageConcurrency;
-  /** Called with the concurrency decision, before any step that can wait. */
-  onDecision?(decision: SubmitConcurrencyDecision): void;
+  /**
+   * Called with the strategy the request arrived under while other turns
+   * were queued (`null` when none were), before any step that can wait.
+   */
+  onDecision?(decision: {
+    strategy: NormalizedMessageConcurrency | null;
+  }): void;
   /**
    * An overlapping submit was dropped (`"drop"` concurrency): roll the
    * client back and send its terminal frame. Nothing was accepted.
@@ -322,30 +333,28 @@ export interface ClientChatRequest<TPrepared> {
    *   request arrived.
    */
   persist(context: {
-    decision: SubmitConcurrencyDecision;
     generation: number;
     isCurrent: () => boolean;
   }): Promise<TPrepared | null>;
   /**
    * Admit the turn through the host's own queue wrapper (tracing, hooks,
    * keep-alive). It must enqueue `turn` on the core's queue under
-   * `generation`, call `onQueued` once it has, and report whether the turn
-   * ran or was skipped as stale.
+   * `generation`, and report whether the turn ran or was skipped as stale.
    */
   enqueue(
     turn: () => Promise<void>,
-    generation: number,
-    onQueued: () => void
+    generation: number
   ): Promise<"completed" | "stale">;
   /**
    * The request's turn is at the front of the queue: store the messages
    * {@link admission} holds, after everything stored so far, and tell tabs.
-   * Called once the debounce wait is over, before the superseded check (a
-   * superseded request's question is kept, and the turn that superseded it
-   * reads it) and before a stop is honored (a stopped request's question is
-   * kept too, unanswered). Not called after a clear. `messages` leaves out
-   * those already stored (a reset after an earlier join), so it can be
-   * empty. Return `false` to skip the request.
+   * Called once the debounce wait is over, and before a stop is honored (a
+   * stopped request's question is kept, unanswered). A request that
+   * superseded others holds their messages too, ahead of its own: theirs
+   * are never run, and their questions are kept. Not called after a clear.
+   * `messages` leaves out those already stored (a reset after an earlier
+   * join, or a request that ran before), so it can be empty. Return
+   * `false` to skip the request.
    */
   join?(context: {
     prepared: TPrepared;
@@ -354,8 +363,8 @@ export interface ClientChatRequest<TPrepared> {
     isCurrent: () => boolean;
   }): Promise<boolean>;
   /**
-   * Host checks at the front of the queue, after the core's superseded and
-   * debounce checks: merging queued messages, waiting for MCP connections.
+   * Host checks at the front of the queue, after {@link join}: merging
+   * queued messages, waiting for MCP connections.
    * Return `false` to skip the request.
    */
   beforeStart?(prepared: TPrepared): Promise<boolean>;
@@ -406,8 +415,6 @@ export class ChatTurns<
   readonly queue: TurnLane;
   /** One abort controller per request id. */
   readonly aborts = new AbortRegistry();
-  /** Overlapping-submit policy (`messageConcurrency`). */
-  readonly submits: SubmitConcurrencyController;
   /** Pending, deferred and active auto-continuation slots. */
   readonly continuation = new ContinuationState<TConnection>();
   /** Accepted turns whose stream has not started, and connections parked on them. */
@@ -480,8 +487,8 @@ export class ChatTurns<
 
   /** Durable admission records, when the host keeps them. */
   readonly admissions: ChatAdmissions | null;
-  /** Decisions of the replays an earlier isolate left, by request id. */
-  readonly #restoredDecisions = new Map<string, SubmitConcurrencyDecision>();
+  /** The debounce wait of a `{ strategy: "debounce" }` without one. */
+  readonly #defaultDebounceMs: number;
   /** Where queued turns are runs. */
   readonly #lane: ChatTurnsOptions["lane"];
   /** Lane runs this isolate keeps parked until their reply ends. */
@@ -615,7 +622,8 @@ export class ChatTurns<
   ) {
     const { lane } = options;
     this.#lane = lane;
-    this.queue = new TurnLane((requestId, entry, extra) => {
+    this.#defaultDebounceMs = options.defaultDebounceMs;
+    this.queue = new TurnLane((requestId, entry, extra, policy) => {
       const nonce = crypto.randomUUID();
       const input: ChatTurnTaskInput = {
         requestId,
@@ -629,7 +637,8 @@ export class ChatTurns<
         retain: false,
         metadata: { requestId },
         lane: CHAT_TURN_LANE,
-        local: entry
+        local: entry,
+        ...(policy && { policy })
       });
     });
     const admissions = options.admissions;
@@ -647,9 +656,6 @@ export class ChatTurns<
       ? () => admissions.recoveryPending()
       : null;
     this.#released = admissions ? () => admissions.released() : null;
-    this.submits = new SubmitConcurrencyController({
-      defaultDebounceMs: options.defaultDebounceMs
-    });
     this.autoContinuation = new AutoContinuationController<TConnection>({
       continuation: this.continuation,
       generateRequestId: () => host.generateRequestId(),
@@ -682,56 +688,55 @@ export class ChatTurns<
 
   // ── Submits ────────────────────────────────────────────────────────
 
-  /** Decide what an incoming client request does under `concurrency`. */
-  decideSubmit(
+  /**
+   * The strategy a client request arrives under: its `messageConcurrency`
+   * when it is a new message and other turns are queued or running, `null`
+   * otherwise.
+   */
+  #strategy(
     concurrency: MessageConcurrency,
     isSubmitMessage: boolean
-  ): SubmitConcurrencyDecision {
-    return this.submits.decide({
-      concurrency,
-      isSubmitMessage,
-      queuedTurns: this.queue.queuedCount()
-    });
-  }
-
-  /**
-   * The checks a client request makes once its turn reaches the front of the
-   * queue: it may have been superseded by a newer overlapping submit, and a
-   * debounced one first waits out its quiet period, during which a reset or a
-   * newer submit can still overtake it.
-   *
-   * @param decision - The request's {@link decideSubmit} result.
-   * @param generation - The queue generation the request was admitted under.
-   * @returns `false` when the request must be skipped without running.
-   */
-  async awaitSubmitTurn(
-    decision: SubmitConcurrencyDecision,
-    generation: number
-  ): Promise<boolean> {
-    if (this.submits.isSuperseded(decision.submitSequence)) return false;
-    if (decision.debounceUntilMs === null) return true;
-    await this.submits.waitForTimestamp(decision.debounceUntilMs);
-    if (this.queue.generation !== generation) return false;
-    return !this.submits.isSuperseded(decision.submitSequence);
+  ): NormalizedMessageConcurrency | null {
+    // A request an earlier isolate left waiting (in its quiet period, say)
+    // is queued too, though this isolate has not replayed it yet.
+    if (
+      !isSubmitMessage ||
+      (this.queue.queuedCount() === 0 && !this.admissions?.waiting())
+    ) {
+      return null;
+    }
+    if (typeof concurrency === "string") return concurrency;
+    const { debounceMs } = concurrency;
+    return {
+      strategy: "debounce",
+      debounceMs:
+        typeof debounceMs === "number" &&
+        Number.isFinite(debounceMs) &&
+        debounceMs >= 0
+          ? debounceMs
+          : this.#defaultDebounceMs
+    };
   }
 
   /**
    * Run one chat request from a client, start to finish. This is the one
    * order both hosts follow:
    *
-   * 1. Decide what the request does under the concurrency policy. A dropped
-   *    request ends here.
-   * 2. Accept it: mark it pre-stream (so a reconnecting client waits for its
+   * 1. Accept it: mark it pre-stream (so a reconnecting client waits for its
    *    stream) and create its abort controller, so a cancel that arrives at
    *    any later point, including while it waits in the queue, is not lost
    *    (#2701).
-   * 3. Record it with the new messages it holds, store what it changes in
-   *    the stored transcript, then queue the turn.
+   * 2. Take its run on the chat lane, which holds the new messages it
+   *    holds, under its concurrency strategy: under `drop` at a busy lane
+   *    nothing is stored and the request ends here; under `latest`, `merge`
+   *    and debounce its run skips the waiting runs that arrived so too, and
+   *    holds their messages ahead of its own; a debounced run starts once
+   *    its quiet period is over.
+   * 3. Store what it changes in the stored transcript, then queue the turn.
    * 4. At the front of the queue: skip it if the chat was reset. Otherwise
    *    its held messages join the transcript, after everything stored so
-   *    far. Then skip it if a newer submit superseded it, end it with
-   *    `aborted` if it was cancelled meanwhile (the model is never called),
-   *    otherwise run it.
+   *    far. Then end it with `aborted` if it was cancelled meanwhile (the
+   *    model is never called), otherwise run it.
    * 5. Whatever happened, drop the abort controller and settle the
    *    pre-stream turn.
    */
@@ -743,8 +748,7 @@ export class ChatTurns<
 
   /**
    * {@link runClientRequest}, or the replay of a request a reset left
-   * (`replay`): its decision is the stored one, its record exists, and
-   * `onQueued` is told when it is queued or ended before that.
+   * (`replay`): it runs inside its run, which holds its record.
    */
   async #runClientRequest<TPrepared>(
     request: ClientChatRequest<TPrepared>,
@@ -756,17 +760,10 @@ export class ChatTurns<
     }
     const generation = this.queue.generation;
     const admissions = request.admission ? this.admissions : null;
-    const restored = replay && this.#restoredDecisions.get(requestId);
-    if (replay) this.#restoredDecisions.delete(requestId);
-    const decision = replay
-      ? restored || this.submits.restore(replay.record.decision)
-      : this.decideSubmit(request.concurrency, request.isSubmitMessage);
-    request.onDecision?.(decision);
-    if (decision.action === "drop") {
-      request.onDropped();
-      return;
-    }
-    const slot = { decision };
+    const strategy = replay
+      ? replay.record.strategy
+      : this.#strategy(request.concurrency, request.isSubmitMessage);
+    request.onDecision?.({ strategy });
 
     // The registry hands out a signal for every string id. Anything else
     // would give a turn no stop can reach.
@@ -777,41 +774,55 @@ export class ChatTurns<
     // A stop that landed on the record before the reset still stops it.
     if (replay?.record.stopped) this.aborts.cancel(requestId);
     this.preStream.begin(requestId);
-    const releasePendingEnqueue = this.submits.beginEnqueue();
-    const onQueued = () => releasePendingEnqueue();
     let reservation: TurnReservation | undefined;
     let stage: "persist" | "turn" = "persist";
-    // The messages the request holds until its turn starts.
+    // The messages the request holds until its turn starts: with those of
+    // the waiting requests it supersedes first.
     const held: HeldChatMessage[] = replay
       ? replay.record.messages
-      : (request.admission?.messages ?? []);
+      : [
+          ...(supersedes(strategy) && admissions
+            ? admissions.supersedableMessages()
+            : []),
+          ...(request.admission?.messages ?? [])
+        ];
     let joined = held.length === 0;
     try {
-      // The record holds the request's new messages: a reset at any point
-      // before its turn has a fiber leaves them on the record, and only
-      // there, so the replay stores them once and nothing else can.
-      if (admissions && !replay && request.admission) {
-        const admission: ChatAdmissionInput = {
+      // The run holds the request's new messages: a reset at any point
+      // before its turn has a fiber leaves them there, and only there, so
+      // the replay stores them once and nothing else can.
+      if (!replay) {
+        const admission: ChatAdmissionInput | undefined = request.admission && {
           order: admissionOrder(),
           messages: held,
           afterUserId: this.#latestUserId(),
-          decision: {
-            strategy: decision.strategy,
-            overlapping: decision.submitSequence !== null,
-            debounceUntilMs: decision.debounceUntilMs
-          },
+          ...(strategy && { strategy }),
           payload: request.admission.payload
         };
-        reservation = this.queue.reserve(requestId, { admission });
-        // Held at once: a request admitted next is after it.
-        admissions.hold(requestId, null, held);
-        admissions.hold(requestId, await reservation.accepted, held);
+        // Taken before any wait: a request accepted next is after it.
+        reservation = this.queue.reserve(
+          requestId,
+          admission ? { admission } : {},
+          arrivalPolicy(strategy)
+        );
+        admissions?.hold(requestId, null, held, supersedes(strategy));
+        const receipt = await reservation.accepted;
+        if (receipt.dropped) {
+          joined = true;
+          // Its messages are not coming: tabs are sent the list without them.
+          admissions?.end(requestId);
+          request.onDropped();
+          return;
+        }
+        // The runs it superseded never run. Those an earlier isolate left
+        // have no request here to say so.
+        admissions?.endRuns(receipt.superseded ?? []);
+        admissions?.hold(requestId, receipt.runId, held, supersedes(strategy));
       }
       // Inside the try, so a failure here is reported and settled like any
       // other step's.
       await request.onAccepted?.();
       const prepared = await request.persist({
-        decision,
         generation,
         isCurrent: () => this.queue.generation === generation
       });
@@ -820,66 +831,58 @@ export class ChatTurns<
         return;
       }
       stage = "turn";
-      const outcome = await request.enqueue(
-        async () => {
-          const current = await this.awaitSubmitTurn(slot.decision, generation);
-          if (this.queue.generation !== generation) {
+      const outcome = await request.enqueue(async () => {
+        if (this.queue.generation !== generation) {
+          request.onSkipped();
+          return;
+        }
+        // A replay whose conversation moved on without it (a rollback
+        // answered something newer) does not run. Its question is still
+        // stored, after what is there: a user's message is never dropped.
+        const movedOn =
+          !joined && replay !== undefined && this.#replayMovedOn(replay.record);
+        if (!joined) {
+          const stored = new Set(this.host.messages().map((m) => m.id));
+          const fresh = held.filter((message) => !stored.has(message.id));
+          if (
+            !(await request.join?.({
+              prepared,
+              messages: fresh,
+              generation,
+              isCurrent: () => this.queue.generation === generation
+            }))
+          ) {
             request.onSkipped();
             return;
           }
-          // A replay whose conversation moved on without it (a rollback
-          // answered something newer) does not run. Its question is still
-          // stored, after what is there: a user's message is never dropped.
-          const movedOn =
-            !joined &&
-            replay !== undefined &&
-            this.#replayMovedOn(replay.record);
-          if (!joined) {
-            const stored = new Set(this.host.messages().map((m) => m.id));
-            const fresh = held.filter((message) => !stored.has(message.id));
-            if (
-              !(await request.join?.({
-                prepared,
-                messages: fresh,
-                generation,
-                isCurrent: () => this.queue.generation === generation
-              }))
-            ) {
-              request.onSkipped();
-              return;
-            }
-            joined = true;
-          }
-          if (!current || movedOn) {
-            request.onSkipped();
-            return;
-          }
-          if (request.beforeStart && !(await request.beforeStart(prepared))) {
-            request.onSkipped();
-            return;
-          }
-          if (signal.aborted) {
-            request.onCancelledBeforeStart();
-            return;
-          }
-          try {
-            await request.run(prepared, signal);
-          } catch (error) {
-            // What a stopped turn throws because of the stop is not a
-            // failure: the request ends `aborted`.
-            if (!isTurnStopped(signal)) throw error;
-            request.onCancelledBeforeStart();
-          }
-        },
-        generation,
-        onQueued
-      );
+          joined = true;
+        }
+        if (movedOn) {
+          request.onSkipped();
+          return;
+        }
+        if (request.beforeStart && !(await request.beforeStart(prepared))) {
+          request.onSkipped();
+          return;
+        }
+        if (signal.aborted) {
+          request.onCancelledBeforeStart();
+          return;
+        }
+        try {
+          await request.run(prepared, signal);
+        } catch (error) {
+          // What a stopped turn throws because of the stop is not a
+          // failure: the request ends `aborted`.
+          if (!isTurnStopped(signal)) throw error;
+          request.onCancelledBeforeStart();
+        }
+      }, generation);
       if (outcome === "stale") request.onSkipped();
     } catch (error) {
       if (!request.onError) throw error;
       await request.onError(error, stage);
     } finally {
-      releasePendingEnqueue();
       reservation?.release();
       if (replay) this.queue.releaseInline(requestId);
       this.admissions?.end(requestId);
@@ -911,12 +914,6 @@ export class ChatTurns<
     const marks = this.#lane.tasks().peek(runId)?.metadata?.chat as
       | { stopped?: unknown; cleared?: unknown }
       | undefined;
-    // The requests an earlier isolate left keep their order under
-    // `latest`, `merge` and `debounce`: their decisions are restored
-    // together, in lane order, so a later one supersedes an earlier one.
-    for (const { requestId, decision } of this.admissions?.takeSeeded() ?? []) {
-      this.#restoredDecisions.set(requestId, this.submits.restore(decision));
-    }
     // A clear discards a waiting request, messages and all.
     if (marks?.cleared === true) return;
     const stopped =
@@ -947,14 +944,31 @@ export class ChatTurns<
    * Carry the admission records an earlier release left
    * (`takeReleasedChatAdmissions`) onto this release's: a client request's
    * becomes a run on the chat lane, in their order, which runs it again by
-   * itself; a continuation's becomes its record key.
+   * itself; a continuation's becomes its record key. A request a later one
+   * superseded (`latest`, `merge`, debounce) gets no run: the later one
+   * holds its messages ahead of its own, as a live arrival does.
    */
   async #carryReleasedAdmissions(
     records: ReadonlyArray<ChatAdmissionRecord>
   ): Promise<void> {
     const admissions = this.admissions;
     if (!admissions) return;
+    const superseded = new Set<ChatAdmissionRecord>();
+    const messagesOf = new Map<ChatAdmissionRecord, HeldChatMessage[]>();
+    let previous: ChatAdmissionRecord | undefined;
     for (const record of records) {
+      if (continuationRecord(record) || !supersedes(record.strategy)) continue;
+      if (previous) {
+        superseded.add(previous);
+        messagesOf.set(record, [
+          ...(messagesOf.get(previous) ?? previous.messages),
+          ...record.messages
+        ]);
+      }
+      previous = record;
+    }
+    for (const record of records) {
+      if (superseded.has(record)) continue;
       const continuation = continuationRecord(record);
       if (continuation) {
         if (!record.stopped) {
@@ -971,9 +985,9 @@ export class ChatTurns<
       const nonce = `released-${record.requestId}`;
       const admission: ChatAdmissionInput = {
         order: record.seq,
-        messages: record.messages,
+        messages: messagesOf.get(record) ?? record.messages,
         afterUserId: record.afterUserId,
-        decision: record.decision,
+        ...(record.strategy && { strategy: record.strategy }),
         payload: record.payload
       };
       const input: ChatTurnTaskInput = {
@@ -1940,8 +1954,6 @@ export class ChatTurns<
     this.queue.reset();
     this.#lastReply = null;
     this.aborts.destroyAll();
-    this.submits.reset();
-    this.#restoredDecisions.clear();
     this.pendingInteraction = null;
     // New interactions must not serialize behind a stale, possibly hung,
     // apply from the turn being reset (#1649).
@@ -1983,12 +1995,12 @@ export class ChatTurns<
   }
 
   /**
-   * Resolve once no turn is queued or running, no submit is between its
-   * concurrency decision and the queue, and no continuation is about to fire.
+   * Resolve once no turn is queued, running or taking its place, and no
+   * continuation is about to fire.
    */
   async waitForIdle(): Promise<void> {
     for (;;) {
-      await this.submits.waitForIdle(() => this.queue.waitForIdle());
+      await this.queue.waitForIdle();
       if (!this.hasPendingDecision()) return;
       await sleep(AutoContinuationController.COALESCE_MS);
     }
@@ -2019,7 +2031,7 @@ export class ChatTurns<
     // before the attempt ends. That continuation settles the chat instead.
     const inLane = inLaneRecoveryAttempt();
     for (;;) {
-      const idle = this.submits.waitForIdle(() => this.queue.waitForIdle());
+      const idle = this.queue.waitForIdle();
       const watch = { done: false };
       const waited = await awaitWithDeadline(
         inLane
@@ -2117,3 +2129,19 @@ function continuationRecord(
  * waits on it, so what it would tell one goes nowhere.
  */
 const DETACHED_CONNECTION = { id: "", send: () => {} };
+
+/**
+ * The arrival policy of a client request's lane run under the strategy it
+ * arrived with (`latest` for `merge` too: the host merges the messages).
+ */
+function arrivalPolicy(
+  strategy: NormalizedMessageConcurrency | null
+): TaskRunOptions["policy"] {
+  if (strategy === null || strategy === "queue") return undefined;
+  if (strategy === "drop") return "drop";
+  // A debounce with no quiet period still supersedes what waits.
+  if (strategy === "latest" || strategy === "merge" || !strategy.debounceMs) {
+    return "latest";
+  }
+  return { debounceMs: strategy.debounceMs };
+}

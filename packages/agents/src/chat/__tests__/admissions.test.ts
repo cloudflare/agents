@@ -94,10 +94,8 @@ function isolate(
       }
       return true;
     },
-    enqueue: async (turn, generation, onQueued) => {
-      const done = turns.queue.enqueue(requestId, turn, { generation });
-      onQueued();
-      const result = await done;
+    enqueue: async (turn, generation) => {
+      const result = await turns.queue.enqueue(requestId, turn, { generation });
       await options.afterTurn?.(turns);
       return result.status === "stale" ? "stale" : "completed";
     },
@@ -218,6 +216,28 @@ describe("durable admission", () => {
     expect(b.records()).toEqual([]);
   });
 
+  it("under `latest`, a new request during recovery is not superseded by the older replays", async () => {
+    const db = new MemoryWorld();
+    const first = isolate(db, { concurrency: "latest" });
+    void first.send("r1");
+    await tick();
+    void first.send("r2");
+    void first.send("r3");
+    await tick();
+    // After the reset r1's run is recovery's, at the lane's head. A new
+    // request arrives before anything replays.
+    const b = isolate(db, { concurrency: "latest" });
+    b.copyTranscript(first);
+    void b.send("r4");
+    await tick();
+    await b.resume();
+    await flush();
+    expect(b.started).toEqual(["r4"]);
+    expect(b.replayed).toEqual([]);
+    // The questions of the requests it superseded are kept, before its own.
+    expect(b.asked.get("r4")).toEqual(["u-r1", "u-r2", "u-r3", "u-r4"]);
+  });
+
   it("a new request waits behind what a reset left, in lane order", async () => {
     const db = new MemoryWorld();
     const a = await queueBehindRunningTurn(db, ["r2"]);
@@ -317,7 +337,9 @@ describe("durable admission", () => {
     b.copyTranscript(first);
     await b.resume();
     await flush();
-    expect(b.ended.get("r2")).toBe("skipped");
+    // Skipped when r3 arrived, on the lane: it does not come back.
+    expect(first.ended.get("r2")).toBe("skipped");
+    expect(b.ended.has("r2")).toBe(false);
     expect(b.started).toEqual(["r3"]);
     // The superseded question is kept, before the one that superseded it.
     expect(b.asked.get("r3")).toEqual(["u-r1", "u-r2", "u-r3"]);
@@ -496,7 +518,7 @@ describe("durable admission", () => {
       messageIds: ["u-old"],
       messages: [{ id: "u-old", role: "user" }],
       afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      strategy: null,
       payload: { requestId: "old" },
       stopped: false,
       createdAt: 1
@@ -516,6 +538,84 @@ describe("durable admission", () => {
     expect(b.started).toEqual(["old"]);
   });
 
+  it("carries an earlier release's `latest` records as the last one, which holds the questions of those it superseded", async () => {
+    const db = new MemoryWorld();
+    const released = (
+      requestId: string,
+      seq: number,
+      strategy: ChatAdmissionRecord["strategy"]
+    ): ChatAdmissionRecord => ({
+      requestId,
+      seq,
+      messageIds: [`u-${requestId}`],
+      messages: [{ id: `u-${requestId}`, role: "user" }],
+      afterUserId: null,
+      strategy,
+      payload: { requestId },
+      stopped: false,
+      createdAt: seq
+    });
+    const b = isolate(db, {
+      concurrency: "latest",
+      released: () => ({
+        records: [
+          released("r1", 1, null),
+          released("r2", 2, "latest"),
+          released("r3", 3, "latest")
+        ],
+        drop: () => {}
+      })
+    });
+    await b.resume();
+    await flush();
+    b.finish("r1");
+    await flush();
+    expect(b.started).toEqual(["r1", "r3"]);
+    // r2's question is kept, and answered with r3's.
+    expect(b.asked.get("r3")).toEqual(["u-r1", "u-r2", "u-r3"]);
+  });
+
+  it("supersedes a request an earlier isolate left in its quiet period", async () => {
+    const db = new MemoryWorld();
+    const debounce = { strategy: "debounce" as const, debounceMs: 50 };
+    const first = isolate(db, { concurrency: debounce });
+    void first.send("r1");
+    await tick();
+    void first.send("r2");
+    await tick();
+    first.finish("r1");
+    await flush();
+    expect(first.records()).toEqual(["r2"]);
+
+    // The isolate resets during r2's quiet period; r3 arrives in the next.
+    const b = isolate(db, { concurrency: debounce });
+    b.copyTranscript(first);
+    void b.send("r3");
+    await b.resume();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await flush();
+    expect(b.started).toEqual(["r3"]);
+    // r2's question is kept, and answered with r3's.
+    expect(b.asked.get("r3")).toEqual(["u-r1", "u-r2", "u-r3"]);
+  });
+
+  it("a clear ends the waiting requests' runs, so the next request does not wait out their quiet period", async () => {
+    const db = new MemoryWorld();
+    const debounce = { strategy: "debounce" as const, debounceMs: 60_000 };
+    const a = isolate(db, { concurrency: debounce });
+    void a.send("r1");
+    await tick();
+    void a.send("r2");
+    await tick();
+    a.finish("r1");
+    await flush();
+    a.turns.reset();
+    await flush();
+    void a.send("r3");
+    await flush();
+    expect(a.started).toEqual(["r1", "r3"]);
+  });
+
   it("carries an earlier release's records once, though a reset cut the first carry short", async () => {
     const db = new MemoryWorld();
     const record: ChatAdmissionRecord = {
@@ -524,7 +624,7 @@ describe("durable admission", () => {
       messageIds: ["u-old"],
       messages: [{ id: "u-old", role: "user" }],
       afterUserId: null,
-      decision: { strategy: null, overlapping: false, debounceUntilMs: null },
+      strategy: null,
       payload: { requestId: "old" },
       stopped: false,
       // The table was never dropped: the reset landed first.
@@ -567,7 +667,9 @@ describe("durable admission", () => {
     b.copyTranscript(first);
     await b.resume();
     await flush();
-    expect(b.ended.get("r2")).toBe("skipped");
+    // Skipped when r3 arrived, on the lane: it does not come back.
+    expect(first.ended.get("r2")).toBe("skipped");
+    expect(b.ended.has("r2")).toBe(false);
     expect(b.started).toEqual(["r3"]);
   });
 
@@ -773,7 +875,7 @@ describe("takeReleasedChatAdmissions", () => {
     expect(records.map((r) => r.requestId)).toEqual(["r1", "r2"]);
     expect(records[0]).toMatchObject({
       messages: [{ id: "u1", role: "user" }],
-      decision: { strategy: "latest", overlapping: true },
+      strategy: "latest",
       payload: { trigger: "submit-message" },
       stopped: false
     });

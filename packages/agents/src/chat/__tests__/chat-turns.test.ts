@@ -254,11 +254,7 @@ describe("ChatTurns", () => {
               messageIds: [],
               messages: [],
               afterUserId: null,
-              decision: {
-                strategy: null,
-                overlapping: false,
-                debounceUntilMs: null
-              },
+              strategy: null,
               payload: { trigger: "continuation", targetMessageIds: ["a1"] },
               stopped: false,
               createdAt: 1
@@ -427,49 +423,6 @@ describe("ChatTurns", () => {
     );
     await vi.advanceTimersByTimeAsync(COALESCE);
     expect(host.fired).toBe(0);
-  });
-
-  // ── Submits ─────────────────────────────────────────────────────────
-
-  it("skips a submit superseded while it waited in the queue", async () => {
-    let release!: () => void;
-    const active = turns.queue.enqueue(
-      "r1",
-      () => new Promise<void>((resolve) => (release = resolve))
-    );
-    const older = turns.decideSubmit("latest", true);
-    const newer = turns.decideSubmit("latest", true);
-    await vi.advanceTimersByTimeAsync(0);
-    release();
-    await active;
-
-    await expect(
-      turns.awaitSubmitTurn(older, turns.queue.generation)
-    ).resolves.toBe(false);
-    await expect(
-      turns.awaitSubmitTurn(newer, turns.queue.generation)
-    ).resolves.toBe(true);
-  });
-
-  it("skips a debounced submit when the chat is reset during its quiet period", async () => {
-    let release!: () => void;
-    const active = turns.queue.enqueue(
-      "r1",
-      () => new Promise<void>((resolve) => (release = resolve))
-    );
-    const decision = turns.decideSubmit(
-      { strategy: "debounce", debounceMs: 200 },
-      true
-    );
-    const generation = turns.queue.generation;
-    await vi.advanceTimersByTimeAsync(0);
-    release();
-    await active;
-
-    const admitted = turns.awaitSubmitTurn(decision, generation);
-    turns.reset();
-    await vi.advanceTimersByTimeAsync(200);
-    await expect(admitted).resolves.toBe(false);
   });
 
   it("releases parked connections when the last accepted turn settles without a stream", () => {
@@ -763,11 +716,8 @@ describe("ChatTurns", () => {
           log.push(`${id}:persist`);
           return "prepared";
         },
-        enqueue: async (turn, generation, onQueued) => {
-          const result = turns.queue.enqueue(id, turn, { generation });
-          onQueued();
-          return (await result).status;
-        },
+        enqueue: async (turn, generation) =>
+          (await turns.queue.enqueue(id, turn, { generation })).status,
         run: async (prepared, signal) => {
           log.push(`${id}:run:${prepared}:${signal.aborted}`);
         },
@@ -793,7 +743,7 @@ describe("ChatTurns", () => {
       expect(preStreamDuringRun).toBe(true);
       expect(turns.aborts.has("r1")).toBe(false);
       expect(turns.preStream.hasInFlight()).toBe(false);
-      expect(turns.submits.pendingEnqueueCount).toBe(0);
+      expect(turns.queue.queuedCount()).toBe(0);
     });
 
     it("ends a request aborted when its run throws after a stop, without reporting an error", async () => {
@@ -831,7 +781,7 @@ describe("ChatTurns", () => {
       // Nothing was accepted: no pre-stream mark, no persist, no queue.
       expect(log).toEqual([]);
       expect(turns.preStream.hasInFlight()).toBe(false);
-      expect(turns.submits.pendingEnqueueCount).toBe(0);
+      expect(turns.queue.queuedCount()).toBe(0);
     });
 
     it("drops an overlapping submit before accepting it", async () => {
@@ -911,6 +861,69 @@ describe("ChatTurns", () => {
       expect(log).not.toContain("r2:run:prepared:false");
     });
 
+    it("skips a request superseded under a debounce with no quiet period", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const debounce = { strategy: "debounce" as const, debounceMs: 0 };
+      const second = request("r2", log, { concurrency: debounce });
+      const third = request("r3", log, { concurrency: debounce });
+      await vi.advanceTimersByTimeAsync(0);
+      release();
+      await Promise.all([first, second, third]);
+
+      expect(log).toContain("r2:skipped");
+      expect(log).toContain("r3:run:prepared:false");
+    });
+
+    it("skips a debounced request when the chat is reset during its quiet period", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = request("r2", log, {
+        concurrency: { strategy: "debounce", debounceMs: 200 }
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      release();
+      await first;
+      turns.reset();
+      await vi.advanceTimersByTimeAsync(200);
+      await second;
+      expect(log.filter((entry) => entry.startsWith("r2"))).toEqual([
+        "r2:accepted",
+        "r2:persist",
+        "r2:skipped"
+      ]);
+    });
+
+    it("starts a debounced request once its quiet period is over, and a newer one restarts it", async () => {
+      const log: Log = [];
+      let release!: () => void;
+      const first = request("r1", log, {
+        run: () => new Promise<void>((resolve) => (release = resolve))
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const debounce = { strategy: "debounce" as const, debounceMs: 200 };
+      const second = request("r2", log, { concurrency: debounce });
+      await vi.advanceTimersByTimeAsync(150);
+      const third = request("r3", log, { concurrency: debounce });
+      release();
+      await first;
+      await vi.advanceTimersByTimeAsync(150);
+      expect(log).not.toContain("r3:run:prepared:false");
+      await vi.advanceTimersByTimeAsync(50);
+      await Promise.all([second, third]);
+      expect(log).toContain("r2:skipped");
+      expect(log).toContain("r3:run:prepared:false");
+      expect(log).not.toContain("r2:run:prepared:false");
+    });
+
     it("skips a request its persist declines or its host check rejects", async () => {
       const log: Log = [];
       await request("r1", log, { persist: async () => null });
@@ -954,7 +967,7 @@ describe("ChatTurns", () => {
       ]);
       expect(turns.aborts.size).toBe(0);
       expect(turns.preStream.hasInFlight()).toBe(false);
-      expect(turns.submits.pendingEnqueueCount).toBe(0);
+      expect(turns.queue.queuedCount()).toBe(0);
 
       await expect(
         request("r3", [], {
