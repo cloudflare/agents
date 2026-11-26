@@ -77,6 +77,8 @@ export type ProbeEvent = {
   reason?: string;
 };
 export type ProbeState = {
+  /** Instances of the object that have started. */
+  starts: number;
   messages: UIMessage[];
   schedules: number;
   events: ProbeEvent[];

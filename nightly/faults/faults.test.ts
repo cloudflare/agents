@@ -23,9 +23,20 @@ if (unknown.length)
   throw new Error(`FAULTS_ONLY names no scenario: ${unknown.join(", ")}`);
 
 // Each class at the root and as a facet sub-agent of a hub.
-const classes = (process.env.FAULTS_CLASSES ?? "chat,think,fchat,fthink").split(
-  ","
-) as Cls[];
+const CLASSES: Cls[] = ["chat", "think", "fchat", "fthink"];
+const classes = [
+  ...new Set(
+    (process.env.FAULTS_CLASSES ?? CLASSES.join(","))
+      .split(",")
+      .map((c) => c.trim())
+  )
+] as Cls[];
+const unknownClasses = classes.filter((c) => !CLASSES.includes(c));
+if (unknownClasses.length) {
+  throw new Error(
+    `FAULTS_CLASSES names no class: ${unknownClasses.join(", ")}`
+  );
+}
 
 for (const cls of classes) {
   describe.concurrent(cls, () => {

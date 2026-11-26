@@ -587,6 +587,13 @@ function bump(sql: SqlFn, key: string): number {
   return n;
 }
 
+/** How many instances of this object have started (a reset starts a new one). */
+function readCount(sql: SqlFn, key: string): number {
+  tables(sql);
+  const rows = sql`SELECT v FROM probe_cfg WHERE k = ${key}` as { v: string }[];
+  return rows[0] ? Number(rows[0].v) : 0;
+}
+
 function userMessage(text: string): UIMessage {
   return {
     id: `srv-${crypto.randomUUID()}`,
@@ -718,6 +725,7 @@ export class ProbeChat extends AIChatAgent<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     applyRuntimeConfig(this, readConfig(this.s), this.s);
+    bump(this.s, "starts");
   }
   private get s(): SqlFn {
     return this.sql.bind(this) as SqlFn;
@@ -784,6 +792,7 @@ export class ProbeChat extends AIChatAgent<Env> {
     return {
       messages: this.messages,
       schedules: (await this.listSchedules()).length,
+      starts: readCount(this.s, "starts"),
       ...readLog(this.s)
     };
   }
@@ -813,6 +822,7 @@ export class ProbeThink extends Think<Env> {
     super(ctx, env);
     const cfg = readConfig(this.s);
     applyRuntimeConfig(this, cfg, this.s);
+    bump(this.s, "starts");
     this.contextOverflow = cfg.overflow ? { reactive: true } : undefined;
   }
   private get s(): SqlFn {
@@ -919,6 +929,7 @@ export class ProbeThink extends Think<Env> {
     return {
       messages: await this.getMessages(),
       schedules: (await this.listSchedules()).length,
+      starts: readCount(this.s, "starts"),
       ...readLog(this.s)
     };
   }
