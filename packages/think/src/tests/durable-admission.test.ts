@@ -123,12 +123,38 @@ const SLOW = { tag: "s", chunks: 30, delayMs: 100 };
 const QUICK = { tag: "q", chunks: 3, delayMs: 10 };
 const QUICK_REPLY = "q0 q1 q2 ";
 
+/** Wait until request `id` has streamed a chunk to this socket. */
+async function streaming(frames: Array<Record<string, unknown>>, id: string) {
+  const started = await waitFor(
+    async () =>
+      frames.some(
+        (f) => f.type === MSG_CHAT_RESPONSE && f.id === id && f.done !== true
+      ),
+    (yes) => yes,
+    5000
+  );
+  if (!started) throw new Error(`${id} never streamed`);
+}
+
+/** Wait until request `id` has its admission record. */
+async function admitted(binding: Binding, room: string, id: string) {
+  const records = await waitFor(
+    async () => (await agent(binding, room)).getAdmissionsForTest(),
+    (list) => list.some((r) => r.requestId === id),
+    5000
+  );
+  if (!records.some((r) => r.requestId === id)) {
+    throw new Error(`${id} was never admitted`);
+  }
+}
+
 async function queueBehindSlowTurn(binding: Binding, room: string) {
   const ws = await connect(binding, room);
+  const frames = record(ws);
   send(ws, "r1", [user("u1", "one")], SLOW);
-  await delay(400);
+  await streaming(frames, "r1");
   send(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-  await delay(300);
+  await admitted(binding, room, "r2");
   return ws;
 }
 
@@ -269,16 +295,16 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const ws = await connect(binding, room);
     const sent = record(ws);
     send(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(400);
+    await streaming(sent, "r1");
     send(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(100);
+    await admitted(binding, room, "r2");
     send(
       ws,
       "r3",
       [user("u1", "one"), user("u2", "two"), user("u3", "three")],
       { ...QUICK, tag: "t" }
     );
-    await delay(300);
+    await admitted(binding, room, "r3");
 
     await reset(binding, room);
     const tab = await connect(binding, room);
@@ -315,8 +341,9 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const binding = "ThinkAdmissionTestAgent";
     const room = crypto.randomUUID();
     const ws = await connect(binding, room);
+    const sent = record(ws);
     send(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(400);
+    await streaming(sent, "r1");
     await (await agent(binding, room)).seedAdmissionForTest("r1", ["u1"]);
 
     await reset(binding, room);

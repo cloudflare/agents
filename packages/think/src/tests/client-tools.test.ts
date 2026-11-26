@@ -4343,9 +4343,9 @@ describe("Think — the continuation turn", () => {
         id: continuationId
       })
     );
-    await delay(50);
+    await handled(agent, "cf_agent_chat_request_cancel");
     await agent.releaseTurnQueueForTest();
-    await delay(400);
+    await settled(agent);
 
     expect(await agent.continuationTurnCountForTest()).toBe(0);
     expect(await agent.pendingContinuationRequestIdForTest()).toBeNull();

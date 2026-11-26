@@ -9773,6 +9773,11 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._chunkHold = { after, reached: false, released, open };
   }
 
+  /** Resolve once no turn runs or waits. */
+  async waitForIdleForTest(): Promise<void> {
+    await waitForThinkIdleForTest(this);
+  }
+
   /** Whether a held stream has sent its chunks and is waiting. */
   async isChunkStreamHeldForTest(): Promise<boolean> {
     return this._chunkHold?.reached ?? false;

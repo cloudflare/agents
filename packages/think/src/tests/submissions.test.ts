@@ -60,6 +60,7 @@ type ThinkSubmissionTestStub = {
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   holdSubmissionStatusHookForTest(): Promise<void>;
   cancelInSubmissionStatusHookForTest(): Promise<void>;
+  waitForIdleForTest(): Promise<void>;
   isSubmissionStatusHookHeldForTest(): Promise<boolean>;
   statusReportsQueuedForTest(submissionId: string): Promise<number>;
   releaseSubmissionStatusHookForTest(): Promise<void>;
@@ -304,6 +305,14 @@ const terminalStatuses = new Set<ThinkSubmissionStatus>([
   "error"
 ]);
 const workflowPromptMetadataKey = "__thinkWorkflowPrompt";
+
+/** Wait until the held delayed-chunk stream has sent its chunks. */
+async function chunkStreamHeld(agent: ThinkSubmissionTestStub): Promise<void> {
+  await vi.waitFor(
+    async () => expect(await agent.isChunkStreamHeldForTest()).toBe(true),
+    { timeout: 5000, interval: 10 }
+  );
+}
 
 /** Wait until the held `onSubmissionStatus` call is running. */
 async function statusHookHeld(agent: ThinkSubmissionTestStub): Promise<void> {
@@ -960,16 +969,14 @@ describe("Think durable submissions", () => {
   it("aborts a running submission without letting late completion overwrite it", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+    // The stream waits after one chunk, so the cancel lands mid-turn.
+    await agent.holdChunksAfterForTest(1);
+    onTestFinished(() => agent.releaseChunksForTest());
 
     const accepted = await agent.testSubmitMessages("cancel me", {
       submissionId: "sub-cancel"
     });
-
-    await waitForSubmission(
-      agent,
-      accepted.submissionId,
-      (submission) => submission.status === "running"
-    );
+    await chunkStreamHeld(agent);
     await agent.cancelSubmissionForTest(accepted.submissionId, "stop");
 
     const aborted = await waitForSubmission(
@@ -979,7 +986,10 @@ describe("Think durable submissions", () => {
     );
 
     expect(aborted.error).toBe("stop");
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // The stream finishes after the abort; once the turn has ended, a late
+    // completion would have been written.
+    await agent.releaseChunksForTest();
+    await agent.waitForIdleForTest();
     await expect(
       agent.inspectSubmissionForTest(accepted.submissionId)
     ).resolves.toMatchObject({ status: "aborted" });
@@ -1162,15 +1172,21 @@ describe("Think durable submissions", () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({ submissionId: "sub-wait-hook" });
     await agent.holdSubmissionStatusHookForTest();
+    onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
 
     // The terminal row is written and its hook is running.
     const cancel = agent.cancelSubmissionForTest("sub-wait-hook", "stop");
     await statusHookHeld(agent);
     let waitSettled = false;
     const waiting = agent.waitForSubmissionForTest("sub-wait-hook");
-    void waiting.then(() => {
-      waitSettled = true;
-    });
+    waiting.then(
+      () => {
+        waitSettled = true;
+      },
+      () => {
+        // A rejected wait fails the test where it is awaited below.
+      }
+    );
     // After a round trip to the agent, the wait still waits for the hook.
     await agent.isSubmissionStatusHookHeldForTest();
     expect(waitSettled).toBe(false);
@@ -1206,6 +1222,7 @@ describe("Think durable submissions", () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({ submissionId: "sub-reuse" });
     await agent.holdSubmissionStatusHookForTest();
+    onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
 
     // Deleted and reused while its terminal hook runs.
     const cancel = agent.cancelSubmissionForTest("sub-reuse", "stop");
@@ -1229,15 +1246,21 @@ describe("Think durable submissions", () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({ submissionId: "sub-del-hook" });
     await agent.holdSubmissionStatusHookForTest();
+    onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
 
     const waiting = agent.waitForSubmissionForTest("sub-del-hook");
     const cancel = agent.cancelSubmissionForTest("sub-del-hook", "stop");
     // Deleted while its terminal hook runs.
     await statusHookHeld(agent);
     let waitSettled = false;
-    void waiting.then(() => {
-      waitSettled = true;
-    });
+    waiting.then(
+      () => {
+        waitSettled = true;
+      },
+      () => {
+        // A rejected wait fails the test where it is awaited below.
+      }
+    );
     await expect(agent.deleteSubmissionForTest("sub-del-hook")).resolves.toBe(
       true
     );
@@ -1286,20 +1309,22 @@ describe("Think durable submissions", () => {
   it("emits a cancelled running submission's terminal status once", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+    // The stream waits after one chunk, so the cancel lands mid-turn.
+    await agent.holdChunksAfterForTest(1);
+    onTestFinished(() => agent.releaseChunksForTest());
     const accepted = await agent.testSubmitMessages("cancel me once", {
       submissionId: "sub-cancel-once"
     });
-    await waitForSubmission(
-      agent,
-      accepted.submissionId,
-      (submission) => submission.status === "running"
-    );
+    await chunkStreamHeld(agent);
 
     await agent.cancelSubmissionForTest(accepted.submissionId, "stop");
     await expect(
       agent.waitForSubmissionForTest(accepted.submissionId)
     ).resolves.toMatchObject({ status: "aborted" });
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Once the turn has ended, a second terminal status would have been
+    // emitted.
+    await agent.releaseChunksForTest();
+    await agent.waitForIdleForTest();
 
     const statuses = (await agent.getSubmissionLog())
       .filter((entry) => entry.submissionId === accepted.submissionId)
