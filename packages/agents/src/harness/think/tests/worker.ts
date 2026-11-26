@@ -34,6 +34,7 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
+const ACTIVE_TOOLS_KEY = "test:active-tools";
 const LATE_EXAMPLES_KEY = "test:late-examples";
 const ENVIRONMENT_KEY = "test:environment";
 const REMIND_SECTION_KEY = "test:remind-section";
@@ -266,7 +267,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           delete toolSet.multiply;
         }
         const system = this.ctx.storage.kv.get<string>(SYSTEM_KEY);
-        return system ? { system } : undefined;
+        const activeTools = this.ctx.storage.kv.get<string[]>(ACTIVE_TOOLS_KEY);
+        if (!system && !activeTools) return undefined;
+        return {
+          ...(system && { system }),
+          ...(activeTools && { activeTools })
+        };
       },
       beforeToolCall: ({ toolName }) => {
         const blocked = this.ctx.storage.kv.get<string>(BLOCK_KEY);
@@ -553,6 +559,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   addLateExamples(): void {
     this.ctx.storage.kv.put(LATE_EXAMPLES_KEY, true);
+  }
+
+  setActiveTools(names: string[] | null): void {
+    if (names) this.ctx.storage.kv.put(ACTIVE_TOOLS_KEY, names);
+    else this.ctx.storage.kv.delete(ACTIVE_TOOLS_KEY);
   }
 
   addLateTool(): void {

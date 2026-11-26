@@ -1539,6 +1539,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // from an answered message) rides on this request alone.
     const context = this.#context(session);
     let contextSystem = "";
+    let blockReminder: string | null = null;
     let request = history;
     let optionsSystem = prompt.system;
     if (context) {
@@ -1546,12 +1547,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       const prepared = await context.prepare({
         messages: history,
         // A call after an interruption is sent as the first attempt was.
-        retry: start.interruptions > 0,
-        // What this request offers, so a change from the last turn's tools
-        // reaches the model once, as a notice after the user message.
-        tools: await toolFingerprint(tools)
+        retry: start.interruptions > 0
       });
       contextSystem = prepared.system;
+      blockReminder = prepared.reminder;
       request = withReminder(
         asUIMessages(await context.project(history)),
         prepared.reminder
@@ -1578,6 +1577,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
     const offered = modelTools(tools, config.activeTools);
+    if (context) {
+      // The tools this request sends, now that `beforeTurn` chose which: a
+      // change from the last turn's reaches the model once, as a notice
+      // after the user message. The blocks were prepared above.
+      const sent = await context.prepare({
+        messages: history,
+        retry: start.interruptions > 0,
+        tools: await toolFingerprint(tools, Object.keys(offered))
+      });
+      request = withReminder(
+        asUIMessages(await context.project(history)),
+        [blockReminder, sent.reminder].filter(Boolean).join("\n\n") || null
+      );
+    }
     const effectiveSystem = config.system ?? system;
     const messages: ModelMessage[] =
       config.messages ??
@@ -2756,46 +2769,48 @@ async function appendedAfter(
     : undefined;
 }
 
-/** Each tool set's fingerprint, made once per build. */
-const fingerprints = new WeakMap<
-  ToolSet,
-  Promise<readonly { readonly name: string; readonly hash: string }[]>
->();
+/** Each tool's hash, made once per tool object. */
+const toolHashes = new WeakMap<object, Promise<string>>();
 
 /**
- * The tools a request sends, by name, each with a hash of its definition
- * as the model sees it (description, input schema, provider fields).
+ * The tools `names` names in `tools`, the ones a request sends, each with
+ * a hash of its definition as the model sees it (description, input
+ * schema, input examples, provider fields).
  */
 function toolFingerprint(
-  tools: ToolSet
+  tools: ToolSet,
+  names: readonly string[]
 ): Promise<readonly { readonly name: string; readonly hash: string }[]> {
-  let made = fingerprints.get(tools);
+  return Promise.all(
+    names.map(async (name) => ({ name, hash: await toolHash(tools[name]) }))
+  );
+}
+
+function toolHash(tool: ToolSet[string] | undefined): Promise<string> {
+  if (!tool) return Promise.resolve("");
+  let made = toolHashes.get(tool);
   if (!made) {
-    made = Promise.all(
-      Object.entries(tools).map(async ([name, tool]) => {
-        const definition = JSON.stringify({
-          type: tool.type,
-          description:
-            typeof tool.description === "string" ? tool.description : undefined,
-          inputSchema: await asSchema(tool.inputSchema).jsonSchema,
-          id: "id" in tool ? tool.id : undefined,
-          args: "args" in tool ? tool.args : undefined,
-          providerOptions: tool.providerOptions,
-          strict: "strict" in tool ? tool.strict : undefined,
-          inputExamples:
-            "inputExamples" in tool ? tool.inputExamples : undefined
-        });
-        const digest = await crypto.subtle.digest(
-          "SHA-256",
-          new TextEncoder().encode(definition)
-        );
-        const hash = [...new Uint8Array(digest).slice(0, 8)]
-          .map((byte) => byte.toString(16).padStart(2, "0"))
-          .join("");
-        return { name, hash };
-      })
-    );
-    fingerprints.set(tools, made);
+    made = (async () => {
+      const definition = JSON.stringify({
+        type: tool.type,
+        description:
+          typeof tool.description === "string" ? tool.description : undefined,
+        inputSchema: await asSchema(tool.inputSchema).jsonSchema,
+        id: "id" in tool ? tool.id : undefined,
+        args: "args" in tool ? tool.args : undefined,
+        providerOptions: tool.providerOptions,
+        strict: "strict" in tool ? tool.strict : undefined,
+        inputExamples: "inputExamples" in tool ? tool.inputExamples : undefined
+      });
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(definition)
+      );
+      return [...new Uint8Array(digest).slice(0, 8)]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    })();
+    toolHashes.set(tool, made);
   }
   return made;
 }

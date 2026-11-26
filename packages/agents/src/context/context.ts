@@ -292,9 +292,16 @@ export class Context {
       };
     }
     const existing = (await this.#records([at.id])).get(at.id);
-    // Written this turn: it already holds the tools; add the notice to it.
-    if (existing?.tools) {
-      if (notice) await this.#put(at.id, { ...existing, toolNotice: notice });
+    // Written this turn: it holds this turn's tools, or (when the blocks
+    // were prepared in an earlier call of the turn) gets them now.
+    if (existing) {
+      if (notice || !existing.tools) {
+        await this.#put(at.id, {
+          ...existing,
+          tools,
+          ...(notice && { toolNotice: notice })
+        });
+      }
       return prepared;
     }
     if (!notice && before) return prepared;

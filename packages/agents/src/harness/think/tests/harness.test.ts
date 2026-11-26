@@ -1227,6 +1227,22 @@ describe("ThinkHarness context", () => {
     expect(second).toMatch(/\|user:again[^|]*Changed: late\./);
   });
 
+  it("counts only the tools a turn sends, after its activeTools", async () => {
+    const stub = fresh();
+    await stub.setActiveTools(["multiply", "set_context", "search_context"]);
+    await stub.prompt("hello", session);
+    // A tool added but not offered by turn 2's activeTools is not announced.
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    // Turn 3 offers everything: what it adds is announced.
+    await stub.setActiveTools(null);
+    await stub.prompt("thanks", session);
+    const [, second, third] = await stub.promptTexts();
+    expect(second).not.toContain("The tools you can call changed");
+    expect(third).toMatch(/\|user:thanks[^|]*Added: [^|]*late/);
+    expect(third).toMatch(/\|user:thanks[^|]*Added: [^|]*gate/);
+  });
+
   it("tells the model once when a client declares a tool between turns", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);
