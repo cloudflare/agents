@@ -13,10 +13,13 @@ The attempt in the calling isolate starts the child and follows its stream. An
 attempt after a reset, or a detached run's later check, asks the child with a
 bounded call and checks again on a cadence instead of holding the child's
 stream, because it runs from the alarm. A detached run delivers its outcome
-from one of those checks (serialized behind a chat host's lane), never from the
-run's terminal report or from `runAgentTool`, so no job waits on the lane.
+from one of those checks (serialized behind a chat host's lane), never from
+`runAgentTool`, so no job waits on the lane. The run's terminal report delivers
+only what no check could: a cancel, or a child that could not take the run. It
+does so unserialized, as an explicit cancel always has, because a report may run
+inline in a job, or before `runAgentTool` returns.
 Released `cf_agent_tool_runs` rows are carried into Task runs on the first start
-and the table is dropped; its reconcile backbone and schedule go with it. The child remains a
+and the table is dropped (a facet empties it instead); its reconcile backbone and schedule go with it. The child remains a
 normal sub-agent facet and owns the full chat transcript plus resumable stream
 chunks. Think children use `cf_agent_tool_child_runs` to map `runId` to the
 underlying Think request and stream ids; AIChatAgent children use

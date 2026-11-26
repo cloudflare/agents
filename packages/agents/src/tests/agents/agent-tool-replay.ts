@@ -448,6 +448,27 @@ export class TestAgentToolReplayAgent extends Agent {
     await this.ctx.storage.setAlarm(Date.now() + 1000);
   }
 
+  /**
+   * A released detached row that recorded its child's completion but had
+   * not delivered it, whose child is gone; carried forward.
+   */
+  async carryForwardReleasedOwedWithoutChildForTest(
+    runId: string
+  ): Promise<void> {
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, agent_type, status, summary, started_at, completed_at,
+        detached, detached_on_finish, detached_max_budget_at
+      ) VALUES (
+        ${runId}, 'TestAgentToolStubChild', 'completed', 'recorded', ${now},
+        ${now}, 1, 'onDetachedDone', ${now + 3_600_000}
+      )
+    `;
+    await this._agentTool._carryForwardAgentToolRuns();
+  }
+
   /** Detached runs a released version left, one per ledger state. */
   async seedReleasedDetachedRowsForTest(): Promise<void> {
     ensureReleasedAgentToolTable(this.ctx.storage.sql);

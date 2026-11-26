@@ -1394,6 +1394,14 @@ export class AgentToolParent {
       });
     }
 
+    if (step.checkpoint.get<boolean>("owedInInput") === true) {
+      // Carried forward from a released version that recorded this outcome
+      // but had not delivered it.
+      const owed = this.host.tasks.inputOf<RunAgentToolResult>(runId);
+      if (owed)
+        return this._deliverDetachedFromAttempt(meta, owed, step.signal);
+    }
+
     const reached = await this._askDetachedChild(meta, runId);
     const inspection = reached?.inspection ?? null;
     if (inspection) this._deliverDetachedMilestones(meta, runId, inspection);
@@ -1411,7 +1419,7 @@ export class AgentToolParent {
       );
     }
 
-    const gaveUp = step.checkpoint.get<boolean>("gaveUp") === true;
+    const gaveUp = step.checkpoint.get("gaveUp") !== undefined;
     if (gaveUp) {
       // The give-up went out while its teardown was unconfirmed. The child's
       // own abort confirms it now: the run is settled, with no callback.
@@ -1499,7 +1507,8 @@ export class AgentToolParent {
     if (tornDown) return { ...giveUp, delivered: true } as unknown as TaskJson;
     // Keep following a child that may still be running: its late real
     // result is delivered too (#1752).
-    step.checkpoint.set("gaveUp", true);
+    // The give-up it delivered, which replay to a client shows meanwhile.
+    step.checkpoint.set("gaveUp", giveUp as unknown as TaskJson);
     return TaskSettlement.park("child", {
       until: this._detachedNextCheck(step, budget, { gaveUp: true })
     });
@@ -1558,7 +1567,14 @@ export class AgentToolParent {
         until: Date.now() + DETACHED_DELIVERY_RETRY_MS
       });
     }
-    return { ...result, delivered: true } as unknown as TaskJson;
+    // An output too large for a Task value stays on the child, as for an
+    // awaited run: the run settles with the rest, never failing after its
+    // delivery went out.
+    const recorded = this._agentToolResultForRecord(result) as Record<
+      string,
+      TaskJson
+    >;
+    return { ...recorded, delivered: true };
   }
 
   /** The give-up result of a detached run; `delivered` when it went out. */
@@ -1842,7 +1858,17 @@ export class AgentToolParent {
   ): AgentToolRunStorageRow | null {
     const meta = this._agentToolTaskMeta(record);
     if (!record || !meta) return null;
-    const result = this._agentToolTaskResult(record);
+    // A detached run that gave up while its child may still finish shows
+    // the give-up it delivered until the child's own end.
+    const gaveUp =
+      meta.detached &&
+      (record.status === "pending" || record.status === "running")
+        ? this.host.tasks.checkpointOf(record.runId, "gaveUp")
+        : undefined;
+    const result =
+      gaveUp !== undefined && typeof gaveUp === "object"
+        ? (gaveUp as unknown as RunAgentToolResult)
+        : this._agentToolTaskResult(record);
     return {
       run_id: record.runId,
       parent_tool_call_id: meta.parentToolCallId ?? null,
@@ -2018,11 +2044,15 @@ export class AgentToolParent {
       retain: true,
       createdAt: row.started_at
     };
-    const rerun = (checkpoint?: Record<string, TaskJson>) => ({
+    const rerun = (
+      checkpoint?: Record<string, TaskJson>,
+      input?: TaskJson
+    ) => ({
       ...base,
       status: "running" as const,
       attempt: 1,
-      ...(checkpoint ? { checkpoint } : {})
+      ...(checkpoint ? { checkpoint } : {}),
+      ...(input !== undefined ? { input } : {})
     });
     const open = row.status === "starting" || row.status === "running";
     if (open) return rerun();
@@ -2052,13 +2082,17 @@ export class AgentToolParent {
           return settled({ ...result, delivered: true } as unknown as TaskJson);
         }
         // Still owed, or the child may still finish: run it again.
-        return rerun(gaveUp ? { gaveUp: true } : undefined);
+        return rerun(
+          gaveUp ? { gaveUp: result as unknown as TaskJson } : undefined
+        );
       }
       if (row.finish_delivered_at != null) {
         return settled({ ...result, delivered: true } as unknown as TaskJson);
       }
-      // A terminal whose delivery is owed: the next attempt delivers it.
-      return rerun(gaveUp ? { gaveUp: true } : undefined);
+      // A terminal whose delivery is owed: the next attempt delivers the
+      // recorded outcome (kept as the run's input), whether or not the
+      // child is still there to ask.
+      return rerun({ owedInInput: true }, result as unknown as TaskJson);
     }
     if (!this._fitsAgentToolRecord(result)) {
       // Too large for a Task value: the whole result is the run's input.

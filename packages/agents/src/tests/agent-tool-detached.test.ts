@@ -132,6 +132,29 @@ describe("detached agent-tool runs on Tasks", () => {
     ]);
   });
 
+  it("replays an unconfirmed give-up to a reconnecting client while it follows the child", async () => {
+    const agent = await parent("detached-gave-up-replay");
+    await agent.startDetachedForTest(
+      "run-gave-up-replay",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
+    );
+    expect(
+      await agent.checkDetachedForTest("run-gave-up-replay")
+    ).toMatchObject({ status: "pending", waitReason: "park" });
+    const replay = await agent.captureReplayTerminalEventsForTest();
+    expect(
+      replay.filter(
+        (event) => "runId" in event && event.runId === "run-gave-up-replay"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        kind: "interrupted",
+        reason: "budget-exceeded"
+      })
+    ]);
+  });
+
   it("settles an unconfirmed give-up once a later check reads the give-up's own abort (#2769)", async () => {
     const agent = await parent("detached-unconfirmed");
     await agent.startDetachedForTest(
@@ -268,6 +291,23 @@ describe("detached agent-tool runs on Tasks", () => {
     expect(state.nextInMs).toBeGreaterThan(1_000);
   });
 
+  it("settles a run whose output is too large for a Task value, delivering once", async () => {
+    const agent = await parent("detached-large-output");
+    await agent.startDetachedForTest("run-large", {
+      chunkBodies: [],
+      summary: "large",
+      output: "x".repeat(1_200_000)
+    });
+    expect((await agent.checkDetachedForTest("run-large")).status).toBe(
+      "completed"
+    );
+    const log = await agent.getDetachedDeliveryLog();
+    expect(statuses(log, "run-large")).toEqual(["completed"]);
+    expect(statuses(log, "run-large", "onAgentToolFinish")).toEqual([
+      "completed"
+    ]);
+  });
+
   it("delivers a finish again after its callback failed once", async () => {
     const agent = await parent("detached-finish-retry");
     await agent.startDetachedForTest(
@@ -391,6 +431,19 @@ describe("detached agent-tool runs on Tasks", () => {
 });
 
 describe("detached agent-tool runs a released version left", () => {
+  it("delivers the outcome a released version recorded but had not delivered, with its child gone", async () => {
+    const agent = await parent("detached-owed-no-child");
+    await agent.carryForwardReleasedOwedWithoutChildForTest(
+      "released-owed-gone"
+    );
+    expect(
+      (await agent.checkDetachedForTest("released-owed-gone")).status
+    ).toBe("completed");
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "released-owed-gone")
+    ).toEqual(["completed"]);
+  });
+
   it("in a facet carries the rows and empties the table instead of dropping it", async () => {
     const agent = await parent("facet-carry");
     expect(
