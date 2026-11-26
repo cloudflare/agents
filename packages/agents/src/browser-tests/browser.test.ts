@@ -17,7 +17,12 @@ function sleep(ms: number): Promise<void> {
 
 function killProcessOnPort(port: number): void {
   try {
-    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
+    // Only the process listening on the port: without -sTCP:LISTEN, lsof
+    // also lists this worker while it still holds client sockets to it,
+    // and the worker kills itself ("Worker exited unexpectedly").
+    const output = execSync(
+      `lsof -ti tcp:${port} -sTCP:LISTEN 2>/dev/null || true`
+    )
       .toString()
       .trim();
     if (output) {
@@ -201,7 +206,33 @@ interface NamedRunOutput {
     newTabs: Array<{ targetId: string; url?: string }>;
     tabClosed: boolean;
     tabShared: boolean;
+    notices: string[];
   } | null;
+}
+
+/** Run code against the observer tests' browser, which has no hook. */
+async function runObserved(
+  code: string,
+  scope?: string
+): Promise<NamedRunOutput> {
+  return (await callAgent("runObserved", [code, scope])) as NamedRunOutput;
+}
+
+/**
+ * Run code against the browser whose `hostObserver` hook reports each
+ * tab's main-frame navigations in a notice.
+ */
+async function runHooked(code: string): Promise<NamedRunOutput> {
+  return (await callAgent("runHooked", [code])) as NamedRunOutput;
+}
+
+/** The notice the hook gives for one tab that navigated to `paths`. */
+function heardNotice(paths: string[]) {
+  return expect.stringMatching(
+    new RegExp(
+      `^The hook heard \\S+ navigate to ${JSON.stringify(paths).replace(/[[\]]/g, "\\$&")}\\.$`
+    )
+  );
 }
 
 /** Run code against the persistent named browser, in a scope. */
@@ -816,6 +847,109 @@ describe("browser connector e2e", () => {
       expect(output.status).toBe("completed");
       expect(output.report?.restarted).toBe(true);
       expect(output.result).not.toBe("lost");
+    });
+  });
+
+  // The host observer: a second CDP connection a BrowserSession opens to the
+  // same browser. Pages come from the test worker, which real Chrome reaches
+  // at BASE_URL.
+  describe("host observer", () => {
+    afterAll(async () => {
+      await callAgent("closeObserved");
+      await callAgent("closeHooked");
+    });
+
+    /** Model code: navigate the active tab and wait until it has loaded. */
+    const navigate = (path: string) => `
+      await browser.cdp({
+        method: "Page.navigate",
+        params: { url: "${BASE_URL}${path}" },
+        sessionId: "active"
+      });
+      for (let i = 0; i < 100; i++) {
+        const { result } = await browser.cdp({
+          method: "Runtime.evaluate",
+          params: { expression: "location.pathname + ' ' + document.readyState", returnByValue: true },
+          sessionId: "active"
+        });
+        if (result.value.endsWith(" complete") && !result.value.startsWith("/pages/redirect")) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }`;
+
+    it("keeps hearing the tab's Page events after the model disables Page", async () => {
+      const output = await runHooked(`async () => {
+        for (const method of ["Page.enable", "Page.disable"]) {
+          await browser.cdp({ method, sessionId: "active" });
+        }
+        ${navigate("/pages/ok")}
+      }`);
+      expect(output.status).toBe("completed");
+      expect(output.report?.notices).toEqual([heardNotice(["/pages/ok"])]);
+    });
+
+    it("isn't detached by the model's Target.detachFromTarget({ targetId })", async () => {
+      const output = await runHooked(`async () => {
+        const { targetInfos } = await browser.cdp({ method: "Target.getTargets" });
+        const { result } = await browser.cdp({
+          method: "Runtime.evaluate",
+          params: { expression: "location.href", returnByValue: true },
+          sessionId: "active"
+        });
+        const tab = targetInfos.find((t) => t.type === "page" && t.url === result.value);
+        await browser.cdp({ method: "Target.detachFromTarget", params: { targetId: tab.targetId } });
+        // A second detach finds no session of the model's left on the tab.
+        let second = "detached";
+        try {
+          await browser.cdp({ method: "Target.detachFromTarget", params: { targetId: tab.targetId } });
+        } catch (error) {
+          second = String(error.message ?? error);
+        }
+        ${navigate("/pages/missing")}
+        return second;
+      }`);
+      expect(output.status).toBe("completed");
+      // Chrome didn't hand the model the observer's session to detach.
+      expect(String(output.result)).toContain("No session");
+      expect(output.report?.notices).toEqual([heardNotice(["/pages/missing"])]);
+    });
+
+    it("answers a page's alert(), so the run doesn't hang", async () => {
+      const output = await runObserved(`async () => {
+        ${navigate("/pages/ok")}
+        await browser.cdp({
+          method: "Runtime.evaluate",
+          params: { expression: "setTimeout(() => alert('hello'), 0); 1" },
+          sessionId: "active"
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        const { result } = await browser.cdp({
+          method: "Runtime.evaluate",
+          params: { expression: "confirm('sure?') + ' ' + document.title", returnByValue: true },
+          sessionId: "active",
+          timeoutMs: 5000
+        });
+        return result.value;
+      }`);
+      expect(output.status).toBe("completed");
+      // The alert was accepted and the confirm dismissed.
+      expect(output.result).toBe("false ok");
+      expect(output.report?.notices).toEqual([
+        'The page opened an alert dialog ("hello"), and the host accepted it.',
+        expect.stringContaining(
+          'The page opened a confirm dialog ("sure?"), and the host dismissed it, so confirm() returned false.'
+        )
+      ]);
+    });
+
+    it("runs the hostObserver hook on the model's tab, and it hears the navigation", async () => {
+      const output = await runHooked(`async () => {
+        ${navigate("/pages/redirect")}
+        ${navigate("/pages/missing")}
+      }`);
+      expect(output.status).toBe("completed");
+      expect(output.report?.notices).toEqual([
+        heardNotice(["/pages/ok", "/pages/missing"])
+      ]);
     });
   });
 });

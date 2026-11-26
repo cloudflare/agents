@@ -124,6 +124,18 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 /** JSON-RPC's "method not found" code, which Chrome also uses for CDP. */
 export const CDP_METHOD_NOT_FOUND = -32601;
 
+/** A command got no reply within its timeout. */
+export class CdpTimeoutError extends Error {
+  override readonly name = "CdpTimeoutError";
+  /** The CDP method that timed out. */
+  readonly method: string;
+
+  constructor(method: string, timeoutMs: number) {
+    super(`CDP command timed out after ${timeoutMs}ms: ${method}`);
+    this.method = method;
+  }
+}
+
 /** The browser answered a command with a JSON-RPC error. */
 export class CdpProtocolError extends Error {
   override readonly name = "CdpProtocolError";
@@ -214,8 +226,9 @@ export class CdpConnection {
    * session on this connection and from the browser itself. Pass a session
    * id to hear one session's, or `sessionId: null` for browser-level events
    * only. Browser Run, for example, sends `Cloudflare.handoffComplete` once
-   * at browser level and once more in each attached session, so a listener
-   * that wants it once passes `sessionId: null`.
+   * at browser level and once per attached session on any connection, so
+   * a listener that wants it once passes `sessionId: null`, and one that
+   * filters by session must use its own connection's session ids.
    *
    * Handlers run synchronously, in the order they were added, as each event
    * arrives: an event is delivered before the next message is handled, so
@@ -371,9 +384,7 @@ export class CdpConnection {
       const startedAt = performance.now();
       const timeoutId = setTimeout(() => {
         this.#pending.delete(id);
-        reject(
-          new Error(`CDP command timed out after ${timeoutMs}ms: ${method}`)
-        );
+        reject(new CdpTimeoutError(String(method), timeoutMs));
       }, timeoutMs);
       this.#pending.set(id, {
         resolve,

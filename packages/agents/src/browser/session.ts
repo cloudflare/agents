@@ -19,6 +19,7 @@
 import {
   CDP_METHOD_NOT_FOUND,
   CdpProtocolError,
+  CdpTimeoutError,
   type CdpConnection
 } from "./cdp-connection";
 import type {
@@ -31,6 +32,7 @@ import {
   type BrowserFunction,
   type SessionHosts
 } from "./browser-functions";
+import { HostObserver } from "./observer";
 import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import type { SearchableCdpSpec } from "./spec";
 import { validate } from "./validate";
@@ -362,8 +364,20 @@ interface TargetInfo {
 /** The session's connection and what it learned. Dropped when it closes. */
 interface ConnectedState {
   connected: BrowserConnection;
+  /** The host's observer, when the browser offers one. */
+  observer?: HostObserver;
   /** Live CDP session per target, valid on this socket only. */
   attached: Map<TargetId, LiveSessionId>;
+  /**
+   * Attaches under way, until the observer is ready there too, so a second
+   * command to the tab waits with the first rather than skipping the hold.
+   */
+  attaching: Map<TargetId, Promise<LiveSessionId>>;
+  /**
+   * Sessions model code attached itself with a raw `Target.attachToTarget`,
+   * so a timeout in one can say the tab is blocked.
+   */
+  rawSessions: Map<LiveSessionId, TargetId>;
   /**
    * Tabs this session attached to, through `attachToTarget` or a raw
    * `Target.attachToTarget`. Their popups are this session's new tabs.
@@ -552,9 +566,18 @@ export class BrowserSession {
         timeoutMs
       });
     } catch (error) {
-      throw await this.#teach(state, error, method, sessionId);
+      throw await this.#teach(state, error, method, sessionId, live);
     }
     this.#observe(state, method, liveParams, result);
+    if (
+      method === "Target.attachToTarget" &&
+      typeof liveParams?.targetId === "string"
+    ) {
+      // The model attached itself: the observer follows it there, and
+      // its next command waits (briefly) for the observer to be ready.
+      state.observer?.attach(liveParams.targetId);
+      await state.observer?.ready(liveParams.targetId);
+    }
     if (method === "Page.captureScreenshot") this.#assertFits(result);
     return result;
   }
@@ -584,7 +607,14 @@ export class BrowserSession {
     return (await this.#connect()).connected.spec();
   }
 
-  /** Recent CDP traffic on this session's connection, newest last. */
+  /**
+   * Recent CDP traffic on this session's connection, newest last. The
+   * observer's traffic is on its own connection, so it isn't here, except
+   * that Browser Run's `Cloudflare.*` events arrive on every connection
+   * tagged with every connection's session ids, so this log can show the
+   * observer's session id. That's harmless: the id doesn't work on this
+   * connection.
+   */
   async getDebugLog(input?: BrowserDebugLogInput): Promise<unknown[]> {
     const { limit } = validate(
       "browser.getDebugLog",
@@ -626,6 +656,7 @@ export class BrowserSession {
       }
       if (!state) return undefined;
       this.#state = undefined;
+      let hostNotices: string[] = [];
       try {
         const open = await this.#recordNewTabs(state);
         const active = await this.#saveActiveTarget(state, open);
@@ -633,9 +664,13 @@ export class BrowserSession {
           await this.#recordSharedTab(state, active);
         }
       } finally {
+        hostNotices = (await state.observer?.close(state.workedIn)) ?? [];
         state.connected.cdp.disconnect();
       }
-      return { ...state.report, notices: reportNotices(state.report) };
+      return {
+        ...state.report,
+        notices: [...reportNotices(state.report), ...hostNotices]
+      };
     } finally {
       // Release the lock only after the active tab is saved, so the next
       // session in the scope finds where this one left off.
@@ -716,19 +751,37 @@ export class BrowserSession {
   }
 
   async #open(): Promise<ConnectedState> {
-    const connected = await this.#browser.connect(
-      this.#scope === undefined ? undefined : { scope: this.#scope }
-    );
+    const connected = await this.#browser.connect({
+      ...(this.#scope === undefined ? {} : { scope: this.#scope }),
+      hostConnection: true
+    });
+    const host = connected.hostConnection;
+    const observer = host
+      ? new HostObserver(host.cdp, {
+          browserName: this.#browser.name,
+          scope: connected.scope,
+          hook: host.hook
+        })
+      : undefined;
     let initialPages: TargetInfo[];
     try {
       initialPages = await this.#pages(connected.cdp);
     } catch (error) {
+      void observer?.close();
       connected.cdp.disconnect();
       throw error;
     }
+    // Start on the scope's tab now, before the model's first command to it.
+    const stored = connected.activeTargetId;
+    if (stored && initialPages.some((page) => page.targetId === stored)) {
+      observer?.attach(stored);
+    }
     const state: ConnectedState = {
       connected,
+      ...(observer ? { observer } : {}),
       attached: new Map(),
+      attaching: new Map(),
+      rawSessions: new Map(),
       workedIn: new Set(),
       initialPages: new Set(initialPages.map((page) => page.targetId)),
       activeResolved: false,
@@ -920,13 +973,33 @@ export class BrowserSession {
     targetId: TargetId,
     timeoutMs?: number
   ): Promise<LiveSessionId> {
+    const pending = state.attaching.get(targetId);
+    if (pending) return pending;
     const existing = state.attached.get(targetId);
     if (existing) return existing;
+    const attaching = this.#attachNow(state, targetId, timeoutMs);
+    state.attaching.set(targetId, attaching);
+    try {
+      return await attaching;
+    } finally {
+      state.attaching.delete(targetId);
+    }
+  }
+
+  async #attachNow(
+    state: ConnectedState,
+    targetId: TargetId,
+    timeoutMs?: number
+  ): Promise<LiveSessionId> {
+    state.observer?.attach(targetId);
     const live = (await state.connected.cdp.attachToTarget(targetId, {
       timeoutMs
     })) as LiveSessionId;
     state.attached.set(targetId, live);
     state.workedIn.add(targetId);
+    // The model's first command here waits for the observer, at most
+    // ~250 ms, so the observer hears what it does. Later ones don't.
+    await state.observer?.ready(targetId);
     return live;
   }
 
@@ -949,8 +1022,15 @@ export class BrowserSession {
     } else if (method === "Target.attachToTarget" && targetId) {
       this.#setActive(state, targetId);
       state.workedIn.add(targetId);
+      const live = (result as { sessionId?: unknown } | undefined)?.sessionId;
+      if (typeof live === "string") {
+        state.rawSessions.set(live as LiveSessionId, targetId);
+      }
     } else if (method === "Target.closeTarget" && targetId) {
       state.attached.delete(targetId);
+      for (const [live, target] of state.rawSessions) {
+        if (target === targetId) state.rawSessions.delete(live);
+      }
       state.closed.add(targetId);
       // The next "active" use picks a tab afresh.
       if (state.activeTargetId === targetId) state.activeTargetId = undefined;
@@ -959,6 +1039,11 @@ export class BrowserSession {
       for (const [target, live] of state.attached) {
         if (target === targetId || live === params?.sessionId) {
           state.attached.delete(target);
+        }
+      }
+      for (const [live, target] of state.rawSessions) {
+        if (target === targetId || live === params?.sessionId) {
+          state.rawSessions.delete(live);
         }
       }
     }
@@ -992,8 +1077,24 @@ export class BrowserSession {
     state: ConnectedState,
     error: unknown,
     method: string,
-    sessionId: string | undefined
+    sessionId: string | undefined,
+    live: LiveSessionId | undefined
   ): Promise<unknown> {
+    if (error instanceof CdpTimeoutError) {
+      const targetId = live
+        ? ([...state.attached].find(([, id]) => id === live)?.[0] ??
+          state.rawSessions.get(live))
+        : undefined;
+      if (targetId && state.observer?.isBlocked(targetId)) {
+        return new Error(
+          `${error.message}. This tab isn't responding, probably because ` +
+            `of a dialog that opened before the host could answer it. ` +
+            `Reload or navigate this tab: send Page.reload with ` +
+            `sessionId: "${sessionId ?? live}", or Page.navigate.`
+        );
+      }
+      return error;
+    }
     if (!(error instanceof CdpProtocolError)) return error;
     if (
       error.code === CDP_SESSION_NOT_FOUND &&

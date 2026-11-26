@@ -68,6 +68,14 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 - If two callers start a browser at the same time, the first one wins and the other closes its extra browser. Storage locks never wait on Browser Run network calls.
 - If the browser dies between the liveness check and the WebSocket connection, `connect()` starts a new one instead of failing, and reports `restarted: true` to a scope that worked in the old one.
 
+### The host observer
+
+`connect({ hostConnection: true })` (internal) also opens a second CDP connection to the same browser, in parallel with the first, and returns it as `BrowserConnection.hostConnection` (internal), with the `Browser`'s `hostObserver` hook. `BrowserSession` always asks for it and runs its host-only observer on it (see [Browser Tools](./browser-tools.md#the-host-observer)). A raw `connect()` doesn't open one. Every session opens it, with or without a hook, because the observer answers page dialogs, which otherwise hang the tab; it costs about one round trip per session. There's no off switch; `Browser.connect` holds the decision in one place, so if one is added later (it would be `dialogs: false`), it's a few lines there.
+
+- **Why a separate socket.** CDP sessions belong to the connection that made them, so model code on the first socket can't reach or detach the observer's. Opening both at once keeps the cost to about one round trip; opened one after the other, it was a whole extra WebSocket upgrade (about 300 ms).
+- **Failure is soft.** If the second socket doesn't open within 2 seconds, the session goes on without it, and a socket that arrives later is closed. Both sockets close together, so the observer never keeps the Durable Object in memory longer than the model's socket did.
+- **A provider must say whether a second connection reaches the same browser.** Browser Run's does: it accepts several connections to one session. Kitesurf's doesn't: a Kitesurf browser is its WebSocket, so a second socket would be a second browser. `browserRun()` is the only `Browser` provider today; a provider added later has to declare this, and `Browser` must skip the observer when it can't have one.
+
 ## Key decisions
 
 - **The model still writes raw CDP.** A typed set of browser actions was prototyped and parked until tests show it beats raw CDP (see the `park/browser-interaction-contract` branch).

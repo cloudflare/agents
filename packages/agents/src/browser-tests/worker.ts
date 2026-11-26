@@ -37,8 +37,38 @@ type Env = {
 
 type SessionMode = "one-shot" | "reuse" | "dynamic";
 
+type NamedRunOutput = (
+  | { status: "completed"; result: unknown }
+  | { status: "error"; error: string }
+) & { logs: string[]; report: BrowserSessionReport | null };
+
 /** The named session the persistent-browser tests drive. */
 const NAMED_SESSION = "e2e";
+
+/** The browser the host observer tests drive (every session has one). */
+const OBSERVED_SESSION = "e2e-observed";
+
+/** The browser whose sessions run a `hostObserver` hook. */
+const HOOKED_SESSION = "e2e-hooked";
+
+/** Pages the observer tests navigate to, served by this Worker. */
+function servePage(url: URL): Response | undefined {
+  switch (url.pathname) {
+    case "/pages/ok":
+      return new Response("<title>ok</title><p>ok</p>", {
+        headers: { "content-type": "text/html" }
+      });
+    case "/pages/missing":
+      return new Response("<title>missing</title>", {
+        status: 404,
+        headers: { "content-type": "text/html" }
+      });
+    case "/pages/redirect":
+      return Response.redirect(new URL("/pages/ok", url).toString(), 302);
+    default:
+      return undefined;
+  }
+}
 
 /** Approval-gated connector used to pause executions mid-run in tests. */
 class GateConnector extends CodemodeConnector<Env> {
@@ -108,22 +138,79 @@ export class BrowserTestAgent extends Agent<Env> {
     });
   }
 
+  #observedBrowser(): Browser {
+    return new Browser({
+      provider: browserRun(this.env.BROWSER),
+      name: OBSERVED_SESSION,
+      store: this.#store()
+    });
+  }
+
+  /**
+   * A browser whose hook listens for each tab's main-frame navigations, and
+   * tells the model what it heard when the session closes.
+   */
+  #hookedBrowser(): Browser {
+    return new Browser({
+      provider: browserRun(this.env.BROWSER),
+      name: HOOKED_SESSION,
+      store: this.#store(),
+      hostObserver: (tab) => {
+        const heard: string[] = [];
+        tab.on("Page.frameNavigated", ({ params }) => {
+          const frame = params.frame as { parentId?: string; url?: string };
+          if (!frame.parentId && frame.url) {
+            heard.push(new URL(frame.url).pathname);
+          }
+        });
+        return () =>
+          tab.notify(
+            `The hook heard ${tab.targetId} navigate to ${JSON.stringify(heard)}.`
+          );
+      }
+    });
+  }
+
   /**
    * Run code against the persistent browser the way `browserTool`
    * does: one session per run, the code in a Dynamic Worker. Includes the
    * session's report.
    */
   @callable()
-  async runNamed(
+  async runNamed(code: string, scope?: string): Promise<NamedRunOutput> {
+    return this.#runIn(this.#namedBrowser(), code, scope);
+  }
+
+  /** {@link runNamed}, on the observer tests' own browser. */
+  @callable()
+  async runObserved(code: string, scope?: string): Promise<NamedRunOutput> {
+    return this.#runIn(this.#observedBrowser(), code, scope);
+  }
+
+  /** Close the observer tests' browser so it doesn't outlive the suite. */
+  @callable()
+  async closeObserved(): Promise<void> {
+    await this.#observedBrowser().close();
+  }
+
+  /** {@link runNamed}, on the browser with a `hostObserver` hook. */
+  @callable()
+  async runHooked(code: string, scope?: string): Promise<NamedRunOutput> {
+    return this.#runIn(this.#hookedBrowser(), code, scope);
+  }
+
+  /** Close the hooked browser so it doesn't outlive the suite. */
+  @callable()
+  async closeHooked(): Promise<void> {
+    await this.#hookedBrowser().close();
+  }
+
+  async #runIn(
+    browser: Browser,
     code: string,
-    scope?: string
-  ): Promise<
-    (
-      | { status: "completed"; result: unknown }
-      | { status: "error"; error: string }
-    ) & { logs: string[]; report: BrowserSessionReport | null }
-  > {
-    const session = this.#namedBrowser().session({ scope });
+    scope: string | undefined
+  ): Promise<NamedRunOutput> {
+    const session = browser.session({ scope });
     try {
       const ran = await runBrowserCode({
         loader: this.env.LOADER,
@@ -263,6 +350,8 @@ export class BrowserTestAgent extends Agent<Env> {
 
 export default {
   async fetch(request: Request, env: Env) {
+    const page = servePage(new URL(request.url));
+    if (page) return page;
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })

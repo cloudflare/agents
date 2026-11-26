@@ -22,6 +22,7 @@ import {
 } from "./browser-functions";
 import { browserCapabilityId } from "./capability-id";
 import type { CdpConnection } from "./cdp-connection";
+import type { BrowserHostObserver } from "./observer";
 import {
   internalHostError,
   isInternalHostMessage,
@@ -139,6 +140,22 @@ export interface BrowserOptions {
   /** Default CDP command timeout for {@link Browser.connect}. */
   timeoutMs?: number;
   /**
+   * Your code on the host's own CDP connection, run once per tab each
+   * {@link BrowserSession} works in, with that tab (see
+   * `BrowserHostTab`). Model code can't reach the connection.
+   *
+   * Every session opens the host connection beside the model's, whether or
+   * not you pass a hook: the SDK answers the pages' JavaScript dialogs on
+   * it, which otherwise hang the tab. It costs about one round trip per
+   * session.
+   * The hook runs after the SDK's own code in each tab, and isn't called
+   * when the connection couldn't open: treat it as advice, not
+   * enforcement. See {@link BrowserHostObserver} for the rest.
+   *
+   * @experimental May change before stabilizing.
+   */
+  hostObserver?: BrowserHostObserver;
+  /**
    * Minimum interval between activity-driven `updatedAt` refreshes.
    * Defaults to {@link SESSION_TOUCH_INTERVAL_MS}, capped at half the
    * keep-alive window.
@@ -172,6 +189,13 @@ export interface BrowserConnectOptions {
    * browser. Defaults to {@link DEFAULT_BROWSER_SCOPE}.
    */
   scope?: string;
+  /**
+   * Also open the host's own connection, at the same time as the main one.
+   * It comes back as {@link BrowserConnection.hostConnection}.
+   *
+   * @internal For `BrowserSession`, which asks for it.
+   */
+  hostConnection?: boolean;
 }
 
 export interface BrowserConnection {
@@ -202,9 +226,9 @@ export interface BrowserConnection {
    * from `devtools-protocol`. Without `sessionId` a listener hears the event
    * from every CDP session on this connection and from the browser itself;
    * `null` means browser-level events only. Browser Run sends
-   * `Cloudflare.handoffComplete` once at browser level and once more in
-   * each attached session, so listen for it with `sessionId: null` to hear
-   * it once.
+   * `Cloudflare.handoffComplete` once at browser level and once per
+   * attached session on any connection (tagged with that connection's
+   * session id), so listen for it with `sessionId: null` to hear it once.
    */
   cdp: CdpConnection;
   /**
@@ -220,6 +244,23 @@ export interface BrowserConnection {
    * the browser itself (cached).
    */
   spec(): Promise<SearchableCdpSpec>;
+  /**
+   * The host's own connection, when it was asked for
+   * ({@link BrowserConnectOptions.hostConnection}), with the `Browser`'s hook
+   * to run on it. A `BrowserSession` takes it and disconnects it when it
+   * closes.
+   *
+   * @internal For `BrowserSession`.
+   */
+  hostConnection?: {
+    /**
+     * A second CDP connection to the same browser, opened at the same time
+     * as `cdp` and still opening. It rejects if it couldn't open.
+     */
+    cdp: Promise<CdpConnection>;
+    /** {@link BrowserOptions.hostObserver}, when it was given. */
+    hook?: BrowserHostObserver;
+  };
 }
 
 /**
@@ -349,23 +390,56 @@ export class Browser extends LifecycleCapability {
     if (scope.trim() === "") {
       throw new Error("Browser scopes must be non-empty");
     }
+    // Every session gets the host connection, because dialog answering is
+    // always on. An off switch for it would go here.
+    const withObserver = options.hostConnection === true;
     let resolved = await this.resolve();
     let cdp: CdpConnection;
+    // Both start now: the model's socket, then the observer's beside it.
+    let opening = this.#open(resolved);
+    let observer = withObserver ? this.#openObserver(resolved) : undefined;
     try {
-      cdp = await this.#open(resolved);
+      cdp = await opening;
     } catch (error) {
+      dropObserver(observer);
       if (!(error instanceof BrowserSessionGoneError)) throw error;
       await this.#retireIfCurrent(resolved.sessionId);
       resolved = await this.resolve();
-      cdp = await this.#open(resolved);
+      opening = this.#open(resolved);
+      observer = withObserver ? this.#openObserver(resolved) : undefined;
+      try {
+        cdp = await opening;
+      } catch (retryError) {
+        dropObserver(observer);
+        throw retryError;
+      }
     }
     try {
       const entered = await this.#enterScope(scope, resolved.sessionId);
-      return this.#connection(resolved, scope, cdp, entered);
+      const { hostObserver: hook } = this.#options;
+      return {
+        ...this.#connection(resolved, scope, cdp, entered),
+        ...(observer
+          ? { hostConnection: { cdp: observer, ...(hook ? { hook } : {}) } }
+          : {})
+      };
     } catch (error) {
+      dropObserver(observer);
       cdp.disconnect();
       throw error;
     }
+  }
+
+  /**
+   * Start opening the observer's connection alongside the main one: opened
+   * after it, it would add a whole WebSocket upgrade to every session.
+   */
+  #openObserver(resolved: ResolvedBrowser): Promise<CdpConnection> {
+    const connecting = this.#open(resolved);
+    // Whoever takes it handles a failure; until then, don't let it go
+    // unhandled.
+    connecting.catch(() => undefined);
+    return connecting;
   }
 
   /**
@@ -934,6 +1008,14 @@ export class Browser extends LifecycleCapability {
       await lock.release();
     }
   }
+}
+
+/** Disconnect an observer connection nobody will take. */
+function dropObserver(observer: Promise<CdpConnection> | undefined): void {
+  observer?.then(
+    (cdp) => cdp.disconnect(),
+    () => undefined
+  );
 }
 
 /** A store record without fields that belong to scope records. */
