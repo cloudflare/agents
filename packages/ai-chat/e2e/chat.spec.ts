@@ -1686,10 +1686,15 @@ test.describe("Large tool output e2e", () => {
       `
     );
 
-    // Follow-up should succeed (agent still alive)
+    // Follow-up should succeed (agent still alive), not end in an error
     const doneMsg = followUp.find(
       (m) => m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && m.done
     );
     expect(doneMsg).toBeTruthy();
+    expect(
+      followUp.some(
+        (m) => m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && m.error
+      )
+    ).toBe(false);
   });
 });
