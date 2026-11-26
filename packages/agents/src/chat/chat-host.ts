@@ -8,10 +8,12 @@
  * `@cloudflare/ai-chat`, not a public API.
  */
 
+import { readUIMessageStream } from "ai";
 import type { UIMessage, UIMessageChunk } from "ai";
 import type { Sessions } from "../sessions/sessions";
 import type { Streams } from "../streams/streams";
 import type { Tasks } from "../tasks/tasks";
+import type { TaskStep, TaskValue } from "../tasks/types";
 import type { WebSockets } from "../websockets/websockets";
 import type { ClientToolSchema } from "./client-tools";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
@@ -21,7 +23,8 @@ export interface ChatDeps {
   readonly tasks: Tasks;
   readonly streams: Streams;
   readonly sessions: Sessions;
-  readonly webSockets: WebSockets;
+  /** Absent for a host that owns no sockets (a harness inside an agent). */
+  readonly webSockets?: WebSockets;
   /** The Sessions session the chat's transcript is in. */
   readonly session?: string;
 }
@@ -116,13 +119,13 @@ export interface ChatHost {
 }
 
 /** How a chat turn ended. */
-export interface ChatTurnResult {
+export type ChatTurnResult = {
   readonly requestId: string;
   readonly status: "completed" | "error" | "aborted" | "skipped";
   /** The stored reply's id, when one was stored. */
   readonly messageId?: string;
   readonly error?: string;
-}
+};
 
 /** The input of a chat-turn run. */
 export interface ChatTurnInput {
@@ -130,4 +133,117 @@ export interface ChatTurnInput {
   readonly questionId?: string;
   readonly clientTools?: readonly ClientToolSchema[];
   readonly body?: Readonly<Record<string, unknown>>;
+}
+
+/** The stream id a turn's reply is written under. */
+export function chatTurnStreamId(requestId: string): string {
+  return `chat-turn:${requestId}`;
+}
+
+/** Read what `respond` returned as UI message chunks. */
+function chunksOf(source: ChatModelStream): ReadableStream<UIMessageChunk> {
+  if (source instanceof ReadableStream) return source;
+  if (source instanceof Response) {
+    throw new Error(
+      "chatTurnDefinition: a Response from respond() is not read yet"
+    );
+  }
+  if ("toUIMessageStream" in source) return source.toUIMessageStream();
+  const iterator = source[Symbol.asyncIterator]();
+  return new ReadableStream<UIMessageChunk>({
+    async pull(controller) {
+      const next = await iterator.next();
+      if (next.done) controller.close();
+      else controller.enqueue(next.value);
+    },
+    async cancel() {
+      await iterator.return?.();
+    }
+  });
+}
+
+/**
+ * The one chat-turn task handler. The host registers it on its Tasks under
+ * the name it chooses, and starts runs on the lane it chooses. A run builds
+ * its model call from its input and the session's transcript, calls the
+ * host's `respond`, writes every chunk to the run's stream and stores the
+ * reply in the session.
+ *
+ * @param options.name - The definition's name, for the host's own records.
+ */
+export function chatTurnDefinition(
+  deps: ChatDeps,
+  host: ChatHost,
+  options: { name?: string } = {}
+): (input: unknown, step: TaskStep) => Promise<ChatTurnResult> {
+  void options;
+  return async (input, step) => {
+    const run = (input ?? {}) as ChatTurnInput;
+    const requestId = step.id;
+    const sessionId = deps.session ?? "";
+    const session = deps.sessions.session(sessionId);
+    const messages = (await session.getHistory()) as unknown as UIMessage[];
+    const call: ChatModelCall = {
+      session: sessionId,
+      requestId,
+      attempt: step.attempt,
+      mode: "answer",
+      trigger: run.trigger ?? "submit-message",
+      ...(run.questionId !== undefined && { questionId: run.questionId }),
+      messages,
+      clientTools: run.clientTools ?? [],
+      ...(run.body !== undefined && { body: run.body }),
+      signal: step.signal,
+      step: <T>(name: string, fn: () => Promise<T>) =>
+        step.do(name, () => fn() as Promise<TaskValue>) as Promise<T>
+    };
+    const source = await host.respond(call);
+    if (!source) {
+      const skipped: ChatTurnResult = { requestId, status: "skipped" };
+      await host.hooks?.onResponse?.(skipped);
+      return skipped;
+    }
+    const writer = await deps.streams.open(chatTurnStreamId(requestId), {
+      tag: requestId
+    });
+    let parts: UIMessage["parts"] = [];
+    const recorded = chunksOf(source).pipeThrough(
+      new TransformStream<UIMessageChunk, UIMessageChunk>({
+        transform(chunk, controller) {
+          const out = host.hooks?.transformChunk?.(chunk, parts) ?? chunk;
+          writer.append(out as never);
+          controller.enqueue(out);
+        }
+      })
+    );
+    let reply: UIMessage | undefined;
+    try {
+      for await (const snapshot of readUIMessageStream({ stream: recorded })) {
+        reply = snapshot;
+        parts = snapshot.parts;
+      }
+    } catch (error) {
+      writer.error(error instanceof Error ? error.message : String(error));
+      const failed: ChatTurnResult = {
+        requestId,
+        status: step.signal.aborted ? "aborted" : "error",
+        error: error instanceof Error ? error.message : String(error)
+      };
+      await host.hooks?.onResponse?.(failed);
+      return failed;
+    }
+    if (reply && reply.parts.length > 0) {
+      const stored = host.hooks?.sanitizeForPersistence?.(reply) ?? reply;
+      await session.appendMessage(stored as never);
+      reply = stored;
+    }
+    writer.close();
+    const result: ChatTurnResult = {
+      requestId,
+      status: "completed",
+      ...(reply && reply.parts.length > 0 && { messageId: reply.id })
+    };
+    await host.hooks?.onResponse?.(result);
+    return result;
+  };
 }

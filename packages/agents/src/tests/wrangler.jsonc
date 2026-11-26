@@ -121,6 +121,10 @@
         "name": "TaskStreamComposeObject"
       },
       {
+        "class_name": "ChatTurnHostObject",
+        "name": "ChatTurnHostObject"
+      },
+      {
         "class_name": "StreamBenchObject",
         "name": "StreamBenchObject"
       },
@@ -554,6 +558,7 @@
         "CutoverHarnessObject",
         "SqliteStrategiesBench",
         "TaskStreamComposeObject",
+        "ChatTurnHostObject",
         "StreamBenchObject",
         "SessionHarnessObject",
         "SessionSearchHarnessObject",
