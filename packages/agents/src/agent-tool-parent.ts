@@ -2307,6 +2307,9 @@ export class AgentToolParent {
     connection?: Connection,
     timeoutMs?: number
   ): Promise<number> {
+    // A replay works from a snapshot of the runs: one cleared meanwhile has
+    // no task, and resolving it would create its child again.
+    if (replay && !this.host.tasks.peek(row.run_id)) return sequence;
     const deadline = this._agentToolRecoveryDeadline(timeoutMs);
     const resolving = this.host.resolveChild(row.agent_type, row.run_id);
     const child =

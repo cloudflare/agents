@@ -491,7 +491,7 @@ export class TestAgentToolReplayAgent extends Agent {
    */
   async carryForwardReleasedOwedWithoutChildForTest(
     runId: string,
-    options: { childWithMilestone?: string } = {}
+    options: { childWithMilestone?: string; onMilestones?: string } = {}
   ): Promise<void> {
     if (options.childWithMilestone) {
       const child = await this.subAgent(TestAgentToolStubChild, runId);
@@ -506,9 +506,8 @@ export class TestAgentToolReplayAgent extends Agent {
     }
     ensureReleasedAgentToolTable(this.ctx.storage.sql);
     const now = Date.now();
-    const milestones = options.childWithMilestone
-      ? JSON.stringify([options.childWithMilestone])
-      : null;
+    const configured = options.childWithMilestone ?? options.onMilestones;
+    const milestones = configured ? JSON.stringify([configured]) : null;
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, agent_type, status, summary, started_at, completed_at,
@@ -520,6 +519,37 @@ export class TestAgentToolReplayAgent extends Agent {
       )
     `;
     await this._agentTool._carryForwardAgentToolRuns();
+  }
+
+  /**
+   * Replay's stored-chunk step for a run cleared after replay listed it:
+   * whether that recreated its child.
+   */
+  async replayClearedRunForTest(runId: string): Promise<boolean> {
+    await (
+      this as unknown as {
+        _agentTools: {
+          _broadcastAgentToolStoredChunks(
+            row: {
+              run_id: string;
+              agent_type: string;
+              parent_tool_call_id: string | null;
+            },
+            sequence: number,
+            replay?: true
+          ): Promise<number>;
+        };
+      }
+    )._agentTools._broadcastAgentToolStoredChunks(
+      {
+        run_id: runId,
+        agent_type: "TestAgentToolStubChild",
+        parent_tool_call_id: null
+      },
+      0,
+      true
+    );
+    return this.hasSubAgent(TestAgentToolStubChild, runId);
   }
 
   /** Detached runs a released version left, one per ledger state. */

@@ -448,8 +448,10 @@ describe("detached agent-tool runs on Tasks", () => {
 describe("detached agent-tool runs a released version left", () => {
   it("delivers the outcome a released version recorded but had not delivered, with its child gone", async () => {
     const agent = await parent("detached-owed-no-child");
+    // Configured for milestones, so only the missing child stops the ask.
     await agent.carryForwardReleasedOwedWithoutChildForTest(
-      "released-owed-gone"
+      "released-owed-gone",
+      { onMilestones: "sources-gathered" }
     );
     expect(
       (await agent.checkDetachedForTest("released-owed-gone")).status
@@ -478,6 +480,11 @@ describe("detached agent-tool runs a released version left", () => {
     expect(
       statuses(await agent.getDetachedDeliveryLog(), "released-owed-ms")
     ).toEqual(["completed"]);
+  });
+
+  it("does not recreate the child of a run cleared while a replay was under way", async () => {
+    const agent = await parent("detached-replay-cleared");
+    expect(await agent.replayClearedRunForTest("run-cleared")).toBe(false);
   });
 
   it("in a facet carries the rows and empties the table instead of dropping it", async () => {
