@@ -182,13 +182,6 @@ export interface ContextPrepareOptions extends ContextReadOptions {
    * was: a change or a pending refresh since then waits for the next turn.
    */
   readonly retry?: boolean;
-  /**
-   * @internal The tools this request sends, each with a hash of its
-   * definition. When the list differs from the one the newest record holds,
-   * the model is told once, after the user message: what was added, what
-   * is gone (not to be called), what changed.
-   */
-  readonly tools?: readonly { readonly name: string; readonly hash: string }[];
 }
 
 /**
@@ -303,16 +296,7 @@ export class Context {
    * that changed since the model last saw them.
    */
   async prepare(options: ContextPrepareOptions = {}): Promise<PreparedContext> {
-    if (!options.tools) {
-      return this.#prepareBlocks(options, await this.#history(options));
-    }
-    const turn = await this.prepareTurn(options);
-    const notice = (await turn.recordSent(options.tools)).reminder;
-    if (!notice) return { system: turn.system, reminder: turn.reminder };
-    return {
-      system: turn.system,
-      reminder: turn.reminder ? `${turn.reminder}\n\n${notice}` : notice
-    };
+    return this.#prepareBlocks(options, await this.#history(options));
   }
 
   /**
