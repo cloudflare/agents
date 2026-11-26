@@ -203,6 +203,8 @@ export type ChatTurnResult = {
 
 /** The input of a chat-turn run. */
 export interface ChatTurnInput {
+  /** The session the turn is in, when one definition serves many. */
+  readonly session?: string;
   readonly trigger: ChatModelCall["trigger"];
   readonly questionId?: string;
   readonly clientTools?: readonly ClientToolSchema[];
@@ -374,7 +376,7 @@ export function chatTurnDefinition(
   return async (input, step) => {
     const run = (input ?? {}) as ChatTurnInput;
     const requestId = step.id;
-    const sessionId = deps.session ?? "";
+    const sessionId = run.session ?? deps.session ?? "";
     const session = deps.sessions.session(sessionId);
     const streamId = chatTurnStreamId(requestId);
     // Every tab sees the reply as it streams, and how it ended.
@@ -420,13 +422,18 @@ export function chatTurnDefinition(
         return undefined;
       }
       const stored = host.hooks?.sanitizeForPersistence?.(message) ?? message;
+      // A regenerated reply is a new branch under its question.
+      const placement =
+        run.trigger === "regenerate-message" && run.questionId !== undefined
+          ? { parentId: run.questionId }
+          : {};
       const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
       let after: (() => Promise<void>) | undefined;
       try {
         out.close({
           discard: true,
           commit: () => {
-            after = sync.upsert(stored as never).after;
+            after = sync.upsert(stored as never, placement).after;
             step.checkpoint.set(REPLY_CHECKPOINT, stored.id);
           }
         });
@@ -437,7 +444,7 @@ export function chatTurnDefinition(
       // Settled by another path first: the reply still lands.
       if (after) await after();
       else {
-        await session.upsertMessage(stored as never);
+        await session.upsertMessage(stored as never, placement);
         step.checkpoint.set(REPLY_CHECKPOINT, stored.id);
       }
       return stored.id;

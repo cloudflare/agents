@@ -769,4 +769,29 @@ describe("chatTurnDefinition", () => {
       expect(text).not.toContain('"state":"streaming"');
     });
   });
+
+  it("a regenerated reply is a new branch under its question, in the run's own session", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("other");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "old",
+        role: "assistant",
+        parts: [{ type: "text", text: "Old" }]
+      } as never);
+      await definitionOf(instance, instance.host)(
+        { trigger: "regenerate-message", questionId: "u1", session: "other" },
+        laterAttempt("rg-1", 1)
+      );
+      expect(instance.calls[0].session).toBe("other");
+      const branches = await session.getBranches("u1");
+      expect(branches.map((m) => m.id).sort()).toEqual(["a1", "old"].sort());
+    });
+  });
 });
