@@ -2854,11 +2854,6 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     this._chatResponseResults.push(result);
   }
 
-  /** No onChatResponse result is waiting or being delivered. */
-  isChatResponseDrainIdleForTest(): boolean {
-    return chatResponseDrainIdleForTest(this);
-  }
-
   getChatResponseResults(): ChatResponseResult[] {
     return [...this._chatResponseResults];
   }
@@ -3097,11 +3092,6 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
     this._responseResults.push(result);
   }
 
-  /** No onChatResponse result is waiting or being delivered. */
-  isChatResponseDrainIdleForTest(): boolean {
-    return chatResponseDrainIdleForTest(this);
-  }
-
   getChatResponseResults(): ChatResponseResult[] {
     return [...this._responseResults];
   }
@@ -3194,11 +3184,6 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
 
   enqueueMessages(messages: string[]): void {
     this._messageQueue.push(...messages);
-  }
-
-  /** No onChatResponse result is waiting or being delivered. */
-  isChatResponseDrainIdleForTest(): boolean {
-    return chatResponseDrainIdleForTest(this);
   }
 
   getChatResponseResults(): ChatResponseResult[] {
