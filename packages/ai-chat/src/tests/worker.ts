@@ -559,6 +559,30 @@ async function runAgentToolChecksForTest(agent: unknown): Promise<void> {
   }
 }
 
+/**
+ * The `cf_agent_tool_runs` table a released version kept, for tests that
+ * seed its rows; the next start carries them into Task runs.
+ */
+function ensureReleasedAgentToolTable(sql: SqlStorage): void {
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS cf_agent_tool_runs (
+      run_id TEXT PRIMARY KEY, parent_tool_call_id TEXT,
+      agent_type TEXT NOT NULL, input_preview TEXT,
+      input_redacted INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL,
+      summary TEXT, output_json TEXT, error_message TEXT,
+      interrupted_reason TEXT, child_still_running INTEGER,
+      display_metadata TEXT, display_order INTEGER NOT NULL DEFAULT 0,
+      started_at INTEGER NOT NULL, completed_at INTEGER,
+      detached INTEGER NOT NULL DEFAULT 0, detached_on_finish TEXT,
+      detached_notify_source TEXT, detached_max_budget_at INTEGER,
+      finish_claimed_at INTEGER, finish_delivered_at INTEGER,
+      give_up_claimed_at INTEGER, give_up_delivered_at INTEGER,
+      detached_no_progress_budget_ms INTEGER, last_progress_at INTEGER,
+      detached_on_milestones TEXT, event_delivery TEXT
+    )
+  `);
+}
+
 export class TestChatAgent extends AIChatAgent<Env> {
   /**
    * Stand in for a child restarted mid-run (#2298): a persisted in-flight
@@ -8969,6 +8993,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     startedAt: number,
     status: "starting" | "running" = "running"
   ): void {
+    ensureReleasedAgentToolTable(this.ctx.storage.sql);
+
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,

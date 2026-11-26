@@ -354,8 +354,6 @@ type AgentToolRunStorageRow = {
   detached_on_milestones?: string | null;
 };
 
-type DetachedReconcilePayload = { cadenceIndex?: number };
-
 export type {
   DeleteFibersOptions,
   FiberContext,
@@ -406,17 +404,17 @@ const AGENT_TOOL_TASK = "__cf_agent_tool";
 // doubles up to this. It asks, rather than holding the child's tail, so the
 // alarm that runs it is never held open by the child.
 const AGENT_TOOL_REATTACH_POLL_MAX_MS = 5_000;
-// How long a detached terminal-delivery claim is leased before another delivery
-// path (a backbone reconcile racing the warm fast path, or a re-delivery after
-// a crash mid-handler) may re-claim it. Guards against a double-fire on the
-// happy path while guaranteeing at-least-once delivery under failure.
-const DETACHED_DELIVERY_LEASE_MS = 60_000;
-// How long the reconcile tick waits for one delivery before it goes on.
-const DETACHED_TICK_DELIVERY_WAIT_MS = 5_000;
-// Escalating cadence for the self-scheduling detached reconcile backbone. The
-// warm fast path makes the first entries near-moot; these bound worst-case
-// post-eviction latency while keeping steady-state alarm cost low. The schedule
-// cancels itself once no detached run remains outstanding.
+// A detached agent-tool run: its attempts follow the child while the parent
+// is up and check on it on the backbone's cadence while it is not.
+const AGENT_TOOL_DETACHED_TASK = "__cf_agent_tool_detached";
+// The cancel reason `clearAgentToolRuns` gives an open run.
+const AGENT_TOOL_CLEARED_REASON = "agent tool run cleared";
+// When a detached run's give-up callback failed, give up again this much
+// later.
+const DETACHED_DELIVERY_RETRY_MS = 30_000;
+// Escalating cadence on which a waiting detached run checks on its child.
+// The warm tail makes the first entries near-moot; these bound worst-case
+// post-eviction latency while keeping steady-state alarm cost low.
 const DETACHED_BACKBONE_CADENCE_S = [5, 15, 30, 120];
 // Detached runs hold a `maxConcurrentAgentTools` slot for their ENTIRE life and
 // have no observer to notice them piling up. With the default `Infinity` cap
@@ -425,7 +423,9 @@ const DETACHED_BACKBONE_CADENCE_S = [5, 15, 30, 120];
 // rather than silently accumulating. (A separate `maxConcurrentDetachedAgentTools`
 // cap is deferred until evidence shows the single cap conflates two budgets.)
 const DETACHED_LIVE_COUNT_WARN_THRESHOLD = 50;
-const DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
+// The Scheduler callback the released reconcile backbone was armed under.
+// Its rows are cancelled when the runs move to Tasks.
+const LEGACY_DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
 // The reasons the backbone cancels a child with when it gives up on a run. The
 // child records the reason as its `aborted` run's error, which is how an abort
 // the give-up caused is told from one the child had for its own reasons.
@@ -446,6 +446,14 @@ type AgentToolTaskMeta = {
   displayOrder: number;
   eventDelivery?: "terminal";
   startedAt: number;
+  /** Set for a detached run: what its delivery and its budgets need. */
+  detached?: {
+    onFinish?: string;
+    notifySource?: string;
+    maxBudgetAt: number;
+    noProgressBudgetMs?: number;
+    onMilestones?: { names: string[]; mode: "react" | "narrate" };
+  };
 };
 /** Handed to the attempt in the isolate that started the run (`local`). */
 type AgentToolTaskLocal = {
@@ -459,6 +467,8 @@ type AgentToolTaskLocal = {
   reissue?: true;
   /** A result too large for the run's record, handed to the caller here. */
   fullResult?: RunAgentToolResult;
+  /** A detached run's caller waits for the child to take the run. */
+  childStarted?: { resolve(): void; reject(error: unknown): void };
 };
 
 /**
@@ -763,10 +773,6 @@ export class Agent<
    * `maxConcurrentAgentTools`. Each leaves when its call returns.
    */
   private readonly _agentToolRunsStarting = new Set<string>();
-  /** @internal Tick deliveries waiting in this isolate, by slot and run. */
-  private readonly _detachedDeliveriesInFlight = new Set<string>();
-  /** @internal Serializes detached-backbone arming against concurrent dispatch. */
-  private _detachedBackboneArming: Promise<void> = Promise.resolve();
   /** @internal Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
 
@@ -1028,115 +1034,9 @@ export class Agent<
     ensureMcpServerTable(this.ctx.storage);
 
     // Queue and schedule schema and migrations are owned by the Queue and
-    // Scheduler capabilities.
-    const addColumnIfNotExists = (sql: string) => {
-      try {
-        this.ctx.storage.sql.exec(sql);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.toLowerCase().includes("duplicate column")) {
-          throw error;
-        }
-      }
-    };
-
-    this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agent_tool_runs (
-          run_id TEXT PRIMARY KEY,
-          parent_tool_call_id TEXT,
-          agent_type TEXT NOT NULL,
-          input_preview TEXT,
-          input_redacted INTEGER NOT NULL DEFAULT 1,
-          status TEXT NOT NULL,
-          summary TEXT,
-          output_json TEXT,
-          error_message TEXT,
-          interrupted_reason TEXT,
-          child_still_running INTEGER,
-          display_metadata TEXT,
-          display_order INTEGER NOT NULL DEFAULT 0,
-          started_at INTEGER NOT NULL,
-          completed_at INTEGER
-        )
-      `;
-
-    this.sql`
-        CREATE INDEX IF NOT EXISTS idx_agent_tool_runs_parent_tool_call_id
-        ON cf_agent_tool_runs(parent_tool_call_id, display_order)
-      `;
-
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN output_json TEXT"
-    );
-    // #1630 follow-up: persist the typed interrupted cause so it survives a
-    // reconnect replay (otherwise live clients see `reason`/`childStillRunning`
-    // but reconnecting clients replay them as `undefined`).
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN interrupted_reason TEXT"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_still_running INTEGER"
-    );
-    // Detached ("background") runs (rfc-detached-agent-tools). `detached`
-    // marks a run dispatched without an awaiting parent turn;
-    // `detached_on_finish` is the parent METHOD NAME to call on terminal
-    // (durable, eviction-surviving — like a `schedule` callback);
-    // `detached_notify_source` is a caller-controlled chat metadata source for
-    // the `notify` sugar; `detached_max_budget_at` is the absolute give-up
-    // deadline. The four ledger columns implement a two-slot (finish /
-    // give-up) claim+lease so delivery is exactly-once on the happy path and
-    // at-least-once under failure — give-up and finish are INDEPENDENT slots
-    // so a premature give-up can never dedupe a child's real late completion
-    // away (the production incident in #1752).
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_finish TEXT"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_notify_source TEXT"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_max_budget_at INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_claimed_at INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_delivered_at INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_claimed_at INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_delivered_at INTEGER"
-    );
-    // Detached progress (rfc-detached-agent-tools §progress). The resetting
-    // no-progress window DURATION (not an absolute deadline — it floats with
-    // the child's latest signal) and the parent's last-observed signal time.
-    // The backbone reconcile reads the child's authoritative `progress.at`
-    // via `inspectAgentToolRun`; this cached value is a best-effort liveness
-    // hint observed off the warm tail so a still-warm parent does not have to
-    // inspect on every tick.
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_no_progress_budget_ms INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN last_progress_at INTEGER"
-    );
-    // Chat-host `detached: { onMilestones }` convenience (4b): JSON
-    // `{ names, mode }` — the milestone names that inject an idempotent chat
-    // notification when reached, and whether to "react" (model turn) or
-    // "narrate" (synthetic assistant line). Persisted so the cold backbone
-    // reconcile can deliver them after eviction, not only the warm tail.
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_milestones TEXT"
-    );
-    // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agent_tool_runs ADD COLUMN event_delivery TEXT"
-    );
+    // Scheduler capabilities. Agent-tool runs are Task runs; the released
+    // `cf_agent_tool_runs` table is read once and dropped
+    // (`_carryForwardAgentToolRuns`).
   }
 
   /**
@@ -1325,6 +1225,14 @@ export class Agent<
       MANAGED_FIBER_TASK,
       createFiberTaskDefinition(fiberHost, true),
       { claimMs, keepCheckpoint: true }
+    );
+    this.tasks.register(
+      AGENT_TOOL_DETACHED_TASK,
+      (_input, step) => this._detachedAgentToolAttempt(step),
+      {
+        claimMs,
+        onStatus: (record) => this._onDetachedAgentToolStatus(record)
+      }
     );
     this.tasks.register(
       AGENT_TOOL_TASK,
@@ -1716,17 +1624,6 @@ export class Agent<
                   "config set here is applied too late and the built-in defaults " +
                   "are used for the recovery that matters. Assign `chatRecovery` " +
                   "as a class field or in the constructor instead."
-              );
-            }
-
-            // The detached backbone's schedule survives eviction; this also
-            // arms it when a dispatching turn crashed after inserting the run
-            // row but before arming the schedule.
-            if (this._hasOutstandingDetachedRuns()) {
-              this.ctx.waitUntil(
-                this._armDetachedBackbone().catch((error: unknown) =>
-                  this._safeRunOnError(error)
-                )
               );
             }
 
@@ -3606,30 +3503,15 @@ export class Agent<
       return this._waitAgentToolTask<Output>(runId);
     }
 
-    const existing = this._readAgentToolRunRow(runId);
-    if (existing) {
+    if (task?.definition === AGENT_TOOL_DETACHED_TASK) {
       // Detached re-dispatch (e.g. chat recovery re-running the dispatching
-      // turn) is idempotent by runId: re-arm the durable backbone for a still
-      // non-terminal run and hand back the live handle instead of re-tailing or
-      // spawning fresh work. A run that already reached terminal simply returns
-      // a running-shaped handle — its delivery already happened (or is owned by
-      // the ledger).
-      if (detached) {
-        if (!this._isAgentToolRowHardTerminal(existing.status)) {
-          await this._armDetachedBackbone();
-        }
-        return { runId, agentType, status: "running" };
-      }
-      return this._resultFromAgentToolRow<Output>(existing);
+      // turn) is idempotent by run id: the run goes on, or has delivered.
+      return { runId, agentType, status: "running" };
     }
 
     const displayOrder = options.displayOrder ?? 0;
     const inputPreview =
       options.inputPreview ?? this._defaultAgentToolPreview(options.input);
-    const displayJson =
-      options.display !== undefined ? JSON.stringify(options.display) : null;
-    const inputPreviewJson =
-      inputPreview !== undefined ? JSON.stringify(inputPreview) : null;
     const startedAt = Date.now();
 
     const meta: AgentToolTaskMeta = {
@@ -3718,45 +3600,6 @@ export class Agent<
       }
     }
 
-    const detachedMaxBudgetAt =
-      startedAt +
-      (detached.maxBudgetMs ?? this._resolvedOptions.detachedMaxBudgetMs);
-    const detachedNoProgressBudgetMs =
-      detached.noProgressBudgetMs ??
-      this._resolvedOptions.detachedNoProgressBudgetMs;
-    const detachedOnMilestonesJson = detached.onMilestones
-      ? JSON.stringify(detached.onMilestones)
-      : null;
-    this.sql`
-      INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, input_preview,
-        input_redacted, status, display_metadata, display_order, started_at,
-        detached, detached_on_finish, detached_notify_source,
-        detached_max_budget_at, detached_no_progress_budget_ms,
-        detached_on_milestones, event_delivery
-      ) VALUES (
-        ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
-        ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
-        ${startedAt}, 1, ${detached.onFinishName ?? null},
-        ${detached.notifySource ?? null}, ${detachedMaxBudgetAt},
-        ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson}, ${null}
-      )
-    `;
-    await this.onAgentToolStart(runInfo);
-    this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
-      kind: "started",
-      runId,
-      agentType,
-      inputPreview,
-      order: displayOrder,
-      display: options.display
-    });
-
-    const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
-    const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
-    await adapter.startAgentToolRun(options.input, { runId });
-    this._markAgentToolRunning(runId);
-
     // The child must OUTLIVE the dispatching turn, so a detached run never
     // inherits `options.signal` (which aborts when this turn ends). Cancel a
     // detached run explicitly with `cancelAgentTool(runId)`.
@@ -3765,16 +3608,64 @@ export class Agent<
         `[agents] runAgentTool: \`signal\` is ignored for a detached run (${runId}); a detached child must outlive the spawning turn. Use cancelAgentTool(runId) to cancel it.`
       );
     }
-    // Arm the durable backbone first so eviction between here and the fast
-    // path still finalizes the run, then kick the warm fast path that tails
-    // the child to terminal and delivers with low latency while alive.
-    await this._armDetachedBackbone({ resetCadence: true });
+    const detachedMeta: AgentToolTaskMeta = {
+      ...meta,
+      detached: {
+        ...(detached.onFinishName !== undefined
+          ? { onFinish: detached.onFinishName }
+          : {}),
+        ...(detached.notifySource !== undefined
+          ? { notifySource: detached.notifySource }
+          : {}),
+        maxBudgetAt:
+          startedAt +
+          (detached.maxBudgetMs ?? this._resolvedOptions.detachedMaxBudgetMs),
+        noProgressBudgetMs:
+          detached.noProgressBudgetMs ??
+          this._resolvedOptions.detachedNoProgressBudgetMs,
+        ...(detached.onMilestones !== undefined
+          ? { onMilestones: detached.onMilestones }
+          : {})
+      }
+    };
+    this._agentToolRunsStarting.add(runId);
+    try {
+      await this.onAgentToolStart(runInfo);
+      this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
+        kind: "started",
+        runId,
+        agentType,
+        inputPreview,
+        order: displayOrder,
+        display: options.display
+      });
+      let childStarted!: AgentToolTaskLocal["childStarted"];
+      const started = new Promise<void>((resolve, reject) => {
+        childStarted = { resolve, reject };
+      });
+      // The first attempt runs here: it starts the child, sets its live
+      // tail going beside the run, and parks the run until its next check.
+      await this.tasks.run(AGENT_TOOL_DETACHED_TASK, null, {
+        runId,
+        metadata: detachedMeta,
+        retain: true,
+        start: "now",
+        local: {
+          input: options.input,
+          meta: detachedMeta,
+          childStarted
+        } satisfies AgentToolTaskLocal
+      });
+      // A child that could not take the run fails this call, as before; the
+      // run also ends `error` and delivers it. (A no-op once settled.)
+      childStarted?.resolve();
+      await started;
+    } finally {
+      this._agentToolRunsStarting.delete(runId);
+    }
     // Surface runaway accumulation: detached runs hold a slot for their whole
     // life with no observer to notice a leak.
     this._maybeWarnDetachedLiveCount();
-    this.ctx.waitUntil(
-      this._detachedFastPath<Input, Output>(runInfo, cls, runId)
-    );
     return { runId, agentType, status: "running" };
   }
 
@@ -3834,7 +3725,15 @@ export class Agent<
     record: TaskRecord,
     settled: RunAgentToolResult<Output>
   ): Promise<RunAgentToolResult<Output>> {
-    const stored = record.result as { outputOnChild?: unknown } | undefined;
+    const stored = record.result as
+      | { outputOnChild?: unknown; outputInInput?: unknown }
+      | undefined;
+    if (settled.status === "completed" && stored?.outputInInput === true) {
+      // A released result too large for a Task value: its run's input.
+      return (
+        this.tasks.inputOf<RunAgentToolResult<Output>>(record.runId) ?? settled
+      );
+    }
     if (settled.status !== "completed" || stored?.outputOnChild !== true) {
       return settled;
     }
@@ -3876,7 +3775,12 @@ export class Agent<
   private _agentToolTaskMeta(
     record: TaskRecord | null | undefined
   ): AgentToolTaskMeta | undefined {
-    if (record?.definition !== AGENT_TOOL_TASK) return undefined;
+    if (
+      record?.definition !== AGENT_TOOL_TASK &&
+      record?.definition !== AGENT_TOOL_DETACHED_TASK
+    ) {
+      return undefined;
+    }
     // SAFETY: written by `runAgentTool` (or the carry-forward) in this shape.
     return record.metadata as AgentToolTaskMeta | undefined;
   }
@@ -3892,10 +3796,16 @@ export class Agent<
     const agentType = this._agentToolTaskMeta(record)?.agentType ?? "";
     if (record.status === "completed") {
       // SAFETY: the attempt returns a `RunAgentToolResult` as its value.
-      const { outputOnChild: _onChild, ...result } =
-        record.result as unknown as RunAgentToolResult<Output> & {
-          outputOnChild?: true;
-        };
+      const {
+        outputOnChild: _onChild,
+        outputInInput: _inInput,
+        delivered: _delivered,
+        ...result
+      } = record.result as unknown as RunAgentToolResult<Output> & {
+        outputOnChild?: true;
+        outputInInput?: true;
+        delivered?: true;
+      };
       return result;
     }
     if (record.status === "aborted" || record.status === "skipped") {
@@ -4043,6 +3953,9 @@ export class Agent<
       inputPreview: meta.inputPreview,
       status: "running",
       display: meta.display as AgentToolDisplayMetadata | undefined,
+      ...(meta.detached?.notifySource !== undefined
+        ? { notifySource: meta.detached.notifySource }
+        : {}),
       displayOrder: meta.displayOrder,
       startedAt: meta.startedAt
     };
@@ -4543,7 +4456,6 @@ export class Agent<
     const row = this._readAgentToolRun(runId);
     if (!row) return;
     if (this._isAgentToolRowHardTerminal(row.status)) return;
-    const isDetached = row.detached === 1;
     const message =
       reason instanceof Error
         ? reason.message
@@ -4553,16 +4465,11 @@ export class Agent<
       const adapter = this._asAgentToolChildAdapter(child);
       await adapter.cancelAgentToolRun(runId, reason);
     } catch {
-      // Best-effort child teardown; we still record the aborted terminal so the
-      // detached parent stops watching and any wired callback fires.
+      // Best-effort child teardown; the run still ends `aborted`.
     }
-    if (!isDetached) return;
-    await this._deliverDetachedTerminal(runId, "finish", {
-      runId,
-      agentType: row.agent_type,
-      status: "aborted",
-      error: message
-    });
+    // A detached run ends `aborted` now, and its report delivers that once.
+    // An awaited run is left to its attempt, which sees the child's abort.
+    if (row.detached === 1) await this.tasks.cancel(runId, message);
   }
 
   /**
@@ -4631,19 +4538,6 @@ export class Agent<
     return status === "completed" || status === "error" || status === "aborted";
   }
 
-  private _hasOutstandingDetachedRuns(): boolean {
-    // A given-up run whose child was torn down is settled (#2768), unless a
-    // finish was already claimed: then its callback may still need a retry.
-    // `IS 0` keeps the predicate null-safe (a finish attempt clears the flag).
-    const rows = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM cf_agent_tool_runs
-      WHERE detached = 1 AND finish_delivered_at IS NULL
-        AND NOT (give_up_delivered_at IS NOT NULL AND child_still_running IS 0
-                 AND finish_claimed_at IS NULL)
-    `;
-    return (rows[0]?.n ?? 0) > 0;
-  }
-
   /**
    * An `aborted` that the backbone's own give-up caused by cancelling the
    * child. The give-up reports it, so it is not delivered as a finish, whether
@@ -4657,13 +4551,14 @@ export class Agent<
     );
   }
 
-  /** Detached runs still holding a concurrency slot (non-terminal). */
+  /** Detached runs still holding a concurrency slot (not settled). */
   private _liveDetachedRunCount(): number {
-    const rows = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM cf_agent_tool_runs
-      WHERE detached = 1 AND status IN ('starting', 'running')
-    `;
-    return rows[0]?.n ?? 0;
+    return this.tasks.peekList({
+      definition: AGENT_TOOL_DETACHED_TASK,
+      status: ["pending", "running"],
+      results: false,
+      limit: Number.MAX_SAFE_INTEGER
+    }).length;
   }
 
   /**
@@ -4690,137 +4585,309 @@ export class Agent<
   }
 
   /**
-   * Warm fast path for a detached run: tail the child to terminal (so the
-   * parent re-broadcasts its live stream to clients) and deliver the completion
-   * with low latency while the isolate stays alive. Best-effort — the durable
-   * `_cfDetachedReconcileTick` backbone is the guarantee; anything this misses
-   * (eviction, a child that has not yet reached terminal) the backbone collects.
+   * One attempt of a detached run. The attempt in the isolate that started
+   * the run starts the child and follows its live tail; every attempt then
+   * asks the child. A terminal is returned (the report delivers it). Past a
+   * budget the child is cancelled and the give-up delivered; otherwise the
+   * run checks again on the backbone's cadence.
    */
-  private async _detachedFastPath<Input, Output>(
-    runInfo: AgentToolRunInfo,
-    cls: ChatCapableAgentClass,
-    runId: string
+  private async _detachedAgentToolAttempt(
+    step: TaskStep
+  ): Promise<TaskJson | TaskSettlement> {
+    const runId = step.id;
+    const local = step.local as AgentToolTaskLocal | undefined;
+    const meta = local?.meta ?? this._agentToolTaskMeta(this.tasks.peek(runId));
+    const budget = meta?.detached;
+    if (!meta || !budget) {
+      throw new Error(`Detached agent tool run ${runId} has no metadata`);
+    }
+    const { agentType } = meta;
+    const fail = (error: unknown): TaskJson =>
+      ({
+        runId,
+        agentType,
+        status: "error",
+        error: error instanceof Error ? error.message : String(error)
+      }) satisfies RunAgentToolResult as unknown as TaskJson;
+    if (local) {
+      // In the isolate that started the run: start the child, then follow
+      // its tail beside the run (not in it, so no alarm waits on the tail).
+      try {
+        const adapter = this._asAgentToolChildAdapter(
+          await this._cf_resolveSubAgent(agentType, runId)
+        );
+        await adapter.startAgentToolRun(local.input, { runId });
+        local.childStarted?.resolve();
+        this.ctx.waitUntil(
+          this._followDetachedChild(adapter, meta, runId, budget.maxBudgetAt)
+        );
+      } catch (error) {
+        local.childStarted?.reject(error);
+        return fail(error);
+      }
+    }
+
+    const reached = await this._askDetachedChild(meta, runId);
+    const inspection = reached?.inspection ?? null;
+    if (inspection) this._deliverDetachedMilestones(meta, runId, inspection);
+    if (
+      inspection &&
+      this._isAgentToolRowHardTerminal(
+        inspection.status as AgentToolRunStatus
+      ) &&
+      !this._isDetachedGiveUpAbort(inspection)
+    ) {
+      return this._terminalResultFromInspection(
+        agentType,
+        inspection
+      ) as unknown as TaskJson;
+    }
+
+    const gaveUp = step.checkpoint.get<boolean>("gaveUp") === true;
+    if (gaveUp) {
+      // The give-up went out while its teardown was unconfirmed. The child's
+      // own abort confirms it now: the run is settled, with no callback.
+      if (inspection && this._isDetachedGiveUpAbort(inspection)) {
+        return this._detachedGiveUpResult(meta, runId, false, true);
+      }
+      return TaskSettlement.park("child", {
+        until: this._detachedNextCheck(step, budget)
+      });
+    }
+
+    // Any signal resets the no-progress window: ephemeral progress or a
+    // durable milestone. A child that never signalled counts from the start
+    // of the run, so a child stuck in its first step is given up on too.
+    const latestMilestone = inspection?.milestones?.length
+      ? inspection.milestones[inspection.milestones.length - 1].at
+      : undefined;
+    const lastSignalAt = Math.max(
+      meta.startedAt,
+      ...[inspection?.progress?.at, latestMilestone].filter(
+        (at): at is number => typeof at === "number"
+      )
+    );
+    const now = Date.now();
+    const overAbsolute = now >= budget.maxBudgetAt;
+    const noProgress = budget.noProgressBudgetMs;
+    const overNoProgress =
+      typeof noProgress === "number" &&
+      noProgress > 0 &&
+      Number.isFinite(noProgress) &&
+      now - lastSignalAt >= noProgress;
+    if (!overAbsolute && !overNoProgress) {
+      return TaskSettlement.park("child", {
+        until: this._detachedNextCheck(
+          step,
+          budget,
+          typeof noProgress === "number" && Number.isFinite(noProgress)
+            ? lastSignalAt + noProgress
+            : undefined
+        )
+      });
+    }
+
+    // Give up: cancel the child, then ask again. A child that ended on its
+    // own before the cancel landed has a real result to deliver.
+    let afterCancel: AgentToolRunInspection | null = null;
+    let tornDown = false;
+    if (reached) {
+      try {
+        await reached.adapter.cancelAgentToolRun(
+          runId,
+          overAbsolute
+            ? DETACHED_BUDGET_CANCEL_REASON
+            : DETACHED_SILENT_CANCEL_REASON
+        );
+        afterCancel = await reached.adapter.inspectAgentToolRun(runId);
+        tornDown = true;
+      } catch {
+        // Unconfirmed: the child may still finish, and is followed.
+      }
+    }
+    if (afterCancel) this._deliverDetachedMilestones(meta, runId, afterCancel);
+    if (
+      afterCancel &&
+      this._isAgentToolRowHardTerminal(
+        afterCancel.status as AgentToolRunStatus
+      ) &&
+      !this._isDetachedGiveUpAbort(afterCancel)
+    ) {
+      return this._terminalResultFromInspection(
+        agentType,
+        afterCancel
+      ) as unknown as TaskJson;
+    }
+    const giveUp = this._detachedGiveUpResult(
+      meta,
+      runId,
+      overAbsolute,
+      false,
+      !tornDown
+    ) as unknown as RunAgentToolResult;
+    try {
+      await this._deliverDetachedOutcome(meta, giveUp);
+    } catch {
+      // The callback failed: give up again on the next check.
+      return TaskSettlement.park("give-up", {
+        until: Date.now() + DETACHED_DELIVERY_RETRY_MS
+      });
+    }
+    if (tornDown) return { ...giveUp, delivered: true } as unknown as TaskJson;
+    // Keep following a child that may still be running: its late real
+    // result is delivered too (#1752).
+    step.checkpoint.set("gaveUp", true);
+    return TaskSettlement.park("child", {
+      until: this._detachedNextCheck(step, budget)
+    });
+  }
+
+  /**
+   * Follow a detached run's live tail while this isolate lives: forward the
+   * child's chunks to clients, and when the tail ends wake the run so it
+   * delivers now instead of at its next check.
+   */
+  private async _followDetachedChild(
+    adapter: AgentToolChildAdapter,
+    meta: AgentToolTaskMeta,
+    runId: string,
+    maxBudgetAt: number
   ): Promise<void> {
     try {
-      const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
-      const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
-      let sequence = 1;
       if (adapter.tailAgentToolRun) {
         const stream = await adapter.tailAgentToolRun(runId, {
           afterSequence: -1
         });
-        sequence = (
-          await this._forwardAgentToolStream(
-            stream,
-            runInfo.parentToolCallId,
-            runId,
-            sequence,
-            undefined
-          )
-        ).next;
-      }
-      const inspection = await adapter.inspectAgentToolRun(runId);
-      if (
-        inspection &&
-        this._isAgentToolRowHardTerminal(
-          inspection.status as AgentToolRunStatus
-        ) &&
-        !this._isDetachedGiveUpAbort(inspection)
-      ) {
-        const result = this._terminalResultFromInspection<Output>(
-          runInfo.agentType,
-          inspection
-        );
-        await this._deliverDetachedTerminal(
+        await this._forwardAgentToolStream(
+          stream,
+          meta.parentToolCallId,
           runId,
-          "finish",
-          result,
-          { sequence, serialize: true },
-          inspection.completedAt
+          1,
+          AbortSignal.timeout(Math.max(1, maxBudgetAt - Date.now()))
         );
       }
+      // False when the run is not parked (its attempt is still running, or
+      // it ended): it then delivers on its own.
+      await this.tasks.settle(runId, TaskSettlement.retry(Date.now()));
     } catch {
-      // Leave it to the backbone reconcile. A failed finish callback can land
-      // after the last tick already stopped polling (e.g. a give-up that tore
-      // the child down), so make sure a backbone is armed to retry the claim.
-      try {
-        if (this._hasOutstandingDetachedRuns()) {
-          await this._armDetachedBackbone();
-        }
-      } catch {
-        // Startup recovery re-arms the backbone if this fails too.
+      // The run's own checks deliver.
+    }
+  }
+
+  /** The give-up result of a detached run; `delivered` when it went out. */
+  private _detachedGiveUpResult(
+    meta: AgentToolTaskMeta,
+    runId: string,
+    overAbsolute: boolean,
+    delivered: boolean,
+    childStillRunning = false
+  ): TaskJson {
+    return {
+      runId,
+      agentType: meta.agentType,
+      status: "interrupted",
+      error: overAbsolute
+        ? "detached run exceeded its budget before completing"
+        : "detached run went silent past its no-progress window",
+      reason: overAbsolute ? "budget-exceeded" : "no-progress",
+      childStillRunning,
+      ...(delivered ? { delivered: true } : {})
+    } as TaskJson;
+  }
+
+  /**
+   * When a waiting detached run checks on its child next: the backbone's
+   * escalating cadence, never past the run's next budget deadline.
+   */
+  private _detachedNextCheck(
+    step: TaskStep,
+    budget: NonNullable<AgentToolTaskMeta["detached"]>,
+    noProgressAt?: number
+  ): number {
+    const index = Math.min(
+      Math.max(0, step.attempt - 1),
+      DETACHED_BACKBONE_CADENCE_S.length - 1
+    );
+    return Math.min(
+      Date.now() + DETACHED_BACKBONE_CADENCE_S[index] * 1000,
+      budget.maxBudgetAt,
+      noProgressAt ?? Number.POSITIVE_INFINITY
+    );
+  }
+
+  /** Ask a detached run's child for its run, for at most 2 s. */
+  private async _askDetachedChild(
+    meta: AgentToolTaskMeta,
+    runId: string
+  ): Promise<
+    | {
+        adapter: AgentToolChildAdapter;
+        inspection: AgentToolRunInspection | null;
       }
+    | undefined
+  > {
+    return this._settleWithinRecoveryTimeout(
+      (async () => {
+        const adapter = this._asAgentToolChildAdapter(
+          await this._cf_resolveSubAgent(meta.agentType, runId)
+        );
+        return {
+          adapter,
+          inspection: await adapter.inspectAgentToolRun(runId)
+        };
+      })(),
+      DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
+    );
+  }
+
+  /** Deliver the configured milestones a child reports. Idempotent. */
+  private _deliverDetachedMilestones(
+    meta: AgentToolTaskMeta,
+    runId: string,
+    inspection: AgentToolRunInspection
+  ): void {
+    if (!inspection.milestones || !meta.detached?.onMilestones) return;
+    const runInfo = this._agentToolRunInfoFromTask(meta, runId);
+    for (const milestone of inspection.milestones) {
+      this._maybeDeliverDetachedMilestone(meta, runInfo, milestone);
     }
   }
 
   /**
-   * Single delivery funnel for a detached terminal. Both the warm fast path and
-   * the durable backbone route through here, with INDEPENDENT ledger slots for
-   * `finish` (the real terminal) vs `give_up` (budget exhausted). Each slot is
-   * delivered at-least-once via a claim + lease:
-   *
-   * - Concurrent double-fire is prevented by the guarded CAS claim (RETURNING
-   *   yields the row only to the winner).
-   * - A crash after the side effect but before `*_delivered_at` is written lets
-   *   the lease expire so a later reconcile re-delivers — hence handlers must be
-   *   idempotent.
-   * - Two slots, not one, because `interrupted` is SOFT: a give-up followed by a
-   *   real completion is legitimate, and a single shared "delivered" bit would
-   *   dedupe the child's real late result away (the #1752 production incident).
+   * The terminal report of a detached run: broadcast its terminal frame and
+   * deliver it, unless it is a give-up that already went out. A failing
+   * per-run callback throws, so Tasks reports it again 30 s later.
    */
-  private async _deliverDetachedTerminal<Output>(
-    runId: string,
-    kind: "finish" | "give_up",
-    result: RunAgentToolResult<Output>,
-    options?: { sequence?: number; serialize?: boolean },
-    completedAt = Date.now()
+  private async _onDetachedAgentToolStatus(record: TaskRecord): Promise<void> {
+    const meta = this._agentToolTaskMeta(record);
+    const result = this._agentToolTaskResult(record);
+    if (!meta || !result) return;
+    const stored = record.result as { delivered?: unknown } | undefined;
+    if (stored?.delivered === true) return;
+    if (record.reason === AGENT_TOOL_CLEARED_REASON) return;
+    await this._deliverDetachedOutcome(meta, result);
+  }
+
+  /**
+   * Deliver one outcome of a detached run: its terminal frame, the global
+   * `onAgentToolFinish` and the per-run `onFinish` (or `notify`), inside
+   * the host's delivery context. At least once: the handler is idempotent.
+   */
+  private async _deliverDetachedOutcome(
+    meta: AgentToolTaskMeta,
+    result: RunAgentToolResult
   ): Promise<void> {
-    const now = Date.now();
-    const leaseFloor = now - DETACHED_DELIVERY_LEASE_MS;
-    // Guarded CAS claim. `rowsWritten` (changes()) is the affected-row count, so
-    // exactly one concurrent caller observes 1 and proceeds; everyone else (a
-    // racing path, or a re-delivery within the lease) observes 0 and bails.
-    const claimQuery =
-      kind === "finish"
-        ? `UPDATE cf_agent_tool_runs
-             SET finish_claimed_at = ?
-             WHERE run_id = ?
-               AND finish_delivered_at IS NULL
-               AND (finish_claimed_at IS NULL OR finish_claimed_at < ?)`
-        : `UPDATE cf_agent_tool_runs
-             SET give_up_claimed_at = ?
-             WHERE run_id = ?
-               AND give_up_delivered_at IS NULL
-               AND (give_up_claimed_at IS NULL OR give_up_claimed_at < ?)`;
-    const claimed = this.ctx.storage.sql.exec(
-      claimQuery,
-      now,
-      runId,
-      leaseFloor
-    ).rowsWritten;
-    if (claimed === 0) return;
-
-    const row = this._readAgentToolRun(runId);
-    if (!row) return;
-
-    this._updateAgentToolTerminal(runId, result, completedAt);
-    // Always project the terminal onto the parent's `agent-tool-event` stream so
-    // a background-runs tray flips to its final state live. The backbone/fast
-    // path supply a tail sequence; other paths (e.g. an explicit
-    // `cancelAgentTool`, or a budget give-up) get a synthetic latest-wins
-    // sequence — the client reducer keys terminal status off the event kind, not
-    // the sequence, so a monotonic value is not required.
+    const completedAt = Date.now();
     this._broadcastAgentToolTerminal(
-      row.parent_tool_call_id ?? undefined,
-      options?.sequence ?? Date.now(),
+      meta.parentToolCallId,
+      completedAt,
       result
     );
-
-    const runInfo = this._agentToolRunInfoFromRow(
-      row,
-      result.status,
+    const runInfo: AgentToolRunInfo = {
+      ...this._agentToolRunInfoFromTask(meta, result.runId),
+      status: result.status,
       completedAt
-    );
+    };
     const lifecycle: AgentToolLifecycleResult = {
       status: result.status,
       ...(result.summary !== undefined ? { summary: result.summary } : {}),
@@ -4830,68 +4897,41 @@ export class Agent<
         ? { childStillRunning: result.childStillRunning }
         : {})
     };
-
+    const callbackName = meta.detached?.onFinish;
     const invoke = async () => {
-      // Global metering hook fires for detached runs too (cost accounting
-      // parity with the awaited path).
+      // Global metering hook fires for detached runs too.
       try {
         await this.onAgentToolFinish(runInfo, lifecycle);
       } catch (error) {
         await this._safeRunOnError(error);
       }
-      // Targeted, durable per-run callback (method name persisted on the row).
-      const callbackName = row.detached_on_finish;
-      if (callbackName) {
-        const callback = (this as unknown as Record<string, unknown>)[
-          callbackName
-        ];
-        if (typeof callback === "function") {
-          try {
-            await (
-              callback as (
-                run: AgentToolRunInfo,
-                res: AgentToolLifecycleResult
-              ) => Promise<void>
-            ).bind(this)(runInfo, lifecycle);
-          } catch (error) {
-            this._emit("agent_tool:detached:delivery_failed", {
-              runId,
-              kind,
-              status: result.status,
-              callback: callbackName,
-              error: error instanceof Error ? error.message : String(error)
-            });
-            await this._safeRunOnError(error);
-            throw error;
-          }
-        }
+      if (!callbackName) return;
+      const callback = (this as unknown as Record<string, unknown>)[
+        callbackName
+      ];
+      if (typeof callback !== "function") return;
+      try {
+        await (
+          callback as (
+            run: AgentToolRunInfo,
+            res: AgentToolLifecycleResult
+          ) => Promise<void>
+        ).bind(this)(runInfo, lifecycle);
+      } catch (error) {
+        this._emit("agent_tool:detached:delivery_failed", {
+          runId: result.runId,
+          kind: result.status === "interrupted" ? "give_up" : "finish",
+          status: result.status,
+          callback: callbackName,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        await this._safeRunOnError(error);
+        throw error;
       }
     };
-
-    // Delivery can fire from a scheduled alarm or the warm fast path (no ambient
-    // turn). `_runDetachedDelivery` establishes `agentContext` so a handler that
-    // calls runAgentTool / setState / submitMessages works, and — in chat-layer
-    // subclasses — serializes the delivery against the host turn queue when
-    // `serialize` is set, so a state-mutating `onFinish` never interleaves with
-    // an active LLM turn (RFC §"run inside a turn"). An explicit cancel runs
-    // inline (it is already inside its caller's context).
-    await this._runDetachedDelivery(invoke, { serialize: options?.serialize });
-
-    // Mark delivered only AFTER the handler resolves. A crash before this point
-    // leaves the lease to expire and a later reconcile to re-deliver.
-    if (kind === "finish") {
-      this.sql`
-        UPDATE cf_agent_tool_runs
-        SET finish_delivered_at = ${Date.now()}
-        WHERE run_id = ${runId}
-      `;
-    } else {
-      this.sql`
-        UPDATE cf_agent_tool_runs
-        SET give_up_delivered_at = ${Date.now()}
-        WHERE run_id = ${runId}
-      `;
-    }
+    // Delivery fires from an alarm or this isolate's attempt, never inside a
+    // turn: serialize it against the host's turn queue.
+    await this._runDetachedDelivery(invoke, { serialize: true });
   }
 
   private async _safeRunOnError(error: unknown): Promise<void> {
@@ -4940,306 +4980,6 @@ export class Agent<
     );
   }
 
-  /**
-   * Arm the self-scheduling detached reconcile backbone. Existing schedules are
-   * reused for recovery/startup calls, but a fresh detached dispatch resets the
-   * pending cadence to the fast end so new work is noticed promptly.
-   */
-  private async _armDetachedBackbone(options?: {
-    resetCadence?: boolean;
-  }): Promise<void> {
-    // Serialize arming within the isolate. `_armDetachedBackboneInner` is a
-    // read-modify-write over the schedule rows (list → cancel duplicates →
-    // create one); concurrent dispatches (e.g. a fan-out of detached
-    // `runAgentTool`s in one turn) could otherwise each observe zero schedules
-    // and create their own, leaving several redundant backbones ticking.
-    const run = this._detachedBackboneArming.then(() =>
-      this._armDetachedBackboneInner(options)
-    );
-    // Keep the mutex chain alive even if one arm rejects.
-    this._detachedBackboneArming = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
-  }
-
-  private async _armDetachedBackboneInner(options?: {
-    resetCadence?: boolean;
-  }): Promise<void> {
-    const schedules = await this.listSchedules();
-    const armed = schedules.filter(
-      (schedule) => schedule.callback === DETACHED_RECONCILE_CALLBACK
-    );
-    // Collapse any accidental duplicates down to a single backbone even when no
-    // cadence reset was requested.
-    if (armed.length > 0 && !options?.resetCadence) {
-      for (const schedule of armed.slice(1)) {
-        await this.cancelSchedule(schedule.id);
-      }
-      return;
-    }
-    for (const schedule of armed) {
-      await this.cancelSchedule(schedule.id);
-    }
-    await this.schedule(
-      DETACHED_BACKBONE_CADENCE_S[0],
-      DETACHED_RECONCILE_CALLBACK as keyof this,
-      { cadenceIndex: 0 } satisfies DetachedReconcilePayload,
-      // Armed during startup recovery; the explicit choice keeps the
-      // non-idempotent-startup-schedule warning for user code only.
-      { idempotent: true }
-    );
-  }
-
-  /**
-   * Deliver from the reconcile tick, waiting for it at most 5 s. A chat host
-   * serializes a delivery behind its chat lane, and the lane's next turn may
-   * need a wake job that runs after this tick in the same alarm: the tick
-   * waiting on it would hold the alarm for good. Past the bound the delivery
-   * goes on by itself; its claim and lease still deliver it at least once,
-   * and the tick counts it as outstanding until it is.
-   */
-  private async _deliverDetachedFromTick<Output>(
-    runId: string,
-    kind: "finish" | "give_up",
-    result: RunAgentToolResult<Output>,
-    options?: { sequence?: number; serialize?: boolean },
-    completedAt?: number
-  ): Promise<void> {
-    // One in flight per slot in this isolate, so a lease that runs out
-    // while it waits for the lane does not queue it twice.
-    const key = `${kind}:${runId}`;
-    if (this._detachedDeliveriesInFlight.has(key)) return;
-    this._detachedDeliveriesInFlight.add(key);
-    const delivery = this._deliverDetachedTerminal(
-      runId,
-      kind,
-      result,
-      options,
-      completedAt
-    )
-      .catch((error: unknown) => this._safeRunOnError(error))
-      .finally(() => this._detachedDeliveriesInFlight.delete(key));
-    this.ctx.waitUntil(delivery);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      delivery,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, DETACHED_TICK_DELIVERY_WAIT_MS);
-      })
-    ]);
-    clearTimeout(timer);
-  }
-
-  /**
-   * Durable backbone for detached runs. Runs on a self-rescheduling alarm:
-   * collects any detached run that has reached terminal but was not yet
-   * delivered (e.g. the parent was evicted before the fast path landed), gives
-   * up on any run past its absolute budget (tearing the child down), and
-   * reschedules itself while any detached run remains undelivered — cancelling
-   * itself once everything has settled (zero steady-state cost).
-   */
-  async _cfDetachedReconcileTick(
-    payload?: DetachedReconcilePayload
-  ): Promise<void> {
-    const rows = this.sql<AgentToolRunStorageRow>`
-      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, interrupted_reason,
-             child_still_running, display_metadata, display_order,
-             started_at, completed_at, detached, detached_on_finish,
-             detached_notify_source, detached_max_budget_at,
-             detached_no_progress_budget_ms, last_progress_at,
-             detached_on_milestones,
-             finish_claimed_at, finish_delivered_at, give_up_claimed_at,
-             give_up_delivered_at
-      FROM cf_agent_tool_runs
-      WHERE detached = 1 AND finish_delivered_at IS NULL
-        AND NOT (give_up_delivered_at IS NOT NULL AND child_still_running IS 0
-                 AND finish_claimed_at IS NULL)
-      ORDER BY started_at ASC
-    `;
-
-    for (const row of rows) {
-      const runId = row.run_id;
-      let inspection: AgentToolRunInspection | null = null;
-      try {
-        const child = await this._cf_resolveSubAgent(row.agent_type, runId);
-        const adapter = this._asAgentToolChildAdapter(child);
-        inspection = await adapter.inspectAgentToolRun(runId);
-      } catch {
-        // Treat an unreachable child like a null inspection: keep waiting within
-        // budget rather than sealing (a single failure is not proof it is gone).
-      }
-
-      // Deliver any configured milestone notifications the warm tail missed
-      // (e.g. the parent was evicted when the milestone landed). Idempotent:
-      // `_deliverDetachedMilestone` keys on (runId, name), so re-delivering an
-      // already-notified milestone is a no-op. Runs regardless of terminal
-      // state — a milestone reached just before completion still notifies.
-      if (inspection?.milestones && row.detached_on_milestones) {
-        const milestoneRunInfo = this._agentToolRunInfoFromRow(row);
-        for (const milestone of inspection.milestones) {
-          this._maybeDeliverDetachedMilestone(row, milestoneRunInfo, milestone);
-        }
-      }
-
-      if (
-        inspection &&
-        this._isDetachedGiveUpAbort(inspection) &&
-        row.give_up_delivered_at !== null
-      ) {
-        // The give-up went out while its teardown was unconfirmed. The
-        // child's abort confirms it now: the run is settled, with no callback.
-        this.sql`
-          UPDATE cf_agent_tool_runs SET child_still_running = 0
-          WHERE run_id = ${runId}
-        `;
-        continue;
-      }
-
-      if (
-        inspection &&
-        this._isAgentToolRowHardTerminal(
-          inspection.status as AgentToolRunStatus
-        ) &&
-        !this._isDetachedGiveUpAbort(inspection)
-      ) {
-        const result = this._terminalResultFromInspection(
-          row.agent_type,
-          inspection
-        );
-        await this._deliverDetachedFromTick(
-          runId,
-          "finish",
-          result,
-          { sequence: Date.now(), serialize: true },
-          inspection.completedAt
-        );
-        continue;
-      }
-
-      // Still non-terminal. Give up only once (the give_up slot guards
-      // re-delivery), on whichever bound trips first:
-      //  - the absolute `detached_max_budget_at` ceiling (taking too long), or
-      //  - the resetting no-progress window: once the child has reported at
-      //    least one signal and then goes silent past the window. A child that
-      //    has never reported has no signal time and is bounded ONLY by the
-      //    absolute ceiling — never given up on merely for being slow.
-      const now = Date.now();
-      const budgetAt = row.detached_max_budget_at;
-      // ANY signal resets the window — ephemeral progress OR a durable milestone
-      // (milestones bump the child's signal clock but leave `progress` unset, so
-      // a milestone-only child must still count as alive). After eviction the
-      // child's inspect is authoritative; `last_progress_at` is the warm-tail
-      // cache fallback.
-      const latestMilestone = inspection?.milestones?.length
-        ? inspection.milestones[inspection.milestones.length - 1].at
-        : undefined;
-      const signalTimes = [
-        inspection?.progress?.at,
-        latestMilestone,
-        row.last_progress_at
-      ].filter((t): t is number => typeof t === "number");
-      const lastSignalAt =
-        signalTimes.length > 0 ? Math.max(...signalTimes) : undefined;
-      const noProgressBudgetMs = row.detached_no_progress_budget_ms;
-      const overAbsolute = budgetAt !== null && now >= budgetAt;
-      const overNoProgress =
-        typeof noProgressBudgetMs === "number" &&
-        noProgressBudgetMs > 0 &&
-        Number.isFinite(noProgressBudgetMs) &&
-        typeof lastSignalAt === "number" &&
-        now - lastSignalAt >= noProgressBudgetMs;
-      if (
-        (overAbsolute || overNoProgress) &&
-        row.give_up_delivered_at === null
-      ) {
-        let childTornDown = false;
-        let afterCancel: AgentToolRunInspection | null = null;
-        try {
-          const child = await this._cf_resolveSubAgent(row.agent_type, runId);
-          const adapter = this._asAgentToolChildAdapter(child);
-          await adapter.cancelAgentToolRun(
-            runId,
-            overAbsolute
-              ? DETACHED_BUDGET_CANCEL_REASON
-              : DETACHED_SILENT_CANCEL_REASON
-          );
-          // Cancelling an already-finished child is a no-op, so re-inspect: a
-          // child that completed between the inspection above and the cancel
-          // must have its real result delivered, not be sealed as torn down.
-          afterCancel = await adapter.inspectAgentToolRun(runId);
-          childTornDown = true;
-        } catch {
-          // Could not confirm teardown; the child may complete anyway and the
-          // finish slot (still open) will deliver the real result.
-        }
-        // The post-cancel snapshot can report milestones the first inspection
-        // missed; deliver them now, as this run may not be polled again.
-        if (afterCancel?.milestones && row.detached_on_milestones) {
-          const milestoneRunInfo = this._agentToolRunInfoFromRow(row);
-          for (const milestone of afterCancel.milestones) {
-            this._maybeDeliverDetachedMilestone(
-              row,
-              milestoneRunInfo,
-              milestone
-            );
-          }
-        }
-        // A child that ended on its own before the cancel landed (completed,
-        // error, or stopped by its own client) has a real result to deliver.
-        if (
-          afterCancel &&
-          this._isAgentToolRowHardTerminal(
-            afterCancel.status as AgentToolRunStatus
-          ) &&
-          !this._isDetachedGiveUpAbort(afterCancel)
-        ) {
-          await this._deliverDetachedFromTick(
-            runId,
-            "finish",
-            this._terminalResultFromInspection(row.agent_type, afterCancel),
-            { sequence: Date.now(), serialize: true },
-            afterCancel.completedAt
-          );
-          continue;
-        }
-        await this._deliverDetachedFromTick(
-          runId,
-          "give_up",
-          {
-            runId,
-            agentType: row.agent_type,
-            status: "interrupted",
-            error: overAbsolute
-              ? "detached run exceeded its budget before completing"
-              : "detached run went silent past its no-progress window",
-            reason: overAbsolute ? "budget-exceeded" : "no-progress",
-            childStillRunning: !childTornDown
-          },
-          { serialize: true }
-        );
-      }
-    }
-
-    // Reschedule while anything remains undelivered; otherwise let the backbone
-    // go quiet (the schedule is one-shot and is not recreated here).
-    if (this._hasOutstandingDetachedRuns()) {
-      const currentIndex =
-        typeof payload?.cadenceIndex === "number" ? payload.cadenceIndex : 0;
-      const nextIndex = Math.min(
-        currentIndex + 1,
-        DETACHED_BACKBONE_CADENCE_S.length - 1
-      );
-      await this.schedule(
-        DETACHED_BACKBONE_CADENCE_S[nextIndex],
-        DETACHED_RECONCILE_CALLBACK as keyof this,
-        { cadenceIndex: nextIndex } satisfies DetachedReconcilePayload
-      );
-    }
-  }
-
   hasAgentToolRun<T extends Agent>(
     cls: SubAgentClass<T>,
     runId: string
@@ -5270,14 +5010,12 @@ export class Agent<
     });
 
     for (const row of retained) {
-      const task = this.tasks.peek(row.run_id);
-      const isTask = this._agentToolTaskMeta(task) !== undefined;
       try {
         const cls = this._agentToolClassByName(row.agent_type);
         if (row.status === "starting" || row.status === "running") {
-          // An awaited run's cancel aborts its attempt, which stops
-          // following the child.
-          if (isTask) await this.tasks.cancel(row.run_id, "cleared");
+          // The cancel aborts the run's attempt, which stops following the
+          // child. A cleared detached run delivers nothing.
+          await this.tasks.cancel(row.run_id, AGENT_TOOL_CLEARED_REASON);
           const child = await this.subAgent(cls, row.run_id);
           const adapter = this._asAgentToolChildAdapter(child);
           await adapter.cancelAgentToolRun(
@@ -5289,13 +5027,7 @@ export class Agent<
       } catch {
         // Cleanup is intentionally idempotent.
       }
-      if (isTask) {
-        this.tasks.deleteRun(row.run_id);
-      } else {
-        this.sql`
-          DELETE FROM cf_agent_tool_runs WHERE run_id = ${row.run_id}
-        `;
-      }
+      this.tasks.deleteRun(row.run_id);
     }
   }
 
@@ -5309,52 +5041,36 @@ export class Agent<
   }
 
   private _activeAgentToolRunCount(): number {
-    const rows = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM cf_agent_tool_runs
-      WHERE status IN ('starting', 'running')
-    `;
-    const awaited = new Set(this._agentToolRunsStarting);
-    for (const record of this.tasks.peekList({
-      definition: AGENT_TOOL_TASK,
-      status: ["pending", "running"],
-      results: false,
-      limit: Number.MAX_SAFE_INTEGER
-    })) {
-      awaited.add(record.runId);
-    }
-    return (rows[0]?.n ?? 0) + awaited.size;
-  }
-
-  /**
-   * Every run this agent keeps, oldest first: awaited runs from their tasks,
-   * detached runs from `cf_agent_tool_runs`.
-   */
-  private _listAgentToolRuns(): AgentToolRunStorageRow[] {
-    const detached = this.sql<AgentToolRunStorageRow>`
-      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, interrupted_reason,
-             child_still_running, display_metadata, display_order,
-             started_at, completed_at, detached, detached_on_finish,
-             detached_notify_source, detached_max_budget_at,
-             finish_claimed_at, finish_delivered_at, give_up_claimed_at,
-             give_up_delivered_at
-      FROM cf_agent_tool_runs
-      ORDER BY started_at ASC
-    `;
-    const awaited = this.tasks
-      .peekList({
-        definition: AGENT_TOOL_TASK,
-        order: "oldest",
+    const open = new Set(this._agentToolRunsStarting);
+    for (const definition of [AGENT_TOOL_TASK, AGENT_TOOL_DETACHED_TASK]) {
+      for (const record of this.tasks.peekList({
+        definition,
+        status: ["pending", "running"],
+        results: false,
         limit: Number.MAX_SAFE_INTEGER
-      })
-      .map((record) => this._agentToolRowFromTask(record))
-      .filter((row): row is AgentToolRunStorageRow => row !== null);
-    return [...detached, ...awaited].sort(
-      (left, right) => left.started_at - right.started_at
-    );
+      })) {
+        open.add(record.runId);
+      }
+    }
+    return open.size;
   }
 
-  /** An awaited run's task, read in the shape of a `cf_agent_tool_runs` row. */
+  /** Every run this agent keeps, awaited and detached, oldest first. */
+  private _listAgentToolRuns(): AgentToolRunStorageRow[] {
+    return [AGENT_TOOL_TASK, AGENT_TOOL_DETACHED_TASK]
+      .flatMap((definition) =>
+        this.tasks.peekList({
+          definition,
+          order: "oldest",
+          limit: Number.MAX_SAFE_INTEGER
+        })
+      )
+      .map((record) => this._agentToolRowFromTask(record))
+      .filter((row): row is AgentToolRunStorageRow => row !== null)
+      .sort((left, right) => left.started_at - right.started_at);
+  }
+
+  /** A run's task, read in the shape of a released `cf_agent_tool_runs` row. */
   private _agentToolRowFromTask(
     record: TaskRecord | undefined
   ): AgentToolRunStorageRow | null {
@@ -5385,9 +5101,10 @@ export class Agent<
       display_order: meta.displayOrder,
       started_at: meta.startedAt,
       completed_at: record.settledAt ?? null,
-      detached: 0,
-      detached_on_finish: null,
-      detached_max_budget_at: null,
+      detached: meta.detached ? 1 : 0,
+      detached_on_finish: meta.detached?.onFinish ?? null,
+      detached_notify_source: meta.detached?.notifySource ?? null,
+      detached_max_budget_at: meta.detached?.maxBudgetAt ?? null,
       finish_claimed_at: null,
       finish_delivered_at: null,
       give_up_claimed_at: null,
@@ -5396,80 +5113,185 @@ export class Agent<
   }
 
   /**
-   * Carry the awaited runs an earlier version kept in `cf_agent_tool_runs`
-   * into their tasks, once. A settled row becomes a settled run with its
-   * result; an open one becomes an interrupted run, which Tasks runs again:
-   * its attempt re-attaches to the child. Detached rows stay until their own
-   * move.
+   * Carry the runs an earlier version kept in `cf_agent_tool_runs` into
+   * their tasks, once, then drop the table and the released backbone's
+   * schedule rows.
+   *
+   * - A settled awaited row becomes a settled run with its result; a result
+   *   too large for a Task value goes in the run's input (parted), and its
+   *   record says so.
+   * - A settled detached row whose delivery went out (`finish_delivered_at`,
+   *   or a give-up with the child torn down) becomes a settled run marked
+   *   delivered.
+   * - Every other row becomes an interrupted run, which Tasks runs again:
+   *   an awaited one re-attaches, a detached one asks its child and
+   *   delivers what is owed (a give-up that went out is not sent again).
    */
   private async _carryForwardAgentToolRuns(): Promise<void> {
-    const rows = this.sql<
-      AgentToolRunStorageRow & { event_delivery: string | null }
-    >`
-      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, interrupted_reason,
-             child_still_running, display_metadata, display_order,
-             started_at, completed_at, event_delivery
-      FROM cf_agent_tool_runs
-      WHERE detached = 0
-    `;
+    const sql = this.ctx.storage.sql;
+    if (!hasTable(sql, "cf_agent_tool_runs")) return;
+    // `SELECT *`: a table from an old version may lack later columns.
+    const rows = sql
+      .exec("SELECT * FROM cf_agent_tool_runs ORDER BY started_at ASC")
+      .toArray() as Array<
+      Partial<AgentToolRunStorageRow> & {
+        run_id: string;
+        agent_type: string;
+        status: AgentToolRunStatus;
+        started_at: number;
+        event_delivery?: string | null;
+      }
+    >;
     for (const row of rows) {
-      const inputPreview = this._parseAgentToolJson(row.input_preview);
-      const display = this._parseAgentToolJson(row.display_metadata);
-      const meta: AgentToolTaskMeta = {
-        agentType: row.agent_type,
-        ...(row.parent_tool_call_id !== null
-          ? { parentToolCallId: row.parent_tool_call_id }
-          : {}),
-        ...(inputPreview !== undefined
-          ? { inputPreview: inputPreview as TaskJson }
-          : {}),
-        ...(display !== undefined ? { display: display as TaskJson } : {}),
-        displayOrder: row.display_order,
-        ...(row.event_delivery === "terminal"
-          ? { eventDelivery: "terminal" as const }
-          : {}),
-        startedAt: row.started_at
-      };
-      const open = row.status === "starting" || row.status === "running";
-      const result = open ? undefined : this._resultFromAgentToolRow(row);
-      // A released result too large for a Task value stays on its row,
-      // which readers still read, until detached runs move off the table
-      // too: the row is its only copy the parent keeps.
-      if (result && !this._fitsAgentToolRecord(result)) continue;
       try {
-        // `importRun` writes a run once, so a reset between it and the
-        // delete carries nothing twice.
-        await this.tasks.importRun({
-          runId: row.run_id,
-          definition: AGENT_TOOL_TASK,
-          status: open ? "running" : "completed",
-          attempt: open ? 1 : 0,
-          metadata: meta,
-          ...(result
-            ? {
-                result: {
-                  ...result,
-                  // An older version may have kept no output: ask the child.
-                  ...(result.status === "completed" &&
-                  result.output === undefined
-                    ? { outputOnChild: true }
-                    : {})
-                } as unknown as TaskJson
-              }
-            : {}),
-          retain: true,
-          createdAt: row.started_at,
-          ...(open ? {} : { settledAt: row.completed_at ?? row.started_at })
-        });
+        await this.tasks.importRun(this._agentToolRunFromLegacyRow(row));
       } catch (error) {
-        // A row that cannot be carried stays where it is, readable as
-        // before, and does not stop the others or the start.
+        // A row that cannot be carried stays, and keeps the table, without
+        // stopping the others or the start.
         await this._safeRunOnError(error);
         continue;
       }
-      this.sql`DELETE FROM cf_agent_tool_runs WHERE run_id = ${row.run_id}`;
+      // `importRun` writes a run once, so a reset before this delete
+      // carries nothing twice.
+      sql.exec("DELETE FROM cf_agent_tool_runs WHERE run_id = ?", row.run_id);
     }
+    for (const schedule of await this.listSchedules()) {
+      if (schedule.callback === LEGACY_DETACHED_RECONCILE_CALLBACK) {
+        await this.cancelSchedule(schedule.id);
+      }
+    }
+    const left = sql
+      .exec("SELECT COUNT(*) AS n FROM cf_agent_tool_runs")
+      .one() as { n: number };
+    if (left.n === 0) sql.exec("DROP TABLE cf_agent_tool_runs");
+  }
+
+  /** The Task run a released `cf_agent_tool_runs` row becomes. */
+  private _agentToolRunFromLegacyRow(
+    row: Partial<AgentToolRunStorageRow> & {
+      run_id: string;
+      agent_type: string;
+      status: AgentToolRunStatus;
+      started_at: number;
+      event_delivery?: string | null;
+    }
+  ): Parameters<Tasks["importRun"]>[0] {
+    const inputPreview = this._parseAgentToolJson(row.input_preview ?? null);
+    const display = this._parseAgentToolJson(row.display_metadata ?? null);
+    const milestones = this._parseAgentToolJson(
+      row.detached_on_milestones ?? null
+    ) as string[] | { names?: string[]; mode?: "react" | "narrate" } | null;
+    const milestoneNames = Array.isArray(milestones)
+      ? milestones
+      : milestones?.names;
+    const detached = row.detached === 1;
+    const meta: AgentToolTaskMeta = {
+      agentType: row.agent_type,
+      ...(row.parent_tool_call_id != null
+        ? { parentToolCallId: row.parent_tool_call_id }
+        : {}),
+      ...(inputPreview !== undefined
+        ? { inputPreview: inputPreview as TaskJson }
+        : {}),
+      ...(display !== undefined ? { display: display as TaskJson } : {}),
+      displayOrder: row.display_order ?? 0,
+      ...(row.event_delivery === "terminal"
+        ? { eventDelivery: "terminal" as const }
+        : {}),
+      startedAt: row.started_at,
+      ...(detached
+        ? {
+            detached: {
+              ...(row.detached_on_finish != null
+                ? { onFinish: row.detached_on_finish }
+                : {}),
+              ...(row.detached_notify_source != null
+                ? { notifySource: row.detached_notify_source }
+                : {}),
+              maxBudgetAt:
+                row.detached_max_budget_at ??
+                row.started_at + this._resolvedOptions.detachedMaxBudgetMs,
+              ...(row.detached_no_progress_budget_ms != null
+                ? { noProgressBudgetMs: row.detached_no_progress_budget_ms }
+                : {}),
+              ...(milestoneNames?.length
+                ? {
+                    onMilestones: {
+                      names: milestoneNames,
+                      mode: Array.isArray(milestones)
+                        ? ("narrate" as const)
+                        : (milestones?.mode ?? "narrate")
+                    }
+                  }
+                : {})
+            }
+          }
+        : {})
+    };
+    const base = {
+      runId: row.run_id,
+      definition: detached ? AGENT_TOOL_DETACHED_TASK : AGENT_TOOL_TASK,
+      metadata: meta,
+      retain: true,
+      createdAt: row.started_at
+    };
+    const rerun = (checkpoint?: Record<string, TaskJson>) => ({
+      ...base,
+      status: "running" as const,
+      attempt: 1,
+      ...(checkpoint ? { checkpoint } : {})
+    });
+    const open = row.status === "starting" || row.status === "running";
+    if (open) return rerun();
+    const result = this._resultFromAgentToolRow({
+      run_id: row.run_id,
+      agent_type: row.agent_type,
+      status: row.status,
+      output_json: row.output_json ?? null,
+      summary: row.summary ?? null,
+      error_message: row.error_message ?? null,
+      interrupted_reason: row.interrupted_reason ?? null,
+      child_still_running: row.child_still_running ?? null
+    });
+    const settled = (value: TaskJson, input?: TaskJson) => ({
+      ...base,
+      status: "completed" as const,
+      attempt: 0,
+      result: value,
+      ...(input !== undefined ? { input } : {}),
+      settledAt: row.completed_at ?? row.started_at
+    });
+    if (detached) {
+      const gaveUp = row.give_up_delivered_at != null;
+      if (row.status === "interrupted") {
+        // The give-up went out and the child was torn down: settled.
+        if (gaveUp && row.child_still_running === 0) {
+          return settled({ ...result, delivered: true } as unknown as TaskJson);
+        }
+        // Still owed, or the child may still finish: run it again.
+        return rerun(gaveUp ? { gaveUp: true } : undefined);
+      }
+      if (row.finish_delivered_at != null) {
+        return settled({ ...result, delivered: true } as unknown as TaskJson);
+      }
+      // A terminal whose delivery is owed: the next attempt delivers it.
+      return rerun(gaveUp ? { gaveUp: true } : undefined);
+    }
+    if (!this._fitsAgentToolRecord(result)) {
+      // Too large for a Task value: the whole result is the run's input.
+      const { output: _output, ...rest } = result;
+      return settled(
+        { ...rest, outputInInput: true } as unknown as TaskJson,
+        result as unknown as TaskJson
+      );
+    }
+    return settled({
+      ...result,
+      // An older version may have kept no output: ask the child.
+      ...(result.status === "completed" && result.output === undefined
+        ? { outputOnChild: true }
+        : {})
+    } as unknown as TaskJson);
   }
 
   private _defaultAgentToolPreview(input: unknown): unknown {
@@ -5483,29 +5305,9 @@ export class Agent<
     }
   }
 
-  /** A run, detached (its row) or awaited (its task, read as a row). */
+  /** A run, read from its task in the shape of a released row. */
   private _readAgentToolRun(runId: string): AgentToolRunStorageRow | null {
-    return (
-      this._readAgentToolRunRow(runId) ??
-      this._agentToolRowFromTask(this.tasks.peek(runId))
-    );
-  }
-
-  /** A run's `cf_agent_tool_runs` row: detached runs only, once carried. */
-  private _readAgentToolRunRow(runId: string): AgentToolRunStorageRow | null {
-    const rows = this.sql<AgentToolRunStorageRow>`
-      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, interrupted_reason,
-             child_still_running, display_metadata, display_order,
-             started_at, completed_at, detached, detached_on_finish,
-             detached_notify_source, detached_max_budget_at,
-             finish_claimed_at, finish_delivered_at, give_up_claimed_at,
-             give_up_delivered_at
-      FROM cf_agent_tool_runs
-      WHERE run_id = ${runId}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
+    return this._agentToolRowFromTask(this.tasks.peek(runId));
   }
 
   /**
@@ -5532,7 +5334,17 @@ export class Agent<
   }
 
   private _resultFromAgentToolRow<Output>(
-    row: AgentToolRunStorageRow
+    row: Pick<
+      AgentToolRunStorageRow,
+      | "run_id"
+      | "agent_type"
+      | "status"
+      | "output_json"
+      | "summary"
+      | "error_message"
+      | "interrupted_reason"
+      | "child_still_running"
+    >
   ): RunAgentToolResult<Output> {
     const output = this._parseAgentToolJson(row.output_json) as
       | Output
@@ -5545,29 +5357,6 @@ export class Agent<
       ...(row.summary !== null ? { summary: row.summary } : {}),
       ...(row.error_message !== null ? { error: row.error_message } : {}),
       ...this._agentToolInterruptedExtrasFromRow(row)
-    };
-  }
-
-  private _agentToolRunInfoFromRow(
-    row: AgentToolRunStorageRow,
-    status: AgentToolRunStatus = row.status,
-    completedAt = row.completed_at ?? undefined
-  ): AgentToolRunInfo {
-    return {
-      runId: row.run_id,
-      parentToolCallId: row.parent_tool_call_id ?? undefined,
-      agentType: row.agent_type,
-      inputPreview: this._parseAgentToolJson(row.input_preview),
-      status,
-      display: this._parseAgentToolJson(row.display_metadata) as
-        | AgentToolDisplayMetadata
-        | undefined,
-      ...(row.detached_notify_source != null
-        ? { notifySource: row.detached_notify_source }
-        : {}),
-      displayOrder: row.display_order,
-      startedAt: row.started_at,
-      completedAt
     };
   }
 
@@ -5598,57 +5387,6 @@ export class Agent<
       status: "error",
       error: inspection.error ?? "Agent tool run failed"
     };
-  }
-
-  private _updateAgentToolTerminal<Output>(
-    runId: string,
-    result: RunAgentToolResult<Output>,
-    completedAt = Date.now()
-  ): void {
-    // `interrupted` is a SOFT terminal — recovery gave up collecting, but the
-    // child (a durable facet) may still reach its real terminal. So it is NOT
-    // in the guard below: a later child completion (via a re-issue's re-attach,
-    // #1630) can repair an `interrupted` row to `completed`/`error`. The three
-    // HARD terminals are never overwritten.
-    // Persist the typed interrupted cause (#1630 follow-up) so a reconnect
-    // replay reconstructs the same `reason` / `childStillRunning` a live client
-    // saw. Written unconditionally so repairing an `interrupted` row to a hard
-    // terminal (e.g. a re-attach that finally collects `completed`) CLEARS the
-    // stale cause rather than leaving it dangling.
-    const childStillRunning =
-      result.childStillRunning === undefined
-        ? null
-        : result.childStillRunning
-          ? 1
-          : 0;
-    this.sql`
-      UPDATE cf_agent_tool_runs
-      SET status = ${result.status},
-          summary = ${result.summary ?? null},
-          output_json = ${this._stringifyAgentToolOutput(result.output)},
-          error_message = ${result.error ?? null},
-          interrupted_reason = ${result.reason ?? null},
-          child_still_running = ${childStillRunning},
-          completed_at = ${completedAt}
-      WHERE run_id = ${runId}
-        AND status NOT IN ('completed', 'error', 'aborted')
-    `;
-    if (result.status === "completed" && result.output !== undefined) {
-      this.sql`
-        UPDATE cf_agent_tool_runs
-        SET output_json = COALESCE(output_json, ${this._stringifyAgentToolOutput(result.output)}),
-            summary = COALESCE(summary, ${result.summary ?? null})
-        WHERE run_id = ${runId} AND status = 'completed'
-      `;
-    }
-  }
-
-  private _markAgentToolRunning(runId: string): void {
-    this.sql`
-      UPDATE cf_agent_tool_runs
-      SET status = 'running'
-      WHERE run_id = ${runId} AND status = 'starting'
-    `;
   }
 
   private _parseAgentToolJson(value: string | null): unknown {
@@ -6101,21 +5839,9 @@ export class Agent<
       ...(data.data !== undefined ? { data: data.data } : {}),
       at
     };
-    const row = this._readAgentToolRun(runId);
-    if (!row) return;
-    // The cached liveness timestamp only feeds the DETACHED no-progress budget;
-    // skip the write for awaited runs (the `onProgress` hook still fires below).
-    if (row.detached) {
-      try {
-        this.sql`
-          UPDATE cf_agent_tool_runs SET last_progress_at = ${at}
-          WHERE run_id = ${runId}
-        `;
-      } catch {
-        // Row may have settled / been pruned; the hook still fires below.
-      }
-    }
-    const runInfo = this._agentToolRunInfoFromRow(row);
+    const meta = this._agentToolTaskMeta(this.tasks.peek(runId));
+    if (!meta) return;
+    const runInfo = this._agentToolRunInfoFromTask(meta, runId);
     void Promise.resolve(this.onProgress(runInfo, snapshot)).catch((error) => {
       console.error(
         `[agents] onProgress hook threw for run ${runId}:`,
@@ -6127,7 +5853,7 @@ export class Agent<
     // The cold backbone reconcile delivers the same set after eviction; the
     // idempotency key makes the two paths converge to at-most-once.
     if (isMilestone && typeof data.name === "string") {
-      this._maybeDeliverDetachedMilestone(row, runInfo, {
+      this._maybeDeliverDetachedMilestone(meta, runInfo, {
         name: data.name,
         sequence: typeof data.sequence === "number" ? data.sequence : 0,
         at: typeof data.at === "number" ? data.at : at,
@@ -6143,24 +5869,13 @@ export class Agent<
    * `Agent`; chat hosts inject an idempotent synthetic chat message).
    */
   private _maybeDeliverDetachedMilestone(
-    row: AgentToolRunStorageRow,
+    meta: AgentToolTaskMeta,
     runInfo: AgentToolRunInfo,
     milestone: AgentToolMilestone
   ): void {
-    // Stored as `{ names, mode }`; tolerate a bare-array legacy/manual value.
-    const configured = this._parseAgentToolJson(
-      row.detached_on_milestones ?? null
-    ) as
-      | string[]
-      | { names?: string[]; mode?: "react" | "narrate" }
-      | undefined;
-    const names = Array.isArray(configured) ? configured : configured?.names;
-    const mode = Array.isArray(configured)
-      ? "narrate"
-      : (configured?.mode ?? "narrate");
-    if (!Array.isArray(names) || !names.includes(milestone.name)) {
-      return;
-    }
+    const configured = meta.detached?.onMilestones;
+    if (!configured?.names.includes(milestone.name)) return;
+    const mode = configured.mode;
     void Promise.resolve(
       this._deliverDetachedMilestone(runInfo, milestone, mode)
     ).catch((error) => {

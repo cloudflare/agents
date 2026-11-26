@@ -108,7 +108,7 @@ describe("agent-tool runs from a released version", () => {
       env.TestAgentToolReplayAgent,
       `carry-forward-${crypto.randomUUID()}`
     );
-    const { reissued, replayKinds, tableRows, childStarts } =
+    const { reissued, replayKinds, tableLeft, childStarts } =
       await agent.carryForwardSettledReleasedRowsForTest();
 
     // A re-issue of a hard terminal returns the stored result; the child is
@@ -135,8 +135,8 @@ describe("agent-tool runs from a released version", () => {
       "started",
       "interrupted"
     ]);
-    // Only the detached row is left in the old table.
-    expect(tableRows).toEqual([{ run_id: "released-detached", detached: 1 }]);
+    // Every row was carried, the detached one too, and the table is gone.
+    expect(tableLeft).toBe(false);
   });
 });
 
@@ -153,20 +153,20 @@ describe("agent-tool results the run's record cannot hold", () => {
     expect(reissueBytes).toBe(callerBytes);
   });
 
-  it("keeps a released row too large for the record on the table, and carries the rows after it", async () => {
+  it("carries a released row too large for the record with its result as the run's input, and the rows after it", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,
       `carry-oversized-${crypto.randomUUID()}`
     );
-    const { carried, tableRows, reissueBytes } =
+    const { carried, tableLeft, reissueBytes } =
       await agent.carryOversizedReleasedRowForTest();
-    // The large row stays on the table; the open row after it is carried.
+    // The large result is kept as its run's input; both rows are carried.
     expect(carried).toEqual({
-      "released-big": null,
+      "released-big": "completed",
       "released-open-after": "running"
     });
-    expect(tableRows).toBe(1);
-    // Read from the row, with the child gone.
+    expect(tableLeft).toBe(false);
+    // Read from the run's input, with the child gone.
     expect(reissueBytes).toBeGreaterThan(1_200_000);
   });
 
