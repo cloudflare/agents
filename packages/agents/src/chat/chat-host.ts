@@ -14,9 +14,12 @@ import type { Sessions } from "../sessions/sessions";
 import type { Streams } from "../streams/streams";
 import type { Tasks } from "../tasks/tasks";
 import type { TaskStep, TaskValue } from "../tasks/types";
+import type { StreamWriter } from "../streams/types";
 import type { WebSockets } from "../websockets/websockets";
 import type { ClientToolSchema } from "./client-tools";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
+import { chatRecoveryBackoffSeconds } from "./recovery-engine";
+import { TaskSettlement } from "../tasks/settlement";
 
 /** The capabilities the chat functions are given. They own every row and job. */
 export interface ChatDeps {
@@ -112,10 +115,68 @@ export interface ChatHooks {
   ): InterruptedToolPart;
 }
 
+/** The options a host gives the chat-turn definition. */
+export interface ChatOptions {
+  /**
+   * `false` gives up on an interrupted turn. Otherwise a turn is attempted
+   * up to `maxAttempts` times (default 3), with a backoff between attempts,
+   * and a stream that sends nothing for `stallTimeoutMs` is treated as
+   * interrupted.
+   */
+  readonly recovery?:
+    | false
+    | { readonly maxAttempts?: number; readonly stallTimeoutMs?: number };
+}
+
 /** What a host supplies. */
 export interface ChatHost {
   respond(call: ChatModelCall): Promise<ChatModelStream | undefined>;
   readonly hooks?: ChatHooks;
+  readonly options?: ChatOptions;
+}
+
+/** The default number of attempts of an interrupted turn. */
+const DEFAULT_MAX_ATTEMPTS = 3;
+
+/** The model's own error, sent as an `error` chunk in the stream. */
+class InBandStreamError extends Error {}
+
+/** A stream that sent nothing for the stall timeout. */
+class StreamStalledError extends Error {
+  constructor(ms: number) {
+    super(`The model stream sent nothing for ${ms} ms.`);
+    this.name = "StreamStalledError";
+  }
+}
+
+/** `chunks`, erroring with a stall when nothing arrives for `ms`. */
+function watchStall(
+  chunks: ReadableStream<UIMessageChunk>,
+  ms: number | undefined
+): ReadableStream<UIMessageChunk> {
+  if (!ms || ms <= 0) return chunks;
+  const reader = chunks.getReader();
+  return new ReadableStream<UIMessageChunk>({
+    async pull(controller) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stalled = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new StreamStalledError(ms)), ms);
+      });
+      try {
+        const next = await Promise.race([reader.read(), stalled]);
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      } catch (error) {
+        void reader.cancel(error).catch(() => {});
+        controller.error(error);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    }
+  });
 }
 
 /** How a chat turn ended. */
@@ -170,13 +231,31 @@ async function messageOf(
   each?: (snapshot: UIMessage) => void
 ): Promise<UIMessage | undefined> {
   let last = message;
+  let failure: { error: unknown } | undefined;
+  // A stream error (and an in-band error chunk) ends the read, and is
+  // rethrown here: the caller decides whether the turn recovers.
+  const stream = chunks.pipeThrough(
+    new TransformStream<UIMessageChunk, UIMessageChunk>({
+      transform(chunk, controller) {
+        if (chunk.type === "error") {
+          failure ??= { error: new InBandStreamError(chunk.errorText) };
+        }
+        controller.enqueue(chunk);
+      }
+    })
+  );
   for await (const snapshot of readUIMessageStream({
-    stream: chunks,
-    ...(message && { message })
+    stream,
+    ...(message && { message }),
+    terminateOnError: true,
+    onError: (error) => {
+      failure ??= { error };
+    }
   })) {
     last = snapshot;
     each?.(snapshot);
   }
+  if (failure) throw failure.error;
   return last;
 }
 
@@ -248,7 +327,10 @@ export function chatTurnDefinition(
   deps: ChatDeps,
   host: ChatHost,
   options: { name?: string } = {}
-): (input: unknown, step: TaskStep) => Promise<ChatTurnResult> {
+): (
+  input: unknown,
+  step: TaskStep
+) => Promise<ChatTurnResult | TaskSettlement> {
   void options;
   return async (input, step) => {
     const run = (input ?? {}) as ChatTurnInput;
@@ -260,6 +342,15 @@ export function chatTurnDefinition(
       await host.hooks?.onResponse?.(result);
       return result;
     };
+    const recovery = host.options?.recovery;
+    const maxAttempts =
+      recovery === false ? 1 : (recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+    // An interruption this attempt can't finish: the stream stays open and
+    // the next attempt continues it after a backoff, within the budget.
+    const interrupted = () =>
+      TaskSettlement.retry(
+        Date.now() + chatRecoveryBackoffSeconds(step.attempt) * 1000
+      );
 
     // An earlier attempt of this run was cut off: what it streamed is the
     // reply this attempt continues.
@@ -285,6 +376,44 @@ export function chatTurnDefinition(
         partial = repairCutOffTools(built, host.hooks);
         await session.upsertMessage(partial as never);
       }
+      const partialParts = (partial?.parts ?? []) as never[];
+      let decision: ChatRecoveryOptions | void = undefined;
+      if (recovery !== false && step.attempt <= maxAttempts) {
+        decision = await host.hooks?.onRecovery?.({
+          incidentId: requestId,
+          recoveryRootRequestId: requestId,
+          attempt: step.attempt,
+          maxAttempts,
+          recoveryKind: partial ? "continue" : "retry",
+          streamId,
+          requestId,
+          partialText: (partial?.parts ?? [])
+            .map((part) => ("text" in part ? String(part.text) : ""))
+            .join(""),
+          partialParts,
+          recoveryData: null,
+          messages: (await session.getHistory()) as unknown as UIMessage[],
+          createdAt: step.createdAt
+        });
+      }
+      if (
+        recovery === false ||
+        step.attempt > maxAttempts ||
+        decision?.continue === false
+      ) {
+        // Given up: what was streamed stays stored (unless the app said
+        // not to keep it), and the turn ends as an error.
+        if (partial && decision?.persist === false) {
+          await session.deleteMessages([partial.id]);
+        }
+        const writer = await deps.streams.open(streamId, { tag: requestId });
+        writer.error("interrupted");
+        return report({
+          requestId,
+          status: "error",
+          error: "The turn was interrupted and not continued."
+        });
+      }
     }
 
     const messages = (await session.getHistory()) as unknown as UIMessage[];
@@ -308,39 +437,72 @@ export function chatTurnDefinition(
       step: <T>(name: string, fn: () => Promise<T>) =>
         step.do(name, () => fn() as Promise<TaskValue>) as Promise<T>
     };
-    const source = await host.respond(call);
-    if (!source) return report({ requestId, status: "skipped" });
-
-    const writer = await deps.streams.open(streamId, { tag: requestId });
+    let writer: StreamWriter | undefined;
     let parts: UIMessage["parts"] = partial?.parts ?? [];
-    const recorded = chunksOf(source).pipeThrough(
-      new TransformStream<UIMessageChunk, UIMessageChunk>({
-        transform(chunk, controller) {
-          // A continuation keeps the reply's id.
-          const own =
-            partial && chunk.type === "start"
-              ? ({ ...chunk, messageId: partial.id } as UIMessageChunk)
-              : chunk;
-          const out = host.hooks?.transformChunk?.(own, parts) ?? own;
-          writer.append(out as never);
-          controller.enqueue(out);
-        }
-      })
-    );
     let reply: UIMessage | undefined;
-    try {
-      reply = await messageOf(recorded, partial, (snapshot) => {
-        parts = snapshot.parts;
-      });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      writer.error(text);
-      return report({
-        requestId,
-        status: step.signal.aborted ? "aborted" : "error",
-        error: text
-      });
+    let overflowTried = false;
+    for (;;) {
+      const source = await host.respond(call);
+      if (!source) {
+        writer?.close({ discard: true });
+        return report({ requestId, status: "skipped" });
+      }
+      const out = (writer ??= await deps.streams.open(streamId, {
+        tag: requestId
+      }));
+      const continuing = partial;
+      const recorded = watchStall(
+        chunksOf(source),
+        recovery === false ? undefined : recovery?.stallTimeoutMs
+      ).pipeThrough(
+        new TransformStream<UIMessageChunk, UIMessageChunk>({
+          transform(chunk, controller) {
+            // A continuation keeps the reply's id.
+            const own =
+              continuing && chunk.type === "start"
+                ? ({ ...chunk, messageId: continuing.id } as UIMessageChunk)
+                : chunk;
+            const next = host.hooks?.transformChunk?.(own, parts) ?? own;
+            out.append(next as never);
+            controller.enqueue(next);
+          }
+        })
+      );
+      try {
+        reply = await messageOf(recorded, continuing, (snapshot) => {
+          parts = snapshot.parts;
+        });
+        break;
+      } catch (error) {
+        if (step.signal.aborted) {
+          out.error("aborted");
+          return report({ requestId, status: "aborted" });
+        }
+        const verdict =
+          error instanceof StreamStalledError
+            ? "transient"
+            : (host.hooks?.classifyError?.(
+                error,
+                error instanceof InBandStreamError
+              ) ?? "terminal");
+        if (
+          verdict === "overflow" &&
+          !overflowTried &&
+          (await host.hooks?.onContextOverflow?.(call))
+        ) {
+          // Room was made: ask the model again, once.
+          overflowTried = true;
+          continue;
+        }
+        if (verdict === "transient" && recovery !== false) {
+          if (step.attempt < maxAttempts) return interrupted();
+        }
+        const text = error instanceof Error ? error.message : String(error);
+        out.error(text);
+        return report({ requestId, status: "error", error: text });
+      }
     }
+
     // The cutover: the reply is stored and the stream settled and its rows
     // dropped in one transaction, so a crash leaves the live stream or the
     // stored reply, never neither.

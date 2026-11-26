@@ -3,12 +3,16 @@ import { describe, expect, it } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import { chatTurnDefinition, chatTurnStreamId } from "../../chat/chat-host";
 import type { TaskStep } from "../../tasks/types";
+import { TaskSettlement } from "../../tasks/settlement";
+import type { ChatHost } from "../../chat/chat-host";
 
 /** A later attempt of run `id`, as Tasks hands it after a reset. */
-function laterAttempt(id: string): TaskStep {
+function laterAttempt(id: string, attempt = 2): TaskStep {
   return {
     id,
-    attempt: 2,
+    attempt,
+    createdAt: 0,
+    sleep: async () => {},
     signal: new AbortController().signal,
     local: undefined,
     interrupted: null,
@@ -18,7 +22,7 @@ function laterAttempt(id: string): TaskStep {
 
 async function runTurn(instance: ChatTurnHostObject, input: unknown) {
   await instance.lifecycle.start();
-  const receipt = await instance.tasks.run("turn", input as never, {
+  const receipt = await instance.tasks.run("__cf_chat_turn", input as never, {
     start: "now"
   });
   return receipt.runId;
@@ -194,6 +198,117 @@ describe("chatTurnDefinition", () => {
       expect(history.map((m) => m.id)).toEqual(["u1", "a1"]);
       expect(JSON.stringify(history[1])).toContain("Lisbon");
       expect(JSON.stringify(history[1])).toContain("Hello");
+    });
+  });
+
+  const definitionOf = (instance: ChatTurnHostObject, host: ChatHost) =>
+    chatTurnDefinition(
+      {
+        tasks: instance.tasks,
+        streams: instance.streams,
+        sessions: instance.sessions,
+        session: "s1"
+      },
+      host
+    );
+
+  async function cutOff(instance: ChatTurnHostObject, runId: string) {
+    await instance.lifecycle.start();
+    const cut = await instance.streams.open(chatTurnStreamId(runId), {
+      tag: runId
+    });
+    for (const chunk of [
+      { type: "start", messageId: "a1" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "Hel" }
+    ]) {
+      cut.append(chunk as never);
+    }
+  }
+
+  it("gives up on a cut-off turn past its attempt budget", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: { recovery: { maxAttempts: 2 } }
+      })({ trigger: "submit-message" }, laterAttempt("run-1", 3));
+      expect(result).toMatchObject({ requestId: "run-1", status: "error" });
+      expect(instance.calls).toEqual([]);
+      expect(
+        await instance.streams.status(chatTurnStreamId("run-1"))
+      ).toMatchObject({ state: "errored" });
+      // What it streamed stays stored.
+      const history = await instance.sessions.session("s1").getHistory();
+      expect(JSON.stringify(history)).toContain("Hel");
+    });
+  });
+
+  it("gives up when onRecovery says not to continue", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        hooks: { onRecovery: () => ({ continue: false }) }
+      })({ trigger: "submit-message" }, laterAttempt("run-1", 2));
+      expect(result).toMatchObject({ status: "error" });
+      expect(instance.calls).toEqual([]);
+    });
+  });
+
+  it("treats a stream that stalls as interrupted, to retry after a backoff", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              // Then nothing.
+            }
+          }),
+        options: { recovery: { stallTimeoutMs: 20 } }
+      })({ trigger: "server" }, laterAttempt("run-2", 1));
+      expect(result).toBeInstanceOf(TaskSettlement);
+      // The stream stays open for the next attempt to continue.
+      expect(
+        await instance.streams.status(chatTurnStreamId("run-2"))
+      ).toMatchObject({ state: "streaming" });
+    });
+  });
+
+  it("asks the model again once after making room for a context overflow", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let calls = 0;
+      let madeRoom = 0;
+      const result = await definitionOf(instance, {
+        respond: async (call) => {
+          calls++;
+          if (calls === 1) {
+            return new ReadableStream({
+              start(controller) {
+                controller.error(new Error("context too long"));
+              }
+            });
+          }
+          return instance.host.respond(call);
+        },
+        hooks: {
+          classifyError: () => "overflow",
+          onContextOverflow: async () => {
+            madeRoom++;
+            return true;
+          }
+        }
+      })({ trigger: "server" }, laterAttempt("run-3", 1));
+      expect(madeRoom).toBe(1);
+      expect(calls).toBe(2);
+      expect(result).toMatchObject({ status: "completed" });
     });
   });
 });

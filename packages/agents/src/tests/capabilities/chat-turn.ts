@@ -4,7 +4,6 @@ import { Lifecycle } from "../../lifecycle";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
 import { Tasks } from "../../tasks/tasks";
-import type { TaskStep } from "../../tasks/types";
 import {
   chatTurnDefinition,
   type ChatHost,
@@ -44,23 +43,25 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
     },
     hooks: { onResponse: (result) => void this.results.push(result) }
   };
-  readonly tasks: Tasks = new Tasks({
-    definitions: {
-      turn: (input: unknown, step: TaskStep) =>
-        chatTurnDefinition(
-          {
-            tasks: this.tasks,
-            streams: this.streams,
-            sessions: this.sessions,
-            session: "s1"
-          },
-          this.host,
-          { name: "turn" }
-        )(input, step)
-    }
-  });
+  readonly tasks: Tasks = new Tasks();
+  get deps() {
+    return {
+      tasks: this.tasks,
+      streams: this.streams,
+      sessions: this.sessions,
+      session: "s1"
+    };
+  }
   readonly lifecycle = Lifecycle.install(this)
     .use(this.streams)
     .use(this.sessions)
     .use(this.tasks);
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.tasks.register(
+      "__cf_chat_turn",
+      chatTurnDefinition(this.deps, this.host, { name: "__cf_chat_turn" })
+    );
+  }
 }
