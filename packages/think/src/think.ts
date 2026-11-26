@@ -1028,8 +1028,6 @@ const waitTurnResultContext = new AsyncLocalStorage<{
 // finalized it, so a wait from the hook can never settle.
 const submissionStatusHookContext = new AsyncLocalStorage<{
   agent: unknown;
-  /** The submission whose status the hook is reporting. */
-  submissionId: string;
   ended: boolean;
 }>();
 
@@ -5402,21 +5400,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       {
         maxAttempts: 3,
         // One submission's reports in order: each waits for the last.
-        onStatus: (record) => {
-          // A report the hook caused for its own submission (it cancelled
-          // it) runs now: queued behind that hook, neither would return.
-          const inside = submissionStatusHookContext.getStore();
-          if (
-            inside?.agent === this &&
-            inside.submissionId === record.runId &&
-            !inside.ended
-          ) {
-            return this._onSubmissionStatus(record);
-          }
-          return this.#submissionStatuses.run(record.runId, () =>
+        onStatus: (record) =>
+          this.#submissionStatuses.run(record.runId, () =>
             this._onSubmissionStatus(record)
-          );
-        }
+          )
       }
     );
   }
@@ -5549,7 +5536,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     }
     // No keep-alive hold: Tasks reports inside the request or alarm that
     // moved the submission (submit, an attempt, cancel, the report job).
-    const hook = { agent: this, submissionId, ended: false };
+    const hook = { agent: this, ended: false };
     try {
       await submissionStatusHookContext.run(hook, () =>
         this.onSubmissionStatus(inspection)
