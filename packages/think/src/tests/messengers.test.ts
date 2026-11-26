@@ -3,7 +3,7 @@ import type { FiberRecoveryResult } from "agents";
 import { getAgentByName } from "agents";
 import { Chat } from "chat";
 import type { Adapter } from "chat";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chatSdkMessenger,
   defaultChatSdkEvent,
@@ -1948,8 +1948,28 @@ describe("think messengers core", () => {
   });
 
   describe("typing indicator (#2324)", () => {
+    // A fake clock: the refresh interval, the model's delay and the checks
+    // after the turn all move only when the test advances time.
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
     const sleep = (ms: number) =>
       new Promise((resolve) => setTimeout(resolve, ms));
+    /** Run the delivery to its end on the fake clock. */
+    async function settle<T>(delivered: Promise<T>): Promise<T> {
+      let done = false;
+      void delivered.then(
+        () => (done = true),
+        () => (done = true)
+      );
+      for (let i = 0; i < 1000 && !done; i++) {
+        await vi.advanceTimersByTimeAsync(5);
+      }
+      return delivered;
+    }
 
     function deliver(
       startTyping: () => Promise<void>,
@@ -1993,7 +2013,7 @@ describe("think messengers core", () => {
       const { delivered, posts } = deliver(() =>
         Promise.reject(new Error("typing unavailable"))
       );
-      await delivered;
+      await settle(delivered);
 
       expect(posts).toEqual(["hi"]);
     });
@@ -2004,9 +2024,9 @@ describe("think messengers core", () => {
         typing++;
         return Promise.resolve();
       });
-      await delivered;
+      await settle(delivered);
       const afterTurn = typing;
-      await sleep(50);
+      await vi.advanceTimersByTimeAsync(50);
 
       expect(afterTurn).toBeGreaterThan(1);
       expect(typing).toBe(afterTurn);
@@ -2024,9 +2044,9 @@ describe("think messengers core", () => {
           throw new Error("model failed");
         }
       );
-      await delivered;
+      await settle(delivered);
       const afterTurn = typing;
-      await sleep(50);
+      await vi.advanceTimersByTimeAsync(50);
 
       expect(typing).toBe(afterTurn);
       expect(posts).toEqual([ERROR_MESSENGER_RESPONSE]);
@@ -2048,8 +2068,8 @@ describe("think messengers core", () => {
         undefined,
         log
       );
-      await delivered;
-      await sleep(50);
+      await settle(delivered);
+      await vi.advanceTimersByTimeAsync(50);
 
       expect(posts).toEqual(["hi"]);
       expect(maxInFlight).toBe(1);
@@ -2068,7 +2088,7 @@ describe("think messengers core", () => {
             ? new Promise<void>(() => {})
             : Promise.resolve();
         });
-        await delivered;
+        await settle(delivered);
 
         expect(posts).toEqual(["hi"]);
       }
