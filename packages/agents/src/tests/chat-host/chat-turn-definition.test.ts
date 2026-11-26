@@ -55,9 +55,8 @@ describe("chatTurnDefinition", () => {
       const history = await instance.sessions.session("s1").getHistory();
       expect(history.map((m) => m.role)).toEqual(["user", "assistant"]);
       expect(JSON.stringify(history[1])).toContain("Hello");
-      expect(
-        await instance.streams.status(chatTurnStreamId(runId))
-      ).toMatchObject({ state: "completed" });
+      // The cutover dropped the stream with the reply stored.
+      expect(await instance.streams.status(chatTurnStreamId(runId))).toBeNull();
       expect(instance.results).toEqual([
         { requestId: runId, status: "completed", messageId: history[1].id }
       ]);
@@ -158,7 +157,7 @@ describe("chatTurnDefinition", () => {
       });
       expect(
         await instance.streams.status(chatTurnStreamId("run-1"))
-      ).toMatchObject({ state: "completed" });
+      ).toBeNull();
     });
   });
 });

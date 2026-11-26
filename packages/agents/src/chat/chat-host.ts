@@ -336,11 +336,31 @@ export function chatTurnDefinition(
         error: text
       });
     }
+    // The cutover: the reply is stored and the stream settled and its rows
+    // dropped in one transaction, so a crash leaves the live stream or the
+    // stored reply, never neither.
     if (reply && reply.parts.length > 0) {
-      reply = host.hooks?.sanitizeForPersistence?.(reply) ?? reply;
-      await session.upsertMessage(reply as never);
+      const stored = host.hooks?.sanitizeForPersistence?.(reply) ?? reply;
+      reply = stored;
+      const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
+      let after: (() => Promise<void>) | undefined;
+      try {
+        writer.close({
+          discard: true,
+          commit: () => {
+            after = sync.upsert(stored as never).after;
+          }
+        });
+      } catch (error) {
+        sync.abandon();
+        throw error;
+      }
+      // Settled by another path first: the reply still lands.
+      if (after) await after();
+      else await session.upsertMessage(stored as never);
+    } else {
+      writer.close({ discard: true });
     }
-    writer.close();
     return report({
       requestId,
       status: "completed",
