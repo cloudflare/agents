@@ -5522,7 +5522,10 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 100, 10);
+    // The first turn's stream is held, so it runs until the test lets it go.
+    await agent.setSlowStreamMode(true, 10, 3);
+    await agent.holdSlowStreamForTest();
+    onTestFinished(() => agent.releaseSlowStreamForTest());
     const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
     const done1 = waitForDoneId(ws, request1, 10000);
     await waitForActiveTurn(agent);
@@ -5534,6 +5537,8 @@ describe("Think — messageConcurrency", () => {
     ws.send(
       JSON.stringify({ type: "cf_agent_chat_request_cancel", id: request2 })
     );
+    await handled(agent, "cf_agent_chat_request_cancel");
+    await agent.releaseSlowStreamForTest();
 
     expect((await done1).at(-1)?.outcome).toBe("completed");
     expect((await done2).at(-1)?.outcome).toBe("aborted");
@@ -5559,7 +5564,10 @@ describe("Think — messageConcurrency", () => {
       otherTabFrames.push(JSON.parse(event.data as string));
     });
 
-    await agent.setSlowStreamMode(true, 100, 10);
+    // The first turn's stream is held, so it runs until the test lets it go.
+    await agent.setSlowStreamMode(true, 10, 3);
+    await agent.holdSlowStreamForTest();
+    onTestFinished(() => agent.releaseSlowStreamForTest());
     const request1 = sendChatRequest(ws, [makeUserMessage("First")], {
       clientTools: [{ name: "first_tool", description: "From request 1" }]
     });
@@ -5582,6 +5590,8 @@ describe("Think — messageConcurrency", () => {
     ws.send(
       JSON.stringify({ type: "cf_agent_chat_request_cancel", id: request2 })
     );
+    await handled(agent, "cf_agent_chat_request_cancel");
+    await agent.releaseSlowStreamForTest();
     await done1;
     expect((await done2).at(-1)?.outcome).toBe("aborted");
     await settled(agent);
@@ -5600,7 +5610,10 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 100, 10);
+    // The first turn's stream is held, so it runs until the test lets it go.
+    await agent.setSlowStreamMode(true, 10, 3);
+    await agent.holdSlowStreamForTest();
+    onTestFinished(() => agent.releaseSlowStreamForTest());
     const request1 = sendChatRequest(ws, [makeUserMessage("First")], {
       marker: "first"
     });
@@ -5617,7 +5630,10 @@ describe("Think — messageConcurrency", () => {
 
     // Called while the stored body is still the first request's. The turn
     // runs after the second request and reads the stored body then.
-    const status = await agent.saveMessagesForTest("Server follow-up");
+    const saved = agent.saveMessagesForTest("Server follow-up");
+    await queued(agent, 2);
+    await agent.releaseSlowStreamForTest();
+    const status = await saved;
     await done1;
     await done2;
 
