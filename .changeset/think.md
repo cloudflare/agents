@@ -9,3 +9,4 @@ Think: scheduled tasks, submissions and extensions.
 - A messenger reply finished by chat recovery is retried with backoff until a send fails more than twelve hours after the first try or three resets in a row cut its attempts off, instead of eight scheduled retries and then the next wake.
 - A workflow prompt whose structured output exceeds a workflow event (1 MiB) ends `error` with that reason.
 - An extension's `permissions.network` hosts are enforced when the Worker re-exports `HostBridgeLoopback` (#3173). A context block's `type` in an extension manifest is now ignored, with a warning.
+- `onSubmissionStatus` runs one submission's status reports in order: a report waits until the hook for the one before it returns, so a slow `running` hook can no longer finish after `aborted`.

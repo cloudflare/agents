@@ -1305,6 +1305,33 @@ describe("Think durable submissions", () => {
     expect(statuses).toEqual(["pending", "running", "aborted"]);
   });
 
+  it("runs a submission's status hooks in order: a held one holds the next", async () => {
+    const agent = await freshAgent();
+    await agent.holdSubmissionStatusHookForTest();
+    // The first report (pending) is held, so acceptance waits on it.
+    const accepting = agent.testSubmitMessages("held status", {
+      submissionId: "sub-status-order"
+    });
+    await vi.waitFor(async () => {
+      expect(await agent.isSubmissionStatusHookHeldForTest()).toBe(true);
+    });
+    // Reported while the pending hook is still running.
+    const cancelling = agent.cancelSubmissionForTest(
+      "sub-status-order",
+      "stop"
+    );
+    await agent.releaseSubmissionStatusHookForTest();
+    await accepting;
+    await cancelling;
+    await agent.waitForSubmissionForTest("sub-status-order");
+
+    const statuses = (await agent.getSubmissionLog())
+      .filter((entry) => entry.submissionId === "sub-status-order")
+      .map((entry) => entry.status);
+    expect(statuses[0]).toBe("pending");
+    expect(statuses.at(-1)).toBe("aborted");
+  });
+
   it("aborts a submission cancelled while its running hook is in flight", async () => {
     const agent = await freshAgent();
     await agent.setSubmissionStatusDelayForTest(150);

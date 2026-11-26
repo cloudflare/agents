@@ -527,3 +527,31 @@ export function legacySubmissionImport(row: LegacySubmissionRow): {
     ...(row.completed_at !== null && { settledAt: row.completed_at })
   };
 }
+
+/**
+ * Runs each submission's status reports one after another, in the order
+ * they arrive, so an app that stores the latest status never ends on an
+ * earlier one (a slow `running` hook finishing after `aborted`). Reports of
+ * different submissions do not wait for each other. Holds one promise per
+ * submission with a report in flight, removed when its last one ends.
+ *
+ * @internal
+ */
+export class SubmissionStatusQueue {
+  readonly #tails = new Map<string, Promise<void>>();
+
+  /** Run `report` after the submission's earlier reports have ended. */
+  run(submissionId: string, report: () => Promise<void>): Promise<void> {
+    const previous = this.#tails.get(submissionId) ?? Promise.resolve();
+    // A failed report does not hold up the next; its caller still sees it.
+    const next = previous.then(report);
+    const tail = next.catch(() => {});
+    this.#tails.set(submissionId, tail);
+    void tail.then(() => {
+      if (this.#tails.get(submissionId) === tail) {
+        this.#tails.delete(submissionId);
+      }
+    });
+    return next;
+  }
+}
