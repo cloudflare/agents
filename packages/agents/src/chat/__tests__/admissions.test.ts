@@ -760,7 +760,7 @@ describe("chatRecoveryNames", () => {
       list: async <T>() =>
         new Map(incidents.map((incident, i) => [`k${i}`, incident as T]))
     } as unknown as Pick<DurableObjectStorage, "list">;
-    return { sql, storage };
+    return { sql, storage, db };
   }
 
   it("knows a turn whose run keeps its input in parts by its metadata", async () => {
@@ -772,6 +772,43 @@ describe("chatRecoveryNames", () => {
         turnName: "turn",
         liveRequestIds: new Set(),
         requestId: "r-big"
+      })
+    ).toBe(true);
+  });
+
+  it("does not read a run started only for a recovery attempt as a turn of its request", async () => {
+    const { sql, storage, db } = setup([]);
+    // What `ChatTurns.startAttemptRun` leaves: the attempt in the input, the
+    // callback in the metadata, off the lane.
+    db.prepare(
+      "insert into cf_agents_task_runs (definition, status, wait_reason, input, metadata) values (?, ?, ?, ?, ?)"
+    ).run(
+      "turn",
+      "pending",
+      "sleep",
+      JSON.stringify({
+        requestId: "r-attempt",
+        attempt: { callback: "_chatRecoveryContinue", data: {} }
+      }),
+      JSON.stringify({ callback: "_chatRecoveryContinue", incidentId: "i" })
+    );
+    expect(
+      await chatRecoveryNames({
+        sql,
+        storage,
+        turnName: "turn",
+        liveRequestIds: new Set(),
+        requestId: "r-attempt"
+      })
+    ).toBe(false);
+    // The turn's own run still counts.
+    expect(
+      await chatRecoveryNames({
+        sql,
+        storage,
+        turnName: "turn",
+        liveRequestIds: new Set(),
+        requestId: "r1"
       })
     ).toBe(true);
   });

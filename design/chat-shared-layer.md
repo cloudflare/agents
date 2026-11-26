@@ -283,17 +283,19 @@ Durable chat recovery is an invariant in both hosts: every chat entry path runs 
 
 In (c) a stored tool part wins over the rebuilt one when it has got at least as far (a result beats an approval, an approval beats a call): a stream has no producer once it is orphaned, so a tool result or an approval that arrived since was written to the stored message, never to the stream. A result the stream itself carries for a call the message held before (a continuation's) is further on, and the rebuilt part stays.
 
-Root-agent continuation attempts run as chained `__cf_internal_chat_recovery`
-Task runs. Initial detection joins by incident identity; stable-state
-retries enqueue a separate run and express their delay with `step.sleep`. The
-Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
+Continuation attempts run as steps of a chat-turn Task run: the run of the
+turn being recovered, or one started only for the attempt
+([chat-turn-core.md](./chat-turn-core.md), "Where an attempt runs"). A run
+started for a first schedule joins by incident identity; a stable-state
+retry that its attempt's run cannot keep gets a separate run; delays are
+`step.sleep`. The
+run calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
 entry point; both hosts run it through the shared
 `dispatchChatRecoveryToHandoff`, which returns at model handoff so a long turn
 never blocks the Lifecycle job loop and registers the turn as tracked alarm
-work (on the root; on a facet `trackAlarmWork` declines, because the facet runs
-its routed dispatch outside an alarm scope and the root tracks only the routed
-call, which returns at handoff, so the detached turn stays outside the
-breaker). A platform
+work, at a root and in a facet alike: a facet's runs execute under its own
+alarm pass, driven by its root
+([alarm-coordination.md](./alarm-coordination.md)). A platform
 failure before handoff propagates through the
 current Task or compatibility schedule; after handoff that execution has
 settled, so the detached continuation enqueues exactly one replacement attempt.
@@ -441,7 +443,7 @@ The machine handles accumulator creation (including continuation context walking
 - Auto-continuation barrier (#1649 / #1650) extracted to `agents/chat/auto-continuation-controller.ts` (`AutoContinuationController`). The controller owns the coalesce timer, the `_barrierActive` double-fire guard, and the schedule/coalesce/fire lifecycle (`schedule` / `rearmForBatch` / `armTimer` / `fireWhenStable` / `activateDeferredAndReschedule` / `reset`), parameterized by an `AutoContinuationHost` (stream-active signal, pending-interaction signal, incomplete-batch test, apply-drain, `keepAliveWhile`, and the host `fire()` turn pipeline). Both hosts retain thin delegating wrappers over their original method names; `COALESCE_MS` (50ms) is now single-sourced on the controller. Exported `@internal` for sibling packages. Fast-follow: Think's `waitUntilStable()` now consults `controller.isArmed()` to wait out an armed continuation, converging its idle definition with ai-chat's `waitForIdle()`. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 - Adapter-spine helpers de-duplicated (Tier A + B, pure leaf lifts, no behavior change). Three byte-identical fragments shared by both hosts now live once in `agents/chat`: (1) `async-helpers.ts` — the `TIMED_OUT` sentinel, `awaitWithDeadline` (deadline-bounded race), and `drainInteractionApplies` (the substrate-free interaction-apply completeness drain, parameterized by `hasPending` / `getTail`); (2) `classifyAgentToolChildRecovery(storage)` in `recovery-incident.ts` — the parent's agent-tool reattach incident scan (in-progress > failed > none precedence); (3) `interceptAgentToolBroadcast(msg, hooks)` in `agent-tools.ts` — the #1575 outgoing-frame snoop that tails an agent-tool child's progress, parameterized by an `AgentToolBroadcastHooks` substrate (forwarders / liveSequences / lastErrors maps, the host response-type constant, and the host run-lookup). Both hosts delegate through their existing private method names and `broadcast()` overrides (which keep a cheap size-guard so the common no-child path stays allocation-free, then call `super.broadcast`), so all call sites are untouched. The recovery-engine adapter seam (`_chatRecoveryEngine` / `_runChatRecoveryFiber`) and the genuinely product-substrate `dispatch`/`classify`/`terminalize` methods were deliberately left in the hosts (RFC bucket 3) for the Turns effort. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 - `useAgentChat` and `WebSocketChatTransport` hoisted into `agents/chat/react` and `agents/chat/transport` (#1801). `@cloudflare/ai-chat/react` re-exports the hook; `@cloudflare/think/react` wraps it.
-- Recovery continuations moved onto Tasks as chained `__cf_internal_chat_recovery` runs (#2194).
+- Recovery continuations moved onto Tasks as chained `__cf_internal_chat_recovery` runs (#2194), and from there into chat-turn runs; that definition now only finishes runs an earlier version enqueued.
 - Sessions moved into a Lifecycle capability (`agents/sessions`, #2196). Both hosts persist through it, so row-size truncation left the message path and `enforceRowSizeLimit` now guards only non-session tables.
 - `ResumableStream` rebuilt over the Streams Lifecycle capability (`agents/streams`, #2173).
 - `ChatTurns` (`agents/chat/chat-turns.ts`) took over the turn coordination both hosts duplicated: the fields around `TurnQueue`, clear, cancel, the tool-result continuation decision, and the idle and stable waits. See [rfc-chat-turn-core.md](./rfc-chat-turn-core.md).

@@ -59,7 +59,6 @@ import type { MessengerContext } from "../../messengers";
 import {
   CHAT_MESSAGE_TYPES,
   CHAT_RECOVERY_TASK_NAME,
-  chatRecoveryTaskRunOptions,
   dispatchChatProtocol,
   sanitizeMessage,
   LiveReply,
@@ -364,6 +363,7 @@ async function recoverInterruptedTurnsForTest(agent: Think): Promise<void> {
   }>`
     SELECT run_id, input, metadata, checkpoint FROM cf_agents_task_runs
     WHERE definition = ${Think.CHAT_FIBER_NAME} AND status = 'pending'
+      AND json_extract(metadata, '$.callback') IS NULL
     ORDER BY created_at
   `;
   for (const run of runs) {
@@ -447,9 +447,11 @@ function waitingRunAttemptsForTest(
 }
 
 function pendingRecoveryRunIds(agent: Think, callback: string): string[] {
+  // A run started only for the attempt, or a recovery Task run an earlier
+  // version enqueued.
   const tasks = agent.sql<{ run_id: string }>`
     SELECT run_id FROM cf_agents_task_runs
-    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+    WHERE definition IN (${CHAT_RECOVERY_TASK_NAME}, ${Think.CHAT_FIBER_NAME})
       AND status IN ('pending', 'running')
       AND json_extract(metadata, '$.callback') = ${callback}
     ORDER BY created_at ASC
@@ -510,10 +512,12 @@ function latestRecoveryAttemptForTest(
     key: string | null;
     at: number;
   }>`
-    SELECT json_extract(input, '$.delaySeconds') AS delay,
+    SELECT coalesce(json_extract(input, '$.attempt.delaySeconds'),
+                    json_extract(input, '$.delaySeconds')) AS delay,
            idempotency_key AS key, created_at AS at
     FROM cf_agents_task_runs
-    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+    WHERE definition IN (${CHAT_RECOVERY_TASK_NAME}, ${Think.CHAT_FIBER_NAME})
+      AND json_extract(metadata, '$.callback') IS NOT NULL
       AND (${pendingOnly ? 1 : 0} = 0 OR status = 'pending')
     ORDER BY created_at DESC
     LIMIT 1
@@ -579,7 +583,12 @@ async function runQueuedRecoveryTaskForTest(
   const past = Date.now() - 1_000;
   agent.sql`
     UPDATE cf_agents_task_runs
-    SET next_at = ${past}, input = json_set(input, '$.delaySeconds', 0)
+    SET next_at = ${past},
+        input = CASE
+          WHEN json_type(input, '$.attempt') = 'object'
+            THEN json_set(input, '$.attempt.delaySeconds', 0)
+          ELSE json_set(input, '$.delaySeconds', 0)
+        END
     WHERE run_id = ${runId}
   `;
   agent.sql`
@@ -11162,10 +11171,16 @@ export class ThinkProgrammaticTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
-      ...chatRecoveryTaskRunOptions(input, "redefer"),
-      start: "alarm"
-    });
+    await (
+      this as unknown as {
+        _turns: {
+          startAttemptRun(
+            attempt: typeof input,
+            reason: "redefer"
+          ): Promise<void>;
+        };
+      }
+    )._turns.startAttemptRun(input, "redefer");
   }
 
   /** Mark matching Task attempts terminal without removing their metadata. */
@@ -11175,7 +11190,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     this.sql`
       UPDATE cf_agents_task_runs
       SET status = 'completed', next_at = NULL
-      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      WHERE definition IN (${CHAT_RECOVERY_TASK_NAME}, ${Think.CHAT_FIBER_NAME})
         AND json_extract(metadata, '$.recoveredRequestId') = ${requestId}
     `;
   }
@@ -12394,6 +12409,7 @@ export class ThinkRecoveryTestAgent extends Think {
     const rows = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
       WHERE definition = ${Think.CHAT_FIBER_NAME}
+        AND json_extract(metadata, '$.callback') IS NULL
         AND status IN ('pending', 'running')
     `;
     return rows[0]?.count ?? 0;
@@ -14233,9 +14249,12 @@ export class ThinkRecoveryTestAgent extends Think {
       if (!beforeAcceptance) await recoveryWork;
       const handoffSignalsAtPause = handoffSignals;
       const activeRecoveryTasks = recoveryWorkCountForTest(this, callback);
+      // Chat turns' runs: a run started only for a recovery attempt is
+      // counted with the recovery work above.
       const chatTasks = this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_task_runs
         WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
+          AND json_extract(metadata, '$.callback') IS NULL
           AND status IN ('pending', 'running')
       `;
       const requestIdNow = readSubmissionRequestId();
@@ -14527,10 +14546,16 @@ export class ThinkRecoveryTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
-      ...chatRecoveryTaskRunOptions(input, "redefer"),
-      start: "alarm"
-    });
+    await (
+      this as unknown as {
+        _turns: {
+          startAttemptRun(
+            attempt: typeof input,
+            reason: "redefer"
+          ): Promise<void>;
+        };
+      }
+    )._turns.startAttemptRun(input, "redefer");
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<{
@@ -14561,10 +14586,16 @@ export class ThinkRecoveryTestAgent extends Think {
       data,
       delaySeconds: 60
     };
-    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
-      ...chatRecoveryTaskRunOptions(input, "redefer"),
-      start: "alarm"
-    });
+    await (
+      this as unknown as {
+        _turns: {
+          startAttemptRun(
+            attempt: typeof input,
+            reason: "redefer"
+          ): Promise<void>;
+        };
+      }
+    )._turns.startAttemptRun(input, "redefer");
   }
 
   async getScheduledChatRecoveryPayloadForTest(
@@ -14575,15 +14606,16 @@ export class ThinkRecoveryTestAgent extends Think {
     // `payload` as `never`. The scheduled payload only needs its recovery-link
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
-    // A recovery Task run's input, or the attempt a replayed turn's run
-    // journaled to run itself.
+    // The attempt a replayed turn's run journaled to run itself, the input
+    // of a run started only for an attempt, or a recovery Task run's input.
     const runId = pendingRecoveryRunIds(this, callback)[0];
     const taskRows = this.sql<{ payload: string }>`
       SELECT COALESCE(
         (SELECT json_extract(result, '$.data') FROM cf_agents_task_steps
          WHERE run_id = ${runId ?? ""} AND step_name = 'model-turn'),
-        (SELECT json_extract(input, '$.data') FROM cf_agents_task_runs
-         WHERE run_id = ${runId ?? ""})
+        (SELECT coalesce(json_extract(input, '$.attempt.data'),
+                         json_extract(input, '$.data'))
+         FROM cf_agents_task_runs WHERE run_id = ${runId ?? ""})
       ) AS payload
     `.filter((row) => row.payload != null);
     const scheduledRows = this.sql<{ payload: string }>`

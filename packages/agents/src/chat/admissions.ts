@@ -276,8 +276,9 @@ export async function chatRecoveryNames(input: {
 /**
  * Request ids of chat-turn runs that have not settled: Task runs of the
  * turn definition (not one parked while its recovered reply streams) (a turn queued on the chat lane once its model call
- * began), and legacy fibers (facets). A table that does not exist
- * yet holds none.
+ * began), and legacy fibers (facets). A run started only for a recovery
+ * attempt (`ChatTurns.startAttemptRun`) is not a turn: its metadata names
+ * the attempt's callback. A table that does not exist yet holds none.
  */
 export function interruptedTurnRequestIds(
   sql: AgentToolSql,
@@ -290,6 +291,7 @@ export function interruptedTurnRequestIds(
         `select input, metadata from cf_agents_task_runs
          where definition = ? and status in ('pending', 'running')
            and coalesce(wait_reason, '') != 'park'
+           and json_type(metadata, '$.callback') is null
            and (lane is null or json_type(checkpoint, '$.snapshot') is not null)`,
         turnName
       )

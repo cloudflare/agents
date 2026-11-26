@@ -1517,3 +1517,133 @@ describe("ChatTurns request context", () => {
     warn.mockRestore();
   });
 });
+
+describe("ChatTurns.startAttemptRun", () => {
+  type RunCall = {
+    definition: string;
+    input: Record<string, unknown>;
+    options: {
+      runId?: string;
+      idempotencyKey?: string;
+      retain?: boolean;
+      metadata?: Record<string, unknown>;
+      start?: string;
+      lane?: string;
+    };
+  };
+
+  function setup() {
+    const calls: RunCall[] = [];
+    const lane = memoryLane();
+    const turns = new ChatTurns(new FakeHost(), {
+      defaultDebounceMs: 750,
+      lane: {
+        ...lane,
+        tasks: () =>
+          ({
+            run: async (
+              definition: string,
+              input: Record<string, unknown>,
+              options: RunCall["options"]
+            ) => {
+              calls.push({ definition, input, options });
+              return { runId: options.runId ?? "run" };
+            }
+          }) as unknown as ReturnType<typeof lane.tasks>
+      }
+    });
+    return { turns, calls, definition: lane.definition };
+  }
+
+  const attempt = (delivery?: number) => ({
+    callback: "_chatRecoveryContinue" as const,
+    data: {
+      incidentId: "incident-1",
+      ...(delivery !== undefined && { delivery })
+    },
+    delaySeconds: 30
+  });
+
+  it("starts a chat-turn run that carries the attempt, off the lane, from the alarm", async () => {
+    const { turns, calls, definition } = setup();
+    await turns.startAttemptRun(
+      {
+        ...attempt(1),
+        data: { ...attempt(1).data, recoveredRequestId: "req-1" }
+      },
+      "chained_retry"
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].definition).toBe(definition);
+    expect(calls[0].input.attempt).toEqual({
+      callback: "_chatRecoveryContinue",
+      data: {
+        incidentId: "incident-1",
+        delivery: 1,
+        recoveredRequestId: "req-1"
+      },
+      delaySeconds: 30
+    });
+    expect(calls[0].options).toEqual({
+      retain: false,
+      // What a host reads to tell a recovery is still to run. No request
+      // id: the run is not a turn of that request.
+      metadata: {
+        callback: "_chatRecoveryContinue",
+        incidentId: "incident-1",
+        recoveredRequestId: "req-1"
+      },
+      start: "alarm"
+    });
+  });
+
+  it("keys the run by dedupeKey when supplied, joining a retry to its own prior attempt", async () => {
+    const { turns, calls } = setup();
+    await turns.startAttemptRun(attempt(), "redefer", "dedupe-1");
+    expect(calls[0].options.runId).toBe("dedupe-1");
+  });
+
+  it("leaves redefer unkeyed when no dedupeKey is supplied", async () => {
+    const { turns, calls } = setup();
+    await turns.startAttemptRun(attempt(), "redefer");
+    expect(calls[0].options.runId).toBeUndefined();
+    expect(calls[0].options.idempotencyKey).toBeUndefined();
+  });
+
+  it("keys one first schedule, so a retried start of it joins its run", async () => {
+    const { turns, calls } = setup();
+    await turns.startAttemptRun(attempt(2), "initial");
+    await turns.startAttemptRun(attempt(2), "initial");
+    expect(calls[0].options.idempotencyKey).toBeDefined();
+    expect(calls[0].options.idempotencyKey).toBe(
+      calls[1].options.idempotencyKey
+    );
+  });
+
+  it("gives a later schedule of the same incident its own run", async () => {
+    const { turns, calls } = setup();
+    await turns.startAttemptRun(attempt(1), "initial");
+    await turns.startAttemptRun(attempt(2), "initial");
+    expect(calls[0].options.idempotencyKey).not.toBe(
+      calls[1].options.idempotencyKey
+    );
+  });
+
+  it("keeps the old key for a payload with no schedule number", async () => {
+    const { turns, calls } = setup();
+    await turns.startAttemptRun(attempt(), "initial");
+    expect(calls[0].options.idempotencyKey).toBe(
+      "chat-recovery:_chatRecoveryContinue:incident-1"
+    );
+  });
+
+  it("leaves a chained or timed-out attempt unkeyed: it must not join the run that starts it", async () => {
+    const { turns, calls } = setup();
+    await turns.startAttemptRun(attempt(1), "chained_retry");
+    await turns.startAttemptRun(attempt(1), "stable_timeout_retry");
+    expect(calls.map((call) => call.options.idempotencyKey)).toEqual([
+      undefined,
+      undefined
+    ]);
+  });
+});

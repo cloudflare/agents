@@ -261,7 +261,6 @@ import {
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
   runAppStart,
-  enqueueChatRecoveryTask,
   clearRecentChatTerminals,
   recentChatTerminal,
   recordRecentChatTerminal,
@@ -287,7 +286,6 @@ import {
   type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
   type ChatRecoveryScheduleCallback,
-  type ChatRecoveryTaskReason,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAttemptScope,
   type ChatRecoveryIncident
@@ -3027,26 +3025,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         attempts
       })
     );
-    // The recovery Task: attempts scheduled outside a replayed turn's run.
+    // The recovery Task, which only finishes runs an earlier version
+    // enqueued.
     this.tasks.register(
       CHAT_RECOVERY_TASK_NAME,
       createChatRecoveryTaskDefinition(attempts)
-    );
-  }
-
-  /** Enqueue one recovery attempt on the shared Tasks transport. */
-  private _enqueueChatRecovery(
-    callback: ChatRecoveryScheduleCallback,
-    data: Record<string, unknown>,
-    reason: ChatRecoveryTaskReason,
-    delaySeconds: number,
-    dedupeKey?: string
-  ): Promise<void> {
-    return enqueueChatRecoveryTask(
-      this.tasks,
-      { callback, data, delaySeconds },
-      reason,
-      dedupeKey
     );
   }
 
@@ -6247,13 +6230,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       this._readRunningSubmissionForRecovery(recoveredRequestId)
         ?.submission_id === submission.submission_id;
 
+    // An attempt no turn's run kept runs in a chat-turn run of its own
+    // (`ChatTurns.startAttemptRun`); one an earlier version enqueued is a
+    // run of the recovery Task. Both carry the callback and the request.
+    const turnRuns = await this.tasks.list({
+      definition: (this.constructor as typeof Think).CHAT_FIBER_NAME,
+      status: ["pending", "running"],
+      limit: Number.MAX_SAFE_INTEGER
+    });
     const recoveryRuns = await this.tasks.list({
       definition: CHAT_RECOVERY_TASK_NAME,
       status: ["pending", "running"],
       limit: Number.MAX_SAFE_INTEGER
     });
     if (
-      recoveryRuns.some(
+      [...turnRuns, ...recoveryRuns].some(
         (run) =>
           isChatRecoveryCallback(run.metadata?.callback) &&
           matchesSubmission(run.metadata.recoveredRequestId)
@@ -6275,11 +6266,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         .map(({ incident }) => incident.requestId)
     );
     if (planned.size > 0) {
-      const turnRuns = await this.tasks.list({
-        definition: (this.constructor as typeof Think).CHAT_FIBER_NAME,
-        status: ["pending", "running"],
-        limit: Number.MAX_SAFE_INTEGER
-      });
       if (
         turnRuns.some((run) => {
           const requestId = run.metadata?.requestId;
@@ -9581,11 +9567,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         }
       },
       scheduleRecovery: (callback, data, reason, delaySeconds, dedupeKey) =>
-        this._enqueueChatRecovery(
-          callback,
-          data,
+        this._turns.startAttemptRun(
+          { callback, data, delaySeconds },
           reason,
-          delaySeconds,
           dedupeKey
         ),
       setRecovering: (active, requestId) =>

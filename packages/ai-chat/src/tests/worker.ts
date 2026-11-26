@@ -37,7 +37,6 @@ import type {
 } from "../";
 import {
   CHAT_RECOVERY_TASK_NAME,
-  chatRecoveryTaskRunOptions,
   recentChatTerminal,
   toolResultUpdate,
   type ChatTurns,
@@ -170,13 +169,19 @@ function chatResponseDrainIdleForTest(agent: AIChatAgent): boolean {
   );
 }
 
+/**
+ * The open runs that run an attempt of `callback`, oldest first: a run
+ * started only for the attempt, a recovery Task run an earlier version
+ * enqueued, and a turn's own run that kept the attempt.
+ */
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
   return sql
     .exec<{ run_id: string }>(
       `SELECT run_id, created_at FROM cf_agents_task_runs
-       WHERE definition = ? AND status IN ('pending', 'running')
+       WHERE definition IN (?, '__cf_internal_chat_turn')
+         AND status IN ('pending', 'running')
          AND json_extract(metadata, '$.callback') = ?
-       UNION ALL
+       UNION
        SELECT r.run_id, r.created_at FROM cf_agents_task_runs r
        JOIN cf_agents_task_steps s
          ON s.run_id = r.run_id AND s.step_name = 'model-turn'
@@ -284,6 +289,7 @@ async function recoverInterruptedTurnsForTest(
   }>`
     SELECT run_id, input, metadata, checkpoint FROM cf_agents_task_runs
     WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME} AND status = 'pending'
+      AND json_extract(metadata, '$.callback') IS NULL
     ORDER BY created_at
   `;
   for (const run of runs) {
@@ -4487,12 +4493,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     });
   }
 
-  /** The chat-turn Task runs not yet settled: a turn a replay could recover. */
+  /**
+   * The chat turns' Task runs not yet settled: a turn a replay could
+   * recover. A run started only for a recovery attempt is not one.
+   */
   openChatTurnRunsForTest(): number {
     return (
       this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_task_runs
         WHERE definition = '__cf_internal_chat_turn'
+          AND json_extract(metadata, '$.callback') IS NULL
           AND status IN ('pending', 'running')
       `[0]?.count ?? 0
     );
@@ -4535,6 +4545,70 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
+  /** Start a run for a recovery attempt no turn's run kept, as the engine does. */
+  async startAttemptRunForTest(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: Record<string, unknown>,
+    delaySeconds: number
+  ): Promise<void> {
+    await this["_turns"].startAttemptRun(
+      { callback, data, delaySeconds },
+      "initial"
+    );
+  }
+
+  /**
+   * Leave a recovery run as the release enqueued it: a run of the recovery
+   * Task, with the options its `chatRecoveryTaskRunOptions` built for a
+   * first schedule.
+   */
+  async seedReleasedRecoveryRunForTest(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: Record<string, unknown>,
+    delaySeconds: number
+  ): Promise<void> {
+    const incidentId =
+      typeof data.incidentId === "string" ? data.incidentId : undefined;
+    await this.tasks.run(
+      CHAT_RECOVERY_TASK_NAME,
+      { callback, data, delaySeconds },
+      {
+        retain: false,
+        ...(incidentId && {
+          idempotencyKey: `chat-recovery:${callback}:${incidentId}${
+            typeof data.delivery === "number" ? `:${data.delivery}` : ""
+          }`
+        }),
+        metadata: { callback, ...(incidentId && { incidentId }) },
+        start: "alarm"
+      }
+    );
+  }
+
+  /** The open runs of the recovery Task, which only earlier versions enqueue. */
+  openReleasedRecoveryRunsForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+          AND status IN ('pending', 'running')
+      `[0]?.count ?? 0
+    );
+  }
+
+  /** The steps of the open runs that run a continue attempt, by name. */
+  recoveryRunStepsForTest(): string[] {
+    return pendingRecoveryRunIds(
+      this.ctx.storage.sql,
+      "_chatRecoveryContinue"
+    ).flatMap((runId) =>
+      this.sql<{ step_name: string; state: string }>`
+        SELECT step_name, state FROM cf_agents_task_steps
+        WHERE run_id = ${runId} ORDER BY step_name ASC
+      `.map((row) => `${row.step_name}:${row.state}`)
+    );
+  }
+
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
@@ -4543,10 +4617,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       data,
       delaySeconds: 60
     };
-    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
-      ...chatRecoveryTaskRunOptions(input, "redefer"),
-      start: "alarm"
-    });
+    await this["_turns"].startAttemptRun(input, "redefer");
   }
 
   /** Retry-path twin of {@link preScheduleRecoveryContinueForTest}. */
@@ -4558,10 +4629,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       data,
       delaySeconds: 60
     };
-    await this.tasks.run(CHAT_RECOVERY_TASK_NAME, input, {
-      ...chatRecoveryTaskRunOptions(input, "redefer"),
-      start: "alarm"
-    });
+    await this["_turns"].startAttemptRun(input, "redefer");
   }
 
   async getChatRecoveringForTest(): Promise<{ requestId?: string } | null> {
@@ -4786,25 +4854,30 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this._throwsBeforeHandoff;
   }
 
-  /** The recovery Task's open runs, as `status` or `status:waitReason`. */
-  openRecoveryTaskRunsForTest(): string[] {
+  /**
+   * The open runs started only to run a recovery attempt, as `status` or
+   * `status:waitReason`.
+   */
+  openAttemptRunsForTest(): string[] {
     return this.sql<{ status: string; wait_reason: string | null }>`
       SELECT status, wait_reason FROM cf_agents_task_runs
-      WHERE definition = '__cf_internal_chat_recovery'
+      WHERE definition = '__cf_internal_chat_turn'
+        AND json_extract(metadata, '$.callback') IS NOT NULL
         AND status IN ('pending', 'running')
     `.map((row) =>
       row.wait_reason ? `${row.status}:${row.wait_reason}` : row.status
     );
   }
 
-  /** Run every open recovery Task run now, as its later wake would. */
-  async runOpenRecoveryTaskRunsForTest(): Promise<void> {
+  /** Run every open attempt run now, as its later wake would. */
+  async runOpenAttemptRunsForTest(): Promise<void> {
     this.sql`
       UPDATE cf_agents_task_runs SET next_at = ${Date.now() - 1_000}
-      WHERE definition = '__cf_internal_chat_recovery'
+      WHERE definition = '__cf_internal_chat_turn'
+        AND json_extract(metadata, '$.callback') IS NOT NULL
         AND status IN ('pending', 'running')
     `;
-    await this.tasks.runDue("__cf_internal_chat_recovery");
+    await this.tasks.runDue("__cf_internal_chat_turn");
   }
 
   protected override async continueLastTurn(
@@ -5322,7 +5395,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.sql`
       UPDATE cf_agents_task_runs
       SET next_at = ${past},
-          input = json_set(input, '$.delaySeconds', 0)
+          input = CASE
+            WHEN json_type(input, '$.attempt') = 'object'
+              THEN json_set(input, '$.attempt.delaySeconds', 0)
+            ELSE json_set(input, '$.delaySeconds', 0)
+          END
       WHERE run_id = ${runId}
     `;
     this.sql`
@@ -5596,30 +5673,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   private _recoveryTaskKeyed: boolean[] = [];
 
-  /** Record whether each recovery enqueued from now on has an idempotency key. */
+  /** Record whether each recovery scheduled from now on has an idempotency key. */
   trackRecoveryTaskKeysForTest(): void {
-    const self = this as unknown as {
-      _enqueueChatRecovery(
-        callback: Parameters<typeof chatRecoveryTaskRunOptions>[0]["callback"],
-        data: Record<string, unknown>,
-        reason: Parameters<typeof chatRecoveryTaskRunOptions>[1],
-        delaySeconds: number,
-        dedupeKey?: string
-      ): Promise<void>;
-    };
-    const original = self._enqueueChatRecovery.bind(this);
-    self._enqueueChatRecovery = (callback, data, reason, delaySeconds, key) => {
+    const turns = this["_turns"];
+    const original = turns.startAttemptRun.bind(turns);
+    turns.startAttemptRun = (attempt, reason, key) => {
+      // The key `startAttemptRun` gives a first schedule of an incident.
       this._recoveryTaskKeyed.push(
-        chatRecoveryTaskRunOptions(
-          { callback, data, delaySeconds },
-          reason,
-          key
-        ).idempotencyKey !== undefined
+        reason === "initial" && typeof attempt.data.incidentId === "string"
       );
-      return original(callback, data, reason, delaySeconds, key);
+      return original(attempt, reason, key);
     };
-    // An attempt a turn's own run takes is keyed as the Task would have
-    // keyed it: only a first (`initial`) schedule.
+    // An attempt a turn's own run takes is keyed the same way: only a
+    // first (`initial`) schedule.
     const engine = (
       this as unknown as { _chatRecoveryEngine(): unknown }
     )._chatRecoveryEngine() as {
@@ -5667,15 +5733,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     };
   }
 
-  /** The backoff, in seconds, of the recovery Task scheduled last. */
+  /** The backoff, in seconds, of the recovery attempt scheduled last. */
   getScheduledRecoveryDelayForTest(): number | null {
     return (
-      // A recovery Task run's input, or the attempt a turn's run journaled.
+      // An attempt run's input, or the attempt a turn's run journaled.
       this.sql<{ delay: number | null }>`
         SELECT delay FROM (
-          SELECT json_extract(input, '$.delaySeconds') AS delay, created_at
+          SELECT json_extract(input, '$.attempt.delaySeconds') AS delay,
+                 created_at
           FROM cf_agents_task_runs
-          WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+          WHERE json_extract(input, '$.attempt.callback') IS NOT NULL
           UNION ALL
           SELECT json_extract(result, '$.delaySeconds') AS delay, updated_at
           FROM cf_agents_task_steps
@@ -8221,7 +8288,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
    * (its storage owns the run and step journal), mirrored as one routed wake
    * job on this root's queue (`owner_path` set) — the alarm this root
    * actually owns. `schedules` pins that the retired Scheduler bridge stays
-   * dead. Pins `_enqueueChatRecovery` against the real detection path, not a
+   * dead. Pins the attempt's run against the real detection path, not a
    * manually seeded row.
    */
   async driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
