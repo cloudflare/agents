@@ -66,9 +66,17 @@ const userMessage: ChatMessage = {
   parts: [{ type: "text", text: "Hello" }]
 };
 
-/** Wait until the agent has recorded `count` onChatResponse results. */
+/**
+ * Wait until the agent has recorded `count` onChatResponse results and
+ * nothing more can report: the chat is idle and no result is waiting or
+ * being delivered. Only then is an exact count final.
+ */
 async function waitForResults(
-  agent: { getChatResponseResults(): Promise<unknown> },
+  agent: {
+    getChatResponseResults(): Promise<unknown>;
+    waitForIdleForTest(): Promise<unknown>;
+    isChatResponseDrainIdleForTest(): Promise<boolean>;
+  },
   count: number
 ) {
   await vi.waitFor(
@@ -76,6 +84,13 @@ async function waitForResults(
       expect(
         ((await agent.getChatResponseResults()) as unknown[]).length
       ).toBeGreaterThanOrEqual(count);
+    },
+    { timeout: 3000 }
+  );
+  await vi.waitFor(
+    async () => {
+      await agent.waitForIdleForTest();
+      expect(await agent.isChatResponseDrainIdleForTest()).toBe(true);
     },
     { timeout: 3000 }
   );

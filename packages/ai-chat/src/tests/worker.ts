@@ -159,6 +159,17 @@ function queuedTurnCountForTest(agent: AIChatAgent): number {
   )._turns.queue.queuedCount();
 }
 
+/** `agent` has no onChatResponse result waiting or being delivered. */
+function chatResponseDrainIdleForTest(agent: AIChatAgent): boolean {
+  const drain = agent as unknown as {
+    _pendingChatResponseResults: unknown[];
+    _insideResponseHook: boolean;
+  };
+  return (
+    drain._pendingChatResponseResults.length === 0 && !drain._insideResponseHook
+  );
+}
+
 function pendingRecoveryRunIds(sql: SqlStorage, callback: string): string[] {
   return sql
     .exec<{ run_id: string }>(
@@ -2843,6 +2854,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     this._chatResponseResults.push(result);
   }
 
+  /** No onChatResponse result is waiting or being delivered. */
+  isChatResponseDrainIdleForTest(): boolean {
+    return chatResponseDrainIdleForTest(this);
+  }
+
   getChatResponseResults(): ChatResponseResult[] {
     return [...this._chatResponseResults];
   }
@@ -2971,6 +2987,11 @@ export class ResponseAgent extends AIChatAgent<Env> {
     this._responseResults.push(result);
   }
 
+  /** No onChatResponse result is waiting or being delivered. */
+  isChatResponseDrainIdleForTest(): boolean {
+    return chatResponseDrainIdleForTest(this);
+  }
+
   getChatResponseResults(): ChatResponseResult[] {
     return [...this._responseResults];
   }
@@ -3076,6 +3097,11 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
     this._responseResults.push(result);
   }
 
+  /** No onChatResponse result is waiting or being delivered. */
+  isChatResponseDrainIdleForTest(): boolean {
+    return chatResponseDrainIdleForTest(this);
+  }
+
   getChatResponseResults(): ChatResponseResult[] {
     return [...this._responseResults];
   }
@@ -3168,6 +3194,11 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
 
   enqueueMessages(messages: string[]): void {
     this._messageQueue.push(...messages);
+  }
+
+  /** No onChatResponse result is waiting or being delivered. */
+  isChatResponseDrainIdleForTest(): boolean {
+    return chatResponseDrainIdleForTest(this);
   }
 
   getChatResponseResults(): ChatResponseResult[] {
