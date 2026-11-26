@@ -28,10 +28,12 @@ function awaitsClient(messages: UIMessage[]): boolean {
 
 /**
  * The tab's rule breaks. A `done` frame with outcome `recovering` hands its
- * request to recovery; it is not the request's end. The end comes once,
- * later, under the request's own id or under a continuation the server
- * started (an id the tab did not send). An end of another request the tab
- * sent does not close a hand-off.
+ * request to recovery; it is not the request's end. Recovery carries the
+ * request on in a continuation the server starts (an id the tab did not
+ * send), which may itself hand off to the next one: the chain is one
+ * request. Each chain must end once: an end under the request's id, under
+ * the chain's latest continuation, or under a new continuation. An end of
+ * another request the tab sent does not end a chain.
  */
 function tabViolations(
   n: number,
@@ -41,24 +43,27 @@ function tabViolations(
   const out: string[] = [];
   const seen = new Set<string>();
   const ends = new Map<string, number>();
-  const handedOff: string[] = [];
+  const chains: { origin: string; current: string }[] = [];
   for (const f of tab.frames) {
     if (f.type !== MT.RESPONSE || !f.done || !f.id) continue;
-    seen.add(f.id);
+    const id = f.id;
+    seen.add(id);
+    const own = chains.findIndex((c) => c.origin === id || c.current === id);
     if (f.outcome === "recovering") {
-      if (!handedOff.includes(f.id)) handedOff.push(f.id);
+      if (own >= 0) continue;
+      if (tab.sent.includes(id)) chains.push({ origin: id, current: id });
+      else if (chains.length) chains[0].current = id;
       continue;
     }
-    ends.set(f.id, (ends.get(f.id) ?? 0) + 1);
-    const own = handedOff.indexOf(f.id);
-    if (own >= 0) handedOff.splice(own, 1);
-    else if (!tab.sent.includes(f.id)) handedOff.shift();
+    ends.set(id, (ends.get(id) ?? 0) + 1);
+    if (own >= 0) chains.splice(own, 1);
+    else if (!tab.sent.includes(id)) chains.shift();
   }
   // A recovery that finds the turn waiting on the client leaves it
   // waiting: the client's answer continues it.
-  if (handedOff.length && !awaitsClient(messages)) {
+  if (chains.length && !awaitsClient(messages)) {
     out.push(
-      `tab ${n}: ${handedOff.join(", ")} handed to recovery and never ended`
+      `tab ${n}: ${chains.map((c) => c.origin).join(", ")} handed to recovery and never ended`
     );
   }
   for (const id of tab.sent) {
