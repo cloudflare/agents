@@ -98,6 +98,24 @@ describe("Tasks lanes", () => {
         async () => (await instance.tasks.get("b"))?.status === "completed"
       );
       expect(listed("l", ["completed"])).toEqual(["a", "b"]);
+      // A page at a time: after a record, in either order.
+      const page = (order: "oldest" | "newest", after?: string) => {
+        const record = after ? instance.tasks.peek(after) : undefined;
+        return instance.tasks
+          .peekList({
+            definition: "laned",
+            order,
+            limit: 1,
+            ...(record && {
+              after: { createdAt: record.createdAt, runId: record.runId }
+            })
+          })
+          .map((r) => r.runId);
+      };
+      expect(page("oldest")).toEqual(["a"]);
+      expect(page("oldest", "a")).toEqual(["b"]);
+      expect(page("oldest", "c")).toEqual([]);
+      expect(page("newest", "c")).toEqual(["b"]);
     });
   });
 

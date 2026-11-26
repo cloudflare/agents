@@ -174,6 +174,36 @@ describe("ThinkHarness turns", () => {
     expect(await stub.inspect("op-2")).toBeUndefined();
   });
 
+  it("pages submissions after a page's last one, even once it is deleted", async () => {
+    const stub = fresh();
+    // Ids in run-id order: submissions accepted in the same millisecond
+    // are listed by run id.
+    for (const id of ["s1", "s2", "s3"]) {
+      await stub.wait(
+        (await stub.submit(id, { operationId: id, submission: true }))
+          .operationId
+      );
+    }
+    const first = await stub.submissionPage(2);
+    expect(first.map((s) => s.id)).toEqual(["s1", "s2"]);
+    // The page ended in one that is then deleted; the next page still
+    // starts after it, not from the front again.
+    expect(await stub.deleteSubmission("s2")).toBe(true);
+    const next = await stub.submissionPage(2, {
+      operationId: "s2",
+      createdAt: first[1].createdAt
+    });
+    expect(next.map((s) => s.id)).toEqual(["s3"]);
+    // The cursor is by time first: an id before every other, at a time
+    // after the newest, leaves nothing to read.
+    expect(
+      await stub.submissionPage(2, {
+        operationId: "s0",
+        createdAt: next[0].createdAt + 1
+      })
+    ).toEqual([]);
+  });
+
   it("treats an empty idempotency key as none, as Think does", async () => {
     const stub = fresh();
     const first = await stub.submit("one", { idempotencyKey: "" });
@@ -192,6 +222,41 @@ describe("ThinkHarness turns", () => {
     expect(end).toBe("done");
     // The chunks of the operation the key started, which the chat joined.
     expect(types).toContain("text-delta");
+  });
+
+  it("lists submissions apart from other operations, keeps them across a reset, and deletes settled ones", async () => {
+    const stub = fresh();
+    await stub.submit("plain", { operationId: "op-plain" });
+    const first = await stub.submit("one", {
+      operationId: "sub-1",
+      submission: true
+    });
+    await stub.wait(first.operationId);
+    const gate = await stub.submit("gate", {
+      operationId: "sub-2",
+      submission: true
+    });
+    await stub.gateStarted(1);
+    expect(await stub.submissionList()).toEqual([
+      { id: "sub-2", status: "running" },
+      { id: "sub-1", status: "done" }
+    ]);
+    // An open submission is not deleted, nor an operation that is not one.
+    expect(await stub.deleteSubmission("sub-2")).toBe(false);
+    expect(await stub.deleteSubmission("op-plain")).toBe(false);
+    expect(await stub.inspect("op-plain")).toBeDefined();
+    await stub.release();
+    await stub.wait(gate.operationId);
+    // A reset keeps submissions, as Think keeps its own.
+    await stub.reset();
+    expect((await stub.submissionList()).map((s) => s.id)).toEqual([
+      "sub-2",
+      "sub-1"
+    ]);
+    expect(await stub.deleteSubmission("sub-1")).toBe(true);
+    expect(await stub.submissionList()).toEqual([
+      { id: "sub-2", status: "done" }
+    ]);
   });
 
   it("refuses to steer instead of queueing the input", async () => {

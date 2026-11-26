@@ -2232,6 +2232,11 @@ export class Tasks<
      */
     results?: boolean;
     order?: "oldest" | "newest";
+    /**
+     * Only records after this one in `order`: the last record of the page
+     * before, to read a long list a page at a time.
+     */
+    after?: { readonly createdAt: number; readonly runId: string };
     limit?: number;
   }): TaskRecord[] {
     if (options.status?.length === 0) return [];
@@ -2255,6 +2260,10 @@ export class Tasks<
       params.push(options.parked ? 1 : 0);
     }
     const direction = options.order === "oldest" ? "ASC" : "DESC";
+    if (options.after !== undefined) {
+      query += ` AND (created_at, run_id) ${direction === "ASC" ? ">" : "<"} (?, ?)`;
+      params.push(options.after.createdAt, options.after.runId);
+    }
     query += ` ORDER BY created_at ${direction}, run_id ${direction} LIMIT ?`;
     params.push(options.limit ?? DEFAULT_LIST_LIMIT);
     let rows: unknown[];

@@ -3411,6 +3411,51 @@ describe("Think durable submissions", () => {
     ).resolves.toBeNull();
   });
 
+  it("bulk deletes matches that lie past a page of submissions that do not match", async () => {
+    const agent = await freshAgent();
+    await agent.setThrowingStreamError("boom");
+    const failed = await agent.testSubmitMessages("explode", {
+      submissionId: "sub-page-error"
+    });
+    await waitForSubmission(
+      agent,
+      failed.submissionId,
+      (submission) => submission.status === "error"
+    );
+    await agent.setThrowingStreamError(null);
+    // Two completed ones after it, then one more error: with a limit of
+    // one, a first page holds the earlier error only; a later call must
+    // still find the second error behind the completed ones.
+    for (const id of ["sub-page-ok-1", "sub-page-ok-2"]) {
+      const ok = await agent.testSubmitMessages(id, { submissionId: id });
+      await waitForSubmission(agent, ok.submissionId, (submission) =>
+        terminalStatuses.has(submission.status)
+      );
+    }
+    await agent.setThrowingStreamError("boom again");
+    const later = await agent.testSubmitMessages("explode again", {
+      submissionId: "sub-page-error-2"
+    });
+    await waitForSubmission(
+      agent,
+      later.submissionId,
+      (submission) => submission.status === "error"
+    );
+
+    expect(
+      await agent.deleteSubmissionsForTest({ status: "error", limit: 1 })
+    ).toBe(1);
+    expect(
+      await agent.deleteSubmissionsForTest({ status: "error", limit: 1 })
+    ).toBe(1);
+    await expect(
+      agent.inspectSubmissionForTest("sub-page-error-2")
+    ).resolves.toBeNull();
+    await expect(
+      agent.inspectSubmissionForTest("sub-page-ok-1")
+    ).resolves.toMatchObject({ status: "completed" });
+  });
+
   it("filters list and bulk delete before applying limits and cutoffs", async () => {
     const agent = await freshAgent();
     const now = Date.now();

@@ -1238,6 +1238,34 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return { types, end };
   }
 
+  /** The root session's submissions, newest first: their ids and statuses. */
+  async submissionList(): Promise<{ id: string; status: string }[]> {
+    const listed = await this.harness.submissions(this.harness.session().id, {
+      limit: 100
+    });
+    return listed.map((s) => ({ id: s.operationId, status: s.status }));
+  }
+
+  /** One page of the root session's submissions, oldest first, by id. */
+  async submissionPage(
+    limit: number,
+    after?: { operationId: string; createdAt: number }
+  ): Promise<{ id: string; createdAt: number }[]> {
+    const listed = await this.harness.submissions(this.harness.session().id, {
+      order: "oldest",
+      limit,
+      ...(after && { after })
+    });
+    return listed.map((s) => ({ id: s.operationId, createdAt: s.createdAt }));
+  }
+
+  deleteSubmission(operationId: string): Promise<boolean> {
+    return this.harness.deleteSubmission(
+      this.harness.session().id,
+      operationId
+    );
+  }
+
   /** An operation's status (see `inspectRecord` for the rest). */
   async inspect(
     operationId: string
