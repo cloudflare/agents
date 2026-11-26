@@ -95,4 +95,4 @@ The browser AI now sees `page.scroll_to_top` and `remote.greet` / `remote.add` /
 
 ## See also
 
-- [`experimental/webmcp.md`](../../experimental/webmcp.md) — design notes, options reference, and edge cases
+- [`docs/experimental/webmcp.md`](../../docs/experimental/webmcp.md) — design notes, options reference, and edge cases

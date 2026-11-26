@@ -3,8 +3,8 @@
 Type: analysis (point-in-time discovery record)
 
 This captures the ergonomic gaps found while building a realistic non-coding
-agent on **today's** Think APIs. The prototype lives at
-`experimental/ops-approval-agent` and is a refund/dispute operations agent: it
+agent on **today's** Think APIs. The prototype lived at
+`experimental/ops-approval-agent` (since removed) and was a refund/dispute operations agent: it
 looks up an order and issues a refund — a money-moving side effect that must be
 permission-gated, human-approved, and idempotent. Those three guarantees are
 where today's primitives strain.
