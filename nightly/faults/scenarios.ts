@@ -145,7 +145,13 @@ async function finish(
   if (offer?.type === MT.RESUMING) {
     await late
       .waitFor(
-        (f) => isResp(f) && f.id === offer.id && f.done === true,
+        // A replayed `recovering` hand-off is not the end: the terminal
+        // may follow it.
+        (f) =>
+          isResp(f) &&
+          f.id === offer.id &&
+          f.done === true &&
+          f.outcome !== "recovering",
         15_000,
         "replayed end"
       )
