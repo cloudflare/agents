@@ -1074,6 +1074,61 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   /**
+   * A released completed row whose output is too large for a Task value,
+   * then an open row after it: both are carried, the large one without its
+   * output, which a re-issue reads back from the child.
+   */
+  async carryOversizedReleasedRowForTest(): Promise<{
+    carried: Record<string, string | null>;
+    tableRows: number;
+    reissueBytes: number;
+  }> {
+    const output = { blob: "y".repeat(1_200_000) };
+    const big = "released-big";
+    const child = await this.subAgent(TestAgentToolStubChild, big);
+    await child.startAgentToolRun(
+      { chunkBodies: [], summary: "big", output },
+      { runId: big }
+    );
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, agent_type, status, summary, output_json, display_order,
+        started_at, completed_at, detached
+      ) VALUES (
+        ${big}, 'TestAgentToolStubChild', 'completed', 'big',
+        ${JSON.stringify(output)}, 0, ${now}, ${now}, 0
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, agent_type, status, display_order, started_at, detached
+      ) VALUES (
+        'released-open-after', 'TestAgentToolStubChild', 'running', 0,
+        ${now + 1}, 0
+      )
+    `;
+    await this._agentTool._carryForwardAgentToolRuns();
+    const carried: Record<string, string | null> = {};
+    for (const runId of [big, "released-open-after"]) {
+      carried[runId] = this.tasks.peek(runId)?.status ?? null;
+    }
+    const tableRows =
+      this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM cf_agent_tool_runs
+      `[0]?.n ?? 0;
+    const again = await this.runAgentTool(TestAgentToolStubChild, {
+      runId: big,
+      input: { chunkBodies: [], summary: "must not run" }
+    });
+    return {
+      carried,
+      tableRows,
+      reissueBytes: JSON.stringify(again.output ?? "").length
+    };
+  }
+
+  /**
    * A completed row a released version kept without its output, while the
    * child still has it: what a re-issue after the carry-forward returns.
    */

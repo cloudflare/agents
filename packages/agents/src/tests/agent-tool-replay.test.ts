@@ -153,6 +153,21 @@ describe("agent-tool results the run's record cannot hold", () => {
     expect(reissueBytes).toBe(callerBytes);
   });
 
+  it("carries a released row too large for the record without its output, and the rows after it", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `carry-oversized-${crypto.randomUUID()}`
+    );
+    const { carried, tableRows, reissueBytes } =
+      await agent.carryOversizedReleasedRowForTest();
+    expect(carried).toEqual({
+      "released-big": "completed",
+      "released-open-after": "running"
+    });
+    expect(tableRows).toBe(0);
+    expect(reissueBytes).toBeGreaterThan(1_200_000);
+  });
+
   it("reads the output of a carried row that has none from the child", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,
