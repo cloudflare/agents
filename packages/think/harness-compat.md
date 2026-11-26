@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**242 of the 1261 tests that construct Think pass (19%).** Across the whole suite, 534 of 1553.
+**239 of the 1271 tests that construct Think pass (18%).** Across the whole suite, 531 of 1563.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -25,33 +25,34 @@ supported by the harness-backed Think yet".
 | `agent-tools.test.ts`                  | 12 / 64  | 18%  |
 | `assistant-agent-loop.test.ts`         | 9 / 33   | 27%  |
 | `assistant-agent.test.ts`              | 5 / 5    | 100% |
-| `assistant-message-metadata.test.ts`   | 1 / 9    | 11%  |
+| `assistant-message-metadata.test.ts`   | 0 / 9    | 0%   |
 | `attachment-consumption.test.ts`       | 0 / 4    | 0%   |
 | `browser-tools.test.ts`                | 6 / 6    | 100% |
 | `channel-policy.test.ts`               | 1 / 3    | 33%  |
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 33 / 136 | 24%  |
-| `cold-rpc-initialization.test.ts`      | 3 / 4    | 75%  |
+| `client-tools.test.ts`                 | 0 / 138  | 0%   |
+| `cold-rpc-initialization.test.ts`      | 4 / 4    | 100% |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
 | `deliver-notice.test.ts`               | 0 / 7    | 0%   |
-| `durable-admission.test.ts`            | 1 / 7    | 14%  |
+| `durable-admission.test.ts`            | 4 / 9    | 44%  |
 | `empty-reply.test.ts`                  | 0 / 10   | 0%   |
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
 | `execute-hitl.test.ts`                 | 0 / 16   | 0%   |
 | `execute-tool.test.ts`                 | 6 / 6    | 100% |
-| `extension-manager.test.ts`            | 42 / 45  | 93%  |
+| `extension-manager.test.ts`            | 48 / 48  | 100% |
+| `facet-request-order.test.ts`          | 0 / 1    | 0%   |
 | `fetch-tools.test.ts`                  | 52 / 53  | 98%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
-| `hooks.test.ts`                        | 38 / 149 | 25%  |
+| `hooks.test.ts`                        | 55 / 149 | 36%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
 | `mcp-tool-materialization.test.ts`     | 5 / 5    | 100% |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
-| `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
+| `message-reconciliation.test.ts`       | 0 / 11   | 0%   |
 | `messengers.test.ts`                   | 79 / 104 | 75%  |
 | `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
 | `onconnect-broadcast.test.ts`          | 1 / 14   | 7%   |
@@ -69,16 +70,16 @@ supported by the harness-backed Think yet".
 | `rpc-chat-turns.test.ts`               | 0 / 5    | 0%   |
 | `run-turn-recovery.test.ts`            | 1 / 11   | 9%   |
 | `run-turn.test.ts`                     | 13 / 35  | 37%  |
-| `scheduled-tasks.test.ts`              | 6 / 9    | 66%  |
+| `scheduled-tasks.test.ts`              | 9 / 9    | 100% |
 | `skills-tools.test.ts`                 | 2 / 2    | 100% |
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
-| `streaming-message-id.test.ts`         | 1 / 1    | 100% |
-| `submissions.test.ts`                  | 14 / 116 | 12%  |
+| `streaming-message-id.test.ts`         | 0 / 1    | 0%   |
+| `submissions.test.ts`                  | 20 / 116 | 17%  |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
 | `think-eviction.test.ts`               | 2 / 3    | 66%  |
-| `think-session.test.ts`                | 59 / 305 | 19%  |
+| `think-session.test.ts`                | 59 / 307 | 19%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
 | `workspace-tools.test.ts`              | 8 / 10   | 80%  |
