@@ -18,6 +18,19 @@ import { sseResponse, type StreamChunk } from "../../streams";
  * interruption.
  */
 
+/**
+ * A promise for a reader's first `onUpToDate`, and the callback to pass.
+ * The reader parks on the tail in the same synchronous run as the callback,
+ * so once this resolves, an append wakes a parked reader.
+ */
+function upToDate(): { reached: Promise<void>; onUpToDate: () => void } {
+  let onUpToDate = () => {};
+  const reached = new Promise<void>((resolve) => {
+    onUpToDate = resolve;
+  });
+  return { reached, onUpToDate };
+}
+
 async function collect(
   iterator: AsyncGenerator<StreamChunk, void, undefined>
 ): Promise<StreamChunk[]> {
@@ -108,13 +121,17 @@ describe("Streams capability", () => {
       stream.append({ i: 0 });
 
       const batches: number[][] = [];
+      const tail = upToDate();
       const reading = (async () => {
-        for await (const batch of instance.streams.readBatches("coalesce")) {
+        for await (const batch of instance.streams.readBatches("coalesce", {
+          onUpToDate: tail.onUpToDate
+        })) {
           batches.push(batch.map((c) => c.seq));
         }
       })();
 
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      // The reader has drained the backlog and parks on the tail.
+      await tail.reached;
       // Three appends and the close land in one synchronous block, so the
       // tailing reader wakes once and drains the backlog as one array.
       stream.append({ i: 1 });
@@ -300,16 +317,23 @@ describe("Streams capability", () => {
       stream.append({ i: 1 });
 
       const order: string[] = [];
+      let caughtUp = () => {};
+      const caughtUpPromise = new Promise<void>((resolve) => {
+        caughtUp = resolve;
+      });
       const reading = (async () => {
         for await (const batch of instance.streams.readBatches("utd", {
           batchSize: 1,
-          onUpToDate: () => order.push("up-to-date")
+          onUpToDate: () => {
+            order.push("up-to-date");
+            caughtUp();
+          }
         })) {
           order.push(`batch:${batch.map((c) => c.seq).join(",")}`);
         }
       })();
 
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await caughtUpPromise;
       stream.append({ i: 2 });
       stream.close();
       await reading;
@@ -359,15 +383,19 @@ describe("Streams capability", () => {
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
       const stream = await instance.streams.open("held-batch");
       const order: string[] = [];
+      const tail = upToDate();
       const reading = (async () => {
-        for await (const batch of instance.streams.readBatches("held-batch")) {
+        for await (const batch of instance.streams.readBatches("held-batch", {
+          onUpToDate: tail.onUpToDate
+        })) {
           order.push(`batch:${batch.map((c) => c.seq).join(",")}`);
           // The producer appends while this consumer still holds the batch
           // (the generator is suspended at its yield, with no waiter).
           if (batch[0].seq === 0) stream.append({ i: 1 });
         }
       })();
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      // The empty stream's reader parks on the tail before the first append.
+      await tail.reached;
       stream.append({ i: 0 });
 
       // The held-batch chunk must arrive with NO further append or close.
@@ -388,12 +416,16 @@ describe("Streams capability", () => {
       stream.append({ i: 0 });
 
       const seqs: number[] = [];
+      const tail = upToDate();
       const reading = (async () => {
-        for await (const batch of instance.streams.readBatches("doomed")) {
+        for await (const batch of instance.streams.readBatches("doomed", {
+          onUpToDate: tail.onUpToDate
+        })) {
           seqs.push(...batch.map((c) => c.seq));
         }
       })();
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      // The reader has replayed chunk 0 and parks on the tail.
+      await tail.reached;
 
       // The sweep path can remove a live stream; parked readers must wake
       // and observe the deletion instead of pending until an unrelated
