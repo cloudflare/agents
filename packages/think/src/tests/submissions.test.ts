@@ -62,6 +62,7 @@ type ThinkSubmissionTestStub = {
     status?: ThinkSubmissionInspection["status"]
   ): Promise<void>;
   hookCancelResultForTest(): Promise<unknown>;
+  waitFromHeldHookForTest(submissionId: string): Promise<string>;
   cancelInSubmissionStatusHookForTest(): Promise<void>;
   isSubmissionStatusHookHeldForTest(): Promise<boolean>;
   statusReportsQueuedForTest(submissionId: string): Promise<number>;
@@ -1388,7 +1389,30 @@ describe("Think durable submissions", () => {
       true
     );
     await agent.releaseSubmissionStatusHookForTest();
-    await expect(waiting).resolves.toMatchObject({ status: "completed" });
+    const settled = await waiting;
+    expect(settled).toMatchObject({ status: "completed" });
+    expect(settled?.completedAt).toBeDefined();
+  });
+
+  it("refuses a wait from a status hook on a submission still open", async () => {
+    const agent = await freshAgent();
+    await agent.holdSubmissionStatusHookForTest("running");
+    const first = await agent.testSubmitMessages("first", {
+      submissionId: `sub-hook-first-${crypto.randomUUID()}`
+    });
+    await vi.waitFor(async () => {
+      expect(await agent.isSubmissionStatusHookHeldForTest()).toBe(true);
+    });
+    const second = await agent.testSubmitMessages("second", {
+      submissionId: `sub-hook-second-${crypto.randomUUID()}`
+    });
+    // From inside the held hook of the first, the second cannot settle.
+    expect(await agent.waitFromHeldHookForTest(second.submissionId)).toContain(
+      "waitForSubmission() cannot be called from onSubmissionStatus"
+    );
+    await agent.releaseSubmissionStatusHookForTest();
+    await agent.waitForSubmissionForTest(first.submissionId);
+    await agent.waitForSubmissionForTest(second.submissionId);
   });
 
   it("lets a status hook cancel its own submission", async () => {

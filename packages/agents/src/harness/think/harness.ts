@@ -1031,21 +1031,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return asUIMessages(await this.#handle(session).getHistory());
   }
 
-  /**
-   * @internal Whether any message an operation submitted is in the
-   * session's transcript: its messages were placed.
-   */
-  async messagesPlaced(
+  /** @internal The ids of the messages an operation submitted, if any. */
+  async submittedMessageIds(
     session: ThinkSessionId,
     operationId: string
-  ): Promise<boolean> {
+  ): Promise<string[]> {
     await this.lifecycle.ready();
     const stored = this.#tasks.inputOf<OperationRunInput>(
       runIdOf(session, operationId)
     );
-    if (stored?.input.kind !== "messages") return false;
-    const ids = stored.input.messages.map((message) => message.id);
-    return (await this.storedIds(session, ids)).size > 0;
+    return stored?.input.kind === "messages"
+      ? stored.input.messages.map((message) => message.id)
+      : [];
   }
 
   /** @internal Which of `ids` a session already stores (key probes). */

@@ -1098,23 +1098,33 @@ export class Think<
   async waitForSubmission(
     submissionId: string
   ): Promise<ThinkSubmissionInspection | null> {
-    if (this.#submissionStatuses.reporting(submissionId)) {
-      // As on Think: the submission settles only after the hook returns.
-      throw new Error(
-        "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
-      );
-    }
     const before = await this.harness.inspection(
       this.harness.session().id,
       submissionId
     );
     if (!before) return null;
+    const open = before.status === "queued" || before.status === "running";
+    if (
+      this.#submissionStatuses.reporting(submissionId) ||
+      (open && this.#submissionStatuses.reporting())
+    ) {
+      // As on Think: the hook's own submission, or one still open, settles
+      // only after the hook returns.
+      throw new Error(
+        "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
+      );
+    }
     const result = await this.harness.session().wait(submissionId);
     // Read again for its times; deleted meanwhile (the app's terminal hook
-    // may delete it), the wait's result still says how it ended.
+    // may delete it), the wait's result still says how it ended, and it
+    // ended no later than now.
     return (
       (await this.inspectSubmission(submissionId)) ??
-      submissionInspection({ ...before, ...result })
+      submissionInspection({
+        ...before,
+        ...result,
+        settledAt: before.settledAt ?? Date.now()
+      })
     );
   }
 
@@ -1159,17 +1169,23 @@ export class Think<
     if (before.status !== "pending" && before.status !== "running") {
       return { outcome: "already_terminal", submissionId, submission: before };
     }
+    const session = this.harness.session().id;
+    // Read before the cancel: the app's terminal hook may delete the record.
+    const ids = await this.harness.submittedMessageIds(session, submissionId);
     await this.harness.session().abort(submissionId);
     await this.harness.session().wait(submissionId);
     const after = (await this.inspectSubmission(submissionId)) ?? before;
+    // Only a started submission places its messages; one that never ran
+    // placed nothing, even if a message of the same id was already there.
+    const messagesApplied =
+      before.status === "running" &&
+      ids.length > 0 &&
+      (await this.harness.storedIds(session, ids)).size > 0;
     return {
       outcome: "cancelled",
       submissionId,
       previousStatus: before.status,
-      messagesApplied: await this.harness.messagesPlaced(
-        this.harness.session().id,
-        submissionId
-      ),
+      messagesApplied,
       submission: after
     };
   }
