@@ -479,7 +479,8 @@ export class ChatTurns<
    */
   liveReply: LiveReply | null = null;
   /** Depth of {@link runtimeAbort} calls in progress. */
-  #runtimeAborts = 0;
+  /** The reasons of the runtime's own aborts running now ({@link runtimeAbort}). */
+  readonly #runtimeReasons: unknown[] = [];
   /** The signals of the turns a stop landed on. */
   readonly #stoppedSignals = new WeakSet<AbortSignal>();
 
@@ -1600,19 +1601,19 @@ export class ChatTurns<
    * on it is dropped. The isolate is held until the stop's bookkeeping ends.
    */
   stallAbort(requestId: string): void {
+    // Cancelled now, inside the runtime's abort: a cancel the hold ran
+    // later would read as a user's stop.
+    const reason = new ChatStreamStalledError(
+      "chat stream stalled: inactivity watchdog fired"
+    );
     this.runtimeAbort(() => {
-      // Cancelled now, inside the runtime's abort: a cancel the hold ran
-      // later would read as a user's stop.
-      const reason = new ChatStreamStalledError(
-        "chat stream stalled: inactivity watchdog fired"
-      );
       if (this.host.abortRequest) {
         this.host.abortRequest(requestId, reason);
         return;
       }
       const settled = this.cancel(requestId, reason);
       void this.host.keepAliveWhile(() => settled);
-    });
+    }, reason);
   }
 
   // ── Before a turn ──────────────────────────────────────────────────
@@ -1760,12 +1761,19 @@ export class ChatTurns<
   cancel(requestId: string, reason?: unknown): Promise<void> {
     // A request that waits as a record, here or after a reset, stays stopped.
     this.admissions?.stop(requestId);
-    this.#noteStopped(this.aborts.get(requestId)?.signal);
-    this.#stop(() => {
-      this.aborts.get(requestId)?.abort(reason);
-      this.#recoveryAttempts.get(requestId)?.abort(reason);
-    }, requestId);
-    return this.#afterStop(requestId, reason);
+    // Inside the runtime's abort, a cancel with another reason (a user's
+    // stop that a subclass's `abortRequest` issues) is still a stop.
+    const runtime = this.#runtimeReasons.includes(reason);
+    this.#noteStopped(this.aborts.get(requestId)?.signal, runtime);
+    this.#stop(
+      () => {
+        this.aborts.get(requestId)?.abort(reason);
+        this.#recoveryAttempts.get(requestId)?.abort(reason);
+      },
+      requestId,
+      runtime
+    );
+    return this.#afterStop(requestId, reason, runtime);
   }
 
   /**
@@ -1781,8 +1789,8 @@ export class ChatTurns<
     );
   }
 
-  #noteStopped(signal: AbortSignal | undefined): void {
-    if (signal && this.#runtimeAborts === 0) this.#stoppedSignals.add(signal);
+  #noteStopped(signal: AbortSignal | undefined, runtime: boolean): void {
+    if (signal && !runtime) this.#stoppedSignals.add(signal);
   }
 
   /**
@@ -1792,8 +1800,12 @@ export class ChatTurns<
    *   rejects: a stop that could not finish its bookkeeping still stopped
    *   the turn.
    */
-  async #afterStop(requestId: string | null, reason: unknown): Promise<void> {
-    if (this.#runtimeAborts > 0) return;
+  async #afterStop(
+    requestId: string | null,
+    reason: unknown,
+    runtime: boolean
+  ): Promise<void> {
+    if (runtime) return;
     try {
       await this.host.stopped?.(requestId, reason);
     } catch (error) {
@@ -1811,14 +1823,21 @@ export class ChatTurns<
    */
   stopAll(reason?: unknown): Promise<void> {
     this.admissions?.stopAll();
-    for (const { signal } of this.aborts.values()) this.#noteStopped(signal);
-    this.#stop(() => {
-      this.#abortAll(reason);
-      for (const attempt of this.#recoveryAttempts.values()) {
-        attempt.abort(reason);
-      }
-    }, null);
-    return this.#afterStop(null, reason);
+    const runtime = this.#runtimeReasons.includes(reason);
+    for (const { signal } of this.aborts.values()) {
+      this.#noteStopped(signal, runtime);
+    }
+    this.#stop(
+      () => {
+        this.#abortAll(reason);
+        for (const attempt of this.#recoveryAttempts.values()) {
+          attempt.abort(reason);
+        }
+      },
+      null,
+      runtime
+    );
+    return this.#afterStop(null, reason, runtime);
   }
 
   /**
@@ -1872,7 +1891,10 @@ export class ChatTurns<
     // turn's signal. That is the runtime's abort, not a user's stop.
     const stop = () => {
       if (signal.reason instanceof ChatRecoverySupersededError) {
-        this.runtimeAbort(() => void this.cancel(requestId, signal.reason));
+        this.runtimeAbort(
+          () => void this.cancel(requestId, signal.reason),
+          signal.reason
+        );
       } else {
         void this.cancel(requestId, signal.reason);
       }
@@ -1899,13 +1921,18 @@ export class ChatTurns<
    * {@link cancel} (through the host's `abortRequest`, so a subclass that
    * observes aborts still sees it) and nothing waiting is dropped. The stall
    * watchdog uses it: recovery continues the turn it aborts.
+   *
+   * @param reason - The runtime's reason. Only a cancel with this reason is
+   *   the runtime's: one with another reason that `abort` leads to (a
+   *   subclass's `abortRequest` that stops the request for its user) is a
+   *   stop.
    */
-  runtimeAbort(abort: () => void): void {
-    this.#runtimeAborts++;
+  runtimeAbort(abort: () => void, reason?: unknown): void {
+    this.#runtimeReasons.push(reason);
     try {
       abort();
     } finally {
-      this.#runtimeAborts--;
+      this.#runtimeReasons.pop();
     }
   }
 
@@ -1917,7 +1944,7 @@ export class ChatTurns<
    * @param requestId - The request the stop names, or `null` for a stop of
    *   every request.
    */
-  #stop(abort: () => void, requestId: string | null): void {
+  #stop(abort: () => void, requestId: string | null, runtime: boolean): void {
     const active = this.queue.activeRequestId;
     const activeSignal =
       active === null ? undefined : this.aborts.get(active)?.signal;
@@ -1925,7 +1952,7 @@ export class ChatTurns<
 
     abort();
 
-    if (this.#runtimeAborts > 0) return;
+    if (runtime) return;
     if (requestId === null) {
       // Every request: whatever waits now is dropped, with or without a
       // running turn, also when an earlier stop stopped that turn already.

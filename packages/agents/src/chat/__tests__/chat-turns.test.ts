@@ -664,9 +664,8 @@ describe("ChatTurns", () => {
 
     it("the runtime's own abort is not a stop", () => {
       const signal = turnSignal(turns.aborts, "r1");
-      turns.runtimeAbort(
-        () => void turns.cancel("r1", new ChatStreamStalledError("stalled"))
-      );
+      const stalled = new ChatStreamStalledError("stalled");
+      turns.runtimeAbort(() => void turns.cancel("r1", stalled), stalled);
       expect(signal?.aborted).toBe(true);
       expect(host.stops).toEqual([]);
       expect(turns.isStopped(signal)).toBe(false);
@@ -674,14 +673,26 @@ describe("ChatTurns", () => {
 
     it("a stop that lands after the runtime's abort still counts as a stop", () => {
       const signal = turnSignal(turns.aborts, "r1");
-      turns.runtimeAbort(
-        () => void turns.cancel("r1", new ChatStreamStalledError("stalled"))
-      );
+      const stalled = new ChatStreamStalledError("stalled");
+      turns.runtimeAbort(() => void turns.cancel("r1", stalled), stalled);
       expect(turns.isStopped(signal)).toBe(false);
       // The signal is already aborted, and keeps the stall as its reason.
       void turns.cancel("r1", "user pressed stop");
       expect(signal?.reason).toBeInstanceOf(ChatStreamStalledError);
       expect(turns.isStopped(signal)).toBe(true);
+    });
+
+    it("a user's stop issued inside the runtime's abort is a stop", () => {
+      const signal = turnSignal(turns.aborts, "r1");
+      const stalled = new ChatStreamStalledError("stalled");
+      // A subclass's abortRequest stops the request for its user the moment
+      // the watchdog aborts it.
+      turns.runtimeAbort(() => {
+        void turns.cancel("r1", stalled);
+        void turns.cancel("r1", "user stop");
+      }, stalled);
+      expect(turns.isStopped(signal)).toBe(true);
+      expect(host.stops).toEqual([{ requestId: "r1", reason: "user stop" }]);
     });
 
     it("a host whose stop bookkeeping fails still stopped the turn", async () => {
