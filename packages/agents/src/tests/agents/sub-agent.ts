@@ -1540,6 +1540,17 @@ type BroadcastState = { count: number; lastMsg: string };
 export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
   initialState: BroadcastState = { count: 0, lastMsg: "" };
 
+  /** Ids of the connections this facet was told closed, in order. */
+  readonly closedIds: string[] = [];
+
+  onClose(connection: Connection): void {
+    this.closedIds.push(connection.id);
+  }
+
+  closedConnectionIds(): string[] {
+    return this.closedIds;
+  }
+
   /** Calls `this.broadcast(...)` directly from a facet RPC. */
   tryBroadcast(msg: string): string {
     try {
@@ -3217,6 +3228,11 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(BroadcastSubAgent, subAgentName);
     return child.tryBroadcast(msg);
+  }
+
+  async subAgentClosedConnectionIds(subAgentName: string): Promise<string[]> {
+    const child = await this.subAgent(BroadcastSubAgent, subAgentName);
+    return child.closedConnectionIds();
   }
 
   async subAgentRelayBroadcastFromFreshContext(

@@ -324,6 +324,38 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("tells a sub-agent its socket closed while a socket to its child has the same id", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+    const pk = crypto.randomUUID();
+    const base = `/agents/test-sub-agent-parent/${parent}/sub/broadcast-sub-agent/${child}`;
+    const open = async (path: string) => {
+      const response = await exports.default.fetch(
+        `http://example.com${path}?_pk=${pk}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      expect(response.status).toBe(101);
+      const ws = response.webSocket as WebSocket;
+      ws.accept();
+      return ws;
+    };
+    const own = await open(base);
+    const nested = await open(
+      `${base}/sub/broadcast-sub-agent/${uniqueName()}`
+    );
+    const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+    try {
+      own.close();
+      await vi.waitFor(async () => {
+        expect(await parentStub.subAgentClosesHandledForTest()).toBe(1);
+      });
+      expect(await parentStub.subAgentClosedConnectionIds(child)).toEqual([pk]);
+    } finally {
+      nested.close();
+      own.close();
+    }
+  });
+
   it("keeps a sub-agent's sends off another sub-agent's socket with the same id", async () => {
     // A client picks its `_pk`, so two sub-agents can each have a socket
     // with the same id: each one's frames are its own.

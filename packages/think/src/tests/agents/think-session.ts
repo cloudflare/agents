@@ -1256,19 +1256,17 @@ export class ThinkTestAgent extends Think {
   }
 
   override async _cf_sendToSubAgentConnection(
-    connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
+    ...args: Parameters<Think["_cf_sendToSubAgentConnection"]>
   ): Promise<void> {
     await this._delayNextSubAgentConnectionSend();
-    await super._cf_sendToSubAgentConnection(connectionId, message);
+    await super._cf_sendToSubAgentConnection(...args);
   }
 
   override async _cf_sendManyToSubAgentConnection(
-    connectionId: string,
-    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+    ...args: Parameters<Think["_cf_sendManyToSubAgentConnection"]>
   ): Promise<void> {
     await this._delayNextSubAgentConnectionSend();
-    await super._cf_sendManyToSubAgentConnection(connectionId, messages);
+    await super._cf_sendManyToSubAgentConnection(...args);
   }
 
   private async _delayNextSubAgentConnectionSend(): Promise<void> {

@@ -1539,11 +1539,15 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   ): Promise<boolean> {
     // A client that reconnected with its id before this socket closed
     // (#2709) is still connected: the sub-agent keeps the connection.
+    // Only a socket with the same route is that client: one routed to a
+    // descendant of the same sub-agent is not.
     const path = this.connectionTargetPath(connection);
     if (
       path !== null &&
       this.#childConnections(connection.id, path).some(
-        (other) => other.readyState === WebSocket.OPEN
+        (other) =>
+          other.readyState === WebSocket.OPEN &&
+          this.isSameAgentPath(this.connectionTargetPath(other) ?? [], path)
       )
     ) {
       return true;
