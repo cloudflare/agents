@@ -32,6 +32,10 @@ interface ChatRecoveryTestStub {
   ): Promise<void>;
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   openChatTurnRunsForTest(): Promise<number>;
+  armFailingReaderTurnForTest(
+    message: string,
+    prelude: "partial"
+  ): Promise<void>;
   insertLegacyChatFiberForTest(
     requestId: string,
     snapshot?: unknown
@@ -3809,6 +3813,148 @@ describe("platform-transient reader errors (#1964)", () => {
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
   }, 10_000);
 
+  it("answers a question sent while a stalled reply's recovery backs off from a transient error after the recovered reply", async () => {
+    const room = `stall-transient-question-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // The turn stalls; its recovery's model call then fails transiently,
+    // and the recovery backs off again.
+    await agentStub.armFailingReaderTurnForTest(
+      "Network connection lost.",
+      "partial"
+    );
+    await agentStub.driveStallingTurnForTest();
+    for (let i = 0; i < 400; i++) {
+      const incidents =
+        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+          status: string;
+          attempt: number;
+        }>;
+      if (
+        incidents[0]?.status === "scheduled" &&
+        (await agentStub.getFailingReaderCallsForTest()) === 1
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The recovery's model call failed, and it waits out its backoff.
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([
+      expect.objectContaining({ status: "scheduled" })
+    ]);
+    expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const done = new Promise<void>((resolve) => {
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const frame = JSON.parse(event.data as string) as {
+          type?: string;
+          id?: string;
+          done?: boolean;
+        };
+        if (
+          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.id === "req-second" &&
+          frame.done
+        ) {
+          resolve();
+        }
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-second",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              ...stored,
+              {
+                id: "user-second",
+                role: "user",
+                parts: [{ type: "text", text: "Never mind, something else" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    await done;
+    await agentStub.waitForIdleForTest();
+    ws.close(1000);
+
+    expect(
+      await agentStub.getChatRecoveryIncidentsForTest()
+    ).not.toContainEqual(expect.objectContaining({ status: "skipped" }));
+    const after = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const at = after.findIndex((m) => m.id === "user-second");
+    expect(at).toBeGreaterThan(0);
+    expect(
+      after
+        .slice(0, at)
+        .flatMap((m) => m.parts)
+        .map((p) => (p as { text?: string }).text ?? "")
+        .join("")
+    ).toContain("Continued response.");
+    expect(after.at(-1)?.role).toBe("assistant");
+  }, 20_000);
+
+  it("ends the turn's run when the user stops a recovery waiting out its backoff", async () => {
+    const room = `transient-cancel-run-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    expect(
+      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
+    ).toBe("aborted");
+    // The turn's own run keeps the attempt and sleeps out its backoff.
+    expect(await agentStub.openChatTurnRunsForTest()).toBe(1);
+    const [incident] =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        requestId: string;
+        recoveryRootRequestId?: string;
+      }>;
+    const stoppedId = incident.recoveryRootRequestId ?? incident.requestId;
+
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const ended = new Promise<void>((resolve) => {
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const frame = JSON.parse(event.data as string) as {
+          type?: string;
+          id?: string;
+          done?: boolean;
+        };
+        if (
+          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.id === stoppedId &&
+          frame.done
+        ) {
+          resolve();
+        }
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+        id: stoppedId
+      })
+    );
+    await ended;
+    ws.close(1000);
+
+    // Nothing holds the lane for the stopped recovery: a question sent now
+    // does not wait for its backoff.
+    expect(await agentStub.openChatTurnRunsForTest()).toBe(0);
+    expect(
+      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
+    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
+  }, 10_000);
+
   // Replays of paths the chat recovery model (verify-chat) found.
   it("stops a recovery the user cancels while it waits on the model", async () => {
     const room = `transient-cancel-running-${crypto.randomUUID()}`;
@@ -3974,69 +4120,84 @@ describe("platform-transient reader errors (#1964)", () => {
     ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
   }, 10_000);
 
-  it("answers a question sent during a recovery's backoff after the recovered reply", async () => {
-    const room = `transient-newer-question-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
+  it.each([
+    ["once", 1],
+    ["again while it recovers", 2]
+  ])(
+    "answers a question sent during a recovery's backoff after the recovered reply, cut off %s",
+    async (_, cuts) => {
+      const room = `transient-newer-question-${crypto.randomUUID()}`;
+      const agentStub = await getTestAgent(room);
 
-    // Turn 1 is cut off and its recovery is scheduled (1s backoff).
-    expect(
-      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
-    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+      // Turn 1 is cut off and its recovery is scheduled (1s backoff). With
+      // two cuts, the recovered reply is cut off too and recovers again.
+      expect(
+        await agentStub.driveFailingReaderTurnForTest(
+          "Network connection lost.",
+          cuts
+        )
+      ).toBe("aborted");
+      const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
 
-    // A tab sends a second question during the backoff. It waits in the
-    // lane behind the recovery, which holds it (ChatOrder).
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    const question: ChatMessage = {
-      id: "user-second",
-      role: "user",
-      parts: [{ type: "text", text: "Never mind, something else" }]
-    };
-    const done = new Promise<void>((resolve) => {
-      ws.addEventListener("message", (event: MessageEvent) => {
-        const frame = JSON.parse(event.data as string) as {
-          type?: string;
-          id?: string;
-          done?: boolean;
-        };
-        if (
-          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-          frame.id === "req-second" &&
-          frame.done
-        ) {
-          resolve();
-        }
+      // A tab sends a second question during the backoff. It waits in the
+      // lane behind the recovery, which holds it (ChatOrder).
+      const { ws } = await connectChatWS(
+        `/agents/chat-recovery-test-agent/${room}`
+      );
+      const question: ChatMessage = {
+        id: "user-second",
+        role: "user",
+        parts: [{ type: "text", text: "Never mind, something else" }]
+      };
+      const done = new Promise<void>((resolve) => {
+        ws.addEventListener("message", (event: MessageEvent) => {
+          const frame = JSON.parse(event.data as string) as {
+            type?: string;
+            id?: string;
+            done?: boolean;
+          };
+          if (
+            frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+            frame.id === "req-second" &&
+            frame.done
+          ) {
+            resolve();
+          }
+        });
       });
-    });
-    ws.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
-        id: "req-second",
-        init: {
-          method: "POST",
-          body: JSON.stringify({ messages: [...stored, question] })
-        }
-      })
-    );
-    await done;
-    await agentStub.waitForIdleForTest();
-    ws.close(1000);
+      // Still in the first backoff: the recovered reply has not started.
+      expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([
+        expect.objectContaining({ status: "scheduled", attempt: 1 })
+      ]);
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-second",
+          init: {
+            method: "POST",
+            body: JSON.stringify({ messages: [...stored, question] })
+          }
+        })
+      );
+      await done;
+      await agentStub.waitForIdleForTest();
+      ws.close(1000);
 
-    // The recovered reply comes first, then the question and its answer.
-    const after = (await agentStub.getPersistedMessages()) as ChatMessage[];
-    const at = after.findIndex((m) => m.id === "user-second");
-    expect(at).toBeGreaterThan(0);
-    expect(
-      after
-        .slice(0, at)
-        .flatMap((m) => m.parts)
-        .map((p) => (p as { text?: string }).text ?? "")
-        .join("")
-    ).toContain("Continued response.");
-    expect(after.at(-1)?.role).toBe("assistant");
-  }, 15_000);
+      // The recovered reply comes first, then the question and its answer.
+      const after = (await agentStub.getPersistedMessages()) as ChatMessage[];
+      const at = after.findIndex((m) => m.id === "user-second");
+      expect(at).toBeGreaterThan(0);
+      expect(
+        after
+          .slice(0, at)
+          .flatMap((m) => m.parts)
+          .map((p) => (p as { text?: string }).text ?? "")
+          .join("")
+      ).toContain("Continued response.");
+      expect(after.at(-1)?.role).toBe("assistant");
+    },
+    15_000
+  );
 
   it("delivers a terminal error when routing into recovery throws", async () => {
     const agentStub = await getTestAgent(

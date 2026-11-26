@@ -13,6 +13,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { TaskJson, TaskStep } from "../tasks";
+import { isTaskSuspension } from "../tasks/replay";
 import { TaskSettlement } from "../tasks/settlement";
 import type { TaskCheckpoint } from "../tasks/types";
 import type { ChatAdmissionInput, ChatAdmissionRecord } from "./admissions";
@@ -370,12 +371,16 @@ export function createChatTurnTaskDefinition(
               )
             )
           );
+          // A recovered reply cut off again keeps its next attempt in this
+          // run; the lane that waits for the reply waits for that too.
+          if (scheduled && !lane) continueHeldLane(step.id, requestId);
           entry.settle.resolve(value);
         } catch (error) {
           entry.settle.reject(error);
           throw error;
         } finally {
           open = false;
+          heldTurns.delete(requestId);
         }
         // SAFETY: the attempt is the recovery engine's JSON payload.
         return (scheduled ?? null) as TaskJson;
@@ -410,6 +415,24 @@ async function runKeptAttempt(
       delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
     });
   if (!lane) {
+    const release = continuedHolds.get(step.id);
+    if (release) {
+      // A recovered reply cut off again: its lane is still held for it, and
+      // is released when this attempt's own recovered reply ends.
+      let reply: Promise<void> | undefined;
+      try {
+        ({ reply } = await runHoldingLane(run));
+      } catch (error) {
+        if (isTaskSuspension(error)) throw error;
+        continuedHolds.delete(step.id);
+        release();
+        throw error;
+      }
+      continuedHolds.delete(step.id);
+      if (reply) void reply.finally(release);
+      else release();
+      return;
+    }
     // The recovered turn of an earlier isolate's lane run, cut off by a
     // second reset: it recovers holding the lane that run still holds,
     // so nothing queued behind starts ahead of it.
@@ -433,7 +456,47 @@ async function runKeptAttempt(
   }
 }
 
-type LaneAttempt = { reply?: Promise<void> };
+type LaneAttempt = {
+  reply?: Promise<void>;
+  /** Holds a recovered reply cut off again adds ({@link continueHeldLane}). */
+  more: Array<Promise<void>>;
+};
+
+/**
+ * The release of a held lane, by the run id of the recovered turn that was
+ * cut off again and keeps its next attempt. Removed when that attempt ends;
+ * a reset loses it with the park it holds, which the turn's run then
+ * recovers as an earlier isolate's ({@link ChatTurnTaskHooks.laneHeldForRecovery}).
+ */
+const continuedHolds = new Map<string, () => void>();
+
+/**
+ * The held lanes of the recovered turns a lane run's recovery attempt
+ * started, by request id: the turn's run may run in another async context
+ * (the alarm's). Removed when the turn's model call ends.
+ */
+const heldTurns = new Map<string, LaneAttempt>();
+
+/**
+ * @internal Note that the turn `requestId` starts in a lane run's recovery
+ * attempt, so a cut-off of it keeps that lane ({@link continueHeldLane}).
+ */
+export function noteHeldTurn(requestId: string): void {
+  const held = laneAttempt.getStore();
+  if (held) heldTurns.set(requestId, held);
+}
+
+/**
+ * Keep the lane held for the recovered turn `requestId` after its reply
+ * ends, until the attempt its run `runId` kept ends as well.
+ */
+function continueHeldLane(runId: string, requestId: string): void {
+  const held = heldTurns.get(requestId) ?? laneAttempt.getStore();
+  if (!held) return;
+  held.more.push(
+    new Promise<void>((resolve) => continuedHolds.set(runId, resolve))
+  );
+}
 
 /** Set while the app's `onStart` runs. */
 const appStart = new AsyncLocalStorage<true>();
@@ -457,7 +520,7 @@ const laneAttempt = new AsyncLocalStorage<LaneAttempt>();
 export async function runHoldingLane(
   fn: () => Promise<void>
 ): Promise<LaneAttempt> {
-  const held: LaneAttempt = {};
+  const held: LaneAttempt = { more: [] };
   await laneAttempt.run(held, fn);
   return held;
 }
@@ -469,10 +532,15 @@ export async function runHoldingLane(
 export function holdLaneForReply(reply: Promise<unknown>): boolean {
   const held = laneAttempt.getStore();
   if (!held) return false;
-  held.reply = reply.then(
-    () => {},
-    () => {}
-  );
+  held.reply = (async () => {
+    await reply.then(
+      () => {},
+      () => {}
+    );
+    for (let next = held.more.shift(); next; next = held.more.shift()) {
+      await next;
+    }
+  })();
   return true;
 }
 

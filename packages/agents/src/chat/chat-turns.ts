@@ -1907,7 +1907,43 @@ export class ChatTurns<
       requestId,
       runtime
     );
-    return this.#afterStop(requestId, reason, runtime);
+    if (runtime) return this.#afterStop(requestId, reason, runtime);
+    // Started first, so the run has ended by the time the stop's terminal
+    // frame goes out; the host still hears of the stop at once.
+    const ended = this.#endKeptBackoffs(requestId);
+    const stopped = this.#afterStop(requestId, reason, runtime);
+    return Promise.all([ended, stopped]).then(() => {});
+  }
+
+  /**
+   * End the lane runs that wait out the backoff of the recovery attempt
+   * they kept for `requestId`: the stop has settled its incident, and what
+   * is queued behind must not wait for its wake. A clear leaves them: their
+   * attempt wakes, finds the conversation changed and settles its incident.
+   */
+  async #endKeptBackoffs(requestId: string): Promise<void> {
+    try {
+      const tasks = this.#lane.tasks();
+      const waiting = tasks
+        .peekList({
+          definition: this.#lane.definition,
+          lane: CHAT_TURN_LANE,
+          status: ["pending"],
+          parked: false,
+          results: false
+        })
+        .filter(
+          (run) =>
+            run.metadata?.requestId === requestId &&
+            // A lane run sleeps only in its kept attempt's backoff.
+            run.waitReason === "sleep"
+        );
+      for (const run of waiting) {
+        await tasks.cancel(run.runId, "chat recovery stopped");
+      }
+    } catch (error) {
+      console.error("[chat] failed to end a stopped recovery's run:", error);
+    }
   }
 
   /**
