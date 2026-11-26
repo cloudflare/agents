@@ -1,8 +1,5 @@
 import { hasTable } from "./lifecycle/schema";
-import type {
-  FacetCapableCtx,
-  DynamicAgentClass as SubAgentClass
-} from "./dynamic-agents/types";
+import type { DynamicAgentClass as SubAgentClass } from "./dynamic-agents/types";
 import { nanoid } from "nanoid";
 import type { Agent } from "./index";
 import type { Connection } from "./lifecycle/durable-object-lifecycle";
@@ -159,11 +156,12 @@ export interface AgentToolParentHost {
   /** A method of the agent by name, bound to it; `undefined` if none. */
   method(name: string): ((...args: never[]) => unknown) | undefined;
   resolveChild: Agent["_cf_resolveSubAgent"];
+  hasSubAgent(agentType: string, name: string): boolean;
   emit: Agent["_emit"];
   broadcast: Agent["broadcast"];
   onError(error: unknown): unknown;
-  subAgent: Agent["subAgent"];
-  deleteSubAgent: Agent["deleteSubAgent"];
+  /** Delete a child by its class name, and its storage. */
+  deleteChild(agentType: string, name: string): Promise<void>;
   listSchedules: Agent["listSchedules"];
   cancelSchedule: Agent["cancelSchedule"];
   onAgentToolStart: Agent["onAgentToolStart"];
@@ -1399,7 +1397,13 @@ export class AgentToolParent {
       // but had not delivered it. Milestones the child still has go first.
       const owed = this.host.tasks.inputOf<RunAgentToolResult>(runId);
       if (owed) {
-        const asked = await this._askDetachedChild(meta, runId);
+        // Only a run with milestones asks, and only a child still there:
+        // asking would create a child that was deleted.
+        const asked =
+          meta.detached?.onMilestones &&
+          this.host.hasSubAgent(meta.agentType, runId)
+            ? await this._askDetachedChild(meta, runId)
+            : null;
         if (asked?.inspection) {
           this._deliverDetachedMilestones(meta, runId, asked.inspection);
         }
@@ -1797,25 +1801,32 @@ export class AgentToolParent {
     });
 
     for (const row of retained) {
-      try {
-        const cls = this._agentToolClassByName(row.agent_type);
-        // Its task, not its row: a detached run that gave up while its child
-        // may still finish shows `interrupted` but is still open.
-        const open = this.host.tasks.peek(row.run_id)?.status;
-        if (open === "pending" || open === "running") {
-          // The cancel aborts the run's attempt, which stops following the
-          // child. A cleared detached run delivers nothing.
-          await this.host.tasks.cancel(row.run_id, AGENT_TOOL_CLEARED_REASON);
-          const child = await this.host.subAgent(cls, row.run_id);
-          const adapter = this._asAgentToolChildAdapter(child);
-          await adapter.cancelAgentToolRun(
+      // Its task, not its row: a detached run that gave up while its child
+      // may still finish shows `interrupted` but is still open.
+      const open = this.host.tasks.peek(row.run_id)?.status;
+      if (open === "pending" || open === "running") {
+        // The cancel aborts the run's attempt, which stops following the
+        // child. A cleared detached run delivers nothing.
+        await this.host.tasks.cancel(row.run_id, AGENT_TOOL_CLEARED_REASON);
+        try {
+          const child = await this.host.resolveChild(
+            row.agent_type,
+            row.run_id
+          );
+          await this._asAgentToolChildAdapter(child).cancelAgentToolRun(
             row.run_id,
             "clearing agent tool run"
           );
+        } catch {
+          // Best effort: deleting the child below stops it either way.
         }
-        await this.host.deleteSubAgent(cls, row.run_id);
+      }
+      try {
+        // By name: the class an export resolves to need not carry it.
+        await this.host.deleteChild(row.agent_type, row.run_id);
       } catch {
-        // Cleanup is intentionally idempotent.
+        // Kept, with the child, so a later clear tries again.
+        continue;
       }
       this.host.tasks.deleteRun(row.run_id);
     }
@@ -2764,15 +2775,6 @@ export class AgentToolParent {
       );
     }
     return candidate as AgentToolChildAdapter<Input, Output>;
-  }
-
-  private _agentToolClassByName(className: string): SubAgentClass<Agent> {
-    const ctx = this.host.ctx as unknown as Partial<FacetCapableCtx>;
-    const cls = ctx.exports?.[className];
-    if (!cls) {
-      throw new Error(`Agent tool class "${className}" is not exported.`);
-    }
-    return cls as unknown as SubAgentClass<Agent>;
   }
 
   /**

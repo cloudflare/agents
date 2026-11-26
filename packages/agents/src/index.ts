@@ -1111,11 +1111,12 @@ export class Agent<
       },
       resolveChild: (agentType, runId) =>
         this._cf_resolveSubAgent(agentType, runId),
+      hasSubAgent: (agentType, name) => this.hasSubAgent(agentType, name),
       emit: (type, payload) => this._emit(type, payload),
       broadcast: (message, without) => this.broadcast(message, without),
       onError: (error) => this.onError(error),
-      subAgent: (cls, name) => this.subAgent(cls, name),
-      deleteSubAgent: (cls, name) => this.deleteSubAgent(cls, name),
+      deleteChild: (agentType, name) =>
+        this._dynamicAgents.delete(agentType, name),
       listSchedules: (criteria) => this.listSchedules(criteria),
       cancelSchedule: (id) => this.cancelSchedule(id),
       onAgentToolStart: (run) => this.onAgentToolStart(run),

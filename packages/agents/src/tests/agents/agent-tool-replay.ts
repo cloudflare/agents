@@ -221,6 +221,19 @@ export class TestAgentToolReplayAgent extends Agent {
       .map((entry) => entry.source);
   }
 
+  /** Milestone and `onDetachedDone` deliveries, in the order they began. */
+  detachedEventOrder: { runId: string; event: string }[] = [];
+
+  getDetachedEventOrderForTest(runId: string): string[] {
+    return this.detachedEventOrder
+      .filter((entry) => entry.runId === runId)
+      .map((entry) => entry.event);
+  }
+
+  hasChildForTest(runId: string): boolean {
+    return this.hasSubAgent(TestAgentToolStubChild, runId);
+  }
+
   getDetachedMilestonesForTest(runId: string): string[] {
     return this.detachedMilestoneLog
       .filter((entry) => entry.runId === runId)
@@ -244,6 +257,10 @@ export class TestAgentToolReplayAgent extends Agent {
     this.deliveredNotifySources.push({
       runId: run.runId,
       ...(run.notifySource !== undefined ? { source: run.notifySource } : {})
+    });
+    this.detachedEventOrder.push({
+      runId: run.runId,
+      event: `finish:${result.status}`
     });
     this.detachedDeliveryLog.push({
       hook: "onDetachedDone",
@@ -291,6 +308,10 @@ export class TestAgentToolReplayAgent extends Agent {
     milestone: { name: string }
   ): Promise<void> {
     this.detachedMilestoneLog.push({ runId: run.runId, name: milestone.name });
+    this.detachedEventOrder.push({
+      runId: run.runId,
+      event: `milestone:${milestone.name}`
+    });
   }
 
   /** Start a detached run on a stub child, `onDetachedDone` wired. */
@@ -354,10 +375,11 @@ export class TestAgentToolReplayAgent extends Agent {
   /** Clear every run; what is left of `runId`, and the open-run count. */
   async clearRunsForTest(
     runId: string
-  ): Promise<{ task: string | null; open: number }> {
+  ): Promise<{ task: string | null; open: number; child: boolean }> {
     await this.clearAgentToolRuns();
     return {
       task: this.tasks.peek(runId)?.status ?? null,
+      child: this.hasSubAgent(TestAgentToolStubChild, runId),
       open: (
         this as unknown as {
           _agentTools: { _activeAgentToolRunCount(): number };

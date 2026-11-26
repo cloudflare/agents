@@ -165,7 +165,8 @@ describe("detached agent-tool runs on Tasks", () => {
     await agent.checkDetachedForTest("run-gave-up-clear");
     expect(await agent.clearRunsForTest("run-gave-up-clear")).toEqual({
       task: null,
-      open: 0
+      open: 0,
+      child: false
     });
   });
 
@@ -456,6 +457,8 @@ describe("detached agent-tool runs a released version left", () => {
     expect(
       statuses(await agent.getDetachedDeliveryLog(), "released-owed-gone")
     ).toEqual(["completed"]);
+    // Delivering it does not bring the child back.
+    expect(await agent.hasChildForTest("released-owed-gone")).toBe(false);
   });
 
   it("delivers the milestones the child still has before a released recorded outcome", async () => {
@@ -470,8 +473,8 @@ describe("detached agent-tool runs a released version left", () => {
       "completed"
     );
     expect(
-      await agent.getDetachedMilestonesForTest("released-owed-ms")
-    ).toEqual(["sources-gathered"]);
+      await agent.getDetachedEventOrderForTest("released-owed-ms")
+    ).toEqual(["milestone:sources-gathered", "finish:completed"]);
     expect(
       statuses(await agent.getDetachedDeliveryLog(), "released-owed-ms")
     ).toEqual(["completed"]);
