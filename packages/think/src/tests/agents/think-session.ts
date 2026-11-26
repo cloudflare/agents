@@ -15520,12 +15520,28 @@ export class ThinkAdmissionTestAgent extends Think {
           chunks?: number;
           delayMs?: number;
           clientToolThenHang?: boolean;
+          clientToolThenEnd?: boolean;
         }
       | undefined;
     // The reply calls a client tool and its stream stays open: only a stop
     // or an eviction ends it. The answer's continuation replies with text.
     if (body?.clientToolThenHang) {
       return { model: createSlowClientToolMockModel(1000, 600) };
+    }
+    // The reply calls a client tool and ends; the answer's continuation
+    // replies with text.
+    if (body?.clientToolThenEnd) {
+      // The continuation streams slowly, so a tab that reconnects after a
+      // reset sees it.
+      if (ctx.continuation) {
+        return {
+          model: createDelayedMultiChunkMockModel(
+            ["Continuation ", "after ", "tool"],
+            400
+          )
+        };
+      }
+      return { model: createSlowClientToolMockModel(10, 1) };
     }
     // A turn with no body (a submission) streams slowly when the question
     // it answers says "slow".

@@ -122,13 +122,15 @@ function messageReceivedAtForTest(
 }
 
 type ContinuationStateForTest = {
+  /** A continuation is scheduled or running and has not streamed yet. */
   hasPending: boolean;
-  hasDeferred: boolean;
+  /** A next continuation is scheduled behind one that runs. */
+  hasNext: boolean;
   activeRequestId: string | null;
   activeConnectionId: string | null;
 };
 
-/** What `agent`'s auto-continuation holds: armed, deferred, running. */
+/** What `agent`'s auto-continuation holds: armed, next, running. */
 function continuationStateForTest(
   agent: AIChatAgent
 ): ContinuationStateForTest {
@@ -136,15 +138,15 @@ function continuationStateForTest(
     agent as unknown as {
       _continuation: {
         pending: unknown;
-        deferred: unknown;
+        running: unknown;
         activeRequestId: string | null;
         activeConnectionId: string | null;
       };
     }
   )._continuation;
   return {
-    hasPending: continuation.pending !== null,
-    hasDeferred: continuation.deferred !== null,
+    hasPending: continuation.pending !== null || continuation.running !== null,
+    hasNext: continuation.pending !== null && continuation.running !== null,
     activeRequestId: continuation.activeRequestId,
     activeConnectionId: continuation.activeConnectionId
   };
@@ -660,14 +662,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   /** The request id of the continuation waiting to run, if any. */
+  /** The continuation whose stream comes next: running, else scheduled. */
   pendingContinuationRequestIdForTest(): string | null {
-    return (
-      (
-        this as unknown as {
-          _continuation: { pending: { requestId: string } | null };
-        }
-      )._continuation.pending?.requestId ?? null
-    );
+    const { running, pending } = (
+      this as unknown as {
+        _continuation: {
+          running: { requestId: string } | null;
+          pending: { requestId: string } | null;
+        };
+      }
+    )._continuation;
+    return (running ?? pending)?.requestId ?? null;
   }
 
   private _persistDelayForTest: {

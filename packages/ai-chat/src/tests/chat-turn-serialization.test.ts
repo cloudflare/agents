@@ -481,7 +481,7 @@ describe("AIChatAgent chat turn serialization", () => {
     // The continuation is queued behind the active turn.
     await waitUntil(async () => {
       const state = await agentStub.getContinuationStateForTest();
-      return state.hasPending || state.hasDeferred;
+      return state.hasPending || state.hasNext;
     });
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);

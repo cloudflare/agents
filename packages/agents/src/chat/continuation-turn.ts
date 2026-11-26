@@ -17,7 +17,8 @@
  * - {@link replyFinalized}: any reply finished, so a continuation its
  *   stream held can fire.
  * - {@link settleContinuationTurn}: the turn ended. Release what it still
- *   owns and start the follow-up a result deferred while it ran.
+ *   owns. A result that arrived while it ran is the next pending
+ *   continuation, held until this one streams or settles.
  *
  * The rules these keep, each with a broken variant in the `ChatTurns` TLA+
  * model (`.claude/skills/verify-chat`):
@@ -43,7 +44,7 @@ import {
   continuationTargetIsLatest,
   type ContinuationConnection,
   type ContinuationPending,
-  type ContinuationState
+  type ContinuationSlots
 } from "./continuation-state";
 import {
   reportTurnFailure,
@@ -56,11 +57,9 @@ import { isTurnStopped, turnSignal, type TurnAborts } from "./turn-stop";
 export interface ContinuationTurnParts<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
-  readonly continuation: ContinuationState<TConnection>;
+  readonly continuation: ContinuationSlots<TConnection>;
   /** Re-run the barrier for a pending continuation that has not fired. */
   rearmForBatch(): void;
-  /** Make the deferred follow-up the pending continuation, through the barrier. */
-  activateDeferred(): void;
   readonly aborts: TurnAborts;
   /** The stored transcript, oldest first. */
   messages(): ReadonlyArray<{
@@ -106,8 +105,8 @@ export interface ContinuationTurnParts<
 export interface ContinuationDropped {
   /**
    * The request id the continuation would have run under. `null` for a
-   * result a stop dropped before it had a continuation of its own: one that
-   * waited behind a running continuation, or one still being applied.
+   * result a stop dropped while it was still being applied, before it had
+   * a continuation of its own.
    */
   requestId: string | null;
   /**
@@ -250,7 +249,9 @@ function tryClaimContinuation<TConnection extends ContinuationConnection>(
   if (!pending || pending.requestId !== requestId) return { dropped: null };
   const dropped = nothingToAnswer(parts, pending);
   if (dropped) return { dropped };
-  pending.pastCoalesce = true;
+  // Its turn started: an answer from now on schedules the next one.
+  parts.continuation.running = pending;
+  parts.continuation.pending = null;
   return { continuation: pending };
 }
 
@@ -485,8 +486,8 @@ async function runContinuationBody<
  * happens when the pending continuation is another's or none.
  *
  * A turn that never started uses only this. It does not settle: by the time
- * it runs, later turns may have started, and after a reset the deferred slot
- * belongs to the chat that came after it.
+ * it runs, later turns may have started, and after a reset the slots
+ * belong to the chat that came after it.
  */
 function releaseOwnPending<TConnection extends ContinuationConnection>(
   parts: ContinuationTurnParts<TConnection>,
@@ -514,8 +515,9 @@ function releasePending<TConnection extends ContinuationConnection>(
  * `STREAM_RESUMING`). From here on the reply pipeline reports the turn's
  * failures.
  *
- * A result deferred while the turn ran stays deferred until the turn
- * settles: only then is it known whether the reply answered it.
+ * A result that arrived while the turn ran is the next pending
+ * continuation. The stream gate holds it from here until the reply is
+ * finalized, and its turn decides whether the reply answered it.
  */
 export function continuationStreamStarted<
   TConnection extends ContinuationConnection
@@ -526,9 +528,13 @@ export function continuationStreamStarted<
 ): void {
   const { continuation } = parts;
   if (parts.streamed.has(requestId)) parts.streamed.set(requestId, true);
-  if (continuation.pending?.requestId !== requestId) return;
-  continuation.activatePending();
+  const running = continuation.running;
+  if (running?.requestId !== requestId) return;
+  continuation.activeRequestId = requestId;
+  continuation.activeConnectionId = running.connectionId;
+  continuation.running = null;
   continuation.flushAwaitingConnections(notifyResuming);
+  continuation.awaitPending();
 }
 
 /**
@@ -570,7 +576,6 @@ export function replyFinalized<TConnection extends ContinuationConnection>(
  *   unanswered sibling. The connections waiting on it get
  *   `STREAM_RESUME_NONE`. One whose turn already waits in the queue finds
  *   nothing to claim when the turn starts.
- * - The deferred result: it arrived while the stopped continuation ran.
  * - A continuation turn no pending continuation stands for (`Think`'s
  *   connection-less one) that has not started: it is aborted, and reports
  *   itself when its turn starts.
@@ -600,13 +605,9 @@ export function dropWaitingContinuations<
     ...(stoppedRequestId !== null && { stoppedRequestId })
   };
   const pending = continuation.pending;
-  if (pending && !pending.pastCoalesce) {
+  if (pending) {
     releasePending(parts);
     parts.dropped({ requestId: pending.requestId, ...stopped });
-  }
-  if (continuation.deferred) {
-    continuation.clearDeferred();
-    parts.dropped({ requestId: null, ...stopped });
   }
   for (const requestId of parts.unscheduled) {
     parts.aborts.get(requestId)?.abort();
@@ -624,7 +625,7 @@ export function dropPendingContinuation<
   TConnection extends ContinuationConnection
 >(parts: ContinuationTurnParts<TConnection>, requestId: string): void {
   const pending = parts.continuation.pending;
-  if (!pending || pending.pastCoalesce || pending.requestId !== requestId) {
+  if (!pending || pending.requestId !== requestId) {
     return;
   }
   if (parts.aborts.has(requestId)) return;
@@ -634,48 +635,32 @@ export function dropPendingContinuation<
 
 /**
  * Settle the continuation slots when the continuation turn `requestId`
- * ends, however it ended. A turn touches only what it owns:
- *
- * - It still owns the pending continuation when its stream never started
- *   (it failed, was cancelled, produced nothing, or had nothing to claim,
- *   which includes a reply that already went on to its answer).
- *   The connections waiting on it get `STREAM_RESUME_NONE`.
- * - A pending continuation it does not own is left alone (#2443): a result
- *   that landed while this turn streamed created it, and it fires on its
- *   own. It also covers the deferred result, which arrived before it: it
- *   takes over the deferred result's targets, the deferred slot is emptied,
- *   and the model is asked once, not twice.
- * - Otherwise the deferred result becomes the next continuation, through
- *   the barrier. This holds for a turn that failed too: the result it
- *   deferred has not been read by any model call.
- *
- * A stop of the turn already dropped what was deferred when it landed
- * ({@link dropWaitingContinuations}). A result deferred after the stop is a
- * new action and runs as the next continuation like any other.
+ * ends, however it ended. A turn touches only what it owns: its
+ * continuation, while its stream never started (it failed, was cancelled,
+ * produced nothing, or had nothing to claim, which includes a reply that
+ * already went on to its answer). The connections waiting on it get
+ * `STREAM_RESUME_NONE`. A pending continuation an answer scheduled while
+ * this turn ran is the next one, and its turn is already behind this one
+ * in the lane or fires by itself.
  */
 export function settleContinuationTurn<
   TConnection extends ContinuationConnection
 >(parts: ContinuationTurnParts<TConnection>, requestId: string): void {
   const { continuation } = parts;
-  const pending = continuation.pending;
-  if (pending?.requestId === requestId) {
-    // Its stream never started.
+  if (continuation.pending?.requestId === requestId) {
+    // It had nothing to claim.
     releasePending(parts);
-  } else if (pending && !pending.pastCoalesce) {
-    const deferred = continuation.deferred;
-    if (deferred) {
-      // The newer one answers for the deferred result too, so it takes over
-      // the messages that result targets. Without them, a deferred result
-      // for the latest reply is lost when the newer continuation was
-      // scheduled for an older one.
-      pending.targetMessageIds = mergeContinuationTargets(
-        pending.targetMessageIds,
-        deferred.targetMessageIds
-      );
-      continuation.clearDeferred();
-    }
+  } else if (continuation.running?.requestId === requestId) {
+    // Its stream never started.
+    continuation.running = null;
+    continuation.sendResumeNone();
+    parts.released?.(requestId);
+    continuation.awaitPending();
   }
-  parts.activateDeferred();
+  // A result that arrived while it ran was held for it. Its reply may have
+  // ended without a finalize that re-arms (recovery gave up, say), so run
+  // its barrier now, however this turn ended.
+  parts.rearmForBatch();
 }
 
 /**
@@ -738,12 +723,4 @@ export function transcriptEndsInAnswer(
     }
   }
   return hasContent;
-}
-
-/** The targets of two continuations folded into one. */
-function mergeContinuationTargets(
-  a: readonly string[],
-  b: readonly string[]
-): readonly string[] {
-  return [...a, ...b.filter((id) => !a.includes(id))];
 }

@@ -227,7 +227,7 @@ describe("Client tools continuation", () => {
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
       expect(await agentStub.getContinuationStateForTest()).toMatchObject({
         hasPending: false,
-        hasDeferred: false,
+        hasNext: false,
         activeRequestId: null
       });
     } finally {
@@ -390,7 +390,7 @@ describe("Client tools continuation", () => {
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(2);
       expect(await agentStub.getContinuationStateForTest()).toMatchObject({
         hasPending: false,
-        hasDeferred: false,
+        hasNext: false,
         activeRequestId: null
       });
     } finally {
@@ -1280,7 +1280,7 @@ describe("Client tools continuation", () => {
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
       expect(await agentStub.getContinuationStateForTest()).toEqual({
         hasPending: false,
-        hasDeferred: false,
+        hasNext: false,
         activeRequestId: null,
         activeConnectionId: null
       });
@@ -1371,7 +1371,7 @@ describe("Client tools continuation", () => {
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
       expect(await agentStub.getContinuationStateForTest()).toEqual({
         hasPending: false,
-        hasDeferred: false,
+        hasNext: false,
         activeRequestId: null,
         activeConnectionId: null
       });

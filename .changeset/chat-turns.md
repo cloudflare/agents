@@ -17,3 +17,4 @@
 - An `experimental_steering` message stays in the transcript (#3143).
 - Under `latest`, `merge` and debounce, a request a newer one superseded stays superseded across a restart. Its question is stored with the newer request's, and a `merge` turn already at the front of the queue is no longer cancelled by a newer message.
 - `agents/chat` exports `buildInClauseStrings` again (deprecated), so a released `@cloudflare/think` 0.24.0 installed beside this `agents` loads.
+- A tool answer that arrives while a continuation runs now schedules the next continuation, whose turn waits behind the running one. It starts one coalesce window after the reply ends, and a stop that drops it reports its own request id instead of `null`.

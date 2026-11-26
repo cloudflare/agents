@@ -169,6 +169,24 @@ describe("ChatTurns", () => {
     expect(host.fired).toBe(1);
   });
 
+  it("holds when a continuation claims its turn during the drain", async () => {
+    host.transcript = [user("u1"), halfAnswered()];
+    const release = await scheduleBehindHeldApply();
+    // Another continuation's turn starts while the drain waits.
+    turns.continuation.running = {
+      connection,
+      connectionId: "c1",
+      requestId: "cont-0",
+      errorPrefix: "[test]",
+      prerequisite: null,
+      pastCoalesce: false,
+      targetMessageIds: ["a1"]
+    };
+    host.transcript = [user("u1"), toolReply("a1", "output-available")];
+    await release();
+    expect(host.fired).toBe(0);
+  });
+
   it("absorbs a barrier check that re-enters during the drain", async () => {
     host.transcript = [user("u1"), halfAnswered()];
     const release = await scheduleBehindHeldApply();

@@ -25,7 +25,10 @@ import {
   STREAM_RESUME_NONE_REASONS,
   type StreamResumeNoneReason
 } from "./protocol";
-import type { ContinuationState } from "./continuation-state";
+import type {
+  ContinuationPending,
+  ContinuationSlots
+} from "./continuation-state";
 import type { PreStreamTurns } from "./pre-stream-turns";
 import type { ReplyStreams } from "./reply-stream";
 import { replayCompletedChunks, replayErroredChunks } from "./stream-rows";
@@ -50,7 +53,14 @@ export interface ResumeHandshakeHost {
   readonly responseMessageType: string;
   /** The host's stream log. Named as released hosts pass it. */
   readonly resumableStream: ReplyStreams;
-  readonly continuation: ContinuationState<Connection>;
+  /**
+   * The continuation slots. `running` is optional: released ai-chat 0.12.3
+   * and Think 0.24.0 pass their own `ContinuationState`, which has none.
+   */
+  readonly continuation: Pick<
+    ContinuationSlots<Connection>,
+    "pending" | "activeRequestId" | "activeConnectionId" | "awaitingConnections"
+  > & { readonly running?: ContinuationPending<Connection> | null };
   /**
    * Accepted-but-not-yet-streamed turns (#1784). Optional: experimental
    * recovery adapters that don't track a pre-stream window omit it and keep the
@@ -214,6 +224,8 @@ export class ResumeHandshake {
   ): Promise<void> {
     connection = this.#once(connection);
     const { resumableStream, continuation, preStream } = this.host;
+    // The continuation whose stream comes next: its turn started, or not yet.
+    const waiting = continuation.running ?? continuation.pending ?? null;
     if (resumableStream.hasActiveStream()) {
       // A request the tab waits on that ended while it was away, and a
       // recovery now streams under another id: end it first, or the tab
@@ -236,20 +248,15 @@ export class ResumeHandshake {
         this.notifyStreamResuming(connection, probeId);
       }
     } else if (
-      continuation.pending !== null &&
-      (continuation.pending.connectionId === null ||
-        continuation.pending.connectionId === connection.id)
+      waiting !== null &&
+      (waiting.connectionId === null || waiting.connectionId === connection.id)
     ) {
       // A continuation turn is accepted but its stream has not started yet.
       // Park the connection AND tell it to keep waiting (#1784) so its resume
       // probe does not time out before the continuation stream begins; the host
       // flushes `awaitingConnections` into `STREAM_RESUMING` on stream start.
       continuation.awaitingConnections.set(connection.id, connection);
-      this._sendStreamPending(
-        connection,
-        continuation.pending.requestId,
-        probeId
-      );
+      this._sendStreamPending(connection, waiting.requestId, probeId);
     } else if (await this._replayTerminalOnResume(connection, probeId)) {
       // A turn terminalized while no client was connected (#1645): drive the
       // resume handshake so the terminal error frame can be delivered on the

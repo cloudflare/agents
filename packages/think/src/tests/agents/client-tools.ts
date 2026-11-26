@@ -1963,12 +1963,20 @@ export class ThinkClientToolsAgent extends Think {
     this._releaseHeldTurnQueue = null;
   }
 
-  /** The request id of the continuation waiting to run, if any. */
+  /** The continuation whose stream comes next: running, else scheduled. */
   async pendingContinuationRequestIdForTest(): Promise<string | null> {
-    const turns = this["_turns"] as unknown as
-      | { continuation: { pending: { requestId: string } | null } }
-      | undefined;
-    return turns?.continuation.pending?.requestId ?? null;
+    const continuation = (
+      this["_turns"] as unknown as
+        | {
+            continuation: {
+              running: { requestId: string } | null;
+              pending: { requestId: string } | null;
+            };
+          }
+        | undefined
+    )?.continuation;
+    if (!continuation) return null;
+    return (continuation.running ?? continuation.pending)?.requestId ?? null;
   }
 
   /** How many continuation turns reached `beforeTurn`. */
@@ -2038,12 +2046,12 @@ export class ThinkClientToolsAgent extends Think {
 
   async getContinuationSlotsForTest(): Promise<{
     pending: boolean;
-    deferred: boolean;
+    next: boolean;
   }> {
     const continuation = this["_turns"].continuation;
     return {
-      pending: continuation.pending !== null,
-      deferred: continuation.deferred !== null
+      pending: continuation.pending !== null || continuation.running !== null,
+      next: continuation.pending !== null && continuation.running !== null
     };
   }
 
