@@ -1637,18 +1637,18 @@ describe("Think durable submissions", () => {
       submission: { status: "aborted", error: "not needed" }
     });
 
+    // The stream waits after one chunk, so the cancel finds it running.
+    await agent.holdChunksAfterForTest(1);
+    onTestFinished(() => agent.releaseChunksForTest());
     const running = await agent.testSubmitMessages("cancel me", {
       submissionId: "sub-outcome-running"
     });
-    await waitForSubmission(
-      agent,
-      running.submissionId,
-      (submission) => submission.status === "running"
-    );
+    await chunkStreamHeld(agent);
     const cancelled = await agent.cancelSubmissionForTest(
       running.submissionId,
       "stop"
     );
+    await agent.releaseChunksForTest();
     expect(cancelled).toMatchObject({
       outcome: "cancelled",
       previousStatus: "running",

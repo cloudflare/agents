@@ -6591,9 +6591,12 @@ export class ThinkAgentToolParent extends Agent {
       // Tiny inspect deadline + a re-attach budget larger than it: the serial
       // design would let the stuck child's re-attach blow the deadline and
       // starve the fast child; the parallel design collects the fast child.
+      // The re-attach budget is far above the fast child's 200 ms, so a
+      // loaded machine cannot run it out, and far below the stuck child's
+      // 60 s, which serially would still take all of it.
       await this.reconcileAgentToolRunsForTest({
-        totalRecoveryTimeoutMs: 300,
-        reattachTimeoutMs: 1500
+        totalRecoveryTimeoutMs: 2000,
+        reattachTimeoutMs: 4000
       });
     } finally {
       await stuckChild.cancelAgentToolRun(stuckRunId, "test cleanup");
@@ -11215,15 +11218,42 @@ export class ThinkProgrammaticTestAgent extends Think {
    */
   async testSaveMessagesAbortMidStream(
     text: string,
-    abortAfterMs: number
+    afterChunks: number
   ): Promise<{
     result: SaveMessagesResult;
     persistedMessageCount: number;
     lastResponseStatus: ChatResponseResult["status"] | null;
   }> {
-    const result = await this.testSaveMessagesWithSignal(text, {
-      abortAfterMs
-    });
+    // The stream sends `afterChunks` chunks and waits; the abort lands then,
+    // and the stream runs on so the turn sees it.
+    await this.holdChunksAfterForTest(afterChunks);
+    const hold = this._chunkHold;
+    const controller = new AbortController();
+    let ended = false;
+    void (async () => {
+      while (hold && !hold.reached && !ended) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      if (ended) return;
+      controller.abort(new Error("mid-stream abort"));
+      await this.releaseChunksForTest();
+    })();
+    const result = await this.saveMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ],
+      { signal: controller.signal }
+    );
+    ended = true;
+    // The turn must have reached the hold: otherwise nothing was aborted.
+    if (!hold?.reached) {
+      await this.releaseChunksForTest();
+      throw new Error("the stream ended before it reached the hold");
+    }
     const lastResponse =
       this._responseLog.length > 0
         ? this._responseLog[this._responseLog.length - 1]
