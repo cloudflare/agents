@@ -1241,6 +1241,16 @@ describe("ThinkHarness context", () => {
     ]);
   });
 
+  it("reports no refresh a beforeTurn system prompt replaces", async () => {
+    const stub = fresh();
+    await stub.setSystem("Fixed.");
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.refreshContext(session);
+    await stub.prompt("refreshed", session);
+    expect(await stub.prefixChanges()).toEqual([]);
+  });
+
   it("reports history rewritten around the harness as the next call's cause", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);

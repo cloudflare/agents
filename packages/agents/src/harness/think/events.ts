@@ -65,6 +65,10 @@ export type ThinkSessionEvent =
  * - `messages`: history was rewritten: compacted, a message edited outside
  *   a turn, or messages deleted.
  *
+ * `tools` and `system` need a context in the session, and compare with
+ * what the branch being answered was sent (a regeneration compares with
+ * its own branch). `messages` names the operation, on any branch.
+ *
  * @experimental
  */
 export type PrefixChangeCause =

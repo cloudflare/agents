@@ -1611,7 +1611,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         causes.push({ kind: "tools", ...tooled.changed });
       }
     }
-    if (refreshed) causes.push({ kind: "system" });
+    // A `system` from `beforeTurn` replaces the refreshed prompt.
+    if (refreshed && config.system === undefined) {
+      causes.push({ kind: "system" });
+    }
     const rewrites = this.#rewrites.get(session);
     if (rewrites) {
       this.#rewrites.delete(session);
