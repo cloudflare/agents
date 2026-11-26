@@ -1644,11 +1644,13 @@ describe("think messengers core", () => {
         if ((await agent.getModelLog()).length > 0) break;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      // Past the 1s lock TTL, well inside the 4s first turn.
+      // Past the 1s lock TTL, while the first turn's model call is held.
+      // This waits out the lock's own timer; the turn cannot end meanwhile.
       await new Promise((resolve) => setTimeout(resolve, 1500));
       await send("l2", "second");
       // Queued behind the running turn, not handled under a lock of its own.
       expect(await agent.queueDepthForTest(threadId)).toBe(1);
+      await agent.releaseSlowModelForTest();
       await first;
 
       expect(await agent.getModelLog()).toEqual([

@@ -154,6 +154,16 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return this._recoveryMode() ? "transient" : undefined;
   }
 
+  private _releaseSlowModel = () => {};
+  private readonly _slowModelHeld = new Promise<void>((resolve) => {
+    this._releaseSlowModel = resolve;
+  });
+
+  /** Let a `slow-…` agent's model calls, held and later, run on. */
+  releaseSlowModelForTest(): void {
+    this._releaseSlowModel();
+  }
+
   override getModel(): LanguageModel {
     const record = (text: string) => this._record("prompt", text);
     const recordEnd = (text: string) => this._record("stream-end", text);
@@ -168,8 +178,10 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
           this.ctx.abort("reset mid-reply");
         }
       : undefined;
-    // An agent named `slow-…` takes 4s per model call.
-    const slowMs = this.name.startsWith("slow-") ? 4000 : 0;
+    // An agent named `slow-…` holds each model call until the test releases
+    // it (`releaseSlowModelForTest`).
+    const slow = this.name.startsWith("slow-");
+    const held = () => this._slowModelHeld;
     return {
       specificationVersion: "v3",
       provider: "test",
@@ -182,8 +194,8 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         const prompt = lastUserText(options.prompt);
         record(prompt);
         await resetOnce?.();
-        if (slowMs) {
-          await new Promise((resolve) => setTimeout(resolve, slowMs));
+        if (slow) {
+          await held();
           recordEnd(prompt);
         }
         const call = nextCall();
