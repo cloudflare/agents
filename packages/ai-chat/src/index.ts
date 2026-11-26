@@ -589,6 +589,9 @@ export class AIChatAgent<
     broadcast: (message, without) => this.broadcast(message, without),
     connections: () => this.getConnections(),
     reachesUnlisted: () => broadcastReachesUnlistedSockets(this),
+    observed: () =>
+      this._agentToolRuns.intercepting ||
+      this.broadcast !== AIChatAgent.prototype.broadcast,
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
     storedOriginIds: (requestId) =>

@@ -284,6 +284,15 @@ export class AgentToolRuns {
    * @returns `true` when the frame is a chunk of a terminal-only run, which
    *   the host must not broadcast.
    */
+  /** Whether {@link intercept} looks at frames now: a run is in flight. */
+  get intercepting(): boolean {
+    return (
+      this.forwarders.size > 0 ||
+      this.liveSequences.size > 0 ||
+      this.terminalOnlyRuns.size > 0
+    );
+  }
+
   intercept(msg: string | ArrayBuffer | ArrayBufferView): boolean {
     // With no run in flight this returns before it parses anything.
     const chunkRunId = interceptAgentToolBroadcast(msg, {

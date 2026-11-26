@@ -533,3 +533,52 @@ describe("Think — terminal replay on reconnect (#1645)", () => {
     await closeWS(ws);
   });
 });
+
+describe("chat frames with no client (#2724)", () => {
+  type Counting = {
+    countChatFrameSerializationsForTest(
+      message: string
+    ): Promise<Record<string, number>>;
+  };
+
+  it("serializes no chat frame when no client is connected", async () => {
+    const agent = (await freshAgent()) as unknown as Counting;
+    await agent.countChatFrameSerializationsForTest("first");
+    expect(await agent.countChatFrameSerializationsForTest("second")).toEqual(
+      {}
+    );
+  });
+
+  it("serializes no chat frame in a sub-agent no client has open", async () => {
+    const parent = await freshAgent();
+    const child = (await getSubAgentByName(
+      parent,
+      ThinkTestAgent,
+      crypto.randomUUID()
+    )) as unknown as Counting;
+    await child.countChatFrameSerializationsForTest("first");
+    expect(await child.countChatFrameSerializationsForTest("second")).toEqual(
+      {}
+    );
+  });
+
+  it("still sends the frames to a connected client", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectWS(room);
+    const seen: string[] = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      const type = (JSON.parse(event.data as string) as { type?: string }).type;
+      if (type === MSG_CHAT_MESSAGES || type === MSG_CHAT_RESPONSE) {
+        seen.push(type);
+      }
+    });
+    const agent = (await freshAgent(room)) as unknown as Counting;
+    const counts = await agent.countChatFrameSerializationsForTest("hello");
+    await vi.waitFor(() => {
+      expect(seen).toContain(MSG_CHAT_RESPONSE);
+      expect(seen).toContain(MSG_CHAT_MESSAGES);
+    });
+    expect(counts[MSG_CHAT_RESPONSE]).toBeGreaterThan(0);
+    ws.close();
+  });
+});
