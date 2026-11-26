@@ -1033,4 +1033,26 @@ describe("chatTurnDefinition", () => {
       });
     });
   });
+
+  it("reads only the newest messages that fit the hydration byte budget", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      for (const id of ["u1", "u2", "u3"]) {
+        await session.appendMessage({
+          id,
+          role: "user",
+          parts: [{ type: "text", text: "x".repeat(2000) }]
+        } as never);
+      }
+      await definitionOf(instance, {
+        ...instance.host,
+        options: { hydrationByteBudget: 3000 }
+      })({ trigger: "server" }, laterAttempt("h-1", 1));
+      const ids = instance.calls[0].messages.map((m) => m.id);
+      expect(ids.at(-1)).toBe("u3");
+      expect(ids).not.toContain("u1");
+    });
+  });
 });
