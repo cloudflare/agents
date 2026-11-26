@@ -27,6 +27,11 @@ export interface DeliveryAttempt {
    * attempt. A write after the attempt timed out throws.
    */
   readonly checkpoint: TaskCheckpoint;
+  /**
+   * What the sender passed as `local` to {@link sendDelivery}, on the first
+   * attempt in the isolate that sent it; `undefined` on any later attempt.
+   */
+  readonly local: unknown;
 }
 
 /**
@@ -143,7 +148,8 @@ export async function sendDelivery<Payload>(
     sentAt: number;
     attempts: number;
     progress?: Record<string, TaskJson>;
-  }
+  },
+  local?: unknown
 ): Promise<void> {
   if (!resume) {
     // The first attempt runs here and now: its claim arms the run's only
@@ -151,7 +157,8 @@ export async function sendDelivery<Payload>(
     await tasks.run(deliveryDefinition(sink), payload, {
       runId: id,
       retain: false,
-      start: "now"
+      start: "now",
+      ...(local !== undefined && { local })
     });
     return;
   }
@@ -283,7 +290,7 @@ async function attemptDelivery<Payload>(
   };
   try {
     const outcome = await Promise.race([
-      sink.deliver(payload, { checkpoint }),
+      sink.deliver(payload, { checkpoint, local: step.local }),
       timedOut
     ]);
     if (outcome === "hold") {

@@ -1,15 +1,14 @@
 /**
- * E2E test: Think messenger reply-fiber recovery after process eviction.
+ * E2E test: Think messenger reply recovery after process eviction.
  *
- * A `MESSENGER_REPLY_FIBER_NAME` fiber interrupted by a SIGKILL is recovered on
- * the next DO start through `_handleInternalFiberRecovery` →
- * `ThinkMessengerRuntime.handleFiberRecovery`:
- *  - an `accepted`-stage snapshot recovers in "answer" mode (the reply resumes
- *    and the model answer is posted to the thread)
- *  - a `streaming`-stage snapshot recovers in "apologize" mode (an interrupted
- *    message is posted)
+ * A messenger reply (one delivery run) interrupted by a SIGKILL is recovered
+ * by its next attempt after the DO restarts, by the stage it recorded:
+ *  - no stage ("accepted") recovers in "answer" mode (the reply re-runs and
+ *    the model answer is posted to the thread)
+ *  - "streaming" recovers in "apologize" mode (an interrupted message is
+ *    posted)
  *
- * The reply fiber is started for real (it stashes the target stage and parks),
+ * The reply is started for real (it records the target stage and parks),
  * then killed mid-flight. Recovery posts through an in-memory fake `chat`
  * adapter that records into agent SQL.
  */

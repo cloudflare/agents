@@ -4,10 +4,9 @@ import { Message, parseMarkdown } from "chat";
 import { Think } from "../../think";
 import { releaseDelivery, sendDelivery } from "agents/internal";
 import { recoveredReplyId } from "../../messengers/recovered-reply";
+import { recoverMessengerReply } from "../../messengers/reply-task";
 import {
   chatSdkMessenger,
-  MESSENGER_REPLY_FIBER_NAME,
-  messengerReplySnapshot,
   type MessengerEvent,
   type ThinkMessengerRuntime,
   type ThinkMessengers
@@ -347,28 +346,21 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       }
     };
     try {
-      await runtime.handleFiberRecovery(
+      await recoverMessengerReply(
+        runtime,
         {
-          createdAt: Date.now(),
-          id: "msgr_recovered",
-          name: MESSENGER_REPLY_FIBER_NAME,
-          recoveryReason: "interrupted",
-          snapshot: messengerReplySnapshot(
-            options?.stage ?? "accepted",
-            event,
-            {
-              _type: "chat:Thread",
-              adapterName: "fake",
-              channelId: threadId,
-              id: threadId,
-              isDM: true
-            }
-          )
+          event,
+          thread: {
+            _type: "chat:Thread",
+            adapterName: "fake",
+            channelId: threadId,
+            id: threadId,
+            isDM: true
+          }
         },
-        {
-          persistRecoverySnapshot: () => {},
-          retriesAfter: () => options?.retried ?? false
-        }
+        options?.stage ?? "accepted",
+        () => {},
+        () => options?.retried ?? false
       );
       return null;
     } catch (error) {
@@ -620,13 +612,20 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     const key = `__cf_messenger_recovery:msgr_${nonce}`;
     await this.ctx.storage.put(
       key,
-      messengerReplySnapshot("accepted", event, {
-        _type: "chat:Thread",
-        adapterName: "fake",
-        channelId: threadId,
-        id: threadId,
-        isDM: true
-      })
+      // The snapshot as think@0.24.0 wrote it.
+      {
+        type: "think:messenger-reply",
+        stage: "accepted",
+        tag: { stage: "accepted", kind: "interim", turnEnded: false },
+        event,
+        thread: {
+          _type: "chat:Thread",
+          adapterName: "fake",
+          channelId: threadId,
+          id: threadId,
+          isDM: true
+        }
+      }
     );
     await this.tasks.run(
       "__cf_internal_messenger_reply",
@@ -641,7 +640,9 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return (
       this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM cf_agents_task_runs
-        WHERE definition = '__cf_internal_messenger_reply'
+        WHERE definition IN (
+          '__cf_internal_messenger_reply', '__cf_delivery:messenger-reply'
+        )
           AND status IN ('pending', 'running')
       `[0]?.n ?? 0
     );

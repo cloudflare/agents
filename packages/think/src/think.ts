@@ -144,7 +144,9 @@ import {
 } from "./inference/invocation";
 import {
   registerMessengerReplies,
-  type MessengerReplyRun
+  sendMessengerReply,
+  type LiveMessengerReply,
+  type MessengerReplyPayload
 } from "./messengers/reply-task";
 import { ThinkModelResolver } from "./model";
 import {
@@ -664,7 +666,7 @@ export type {
   NormalizedChannelDefinition,
   ThinkChannels
 } from "./channels";
-export type { DeliveryKind, DeliveryTag } from "./messengers";
+export type { DeliveryKind } from "./messengers";
 export { ThinkSession, ThinkSession as Session } from "./session";
 export type {
   CompactAfterOptions,
@@ -1576,7 +1578,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         return (input) => host._cf_deliverRecoveredMessengerReply(input);
       })
     );
-    this.#runMessengerReply = registerMessengerReplies(
+    registerMessengerReplies(
       this.tasks,
       this.ctx.storage,
       () => this._messengerRuntime
@@ -2521,9 +2523,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   // ── Config storage helpers (think_config table) ─────────────────
 
   /** Messenger replies as Task runs. */
-  readonly #runMessengerReply: (
-    run: MessengerReplyRun
-  ) => Promise<{ accepted: boolean }>;
 
   /** Think's private keyed config rows. */
   private readonly _cfConfig = new ThinkConfigStore();
@@ -3058,10 +3057,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * lives.
    * @internal
    */
-  _runMessengerReplyTask(
-    run: MessengerReplyRun
-  ): Promise<{ accepted: boolean }> {
-    return this.#runMessengerReply(run);
+  _sendMessengerReply(
+    id: string,
+    payload: MessengerReplyPayload,
+    live: LiveMessengerReply
+  ): Promise<void> {
+    return sendMessengerReply(this.tasks, id, payload, live);
   }
 
   private _runChatRecoveryFiber<T>(
@@ -9832,7 +9833,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    if (await this._messengerRuntime?.handleFiberRecovery(ctx)) return true;
     const prefix = (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
     if (!ctx.name.startsWith(prefix)) return false;
     await this._recoverChatTurn({
