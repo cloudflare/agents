@@ -332,7 +332,12 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const messages = await restarted.getMessagesForTest();
     expect(messages.some((m) => textOf(m) === QUICK_REPLY)).toBe(false);
     // Skipped on the lane when r3 arrived, before the reset: it does not
-    // come back.
+    // come back. Its frame went to the first tab; wait for it there.
+    await waitFor(
+      async () => doneFrame(sent, "r2"),
+      (f) => f !== undefined,
+      5000
+    );
     expect(doneFrame(sent, "r2")?.outcome).toBe("skipped");
     expect(doneFrame(frames, "r2")).toBeUndefined();
     // The superseded question is kept, and answered with the latest.
