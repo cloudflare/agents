@@ -56,7 +56,11 @@ import type {
 } from "../../experimental/channels/harness";
 import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
-import { CONTEXT_RECORD_KIND, type Context } from "../../context/context";
+import {
+  CONTEXT_RECORD_KIND,
+  type Context,
+  type PreparedTurn
+} from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
@@ -1539,17 +1543,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // from an answered message) rides on this request alone.
     const context = this.#context(session);
     let contextSystem = "";
+    let recordTools: PreparedTurn["recordTools"] | undefined;
     let blockReminder: string | null = null;
     let request = history;
     let optionsSystem = prompt.system;
     if (context) {
       await this.#remindBlocks(context, prompt.remind);
-      const prepared = await context.prepare({
+      const prepared = await context.prepareTurn({
         messages: history,
         // A call after an interruption is sent as the first attempt was.
         retry: start.interruptions > 0
       });
       contextSystem = prepared.system;
+      recordTools = prepared.recordTools;
       blockReminder = prepared.reminder;
       request = withReminder(
         asUIMessages(await context.project(history)),
@@ -1577,19 +1583,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
     const offered = modelTools(tools, config.activeTools);
-    if (context) {
+    if (context && recordTools) {
       // The tools this request sends, now that `beforeTurn` chose which: a
       // change from the last turn's reaches the model once, as a notice
       // after the user message. The blocks were prepared above.
-      const sent = await context.prepare({
-        messages: history,
-        retry: start.interruptions > 0,
-        tools: await toolFingerprint(tools, Object.keys(offered))
-      });
-      request = withReminder(
-        asUIMessages(await context.project(history)),
-        [blockReminder, sent.reminder].filter(Boolean).join("\n\n") || null
+      const tooled = await recordTools(
+        await toolFingerprint(tools, Object.keys(offered))
       );
+      if (tooled.changed) {
+        request = withReminder(
+          asUIMessages(await context.project(history)),
+          [blockReminder, tooled.reminder].filter(Boolean).join("\n\n") || null
+        );
+      }
     }
     const effectiveSystem = config.system ?? system;
     const messages: ModelMessage[] =

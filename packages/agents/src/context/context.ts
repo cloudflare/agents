@@ -184,6 +184,18 @@ export interface ContextPrepareOptions extends ContextReadOptions {
  *
  * @experimental The API surface may change before stabilizing.
  */
+/** @internal See {@link Context.prepareTurn}. */
+export interface PreparedTurn extends PreparedContext {
+  recordTools(
+    tools: readonly { readonly name: string; readonly hash: string }[]
+  ): Promise<{
+    /** The tools differ from the ones the model was last sent. */
+    readonly changed: boolean;
+    /** The notice when it could not be recorded: this request only. */
+    readonly reminder: string | null;
+  }>;
+}
+
 export interface PreparedContext {
   readonly system: string;
   /**
@@ -269,28 +281,70 @@ export class Context {
    * that changed since the model last saw them.
    */
   async prepare(options: ContextPrepareOptions = {}): Promise<PreparedContext> {
+    if (!options.tools) {
+      return this.#prepareBlocks(options, await this.#history(options));
+    }
+    const turn = await this.prepareTurn(options);
+    const notice = (await turn.recordTools(options.tools)).reminder;
+    if (!notice) return { system: turn.system, reminder: turn.reminder };
+    return {
+      system: turn.system,
+      reminder: turn.reminder ? `${turn.reminder}\n\n${notice}` : notice
+    };
+  }
+
+  /**
+   * @internal {@link prepare} in two steps, for a host that decides the
+   * request's tools after it has the system prompt: the blocks now, then
+   * `recordTools` with the tools the request sends, once. When they
+   * changed, the notice is recorded at the turn's user message (project
+   * the history again), or, when it cannot be, returned to send after this
+   * request's cached prefix only, as `reminder` is.
+   */
+  async prepareTurn(
+    options: ContextPrepareOptions = {}
+  ): Promise<PreparedTurn> {
     const history = await this.#history(options);
-    if (!options.tools) return this.#prepareBlocks(options, history);
-    const tools = options.tools.map(({ name, hash }) => [name, hash] as const);
+    // Both read before the blocks are recorded, so a record this turn
+    // writes neither hides the earlier tools nor moves the turn's target.
     const before = (await this.#delivered(history)).tools;
-    const prepared = await this.#prepareBlocks(options, history, tools);
-    if (options.retry) return prepared;
-    const notice = before ? toolNotice(before, tools) : null;
     const tail = history.at(-1);
     const at =
+      !options.retry &&
       tail?.role === "user" &&
       (await this.#session.getLatestLeaf())?.id === tail.id
         ? tail
         : undefined;
-    if (!at) {
-      if (!notice) return prepared;
-      return {
-        system: prepared.system,
-        reminder: prepared.reminder
-          ? `${prepared.reminder}\n\n${notice}`
-          : notice
-      };
-    }
+    // A record the blocks write carries the earlier tools forward, so it
+    // is rewritten only when the request's tools differ.
+    const prepared = await this.#prepareBlocks(options, history, before);
+    return {
+      ...prepared,
+      recordTools: async (fingerprint) => {
+        if (options.retry) return { changed: false, reminder: null };
+        const tools = fingerprint.map(
+          ({ name, hash }) => [name, hash] as const
+        );
+        const notice = before ? toolNotice(before, tools) : null;
+        const changed = notice !== null;
+        if (!at) return { changed, reminder: notice };
+        await this.#recordTools(history, at, tools, before, notice);
+        return { changed, reminder: null };
+      }
+    };
+  }
+
+  /** Record the turn's tools at its user message, and the notice if any. */
+  async #recordTools(
+    history: readonly SessionMessage[],
+    at: SessionMessage,
+    tools: readonly (readonly [string, string])[],
+    before: readonly (readonly [string, string])[] | undefined,
+    notice: string | null
+  ): Promise<void> {
+    // Unchanged: the newest record holds them, carried forward by any
+    // record this turn wrote.
+    if (!notice && before) return;
     const existing = (await this.#records([at.id])).get(at.id);
     // Written this turn: it holds this turn's tools, or (when the blocks
     // were prepared in an earlier call of the turn) gets them now.
@@ -302,9 +356,8 @@ export class Context {
           ...(notice && { toolNotice: notice })
         });
       }
-      return prepared;
+      return;
     }
-    if (!notice && before) return prepared;
     // Nothing recorded this turn: one record holds the new fingerprint
     // (and the notice), naming the snapshot as a change record does.
     const delivered = await this.#delivered(history);
@@ -316,7 +369,7 @@ export class Context {
         tools,
         ...(notice && { toolNotice: notice })
       });
-      return prepared;
+      return;
     }
     // This record moves past the history it was given, so what the model
     // wrote itself there counts as delivered, as on a change record.
@@ -338,7 +391,6 @@ export class Context {
       tools,
       ...(notice && { toolNotice: notice })
     });
-    return prepared;
   }
 
   /** `tools`, when given, goes on every record this writes. */

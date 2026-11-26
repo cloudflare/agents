@@ -1307,6 +1307,43 @@ describe("ThinkHarness context", () => {
     const prompt = await stub.lastPromptText();
     expect(prompt.split("|")[0]).toContain("Monday");
     expect(prompt).toMatch(/\|user:[^|]*Today is Tuesday\.[^|]*$/);
+    // Once: the tools' step adds no second copy of the blocks' reminder.
+    expect(prompt.split("Today is Tuesday.")).toHaveLength(2);
+  });
+
+  it("sends a changed block and changed tools before the same message, each once", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+    const [, second, third] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Today is Tuesday\./);
+    expect(second).toMatch(/\|user:again[^|]*Added: late\./);
+    expect(third.split("Today is Tuesday.")).toHaveLength(3); // echoed once
+    expect(third.split("Added: late.")).toHaveLength(3);
+    expect(third.startsWith(second)).toBe(true);
+  });
+
+  it("sends a regenerated answer a block changed since once", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    const receipt = await stub.regenerate(session);
+    await stub.wait(receipt.operationId, session);
+    const prompt = await stub.lastPromptText();
+    expect(prompt.split("Today is Tuesday.")).toHaveLength(2);
+  });
+
+  it("records the tools at the user message when beforeTurn adds a message", async () => {
+    const stub = fresh();
+    await stub.noteInBeforeTurn();
+    await stub.prompt("hello", session);
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    const [, second] = await stub.promptTexts();
+    expect(second).toMatch(/\|user:again[^|]*Added: late\./);
   });
 
   it("sends a call recovered after an eviction as its first attempt; a change since waits", async () => {
