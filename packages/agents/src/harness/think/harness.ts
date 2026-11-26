@@ -1041,6 +1041,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return asUIMessages(await this.#handle(session).getHistory());
   }
 
+  /** @internal The ids of the messages an operation submitted, if any. */
+  async submittedMessageIds(
+    session: ThinkSessionId,
+    operationId: string
+  ): Promise<string[]> {
+    await this.lifecycle.ready();
+    const stored = this.#tasks.inputOf<OperationRunInput>(
+      runIdOf(session, operationId)
+    );
+    return stored?.input.kind === "messages"
+      ? stored.input.messages.map((message) => message.id)
+      : [];
+  }
+
   /** @internal Which of `ids` a session already stores (key probes). */
   async storedIds(
     session: ThinkSessionId,
@@ -2249,6 +2263,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * resolves after it returned.
    */
   async #onStatus(record: TaskRecord): Promise<void> {
+    await this.#reportStatus(record);
+    if (record.definition !== SUBMISSION_DEFINITION) return;
+    try {
+      await this.#options.onSubmissionStatus?.(this.#inspection(record));
+    } catch (error) {
+      console.error("ThinkHarness onSubmissionStatus failed", error);
+    }
+  }
+
+  /** An operation's status report: its event, and a settled one's end. */
+  async #reportStatus(record: TaskRecord): Promise<void> {
     const [session, operationId] = operationOf(record.runId);
     if (isQueued(record)) {
       this.#events.emit(session, {

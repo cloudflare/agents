@@ -65,6 +65,7 @@ import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
 import {
   admittedSubmissionMetadata,
   isTerminalSubmissionStatus,
+  SubmissionStatusQueue,
   TERMINAL_SUBMISSION_STATUSES,
   type DeleteSubmissionsOptions,
   type ListSubmissionsOptions,
@@ -270,6 +271,8 @@ export class Think<
   #messages: UIMessage[] = [];
   #context: Context | undefined;
   #handle: Session | undefined;
+  /** Each submission's status reports, run one at a time in order. */
+  readonly #submissionStatuses = new SubmissionStatusQueue();
   /** Skills from `getSkills()`, loaded in onStart as Think loads them. */
   readonly #skills = new ThinkSkills();
   #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
@@ -357,6 +360,11 @@ export class Think<
       get maxSteps() {
         return self.#turnMaxSteps ?? self.maxSteps;
       },
+      // One submission's reports in order, as on Think.
+      onSubmissionStatus: (status) =>
+        this.#submissionStatuses.run(status.operationId, () =>
+          this.#submissionStatus(status)
+        ),
       hooks: {
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
@@ -1049,12 +1057,82 @@ export class Think<
     return deleted;
   }
 
+  /** Called when a submission's status changes, as on Think. */
+  protected onSubmissionStatus(
+    _submission: ThinkSubmissionInspection
+  ): void | Promise<void> {}
+
+  /**
+   * The harness's report of a submission's status: Think's events, then
+   * the app's hook, before a wait on the submission resolves.
+   */
+  async #submissionStatus(status: ThinkOperationInspection): Promise<void> {
+    const inspection = submissionInspection(status);
+    const { submissionId, requestId } = inspection;
+    if (status.status === "queued") {
+      this._emit("submission:create", {
+        submissionId,
+        requestId,
+        idempotencyKey: inspection.idempotencyKey
+      });
+    }
+    this._emit("submission:status", {
+      submissionId,
+      requestId,
+      status: inspection.status
+    });
+    if (inspection.status === "error" && inspection.error) {
+      this._emit("submission:error", {
+        submissionId,
+        requestId,
+        error: inspection.error
+      });
+      console.error("[Think] Submission failed", {
+        submissionId,
+        requestId,
+        idempotencyKey: inspection.idempotencyKey,
+        metadata: inspection.metadata,
+        error: inspection.error
+      });
+    }
+    try {
+      await this.onSubmissionStatus(inspection);
+    } catch (error) {
+      console.error("[Think] onSubmissionStatus failed", error);
+    }
+  }
+
   async waitForSubmission(
     submissionId: string
   ): Promise<ThinkSubmissionInspection | null> {
-    if (!(await this.harness.session().inspect(submissionId))) return null;
-    await this.harness.session().wait(submissionId);
-    return this.inspectSubmission(submissionId);
+    const before = await this.harness.inspection(
+      this.harness.session().id,
+      submissionId
+    );
+    if (!before) return null;
+    const open = before.status === "queued" || before.status === "running";
+    if (
+      this.#submissionStatuses.reporting(submissionId) ||
+      (open && this.#submissionStatuses.reporting())
+    ) {
+      // As on Think: the hook's own submission, or one still open, settles
+      // only after the hook returns.
+      throw new Error(
+        "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
+      );
+    }
+    const result = await this.harness.session().wait(submissionId);
+    // Read again for its times; deleted meanwhile (the app's terminal hook
+    // may delete it), the wait's result still says how it ended, and it
+    // ended no later than now.
+    return (
+      (await this.inspectSubmission(submissionId)) ??
+      submissionInspection({
+        ...before,
+        ...result,
+        settledAt: before.settledAt ?? Date.now()
+      })
+    );
   }
 
   // ── Programmatic chat ─────────────────────────────────────────────
@@ -1098,14 +1176,23 @@ export class Think<
     if (before.status !== "pending" && before.status !== "running") {
       return { outcome: "already_terminal", submissionId, submission: before };
     }
+    const session = this.harness.session().id;
+    // Read before the cancel: the app's terminal hook may delete the record.
+    const ids = await this.harness.submittedMessageIds(session, submissionId);
     await this.harness.session().abort(submissionId);
     await this.harness.session().wait(submissionId);
     const after = (await this.inspectSubmission(submissionId)) ?? before;
+    // Only a started submission places its messages; one that never ran
+    // placed nothing, even if a message of the same id was already there.
+    const messagesApplied =
+      before.status === "running" &&
+      ids.length > 0 &&
+      (await this.harness.storedIds(session, ids)).size > 0;
     return {
       outcome: "cancelled",
       submissionId,
       previousStatus: before.status,
-      messagesApplied: before.status === "running",
+      messagesApplied,
       submission: after
     };
   }

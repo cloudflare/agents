@@ -204,6 +204,22 @@ describe("ThinkHarness turns", () => {
     ).toEqual([]);
   });
 
+  it("reports a submission's acceptance, start and end, and before wait() resolves", async () => {
+    const stub = fresh();
+    await stub.submit("plain", { operationId: "plain" });
+    const receipt = await stub.submit("one", {
+      operationId: "sub",
+      submission: true
+    });
+    await stub.wait(receipt.operationId);
+    // Only submissions are reported, and the end is in before the wait.
+    expect(await stub.submissionStatuses()).toEqual([
+      "sub:queued",
+      "sub:running",
+      "sub:done"
+    ]);
+  });
+
   it("treats an empty idempotency key as none, as Think does", async () => {
     const stub = fresh();
     const first = await stub.submit("one", { idempotencyKey: "" });

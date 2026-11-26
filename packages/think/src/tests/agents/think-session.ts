@@ -9563,15 +9563,31 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     const hold = this._statusHookHold;
-    if (hold) {
+    if (hold && (hold.status === undefined || hold.status === result.status)) {
       this._statusHookHold = null;
       hold.reached = true;
-      await hold.released;
+      // While held, run what a test hands the hook (inside its context).
+      let released = false;
+      void hold.released.then(() => {
+        released = true;
+      });
+      while (!released) {
+        await Promise.race([
+          hold.released,
+          new Promise<void>((resolve) => {
+            hold.wake = resolve;
+          })
+        ]);
+        for (const task of hold.tasks.splice(0)) await task();
+      }
     }
     this._submissionLog.push(result);
     if (this._cancelInSubmissionStatusHook && result.status === "running") {
       this._cancelInSubmissionStatusHook = false;
-      await this.cancelSubmission(result.submissionId, "from the hook");
+      this._hookCancelResult = await this.cancelSubmission(
+        result.submissionId,
+        "from the hook"
+      );
     }
     if (
       this._waitInSubmissionStatusHook &&
@@ -9594,22 +9610,67 @@ export class ThinkProgrammaticTestAgent extends Think {
     reached: boolean;
     released: Promise<void>;
     open: () => void;
+    /** Only a hook for this status is held; any when unset. */
+    status?: ThinkSubmissionInspection["status"];
+    /** Work a test hands the held hook, run inside it. */
+    tasks: (() => Promise<void>)[];
+    wake: () => void;
   } | null = null;
-  private _heldStatusHook: { reached: boolean; open: () => void } | null = null;
+  private _hookCancelResult: unknown = null;
+
+  /** What the hook's own cancelSubmission returned. */
+  async hookCancelResultForTest(): Promise<unknown> {
+    return this._hookCancelResult;
+  }
+  private _heldStatusHook: {
+    reached: boolean;
+    open: () => void;
+    tasks: (() => Promise<void>)[];
+    wake: () => void;
+  } | null = null;
 
   /** Hold the next `onSubmissionStatus` call until released. */
-  async holdSubmissionStatusHookForTest(): Promise<void> {
+  async holdSubmissionStatusHookForTest(
+    status?: ThinkSubmissionInspection["status"]
+  ): Promise<void> {
     let open = () => {};
     const released = new Promise<void>((resolve) => {
       open = resolve;
     });
-    this._statusHookHold = { reached: false, released, open };
+    this._statusHookHold = {
+      reached: false,
+      released,
+      open,
+      status,
+      tasks: [],
+      wake: () => {}
+    };
     this._heldStatusHook = this._statusHookHold;
   }
 
   /** How many status reports of a submission have reached Think's queue. */
   async statusReportsQueuedForTest(submissionId: string): Promise<number> {
     return statusReportsQueued.get(submissionId) ?? 0;
+  }
+
+  /**
+   * From inside the held hook, wait for a submission: "resolved", or the
+   * error's message.
+   */
+  async waitFromHeldHookForTest(submissionId: string): Promise<string> {
+    const hold = this._heldStatusHook;
+    if (!hold) throw new Error("no hook is held");
+    return new Promise<string>((resolve) => {
+      hold.tasks.push(async () => {
+        try {
+          await this.waitForSubmission(submissionId);
+          resolve("resolved");
+        } catch (error) {
+          resolve(error instanceof Error ? error.message : String(error));
+        }
+      });
+      hold.wake();
+    });
   }
 
   /** Whether the held `onSubmissionStatus` call is waiting. */

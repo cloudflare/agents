@@ -548,6 +548,18 @@ export class SubmissionStatusQueue {
     readonly submissionId: string;
   }>();
 
+  /**
+   * Whether this is running inside a report of this queue's: of the given
+   * submission's, or of any when none is given.
+   */
+  reporting(submissionId?: string): boolean {
+    const inside = this.#running.getStore();
+    return (
+      inside?.queue === this &&
+      (submissionId === undefined || inside.submissionId === submissionId)
+    );
+  }
+
   /** Run `report` after the submission's earlier reports have ended. */
   run(submissionId: string, report: () => Promise<void>): Promise<void> {
     const inside = this.#running.getStore();

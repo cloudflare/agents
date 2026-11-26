@@ -58,7 +58,11 @@ type ThinkSubmissionTestStub = {
   ): Promise<ThinkSubmissionStatus>;
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
-  holdSubmissionStatusHookForTest(): Promise<void>;
+  holdSubmissionStatusHookForTest(
+    status?: ThinkSubmissionInspection["status"]
+  ): Promise<void>;
+  hookCancelResultForTest(): Promise<unknown>;
+  waitFromHeldHookForTest(submissionId: string): Promise<string>;
   cancelInSubmissionStatusHookForTest(): Promise<void>;
   waitForIdleForTest(): Promise<void>;
   isSubmissionStatusHookHeldForTest(): Promise<boolean>;
@@ -1364,6 +1368,76 @@ describe("Think durable submissions", () => {
       .map((entry) => entry.status);
     expect(statuses[0]).toBe("pending");
     expect(statuses.at(-1)).toBe("aborted");
+  });
+
+  it("says a submission cancelled from its running hook applied no messages", async () => {
+    const agent = await freshAgent();
+    await agent.cancelInSubmissionStatusHookForTest();
+    const accepted = await agent.testSubmitMessages("cancel before applying", {
+      submissionId: "sub-hook-cancel-applied"
+    });
+    await agent.waitForSubmissionForTest(accepted.submissionId);
+    expect(await agent.hookCancelResultForTest()).toMatchObject({
+      outcome: "cancelled",
+      messagesApplied: false
+    });
+    expect(textParts(await agent.getStoredMessages())).not.toContain(
+      "cancel before applying"
+    );
+  });
+
+  it("throws from a submission's own status hook when it waits for it, and outside waits still end", async () => {
+    const agent = await freshAgent();
+    await agent.waitInSubmissionStatusHookForTest();
+    const accepted = await agent.testSubmitMessages("wait in my hook", {
+      submissionId: `sub-self-wait-${crypto.randomUUID()}`
+    });
+    const settled = await agent.waitForSubmissionForTest(accepted.submissionId);
+    expect(settled?.status).toBe("completed");
+    const waits = await agent.getSubmissionStatusHookWaitsForTest();
+    expect(waits[0]).toContain(
+      "error:waitForSubmission() cannot be called from onSubmissionStatus"
+    );
+  });
+
+  it("hands a waiter the result when the terminal hook deletes the submission", async () => {
+    const agent = await freshAgent();
+    await agent.holdSubmissionStatusHookForTest("completed");
+    const accepted = await agent.testSubmitMessages("deleted in my hook", {
+      submissionId: `sub-deleted-${crypto.randomUUID()}`
+    });
+    const waiting = agent.waitForSubmissionForTest(accepted.submissionId);
+    await vi.waitFor(async () => {
+      expect(await agent.isSubmissionStatusHookHeldForTest()).toBe(true);
+    });
+    expect(await agent.deleteSubmissionForTest(accepted.submissionId)).toBe(
+      true
+    );
+    await agent.releaseSubmissionStatusHookForTest();
+    const settled = await waiting;
+    expect(settled).toMatchObject({ status: "completed" });
+    expect(settled?.completedAt).toBeDefined();
+  });
+
+  it("refuses a wait from a status hook on a submission still open", async () => {
+    const agent = await freshAgent();
+    await agent.holdSubmissionStatusHookForTest("running");
+    const first = await agent.testSubmitMessages("first", {
+      submissionId: `sub-hook-first-${crypto.randomUUID()}`
+    });
+    await vi.waitFor(async () => {
+      expect(await agent.isSubmissionStatusHookHeldForTest()).toBe(true);
+    });
+    const second = await agent.testSubmitMessages("second", {
+      submissionId: `sub-hook-second-${crypto.randomUUID()}`
+    });
+    // From inside the held hook of the first, the second cannot settle.
+    expect(await agent.waitFromHeldHookForTest(second.submissionId)).toContain(
+      "waitForSubmission() cannot be called from onSubmissionStatus"
+    );
+    await agent.releaseSubmissionStatusHookForTest();
+    await agent.waitForSubmissionForTest(first.submissionId);
+    await agent.waitForSubmissionForTest(second.submissionId);
   });
 
   it("lets a status hook cancel its own submission", async () => {
