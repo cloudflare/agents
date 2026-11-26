@@ -134,6 +134,16 @@ export type ChatTurnTaskHooks = {
    * ends, then end it (`ChatTurns.parkUntil`).
    */
   parkUntil(runId: string, reply: Promise<void>): void;
+  /**
+   * Whether a lane run an earlier isolate left parked holds the chat lane
+   * for a recovery (`ChatTurns.laneHeldForRecovery`).
+   */
+  laneHeldForRecovery(): boolean;
+  /**
+   * Keep those parked runs at the lane's head until `reply` ends as well
+   * (`ChatTurns.holdParksUntil`).
+   */
+  holdParksUntil(reply: Promise<void>): void;
 };
 
 /** The Tasks lane the chat turns of an agent run on, one at a time. */
@@ -383,6 +393,14 @@ export function createChatTurnTaskDefinition(
           delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
         });
       if (!lane) {
+        // The recovered turn of an earlier isolate's lane run, cut off by a
+        // second reset: it recovers holding the lane that run still holds,
+        // so nothing queued behind starts ahead of it.
+        if (hooks.laneHeldForRecovery()) {
+          const { reply } = await runHoldingLane(run);
+          if (reply) hooks.holdParksUntil(reply);
+          return;
+        }
         await run();
         return;
       }

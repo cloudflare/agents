@@ -886,6 +886,8 @@ export class AIChatAgent<
         recover: (turn) => this._recoverChatTurn(turn),
         replay: (runId, record) => this._turns.replayInRun(runId, record),
         parkUntil: (runId, reply) => this._turns.parkUntil(runId, reply),
+        laneHeldForRecovery: () => this._turns.laneHeldForRecovery(),
+        holdParksUntil: (reply) => this._turns.holdParksUntil(reply),
         attempts
       })
     );
