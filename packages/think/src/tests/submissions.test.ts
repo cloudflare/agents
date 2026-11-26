@@ -59,6 +59,7 @@ type ThinkSubmissionTestStub = {
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   holdSubmissionStatusHookForTest(): Promise<void>;
+  cancelInSubmissionStatusHookForTest(): Promise<void>;
   isSubmissionStatusHookHeldForTest(): Promise<boolean>;
   releaseSubmissionStatusHookForTest(): Promise<void>;
   setProgrammaticResponseForTest(response: string): Promise<void>;
@@ -1315,11 +1316,17 @@ describe("Think durable submissions", () => {
     await vi.waitFor(async () => {
       expect(await agent.isSubmissionStatusHookHeldForTest()).toBe(true);
     });
-    // Reported while the pending hook is still running.
+    // Reported while the pending hook is still running: the submission is
+    // aborted before the held hook returns, so the reports overlap.
     const cancelling = agent.cancelSubmissionForTest(
       "sub-status-order",
       "stop"
     );
+    await vi.waitFor(async () => {
+      expect(
+        await agent.inspectSubmissionForTest("sub-status-order")
+      ).toMatchObject({ status: "aborted" });
+    });
     await agent.releaseSubmissionStatusHookForTest();
     await accepting;
     await cancelling;
@@ -1330,6 +1337,20 @@ describe("Think durable submissions", () => {
       .map((entry) => entry.status);
     expect(statuses[0]).toBe("pending");
     expect(statuses.at(-1)).toBe("aborted");
+  });
+
+  it("lets a status hook cancel its own submission", async () => {
+    const agent = await freshAgent();
+    await agent.cancelInSubmissionStatusHookForTest();
+    const accepted = await agent.testSubmitMessages("cancel myself", {
+      submissionId: "sub-self-cancel"
+    });
+    const settled = await agent.waitForSubmissionForTest(accepted.submissionId);
+    expect(settled).toMatchObject({ status: "aborted" });
+    const statuses = (await agent.getSubmissionLog())
+      .filter((entry) => entry.submissionId === "sub-self-cancel")
+      .map((entry) => entry.status);
+    expect(statuses).toEqual(["pending", "running", "aborted"]);
   });
 
   it("aborts a submission cancelled while its running hook is in flight", async () => {

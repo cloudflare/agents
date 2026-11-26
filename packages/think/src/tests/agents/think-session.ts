@@ -9528,6 +9528,10 @@ export class ThinkProgrammaticTestAgent extends Think {
       await hold.released;
     }
     this._submissionLog.push(result);
+    if (this._cancelInSubmissionStatusHook && result.status === "running") {
+      this._cancelInSubmissionStatusHook = false;
+      await this.cancelSubmission(result.submissionId, "from the hook");
+    }
     if (
       this._waitInSubmissionStatusHook &&
       ["completed", "aborted", "skipped", "error"].includes(result.status)
@@ -9570,6 +9574,13 @@ export class ThinkProgrammaticTestAgent extends Think {
   async releaseSubmissionStatusHookForTest(): Promise<void> {
     this._heldStatusHook?.open();
     this._heldStatusHook = null;
+  }
+
+  private _cancelInSubmissionStatusHook = false;
+
+  /** Cancel the submission from its own `running` status hook, once. */
+  async cancelInSubmissionStatusHookForTest(): Promise<void> {
+    this._cancelInSubmissionStatusHook = true;
   }
 
   /** Call `waitForSubmission` from `onSubmissionStatus` on terminal statuses. */
