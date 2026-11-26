@@ -574,16 +574,24 @@ describe("ChatTurns", () => {
     turns.preStream.begin("r1");
     turns.preStream.begin("r2");
     turns.preStream.park(parked);
-    const before = parked.sent.length;
+    const released = () =>
+      parked.sent.some((frame) =>
+        frame.includes("cf_agent_stream_resume_none")
+      );
 
+    // r1 ends without a stream: the tab keeps waiting, now on r2.
     turns.settlePreStreamTurn("r1");
+    expect(JSON.parse(parked.sent.at(-1) ?? "null")).toEqual({
+      type: "cf_agent_stream_pending",
+      id: "r2"
+    });
     turns.settlePreStreamTurn("r2", { releaseParked: false });
-    expect(parked.sent.length).toBe(before);
+    expect(released()).toBe(false);
 
     turns.preStream.begin("r3");
     host.activeStream = true;
     turns.settlePreStreamTurn("r3");
-    expect(parked.sent.length).toBe(before);
+    expect(released()).toBe(false);
 
     turns.preStream.begin("r4");
     host.activeStream = false;
