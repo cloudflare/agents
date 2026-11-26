@@ -216,6 +216,7 @@ export class ResumeHandshake {
     const { resumableStream, continuation, preStream } = this.host;
     // The continuation whose stream comes next: its turn started, or not yet.
     const waiting = continuation.running ?? continuation.pending;
+    let announced: string | null = null;
     if (resumableStream.hasActiveStream()) {
       // A request the tab waits on that ended while it was away, and a
       // recovery now streams under another id: end it first, or the tab
@@ -245,13 +246,23 @@ export class ResumeHandshake {
       // Park the connection AND tell it to keep waiting (#1784) so its resume
       // probe does not time out before the continuation stream begins; the host
       // flushes `awaitingConnections` into `STREAM_RESUMING` on stream start.
+      // Requests it waits on that ended meanwhile are ended first.
+      for (const requestId of requestIds) this.sendEnded(connection, requestId);
       continuation.awaitingConnections.set(connection.id, connection);
       this._sendStreamPending(connection, waiting.requestId, probeId);
-    } else if (await this._replayTerminalOnResume(connection, probeId)) {
+    } else if (
+      (announced = await this._replayTerminalOnResume(connection, probeId)) !==
+      null
+    ) {
       // A turn terminalized while no client was connected (#1645): drive the
       // resume handshake so the terminal error frame can be delivered on the
       // resumed stream (the only path that surfaces as an error on the client)
-      // once this connection ACKs — see `_replayTerminalOnAck`.
+      // once this connection ACKs — see `_replayTerminalOnAck`. Other
+      // requests it waits on that ended are ended too; the announced one's
+      // chunks and error follow the ACK.
+      for (const requestId of requestIds) {
+        if (requestId !== announced) this.sendEnded(connection, requestId);
+      }
     } else if (
       this._replayRecentTerminalOnResume(connection, requestIds, probeId)
     ) {
@@ -480,7 +491,10 @@ export class ResumeHandshake {
     }
   }
 
-  /** See {@link handleResumeRequest}: announce a request that ended. */
+  /**
+   * See {@link handleResumeRequest}: tell the tab how the requests it waits
+   * on ended. The newest is announced, and its end follows the ACK.
+   */
   private _replayRecentTerminalOnResume(
     connection: Connection,
     requestIds: readonly string[],
@@ -488,6 +502,11 @@ export class ResumeHandshake {
   ): boolean {
     const ended = this.host.recentTerminal?.(requestIds);
     if (!ended) return false;
+    // The others that ended get their end at once, each once; the newest is
+    // announced and replayed after the ACK.
+    for (const requestId of requestIds) {
+      if (requestId !== ended.requestId) this.sendEnded(connection, requestId);
+    }
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -538,9 +557,9 @@ export class ResumeHandshake {
   private async _replayTerminalOnResume(
     connection: Connection,
     probeId?: string
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     const pending = await this.host.pendingChatTerminal();
-    if (!pending) return false;
+    if (!pending) return null;
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -549,7 +568,7 @@ export class ResumeHandshake {
         ...(probeId ? { probeId } : {})
       })
     );
-    return true;
+    return pending.requestId;
   }
 
   /**

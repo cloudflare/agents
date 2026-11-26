@@ -66,6 +66,8 @@ interface FakeStreamState {
   /** Chunk bodies the completed stream holds. */
   completedChunks?: string[];
   replayErroredReturn: boolean;
+  /** Chunk bodies an errored stream holds, sent before its error. */
+  erroredChunks?: string[];
   originMessageIds?: string[];
   outcome?: ChatTurnOutcome;
   /** The latest stored stream of each request, by request id. */
@@ -152,13 +154,22 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
         }
         if (rowState === "errored") {
           state.calls.replayErrored.push(tag);
-          return state.replayErroredReturn ? [] : [settledRow(tag, "errored")];
+          return state.replayErroredReturn && !state.erroredChunks
+            ? []
+            : [settledRow(tag, "errored")];
         }
         return [];
       },
       readChunks: (streamId: string, fromSeq: number) => {
         if (fromSeq !== 0) return [];
         if (streamId.startsWith("errored-")) {
+          if (state.erroredChunks) {
+            return state.erroredChunks.map((body, seq) => ({
+              seq,
+              chunk: JSON.stringify(body),
+              created_at: 0
+            }));
+          }
           return [
             { seq: 0, chunk: JSON.stringify(DROPPED_CHUNK), created_at: 0 }
           ];
@@ -762,6 +773,143 @@ describe("ResumeHandshake (driver → golden frames)", () => {
         outcome: "skipped",
         messageIds: ["u1"]
       });
+    });
+
+    it("tells the tab how every request it waits on ended, each once", async () => {
+      const kv = kvStore();
+      // Two requests the tab waits on both ended while it was away.
+      recordRecentChatTerminal(kv, {
+        id: "req-a",
+        done: true,
+        body: "",
+        outcome: "completed"
+      });
+      recordRecentChatTerminal(kv, {
+        id: "req-b",
+        done: true,
+        body: "",
+        outcome: "aborted"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream();
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended: new EndedRequests()
+      });
+      const conn = makeConnection("c1", frames);
+
+      await handshake.handleResumeRequest(conn, "probe-1", ["req-a", "req-b"]);
+      // The older one's end is sent at once; the newest is announced and
+      // replayed after the ACK, as for a single request.
+      expect(frames).toEqual([
+        {
+          body: "",
+          done: true,
+          id: "req-a",
+          type: RESPONSE_TYPE,
+          replay: true,
+          outcome: "completed"
+        },
+        streamResumingFrame("req-b", "probe-1")
+      ]);
+      await handshake.handleResumeAck(conn, "req-b");
+      expect(frames[2]).toMatchObject({
+        id: "req-b",
+        done: true,
+        replay: true,
+        outcome: "aborted"
+      });
+
+      // A second resume from the same tab is not told req-a's end again.
+      await handshake.handleResumeRequest(conn, "probe-2", ["req-a", "req-b"]);
+      expect(frames.filter((f) => f.id === "req-a" && f.done)).toHaveLength(1);
+    });
+
+    it("ends the requests it waits on before parking the tab on a continuation", async () => {
+      const kv = kvStore();
+      recordRecentChatTerminal(kv, {
+        id: "req-a",
+        done: true,
+        body: "",
+        outcome: "completed"
+      });
+      const frames: SentFrame[] = [];
+      const { resumableStream } = makeStream();
+      const continuation = new ContinuationSlots<Connection>();
+      continuation.pending = {
+        connectionId: null,
+        requestId: "cont-1"
+      } as ContinuationSlots<Connection>["pending"];
+      const handshake = new ResumeHandshake({
+        ...makeHost({ resumableStream, continuation }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended: new EndedRequests()
+      });
+
+      await handshake.handleResumeRequest(
+        makeConnection("c1", frames),
+        "probe-1",
+        ["req-a"]
+      );
+      expect(frames).toEqual([
+        {
+          body: "",
+          done: true,
+          id: "req-a",
+          type: RESPONSE_TYPE,
+          replay: true,
+          outcome: "completed"
+        },
+        streamPendingFrame("cont-1", "probe-1")
+      ]);
+    });
+
+    it("leaves the announced pending error to the ACK and ends the other requests at once", async () => {
+      const kv = kvStore();
+      // req-a ended in an error the tab missed; its last recorded frame is
+      // the empty done frame that followed the error.
+      recordRecentChatTerminal(kv, { id: "req-a", done: true, body: "" });
+      recordRecentChatTerminal(kv, {
+        id: "req-b",
+        done: true,
+        body: "",
+        outcome: "completed"
+      });
+      const frames: SentFrame[] = [];
+      const { state, resumableStream } = makeStream({
+        erroredChunks: ["missed text"]
+      });
+      const handshake = new ResumeHandshake({
+        ...makeHost({
+          resumableStream,
+          pendingTerminal: { requestId: "req-a", body: "boom" }
+        }),
+        recentTerminal: (ids) => recentChatTerminal(kv, ids),
+        ended: new EndedRequests()
+      });
+
+      const conn = makeConnection("c1", frames);
+      await handshake.handleResumeRequest(conn, "probe-1", ["req-a", "req-b"]);
+      expect(frames).toEqual([
+        streamResumingFrame("req-a", "probe-1"),
+        {
+          body: "",
+          done: true,
+          id: "req-b",
+          type: RESPONSE_TYPE,
+          replay: true,
+          outcome: "completed"
+        }
+      ]);
+
+      // The ACK on the same tab replays req-a's chunks, then its error.
+      await handshake.handleResumeAck(conn, "req-a");
+      expect(state.calls.replayErrored).toEqual(["req-a"]);
+      expect(frames[2]).toMatchObject({ id: "req-a", body: "missed text" });
+      expect(frames[3]).toEqual(
+        terminalErrorFrame("req-a", "boom", RESPONSE_TYPE)
+      );
     });
 
     it("follows a stream that closed into recovery with the end a stop recorded since", async () => {
