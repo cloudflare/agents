@@ -72,6 +72,10 @@ A context block's `type` in the manifest is ignored with a warning, once per man
 
 The shell (`think/src/harness/think.ts`) takes Think's extension members as Think does: `extensionLoader`, `getExtensions()` and `extensionManager`. At start, with a loader, it creates the same released `ExtensionManager`, loads `getExtensions()` and restores what was loaded at run time (its `ext:<name>` rows, as on Think). It also registers each extension's context blocks. The manager's tools join ThinkHarness as one shipped extension, `sandboxed`, after the subclass's own tools. Its released hooks run from the shell's hook options: `beforeTurn` after the subclass's, then the three observers and `onChunk`. `_cfHostBridge` serves `HostBridgeLoopback` over the same host API as Think.
 
+## Telling the model when the tools change
+
+On every model call, ThinkHarness gives the session's context the tools that call offers, each with a hash of its definition as the model sees it (description, input schema, provider fields), made once per build. The context's record for each user message keeps that list (no new row). When a turn's list differs from the previous record's, the model is told once, after that turn's user message: what was added, what is gone (not to be called, earlier description to be disregarded), what changed. A turn with the same tools writes nothing new. A session without a context gets no notice.
+
 ## Guarantees
 
 The core stores nothing: it adds no row, key or job. One thing is durable, and it predates the core. `Think`'s public `ExtensionManager`, when given `storage`, keeps each extension loaded at run time as `ext:<name>` (manifest and source) in the object's storage, deletes it on `unload`, and `restore()` loads them again after a restart. Moving these records into the manager as a capability comes with run-time loading on ThinkHarness.

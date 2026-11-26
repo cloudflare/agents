@@ -1,4 +1,5 @@
 import {
+  asSchema,
   convertToModelMessages,
   stepCountIs,
   streamText,
@@ -1545,7 +1546,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       const prepared = await context.prepare({
         messages: history,
         // A call after an interruption is sent as the first attempt was.
-        retry: start.interruptions > 0
+        retry: start.interruptions > 0,
+        // What this request offers, so a change from the last turn's tools
+        // reaches the model once, as a notice after the user message.
+        tools: await toolFingerprint(tools)
       });
       contextSystem = prepared.system;
       request = withReminder(
@@ -2750,6 +2754,48 @@ async function appendedAfter(
   return after.length > 0 && after.every((message) => message.role === "user")
     ? leaf.id
     : undefined;
+}
+
+/** Each tool set's fingerprint, made once per build. */
+const fingerprints = new WeakMap<
+  ToolSet,
+  Promise<readonly { readonly name: string; readonly hash: string }[]>
+>();
+
+/**
+ * The tools a request sends, by name, each with a hash of its definition
+ * as the model sees it (description, input schema, provider fields).
+ */
+function toolFingerprint(
+  tools: ToolSet
+): Promise<readonly { readonly name: string; readonly hash: string }[]> {
+  let made = fingerprints.get(tools);
+  if (!made) {
+    made = Promise.all(
+      Object.entries(tools).map(async ([name, tool]) => {
+        const definition = JSON.stringify({
+          type: tool.type,
+          description:
+            typeof tool.description === "string" ? tool.description : undefined,
+          inputSchema: await asSchema(tool.inputSchema).jsonSchema,
+          id: "id" in tool ? tool.id : undefined,
+          args: "args" in tool ? tool.args : undefined,
+          providerOptions: tool.providerOptions,
+          strict: "strict" in tool ? tool.strict : undefined
+        });
+        const digest = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(definition)
+        );
+        const hash = [...new Uint8Array(digest).slice(0, 8)]
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("");
+        return { name, hash };
+      })
+    );
+    fingerprints.set(tools, made);
+  }
+  return made;
 }
 
 function toolRecovery(tool: object): ToolRecovery {

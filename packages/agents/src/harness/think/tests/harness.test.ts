@@ -1197,6 +1197,26 @@ describe("ThinkHarness context", () => {
     );
   });
 
+  it("tells the model once when the tools change between turns", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.addLateTool();
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+
+    const [first, second, third] = await stub.promptTexts();
+    expect(first).not.toContain("The tools you can call changed");
+    // After the user message of the turn that noticed it.
+    expect(second).toMatch(
+      /\|user:again[^|]*The tools you can call changed[^|]*Added: late\./
+    );
+    // Recorded there: every later request carries it in place, once.
+    expect(third.startsWith(second)).toBe(true);
+    // And not again: the next turn's user message is as written. (The
+    // fixture's model echoes its input, so the reply repeats it.)
+    expect(third.endsWith("|user:thanks")).toBe(true);
+  });
+
   it("delivers a changed remind block once and keeps every request a prefix of the next", async () => {
     const stub = fresh();
     await stub.prompt("hello", session);
