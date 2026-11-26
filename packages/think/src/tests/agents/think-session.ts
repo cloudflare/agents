@@ -15552,6 +15552,17 @@ export class ThinkAdmissionTestAgent extends Think {
     return this.messages;
   }
 
+  /** Every recovery incident's status and reason. */
+  async getIncidentsForTest(): Promise<string[]> {
+    const incidents = await this.ctx.storage.list<{
+      status: string;
+      reason?: string;
+    }>({ prefix: "cf:chat-recovery:incident:" });
+    return [...incidents.values()].map(
+      (incident) => `${incident.status}:${incident.reason ?? ""}`
+    );
+  }
+
   /** The next admission record write fails, as SQLite's row limit would. */
   failNextAdmissionForTest(): void {
     // A client request's record is its run on the chat lane.

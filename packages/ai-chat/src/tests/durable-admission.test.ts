@@ -22,6 +22,7 @@ type AdmissionStub = {
   seedQueuedRequestForTest(requestId: string): Promise<void>;
   turnInNextOnStartForTest(): Promise<void>;
   getTranscriptsSeenForTest(): Promise<string[][]>;
+  getIncidentsForTest(): Promise<string[]>;
   ageAdmissionsForTest(ms: number): Promise<void>;
 };
 
@@ -449,6 +450,19 @@ describe("a tool call a reset cut off", () => {
         messages.some((x) => x.role === "assistant" && textOf(x).length > 0)
       ).toBe(true);
       expect(Date.now() - answeredAt).toBeLessThan(15_000);
+      // The answer's continuation took the reply; recovery stepped aside.
+      expect(await stub.getIncidentsForTest()).toEqual([
+        "skipped:continued_by_interaction"
+      ]);
+      expect(
+        frames.some(
+          (frame) =>
+            isUseChatResponseMessage(frame) &&
+            frame.done &&
+            frame.id !== "r1" &&
+            (frame as { outcome?: string }).outcome === "completed"
+        )
+      ).toBe(true);
       // The cut-off request is not reported as failed.
       expect(JSON.stringify(doneFrame(frames, "r1") ?? {})).not.toContain(
         "interrupted"

@@ -23,6 +23,7 @@ type AdmissionStub = {
   ): Promise<{ status: string }>;
   listSubmissions(): Promise<Array<{ submissionId: string; status: string }>>;
   getMessagesForTest(): Promise<UIMessage[]>;
+  getIncidentsForTest(): Promise<string[]>;
   getAdmissionsForTest(): Promise<
     Array<{ requestId: string; stopped: boolean }>
   >;
@@ -408,6 +409,19 @@ describe("a client tool call a reset cut off", () => {
     );
     expect(JSON.stringify(messages)).toContain("Continuation after tool");
     expect(Date.now() - answeredAt).toBeLessThan(15_000);
+    // The answer's continuation took the reply; recovery stepped aside.
+    expect(await restarted.getIncidentsForTest()).toEqual([
+      "skipped:continued_by_interaction"
+    ]);
+    expect(
+      frames.some(
+        (frame) =>
+          frame.type === MSG_CHAT_RESPONSE &&
+          frame.done === true &&
+          frame.id !== "r1" &&
+          (frame.outcome ?? "completed") === "completed"
+      )
+    ).toBe(true);
     // The cut-off request is not reported as failed.
     expect(JSON.stringify(doneFrame(frames, "r1") ?? {})).not.toContain(
       "interrupted"
