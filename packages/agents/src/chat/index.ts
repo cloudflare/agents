@@ -11,6 +11,9 @@ export {
   type StreamChunkData
 } from "./message-builder";
 
+/** @internal Kept for released `@cloudflare/think` 0.24.0, which imports it. */
+export { buildInClauseStrings } from "./sql-batch";
+
 export {
   sanitizeMessage,
   enforceRowSizeLimit,
