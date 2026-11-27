@@ -1,5 +1,6 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { runDurableObjectAlarm } from "cloudflare:test";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import { defaultContextOverflowClassifier } from "../think";
@@ -276,6 +277,8 @@ describe("Think — agentic loop", () => {
       ): Promise<OverflowResult>;
       getCompactedBranches(): Promise<string[][]>;
       armProactiveForTest(): Promise<void>;
+      armResumeForTest(): Promise<void>;
+      chatArmedForTest(message: string): Promise<void>;
       getMessageIdsForTest(): Promise<Array<{ id: string; role: string }>>;
       testProactiveNoOp(message: string): Promise<OverflowResult>;
       testChatAbortDuringRecovery(message: string): Promise<OverflowResult>;
@@ -850,6 +853,39 @@ describe("Think — agentic loop", () => {
         }
       ]);
     });
+
+    it("keeps a resumed reply's new tool result when the guard compacts it", async () => {
+      const name = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        name
+      )) as unknown as OverflowAgent;
+      await agent.armResumeForTest();
+      // The reset lands before the turn's second model call.
+      await agent.chatArmedForTest("use the echo tool").catch(() => {});
+      const restarted = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        name
+      )) as unknown as OverflowAgent & {
+        getTranscriptSummary(): Promise<Array<{ role: string; text: string }>>;
+      };
+      await vi.waitFor(
+        async () => {
+          await runDurableObjectAlarm(
+            restarted as unknown as DurableObjectStub
+          ).catch(() => {});
+          const transcript = await restarted.getTranscriptSummary();
+          expect(
+            transcript.some((m) => m.text === "done after two tools")
+          ).toBe(true);
+        },
+        { timeout: 20_000 }
+      );
+      // The call after the resumed tool round has that round's result.
+      const prompts = await restarted.getProactiveStepPrompts();
+      const last = prompts.at(-1);
+      expect(last?.toolResults).toContain("tc2");
+    }, 30_000);
 
     it("compacts a regenerate on the branch it answers, not the active one", async () => {
       const room = crypto.randomUUID();

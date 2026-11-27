@@ -215,8 +215,14 @@ function createMockToolModel(
  * reaches. Keys its behavior off the model-call count (not prompt inspection)
  * so a mid-turn recompaction does not change which step it is on.
  */
+const RESUME_ARMED_KEY = "test:resume-armed";
+const RESUME_STEP_KEY = "test:resume-step";
+const RESUME_RESET_KEY = "test:resume-reset";
+
 function createTwoToolThenTextModel(
-  onCall?: (options: unknown) => void
+  onCall?: (options: unknown) => void,
+  /** The step of each call, when the test keeps it across a reset. */
+  stepOf?: () => number
 ): LanguageModel {
   let callCount = 0;
   return {
@@ -230,10 +236,12 @@ function createTwoToolThenTextModel(
     doStream(options: Record<string, unknown>) {
       onCall?.(options);
       callCount++;
-      const step = callCount;
+      const step = stepOf ? stepOf() : callCount;
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
+          // A call the test resets the isolate in: it never answers.
+          if (step < 0) return;
           if (step <= 2) {
             const id = `tc${step}`;
             controller.enqueue({
@@ -856,6 +864,8 @@ export class OverflowRecoveryTestAgent extends Think {
     headHasHistory: boolean;
   }> = [];
   private _model?: LanguageModel;
+  /** A restarted isolate arms what the test armed before its reset. */
+  private readonly _armedOnStart = this.#armFromStorage();
 
   override maxSteps = 3;
 
@@ -933,7 +943,12 @@ export class OverflowRecoveryTestAgent extends Think {
         : this.combinedProactiveReactive
           ? createProactiveThenReactiveModel(onCall)
           : this.proactiveMultiFire
-            ? createTwoToolThenTextModel(onCall)
+            ? createTwoToolThenTextModel(
+                onCall,
+                this.ctx.storage.kv.get<boolean>(RESUME_ARMED_KEY)
+                  ? () => this.#resumeStep()
+                  : undefined
+              )
             : this.proactiveMode
               ? createMockToolModel(onCall)
               : createOverflowThenOkModel(
@@ -1307,6 +1322,59 @@ export class OverflowRecoveryTestAgent extends Think {
 
   async getMessageIdsForTest(): Promise<Array<{ id: string; role: string }>> {
     return this.messages.map((m) => ({ id: m.id, role: m.role }));
+  }
+
+  /**
+   * The armed guard and a reset before the turn's second model call, kept
+   * in storage so the restarted isolate resumes the same turn.
+   */
+  async armResumeForTest(): Promise<void> {
+    this.ctx.storage.kv.put(RESUME_ARMED_KEY, true);
+    this.#armFromStorage();
+  }
+
+  /** Seed an earlier exchange, then chat, with the armed config as is. */
+  async chatArmedForTest(message: string): Promise<void> {
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+    await this.chat(message, new TestCollectingCallback());
+  }
+
+  #armFromStorage(): boolean {
+    if (!this.ctx.storage.kv.get<boolean>(RESUME_ARMED_KEY)) return false;
+    this.proactiveMode = true;
+    this.proactiveMultiFire = true;
+    this.compactionNoOp = false;
+    this.contextOverflow = {
+      proactive: { maxInputTokens: 10, maxCompactions: 1 }
+    };
+    this._model = undefined;
+    return true;
+  }
+
+  /** The model's step: counted in storage; a reset cuts the second call once. */
+  #resumeStep(): number {
+    const kv = this.ctx.storage.kv;
+    const step = (kv.get<number>(RESUME_STEP_KEY) ?? 0) + 1;
+    if (step === 2 && !kv.get<boolean>(RESUME_RESET_KEY)) {
+      kv.put(RESUME_RESET_KEY, true);
+      // What the turn wrote so far is on disk, as a moment later in a real
+      // reset; then the isolate goes, mid-call.
+      void this.ctx.storage
+        .sync()
+        .then(() => this.ctx.abort("test: forced reset"));
+      return -1;
+    }
+    kv.put(RESUME_STEP_KEY, step);
+    return step;
   }
 
   /** The ids of each branch a compaction was given. */
