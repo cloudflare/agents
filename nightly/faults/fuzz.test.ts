@@ -404,6 +404,14 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
             )
         })),
         transcript: transcriptShape(msgs),
+        // The tab opened after everything settled: what a returning client saw.
+        lateTab: late.frames.map((f) => ({
+          type: f.type,
+          id: f.id,
+          done: f.done,
+          outcome: f.outcome,
+          replay: f.replay
+        })),
         events: state.events
       },
       null,
