@@ -30,6 +30,7 @@ export {
   ThinkScheduledTasksTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
+  ThinkStableToolsTestAgent,
   ThinkAdmissionTestAgent,
   ThinkLatestAdmissionTestAgent,
   ThinkNonRecoveryTestAgent,

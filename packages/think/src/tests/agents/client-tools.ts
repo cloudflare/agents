@@ -1365,6 +1365,16 @@ export class ThinkClientToolsAgent extends Think {
    * chat protocol starts the apply without awaiting it, so a handled message
    * can still have its apply to come.
    */
+  /** End this isolate, as an eviction does; the next call starts a new one. */
+  resetIsolateForTest(): void {
+    this.ctx.abort("test reset");
+  }
+
+  /** `hasPendingInteraction()`, the protected check `waitUntilStable` uses. */
+  waitsOnClientForTest(): boolean {
+    return this.hasPendingInteraction();
+  }
+
   hasPendingInteractionForTest(): boolean {
     // The harness-backed Think (`pnpm test:harness`) has no `_turns`.
     const turns = this["_turns"] as unknown as

@@ -144,6 +144,10 @@
         "name": "ThinkRecoveryTestAgent"
       },
       {
+        "class_name": "ThinkStableToolsTestAgent",
+        "name": "ThinkStableToolsTestAgent"
+      },
+      {
         "class_name": "ThinkAdmissionTestAgent",
         "name": "ThinkAdmissionTestAgent"
       },
@@ -321,6 +325,7 @@
         "ThinkScheduledTasksTestAgent",
         "ThinkAsyncHookTestAgent",
         "ThinkRecoveryTestAgent",
+        "ThinkStableToolsTestAgent",
         "ThinkAdmissionTestAgent",
         "ThinkLatestAdmissionTestAgent",
         "ThinkNonRecoveryTestAgent",

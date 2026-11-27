@@ -436,5 +436,23 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — waitUntilStable > detects a pending CLIENT-tool interaction (the SPA can still replay the tool-result)",
+    "reason": "Sets the client's tools through Think's private _turns (setRequestContextForTest).",
+    "successor": {
+      "file": "client-tools.test.ts",
+      "test": "Think — a call to a tool the client sent > waits on a call to a tool the client sent in its request"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — waitUntilStable > does NOT block stability on a dead SERVER-tool input-available orphan",
+    "reason": "Sets the client's tools through Think's private _turns and stores the reply through the private _settleInterruptedReply.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — waitUntilStable > does not wait on a stored unanswered call to a server tool: nothing will answer it"
+    }
   }
 ]
