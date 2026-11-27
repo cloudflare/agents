@@ -457,11 +457,12 @@ async function finalAnswerCalls(
       }
     }
   });
-  await waitForSubmission(
+  const settled = await waitForSubmission(
     agent,
     accepted.submissionId,
     (submission) => submission.status === "completed"
   );
+  expect(settled.status).toBe("completed");
   return JSON.parse(await agent.getFinalAnswerCallsForTest()) as Array<{
     toolChoice: unknown;
     tools: string[];
@@ -2257,11 +2258,12 @@ describe("Think durable submissions", () => {
         }
       }
     });
-    await waitForSubmission(
+    const settled = await waitForSubmission(
       agent,
       accepted.submissionId,
       (submission) => submission.status === "completed"
     );
+    expect(settled.status).toBe("completed");
     const calls = JSON.parse(
       await agent.getFinalAnswerCallsForTest()
     ) as Array<{
