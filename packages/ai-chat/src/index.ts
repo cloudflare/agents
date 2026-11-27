@@ -1037,8 +1037,34 @@ export class AIChatAgent<
       sessions: this.sessions,
       kv: this.ctx.storage.kv,
       webSockets: { getConnections: () => this.getConnections() },
-      emit: (type, payload) =>
-        this._emit(type as ObservabilityEvent["type"], payload)
+      emit: (type, payload) => {
+        this._emit(type as ObservabilityEvent["type"], payload);
+        // The live "recovering" status (#1620): on while a turn's recovery
+        // is under way, off when it ends. Tabs are told on each change, and
+        // one that connects meanwhile is told on connect.
+        const recovering =
+          type === "chat:recovery:scheduled" ||
+          type === "chat:recovery:detected" ||
+          type === "chat:recovery:attempt"
+            ? true
+            : type === "chat:recovery:completed" ||
+                type === "chat:recovery:skipped" ||
+                type === "chat:recovery:failed"
+              ? false
+              : undefined;
+        if (recovering !== undefined) {
+          void this.keepAliveWhile(() =>
+            this._setChatRecovering(
+              recovering,
+              typeof payload.requestId === "string"
+                ? payload.requestId
+                : undefined
+            )
+          ).catch((error: unknown) =>
+            console.error("[AIChatAgent] recovering status failed", error)
+          );
+        }
+      }
     };
   }
 

@@ -3221,6 +3221,46 @@ describe("platform-transient reader errors (#1964)", () => {
     }
   }, 20_000);
 
+  it("says the chat is recovering while a turn waits for its next attempt, and stops saying so when the turn ends (#1620)", async () => {
+    const room = `transient-recovering-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+    // A tab is connected throughout.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const received = seenFrames(ws) as Array<{ type?: string }>;
+    const recoveringFrames = () =>
+      received.filter(
+        (frame) => frame.type === MessageType.CF_AGENT_CHAT_RECOVERING
+      ).length;
+
+    // The first attempt fails and the next one is a minute away.
+    const requestId = await agentStub.startFailingReaderTurnForTest(
+      "Network connection lost.",
+      1,
+      HELD_BACKOFF
+    );
+    await vi.waitFor(async () =>
+      expect((await agentStub.getChatRecoveringForTest())?.requestId).toBe(
+        requestId
+      )
+    );
+    // The tab is told.
+    await socketBarrier(ws, received);
+    expect(recoveringFrames()).toBe(1);
+
+    // The wait ends, the turn completes, the status is cleared and the tab
+    // is told again.
+    await agentStub.endRetryWaitsForTest();
+    expect(await agentStub.startedFailingTurnStatusForTest()).toBe("completed");
+    await vi.waitFor(async () =>
+      expect(await agentStub.getChatRecoveringForTest()).toBeNull()
+    );
+    await socketBarrier(ws, received);
+    expect(recoveringFrames()).toBe(2);
+    ws.close(1000);
+  }, 30_000);
+
   it("ends the turn's run when the user stops it while it waits for its next attempt", async () => {
     const room = `transient-cancel-run-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);

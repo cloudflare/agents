@@ -1298,6 +1298,15 @@ export function chatTurnDefinition(
           (before?.retries ?? 0) +
           (step.checkpoint.get(INCIDENT_CHECKPOINT) === undefined ? 0 : 1)
       });
+      // The turn is being recovered from here on: its next attempt is
+      // scheduled.
+      deps.emit?.("chat:recovery:scheduled", {
+        incidentId: requestId,
+        requestId,
+        attempt: failures,
+        maxAttempts,
+        recoveryKind: "continue"
+      });
       // A provider that says how long to wait is believed, up to the cap.
       return TaskSettlement.retry(
         Date.now() +

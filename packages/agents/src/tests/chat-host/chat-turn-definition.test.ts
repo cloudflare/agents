@@ -808,6 +808,12 @@ describe("chatTurnDefinition", () => {
         options: { recovery: { stallTimeoutMs: 20 } }
       })({ trigger: "server" }, laterAttempt("run-2", 1));
       expect(result).toBeInstanceOf(TaskSettlement);
+      // The turn's recovery is announced as soon as the retry is planned.
+      expect(
+        instance.events.some(
+          (event) => event.type === "chat:recovery:scheduled"
+        )
+      ).toBe(true);
       // The stall is published, with the timeout that caught it.
       expect(
         instance.events.filter((event) => event.type === "chat:stream:stalled")
