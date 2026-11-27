@@ -231,14 +231,18 @@ function saveResult(result: ThinkOperationResult): SaveMessagesResult {
   if (result.status === "done") {
     return { requestId: result.operationId, status: "completed" };
   }
+  // A stopped turn ends "aborted"; one stopped while it waited, before it
+  // started, ends "withdrawn". Think reports both as aborted by a stop.
+  if (result.reason === "aborted" || result.reason === "withdrawn") {
+    return {
+      requestId: result.operationId,
+      status: "aborted",
+      reason: "stopped"
+    };
+  }
   return {
     requestId: result.operationId,
-    // A stopped turn ends "aborted"; one stopped while it waited, before it
-    // started, ends "withdrawn". Think reports both as aborted.
-    status:
-      result.reason === "aborted" || result.reason === "withdrawn"
-        ? "aborted"
-        : "error",
+    status: "error",
     ...(result.reason !== undefined && { error: result.reason })
   };
 }
