@@ -187,6 +187,10 @@ export async function submitTurn(
     retain: options.retain ?? false,
     ...(metadata !== undefined && { metadata }),
     policy: arrival === "merge" ? "latest" : arrival,
+    // Its caller is here: the turn may start during startup too, so a host
+    // that waits for it in its own start (an app's `onStart`) is not held
+    // until the start it waits in has finished.
+    local: {},
     ...(options.requestId !== undefined && { runId: options.requestId }),
     ...(options.idempotencyKey !== undefined && {
       idempotencyKey: options.idempotencyKey
