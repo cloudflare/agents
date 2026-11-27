@@ -268,6 +268,11 @@ describe.concurrent("Think on a real model, through resets", () => {
         state.runs.some((r) => r.kind === "getWeather"),
         report
       ).toBe(true);
+      // No tool call ran twice.
+      expect(
+        state.runs.filter((r) => r.n > 1),
+        report
+      ).toEqual([]);
       // One submission record per submitted turn, each completed.
       expect(state.submissions, report).toEqual(
         sent
