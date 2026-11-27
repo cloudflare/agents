@@ -10,7 +10,12 @@ import {
   resumeChat,
   submitTurn
 } from "../../chat/chat-functions";
-import { chatTurnStreamId, parkedIn } from "../../chat/chat-host";
+import {
+  chatTurnDefinition,
+  chatTurnStreamId,
+  parkedIn
+} from "../../chat/chat-host";
+import { TaskSettlement } from "../../tasks/settlement";
 
 const tab = { id: "tab-1", send: () => {} } as unknown as Connection;
 
@@ -1261,6 +1266,111 @@ describe("chat functions over a minimal host", () => {
           results: false
         })
       ).toHaveLength(0);
+    });
+  });
+
+  it("a queued turn stopped before a reset ends aborted when reclaimed, storing its question and calling nothing", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r2", "u2", "Two")
+      );
+      await cancelTurn(instance.deps, "r2");
+      // After a reset, the reclaimed run's first attempt starts.
+      const input = instance.tasks.inputOf("r2");
+      const settled = await chatTurnDefinition(instance.deps, instance.host, {
+        name: instance.lane.definition
+      })(
+        input as never,
+        {
+          id: "r2",
+          attempt: 1,
+          checkpoint: { get: () => undefined, set: () => {} },
+          createdAt: 0,
+          sleep: async () => {},
+          signal: new AbortController().signal,
+          local: undefined,
+          interrupted: null,
+          do: async (_name: string, fn: () => unknown) => fn()
+        } as never
+      );
+      expect(settled).toBeInstanceOf(TaskSettlement);
+      expect(instance.calls.map((c) => c.requestId)).not.toContain("r2");
+      expect(
+        await instance.sessions.session("s1").getMessage("u2")
+      ).not.toBeNull();
+      release();
+      await instance.resultFor("r1");
+    });
+  });
+
+  it("a stop of the streaming turn keeps another reply's request to continue", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u0",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a0",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "k1",
+            state: "input-available",
+            input: {}
+          },
+          {
+            type: "tool-ask",
+            toolCallId: "k2",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      // An answer for a0's batch asks to continue it; the batch is not done.
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "k1", output: 1 },
+        { autoContinue: true }
+      );
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({ type: "cf_agent_chat_request_cancel", id: "r1" })
+      );
+      release();
+      await instance.resultFor("r1");
+      // The last answer of a0's batch asks for nothing, yet a0 continues.
+      await answerTool(instance.deps, instance.lane, {
+        kind: "result",
+        toolCallId: "k2",
+        output: 2
+      });
+      while (!instance.calls.some((c) => c.trigger === "tool-answer")) {
+        await instance.nextResult();
+      }
+      expect(
+        instance.calls.find((c) => c.trigger === "tool-answer")
+      ).toMatchObject({
+        replyId: "a0"
+      });
     });
   });
 });

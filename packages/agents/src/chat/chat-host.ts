@@ -259,6 +259,15 @@ function waitingCallsOf(chunks: readonly UIMessageChunk[]): string[] {
   return waiting;
 }
 
+/** The tool name of a tool part: its `toolName`, or its `tool-<name>` type. */
+function toolNameOf(part: UIMessage["parts"][number]): string | undefined {
+  const record = part as { toolName?: unknown; type?: unknown };
+  if (typeof record.toolName === "string") return record.toolName;
+  return typeof record.type === "string" && record.type.startsWith("tool-")
+    ? record.type.slice(5)
+    : undefined;
+}
+
 /** The run's checkpoint key holding the reply a continuation extends. */
 const BASE_CHECKPOINT = "chat:base";
 /** The run's checkpoint key counting the stream chunks recovery discarded. */
@@ -476,13 +485,9 @@ function repairCutOffTools(
       if (!isCutOffTool(part)) return part;
       // A client tool call with its whole input waits for the tab's answer;
       // one cut off mid-input can never be answered, so it is settled.
-      const name =
-        (part as { toolName?: unknown }).toolName ??
-        ((part as { type: string }).type.startsWith("tool-")
-          ? (part as { type: string }).type.slice(5)
-          : undefined);
+      const name = toolNameOf(part);
       if (
-        typeof name === "string" &&
+        name !== undefined &&
         answeredByClient.has(name) &&
         // An approved client tool waits for the tab's result too.
         ((part as { state?: unknown }).state === "input-available" ||
@@ -710,7 +715,11 @@ export function chatTurnDefinition(
       }
       await session.upsertMessage(message as never);
     }
-    if (stopped) return report({ requestId, status: "aborted" });
+    // The run ends aborted, as a stop of a running turn does.
+    if (stopped) {
+      await report({ requestId, status: "aborted" });
+      return TaskSettlement.aborted("chat turn cancelled");
+    }
     const earlier = await deps.streams.status(streamId);
     if (earlier && earlier.state !== "streaming") {
       return report({
@@ -897,6 +906,9 @@ export function chatTurnDefinition(
           for (const fn of answered.splice(0)) fn();
         }
       };
+      const clientToolNames = new Set(
+        (run.clientTools ?? []).map((tool) => tool.name)
+      );
       const recorded = watchStall(
         chunksOf(source, requestId),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
@@ -907,13 +919,16 @@ export function chatTurnDefinition(
             state?: unknown;
             approval?: { approved?: unknown };
           };
+          const name = toolNameOf(part);
+          // An approved client tool runs in the tab, not here.
           return typeof record.toolCallId === "string" &&
             record.state === "approval-responded" &&
-            record.approval?.approved === true
+            record.approval?.approved === true &&
+            !(name !== undefined && clientToolNames.has(name))
             ? [record.toolCallId]
             : [];
         }),
-        new Set((run.clientTools ?? []).map((tool) => tool.name))
+        clientToolNames
       ).pipeThrough(
         new TransformStream<UIMessageChunk, UIMessageChunk>({
           start(controller) {

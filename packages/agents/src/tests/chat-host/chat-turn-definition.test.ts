@@ -1302,4 +1302,25 @@ describe("chatTurnDefinition", () => {
       expect(result).toMatchObject({ status: "error" });
     });
   });
+
+  it("an approved client tool in the reply continued does not hold the stall watchdog off", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await approvedReply(instance, "ask");
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            start() {
+              // The tab runs the tool; the model sends nothing.
+            }
+          }),
+        options: { recovery: { stallTimeoutMs: 20 } }
+      })(
+        { trigger: "tool-answer", clientTools: [{ name: "ask" }] },
+        laterAttempt("ap-5", 1)
+      );
+      expect(result).toBeInstanceOf(TaskSettlement);
+    });
+  });
 });
