@@ -1882,6 +1882,60 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
+  it("a tab that resumes while a turn waits out its retry backoff gets the next attempt's chunks", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    const sent: Array<Record<string, unknown>> = [];
+    await runInDurableObject(
+      stub,
+      async (instance: ChatTurnHostObject, state) => {
+        const requestId = await cutOffIntoBackoff(instance);
+        const back = recordingTab("tab-back", sent);
+        const send = back.send.bind(back);
+        (back as { send: typeof send }).send = (text: string) => {
+          send(text);
+          const frame = JSON.parse(text) as { type?: string; id?: string };
+          if (frame.type === "cf_agent_stream_resuming") {
+            void chatDispatch(
+              instance.deps,
+              instance.lane,
+              back,
+              JSON.stringify({
+                type: "cf_agent_stream_resume_ack",
+                id: frame.id
+              })
+            );
+          }
+        };
+        instance.tabs.push(back);
+        await resumeChat(instance.deps, instance.lane, back, "p1", [requestId]);
+        instance.reply = [
+          { type: "text-delta", id: "t1", delta: " more" },
+          { type: "text-end", id: "t1" },
+          { type: "finish" }
+        ];
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET next_at = ? WHERE run_id = ?",
+          Date.now(),
+          requestId
+        );
+        await state.storage.setAlarm(Date.now());
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async () => {
+      await vi.waitFor(() =>
+        expect(sent.some((frame) => frame.done === true)).toBe(true)
+      );
+      expect(
+        sent.some(
+          (frame) =>
+            frame.type === "cf_agent_use_chat_response" &&
+            String(frame.body).includes('" more"')
+        )
+      ).toBe(true);
+    });
+  });
+
   it("a stop while a turn waits out its retry backoff tells every tab the request ended", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
