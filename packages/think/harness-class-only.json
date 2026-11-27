@@ -322,5 +322,14 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > answers a turn a reset cut off before its first chunk, with its user message once"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > continues a regeneration interrupted after partial output on its new branch (#2028)",
+    "reason": "an interrupted regeneration built from seeded private stream rows (`insertInterruptedStream`), recovered by hand (`runScheduledRecoveryRetryForTest`)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > finishes a regeneration a reset cut off on its new branch, keeping the earlier answer"
+    }
   }
 ]
