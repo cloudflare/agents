@@ -596,6 +596,7 @@ export { broadcastReachesUnlistedSockets } from "../dynamic-agents/unlisted-sock
 export {
   chatTurnDefinition,
   chatTurnStreamId,
+  continueRequestsOf,
   type ChatDeps,
   type ChatHost,
   type ChatHooks,
@@ -608,6 +609,7 @@ export {
   cancelTurn,
   chatDispatch,
   clearChat,
+  stopAllTurns,
   resumeChat,
   submitTurn,
   type ChatArrival,

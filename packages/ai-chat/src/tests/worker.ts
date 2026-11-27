@@ -1,4 +1,8 @@
-import { CHAT_REQUEST_CONTEXT_KEY, type ChatTurnInput } from "agents/chat";
+import {
+  CHAT_REQUEST_CONTEXT_KEY,
+  continueRequestsOf,
+  type ChatTurnInput
+} from "agents/chat";
 import {
   AIChatAgent,
   type ChatResponseResult,
@@ -136,6 +140,11 @@ type ContinuationStateForTest = {
 };
 
 /** What `agent`'s auto-continuation holds: armed, next, running. */
+/** The test definition that holds a chat's lane. */
+const HELD_LANE_DEFINITION = "__cf_test_held_lane";
+const heldLaneRegistered = new WeakSet<AIChatAgent>();
+const heldLaneGates = new WeakMap<AIChatAgent, Promise<void>>();
+
 function continuationStateForTest(
   agent: AIChatAgent
 ): ContinuationStateForTest {
@@ -160,8 +169,10 @@ function continuationStateForTest(
           | undefined
       )?.chat?.origin
     : undefined;
+  // A continuation a tool answer asked for, waiting on the rest of its batch.
+  const armed = continueRequestsOf(agent.streams).size > 0;
   return {
-    hasPending: continuations.length > 0,
+    hasPending: continuations.length > 0 || armed,
     hasNext: waiting && running !== undefined,
     activeRequestId: running?.runId ?? null,
     activeConnectionId: origin ?? null
@@ -170,9 +181,13 @@ function continuationStateForTest(
 
 /** How many turns `agent`'s queue holds, the running one included. */
 function queuedTurnCountForTest(agent: AIChatAgent): number {
-  return (
-    agent as unknown as { _openChatTurns(): readonly unknown[] }
-  )._openChatTurns().length;
+  // The chat's lane: its turns and a test run holding it.
+  return agent.tasks.peekList({
+    definition: [AIChatAgent.CHAT_TURN_DEFINITION, HELD_LANE_DEFINITION],
+    lane: "chat",
+    status: ["pending", "running"],
+    results: false
+  }).length;
 }
 
 /** `agent` has no onChatResponse result waiting or being delivered. */
@@ -747,17 +762,23 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   /** Put a turn that does nothing at the front of the queue until released. */
-  holdTurnQueueForTest(): void {
+  /**
+   * Hold the chat's lane with a run of a test definition, so the turns that
+   * arrive wait behind it until {@link releaseTurnQueueForTest}.
+   */
+  async holdTurnQueueForTest(): Promise<void> {
     const held = new Promise<void>((resolve) => {
       this._releaseHeldTurnQueue = resolve;
     });
-    void (
-      this as unknown as {
-        _turnQueue: {
-          enqueue(id: string, fn: () => Promise<void>): Promise<unknown>;
-        };
-      }
-    )._turnQueue.enqueue("held-for-test", () => held);
+    if (!heldLaneRegistered.has(this)) {
+      heldLaneRegistered.add(this);
+      this.tasks.register(HELD_LANE_DEFINITION, async () => {
+        await heldLaneGates.get(this);
+        return null;
+      });
+    }
+    heldLaneGates.set(this, held);
+    await this.tasks.run(HELD_LANE_DEFINITION, null, { lane: "chat" });
   }
 
   releaseTurnQueueForTest(): void {
@@ -765,18 +786,31 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._releaseHeldTurnQueue = null;
   }
 
-  /** The request id of the continuation waiting to run, if any. */
-  /** The continuation whose stream comes next: running, else scheduled. */
+  /** The continuation whose stream comes next: running, else waiting. */
   pendingContinuationRequestIdForTest(): string | null {
-    const { running, pending } = (
+    const state = continuationStateForTest(this);
+    if (state.activeRequestId !== null) return state.activeRequestId;
+    // Armed on the rest of its batch: it has no run yet, and is named by
+    // the reply it would continue.
+    const [armed] = continueRequestsOf(this.streams);
+    if (armed !== undefined) return armed;
+    return (
+      this._openChatTurnsForTest().find((run) => {
+        const input = this.tasks.inputOf<ChatTurnInput>(run.runId);
+        return input?.mode === "continue" || input?.trigger === "tool-answer";
+      })?.runId ?? null
+    );
+  }
+
+  private _openChatTurnsForTest(): readonly {
+    runId: string;
+    status: string;
+  }[] {
+    return (
       this as unknown as {
-        _continuation: {
-          running: { requestId: string } | null;
-          pending: { requestId: string } | null;
-        };
+        _openChatTurns(): readonly { runId: string; status: string }[];
       }
-    )._continuation;
-    return (running ?? pending)?.requestId ?? null;
+    )._openChatTurns();
   }
 
   private _persistDelayForTest: {

@@ -152,6 +152,7 @@ import { nanoid } from "nanoid";
 import {
   cancelTurn,
   chatDispatch,
+  stopAllTurns,
   submitTurn,
   chatTurnDefinition,
   clearChat,
@@ -2464,7 +2465,7 @@ export class AIChatAgent<
     this._holdForStop(
       Promise.all([
         this._turns.stopAll(reason),
-        ...this._openChatTurns().map((run) => cancelTurn(deps, run.runId, why))
+        stopAllTurns(deps, this._chatLane(), why)
       ]).then(() => {})
     );
   }

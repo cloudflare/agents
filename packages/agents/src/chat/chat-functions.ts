@@ -283,6 +283,34 @@ export async function cancelTurn(
   return cancelled;
 }
 
+/**
+ * Stop every turn of the chat, waiting or running, and drop the
+ * continuations tool answers asked for that have not started.
+ */
+export async function stopAllTurns(
+  deps: ChatDeps,
+  lane: ChatLane,
+  reason?: string
+): Promise<void> {
+  const wanted = continueRequestsOf(deps.streams);
+  if (wanted.size > 0) {
+    wanted.clear();
+    deps.emit?.("chat:continuation:dropped", {
+      requestId: null,
+      reason: "stopped"
+    });
+  }
+  for (const run of deps.tasks.peekList({
+    definition: lane.definition,
+    lane: lane.lane,
+    status: ["pending", "running"],
+    results: false,
+    order: "oldest"
+  })) {
+    await cancelTurn(deps, run.runId, reason);
+  }
+}
+
 /** Clear the chat: no waiting or running turn goes on, and the transcript is emptied. */
 export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
   const retrying = deps.tasks
@@ -346,10 +374,21 @@ export async function answerTool(
      * with the latest schemas.
      */
     clientTools?: unknown;
+    /**
+     * The tab that answered. Asking to continue, it waits for the
+     * continuation's stream: offered it when it starts, or told there is
+     * none.
+     */
+    connection?: Connection;
   } = {}
 ): Promise<boolean> {
   const counts = answeringIn(deps);
   const key = deps.session ?? "";
+  if (options.autoContinue && options.connection) {
+    parkedIn(deps.streams, key).set(options.connection.id, {
+      connection: options.connection
+    });
+  }
   counts.set(key, (counts.get(key) ?? 0) + 1);
   try {
     return await applyAnswer(deps, lane, answer, options);
@@ -750,8 +789,16 @@ export async function chatDispatch(
       // continue; other replies keep theirs.
       const live = liveTurnsOf(deps.streams).get(deps.session ?? "");
       const replyId = live?.requestId === event.id ? live.replyId() : undefined;
-      if (replyId !== undefined)
-        continueRequestsOf(deps.streams).delete(replyId);
+      if (
+        replyId !== undefined &&
+        continueRequestsOf(deps.streams).delete(replyId)
+      ) {
+        deps.emit?.("chat:continuation:dropped", {
+          requestId: null,
+          reason: "stopped",
+          stoppedRequestId: event.id
+        });
+      }
       await cancelTurn(deps, event.id);
       return true;
     }
@@ -786,7 +833,8 @@ export async function chatDispatch(
         },
         {
           autoContinue: event.autoContinue === true,
-          clientTools: event.clientTools
+          clientTools: event.clientTools,
+          connection
         }
       );
       return true;
@@ -802,7 +850,7 @@ export async function chatDispatch(
             approvalId: event.approvalId
           })
         },
-        { autoContinue: event.autoContinue === true }
+        { autoContinue: event.autoContinue === true, connection }
       );
       return true;
     case "stream-resume-request":

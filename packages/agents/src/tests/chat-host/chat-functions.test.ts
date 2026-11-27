@@ -2157,4 +2157,53 @@ describe("chat functions over a minimal host", () => {
       ]);
     });
   });
+
+  it("a tab that answers and asks to continue is offered the continuation's stream", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      const sent: Array<Record<string, unknown>> = [];
+      const answering = {
+        id: "tab-a",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      } as unknown as Connection;
+      const done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        answering,
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "c1",
+          toolName: "locate",
+          output: {},
+          autoContinue: true
+        })
+      );
+      const result = await done;
+      expect(sent).toContainEqual({
+        type: "cf_agent_stream_resuming",
+        id: result.requestId
+      });
+    });
+  });
 });
