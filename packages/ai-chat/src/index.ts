@@ -1088,6 +1088,10 @@ export class AIChatAgent<
         sanitizeForPersistence: (message) =>
           this._sanitizeMessageForPersistence(message),
         onRecovery: (context) => this.onChatRecovery(context),
+        // A tool call a cut-off reply left unanswered is settled by the
+        // app's hook, as the release did.
+        repairInterruptedToolPart: (part) =>
+          this.repairInterruptedToolPart(part as never) as never,
         // What the provider's error says: a rate limit or a transient
         // failure goes into bounded chat recovery, like a dropped stream
         // (#1964). An in-band error is the provider's answer.

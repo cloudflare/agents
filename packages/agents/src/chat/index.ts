@@ -599,15 +599,12 @@ export {
   chatTurnDefinition,
   chatTurnStreamId,
   CHAT_STASH_CHECKPOINT,
-  continueRequestsOf,
   type ChatDeps,
   type ChatHost,
-  type ChatModelCall,
   type ChatTurnInput,
   type ChatTurnResult
 } from "./chat-host";
 export {
-  answerTool,
   cancelTurn,
   chatDispatch,
   clearChat,

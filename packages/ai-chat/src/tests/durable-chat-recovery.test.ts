@@ -272,7 +272,7 @@ interface ChatRecoveryTestStub {
     message: string,
     turns?: number,
     options?: {
-      prelude?: "partial" | "approval" | "start-only" | "none";
+      prelude?: "partial" | "approval" | "server-tool" | "start-only" | "none";
       priorAssistant?: boolean;
       responseHeaders?: Record<string, string>;
       statusCode?: number;
@@ -2294,6 +2294,30 @@ describe("platform-transient reader errors (#1964)", () => {
     asker.ws.close(1000);
     other.ws.close(1000);
   }, 30_000);
+
+  it("settles a server tool its reply was cut off in as the release did, through repairInterruptedToolPart", async () => {
+    const agentStub = await getTestAgent(
+      `server-tool-cut-${crypto.randomUUID()}`
+    );
+    expect(
+      await agentStub.driveFailingReaderTurnForTest(
+        "Network connection lost.",
+        1,
+        { prelude: "server-tool" }
+      )
+    ).toBe("completed");
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const call = messages
+      .flatMap((message) => message.parts)
+      .find(
+        (part) => (part as { toolCallId?: string }).toolCallId === "call-server"
+      ) as { state?: string; errorText?: string } | undefined;
+    expect(call).toMatchObject({
+      state: "output-error",
+      errorText:
+        "The tool call was interrupted before a result was recorded. The tool may still have run."
+    });
+  }, 20_000);
 
   it("ends the turn's run when the user stops it while it waits for its next attempt", async () => {
     const room = `transient-cancel-run-${crypto.randomUUID()}`;

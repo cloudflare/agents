@@ -809,8 +809,10 @@ describe("chat turn races", () => {
 
     // The first result asks to continue and parks on its sibling.
     send(ws, toolResult("call-1"));
-    await waitUntil(
-      async () => (await agent.pendingContinuationRequestIdForTest()) !== null
+    await waitUntil(async () =>
+      JSON.stringify(await agent.getPersistedMessages()).includes(
+        '"output-available"'
+      )
     );
     await delay(150);
     expect(await agent.getChatMessageCallCountForTest()).toBe(0);

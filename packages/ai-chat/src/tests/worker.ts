@@ -1,11 +1,10 @@
 import {
   CHAT_REQUEST_CONTEXT_KEY,
   chatTurnStreamId,
-  answerTool,
   type ChatDeps,
   type ChatLane,
-  continueRequestsOf,
   cancelTurn,
+  chatDispatch,
   aiSdkRecoveryCodec,
   type ChatTurnInput
 } from "agents/chat";
@@ -174,10 +173,8 @@ function continuationStateForTest(
           | undefined
       )?.chat?.origin
     : undefined;
-  // A continuation a tool answer asked for, waiting on the rest of its batch.
-  const armed = continueRequestsOf(agent.streams).size > 0;
   return {
-    hasPending: continuations.length > 0 || armed,
+    hasPending: continuations.length > 0,
     hasNext: waiting && running !== undefined,
     activeRequestId: running?.runId ?? null,
     activeConnectionId: origin ?? null
@@ -446,6 +443,7 @@ function makeHangingSSEResponse() {
 export type FailingReaderPrelude =
   | "partial"
   | "approval"
+  | "server-tool"
   | "start-only"
   | "none";
 
@@ -478,6 +476,16 @@ function makeFailingSSEResponse(
         type: "tool-approval-request",
         approvalId: "approval-1",
         toolCallId: "call-approval"
+      }
+    ],
+    // A server tool's call, cut off before its result.
+    "server-tool": [
+      { type: "start" },
+      {
+        type: "tool-input-available",
+        toolCallId: "call-server",
+        toolName: "getWeather",
+        input: { city: "Paris" }
       }
     ],
     "start-only": [{ type: "start" }],
@@ -820,10 +828,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
   pendingContinuationRequestIdForTest(): string | null {
     const state = continuationStateForTest(this);
     if (state.activeRequestId !== null) return state.activeRequestId;
-    // Armed on the rest of its batch: it has no run yet, and is named by
-    // the reply it would continue.
-    const [armed] = continueRequestsOf(this.streams);
-    if (armed !== undefined) return armed;
     return (
       this._openChatTurnsForTest().find((run) => {
         const input = this.tasks.inputOf<ChatTurnInput>(run.runId);
@@ -1380,16 +1384,28 @@ export class TestChatAgent extends AIChatAgent<Env> {
     errorText?: string
   ): Promise<boolean> {
     void toolName;
-    // The chat module's tool answer, with no continuation.
+    // The chat module's tool answer, as a tab sends it, with no
+    // continuation. It applied when it changed the stored transcript.
     const deps = (this as unknown as { _chatDeps(): ChatDeps })._chatDeps();
     const lane = (this as unknown as { _chatLane(): ChatLane })._chatLane();
-    return answerTool(deps, lane, {
-      kind: "result",
-      toolCallId,
-      output,
-      ...(overrideState && { state: overrideState }),
-      ...(errorText !== undefined && { errorText })
-    });
+    const before = JSON.stringify(await this.sessions.session().getHistory());
+    await chatDispatch(
+      deps,
+      lane,
+      { id: "test-tool-result", send: () => {} } as unknown as Connection,
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId,
+        toolName,
+        output,
+        ...(overrideState && { state: overrideState }),
+        ...(errorText !== undefined && { errorText }),
+        autoContinue: false
+      })
+    );
+    return (
+      JSON.stringify(await this.sessions.session().getHistory()) !== before
+    );
   }
 
   private _getChainedContinuationRegressionResponse(): Response | undefined {
