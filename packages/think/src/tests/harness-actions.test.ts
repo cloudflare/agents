@@ -104,6 +104,28 @@ describe("harness-backed Think: actions that need a human", () => {
     expect(await think.charged()).toBe(1);
   });
 
+  it("answers both racing decisions with what the harness applied", async () => {
+    const think = await agent();
+    await think.say("charge 7");
+    const [pending] = await think.pendingApprovals();
+
+    const [approved, rejected] = await Promise.all([
+      think.approveExecution(pending.executionId),
+      think.rejectExecution(pending.executionId, "too late")
+    ]);
+
+    const ran = (await think.charged()) === 1;
+    const answers = [approved, rejected].map((answer) =>
+      (answer as { status?: string }).status === "rejected"
+        ? "rejected"
+        : (answer as { charged?: number }).charged !== undefined
+          ? "ran"
+          : "other"
+    );
+    // Neither answer contradicts what happened to the call.
+    expect(answers).not.toContain(ran ? "rejected" : "ran");
+  });
+
   it("lists the same descriptor after a restart, from the action and its input", async () => {
     const name = crypto.randomUUID();
     const think = await agent(name);

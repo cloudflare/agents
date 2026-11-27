@@ -1447,25 +1447,30 @@ export class Think<
             : (result.reason ?? result.status)
       };
     }
-    // As on Think: the action's outcome, or the rejection.
-    if (!approved) {
+    // As on Think: the action's outcome, or the rejection. Read from the
+    // call's final state, not from this decision: when two decisions race,
+    // the one the harness applied is what happened.
+    const toolCallId = pending.descriptor.toolCallId;
+    let final:
+      | { state?: unknown; output?: unknown; errorText?: unknown }
+      | undefined;
+    for (const message of this.messages) {
+      for (const part of message.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          final = part as typeof final;
+        }
+      }
+    }
+    if (final?.state === "output-denied") {
       return {
         status: "rejected",
         executionId,
-        reason: reason ?? "Rejected by user"
+        reason: approved ? "Rejected by user" : (reason ?? "Rejected by user")
       };
     }
-    const toolCallId = pending.descriptor.toolCallId;
-    for (const message of this.messages) {
-      for (const part of message.parts) {
-        if (
-          "toolCallId" in part &&
-          part.toolCallId === toolCallId &&
-          part.state === "output-available"
-        ) {
-          return part.output;
-        }
-      }
+    if (final?.state === "output-available") return final.output;
+    if (final?.state === "output-error") {
+      return { status: "error", executionId, error: final.errorText };
     }
     return {
       status: "error",
