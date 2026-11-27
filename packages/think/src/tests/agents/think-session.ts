@@ -5659,6 +5659,29 @@ export class ThinkTestAgent extends Think {
    * progress, so only the transient counter bounds the loop. Returns how many
    * recoveries ran before nothing more was scheduled.
    */
+  /**
+   * Whether an open incident still owes an attempt that is not waiting yet.
+   * Waits until the attempt is there or every incident has ended, for at
+   * most five seconds.
+   */
+  private async _recoveryAttemptOwedForTest(): Promise<boolean> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      await waitForThinkIdleForTest(this);
+      await waitForRunStepsForTest(this);
+      const waiting =
+        recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+        recoveryWorkCountForTest(this, "_chatRecoveryRetry");
+      if (waiting > 0) return true;
+      const open = (await this._recoveryIncidentsForTest()).some(
+        (incident) =>
+          incident.status === "scheduled" || incident.status === "attempting"
+      );
+      if (!open || Date.now() > deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   async testRepeatedStallAfterProgressForTest(maxRounds: number): Promise<{
     rounds: number;
     scheduledAtEnd: number;
@@ -5669,18 +5692,26 @@ export class ThinkTestAgent extends Think {
     this.chatStreamStallTimeoutMs = 50;
     try {
       await this.testChat("stall after progress, repeatedly");
+      // Counts the attempts run, not the waits for one.
       let rounds = 0;
-      for (; rounds < maxRounds; rounds++) {
+      while (rounds < maxRounds) {
         const continues = recoveryWorkCountForTest(
           this,
           "_chatRecoveryContinue"
         );
         const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
-        if (continues === 0 && retries === 0) break;
+        if (continues === 0 && retries === 0) {
+          // No attempt waits. The incident says whether one is still to
+          // come: an attempt that ended schedules the next one just after,
+          // so "scheduled" with nothing waiting is that moment, not the end.
+          if (!(await this._recoveryAttemptOwedForTest())) break;
+          continue;
+        }
         await runRecoveryWorkForTest(
           this,
           continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
         );
+        rounds++;
       }
       return {
         rounds,
