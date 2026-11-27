@@ -304,8 +304,11 @@ export async function cancelTurn(
     return marked;
   }
   const retrying = retryingTurn(deps, requestId);
+  // Its reply is stored while the run still holds its place in the lane:
+  // once the run ends, the next turn stores its question.
+  await retrying?.keep();
   const cancelled = await deps.tasks.cancel(requestId, reason);
-  if (cancelled && retrying) await retrying.settle(true);
+  if (cancelled && retrying) await retrying.settle(false);
   return cancelled;
 }
 

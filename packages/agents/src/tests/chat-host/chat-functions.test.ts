@@ -1879,6 +1879,41 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
+  it("a stop while a turn waits out its retry backoff stores its reply before the next turn stores its question", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const requestId = await cutOffIntoBackoff(instance);
+      // The next question waits behind it.
+      await submitTurn(
+        instance.deps,
+        instance.lane,
+        {
+          trigger: "submit-message",
+          messages: [
+            { id: "u2", role: "user", parts: [{ type: "text", text: "Next" }] }
+          ]
+        } as never,
+        { requestId: "r2" }
+      );
+      instance.reply = [
+        { type: "start", messageId: "a2" },
+        { type: "text-start", id: "t2" },
+        { type: "text-delta", id: "t2", delta: "Answer" },
+        { type: "text-end", id: "t2" },
+        { type: "finish" }
+      ];
+      expect(await cancelTurn(instance.deps, requestId)).toBe(true);
+      await instance.resultFor("r2");
+      const history = await instance.sessions.session("s1").getHistory();
+      expect(history.map((message) => message.id)).toEqual([
+        "u1",
+        "a1",
+        "u2",
+        "a2"
+      ]);
+    });
+  });
+
   it("a clear while a turn waits out its retry backoff keeps nothing and settles its stream", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {

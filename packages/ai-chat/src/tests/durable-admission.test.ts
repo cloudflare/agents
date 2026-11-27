@@ -172,6 +172,35 @@ const QUICK = { chunkCount: 3, chunkDelayMs: 10 };
 const QUICK_REPLY = "chunk-0 chunk-1 chunk-2 ";
 
 describe("durable admission: a request queued behind a turn a reset cuts off", () => {
+  it("answers a request sent while the cut-off turn waits to be recovered after it, in order", async () => {
+    const room = crypto.randomUUID();
+    const binding = "RecoverySlowStreamAgent";
+    const { ws } = await connectChatWS(
+      `/agents/recovery-slow-stream-agent/${room}`
+    );
+    await holdRunning(ws, await agent(binding, room));
+    await reset(binding, room);
+    // A tab comes back and asks its next question at once, as a tab that
+    // only sends its new message does.
+    const { ws: tab } = await connectChatWS(
+      `/agents/recovery-slow-stream-agent/${room}`
+    );
+    record(tab);
+    sendChatRequest(tab, "r2", [user("u2", "two")], QUICK);
+    const restarted = await agent(binding, room);
+    const messages = await waitFor(
+      () => restarted.getPersistedMessages(),
+      (m) => m.filter((x) => x.role === "assistant").length >= 2
+    );
+    expect(messages.map((m) => m.id.startsWith("u") ? m.id : m.role)).toEqual([
+      "u1",
+      "assistant",
+      "u2",
+      "assistant"
+    ]);
+    expect(textOf(messages[3])).toBe(QUICK_REPLY);
+  }, 30_000);
+
   it("gets its own reply after the recovered one, and its tab its terminal frame", async () => {
     const room = crypto.randomUUID();
     const binding = "RecoverySlowStreamAgent";
