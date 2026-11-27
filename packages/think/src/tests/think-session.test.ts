@@ -2237,6 +2237,8 @@ describe("Think — dynamic configuration", () => {
     // start lifts it again.
     await agent.resetIsolateForTest().catch(() => {});
     const restarted = await freshLegacyConfigMigrationAgent(name);
+    // The restart's lift ran: it drops the table it lifted from.
+    expect(await restarted.legacyConfigTableExistsForTest()).toBe(false);
     const config = await restarted.getTestConfig();
     expect(config).not.toBeNull();
     expect(config!.theme).toBe("light");
