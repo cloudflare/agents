@@ -46,12 +46,21 @@ describe("Tasks after a transient platform failure", () => {
           .one();
         expect(time).toBe(row().next_at);
 
-        // When the wait is over the run goes again and completes.
+        // When the wait is over, its wake job runs it again through the
+        // alarm and it completes.
+        const due = Date.now() - 1;
         state.storage.sql.exec(
           "UPDATE cf_agents_task_runs SET next_at = ? WHERE run_id = 'p'",
-          Date.now() - 1
+          due
         );
-        await instance.tasks.runDue("flakyPlatform");
+        state.storage.sql.exec(
+          "UPDATE cf_agents_jobs SET time = ? WHERE id = 'task:p'",
+          due
+        );
+        await instance.lifecycle.alarm();
+        await until(
+          async () => (await instance.tasks.get("p"))?.status === "completed"
+        );
         expect(await instance.tasks.get("p")).toMatchObject({
           status: "completed",
           result: "ok"
