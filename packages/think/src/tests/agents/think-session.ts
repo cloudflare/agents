@@ -3714,6 +3714,13 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /** What onChatRecovery was told in this isolate, in order. */
+  async recoveryCallsForTest(): Promise<
+    ThinkTestAgent["_recoveryCallsForTest"]
+  > {
+    return this._recoveryCallsForTest;
+  }
+
   /** Reset this agent's isolate, as an eviction does. */
   async resetIsolateForTest(): Promise<void> {
     this.ctx.abort("test: forced reset");

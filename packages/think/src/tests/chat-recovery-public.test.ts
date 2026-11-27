@@ -4,9 +4,9 @@
  * the agent is stable. Public API only, so it runs on Think and on the
  * harness-backed Think alike.
  */
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 async function freshAgent(name: string) {
   return getAgentByName(env.ThinkTestAgent, `${name}-${crypto.randomUUID()}`);
@@ -163,5 +163,99 @@ describe("chat recovery, through public behaviour", () => {
       expect(first?.recoveryRootRequestId).toEqual(expect.any(String));
       expect(first?.recoveryRootRequestId).toBe(first?.requestId);
     });
+  });
+
+  // The same context after a real reset of the isolate mid-turn, as an
+  // eviction or a deploy leaves a turn: the recovery runs on the next start.
+  describe("onChatRecovery's context after a reset", () => {
+    async function resetDuringTurn(name: string, chunksBeforeReset: number) {
+      const room = `${name}-${crypto.randomUUID()}`;
+      const agent = () => getAgentByName(env.ThinkTestAgent, room);
+      await (
+        await agent()
+      ).useSlowModelForTest(
+        ["one ", "two ", "three ", "four ", "five ", "six "],
+        chunksBeforeReset === 0 ? 2_000 : 150
+      );
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      const requestId = crypto.randomUUID();
+      let chunks = 0;
+      let started = false;
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          body?: string;
+          done?: boolean;
+        };
+        if (frame.type !== "cf_agent_use_chat_response" || frame.done) return;
+        started = true;
+        if (frame.body?.includes("text-delta")) chunks++;
+      });
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: requestId,
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "reset me" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      // Mid-reply: after some text. Before the first chunk: once the reply
+      // has begun streaming, with no text yet.
+      await vi.waitFor(
+        () => {
+          expect(
+            chunksBeforeReset === 0 ? started : chunks >= chunksBeforeReset
+          ).toBe(true);
+        },
+        { timeout: 10_000, interval: 10 }
+      );
+      await (await agent()).resetIsolateForTest().catch(() => undefined);
+      ws.close();
+      // The next start recovers the turn and asks onChatRecovery.
+      let calls: Awaited<
+        ReturnType<Awaited<ReturnType<typeof agent>>["recoveryCallsForTest"]>
+      > = [];
+      await vi.waitFor(
+        async () => {
+          calls = await (await agent()).recoveryCallsForTest();
+          expect(calls.length).toBeGreaterThanOrEqual(1);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      return { requestId, calls };
+    }
+
+    it("tells onChatRecovery the partial a reset cut off mid-reply", async () => {
+      const { requestId, calls } = await resetDuringTurn("reset-mid", 2);
+      const [first] = calls;
+      // What the reset left of the reply: text the tab had seen, not empty.
+      expect(first?.partialText).toMatch(/^one /);
+      expect(first?.streamId).not.toBe("");
+      expect(first?.createdAt).toEqual(expect.any(Number));
+      expect(first?.recoveryRootRequestId).toBe(requestId);
+    }, 30_000);
+
+    it("tells onChatRecovery of a turn a reset cut off before its first chunk, with no partial", async () => {
+      const { requestId, calls } = await resetDuringTurn("reset-pre", 0);
+      const [first] = calls;
+      expect(first?.partialText).toBe("");
+      expect(first?.recoveryRootRequestId).toBe(requestId);
+    }, 30_000);
   });
 });
