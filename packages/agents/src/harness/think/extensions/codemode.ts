@@ -372,10 +372,7 @@ export function codemodeTransforms(options: CodemodeOptions): ThinkExtension {
           };
           // An arrow function ends without its statement's semicolon,
           // which the executor would wrap inside its call.
-          const code = normalizeCode(input.code).replace(
-            /;(?:\s|\/\/[^\n]*|\/\*[\s\S]*?\*\/)*$/,
-            ""
-          );
+          const code = withoutFinalSemicolon(normalizeCode(input.code));
           const ran = await options.executor.execute(code, [
             ...providers.values(),
             lookup
@@ -395,4 +392,30 @@ export function codemodeTransforms(options: CodemodeOptions): ThinkExtension {
       });
     });
   };
+}
+
+/**
+ * The script without the semicolon that ends it, past any trailing
+ * whitespace and comments. One scan back from the end, so no script makes
+ * it slow (it runs on the agent, before the sandbox's time limit).
+ */
+export function withoutFinalSemicolon(code: string): string {
+  let end = code.length;
+  for (;;) {
+    while (end > 0 && /\s/.test(code[end - 1] ?? "")) end--;
+    if (end >= 2 && code.startsWith("*/", end - 2)) {
+      const open = code.lastIndexOf("/*", end - 3);
+      if (open < 0) return code;
+      end = open;
+      continue;
+    }
+    const lineStart = code.lastIndexOf("\n", end - 1) + 1;
+    const slash = code.indexOf("//", lineStart);
+    if (slash >= 0 && slash < end) {
+      end = slash;
+      continue;
+    }
+    break;
+  }
+  return code[end - 1] === ";" ? code.slice(0, end - 1) : code;
 }

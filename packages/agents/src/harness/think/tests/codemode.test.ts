@@ -3,6 +3,7 @@ import { abortAllDurableObjects, runDurableObjectAlarm } from "cloudflare:test";
 import { tool } from "ai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { withoutFinalSemicolon } from "../extensions/codemode";
 import { codemode } from "../extensions/index";
 import { harnessHookRules } from "../extensions/hooks";
 import { loadInProcess } from "../extensions/in-process";
@@ -71,6 +72,22 @@ describe("codemode as an extension", () => {
     const stub = fresh();
     const reply = text(await stub.prompt("async () => 1;")) ?? "";
     expect(reply).toContain("Result: 1");
+  });
+
+  it("drops a script's final semicolon past comments, in one scan", () => {
+    expect(withoutFinalSemicolon("async () => 1; /* done */")).toBe(
+      "async () => 1"
+    );
+    expect(withoutFinalSemicolon("async () => 1; // done\n")).toBe(
+      "async () => 1"
+    );
+    expect(withoutFinalSemicolon('async () => "http://x"')).toBe(
+      'async () => "http://x"'
+    );
+    // A comment with many possible ends and no way to finish: a
+    // backtracking pattern tries every end.
+    const ends = "1;" + "/**/".repeat(40) + "x";
+    expect(withoutFinalSemicolon(ends)).toBe(ends);
   });
 
   it("runs an arrow function that ends with a semicolon and a comment", async () => {

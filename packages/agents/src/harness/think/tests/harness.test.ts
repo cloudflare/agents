@@ -887,6 +887,65 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     expect(await stub.dangerousRuns()).toBe(1);
   });
 
+  it("keeps a write's receipt whenever it settles around the park", async () => {
+    // The write settles 0..30 turns (microtasks and timers) after the park
+    // aborts it: before, during and after the park is written.
+    for (let hops = 0; hops <= 30; hops += 1) {
+      const stub = fresh();
+      await stub.setReceiptHops(hops);
+      await stub.prompt("compose receipt");
+      const [call] = await stub.lastToolCalls();
+      // Approved once the write has settled.
+      await vi.waitFor(async () =>
+        expect(await stub.toolAttempts()).toContain("after receipt_write:1")
+      );
+      const receipt = await stub.answer({
+        type: "approval",
+        approvalId: call?.approvalId ?? "",
+        approved: true
+      });
+      expect([hops, text(await stub.wait(receipt.operationId))]).toEqual([
+        hops,
+        expect.stringContaining("receipt")
+      ]);
+      expect(await stub.receiptRuns()).toBe(1);
+    }
+  }, 60_000);
+
+  it("keeps the newer read when one from an earlier approval settles after the next park", async () => {
+    const stub = fresh();
+    await stub.prompt("compose rounds");
+    await stub.readStarted(1);
+    const [first] = await stub.lastToolCalls();
+    // Approved: the read reruns (read 2), returns v2, and the script parks
+    // again for its second approval.
+    const once = await stub.answer({
+      type: "approval",
+      approvalId: first?.approvalId ?? "",
+      approved: true
+    });
+    await stub.readStarted(2);
+    await stub.releaseRead(2);
+    await stub.wait(once.operationId);
+    const [second] = await stub.lastToolCalls();
+    expect(second?.approvalId).not.toBe(first?.approvalId);
+    // Read 1, from before the first approval, settles now.
+    await stub.releaseRead(1);
+    await vi.waitFor(async () =>
+      expect(
+        (await stub.toolAttempts()).filter((a) =>
+          a.startsWith("after versioned_read")
+        )
+      ).toHaveLength(2)
+    );
+    const twice = await stub.answer({
+      type: "approval",
+      approvalId: second?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(twice.operationId))).toContain("read v2");
+  });
+
   it("reports a write the park cut short as interrupted, and doesn't run it again", async () => {
     const stub = fresh();
     await stub.prompt("compose write");
@@ -898,7 +957,10 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
       approvalId: call?.approvalId ?? "",
       approved: true
     });
-    expect(text(await stub.wait(receipt.operationId))).toContain("interrupted");
+    // Interrupted by the park, not by a restart.
+    expect(text(await stub.wait(receipt.operationId))).toContain(
+      "because another call waited for approval"
+    );
     expect(await stub.writeRuns()).toBe(1);
   });
 

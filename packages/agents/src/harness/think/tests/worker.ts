@@ -55,6 +55,9 @@ const TRIPLED_KEY = "test:tripled";
 const RELAY_ABORTED_KEY = "relay-aborted";
 const ABORTABLE_RUNS_KEY = "abortable-runs";
 const WRITE_RUNS_KEY = "write-runs";
+const READ_RUNS_KEY = "read-runs";
+const RECEIPT_RUNS_KEY = "receipt-runs";
+const RECEIPT_HOPS_KEY = "receipt-hops";
 const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
@@ -270,13 +273,64 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               parallel: z.boolean().optional(),
               relay: z.boolean().optional(),
               abortable: z.boolean().optional(),
-              write: z.boolean().optional()
+              write: z.boolean().optional(),
+              receipt: z.boolean().optional(),
+              rounds: z.boolean().optional()
             }),
             execute: async (
-              { gate, approve, parallel, relay, abortable, write },
+              {
+                gate,
+                approve,
+                parallel,
+                relay,
+                abortable,
+                write,
+                receipt,
+                rounds
+              },
               options
             ) => {
               const { invoke } = options as unknown as { invoke: ToolInvoke };
+              // A write that commits and returns its receipt when aborted.
+              if (receipt) {
+                const writing = invoke("receipt_write", {});
+                while (!this.ctx.storage.kv.get<number>(RECEIPT_RUNS_KEY)) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [written, done] = await Promise.all([
+                  writing,
+                  invoke("dangerous", {})
+                ]);
+                if (!written.ok) return written.errorText;
+                return done.ok ? `${written.output}` : done.errorText;
+              }
+              // A read beside one approval, then a second approval.
+              if (rounds) {
+                // The read has started (or was answered) before its
+                // sibling asks.
+                const kv = this.ctx.storage.kv;
+                const before = kv.get<number>(READ_RUNS_KEY) ?? 0;
+                const reading = invoke("versioned_read", {});
+                let answered = false;
+                const settle = () => {
+                  answered = true;
+                };
+                void reading.then(settle, settle);
+                while (
+                  !answered &&
+                  (kv.get<number>(READ_RUNS_KEY) ?? 0) <= before
+                ) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [read, first] = await Promise.all([
+                  reading,
+                  invoke("dangerous", { flavor: "one" })
+                ]);
+                if (!first.ok) return first.errorText;
+                const second = await invoke("dangerous", { flavor: "two" });
+                if (!second.ok) return second.errorText;
+                return read.ok ? `read ${read.output}` : read.errorText;
+              }
               // A write the park cuts short.
               if (write) {
                 const writing = invoke("abortable_write", {});
@@ -370,6 +424,54 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           }),
           callers: ["code"] as const,
           // Safe to run again: a park that cuts it short reruns it.
+          recovery: "rerun" as const
+        },
+        // Code-only, not safe to rerun: commits, and returns its receipt
+        // as soon as it's aborted.
+        receipt_write: {
+          ...tool({
+            description: "Write and return a receipt",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(
+                RECEIPT_RUNS_KEY,
+                (kv.get<number>(RECEIPT_RUNS_KEY) ?? 0) + 1
+              );
+              await new Promise<void>((resolve) => {
+                if (options.abortSignal?.aborted) resolve();
+                options.abortSignal?.addEventListener("abort", () => resolve());
+              });
+              // Settles this many microtasks after the abort: a test walks
+              // it across the park.
+              const hops = kv.get<number>(RECEIPT_HOPS_KEY) ?? 0;
+              for (let i = 0; i < hops; i++) {
+                await (i % 2
+                  ? Promise.resolve()
+                  : new Promise((resolve) => setTimeout(resolve, 0)));
+              }
+              return "receipt";
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only, safe to rerun: read n waits for its own release, and
+        // returns `v<n>`.
+        versioned_read: {
+          ...tool({
+            description: "Read a version",
+            inputSchema: z.object({}),
+            execute: async () => {
+              const kv = this.ctx.storage.kv;
+              const n = (kv.get<number>(READ_RUNS_KEY) ?? 0) + 1;
+              kv.put(READ_RUNS_KEY, n);
+              while (!kv.get(`read-release:${n}`)) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              return `v${n}`;
+            }
+          }),
+          callers: ["code"] as const,
           recovery: "rerun" as const
         },
         // Code-only, not safe to rerun: a write the park may cut short.
@@ -740,7 +842,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               parallel: text === "compose parallel",
               relay: text === "compose relay",
               abortable: text === "compose abortable",
-              write: text === "compose write"
+              write: text === "compose write",
+              receipt: text === "compose receipt",
+              rounds: text === "compose rounds"
             }
           }
         ]);
@@ -1040,6 +1144,27 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   composeAborted(): boolean {
     return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
+  }
+
+  setReceiptHops(hops: number): void {
+    this.ctx.storage.kv.put(RECEIPT_HOPS_KEY, hops);
+  }
+
+  receiptRuns(): number {
+    return this.ctx.storage.kv.get<number>(RECEIPT_RUNS_KEY) ?? 0;
+  }
+
+  /** Resolve once the versioned read has started `runs` times. */
+  async readStarted(runs: number): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      if ((this.ctx.storage.kv.get<number>(READ_RUNS_KEY) ?? 0) >= runs) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("The read never started");
+  }
+
+  releaseRead(n: number): void {
+    this.ctx.storage.kv.put(`read-release:${n}`, true);
   }
 
   writeRuns(): number {
