@@ -96,6 +96,11 @@ import {
 } from "../action-tools";
 import {
   createEffectState,
+  decisionIdOf,
+  decisionRunId,
+  isPendingDecision,
+  pendingDecisions,
+  registerDecisionTask,
   registerEffectTask,
   stableStringify,
   sweepEffects
@@ -618,6 +623,11 @@ export class Think<
       )
     );
     registerEffectTask(this.tasks, this.#effects);
+    // Decisions a released Think parked for durable-pause actions
+    // (`actpause_…`) are carried forward: listed, and decided here (H11).
+    registerDecisionTask(this.tasks, (runId) =>
+      this.#onReleasedDecisionSettled(runId)
+    );
     const self = this;
     this.harness = new ThinkHarness({
       // The Agent's own Tasks, which Think's runs already use.
@@ -1567,6 +1577,19 @@ export class Think<
       compileActionTools(actions, this.#actionToolHost, this.#actionMetadata);
     }
     const out: PendingApproval[] = [];
+    // A released Think's parked durable-pause decisions, with the
+    // descriptor it kept for each.
+    for (const record of pendingDecisions(this.tasks)) {
+      const id = decisionIdOf(record.runId);
+      if (executionId !== undefined && id !== executionId) continue;
+      const descriptor = record.metadata?.descriptor;
+      if (descriptor === undefined) continue;
+      out.push({
+        executionId: id,
+        source: "action",
+        descriptor: descriptor as unknown as PendingApproval["descriptor"]
+      });
+    }
     for (const call of await this.harness.pendingApprovals(
       this.harness.session().id
     )) {
@@ -1614,8 +1637,112 @@ export class Think<
     return out;
   }
 
+  /** Outputs of released decisions being decided here, by run. */
+  readonly #releasedOutputs = new Map<string, unknown>();
+
+  /**
+   * A released decision's verdict arrived: run the approved action (or
+   * build the rejection), write its outcome into the paused tool call the
+   * released reply holds, and remember it for the caller.
+   */
+  async #onReleasedDecisionSettled(runId: string): Promise<void> {
+    const input = this.tasks.inputOf<{
+      kind: string;
+      action: string;
+      toolCallId: string;
+      input: unknown;
+    }>(runId);
+    const record = this.tasks.peek(runId);
+    if (!input || input.kind !== "action" || !record) return;
+    const executionId = decisionIdOf(runId);
+    const verdict = (record.result ?? {}) as {
+      approved?: boolean;
+      reason?: string;
+    };
+    let output: unknown;
+    if (verdict.approved) {
+      const tools = compileActionTools(
+        await this.getActions(),
+        this.#actionToolHost,
+        new Map()
+      );
+      const tool = tools[input.action] as
+        | { execute?: (input: unknown, options: unknown) => unknown }
+        | undefined;
+      try {
+        output = tool?.execute
+          ? await tool.execute(input.input, {
+              toolCallId: input.toolCallId,
+              messages: []
+            })
+          : {
+              status: "error",
+              executionId,
+              error: `Action "${input.action}" is no longer available.`
+            };
+      } catch (error) {
+        output = {
+          status: "error",
+          executionId,
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+    } else {
+      output = {
+        status: "rejected",
+        executionId,
+        reason: verdict.reason ?? "Rejected by user"
+      };
+    }
+    this.#releasedOutputs.set(runId, output);
+    // The paused tool call in the released reply takes the outcome.
+    const handle = await this.#rootHandle();
+    for (const message of await this.harness.session().messages()) {
+      const index = message.parts.findIndex(
+        (part) => "toolCallId" in part && part.toolCallId === input.toolCallId
+      );
+      if (index === -1) continue;
+      const parts = [...message.parts];
+      parts[index] = {
+        ...parts[index],
+        state: "output-available",
+        output
+      } as UIMessage["parts"][number];
+      await handle.updateMessage({ ...message, parts } as never);
+      break;
+    }
+    await this.#sync();
+    this.tasks.deleteRun(runId);
+  }
+
+  /** Decide a released Think's parked durable-pause. */
+  async #decideReleased(
+    executionId: string,
+    approved: boolean,
+    reason?: string
+  ): Promise<unknown> {
+    const runId = decisionRunId(executionId);
+    if (!isPendingDecision(this.tasks.peek(runId))) {
+      return {
+        status: "error",
+        executionId,
+        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+      };
+    }
+    await this.tasks.settle(runId, {
+      approved,
+      ...(reason !== undefined && { reason })
+    });
+    const output = this.#releasedOutputs.get(runId);
+    this.#releasedOutputs.delete(runId);
+    return output;
+  }
+
   /** Approve a pending action call; the turn continues and runs it. */
   async approveExecution(executionId: string): Promise<unknown> {
+    if (executionId.startsWith("actpause_")) {
+      return this.#decideReleased(executionId, true);
+    }
     return this.#decide(executionId, true);
   }
 
@@ -1628,6 +1755,9 @@ export class Think<
     reason?: string,
     options?: RejectExecutionOptions
   ): Promise<unknown> {
+    if (executionId.startsWith("actpause_")) {
+      return this.#decideReleased(executionId, false, reason);
+    }
     return this.#decide(executionId, false, reason, options?.autoContinue);
   }
 

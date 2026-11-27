@@ -10,6 +10,7 @@ type ActionsStub = {
   classifyErrorsAsForTest(
     as: "fatal" | "transient" | "rate_limit"
   ): Promise<void>;
+  seedReleasedPauseForTest(amount: number): Promise<string>;
   charged(): Promise<number>;
   toolStates(): Promise<string[]>;
   lastText(): Promise<string>;
@@ -273,6 +274,32 @@ describe("harness-backed Think: actions that need a human", () => {
       hasSignal: true,
       aborted: true
     });
+  });
+
+  it("carries a released durable-pause forward: listed, and run once on approve", async () => {
+    const think = await agent();
+    const executionId = await think.seedReleasedPauseForTest(7);
+
+    const [pending] = await think.pendingApprovals();
+    expect(pending).toMatchObject({
+      executionId,
+      descriptor: { action: "pauseCharge", kind: "durable-pause" }
+    });
+    expect(await think.approveExecution(executionId)).toEqual({ charged: 7 });
+    expect(await think.charged()).toBe(1);
+    expect(await think.pendingApprovals()).toEqual([]);
+  });
+
+  it("carries a released durable-pause forward: a rejection runs nothing", async () => {
+    const think = await agent();
+    const executionId = await think.seedReleasedPauseForTest(7);
+
+    expect(await think.rejectExecution(executionId, "no")).toMatchObject({
+      status: "rejected",
+      executionId
+    });
+    expect(await think.charged()).toBe(0);
+    expect(await think.pendingApprovals()).toEqual([]);
   });
 
   it("does not run an approved action whose input beforeToolCall changed", async () => {

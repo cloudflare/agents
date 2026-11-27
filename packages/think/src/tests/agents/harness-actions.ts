@@ -4,7 +4,8 @@
  * The model calls the action named in the prompt once, then answers with
  * the tool result it got.
  */
-import type { LanguageModel } from "ai";
+import type { LanguageModel, UIMessage } from "ai";
+import { parkDecision } from "../../action-ledger";
 import { z } from "zod";
 import { action, type Action } from "../../actions";
 import { Think } from "../../harness/think";
@@ -242,6 +243,61 @@ export class ThinkHarnessActionsAgent extends Think {
     | { trigger: string | null; hasSignal: boolean; aborted?: true }
     | undefined {
     return this.ctx.storage.kv.get(GRANT_CONTEXT_KEY);
+  }
+
+  /**
+   * What a released Think left for a durable-pause action it parked: the
+   * decision run (`actpause_…`, parked on the decision definition) and the
+   * reply whose tool call ended with `{ status: "paused", executionId }`.
+   */
+  async seedReleasedPauseForTest(amount: number): Promise<string> {
+    const executionId = `actpause_${crypto.randomUUID()}`;
+    const toolCallId = `call-${crypto.randomUUID()}`;
+    await parkDecision(this.tasks, {
+      id: executionId,
+      input: {
+        kind: "action",
+        action: "pauseCharge",
+        toolCallId,
+        requestId: null,
+        input: { amount }
+      },
+      descriptor: {
+        requestId: "",
+        toolCallId,
+        action: "pauseCharge",
+        summary: "Charge the card after a human approves",
+        input: { amount },
+        permissions: [],
+        kind: "durable-pause"
+      }
+    });
+    await this.addMessages([
+      {
+        id: `user-${toolCallId}`,
+        role: "user",
+        parts: [{ type: "text", text: `pause and charge ${amount}` }]
+      },
+      {
+        id: `reply-${toolCallId}`,
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-pauseCharge",
+            toolCallId,
+            state: "output-available",
+            input: { amount },
+            output: {
+              status: "paused",
+              executionId,
+              action: "pauseCharge",
+              message: "This action is awaiting human approval."
+            }
+          }
+        ]
+      } as UIMessage
+    ]);
+    return executionId;
   }
 
   async say(text: string): Promise<void> {
