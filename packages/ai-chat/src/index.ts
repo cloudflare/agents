@@ -41,6 +41,7 @@ import {
   classifyProviderError,
   reconcileOrphanPartial,
   CHAT_REQUEST_CONTEXT_KEY,
+  CHAT_STASH_CHECKPOINT,
   requestContextFromLegacy,
   storableRequestContext,
   interruptedToolPartAsError,
@@ -1098,19 +1099,32 @@ export class AIChatAgent<
             if (connection.id === originId) originConnection = connection;
           }
         }
+        // `this.stash(data)` in the app's turn is kept with the turn's run,
+        // and comes back as `recoveryData` if the turn is recovered.
         const ask = () =>
-          this.onChatMessage(async () => {}, {
-            requestId: call.requestId,
-            abortSignal: call.signal,
-            // No client tools reach `onChatMessage` as none, as before.
-            ...(call.clientTools.length > 0 && {
-              clientTools: [...call.clientTools]
-            }),
-            // A request with no custom fields has no body, as before.
-            ...(call.body !== undefined &&
-              Object.keys(call.body).length > 0 && { body: { ...call.body } }),
-            continuation: call.mode === "continue"
-          });
+          this._withFiberStash(
+            {
+              id: call.requestId,
+              signal: call.signal,
+              stash: (data) =>
+                call.checkpoint.set(CHAT_STASH_CHECKPOINT, data as never)
+            },
+            () =>
+              this.onChatMessage(async () => {}, {
+                requestId: call.requestId,
+                abortSignal: call.signal,
+                // No client tools reach `onChatMessage` as none, as before.
+                ...(call.clientTools.length > 0 && {
+                  clientTools: [...call.clientTools]
+                }),
+                // A request with no custom fields has no body, as before.
+                ...(call.body !== undefined &&
+                  Object.keys(call.body).length > 0 && {
+                    body: { ...call.body }
+                  }),
+                continuation: call.mode === "continue"
+              })
+          );
         let response: Awaited<ReturnType<typeof ask>>;
         try {
           response = await agentContext.run(

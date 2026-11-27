@@ -416,7 +416,28 @@ const DISCARDED_CHECKPOINT = "chat:discarded";
  * counted so far (attempts, progress, interrupted attempts), read by the
  * next attempt that finds this one cut off.
  */
+/**
+ * The run's checkpoint key for what the host's turn stashed for its own
+ * recovery (`ChatModelCall.checkpoint`): handed back to `onRecovery` as
+ * `recoveryData`.
+ *
+ * @internal
+ */
+export const CHAT_STASH_CHECKPOINT = "chat:stash";
 const INCIDENT_CHECKPOINT = "chat:incident";
+
+/**
+ * Whether the turn of `step` ended because its recovery gave up: the budget
+ * was spent, or the app chose not to continue. A host that reports such an
+ * end differently from a failed reply asks here.
+ *
+ * @internal
+ */
+export function chatRecoveryGaveUp(step: TaskStep): boolean {
+  const status =
+    step.checkpoint.get<ChatRecoveryIncident>(INCIDENT_CHECKPOINT)?.status;
+  return status === "exhausted" || status === "skipped";
+}
 /**
  * The run's checkpoint key for the failure that sent it to be tried again
  * (a provider's transient error, a stalled stream): its text, and how many
@@ -1270,6 +1291,8 @@ export function chatTurnDefinition(
       const failures = (before?.failures ?? 0) + 1;
       step.checkpoint.set(FAILED_CHECKPOINT, {
         text: error instanceof Error ? error.message : String(error),
+        // Until the next attempt has looked: this one ended itself.
+        live: true,
         failures,
         retries:
           (before?.retries ?? 0) +
@@ -1396,7 +1419,21 @@ export function chatTurnDefinition(
         text: string;
         failures: number;
         retries: number;
+        live?: boolean;
       }>(FAILED_CHECKPOINT);
+      const thisAttempt = {
+        isolate: (isolateId ??= crypto.randomUUID()),
+        token: crypto.randomUUID()
+      };
+      // A reply that waits on the client (a client tool's result, an
+      // approval) is not stuck: the budget cannot give it up while it
+      // waits. The app is still asked, since it may choose to drop it.
+      const awaitsClient =
+        partial !== undefined &&
+        continuationWaitsOnClient(
+          [partial],
+          new Set((run.clientTools ?? []).map((tool) => tool.name))
+        );
       const evaluated =
         recovery === false
           ? undefined
@@ -1405,14 +1442,26 @@ export function chatTurnDefinition(
                 requestId,
                 recoveryKind: partial ? "continue" : "retry"
               },
-              trigger: {
-                kind: "interrupted",
-                attempt: {
-                  isolate: (isolateId ??= crypto.randomUUID()),
-                  token: crypto.randomUUID()
-                }
+              // An attempt that ended itself to be tried again (a stall, a
+              // transient failure) did not die: it is not an interrupted
+              // attempt.
+              trigger: failed?.live
+                ? { kind: "stalled" }
+                : { kind: "interrupted", attempt: thisAttempt },
+              // Work is counted as released, one unit for ten chunks: the
+              // budget is scaled to chunks here, and the app's hook is
+              // told units.
+              config: {
+                ...budget,
+                maxRecoveryWork: budget.maxRecoveryWork * CHUNK_BATCH.maxChunks,
+                ...(budget.shouldKeepRecovering && {
+                  shouldKeepRecovering: (context) =>
+                    budget.shouldKeepRecovering?.({
+                      ...context,
+                      work: Math.ceil(context.work / CHUNK_BATCH.maxChunks)
+                    }) ?? true
+                })
               },
-              config: budget,
               existing: counted
                 ? {
                     ...counted,
@@ -1422,8 +1471,9 @@ export function chatTurnDefinition(
                       })
                   }
                 : null,
+              // Progress is every chunk streamed, so a little more counts.
               currentProgress: streamedCount,
-              awaitingClientInteraction: false,
+              awaitingClientInteraction: awaitsClient,
               now: Date.now(),
               onShouldKeepRecoveringError: (error) =>
                 console.error(
@@ -1432,7 +1482,24 @@ export function chatTurnDefinition(
                 )
             });
       if (evaluated) {
-        step.checkpoint.set(INCIDENT_CHECKPOINT, evaluated.incident as never);
+        // This attempt is in flight either way: if its isolate dies, the
+        // next one counts it.
+        const inFlight = failed?.live
+          ? [
+              ...(evaluated.incident.attemptsInFlight ?? []).filter(
+                (attempt) => attempt.isolate === thisAttempt.isolate
+              ),
+              thisAttempt
+            ]
+          : evaluated.incident.attemptsInFlight;
+        step.checkpoint.set(INCIDENT_CHECKPOINT, {
+          ...evaluated.incident,
+          ...(inFlight &&
+            !evaluated.exhausted && { attemptsInFlight: inFlight })
+        } as never);
+        if (failed?.live) {
+          step.checkpoint.set(FAILED_CHECKPOINT, { ...failed, live: false });
+        }
         for (const { type, ...event } of evaluated.events) {
           deps.emit?.(type, event);
         }
@@ -1451,7 +1518,13 @@ export function chatTurnDefinition(
           requestId,
           partialText,
           partialParts,
-          recoveryData: null,
+          // What the turn stashed, and the request it was sent with.
+          recoveryData: step.checkpoint.get(CHAT_STASH_CHECKPOINT) ?? null,
+          ...(run.body !== undefined && { lastBody: { ...run.body } }),
+          ...(run.clientTools !== undefined &&
+            run.clientTools.length > 0 && {
+              lastClientTools: [...run.clientTools]
+            }),
           messages: (await session.getHistory()) as unknown as UIMessage[],
           createdAt: step.createdAt
         });
@@ -1482,6 +1555,12 @@ export function chatTurnDefinition(
             ...ended,
             reason: "continue_disabled"
           });
+          if (evaluated) {
+            step.checkpoint.set(INCIDENT_CHECKPOINT, {
+              ...evaluated.incident,
+              status: "skipped"
+            } as never);
+          }
           return report({
             requestId,
             status: "error",

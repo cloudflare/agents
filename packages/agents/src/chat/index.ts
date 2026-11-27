@@ -597,6 +597,7 @@ export {
   chatClientView,
   chatTurnDefinition,
   chatTurnStreamId,
+  CHAT_STASH_CHECKPOINT,
   continueRequestsOf,
   type ChatDeps,
   type ChatHost,

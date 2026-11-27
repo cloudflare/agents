@@ -3635,7 +3635,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._saveFromNextResponse = true;
   }
 
+  private _endedRequestIds: string[] = [];
+
+  /** The request ids of the turns that have ended, oldest first. */
+  endedRequestIdsForTest(): string[] {
+    return this._endedRequestIds;
+  }
+
   protected override async onChatResponse(_result: ChatResponseResult) {
+    this._endedRequestIds.push(_result.requestId);
     if (this._clearDuringResponseHook) {
       this._clearDuringResponseHook = false;
       this.resetTurnState();
