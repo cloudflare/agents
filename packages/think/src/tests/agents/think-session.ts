@@ -3760,6 +3760,69 @@ export class ThinkTestAgent extends Think {
     return this._modelConnectingForTest;
   }
 
+  private _exhaustedForTest: Array<{
+    reason: string;
+    terminalMessage: string;
+    recoveryRootRequestId: string;
+    partialText: string;
+  }> = [];
+
+  /**
+   * Stall the next `stalledCalls` model streams after `afterParts` parts,
+   * with `chatRecovery` set for as long as the agent lives: unlike
+   * `stallRecoveryForTest`, nothing is put back, so the attempts recovery
+   * schedules for later run under the same stall and the same config. Start
+   * the turn with `testChat`, then read `recoveryProgressForTest`.
+   */
+  async armLastingStallForTest(options: {
+    afterParts: number;
+    stalledCalls: number;
+    timeoutMs: number;
+    maxAttempts: number;
+    keepRecovering?: boolean;
+  }): Promise<void> {
+    this._modelStallForTest = {
+      afterParts: options.afterParts,
+      calls: options.stalledCalls
+    };
+    this.chatStreamStallTimeoutMs = options.timeoutMs;
+    this._recoveryCallsForTest = [];
+    this._exhaustedForTest = [];
+    this.chatRecovery = {
+      maxAttempts: options.maxAttempts,
+      onExhausted: (ctx: ChatRecoveryExhaustedContext) => {
+        this._exhaustedForTest.push({
+          reason: ctx.reason,
+          terminalMessage: ctx.terminalMessage,
+          recoveryRootRequestId: ctx.recoveryRootRequestId,
+          partialText: ctx.partialText
+        });
+      },
+      ...(options.keepRecovering !== undefined && {
+        shouldKeepRecovering: () => options.keepRecovering === true
+      })
+    };
+  }
+
+  /** Where a lasting stall's recovery has got to. */
+  async recoveryProgressForTest(): Promise<{
+    recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];
+    exhausted: ThinkTestAgent["_exhaustedForTest"];
+    roles: string[];
+    lastAssistantText: string;
+  }> {
+    const messages = await this.getMessages();
+    const last = messages.filter((m) => m.role === "assistant").at(-1);
+    return {
+      recoveryCalls: this._recoveryCallsForTest,
+      exhausted: this._exhaustedForTest,
+      roles: messages.map((m) => m.role),
+      lastAssistantText: (last?.parts ?? [])
+        .map((p) => (p.type === "text" ? p.text : ""))
+        .join("")
+    };
+  }
+
   /** What onChatRecovery was told in this isolate, in order. */
   async recoveryCallsForTest(): Promise<
     ThinkTestAgent["_recoveryCallsForTest"]
