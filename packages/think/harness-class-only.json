@@ -304,5 +304,35 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > onChatRecovery's context after a reset > tells onChatRecovery the partial a reset cut off mid-reply"
     }
+  },
+  {
+    "file": "agent-tools.test.ts",
+    "test": "Think agent tools > a run whose reply is cut off stays open while chat recovery finishes its turn, then ends completed",
+    "reason": "the class's run tracker (`_agentToolRuns.isLive`) and its recovery work run by hand (`runRecoveryWorkForTest`)",
+    "successor": {
+      "file": "agent-tools.test.ts",
+      "test": "Think agent tools > follows a Think child whose reply stalls and is retried, to its result"
+    }
+  },
+  {
+    "file": "agent-tools.test.ts",
+    "test": "Think agent tools > reads the stored chunks of a run that is still running",
+    "reason": "a reply stream opened through the class's `_replyStreams` and a `running` row inserted into `cf_agent_tool_child_runs`",
+    "successor": {
+      "file": "agent-tools.test.ts",
+      "test": "Think agent tools > follows a Think child that is still streaming when the parent attaches, to its result"
+    }
+  },
+  {
+    "file": "agent-tools.test.ts",
+    "test": "Think agent tools > cleans in-memory agent-tool bookkeeping after a run completes",
+    "reason": "the class's in-memory maps `lastErrors` and `preTurnAssistantIds` are empty after a run",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "agent-tools.test.ts",
+    "test": "Think agent tools > attributes frames via the persisted request id after a DO restart (#1575)",
+    "reason": "the class's request-id to run lookup in `_agentToolRuns` after a restart",
+    "mechanicsOnly": true
   }
 ]
