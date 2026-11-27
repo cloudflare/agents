@@ -408,7 +408,9 @@ export class TestAgentToolReplayAgent extends Agent {
    * An awaited run cleared, a reset cutting the clear off before it deleted
    * the run; then the same run id dispatched again. What that call returns.
    */
-  async redispatchAfterCutOffClearForTest(runId: string): Promise<string> {
+  async redispatchAfterCutOffClearForTest(
+    runId: string
+  ): Promise<{ status: string; error?: string }> {
     const first = this.runAgentTool(TestAgentToolStubChild, {
       runId,
       input: { chunkBodies: [], staysRunning: true } satisfies StubRunInput
@@ -425,7 +427,10 @@ export class TestAgentToolReplayAgent extends Agent {
       runId,
       input: { chunkBodies: [], summary: "again" } satisfies StubRunInput
     });
-    return again.status;
+    return {
+      status: again.status,
+      ...(again.error !== undefined ? { error: again.error } : {})
+    };
   }
 
   private async waitForOpenRunForTest(runId: string): Promise<void> {
