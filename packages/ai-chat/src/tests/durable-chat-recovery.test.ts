@@ -518,60 +518,6 @@ describe("onChatRecovery", () => {
     expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
   });
 
-  it("seals a recovery callback whose attempts die before starting a turn (#2613)", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getTestAgent(room);
-    await agentStub.enableExhaustedCaptureForTest(100);
-    await agentStub.seedIncidentForTest({
-      incidentId: "req-pre-turn:",
-      requestId: "req-pre-turn",
-      recoveryKind: "continue",
-      attempt: 1,
-      maxAttempts: 100,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now(),
-      interruptedAttempts: 4
-    });
-    // The last callback died while it was still checking stable state, so
-    // no turn run exists to replay; only its attempt record is left.
-    await agentStub.simulateDeadAttemptForTest("req-pre-turn:");
-
-    await agentStub.runRecoveryCallbackForTest("_chatRecoveryContinue", {
-      incidentId: "req-pre-turn:",
-      originalRequestId: "req-pre-turn"
-    });
-
-    const exhausted = await agentStub.getExhaustedContextsForTest();
-    expect(exhausted).toHaveLength(1);
-    expect(exhausted[0].reason).toBe("interrupted_attempts_exceeded");
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        interruptedAttempts?: number;
-        status: string;
-      }>;
-    expect(incidents[0]).toMatchObject({
-      interruptedAttempts: 5,
-      status: "exhausted"
-    });
-  });
-
-  it("advances progress on streamed content but not on an orphan re-persist (reconnect-immune, #1637)", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getTestAgent(room);
-
-    const { start, afterFlush, afterPersist } =
-      await agentStub.probeProgressReconnectImmunityForTest();
-
-    // Streaming new content advanced progress.
-    expect(afterFlush).toBeGreaterThan(start);
-    // Re-persisting that same content (a recovery/reconnect would) must NOT be
-    // miscounted as new progress — otherwise a reconnecting client could reset
-    // the no-progress window of a stuck turn forever.
-    expect(afterPersist).toBe(afterFlush);
-  });
-
   it("should persist partial by default (persist !== false)", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);

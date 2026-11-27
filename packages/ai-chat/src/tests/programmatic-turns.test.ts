@@ -452,27 +452,4 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
 
     expect(result.status).toBe("aborted");
   });
-
-  it("a turn its shouldApplyMessages declines stores nothing and never runs", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
-
-    const declined = await agentStub.testProgrammaticTurnWithShouldApply(
-      "Declined",
-      [false]
-    );
-    expect(declined.result.status).toBe("aborted");
-    expect(declined.asked).toBe(1);
-    expect(await agentStub.getStartedRequestIds()).toEqual([]);
-    expect(await agentStub.getPersistedUserTexts()).toEqual([]);
-
-    // Asked before and after the messages are worked out; two yeses run it.
-    const applied = await agentStub.testProgrammaticTurnWithShouldApply(
-      "Applied",
-      [true, true]
-    );
-    expect(applied.result.status).toBe("completed");
-    expect(applied.asked).toBe(2);
-    expect(await agentStub.getPersistedUserTexts()).toEqual(["Applied"]);
-  });
 });

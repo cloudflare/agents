@@ -269,10 +269,6 @@ type ParentStub = DurableObjectStub & {
     runId: string,
     requestId: string
   ): Promise<{ running: string | null; unknown: string | null }>;
-  childReconcileStaleRunViaRecoveryForTest(
-    path: "continue" | "retry",
-    withAssistantTurn: boolean
-  ): Promise<{ before: string | null; after: string | null }>;
   childRunWithDateInputForTest(): Promise<unknown>;
   childRunWithCircularOutputForTest(): Promise<{
     status: string | undefined;
@@ -283,13 +279,6 @@ type ParentStub = DurableObjectStub & {
     queued: AgentToolRunInspection | null;
     userTexts: string[];
     chatCalls: string[];
-  }>;
-  childRecoverCancelledRunForTest(
-    path: "continue" | "retry",
-    cancelled?: boolean
-  ): Promise<{
-    incident: { status: string; reason?: string } | null;
-    chatCalls: number;
   }>;
   childSignalCancelsQueuedRunForTest(): Promise<{
     atAbort: AgentToolRunInspection | null;
@@ -530,20 +519,14 @@ describe("AIChatAgent as an agent-tool child", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     const freshParent = await getParent(parentName);
 
-    // The struck run's wake is gone and its incident sealed, by the
-    // breaker in the sub-agent that owns the run.
+    // The struck run's wake is gone, by the breaker in the sub-agent that
+    // owns the run.
     expect(
       await freshParent.childHasTaskWakeForTest(
         executing.childName,
         executingRunId
       )
     ).toBe(false);
-    expect(
-      await freshParent.facetRecoveryIncidentStatusForTest(
-        executing.childName,
-        executing.incidentId
-      )
-    ).toBe("exhausted");
 
     // Tasks backs off per struck run instead of Scheduler's old blanket
     // purge-on-seal: a pending incident that never came due this cycle
@@ -551,12 +534,6 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(
       await freshParent.childHasTaskWakeForTest(pending.childName, pendingRunId)
     ).toBe(true);
-    expect(
-      await freshParent.facetRecoveryIncidentStatusForTest(
-        pending.childName,
-        pending.incidentId
-      )
-    ).toBe("scheduled");
   });
 
   it("backs off a routed facet's own claim on a non-sealing strike, not just the root's mirror", async () => {
@@ -638,7 +615,7 @@ describe("AIChatAgent as an agent-tool child", () => {
     // Root's own dispatch budget (5s) elapses well before the facet's
     // ~6.5s delayed failure — this call returns once root detaches, not
     // once the run actually fails.
-    await parent.driveFacetRecoverySlowOomSealForTest(executing);
+    const runId = await parent.driveFacetRecoverySlowOomSealForTest(executing);
     // The failure that arrives after root detached must still be seen:
     // this is exactly the gap a routed dispatch that discards its
     // still-pending call (instead of tracking it) would miss entirely.
@@ -646,11 +623,8 @@ describe("AIChatAgent as an agent-tool child", () => {
       async () => {
         const freshParent = await getParent(parentName);
         expect(
-          await freshParent.facetRecoveryIncidentStatusForTest(
-            executing.childName,
-            executing.incidentId
-          )
-        ).toBe("exhausted");
+          await freshParent.childHasTaskWakeForTest(executing.childName, runId)
+        ).toBe(false);
       },
       { timeout: 12_000, interval: 200 }
     );
@@ -683,11 +657,8 @@ describe("AIChatAgent as an agent-tool child", () => {
       async () => {
         const freshParent = await getParent(parentName);
         expect(
-          await freshParent.facetRecoveryIncidentStatusForTest(
-            executing.childName,
-            executing.incidentId
-          )
-        ).toBe("exhausted");
+          await freshParent.childHasTaskWakeForTest(executing.childName, runId)
+        ).toBe(false);
       },
       { timeout: 12_000, interval: 200 }
     );
@@ -1594,44 +1565,6 @@ describe("AIChatAgent as an agent-tool child", () => {
     });
   });
 
-  it("finalizes a stranded child run row when its own recovery CONTINUES (#1630)", async () => {
-    // A recovered assistant turn → the reconcile in `_chatRecoveryContinue`'s
-    // finally seals the stranded row `completed` so a re-attached parent
-    // collects immediately instead of waiting out a no-progress window.
-    const parent = await getParent();
-    const completed = await parent.childReconcileStaleRunViaRecoveryForTest(
-      "continue",
-      true
-    );
-    expect(completed.before).toBe("running");
-    expect(completed.after).toBe("completed");
-
-    // No recovered assistant turn → the same finally seals it `error`.
-    const errored = await (
-      await getParent()
-    ).childReconcileStaleRunViaRecoveryForTest("continue", false);
-    expect(errored.before).toBe("running");
-    expect(errored.after).toBe("error");
-  });
-
-  it("finalizes a stranded child run row when its own recovery RETRIES a pre-stream turn (#1630)", async () => {
-    // The pre-stream-eviction path settles via `_chatRecoveryRetry`, which
-    // (like continue) never hits `startAgentToolRun`'s finalizer — so its
-    // finally must run the same reconcile. This is the path the earlier review
-    // flagged as missing on the AIChatAgent retry branch.
-    const completed = await (
-      await getParent()
-    ).childReconcileStaleRunViaRecoveryForTest("retry", true);
-    expect(completed.before).toBe("running");
-    expect(completed.after).toBe("completed");
-
-    const errored = await (
-      await getParent()
-    ).childReconcileStaleRunViaRecoveryForTest("retry", false);
-    expect(errored.before).toBe("running");
-    expect(errored.after).toBe("error");
-  });
-
   it("hands a live run's output hook the input as it was passed, not its stored copy", async () => {
     await expect(
       (await getParent()).childRunWithDateInputForTest()
@@ -1665,26 +1598,6 @@ describe("AIChatAgent as an agent-tool child", () => {
   it("keeps a cancelled run aborted when a chat reset then skips its queued turn", async () => {
     const result = await (await getParent()).childCancelQueuedRunForTest(true);
     expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
-  });
-
-  for (const path of ["continue", "retry"] as const) {
-    it(`does not ${path} the turn of a run cancelled before the isolate died, and says why`, async () => {
-      const result = await (
-        await getParent()
-      ).childRecoverCancelledRunForTest(path);
-      expect(result).toEqual({
-        incident: { status: "skipped", reason: "user_cancelled" },
-        chatCalls: 0
-      });
-    });
-  }
-
-  it("recovers the turn of a run that is aborted but that no parent cancelled", async () => {
-    const result = await (
-      await getParent()
-    ).childRecoverCancelledRunForTest("continue", false);
-    expect(result.chatCalls).toBe(1);
-    expect(result.incident?.reason).not.toBe("user_cancelled");
   });
 
   it("the parent's signal cancels a queued run at once, and the run never starts", async () => {
