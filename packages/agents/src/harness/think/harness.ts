@@ -240,6 +240,8 @@ type PlacedTurn = {
   readonly owner?: string;
   /** Whether the turn continues a reply stored before it began. */
   readonly continues: boolean;
+  /** The request body the turn was asked with, for `beforeTurn`. */
+  readonly body?: { readonly [key: string]: TaskJson };
 };
 
 /**
@@ -275,6 +277,8 @@ class ModelCallError extends Error {
 type OperationRunInput = {
   readonly input: OperationInput;
   readonly source: "client" | "server";
+  /** A tab's request body, past its messages (the shared dispatch's). */
+  readonly body?: Record<string, unknown>;
 };
 
 /**
@@ -371,9 +375,13 @@ function operationInputOf(input: unknown): OperationRunInput {
     readonly trigger?: string;
   };
   if (value.input !== undefined) return value as OperationRunInput;
+  const body = (input as { readonly body?: unknown }).body;
   return {
     input: { kind: "messages", messages: value.messages ?? [] },
-    source: "client"
+    source: "client",
+    ...(body !== null &&
+      typeof body === "object" &&
+      !Array.isArray(body) && { body: body as Record<string, unknown> })
   };
 }
 
@@ -1674,7 +1682,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             trigger: "submit-message",
             questionId: last.id,
             continues: false,
-            ...(input.owner !== undefined && { owner: input.owner })
+            ...(input.owner !== undefined && { owner: input.owner }),
+            // SAFETY: a request body is JSON, as the tab sent it.
+            ...(stored.body !== undefined && {
+              body: stored.body as { readonly [key: string]: TaskJson }
+            })
           });
         });
         break;
@@ -2129,7 +2141,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         system,
         tools: Object.keys(tools),
         // A copy: a hook that edits it does not change what is offered.
-        toolSet: { ...tools }
+        toolSet: { ...tools },
+        ...(placed.body !== undefined && { body: placed.body })
       })) ?? {};
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");

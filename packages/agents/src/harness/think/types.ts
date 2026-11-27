@@ -263,6 +263,11 @@ export type ThinkTurnContext = ThinkHookContext & {
    * a hook of its own (the harness-backed Think's `beforeTurn`).
    */
   readonly toolSet: ToolSet;
+  /**
+   * @internal The request body the turn was asked with (a tab's, past its
+   * messages), for a host that hands it to its own `beforeTurn`.
+   */
+  readonly body?: Record<string, unknown>;
 };
 
 /**
