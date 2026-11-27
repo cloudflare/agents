@@ -1067,7 +1067,12 @@ export class AIChatAgent<
       streams: this.streams,
       sessions: this.sessions,
       kv: this.ctx.storage.kv,
-      webSockets: { getConnections: () => this.getConnections() },
+      // A turn's frames go out through `broadcast`, which agent-tool runs
+      // observe (SEAM, until #3346).
+      webSockets: {
+        getConnections: () => this.getConnections(),
+        broadcast: (text, without) => this.broadcast(text, without)
+      },
       emit: (type, payload) =>
         this._emit(type as ObservabilityEvent["type"], payload)
     };

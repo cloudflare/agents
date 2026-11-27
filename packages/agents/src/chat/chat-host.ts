@@ -51,7 +51,15 @@ export interface ChatDeps {
    * The tabs the chat's frames go to. Absent for a host that owns no
    * sockets (a harness inside an agent).
    */
-  readonly webSockets?: { getConnections(): Iterable<Connection> };
+  readonly webSockets?: {
+    getConnections(): Iterable<Connection>;
+    /**
+     * Send a turn's frame to every tab but `without`, when the host sends
+     * its frames itself (AIChatAgent's `broadcast`, which agent-tool runs
+     * observe). Absent: each tab is sent the frame.
+     */
+    broadcast?(text: string, without: string[]): void;
+  };
   /** The Sessions session the chat's transcript is in. */
   readonly session?: string;
   /**
@@ -1010,10 +1018,15 @@ export function chatTurnDefinition(
       const text = sockets ? frameText(frame) : undefined;
       if (sockets && text !== undefined) {
         const offered = offeredIn(deps.streams);
-        for (const connection of sockets.getConnections()) {
-          // A tab offered this stream gets it from the ack's replay.
-          if (offered.get(connection.id) === requestId) continue;
-          sendIfOpen(connection, text);
+        // A tab offered this stream gets it from the ack's replay.
+        const without = [...offered]
+          .filter(([, id]) => id === requestId)
+          .map(([tab]) => tab);
+        if (sockets.broadcast) sockets.broadcast(text, without);
+        else {
+          for (const connection of sockets.getConnections()) {
+            if (!without.includes(connection.id)) sendIfOpen(connection, text);
+          }
         }
       }
       // An end is kept, after it is sent, for a tab that is away now.
