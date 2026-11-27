@@ -255,6 +255,11 @@ type LiveRun = {
   readonly operationId: string;
   /** What the turn's stream holds, earlier attempts' chunks included. */
   partial: UIMessageChunk[];
+  /**
+   * How many of `partial`'s first chunks recovery discarded (`persist:
+   * false`): not part of the reply, but still at their stream positions.
+   */
+  discarded: number;
   /** Whether the turn continues a reply stored before it began. */
   continues: boolean;
   /** The tools this run resolved, which decide which calls are a client's. */
@@ -1194,7 +1199,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     operationId: string
   ): Promise<UIMessageChunk[]> {
     await this.lifecycle.ready();
-    return this.#turnChunks(runIdOf(session, operationId));
+    // By stream position, as an agent-tool reader's cursor counts them:
+    // chunks recovery discarded keep theirs.
+    return this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
   }
 
   /**
@@ -1233,7 +1240,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const chunks =
       live?.operationId === operationId && live.partial.length > 0
         ? [...live.partial]
-        : this.#turnChunks(runIdOf(session, operationId));
+        : this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
     return { chunks, stop };
   }
 
@@ -1454,7 +1461,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const running = open.find((record) => !isQueued(record));
     const live = this.#live.get(session);
     const partial = live
-      ? [...live.partial]
+      ? live.partial.slice(live.discarded)
       : running
         ? this.#turnChunks(running.runId)
         : [];
@@ -1499,7 +1506,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       return {
         operationId,
         continuation: live.continues,
-        chunks: [...live.partial]
+        chunks: live.partial.slice(live.discarded)
       };
     }
     // Left by an eviction: the turn's stream holds what was durable.
@@ -1596,6 +1603,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const live: LiveRun = {
       operationId,
       partial: [],
+      discarded: 0,
       continues: false,
       done: new Promise<void>((resolve) => {
         finish = resolve;
@@ -1617,12 +1625,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       live.continues = placed.continues;
       // What earlier attempts streamed, which this one continues.
       if (run.attempt > 1) {
-        live.partial = this.#turnChunks(run.id);
+        live.partial = this.#streamChunks(chatTurnStreamId(run.id));
+        live.discarded =
+          this.#tasks.checkpointOf<number>(run.id, CHAT_DISCARDED_CHECKPOINT) ??
+          0;
       }
       this.#events.emit(session, {
         type: "run-start",
         operationId,
-        continuation: placed.continues || live.partial.length > 0
+        continuation: placed.continues || live.partial.length > live.discarded
       });
       try {
         const turn = chatTurnDefinition(
@@ -1655,7 +1666,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     } finally {
       // A cancelled attempt keeps the reply it streamed; its run has no
       // result to name it, so the inspection reads it from here.
-      const keptId = live.reply?.id ?? replyIdOf(live.partial);
+      const keptId =
+        live.reply?.id ?? replyIdOf(live.partial.slice(live.discarded));
       if (run.signal.aborted && keptId !== undefined) {
         // Best-effort: a failed write must not keep the attempt from
         // finishing, or the operations queued behind it would wait.
@@ -1819,7 +1831,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           return true;
         },
         onRecovery: async (context) => {
-          const replyId = replyIdOf(live.partial);
+          const replyId = replyIdOf(live.partial.slice(live.discarded));
           const partial =
             context.partialParts.length > 0 && replyId !== undefined
               ? ({
@@ -1837,7 +1849,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           });
           // What was streamed is dropped: the reply is not rebuilt from it.
           if (typeof decision === "object" && decision.persist === false) {
-            live.partial.length = 0;
+            live.discarded = live.partial.length;
           }
           // An options object is the definition's own answer, as given.
           return decision === "abandon"

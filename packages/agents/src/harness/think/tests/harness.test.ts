@@ -1312,6 +1312,21 @@ describe("ThinkHarness durability", () => {
     );
   });
 
+  it("keeps the stream positions of chunks recovery dropped for an agent-tool reader", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.answerRecovery({ persist: false });
+    // Each attempt answers again and stalls again: the third ends it.
+    await stub.throwInBeforeTurn(3);
+    const receipt = await stub.submit("slow");
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    // The recovery attempt's reader is handed the dropped attempt's chunks
+    // too: a cursor into them stays valid, and the new ones follow.
+    const [stored, followed] = (await stub.operationChunksAt(2)) ?? [0, 0];
+    expect(stored).toBeGreaterThan(0);
+    expect(followed).toBe(stored);
+  });
+
   it("keeps a reply recovery dropped out of the transcript when the next attempt fails", async () => {
     const stub = fresh();
     await stub.setStallTimeout(50);

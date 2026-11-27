@@ -42,6 +42,8 @@ const RECOVERY_ANSWER_KEY = "test:recovery:answer";
 /** The `beforeTurn` call (1-based) that throws, once a test sets it. */
 const THROW_AT_KEY = "test:before-turn:throw-at";
 const BEFORE_TURN_CALLS_KEY = "test:before-turn:calls";
+/** `operationChunks` and `followOperation` lengths at each `beforeTurn`. */
+const OPERATION_CHUNKS_KEY = "test:before-turn:operation-chunks";
 const SYSTEM_KEY = "test:system";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
@@ -323,7 +325,13 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         this.ctx.storage.kv.put(ABANDON_AT_KEY, left - 1);
         return left <= 1 ? "abandon" : "continue";
       },
-      beforeTurn: async ({ toolSet, session, system: built, signal }) => {
+      beforeTurn: async ({
+        toolSet,
+        session,
+        operationId,
+        system: built,
+        signal
+      }) => {
         // A platform blip while the call is prepared, once.
         if (this.ctx.storage.kv.get<boolean>(PREPARE_BLIP_KEY)) {
           this.ctx.storage.kv.put(PREPARE_BLIP_KEY, false);
@@ -335,6 +343,13 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         if (this.ctx.storage.kv.get<number>(THROW_AT_KEY) === calls) {
           throw new Error("beforeTurn failed");
         }
+        // What an agent-tool reader of this operation is handed, by stream
+        // position, as each call begins.
+        this.ctx.storage.kv.put(`${OPERATION_CHUNKS_KEY}:${calls}`, [
+          (await this.harness.operationChunks(session, operationId)).length,
+          this.harness.followOperation(session, operationId, () => {}).chunks
+            .length
+        ]);
         // A hook that waits on I/O, given the operation's signal.
         if (this.ctx.storage.kv.get<boolean>(WAIT_ON_SIGNAL_KEY)) {
           this.ctx.storage.kv.put(SIGNAL_SEEN_KEY, "waiting");
@@ -1288,6 +1303,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** Make `onRecovery` answer `answer`. */
   answerRecovery(answer: { continue?: boolean; persist?: boolean }): void {
     this.ctx.storage.kv.put(RECOVERY_ANSWER_KEY, answer);
+  }
+
+  /** What `operationChunks` and `followOperation` held at `beforeTurn` `call`. */
+  operationChunksAt(call: number): [number, number] | undefined {
+    return this.ctx.storage.kv.get(`${OPERATION_CHUNKS_KEY}:${call}`);
   }
 
   /** Make the `call`-th `beforeTurn` throw. */
