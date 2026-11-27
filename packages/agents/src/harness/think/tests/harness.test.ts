@@ -1312,6 +1312,18 @@ describe("ThinkHarness durability", () => {
     );
   });
 
+  it("keeps a reply recovery dropped out of the transcript when the next attempt fails", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.answerRecovery({ persist: false });
+    // The first call stalls; the recovery attempt's beforeTurn fails.
+    await stub.throwInBeforeTurn(2);
+    const receipt = await stub.submit("slow");
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("unanswered");
+    expect(await stub.messages()).toEqual(["user: slow"]);
+  });
+
   it("tells the model a call whose input a stall cut off did not run, even for a tool safe to rerun", async () => {
     const stub = fresh();
     await stub.setStallTimeout(50);

@@ -6,7 +6,7 @@
  * - `beforeToolCall`: a `run` with a new input passes that input on; the
  *   first `block` or `substitute` ends the chain.
  * - `classifyError`: the first class given wins.
- * - `onRecovery`: the first `abandon` wins.
+ * - `onRecovery`: the first `abandon` or options object wins.
  * - The others observe: every handler runs.
  *
  * A handler that throws ends the dispatch with its error.
@@ -55,7 +55,10 @@ export const harnessHookRules: HookRules<ExtensionHooks> = {
   },
   async onRecovery(context, handlers) {
     for (const handler of handlers) {
-      if ((await handler(context)) === "abandon") return "abandon";
+      const decision = await handler(context);
+      if (decision === "abandon" || typeof decision === "object") {
+        return decision;
+      }
     }
     return undefined;
   },

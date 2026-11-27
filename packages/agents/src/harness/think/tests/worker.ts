@@ -37,6 +37,11 @@ const MULTIPLY_RUNS_KEY = "test:multiply:runs";
 const TOOL_ATTEMPTS_KEY = "test:tool-attempts";
 const THROW_AFTER_KEY = "test:throw-after";
 const RECOVERY_PARTIAL_KEY = "test:recovery:partial";
+/** What `onRecovery` answers, once a test sets it. */
+const RECOVERY_ANSWER_KEY = "test:recovery:answer";
+/** The `beforeTurn` call (1-based) that throws, once a test sets it. */
+const THROW_AT_KEY = "test:before-turn:throw-at";
+const BEFORE_TURN_CALLS_KEY = "test:before-turn:calls";
 const SYSTEM_KEY = "test:system";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
@@ -307,6 +312,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       onRecovery: ({ partial }) => {
         this.ctx.storage.kv.put(RECOVERY_PARTIAL_KEY, partial?.id ?? null);
         if (this.ctx.storage.kv.get<boolean>(ABANDON_KEY)) return "abandon";
+        // What a test set, first.
+        const answer = this.ctx.storage.kv.get<{ persist?: boolean }>(
+          RECOVERY_ANSWER_KEY
+        );
+        if (answer) return answer;
         // Given up at the n-th interruption, when asked.
         const left = this.ctx.storage.kv.get<number>(ABANDON_AT_KEY);
         if (left === undefined) return "continue";
@@ -318,6 +328,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         if (this.ctx.storage.kv.get<boolean>(PREPARE_BLIP_KEY)) {
           this.ctx.storage.kv.put(PREPARE_BLIP_KEY, false);
           throw new Error("Network connection lost.");
+        }
+        const calls =
+          (this.ctx.storage.kv.get<number>(BEFORE_TURN_CALLS_KEY) ?? 0) + 1;
+        this.ctx.storage.kv.put(BEFORE_TURN_CALLS_KEY, calls);
+        if (this.ctx.storage.kv.get<number>(THROW_AT_KEY) === calls) {
+          throw new Error("beforeTurn failed");
         }
         // A hook that waits on I/O, given the operation's signal.
         if (this.ctx.storage.kv.get<boolean>(WAIT_ON_SIGNAL_KEY)) {
@@ -1267,6 +1283,16 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       )
       .toArray()
       .map((row) => row.stream_id);
+  }
+
+  /** Make `onRecovery` answer `answer`. */
+  answerRecovery(answer: { continue?: boolean; persist?: boolean }): void {
+    this.ctx.storage.kv.put(RECOVERY_ANSWER_KEY, answer);
+  }
+
+  /** Make the `call`-th `beforeTurn` throw. */
+  throwInBeforeTurn(call: number): void {
+    this.ctx.storage.kv.put(THROW_AT_KEY, call);
   }
 
   /** Treat a model stream silent this long as stalled. */

@@ -16,6 +16,7 @@ import type {
   ThinkErrorClass,
   ThinkHookContext,
   ThinkRecoveryContext,
+  ThinkRecoveryDecision,
   ThinkSessionId,
   ThinkStepFinishContext,
   ThinkToolCallContext,
@@ -152,7 +153,7 @@ export type ExtensionHooks = {
   onTurnEnd: [ThinkTurnEndContext, void];
   onError: [{ readonly error: unknown } & ThinkHookContext, void];
   classifyError: [{ readonly error: unknown }, ThinkErrorClass | void];
-  onRecovery: [ThinkRecoveryContext, "continue" | "abandon" | void];
+  onRecovery: [ThinkRecoveryContext, ThinkRecoveryDecision | void];
 };
 
 /** @internal */

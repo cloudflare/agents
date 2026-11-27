@@ -3006,7 +3006,7 @@ export class Think<
     readonly operationId: string;
     readonly attempt: number;
     readonly partial: UIMessage | undefined;
-  }): Promise<"continue" | "abandon"> {
+  }): Promise<"continue" | "abandon" | ChatRecoveryOptions> {
     // As on Think: a submission cut off by a reset whose turn started
     // longer ago than the stale window is not recovered. It ends `error`.
     // An attempt that already asked the model in this isolate is a live
@@ -3049,7 +3049,12 @@ export class Think<
       // queue), so an app can refuse stale work.
       createdAt: await this.#turnStartedAt(context.operationId)
     });
-    return decision?.continue === false ? "abandon" : "continue";
+    // The app's answer goes to the turn definition as given: it drops the
+    // partial for `persist: false`, as Think's recovery does.
+    if (decision?.continue !== false && decision?.persist !== false) {
+      return "continue";
+    }
+    return { continue: decision.continue, persist: decision.persist };
   }
 
   async #turnStartedAt(operationId: string): Promise<number> {

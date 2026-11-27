@@ -218,6 +218,8 @@ const PLACED_KEY = "think:placed";
  * read to rebuild what a turn streamed outside its attempt.
  */
 const CHAT_BASE_CHECKPOINT = "chat:base";
+/** The turn definition's count of stream chunks recovery discarded. */
+const CHAT_DISCARDED_CHECKPOINT = "chat:discarded";
 /** The turn definition's error for a turn it did not continue. */
 const TURN_NOT_CONTINUED = "The turn was interrupted and not continued.";
 const DEFAULT_MAX_STEPS = 10;
@@ -1192,7 +1194,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     operationId: string
   ): Promise<UIMessageChunk[]> {
     await this.lifecycle.ready();
-    return this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+    return this.#turnChunks(runIdOf(session, operationId));
   }
 
   /**
@@ -1231,7 +1233,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const chunks =
       live?.operationId === operationId && live.partial.length > 0
         ? [...live.partial]
-        : this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+        : this.#turnChunks(runIdOf(session, operationId));
     return { chunks, stop };
   }
 
@@ -1454,7 +1456,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const partial = live
       ? [...live.partial]
       : running
-        ? this.#streamChunks(chatTurnStreamId(running.runId))
+        ? this.#turnChunks(running.runId)
         : [];
     // The call in progress started with its owner.
     const started = partial.find((chunk) => chunk.type === "start");
@@ -1506,7 +1508,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       operationId,
       continuation:
         placed !== undefined && "continues" in placed && placed.continues,
-      chunks: this.#streamChunks(chatTurnStreamId(running.runId))
+      chunks: this.#turnChunks(running.runId)
     };
   }
 
@@ -1615,7 +1617,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       live.continues = placed.continues;
       // What earlier attempts streamed, which this one continues.
       if (run.attempt > 1) {
-        live.partial = this.#streamChunks(chatTurnStreamId(run.id));
+        live.partial = this.#turnChunks(run.id);
       }
       this.#events.emit(session, {
         type: "run-start",
@@ -1832,7 +1834,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             attempt: context.attempt,
             partial
           });
-          return decision === "abandon" ? { continue: false } : undefined;
+          // What was streamed is dropped: the reply is not rebuilt from it.
+          if (typeof decision === "object" && decision.persist === false) {
+            live.partial.length = 0;
+          }
+          // An options object is the definition's own answer, as given.
+          return decision === "abandon"
+            ? { continue: false }
+            : typeof decision === "object"
+              ? decision
+              : undefined;
         },
         // A server tool call an interruption cut off is reported to the
         // model as interrupted, unless its tool is safe to run again.
@@ -2834,9 +2845,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const chunks =
       streamId === undefined
         ? []
-        : this.#streamChunks(streamId).filter(
-            (chunk) => chunk.type !== "error"
-          );
+        : (legacy
+            ? this.#streamChunks(streamId)
+            : this.#turnChunks(runId)
+          ).filter((chunk) => chunk.type !== "error");
     const open =
       streamId !== undefined && streams.getStream(streamId) !== undefined;
     // The loop's own reply, without the reasoning the turn didn't send.
@@ -3427,6 +3439,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * where earlier versions kept it (and still do after a rollback): it is
    * moved here first.
    */
+  /**
+   * The chunks of run `runId`'s reply stream, without those an earlier
+   * attempt streamed and recovery discarded (`persist: false`).
+   */
+  #turnChunks(runId: string): UIMessageChunk[] {
+    const chunks = this.#streamChunks(chatTurnStreamId(runId));
+    const discarded =
+      this.#tasks.checkpointOf<number>(runId, CHAT_DISCARDED_CHECKPOINT) ?? 0;
+    return discarded > 0 ? chunks.slice(discarded) : chunks;
+  }
+
   #streamChunks(streamId: string | null | undefined): UIMessageChunk[] {
     if (streamId == null) return [];
     const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();

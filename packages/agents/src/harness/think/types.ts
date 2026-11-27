@@ -18,7 +18,10 @@ import type {
   streamText
 } from "ai";
 import type { ClientToolSchema } from "../../chat/client-tools";
-import type { ChatRecoveryConfig } from "../../chat/lifecycle";
+import type {
+  ChatRecoveryConfig,
+  ChatRecoveryOptions
+} from "../../chat/lifecycle";
 import type {
   HarnessInput,
   HarnessInputFrom,
@@ -415,6 +418,18 @@ export type ThinkRecoveryContext = ThinkHookContext & {
 };
 
 /**
+ * What `onRecovery` decides: `continue` or `abandon`. The object form is the
+ * turn definition's own recovery options, for Think's `onChatRecovery`
+ * (`persist: false` drops the partial).
+ *
+ * @experimental The object form is internal.
+ */
+export type ThinkRecoveryDecision =
+  | "continue"
+  | "abandon"
+  | ChatRecoveryOptions;
+
+/**
  * Hooks into the turn loop. All are optional, and each may be async. A
  * throwing hook ends the operation `unanswered`, except `onChunk`,
  * `onTurnEnd` and `onError`, whose errors are logged and ignored.
@@ -459,7 +474,7 @@ export type ThinkHarnessHooks = {
    */
   readonly onRecovery?: (
     context: ThinkRecoveryContext
-  ) => "continue" | "abandon" | Promise<"continue" | "abandon">;
+  ) => ThinkRecoveryDecision | Promise<ThinkRecoveryDecision>;
 };
 
 /** Context for options computed per session. @experimental */
