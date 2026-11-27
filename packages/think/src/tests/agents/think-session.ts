@@ -3950,6 +3950,11 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /** Whether the agent settles within `timeout` ms. */
+  async stableWithinForTest(timeout: number): Promise<boolean> {
+    return this.waitUntilStable({ timeout });
+  }
+
   /** What onChatRecovery answers from now on, across resets. */
   async answerRecoveryForTest(answer: ChatRecoveryOptions): Promise<void> {
     this.ctx.storage.kv.put(RECOVERY_ANSWER_KEY, answer);
