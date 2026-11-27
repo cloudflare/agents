@@ -7628,7 +7628,15 @@ export class ThinkSessionTestAgent extends Think {
     this._response = response;
   }
 
+  /** Think's own default prompt for this agent, for a "kept out" check. */
+  async getDefaultSystemPromptForTest(): Promise<string> {
+    return Think.prototype.getSystemPrompt.call(this);
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
+    // A turn that never reaches the model must not leave the last turn's
+    // prompt to be read as its own.
+    this._lastSystemPrompt = undefined;
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
     return {

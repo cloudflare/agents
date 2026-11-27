@@ -1809,7 +1809,9 @@ describe("Think — the system prompt a turn sends", () => {
       await agent.testChat("Hello");
       const system = await agent.getLastSystemPromptForTest();
       expect(system).toContain("map-reading");
-      expect(system).not.toContain("You are a careful, capable assistant");
+      // This config's own default, not a fixed string another default
+      // would escape.
+      expect(system).not.toContain(await agent.getDefaultSystemPromptForTest());
     }
   });
 
@@ -1845,15 +1847,41 @@ describe("Think — the system prompt a turn sends", () => {
       env.ThinkWorkspaceSkillsAgent as unknown as DurableObjectNamespace<ThinkWorkspaceSkillsAgent>,
       `sys-workspace-skills-${crypto.randomUUID()}`
     );
+    // No skills yet: no catalog and no skill tools.
     await agent.testChat("Hello");
     const first = await agent.getLastSystemPromptForTest();
     expect(first).toContain("No skills are available.");
+    expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
+    await expect(agent.getContextReminder()).resolves.toBeNull();
+
+    // A new skill reaches the model as a reminder after that turn's user
+    // message; the system prompt stays the same.
     await agent.writeSkill("map-reading", "How to read a map.");
     await agent.testChat("Hello again");
     await expect(agent.getLastSystemPromptForTest()).resolves.toBe(first);
+    expect(await agent.getTurnLastMessage()).toContain(
+      "- map-reading: How to read a map."
+    );
+    await expect(agent.getContextReminder()).resolves.toBeNull();
+    expect(await agent.getTurnToolNames()).toEqual(
+      expect.arrayContaining(["activate_skill", "read_skill_resource"])
+    );
+
     await agent.writeSkill("map-reading", "How to read a nautical chart.");
     await agent.testChat("And again");
     await expect(agent.getLastSystemPromptForTest()).resolves.toBe(first);
+    const edited = await agent.getTurnLastMessage();
+    expect(edited).toContain("- map-reading: How to read a nautical chart.");
+    expect(edited).not.toContain("How to read a map.");
+
+    // Deleting the skill is a change too.
+    await agent.deleteSkill("map-reading");
+    await agent.testChat("Last one");
+    expect(await agent.getTurnLastMessage()).toContain(
+      "No skills are available."
+    );
+    await expect(agent.getLastSystemPromptForTest()).resolves.toBe(first);
+    expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
   });
 
   it("folds a changed skill catalog into the system prompt once history is cleared", async () => {
