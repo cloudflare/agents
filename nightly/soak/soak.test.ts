@@ -204,7 +204,9 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
   };
 }
 
-describe("Think on a real model, through resets", () => {
+// The rooms run at once: each is its own object, and the whole soak is bounded
+// by one room (the test timeout, 30 minutes).
+describe.concurrent("Think on a real model, through resets", () => {
   for (let n = 1; n <= ROOMS; n++) {
     it(`room ${n}: ${TURNS} turns, every one answered, nothing lost or run twice`, async () => {
       process.env.PROBE_URL = inject("probeUrl");

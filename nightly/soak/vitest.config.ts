@@ -9,7 +9,9 @@ export default defineConfig({
     // No retries: a failure is a bug in the product or the suite.
     retry: 0,
     hookTimeout: 300_000,
-    // A room is twelve real-model turns, two of them through a reset.
+    // The rooms run at once, so the soak takes as long as its slowest room:
+    // twelve real-model turns, two through a reset, at most 30 minutes.
+    maxConcurrency: 3,
     testTimeout: 1_800_000
   }
 });
