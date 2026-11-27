@@ -1658,4 +1658,164 @@ describe("chat functions over a minimal host", () => {
       expect(replies).toHaveLength(1);
     });
   });
+
+  it("continueLastTurn with no reply to continue is skipped and calls nothing", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await instance.sessions.session("s1").appendMessage({
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Hi" }]
+      } as never);
+      const { requestId } = await submitTurn(instance.deps, instance.lane, {
+        trigger: "server",
+        mode: "continue"
+      });
+      expect(await instance.resultFor(requestId)).toMatchObject({
+        status: "skipped",
+        reason: "nothing-to-continue"
+      });
+      expect(instance.calls).toEqual([]);
+    });
+  });
+
+  it("continueLastTurn while the reply waits on a client tool is skipped", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      const { requestId } = await submitTurn(instance.deps, instance.lane, {
+        trigger: "server",
+        mode: "continue",
+        clientTools: [{ name: "ask" }]
+      });
+      expect(await instance.resultFor(requestId)).toMatchObject({
+        status: "skipped",
+        reason: "awaiting-client"
+      });
+      expect(instance.calls).toEqual([]);
+    });
+  });
+
+  it("continueLastTurn on a reply that holds nothing removes it and answers the question again", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "reasoning", text: "hm" }]
+      } as never);
+      const { requestId } = await submitTurn(instance.deps, instance.lane, {
+        trigger: "server",
+        mode: "continue"
+      });
+      expect(await instance.resultFor(requestId)).toMatchObject({
+        status: "completed"
+      });
+      expect(instance.calls[0]).toMatchObject({ mode: "answer" });
+      expect(instance.calls[0].messages.map((m) => m.id)).toEqual(["u1"]);
+      expect(await session.getMessage("a1")).toBeNull();
+    });
+  });
+
+  it("a body stored with continueLastTurn is the chat's; a pinned one is that turn's only", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi" }]
+      } as never);
+      const pinned = await submitTurn(instance.deps, instance.lane, {
+        trigger: "server",
+        mode: "continue",
+        body: { pinned: true }
+      });
+      await instance.resultFor(pinned.requestId);
+      const stored = await submitTurn(
+        instance.deps,
+        instance.lane,
+        { trigger: "server", mode: "continue", body: { stored: true } },
+        { storeContext: true }
+      );
+      await instance.resultFor(stored.requestId);
+      const later = await submitTurn(instance.deps, instance.lane, {
+        trigger: "server",
+        mode: "continue"
+      });
+      await instance.resultFor(later.requestId);
+      expect(instance.calls.map((c) => c.body)).toEqual([
+        { pinned: true },
+        { stored: true },
+        { stored: true }
+      ]);
+    });
+  });
+
+  it("an abort of the signal a turn was submitted with stops it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let called!: () => void;
+      const inRespond = new Promise<void>((resolve) => (called = resolve));
+      const respond = instance.host.respond;
+      instance.host.respond = async (call) => {
+        called();
+        await new Promise<void>((resolve) =>
+          call.signal.addEventListener("abort", () => resolve(), { once: true })
+        );
+        return respond(call);
+      };
+      const stop = new AbortController();
+      const { requestId } = await submitTurn(
+        instance.deps,
+        instance.lane,
+        {
+          trigger: "server",
+          messages: [
+            { id: "u1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+          ]
+        },
+        { signal: stop.signal }
+      );
+      await inRespond;
+      stop.abort();
+      expect(await instance.resultFor(requestId)).toMatchObject({
+        status: "aborted"
+      });
+      instance.host.respond = respond;
+    });
+  });
 });

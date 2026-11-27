@@ -21,6 +21,8 @@ import type { ClientToolSchema } from "./client-tools";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
 import { chatRecoveryBackoffSeconds } from "./recovery-engine";
 import { TaskSettlement } from "../tasks/settlement";
+import { continuationWaitsOnClient } from "./before-turn";
+import { replyIsRemovedAsEmpty } from "./repair-transcript";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
 import { sendIfOpen } from "./connection";
@@ -380,6 +382,8 @@ export type ChatTurnResult = {
   /** The stored reply's id, when one was stored. */
   readonly messageId?: string;
   readonly error?: string;
+  /** Why a "continue the last turn" was skipped. */
+  readonly reason?: "nothing-to-continue" | "awaiting-client";
 };
 
 /** The input of a chat-turn run. */
@@ -874,10 +878,48 @@ export function chatTurnDefinition(
       return (await session.getHistory(leaf)) as unknown as UIMessage[];
     };
     const messages = await history();
+    // "Continue the last turn", decided before anything is stored: with no
+    // reply, or a reply still waiting on the client, there is nothing to
+    // continue; a reply that holds nothing is removed and its question is
+    // answered again.
+    let answerAgain = false;
+    if (
+      !partial &&
+      run.mode === "continue" &&
+      run.trigger !== "tool-answer" &&
+      step.checkpoint.get(BASE_CHECKPOINT) === undefined
+    ) {
+      const last = messages.at(-1);
+      if (last?.role !== "assistant") {
+        return report({
+          requestId,
+          status: "skipped",
+          reason: "nothing-to-continue"
+        });
+      }
+      if (
+        continuationWaitsOnClient(
+          messages,
+          new Set((run.clientTools ?? []).map((tool) => tool.name))
+        )
+      ) {
+        return report({
+          requestId,
+          status: "skipped",
+          reason: "awaiting-client"
+        });
+      }
+      if (replyIsRemovedAsEmpty(last)) {
+        await session.deleteMessages([last.id]);
+        messages.pop();
+        answerAgain = true;
+      }
+    }
     // A tool answer continues the reply that asked for it (named, or the
     // latest); a host's "continue the last turn" does the same.
     if (
       !partial &&
+      !answerAgain &&
       (run.trigger === "tool-answer" || run.mode === "continue")
     ) {
       const last = messages.at(-1);
