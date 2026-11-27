@@ -1968,6 +1968,7 @@ describe("think messengers core", () => {
       for (let i = 0; i < 1000 && !done; i++) {
         await vi.advanceTimersByTimeAsync(5);
       }
+      if (!done) throw new Error("the delivery never ended on the fake clock");
       return delivered;
     }
 
