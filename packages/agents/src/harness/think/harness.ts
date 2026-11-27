@@ -4,6 +4,7 @@ import {
   readUIMessageStream,
   stepCountIs,
   streamText,
+  type LanguageModelUsage,
   type ModelMessage,
   type ToolSet,
   type UIMessage,
@@ -2190,7 +2191,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             step: steps - 1,
             message: reply,
             finishReason:
-              finish.type === "finish" ? finish.finishReason : undefined
+              finish.type === "finish" ? finish.finishReason : undefined,
+            usage: await model.usage()
           });
           continue;
         }
@@ -2242,6 +2244,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   ): Promise<{
     readonly stream: AsyncIterable<UIMessageChunk>;
     readonly error: () => unknown;
+    /** The call's token usage, once its stream ended. */
+    readonly usage: () => Promise<LanguageModelUsage | undefined>;
   }> {
     const { session, operationId, built, placed } = turn;
     const { tools } = built;
@@ -2336,6 +2340,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }));
     let modelError: unknown;
     const result = streamText({
+      // First, so none of the harness's own arguments below is overridden.
+      ...config.callSettings,
       model,
       ...(effectiveSystem !== undefined && { system: effectiveSystem }),
       messages,
@@ -2363,6 +2369,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const stream = result.toUIMessageStream({
       originalMessages: [] as UIMessage[],
       generateMessageId: () => messageId,
+      ...(config.sendReasoning === false && { sendReasoning: false }),
       // The participant who started the turn runs its client tools.
       messageMetadata: ({ part }) =>
         part.type === "start" && owner !== undefined ? { owner } : undefined
@@ -2375,7 +2382,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           modelError ??= error;
         }
       })(),
-      error: () => modelError
+      error: () => modelError,
+      // A failed call may have none; the step goes on without it.
+      usage: () =>
+        Promise.resolve(result.usage).then(
+          (usage) => usage,
+          () => undefined
+        )
     };
   }
 
