@@ -2058,66 +2058,6 @@ describe("onChatRecovery", () => {
     ).toContain("Continued response.");
   });
 
-  it("retries, in its own run, a recovery run an earlier version enqueued that times out waiting for a stable chat", async () => {
-    const agentStub = await getTestAgent(`upgrade-wait-${crypto.randomUUID()}`);
-    await agentStub.persistMessages([
-      { id: "u-x", role: "user", parts: [{ type: "text", text: "Hi" }] },
-      {
-        id: "a-x",
-        role: "assistant",
-        parts: [{ type: "text", text: "Partial" }]
-      }
-    ]);
-    await agentStub.setForceStableTimeoutForTest(true);
-    await agentStub.seedIncidentForTest({
-      incidentId: "inc-wait",
-      requestId: "root-wait",
-      recoveryKind: "continue",
-      attempt: 1,
-      maxAttempts: 6,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now()
-    });
-    await agentStub.seedReleasedRecoveryRunForTest(
-      "_chatRecoveryContinue",
-      {
-        incidentId: "inc-wait",
-        originalRequestId: "root-wait",
-        targetAssistantId: "a-x"
-      },
-      60
-    );
-    await agentStub.runScheduledRecoveryContinueForTest();
-
-    // The attempt timed out waiting and planned the next one into its own
-    // run: still one run, now waiting out the retry's delay.
-    expect(
-      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
-    ).toBe(1);
-    expect(await agentStub.openReleasedRecoveryRunsForTest()).toBe(1);
-    const steps = await agentStub.recoveryRunStepsForTest();
-    expect(steps).toEqual(
-      expect.arrayContaining(["backoff-2:waiting", "continuation:completed"])
-    );
-    expect(steps.some((step) => step.startsWith("continuation-2"))).toBe(false);
-    const incident = await agentStub.getIncidentForTest("inc-wait");
-    expect(incident?.attempt).toBe(2);
-    expect(incident?.status).toBe("scheduled");
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
-
-    // The retry fires in that run once the chat is stable: the reply is
-    // continued and the run ends.
-    await agentStub.setForceStableTimeoutForTest(false);
-    await agentStub.runScheduledRecoveryContinueForTest();
-    await agentStub.waitForIdleForTest();
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-    expect(await agentStub.getIncidentForTest("inc-wait")).toBeNull();
-    expect(
-      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
-    ).toBe(0);
-  });
-
   it("reschedules a continuation that times out waiting for stable state, within the attempt budget", async () => {
     const agentStub = await getTestAgent(`stable-retry-${crypto.randomUUID()}`);
     await agentStub.setForceStableTimeoutForTest(true);

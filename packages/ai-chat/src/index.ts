@@ -1277,11 +1277,16 @@ export class AIChatAgent<
     // SAFETY: the recovery engine is the sole producer of each callback's
     // payload and Tasks persists it verbatim, so the callback name selects
     // the matching host input type.
+    // A recovery an earlier version scheduled and had not run yet: its
+    // turn is carried onto the chat's lane.
     const attempts: ChatRecoveryTaskHooks = {
       _chatRecoveryContinue: (data) =>
-        this._chatRecoveryContinue(data as ChatRecoveryContinueData),
+        this._carryReleasedRecovery(
+          "continue",
+          data as ChatRecoveryContinueData
+        ),
       _chatRecoveryRetry: (data) =>
-        this._chatRecoveryRetry(data as ChatRecoveryRetryData)
+        this._carryReleasedRecovery("retry", data as ChatRecoveryRetryData)
     };
     const chatFiberName = (this.constructor as typeof AIChatAgent)
       .CHAT_FIBER_NAME;
@@ -4097,9 +4102,7 @@ export class AIChatAgent<
     };
     await submitTurn(
       this._chatDeps(),
-      // A carried turn takes its place in the lane; it is not a new message
-      // that could skip the ones waiting.
-      { ...this._chatLane(), arrival: "queue" },
+      this._chatLane(),
       plan.action === "continue"
         ? { trigger: "server", mode: "continue", ...context }
         : {
@@ -4112,10 +4115,61 @@ export class AIChatAgent<
           },
       {
         requestId,
+        // A carried turn takes its place in the lane: it is not a new
+        // message that could skip the ones waiting.
+        arrival: "queue",
         // The user messages the request came from, so its end names them.
         ...(snapshot?.originMessageIds &&
           snapshot.originMessageIds.length > 0 && {
             metadata: { chat: { messageIds: snapshot.originMessageIds } }
+          })
+      }
+    );
+  }
+
+  /**
+   * A recovery an earlier version had scheduled (its Task run, replayed
+   * here): the reply it was to continue, or the question it was to answer
+   * again, becomes a turn on the chat's lane under the original request id.
+   * The version that scheduled it had asked `onChatRecovery` already.
+   */
+  private async _carryReleasedRecovery(
+    kind: "continue" | "retry",
+    data: ChatRecoveryContinueData & ChatRecoveryRetryData
+  ): Promise<void> {
+    const requestId = data.originalRequestId;
+    if (requestId === undefined) return;
+    await this._forgetReleasedIncidents(requestId);
+    if (await this.tasks.get(requestId)) return;
+    const leaf = await this.#session.getLatestLeaf();
+    // Only while the message it was scheduled for is still the latest: a
+    // conversation that moved on has nothing of this turn's to finish.
+    const target =
+      kind === "continue" ? data.targetAssistantId : data.targetUserId;
+    if (!leaf || (target !== undefined && leaf.id !== target)) {
+      this._frames.endUnstarted(null, requestId, "aborted");
+      return;
+    }
+    const body = data.lastBody ?? this._turns.lastBody;
+    const clientTools = data.lastClientTools ?? this._turns.lastClientTools;
+    const context = {
+      ...(body !== undefined && body !== null && { body }),
+      ...(clientTools !== undefined &&
+        clientTools !== null &&
+        clientTools.length > 0 && { clientTools })
+    };
+    await submitTurn(
+      this._chatDeps(),
+      this._chatLane(),
+      kind === "continue"
+        ? { trigger: "server", mode: "continue", ...context }
+        : { trigger: "submit-message", questionId: leaf.id, ...context },
+      {
+        requestId,
+        arrival: "queue",
+        ...(data.originMessageIds &&
+          data.originMessageIds.length > 0 && {
+            metadata: { chat: { messageIds: data.originMessageIds } }
           })
       }
     );
