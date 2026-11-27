@@ -311,6 +311,76 @@ describe("chatTurnDefinition", () => {
     });
   });
 
+  it("a turn cut off while its reply waits on a client tool is not given up by the budget: it waits for the answer", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await instance.sessions.session("s1").appendMessage({
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Hi" }]
+      } as never);
+      const cut = await instance.streams.open(chatTurnStreamId("run-w"), {
+        tag: "run-w"
+      });
+      for (const chunk of [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "c1",
+          toolName: "ask",
+          input: {}
+        }
+      ]) {
+        cut.append(chunk as never);
+      }
+      const recoveries: number[] = [];
+      // The attempt limit was reached before, a minute ago, with nothing
+      // streamed since.
+      const kept = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-w",
+            requestId: "run-w",
+            recoveryKind: "continue",
+            attempt: 2,
+            maxAttempts: 2,
+            status: "attempting",
+            firstSeenAt: Date.now() - 120_000,
+            lastAttemptAt: Date.now() - 60_000,
+            progress: 1_000,
+            workBaseline: 0
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          ...instance.host.hooks,
+          onRecovery: (context) => void recoveries.push(context.attempt)
+        },
+        options: { recovery: { maxAttempts: 2 } }
+      })(
+        {
+          trigger: "submit-message",
+          questionId: "u1",
+          clientTools: [{ name: "ask" }]
+        },
+        laterAttempt("run-w", 2, undefined, kept)
+      );
+      expect(result).toMatchObject({
+        requestId: "run-w",
+        status: "skipped",
+        reason: "awaiting-client"
+      });
+      // The model is not asked. The app was, and did not object.
+      expect(instance.calls).toEqual([]);
+      expect(recoveries).toHaveLength(1);
+      expect(kept.get("chat:incident")).toMatchObject({ status: "attempting" });
+    });
+  });
+
   it("hands onRecovery what the turn stashed and the request it was sent with", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {

@@ -1425,6 +1425,15 @@ export function chatTurnDefinition(
         isolate: (isolateId ??= crypto.randomUUID()),
         token: crypto.randomUUID()
       };
+      // A reply that waits on the client (a client tool's result, an
+      // approval) is not stuck: the budget cannot give it up while it
+      // waits. The app is still asked, since it may choose to drop it.
+      const awaitsClient =
+        partial !== undefined &&
+        continuationWaitsOnClient(
+          [partial],
+          new Set((run.clientTools ?? []).map((tool) => tool.name))
+        );
       const evaluated =
         recovery === false
           ? undefined
@@ -1464,7 +1473,7 @@ export function chatTurnDefinition(
                 : null,
               // Progress is every chunk streamed, so a little more counts.
               currentProgress: streamedCount,
-              awaitingClientInteraction: false,
+              awaitingClientInteraction: awaitsClient,
               now: Date.now(),
               onShouldKeepRecoveringError: (error) =>
                 console.error(
