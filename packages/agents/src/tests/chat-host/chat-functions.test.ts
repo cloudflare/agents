@@ -1373,4 +1373,41 @@ describe("chat functions over a minimal host", () => {
       });
     });
   });
+
+  it("a server tool's call is written before the tool runs, so a reset while it runs keeps it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      // The tool runs (the model stream waits) after its input arrived.
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "tool-input-start", toolCallId: "s1", toolName: "lookup" },
+        { type: "tool-input-delta", toolCallId: "s1", inputTextDelta: "{}" },
+        {
+          type: "tool-input-available",
+          toolCallId: "s1",
+          toolName: "lookup",
+          input: {}
+        }
+      ]);
+      // What a reset now would find: the stored chunks, nothing flushed.
+      const stop = new AbortController();
+      const types: string[] = [];
+      try {
+        for await (const batch of instance.streams.readBatches(
+          chatTurnStreamId("r1"),
+          { signal: stop.signal, onUpToDate: () => stop.abort() }
+        )) {
+          for (const item of batch)
+            types.push((item.chunk as { type: string }).type);
+          if (stop.signal.aborted) break;
+        }
+      } catch (error) {
+        if (!stop.signal.aborted) throw error;
+      }
+      expect(types).toContain("tool-input-available");
+      release();
+      await instance.resultFor("r1");
+    });
+  });
 });
