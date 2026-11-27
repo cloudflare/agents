@@ -163,17 +163,21 @@ const SUBMISSION_DEFINITION = "__cf_think_harness_submission";
 /** The longest caller's reason kept on an aborted operation's run. */
 const MAX_ABORT_REASON = 1024;
 
+/** How an aborted operation ended: withdrawn if its run never started. */
+function abortedAs(record: TaskRecord): "withdrawn" | "aborted" {
+  return record.attempt === 0 ? "withdrawn" : "aborted";
+}
+
 /**
  * The reason a caller gave when it aborted the operation of `record`
  * ({@link ThinkHarness.abort}), or `undefined` when the run was not
- * cancelled or was cancelled with the harness's own `"withdrawn"` or
- * `"aborted"`. Only `abort` cancels an operation's run.
+ * cancelled, or its reason is the word the harness records by itself for
+ * how it ended ({@link abortedAs}). Only `abort` cancels an operation's run.
  */
 function callerAbortReason(record: TaskRecord): string | undefined {
   return record.status === "aborted" &&
     record.reason !== undefined &&
-    record.reason !== "withdrawn" &&
-    record.reason !== "aborted"
+    record.reason !== abortedAs(record)
     ? record.reason
     : undefined;
 }
@@ -1100,6 +1104,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return record
       ? this.#result(record)
       : { operationId, session, status: "unanswered", reason: "not_found" };
+  }
+
+  /**
+   * @internal Wait for an operation to settle, and return it as it settled,
+   * with what its run records: for the harness-backed Think's
+   * `waitForSubmission`, whose submission may be deleted by the time the
+   * wait resolves (the app's terminal hook may delete it).
+   */
+  async settled(
+    session: ThinkSessionId,
+    operationId: string,
+    signal?: AbortSignal
+  ): Promise<ThinkOperationInspection | undefined> {
+    await this.lifecycle.ready();
+    signal?.throwIfAborted();
+    const record = await this.#tasks.wait(runIdOf(session, operationId), {
+      ...(signal && { signal })
+    });
+    signal?.throwIfAborted();
+    return record ? this.#inspection(record) : undefined;
   }
 
   /** @internal */
@@ -2667,14 +2691,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             : record.error?.message
         );
       default:
-        // A caller's reason is its own text: whether the operation was
-        // withdrawn or aborted is whether its run had started.
+        // Whether the operation was withdrawn or aborted is whether its
+        // run had started, whatever reason its caller gave.
         return unanswered(
-          callerAbortReason(record) === undefined
-            ? (record.reason ?? "aborted")
-            : record.startedAt === undefined
-              ? "withdrawn"
-              : "aborted"
+          record.status === "aborted"
+            ? abortedAs(record)
+            : (record.reason ?? "aborted")
         );
     }
   }

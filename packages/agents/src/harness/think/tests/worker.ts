@@ -833,6 +833,24 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.pending();
   }
 
+  /** A submission's status as `submit` returns, before any other event. */
+  async submittedAs(text: string, operationId: string): Promise<string> {
+    await this.harness.session().submit(text, {
+      operationId,
+      submission: true
+    });
+    return (await this.harness.session().inspect(operationId))?.status ?? "";
+  }
+
+  /** An operation as it settled, for a waiter: plain JSON for RPC. */
+  async settledRecord(operationId: string): Promise<string> {
+    const settled = await this.harness.settled(
+      this.harness.session().id,
+      operationId
+    );
+    return JSON.stringify(settled ?? null);
+  }
+
   /** Abort with the caller's own reason, through the internal method. */
   abortWithReason(operationId: string, reason: string): Promise<boolean> {
     return this.harness.abort(this.harness.session().id, operationId, reason);

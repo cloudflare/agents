@@ -1135,25 +1135,29 @@ export class Think<
       options?.timeoutMs === undefined
         ? undefined
         : AbortSignal.timeout(options.timeoutMs);
-    let result: Awaited<
-      ReturnType<ReturnType<ThinkHarness["session"]>["wait"]>
-    >;
+    let settled: ThinkOperationInspection | undefined;
     try {
-      result = await this.harness.session().wait(submissionId, timeout);
+      settled = await this.harness.settled(
+        this.harness.session().id,
+        submissionId,
+        timeout
+      );
     } catch (error) {
       if (!timeout?.aborted) throw error;
       return this.inspectSubmission(submissionId);
     }
-    // Read again for its times; deleted meanwhile (the app's terminal hook
-    // may delete it), the wait's result still says how it ended, and it
-    // ended no later than now.
+    // Read again; deleted meanwhile (the app's terminal hook may delete
+    // it), the wait still has it as it settled, with a cancel's reason.
     return (
       (await this.inspectSubmission(submissionId)) ??
-      submissionInspection({
-        ...before,
-        ...result,
-        settledAt: before.settledAt ?? Date.now()
-      })
+      submissionInspection(
+        settled ?? {
+          ...before,
+          status: "unanswered",
+          reason: "not_found",
+          settledAt: before.settledAt ?? Date.now()
+        }
+      )
     );
   }
 
