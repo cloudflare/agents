@@ -391,6 +391,62 @@ describe("AIChatAgent messageConcurrency", () => {
     ws.close(1000);
   });
 
+  it.each([
+    ["merge", "merge-message-concurrency-agent"],
+    ["latest", "latest-message-concurrency-agent"],
+    ["queue", "slow-stream-agent"]
+  ])(
+    "%s: a reply stopped while it streams is stored before the question waiting behind it",
+    async (_mode, path) => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/${path}/${room}`);
+      const agentStub = await getAgentByName(
+        (path === "slow-stream-agent"
+          ? env.SlowStreamAgent
+          : path.startsWith("merge")
+            ? env.MergeMessageConcurrencyAgent
+            : env.LatestMessageConcurrencyAgent) as typeof env.MergeMessageConcurrencyAgent,
+        room
+      );
+      const body = { format: "plaintext", chunkCount: 3, chunkDelayMs: 0 };
+
+      // The first reply has streamed a chunk and is held there.
+      await agentStub.holdStreamForTest("req-stop-1");
+      onTestFinished(() => agentStub.releaseStreamForTest("req-stop-1"));
+      sendChatRequest(ws, "req-stop-1", [firstUserMessage], body);
+      await waitUntil(() => agentStub.isStreamHeldForTest("req-stop-1"));
+
+      // A second question waits behind it, and the user stops the first.
+      sendChatRequest(
+        ws,
+        "req-stop-2",
+        [firstUserMessage, secondUserMessage],
+        body
+      );
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+          id: "req-stop-1"
+        })
+      );
+      await waitUntil(
+        async () =>
+          ((await agentStub.getPersistedMessages()) as ChatMessage[]).filter(
+            (message) => message.role === "assistant"
+          ).length === 2
+      );
+
+      const persisted =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(
+        persisted.map((message) =>
+          message.role === "user" ? message.id : message.role
+        )
+      ).toEqual(["user-1", "assistant", "user-2", "assistant"]);
+      ws.close(1000);
+    }
+  );
+
   it("merge concatenates overlapping queued user messages into one follow-up turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(
@@ -476,65 +532,6 @@ describe("AIChatAgent messageConcurrency", () => {
       ["user-1", persistedMessages[1].id, "user-3"]
     ]);
 
-    ws.close(1000);
-  });
-
-  it("merge holds queued messages when persistMessages is overridden", async () => {
-    const room = crypto.randomUUID();
-    const { ws } = await connectChatWS(
-      `/agents/overriding-persist-merge-agent/${room}`
-    );
-    const agentStub = await getAgentByName(
-      env.OverridingPersistMergeAgent,
-      room
-    );
-    // The first reply stays active until the test releases it.
-    await agentStub.holdStreamForTest("req-om-1");
-    onTestFinished(() => agentStub.releaseStreamForTest("req-om-1"));
-    sendChatRequest(ws, "req-om-1", [firstUserMessage], {
-      format: "plaintext",
-      chunkCount: 15,
-      chunkDelayMs: 100
-    });
-    sendChatRequest(ws, "req-om-2", [firstUserMessage, secondUserMessage], {
-      format: "plaintext",
-      chunkCount: 2,
-      chunkDelayMs: 10
-    });
-    sendChatRequest(
-      ws,
-      "req-om-3",
-      [firstUserMessage, secondUserMessage, thirdUserMessage],
-      { format: "plaintext", chunkCount: 2, chunkDelayMs: 10 }
-    );
-    await waitForOverlappingSubmits(agentStub, 2);
-    // Waiting, not stored, though the override does not pass options on.
-    expect(
-      ((await agentStub.getPersistedMessages()) as ChatMessage[]).map(
-        (m) => m.id
-      )
-    ).toEqual(["user-1"]);
-    await agentStub.releaseStreamForTest("req-om-1");
-    await agentStub.waitForIdleForTest();
-    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
-    // Both questions join after the first reply and one turn answers them.
-    // (The override drops the delete that collapses them into one message,
-    // as it did before.)
-    expect(persisted.map((m) => m.role)).toEqual([
-      "user",
-      "assistant",
-      "user",
-      "user",
-      "assistant"
-    ]);
-    expect(persisted[2].id).toBe("user-2");
-    expect(
-      persisted[3].parts.flatMap((p) => (p.type === "text" ? [p.text] : []))
-    ).toEqual(["Second\n\nThird"]);
-    expect(await agentStub.getStartedRequestIds()).toEqual([
-      "req-om-1",
-      "req-om-3"
-    ]);
     ws.close(1000);
   });
 

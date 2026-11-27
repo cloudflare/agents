@@ -666,6 +666,50 @@ describe("Message Sanitization", () => {
     ws.close(1000);
   });
 
+  it("runs the hook on a tool result a tab sends, before it is stored or sent to tabs", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/custom-sanitize-agent/${room}`);
+    const updates: Array<{ message?: ChatMessage }> = [];
+    ws.addEventListener("message", (event: MessageEvent) => {
+      const frame = JSON.parse(event.data as string) as {
+        type?: string;
+        message?: ChatMessage;
+      };
+      if (frame.type === "cf_agent_message_updated") updates.push(frame);
+    });
+    const agentStub = await getAgentByName(env.CustomSanitizeAgent, room);
+    await agentStub.persistMessages([
+      {
+        id: "msg-call",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-myTool",
+            toolCallId: "call_answer",
+            state: "input-available",
+            input: { query: "test" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_answer",
+        toolName: "myTool",
+        output: { content: "sensitive data", metadata: "keep" },
+        autoContinue: false
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const output = (persisted[0].parts[0] as { output?: { content?: string } })
+      .output;
+    expect(output?.content).toBe("[custom-redacted]");
+    expect(JSON.stringify(updates)).not.toContain("sensitive data");
+    ws.close(1000);
+  });
+
   it("user hook runs after built-in sanitization", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/custom-sanitize-agent/${room}`);

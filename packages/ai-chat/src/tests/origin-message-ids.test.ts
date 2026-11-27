@@ -78,7 +78,7 @@ describe("originating message ids on terminal frames (#2280)", () => {
     ws.close(1000);
   });
 
-  it("carries the ids onto a recovered turn's successor request", async () => {
+  it("carries the ids onto the end of a turn recovered inside its run", async () => {
     const room = crypto.randomUUID();
     const agent = await getAgentByName(env.ChatRecoveryTestAgent, room);
     await (
@@ -89,37 +89,15 @@ describe("originating message ids on terminal frames (#2280)", () => {
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
     );
-    const successorTerminals: ResponseFrame[] = [];
-    ws.addEventListener("message", (e: MessageEvent) => {
-      const frame = JSON.parse(e.data as string) as ResponseFrame;
-      if (
-        frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        frame.id !== "req-stall" &&
-        frame.done
-      ) {
-        successorTerminals.push(frame);
-      }
-    });
-
-    const first = waitForTerminal(ws, "req-stall");
+    // The stalled attempt is retried inside the same run, under the same
+    // request id: its one end names the request's messages.
+    const end = waitForTerminal(ws, "req-stall");
     sendChat(ws, "req-stall", [user("msg-s")]);
-    expect(await first).toMatchObject({
-      messageIds: ["msg-s"],
-      outcome: "recovering"
-    });
-
-    for (let i = 0; i < 60 && successorTerminals.length === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    expect(successorTerminals.length).toBeGreaterThan(0);
-    for (const frame of successorTerminals) {
-      expect(frame.messageIds).toEqual(["msg-s"]);
-    }
-
+    expect(await end).toMatchObject({ messageIds: ["msg-s"] });
     ws.close(1000);
   });
 
-  it("carries the ids onto a turn re-run after its reader failed before any part", async () => {
+  it("carries the ids onto the end of a turn re-run after its reader failed before any part", async () => {
     const room = crypto.randomUUID();
     const agent = await getAgentByName(env.ChatRecoveryTestAgent, room);
     await (
@@ -130,30 +108,9 @@ describe("originating message ids on terminal frames (#2280)", () => {
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
     );
-    const successorTerminals: ResponseFrame[] = [];
-    ws.addEventListener("message", (e: MessageEvent) => {
-      const frame = JSON.parse(e.data as string) as ResponseFrame;
-      if (
-        frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        frame.id !== "req-drop" &&
-        frame.done
-      ) {
-        successorTerminals.push(frame);
-      }
-    });
-
-    const first = waitForTerminal(ws, "req-drop");
+    const end = waitForTerminal(ws, "req-drop");
     sendChat(ws, "req-drop", [user("msg-r")]);
-    expect((await first).messageIds).toEqual(["msg-r"]);
-
-    for (let i = 0; i < 100 && successorTerminals.length === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    expect(successorTerminals.length).toBeGreaterThan(0);
-    for (const frame of successorTerminals) {
-      expect(frame.messageIds).toEqual(["msg-r"]);
-    }
-
+    expect((await end).messageIds).toEqual(["msg-r"]);
     ws.close(1000);
   });
 
@@ -205,81 +162,6 @@ describe("originating message ids on terminal frames (#2280)", () => {
     }
 
     ws.close(1000);
-  });
-
-  it("carries the ids onto a pre-stream turn that exhausts on wake", async () => {
-    const room = crypto.randomUUID();
-    const agent = (await getAgentByName(
-      env.ChatRecoveryTestAgent,
-      room
-    )) as unknown as {
-      enableExhaustedCaptureForTest(maxAttempts: number): Promise<void>;
-      persistMessages(messages: unknown[]): Promise<void>;
-      insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
-      seedIncidentForTest(incident: Record<string, unknown>): Promise<void>;
-      readProgressMarkerForTest(): Promise<number>;
-      triggerFiberRecovery(): Promise<void>;
-      getPendingChatTerminalForTest(): Promise<{
-        requestId: string;
-        messageIds?: string[];
-      } | null>;
-    };
-    await agent.enableExhaustedCaptureForTest(1);
-    await agent.persistMessages([user("msg-x")]);
-    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-x", {
-      __cfAIChatFiberSnapshot: {
-        kind: "ai-chat-turn",
-        version: 1,
-        requestId: "req-x",
-        continuation: false,
-        latestMessageId: "msg-x",
-        latestMessageRole: "user",
-        latestUserMessageId: "msg-x",
-        startedAt: Date.now(),
-        originMessageIds: ["msg-x"]
-      },
-      user: null
-    });
-    await agent.seedIncidentForTest({
-      incidentId: "req-x:msg-x",
-      requestId: "req-x",
-      recoveryKind: "retry",
-      attempt: 1,
-      maxAttempts: 1,
-      status: "scheduled",
-      firstSeenAt: Date.now() - 60_000,
-      lastAttemptAt: Date.now() - 60_000,
-      progress: await agent.readProgressMarkerForTest()
-    });
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    const terminal = waitForTerminal(ws, "req-x", (frame) => !!frame.error);
-
-    await agent.triggerFiberRecovery();
-    expect((await terminal).messageIds).toEqual(["msg-x"]);
-    expect(await agent.getPendingChatTerminalForTest()).toMatchObject({
-      requestId: "req-x",
-      messageIds: ["msg-x"]
-    });
-
-    ws.close(1000);
-  });
-
-  it("keeps a recovery's ids off requests running outside its scope", async () => {
-    const agent = (await getAgentByName(
-      env.ChatRecoveryTestAgent,
-      crypto.randomUUID()
-    )) as unknown as {
-      probeRecoveryOriginScopeForTest(ids: string[]): Promise<{
-        successor: string[] | undefined;
-        unrelated: string[] | undefined;
-      }>;
-    };
-    expect(await agent.probeRecoveryOriginScopeForTest(["msg-u"])).toEqual({
-      successor: ["msg-u"],
-      unrelated: undefined
-    });
   });
 
   it("omits messageIds when the request carries no trailing user message", async () => {

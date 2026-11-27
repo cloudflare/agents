@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { seedTaskRun, type TaskHarnessObject } from "../capabilities/tasks";
 
@@ -319,6 +323,52 @@ describe("Tasks lanes", () => {
             .peekList({ definition: "__cf_echo" })
             .map((r) => r.runId)
         ).toEqual(["e"]);
+      }
+    );
+  });
+
+  it("lets an onStart that awaits its own lane run go ahead of runs left from before a reset", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        // A run from before the reset: still `running`, its isolate gone.
+        seedTaskRun(state.storage, {
+          runId: "old",
+          definition: "laned",
+          input: { label: "old" },
+          status: "running",
+          generation: "dead-generation",
+          attempt: 1,
+          nextAt: Date.now() + 60_000
+        });
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET lane = 'l', seq = 1, created_at = 1 WHERE run_id = 'old'"
+        );
+        state.storage.kv.put("startupLaneRun", true);
+      }
+    );
+    // The reset.
+    await evictDurableObject(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        // A fresh start: onStart awaits its own run while "old" waits in
+        // the lane. Behind it, startup would never end.
+        const started = await Promise.race([
+          instance.lifecycle.start().then(() => "started"),
+          new Promise((resolve) => setTimeout(() => resolve("stuck"), 3_000))
+        ]);
+        expect(started).toBe("started");
+        expect(instance.lanedStarted).toEqual(["startup"]);
+        state.storage.kv.delete("startupLaneRun");
+        // The run from before the reset goes next.
+        await instance.tasks.runDue("laned");
+        await until(
+          async () => (await instance.tasks.get("old"))?.status === "completed"
+        );
+        expect(instance.lanedStarted).toEqual(["startup", "old"]);
       }
     );
   });

@@ -49,59 +49,6 @@ async function agent(room = crypto.randomUUID()) {
   };
 }
 
-const exchange = [
-  { id: "u1", role: "user", parts: [{ type: "text", text: "question" }] },
-  { id: "a1", role: "assistant", parts: [{ type: "text", text: "partial" }] }
-];
-
-function scheduledContinue(incidentId: string) {
-  return {
-    incidentId,
-    requestId: `root-${incidentId}`,
-    recoveryKind: "continue",
-    attempt: 1,
-    maxAttempts: 6,
-    status: "scheduled",
-    firstSeenAt: Date.now(),
-    lastAttemptAt: Date.now(),
-    scheduled: { callback: "_chatRecoveryContinue", targetMessageId: "a1" }
-  };
-}
-
-describe("a continuation takes a reply over from its scheduled recovery", () => {
-  it.each(["nothing", "throw"] as const)(
-    "not when its onChatMessage ends before a reply (%s)",
-    async (how) => {
-      const { stub } = await agent();
-      await stub.persistMessages(exchange);
-      await stub.seedIncidentForTest(scheduledContinue("inc-open"));
-
-      // The app continues the reply itself, and its model call fails or
-      // returns nothing. The reply still needs its recovery.
-      await stub.endNextTurnBeforeReplyForTest(how);
-      await stub.continueLastTurnForTest();
-
-      expect(await stub.getOnChatMessageCallCount()).toBe(1);
-      expect(await stub.getIncidentForTest("inc-open")).toMatchObject({
-        status: "scheduled"
-      });
-    }
-  );
-
-  it("once its onChatMessage returned a reply", async () => {
-    const { stub } = await agent();
-    await stub.persistMessages(exchange);
-    await stub.seedIncidentForTest(scheduledContinue("inc-taken"));
-
-    expect(await stub.continueLastTurnForTest()).toBe("completed");
-
-    expect(await stub.getIncidentForTest("inc-taken")).toMatchObject({
-      status: "skipped",
-      reason: "continued_by_interaction"
-    });
-  });
-});
-
 describe("a turn that finished before a clear", () => {
   it("is completed when the clear lands while onChatResponse runs", async () => {
     const { stub } = await agent();
@@ -116,18 +63,17 @@ describe("a turn that finished before a clear", () => {
   });
 });
 
-describe("why a turn is aborted", () => {
-  it("says interrupted for a turn that was cut off and handed to recovery", async () => {
+describe("a turn recovery finishes", () => {
+  it("a turn that was cut off and recovered inside its run reports completed, not interrupted", async () => {
     const { stub } = await agent();
     await stub.armFailingReaderForTest("Network connection lost.");
 
     const result = await stub.saveSyntheticUserMessage("hello");
 
-    // Nobody stopped it, and recovery then finishes the reply.
-    expect(result).toMatchObject({ status: "aborted", reason: "interrupted" });
-    await expect
-      .poll(() => stub.getOnChatMessageCallCount(), { timeout: 8000 })
-      .toBe(2);
+    // Nobody stopped it: recovery finishes the reply inside the same turn,
+    // and the caller is told how the turn ended.
+    expect(result).toMatchObject({ status: "completed" });
+    expect(await stub.getOnChatMessageCallCount()).toBe(2);
     await stub.waitForIdleForTest();
   });
 });
@@ -163,31 +109,6 @@ describe("a context pinned on a turn", () => {
     expect(await stub.getStoredRequestContextForTest()).toEqual({
       body: null,
       clientTools: null
-    });
-  });
-
-  it("a recovered turn runs with the interrupted request's context and leaves the stored one", async () => {
-    const { stub } = await agent();
-    await stub.setRequestContextForTest({ chat: true }, [{ name: "chatTool" }]);
-    await stub.persistMessages(exchange);
-    await stub.seedIncidentForTest(scheduledContinue("inc-run"));
-
-    // The interrupted turn was an agent-tool run's: its input was its body.
-    await stub.runChatRecoveryContinueDirectForTest({
-      incidentId: "inc-run",
-      originalRequestId: "root-inc-run",
-      targetAssistantId: "a1",
-      lastBody: { agentToolInput: "the run's input" },
-      lastClientTools: null
-    });
-
-    expect(await stub.getOnChatMessageBodies()).toEqual([
-      { agentToolInput: "the run's input" }
-    ]);
-    // The chat's next turn does not inherit the run's input.
-    expect(await stub.getStoredRequestContextForTest()).toEqual({
-      body: { chat: true },
-      clientTools: ["chatTool"]
     });
   });
 

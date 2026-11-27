@@ -96,7 +96,10 @@ function textDeltas(frames: Frame[], opts: { replayOnly: boolean }): string[] {
  * RESUME_REQUEST, ACK the STREAM_RESUMING offer, and collect everything the
  * server sends until a terminal `done: true` frame (or RESUME_NONE) arrives.
  */
-async function reconnectAndCollect(path: string): Promise<Frame[]> {
+async function reconnectAndCollect(
+  path: string,
+  requestIds: string[]
+): Promise<Frame[]> {
   const { ws } = await connectChatWS(path);
   const frames = collectFrames(ws);
   ws.addEventListener("message", (e: MessageEvent) => {
@@ -114,7 +117,13 @@ async function reconnectAndCollect(path: string): Promise<Frame[]> {
       // ignore
     }
   });
-  ws.send(JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST }));
+  // A tab asks with the requests it still waits on, as the client does.
+  ws.send(
+    JSON.stringify({
+      type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+      requestIds
+    })
+  );
   await waitFor(() =>
     frames.some(
       (f) =>
@@ -168,16 +177,14 @@ describe("Errored stream replay (#1575)", () => {
           .length === 1
     );
 
-    // A fresh client — it observed none of the live frames — reconnects.
-    const frames = await reconnectAndCollect(path);
+    // The tab reconnects having seen none of the live frames.
+    const frames = await reconnectAndCollect(path, ["req-err-partial"]);
 
-    // It must observe the SAME outcome: the partial content (as replay
-    // frames), then a terminal done+error frame with the same error text.
-    expect(textDeltas(frames, { replayOnly: true })).toEqual([
-      "partial-0 ",
-      "partial-1 ",
-      "partial-2 "
-    ]);
+    // It observes the same outcome. The partial content is in the stored
+    // transcript (a failed reply keeps what it streamed), which the tab
+    // loads; the terminal done+error frame carries the same error text.
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(JSON.stringify(stored.at(-1))).toContain("partial-2");
     const terminal = frames.find(
       (f) =>
         f.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
@@ -219,7 +226,7 @@ describe("Errored stream replay (#1575)", () => {
           .length === 1
     );
 
-    const frames = await reconnectAndCollect(path);
+    const frames = await reconnectAndCollect(path, ["req-err-early"]);
 
     // No content existed before the error, so nothing is replayed — just the
     // terminal error frame.

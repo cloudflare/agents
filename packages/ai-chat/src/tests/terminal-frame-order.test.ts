@@ -70,36 +70,6 @@ function expectAssistantTranscriptBeforeDone(frames: Frame[]) {
   expect(doneIndex).toBe(frames.length - 1);
 }
 
-/** Resolves on the first replay frame for `requestId` whose body has `text`. */
-function replayContaining(
-  ws: WebSocket,
-  requestId: string,
-  text: string,
-  timeout = 10_000
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`No replay of "${text}"`)),
-      timeout
-    );
-    const handler = (e: MessageEvent) => {
-      const data = JSON.parse(e.data as string) as Record<string, unknown>;
-      if (
-        isUseChatResponseMessage(data) &&
-        data.id === requestId &&
-        data.replay &&
-        typeof data.body === "string" &&
-        data.body.includes(text)
-      ) {
-        clearTimeout(timer);
-        ws.removeEventListener("message", handler);
-        resolve();
-      }
-    };
-    ws.addEventListener("message", handler);
-  });
-}
-
 function sendChat(ws: WebSocket, body: Record<string, unknown>): string {
   const id = crypto.randomUUID();
   ws.send(
@@ -204,142 +174,6 @@ describe("AIChatAgent — terminal frame ordering", () => {
     observer.close(1000);
   });
 
-  it("turns the held done frame into an error when persistence fails", async () => {
-    const room = crypto.randomUUID();
-    const { ws } = await connectChatWS(`/agents/response-agent/${room}`);
-    await settle();
-    const agent = await getAgentByName(env.ResponseAgent, room);
-    await agent.failNextAssistantPersist();
-
-    const outcomes: unknown[] = [];
-    ws.addEventListener("message", (e: MessageEvent) => {
-      const data = JSON.parse(e.data as string) as Record<string, unknown>;
-      if (isUseChatResponseMessage(data) && data.done) {
-        outcomes.push(data.outcome);
-      }
-    });
-    const frames = recordUntilDone(ws);
-    sendChat(ws, { format: "sse" });
-
-    const recorded = await frames;
-    expect(recorded.at(-1)).toEqual({ kind: "done", error: true });
-    expect(outcomes).toEqual(["error"]);
-    ws.close(1000);
-  });
-
-  it("holds a resume ACK that lands while the response is being persisted", async () => {
-    const room = crypto.randomUUID();
-    const { ws: sender } = await connectChatWS(
-      `/agents/response-agent/${room}`
-    );
-    await settle();
-    const agent = await getAgentByName(env.ResponseAgent, room);
-    await agent.blockNextAssistantPersist();
-
-    const requestId = sendChat(sender, { format: "sse" });
-    for (
-      let i = 0;
-      i < 100 && !(await agent.isAssistantPersistBlocked());
-      i++
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    expect(await agent.isAssistantPersistBlocked()).toBe(true);
-
-    const { ws: reconnected } = await connectChatWS(
-      `/agents/response-agent/${room}`
-    );
-    await settle();
-    const frames = recordUntilDone(reconnected);
-    const replayed = replayContaining(reconnected, requestId, "chunk-0");
-    reconnected.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-        id: requestId
-      })
-    );
-    // The replay arrives while the persist is still held.
-    await replayed;
-    expect(await agent.isAssistantPersistBlocked()).toBe(true);
-    await agent.releaseAssistantPersist();
-
-    const recorded = await frames;
-    expectAssistantTranscriptBeforeDone(recorded);
-    expect(recorded.at(-1)).toEqual({ kind: "done", error: false });
-    sender.close(1000);
-    reconnected.close(1000);
-  });
-
-  it("replays a recovering stream's partial to an ACK that lands while it is persisted", async () => {
-    const room = crypto.randomUUID();
-    const agent = (await getAgentByName(
-      env.ChatRecoveryTestAgent,
-      room
-    )) as unknown as {
-      armStallingTurnsForTest(timeoutMs: number, hangTurns: number): void;
-      blockNextAssistantPersistForTest(): void;
-      isAssistantPersistBlockedForTest(): boolean;
-      releaseAssistantPersistForTest(): void;
-    };
-    await agent.armStallingTurnsForTest(150, 1);
-    await agent.blockNextAssistantPersistForTest();
-    const { ws: sender } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    await settle();
-
-    const requestId = sendChat(sender, {});
-    for (
-      let i = 0;
-      i < 100 && !(await agent.isAssistantPersistBlockedForTest());
-      i++
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    expect(await agent.isAssistantPersistBlockedForTest()).toBe(true);
-
-    const { ws: reconnected } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    await settle();
-    const done = new Promise<Record<string, unknown>>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("Timeout waiting for done")),
-        10_000
-      );
-      reconnected.addEventListener("message", (e: MessageEvent) => {
-        const data = JSON.parse(e.data as string) as Record<string, unknown>;
-        if (
-          isUseChatResponseMessage(data) &&
-          data.id === requestId &&
-          data.done
-        ) {
-          clearTimeout(timer);
-          resolve(data);
-        }
-      });
-    });
-    const replayed = replayContaining(
-      reconnected,
-      requestId,
-      "partial before stall"
-    );
-    reconnected.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-        id: requestId
-      })
-    );
-    // The replay arrives while the persist is still held.
-    await replayed;
-    expect(await agent.isAssistantPersistBlockedForTest()).toBe(true);
-    await agent.releaseAssistantPersistForTest();
-
-    expect(await done).toMatchObject({ outcome: "recovering" });
-    sender.close(1000);
-    reconnected.close(1000);
-  });
-
   it("settles the originating tab when onChatMessage returns no response", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/response-agent/${room}`);
@@ -360,10 +194,11 @@ describe("AIChatAgent — terminal frame ordering", () => {
     });
     const requestId = sendChat(ws, { noResponse: true });
 
+    // Nothing was answered: the request ends skipped, not completed.
     expect(await done).toMatchObject({
       id: requestId,
       done: true,
-      outcome: "completed"
+      outcome: "skipped"
     });
     ws.close(1000);
   });

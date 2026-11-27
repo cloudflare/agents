@@ -1652,6 +1652,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             tasks: this.#tasks,
             streams: this.#streams,
             sessions: this.#sessions,
+            kv: this.lifecycle.storage.kv,
             session
           },
           this.#chatHost(run, session, operationId, built, placed, live)

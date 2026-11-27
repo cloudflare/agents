@@ -41,8 +41,10 @@ describe("AIChatAgent request context from an earlier release", () => {
       JSON.stringify([{ name: "pick" }]),
       JSON.stringify({ big: "x".repeat(8_000_000) })
     );
+    // One over the row budget is not kept, in storage or in memory: a
+    // server turn reads the context when it starts, from storage.
     const carried = await (await agent()).requestContextStateForTest();
-    expect(carried.clientTools).toEqual(["pick"]);
+    expect(carried.clientTools).toBeNull();
     expect(carried.stored).toBeNull();
     expect(carried.tableLeft).toBe(false);
     await (await agent()).resetIsolateForTest().catch(() => {});
