@@ -657,6 +657,15 @@ export class Think<
           // A call approved after a restart runs before any model call of
           // its turn: the turn's grant is asked for here.
           await this.#authorizeTurn(call.operationId, async () => {
+            // Asked for here, and only resolved when the grant reads it:
+            // a failing `getModel()` fails that read, as in Think.
+            let chosen: ThinkModel | undefined;
+            let failure: unknown;
+            try {
+              chosen = await this.getModel();
+            } catch (error) {
+              failure = error;
+            }
             let model: LanguageModel | undefined;
             const self = this;
             return {
@@ -666,11 +675,9 @@ export class Think<
               }),
               tools: {},
               // Resolved only when read, as in Think.
-              // As in Think, `getModel()` is called only here.
               get model() {
-                return (model ??= self.resolveModel(
-                  self.getModel() as ThinkModel
-                ));
+                if (failure !== undefined) throw failure;
+                return (model ??= self.resolveModel(chosen as ThinkModel));
               },
               continuation: true,
               requestId: call.operationId
