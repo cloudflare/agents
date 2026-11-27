@@ -6,7 +6,7 @@
  * the isolate for real with `ctx.abort()`.
  */
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
@@ -24,6 +24,11 @@ type AdmissionStub = {
   getTranscriptsSeenForTest(): Promise<string[][]>;
   getIncidentsForTest(): Promise<string[]>;
   ageAdmissionsForTest(ms: number): Promise<void>;
+  waitUntilStableForTest(): Promise<boolean>;
+  waitForIdleForTest(): Promise<unknown>;
+  holdStreamForTest(requestId: string): Promise<void>;
+  isStreamHeldForTest(requestId: string): Promise<boolean>;
+  releaseStreamForTest(requestId: string): Promise<void>;
 };
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -87,7 +92,12 @@ async function waitFor<T>(
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const value = await read();
-    if (ok(value) || Date.now() > deadline) return value;
+    if (ok(value)) return value;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `waitFor timed out; last value: ${JSON.stringify(value)}`
+      );
+    }
     await delay(100);
   }
 }
@@ -114,6 +124,49 @@ async function agent(binding: string, room: string): Promise<AdmissionStub> {
   )) as unknown as AdmissionStub;
 }
 
+/**
+ * Send r1 and hold its stream after its first chunk, so it is still running
+ * whenever the test resets the isolate (the reset drops the hold).
+ */
+async function holdRunning(ws: WebSocket, stub: AdmissionStub): Promise<void> {
+  await stub.holdStreamForTest("r1");
+  onTestFinished(() => stub.releaseStreamForTest("r1").catch(() => {}));
+  sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
+  await waitFor(
+    () => stub.isStreamHeldForTest("r1"),
+    (held) => held
+  );
+}
+
+/**
+ * Start r1 (slow) and queue r2 behind it, then wait until r2 is a durable
+ * record waiting on r1: the state a reset is meant to find.
+ */
+async function queueBehindRunningTurn(
+  ws: WebSocket,
+  stub: AdmissionStub
+): Promise<void> {
+  await holdRunning(ws, stub);
+  sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
+  await waitFor(
+    () => stub.getAdmissionsForTest(),
+    (records) => records.some((record) => record.requestId === "r2")
+  );
+}
+
+/**
+ * Wait until nothing is left to run: no record, no turn (a restored request
+ * that is streaming has no record any more), and a stable chat.
+ */
+async function settled(stub: AdmissionStub): Promise<void> {
+  await waitFor(
+    () => stub.getAdmissionsForTest(),
+    (records) => records.length === 0
+  );
+  await stub.waitForIdleForTest();
+  await stub.waitUntilStableForTest();
+}
+
 const SLOW = { chunkCount: 30, chunkDelayMs: 100 };
 const QUICK = { chunkCount: 3, chunkDelayMs: 10 };
 const QUICK_REPLY = "chunk-0 chunk-1 chunk-2 ";
@@ -125,10 +178,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const { ws } = await connectChatWS(
       `/agents/recovery-slow-stream-agent/${room}`
     );
-    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(300);
-    sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(300);
+    await queueBehindRunningTurn(ws, await agent(binding, room));
 
     const stub = await agent(binding, room);
     // The running turn has a fiber; the one waiting behind it has a record.
@@ -195,10 +245,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const { ws } = await connectChatWS(
       `/agents/recovery-slow-stream-agent/${room}`
     );
-    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(300);
-    sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(300);
+    await queueBehindRunningTurn(ws, await agent(binding, room));
     // The turn ahead of it ran for two hours (a long agent-tool run).
     await (await agent(binding, room)).ageAdmissionsForTest(2 * 60 * 60 * 1000);
     await reset(binding, room);
@@ -217,10 +264,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const { ws } = await connectChatWS(
       `/agents/recovery-slow-stream-agent/${room}`
     );
-    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(300);
-    sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(300);
+    await queueBehindRunningTurn(ws, await agent(binding, room));
 
     await reset(binding, room);
     const { ws: tab } = await connectChatWS(
@@ -244,7 +288,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => stub.getPersistedMessages(),
       (m) => m.some((x) => x.role === "assistant")
     );
-    await delay(1000);
+    await settled(stub);
     // The stopped request's question is kept, after the reply before it,
     // with no reply of its own.
     expect((await stub.getPersistedMessages()).map((m) => m.role)).toEqual([
@@ -263,10 +307,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const { ws } = await connectChatWS(
       `/agents/recovery-slow-stream-agent/${room}`
     );
-    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(300);
-    sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(300);
+    await queueBehindRunningTurn(ws, await agent(binding, room));
 
     await reset(binding, room);
     const { ws: tab } = await connectChatWS(
@@ -279,7 +320,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       (records) => records.length === 0,
       5000
     );
-    await delay(5000);
+    await settled(stub);
     expect(
       (await stub.getPersistedMessages()).filter(
         (m) => textOf(m) === QUICK_REPLY
@@ -294,17 +335,23 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const path = `/agents/latest-message-concurrency-agent/${room}`;
     const { ws } = await connectChatWS(path);
     const sent = record(ws);
-    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(300);
-    sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(100);
+    const first = await agent(binding, room);
+    await queueBehindRunningTurn(ws, first);
     sendChatRequest(
       ws,
       "r3",
       [user("u1", "one"), user("u2", "two"), user("u3", "three")],
       QUICK
     );
-    await delay(300);
+    // r3 superseded r2 before the reset: r2 was told, r3 is the record.
+    await waitFor(
+      async () => doneFrame(sent, "r2"),
+      (frame) => frame !== undefined
+    );
+    await waitFor(
+      () => first.getAdmissionsForTest(),
+      (records) => records.some((record) => record.requestId === "r3")
+    );
 
     await reset(binding, room);
     const { ws: tab } = await connectChatWS(path);
@@ -314,7 +361,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => stub.getPersistedMessages(),
       (m) => m.filter((x) => x.role === "assistant").length >= 2
     );
-    await delay(500);
+    await settled(stub);
     // The superseded question is kept, and answered with the latest.
     expect((await stub.getPersistedMessages()).map((m) => m.id)).toEqual([
       "u1",
@@ -337,9 +384,8 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const { ws } = await connectChatWS(
       `/agents/recovery-slow-stream-agent/${room}`
     );
-    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-    await delay(300);
     const stub = await agent(binding, room);
+    await holdRunning(ws, stub);
     // The fiber is there and the record is still there, as a reset in
     // between leaves them.
     await stub.seedAdmissionForTest("r1", ["u1"]);
@@ -350,7 +396,7 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => restarted.getPersistedMessages(),
       (m) => m.some((x) => x.role === "assistant")
     );
-    await delay(4000);
+    await settled(restarted);
     const messages = await restarted.getPersistedMessages();
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(await restarted.getAdmissionsForTest()).toEqual([]);
@@ -492,21 +538,29 @@ describe("two resets a few seconds apart", () => {
       const binding = "RecoverySlowStreamAgent";
       const path = `/agents/recovery-slow-stream-agent/${room}`;
       const { ws } = await connectChatWS(path);
-      sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-      await delay(300);
-      sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-      await delay(300);
+      await queueBehindRunningTurn(ws, await agent(binding, room));
 
       await reset(binding, room);
       // The recovered turn starts streaming the cut reply's continuation.
       const { ws: tab } = await connectChatWS(path);
-      record(tab);
+      const recovered = record(tab);
       const second = await agent(binding, room);
       await waitFor(
         () => second.getTranscriptsSeenForTest(),
         (seen) => seen.length >= 1
       );
-      await delay(1500);
+      // Cut it mid-stream: once its first chunk reached the tab.
+      await waitFor(
+        async () => recovered,
+        (frames) =>
+          frames.some(
+            (frame) =>
+              isUseChatResponseMessage(frame) &&
+              !frame.done &&
+              typeof frame.body === "string" &&
+              frame.body.includes("chunk-")
+          )
+      );
       // The second reset cuts the recovered reply.
       await reset(binding, room);
       tab.close();
