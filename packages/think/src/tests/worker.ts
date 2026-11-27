@@ -55,6 +55,7 @@ export {
   ThinkExtensionTurnAgent,
   ThinkExtensionTurnParent,
   ThinkPrefixChangedAgent,
+  ThinkHarnessActionsAgent,
   ThinkExtensionBeforeTurnModelAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
@@ -119,6 +120,7 @@ import type {
   ThinkExtensionTurnAgent,
   ThinkExtensionTurnParent,
   ThinkPrefixChangedAgent,
+  ThinkHarnessActionsAgent,
   ThinkExtensionBeforeTurnModelAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
@@ -285,6 +287,7 @@ export type Env = {
   ThinkExtensionTurnAgent: DurableObjectNamespace<ThinkExtensionTurnAgent>;
   ThinkExtensionTurnParent: DurableObjectNamespace<ThinkExtensionTurnParent>;
   ThinkPrefixChangedAgent: DurableObjectNamespace<ThinkPrefixChangedAgent>;
+  ThinkHarnessActionsAgent: DurableObjectNamespace<ThinkHarnessActionsAgent>;
   ThinkExtensionBeforeTurnModelAgent: DurableObjectNamespace<ThinkExtensionBeforeTurnModelAgent>;
   ThinkMessengerDeliveryTestAgent: DurableObjectNamespace<ThinkMessengerDeliveryTestAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;

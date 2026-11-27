@@ -1207,10 +1207,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
-   * @internal The approval id a tool call carries, from the newest message
-   * back: a turn's approval sits near the end, so the read stops early.
-   */
-  /**
    * @internal The tool calls of a session's latest reply that wait for
    * approval: only the latest reply can, since a turn after it settled
    * them.
@@ -1234,6 +1230,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     );
   }
 
+  /**
+   * @internal The approval id a tool call carries, from the newest message
+   * back: a turn's approval sits near the end, so the read stops early.
+   */
   async approvalId(
     session: ThinkSessionId,
     toolCallId: string

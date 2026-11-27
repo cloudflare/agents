@@ -67,3 +67,4 @@ export {
   ThinkUpgradeCustomStoreTestAgent
 } from "./prompt-cache";
 export { ThinkPrefixChangedAgent } from "./prefix-changed";
+export { ThinkHarnessActionsAgent } from "./harness-actions";
