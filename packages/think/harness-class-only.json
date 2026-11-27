@@ -334,5 +334,17 @@
     "test": "Think agent tools > attributes frames via the persisted request id after a DO restart (#1575)",
     "reason": "the class's request-id to run lookup in `_agentToolRuns` after a restart",
     "mechanicsOnly": true
+  },
+  {
+    "file": "periphery-modules.test.ts",
+    "test": "ThinkConfigStore > skips a write whose value matches the last value it saw",
+    "reason": "Pins ThinkConfigStore's skipped write (a value equal to the last one seen is not written again), through Think's private _cfConfig; nothing an app can observe.",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > a second pass is a cheap no-op",
+    "reason": "Pins the pass's own bookkeeping through Think's private _evictAgedMediaBestEffort seam: a second pass over unchanged rows reads and writes nothing; nothing an app can observe.",
+    "mechanicsOnly": true
   }
 ]
