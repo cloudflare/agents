@@ -138,7 +138,9 @@ function wakeTime(
 ): number | null {
   if (row?.next_at == null) return null;
   // A claimed run only: a struck one (claim stripped) waits out its backoff.
-  return row.status === "running" && row.generation !== null
+  return row.status === "running" &&
+    row.generation !== null &&
+    row.generation !== STRUCK_GENERATION
     ? Math.min(row.next_at, Date.now() + LIVE_WAKE_MS)
     : row.next_at;
 }
@@ -182,6 +184,12 @@ const PLATFORM_RETRY_MS = 30_000;
  * killed it (#2847). One alarm write per interval while a run executes.
  */
 const LIVE_WAKE_MS = 5_000;
+/**
+ * The generation of a run whose attempt a platform failure ended in a live
+ * isolate: no attempt holds it, so it is not polled, and a fresh isolate
+ * replays it at once, as it does a claimed run.
+ */
+const STRUCK_GENERATION = "struck";
 
 const UTF8 = new TextEncoder();
 
@@ -1710,9 +1718,9 @@ export class Tasks<
             runId,
             generation,
             `UPDATE ${this.#tables.runs}
-             SET generation = NULL, next_at = ?, updated_at = ?
+             SET generation = ?, next_at = ?, updated_at = ?
              WHERE run_id = ? AND generation = ? AND status = 'running'`,
-            [Date.now() + PLATFORM_RETRY_MS, Date.now()]
+            [STRUCK_GENERATION, Date.now() + PLATFORM_RETRY_MS, Date.now()]
           );
           if (struck) await this.#syncWake(runId);
         } catch {
@@ -2638,6 +2646,8 @@ export class Tasks<
     const now = Date.now();
     // A fresh isolate has no live attempts, so every claimed row is an
     // interrupted attempt: make it due immediately for reclaim and replay.
+    // A struck run's short wait was for the isolate it failed in: it goes
+    // now too.
     this.#store.sql`
       UPDATE ${this.#tables.runs} SET next_at = ${now}, updated_at = ${now}
       WHERE status = 'running' AND generation IS NOT NULL
