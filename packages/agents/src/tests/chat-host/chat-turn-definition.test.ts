@@ -440,7 +440,58 @@ describe("chatTurnDefinition", () => {
         laterAttempt("run-1", 3, undefined, counted)
       );
       expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
-      expect(counted.get("chat:incident")).toMatchObject({ progress: 1 });
+      // Three chunks is three tenths of a unit: within the budget.
+      expect(counted.get("chat:incident")).toMatchObject({ progress: 3 });
+    });
+  });
+
+  it("takes one more chunk as progress, and tells shouldKeepRecovering the work in units", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      // Three chunks are stored; two were there when the attempts so far
+      // were counted, and the limit of attempts is reached.
+      await cutOff(instance, "run-1");
+      const work: number[] = [];
+      const counted = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 2,
+            maxAttempts: 2,
+            status: "attempting",
+            firstSeenAt: Date.now() - 120_000,
+            lastAttemptAt: Date.now() - 60_000,
+            progress: 2,
+            workBaseline: 0
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: {
+          recovery: {
+            maxAttempts: 2,
+            shouldKeepRecovering: (context) => {
+              work.push(context.work);
+              return true;
+            }
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, counted)
+      );
+      // The one new chunk starts the count again: the turn is not given up.
+      expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
+      expect(counted.get("chat:incident")).toMatchObject({
+        attempt: 1,
+        progress: 3
+      });
+      // Three chunks of work is one unit.
+      expect(work).toEqual([1]);
     });
   });
 

@@ -1431,7 +1431,20 @@ export function chatTurnDefinition(
               trigger: failed?.live
                 ? { kind: "stalled" }
                 : { kind: "interrupted", attempt: thisAttempt },
-              config: budget,
+              // Work is counted as released, one unit for ten chunks: the
+              // budget is scaled to chunks here, and the app's hook is
+              // told units.
+              config: {
+                ...budget,
+                maxRecoveryWork: budget.maxRecoveryWork * CHUNK_BATCH.maxChunks,
+                ...(budget.shouldKeepRecovering && {
+                  shouldKeepRecovering: (context) =>
+                    budget.shouldKeepRecovering?.({
+                      ...context,
+                      work: Math.ceil(context.work / CHUNK_BATCH.maxChunks)
+                    }) ?? true
+                })
+              },
               existing: counted
                 ? {
                     ...counted,
@@ -1441,8 +1454,8 @@ export function chatTurnDefinition(
                       })
                   }
                 : null,
-              // Work is counted as released: one unit per ten chunks.
-              currentProgress: Math.ceil(streamedCount / CHUNK_BATCH.maxChunks),
+              // Progress is every chunk streamed, so a little more counts.
+              currentProgress: streamedCount,
               awaitingClientInteraction: false,
               now: Date.now(),
               onShouldKeepRecoveringError: (error) =>
