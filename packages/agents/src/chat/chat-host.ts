@@ -298,6 +298,14 @@ export interface ChatTurnInput {
   readonly questionId?: string;
   readonly clientTools?: readonly ClientToolSchema[];
   readonly body?: Readonly<Record<string, unknown>>;
+  /**
+   * The messages the request brings that the transcript does not hold yet.
+   * The turn stores them when it starts, so a question queued behind a
+   * reply follows that reply.
+   */
+  readonly messages?: readonly UIMessage[];
+  /** For a tool answer: the reply holding the answered call, to continue. */
+  readonly replyId?: string;
 }
 
 /** The stream id a turn's reply is written under. */
@@ -600,6 +608,10 @@ export function chatTurnDefinition(
     if (storedReply !== undefined) {
       return report({ requestId, status: "completed", messageId: storedReply });
     }
+    // The request's messages go in now, after every reply queued before it.
+    for (const message of run.messages ?? []) {
+      await session.upsertMessage(message as never);
+    }
     const earlier = await deps.streams.status(streamId);
     if (earlier && earlier.state !== "streaming") {
       return report({
@@ -711,14 +723,17 @@ export function chatTurnDefinition(
     // question sees nothing after it), or to the reply it continues.
     const history = async () =>
       (await session.getHistory(
-        run.questionId !== undefined &&
-          !partial &&
-          run.trigger !== "tool-answer"
-          ? { leafId: run.questionId }
-          : {}
+        run.trigger === "tool-answer" && run.replyId !== undefined
+          ? { leafId: run.replyId }
+          : run.questionId !== undefined &&
+              !partial &&
+              run.trigger !== "tool-answer"
+            ? { leafId: run.questionId }
+            : {}
       )) as unknown as UIMessage[];
     const messages = await history();
-    // A tool answer continues the reply that asked for it.
+    // A tool answer continues the reply that asked for it (named, or the
+    // latest).
     if (!partial && run.trigger === "tool-answer") {
       const last = messages.at(-1);
       if (last?.role === "assistant") {

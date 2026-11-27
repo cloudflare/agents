@@ -26,6 +26,21 @@ function chatRequest(id: string, text: string) {
   });
 }
 
+function chatRequestWith(id: string, messageId: string, text: string) {
+  return JSON.stringify({
+    type: "cf_agent_use_chat_request",
+    id,
+    init: {
+      method: "POST",
+      body: JSON.stringify({
+        messages: [
+          { id: messageId, role: "user", parts: [{ type: "text", text }] }
+        ]
+      })
+    }
+  });
+}
+
 describe("chat functions over a minimal host", () => {
   it("a chat request frame stores the question and runs a turn that stores the reply", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
@@ -524,6 +539,167 @@ describe("chat functions over a minimal host", () => {
         trigger: "server",
         clientTools: [{ name: "askUser" }],
         body: { model: "m" }
+      });
+    });
+  });
+
+  it("a question queued behind a reply is stored after that reply (U1 A1 U2 A2)", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      // Each reply gets its own id from its run.
+      instance.reply = [
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Hello" },
+        { type: "text-end", id: "t1" }
+      ];
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let called!: () => void;
+      const inRespond = new Promise<void>((resolve) => (called = resolve));
+      const respond = instance.host.respond;
+      let first = true;
+      instance.host.respond = async (call) => {
+        if (first) {
+          first = false;
+          called();
+          await released;
+        }
+        return respond(call);
+      };
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r1", "u1", "One")
+      );
+      await inRespond;
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r2", "u2", "Two")
+      );
+      release();
+      await instance.resultFor("r2");
+      const ids = (await instance.sessions.session("s1").getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toEqual(["u1", "r1-reply", "u2", "r2-reply"]);
+      instance.host.respond = respond;
+    });
+  });
+
+  it("an answer to a call in an older reply continues that reply, not the latest", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      await session.appendMessage({
+        id: "u2",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a2",
+        role: "assistant",
+        parts: [{ type: "text", text: "Latest" }]
+      } as never);
+      const done = instance.nextResult();
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c1", output: { ok: true } },
+        { autoContinue: true }
+      );
+      await done;
+      expect(instance.calls[0]).toMatchObject({
+        mode: "continue",
+        replyId: "a1"
+      });
+      expect(instance.calls[0].messages.map((m) => m.id)).toEqual(["u1", "a1"]);
+      expect(await session.getMessage("a2")).toMatchObject({
+        parts: [{ type: "text", text: "Latest" }]
+      });
+    });
+  });
+
+  it("a tab parked on a tool answer that starts a turn is offered that turn's stream, with its probe id", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      const sessionOf = instance.sessions.session.bind(instance.sessions);
+      (instance.sessions as { session: typeof sessionOf }).session = (id) => {
+        const handle = sessionOf(id);
+        const leaf = handle.getLatestLeaf.bind(handle);
+        handle.getLatestLeaf = async () => {
+          await released;
+          return leaf();
+        };
+        return handle;
+      };
+      const done = instance.nextResult();
+      const answered = answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c1", output: { ok: true } },
+        { autoContinue: true }
+      );
+      const sent: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-h", sent),
+        "p3"
+      );
+      release();
+      await answered;
+      const result = await done;
+      expect(sent[0]).toEqual({
+        type: "cf_agent_stream_pending",
+        probeId: "p3"
+      });
+      expect(sent[1]).toEqual({
+        type: "cf_agent_stream_resuming",
+        id: result.requestId,
+        probeId: "p3"
       });
     });
   });
