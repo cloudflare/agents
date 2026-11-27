@@ -215,11 +215,19 @@ export function sendMessengerReply(
   });
 }
 
-/** The definition think@0.24.0 ran replies on. */
-const RELEASED_REPLY_DEFINITION = "__cf_internal_messenger_reply";
+/**
+ * The definition think@0.24.0 ran replies on.
+ *
+ * @internal
+ */
+export const RELEASED_REPLY_DEFINITION = "__cf_internal_messenger_reply";
 
-/** A released reply snapshot, as think@0.24.0 kept it. */
-function releasedSnapshot(
+/**
+ * A released reply snapshot, as think@0.24.0 kept it.
+ *
+ * @internal
+ */
+export function releasedSnapshot(
   value: unknown
 ):
   | { stage: MessengerReplyStage; event: MessengerEvent; thread: unknown }

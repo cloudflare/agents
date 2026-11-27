@@ -169,5 +169,14 @@
       "file": "think-session.test.ts",
       "test": "Think — onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability"
     }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > answers a repeated reply id once, after the first was answered",
+    "reason": "a delivery sink registered under the class's reserved `__cf_delivery:messenger-reply` name and its kept reply run (the class's reply-run rows)",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > streamed replies on adapters without native streaming > answers a webhook its platform sent twice once"
+    }
   }
 ]
