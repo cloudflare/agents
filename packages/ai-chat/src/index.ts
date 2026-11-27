@@ -906,6 +906,9 @@ export class AIChatAgent<
   /** Whether each running call continues a reply, for `onChatResponse`. */
   private readonly _callContinues = new Map<string, boolean>();
 
+  /** Deliveries of `onChatResponse` not finished yet: the chat is not stable. */
+  private readonly _responseDeliveries = new Set<Promise<void>>();
+
   /** `onChatResponse` results waiting for their turn to leave the lane. */
   private readonly _chatResponses: ChatResponseResult[] = [];
 
@@ -1053,6 +1056,9 @@ export class AIChatAgent<
         onResponse: async (result) => {
           const waiter = this._turnWaiters.get(result.requestId);
           this._turnWaiters.delete(result.requestId);
+          // Whether the model was asked: a turn stopped before it started
+          // reports nothing to `onChatResponse`.
+          const ran = this._callContinues.has(result.requestId);
           const continuation =
             this._callContinues.get(result.requestId) ?? false;
           this._callContinues.delete(result.requestId);
@@ -1084,7 +1090,15 @@ export class AIChatAgent<
                 ? ([...this.messages]
                     .reverse()
                     .find((m) => m.role === "assistant") ?? null)
-                : null;
+                : // A turn stopped before its reply held anything still
+                  // reports how it ended, with the empty reply.
+                  result.status === "aborted" && ran
+                  ? ({
+                      id: result.requestId,
+                      role: "assistant",
+                      parts: []
+                    } as UIMessage)
+                  : null;
           if (!message) {
             waiter?.(result);
             return;
@@ -1099,9 +1113,13 @@ export class AIChatAgent<
             status: result.status,
             ...(result.error !== undefined && { error: result.error })
           });
-          void this.tasks
+          const delivered = this.tasks
             .wait(result.requestId)
             .then(() => this._deliverChatResponses());
+          this._responseDeliveries.add(delivered);
+          void delivered.finally(() =>
+            this._responseDeliveries.delete(delivered)
+          );
         },
         sanitizeForPersistence: (message) =>
           this._sanitizeMessageForPersistence(message),
@@ -2422,6 +2440,11 @@ export class AIChatAgent<
         await this.tasks.wait(next.runId, {
           ...(left !== undefined && { timeoutMs: left })
         });
+        continue;
+      }
+      // A turn's `onChatResponse` may start another.
+      if (this._responseDeliveries.size > 0) {
+        await Promise.all(this._responseDeliveries);
         continue;
       }
       if (!pending()) return true;

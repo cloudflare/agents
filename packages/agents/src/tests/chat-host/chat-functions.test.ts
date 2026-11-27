@@ -867,6 +867,9 @@ describe("chat functions over a minimal host", () => {
         tab,
         chatRequestWith("r2", "u2", "Two")
       );
+      const firstContext = await instance.sessions
+        .session("s1")
+        .internal_config(CHAT_REQUEST_CONTEXT_KEY);
       await cancelTurn(instance.deps, "r2");
       release();
       expect(await instance.resultFor("r2")).toMatchObject({
@@ -877,6 +880,12 @@ describe("chat functions over a minimal host", () => {
       );
       // In lane order: the reply it waited behind comes first.
       expect(ids).toEqual(["u1", "a1", "u2"]);
+      // It never ran: the stored context is still the first request's.
+      expect(
+        await instance.sessions
+          .session("s1")
+          .internal_config(CHAT_REQUEST_CONTEXT_KEY)
+      ).toBe(firstContext);
     });
   });
 
@@ -1541,6 +1550,13 @@ describe("chat functions over a minimal host", () => {
         expect.objectContaining({ id: "r2", done: true, outcome: "skipped" })
       );
       expect(other.filter((frame) => frame.id === "r2")).toEqual([]);
+      // It is sent the stored list back, which takes the dropped message
+      // out of its own.
+      const list = sent.find(
+        (frame) => frame.type === "cf_agent_chat_messages"
+      );
+      expect(list).toBeDefined();
+      expect(JSON.stringify(list)).not.toContain('"u2"');
     });
   });
 
@@ -2543,6 +2559,31 @@ describe("chat functions over a minimal host", () => {
         id: "r1",
         messageIds: ["u1"]
       });
+    });
+  });
+
+  it("a clear tells the tab of a waiting request that it was skipped", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const sender = recordingTab("tab-x", sent);
+      const deps = {
+        ...instance.deps,
+        webSockets: { getConnections: () => [sender] } as never
+      };
+      const finish = await holdFirstTurn(instance, instance.lane);
+      await chatDispatch(
+        deps,
+        instance.lane,
+        sender,
+        chatRequestWith("r2", "u2", "two")
+      );
+      await clearChat(deps, instance.lane);
+      await finish().catch(() => {});
+      expect(sent).toContainEqual(
+        expect.objectContaining({ id: "r2", done: true, outcome: "skipped" })
+      );
     });
   });
 });

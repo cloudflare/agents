@@ -837,8 +837,16 @@ export function chatTurnDefinition(
     // The request context, once per turn: a client's request (or a host
     // turn told to) stores its tools and body; a turn that brings none
     // runs with the stored ones, read now.
+    // A turn stopped before it started never ran: it leaves the context.
+    const stoppedEarly =
+      (
+        deps.tasks.peek(requestId)?.metadata?.[STOPPED_METADATA.key] as
+          | Record<string, unknown>
+          | undefined
+      )?.[STOPPED_METADATA.field] === true;
     if (
       (client || given.storeContext) &&
+      !stoppedEarly &&
       step.checkpoint.get(CONTEXT_CHECKPOINT) === undefined
     ) {
       await session.internal_setConfig(

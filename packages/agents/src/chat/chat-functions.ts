@@ -209,6 +209,20 @@ export async function submitTurn(
   // without a reply (its turn never runs to say so).
   if (dropped) {
     endUnstarted(deps, receipt.runId, "skipped", metadata);
+    // The tab put the dropped messages in its list: the stored one, sent
+    // back, takes them out again.
+    const origin = originOf(metadata);
+    if (origin !== undefined && deps.webSockets) {
+      const text = frameText({
+        type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
+        messages: await session.getHistory()
+      } as { type: string });
+      for (const connection of deps.webSockets.getConnections()) {
+        if (connection.id === origin && text !== undefined) {
+          sendIfOpen(connection, text);
+        }
+      }
+    }
   } else {
     for (const run of replaced) {
       endUnstarted(deps, run.id, "skipped", run.metadata);
@@ -321,15 +335,26 @@ export async function stopAllTurns(
 
 /** Clear the chat: no waiting or running turn goes on, and the transcript is emptied. */
 export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
-  const retrying = deps.tasks
-    .peekList({
-      definition: lane.definition,
-      lane: lane.lane,
-      status: ["pending"],
-      results: false
-    })
-    .flatMap((run) => retryingTurn(deps, run.runId) ?? []);
+  const waiting = deps.tasks.peekList({
+    definition: lane.definition,
+    lane: lane.lane,
+    status: ["pending"],
+    results: false
+  });
+  const retrying = waiting.flatMap(
+    (run) => retryingTurn(deps, run.runId) ?? []
+  );
+  // The turns that had not started end skipped, and their tabs are told.
+  const unstarted = waiting
+    .filter((run) => (deps.tasks.peek(run.runId)?.attempt ?? 0) === 0)
+    .map((run) => ({
+      id: run.runId,
+      metadata: deps.tasks.peek(run.runId)?.metadata
+    }));
   await deps.tasks.clear(lane.lane, "chat cleared");
+  for (const run of unstarted) {
+    endUnstarted(deps, run.id, "skipped", run.metadata);
+  }
   for (const turn of retrying) await turn.settle(false);
   await deps.sessions.session(deps.session ?? "").clearMessages();
   continueRequestsOf(deps.streams).clear();
