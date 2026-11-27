@@ -9033,6 +9033,12 @@ export class ThinkToolsTestAgent extends Think {
 
   override beforeStep(ctx: PrepareStepContext): StepConfig | void {
     this._stepHookOrder.push(`before:${ctx.stepNumber}`);
+    if (this._stepSystemForTest) {
+      // SAFETY: StepConfig takes the AI SDK's system message forms.
+      return {
+        system: [{ role: "system", content: this._stepSystemForTest }]
+      } as unknown as StepConfig;
+    }
     this._beforeStepLog.push({
       stepNumber: ctx.stepNumber,
       previousStepCount: ctx.steps.length,
@@ -9252,7 +9258,11 @@ export class ThinkToolsTestAgent extends Think {
     if (this._repairToolCalls) {
       return createToolCallingMockModel('```json\n{"message":"repaired"}\n```');
     }
-    if (this._echoExecuteMode === "validated-output") {
+    if (
+      this._echoExecuteMode === "validated-output" ||
+      this._rewriteTurnMessagesForTest ||
+      this._stepSystemForTest
+    ) {
       return createToolCallingMockModel(undefined, (prompt) =>
         this._toolPrompts.push(prompt)
       );
@@ -9671,6 +9681,19 @@ export class ThinkToolsTestAgent extends Think {
       | "validated-output"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  private _rewriteTurnMessagesForTest = false;
+  private _stepSystemForTest: string | undefined;
+
+  /** `beforeStep` returns this as a structured system message. */
+  async setStepSystemForTest(text: string): Promise<void> {
+    this._stepSystemForTest = text;
+  }
+
+  /** `beforeTurn` rewrites the turn's messages to one question. */
+  async rewriteTurnMessagesForTest(): Promise<void> {
+    this._rewriteTurnMessagesForTest = true;
   }
 
   /** Model prompts recorded in `validated-output` mode, as JSON. */
@@ -10346,6 +10369,16 @@ export class ThinkToolsTestAgent extends Think {
     }
     if (this._turnStopCondition) {
       return { stopWhen: this._turnStopCondition };
+    }
+    if (this._rewriteTurnMessagesForTest) {
+      return {
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "the rewritten ask" }]
+          }
+        ]
+      };
     }
   }
 
@@ -17520,4 +17553,222 @@ export class ThinkAdmissionTestAgent extends Think {
 /** {@link ThinkAdmissionTestAgent} under `messageConcurrency: "latest"`. */
 export class ThinkLatestAdmissionTestAgent extends ThinkAdmissionTestAgent {
   override messageConcurrency = "latest" as const;
+}
+
+/**
+ * A rewritten turn whose tool writes a context block: the next model call
+ * must still carry the tool's result after the reply, with the context
+ * reminder after that.
+ */
+export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
+  private _keepHistory = false;
+
+  /** `beforeTurn` rewrites the prompt to the messages it was given. */
+  async rewriteKeepingHistoryForTest(): Promise<void> {
+    this._keepHistory = true;
+  }
+
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+    if (this._keepHistory) return { messages: ctx.messages };
+    return super.beforeTurn(ctx);
+  }
+
+  private _hiddenReasoning = false;
+  private _failAfterReasoning = false;
+
+  /** The reasoning model, with reasoning sent (the default). */
+  async useReasoningModelForTest(): Promise<void> {
+    this._hiddenReasoning = true;
+  }
+
+  /** Reasoning not sent from now on. */
+  async stopSendingReasoningForTest(): Promise<void> {
+    this.sendReasoning = false;
+  }
+
+  /** The call after the tool fails, ending the turn with an error. */
+  async failAfterReasoningForTest(): Promise<void> {
+    this._failAfterReasoning = true;
+  }
+  private _reasoningPrompts: string[] = [];
+
+  /** The model reasons, calls echo, then answers; reasoning isn't sent. */
+  async hideReasoningForTest(): Promise<void> {
+    this._hiddenReasoning = true;
+    this.sendReasoning = false;
+  }
+
+  async getReasoningPrompts(): Promise<string[]> {
+    return this._reasoningPrompts;
+  }
+
+  private _lookupOnContinue = false;
+  private _lookupPrompts: string[] = [];
+
+  /**
+   * echo, then text; a continuation then calls `lookup`, then text. The
+   * continuation's `beforeTurn` rewrites to the messages it got.
+   */
+  async lookupOnContinueForTest(): Promise<void> {
+    this._lookupOnContinue = true;
+  }
+
+  async getLookupPrompts(): Promise<string[]> {
+    return this._lookupPrompts;
+  }
+
+  override getTools(): ToolSet {
+    if (!this._lookupOnContinue) return this.#writingTools();
+    return {
+      ...this.#writingTools(),
+      lookup: tool({
+        description: "Look something up",
+        inputSchema: z.object({}),
+        execute: async () => "looked up"
+      })
+    };
+  }
+
+  override getModel(): LanguageModel {
+    if (this._lookupOnContinue) return this.#lookupModel();
+    if (!this._hiddenReasoning) return super.getModel();
+    let calls = 0;
+    return {
+      specificationVersion: "v3",
+      provider: "test",
+      modelId: "mock-reasoning-tool",
+      supportedUrls: {},
+      doGenerate() {
+        throw new Error("doGenerate not implemented");
+      },
+      doStream: (options: Record<string, unknown>) => {
+        calls++;
+        this._reasoningPrompts.push(
+          JSON.stringify((options as { prompt?: unknown[] }).prompt ?? [])
+        );
+        const first = calls === 1;
+        const failSecond = this._failAfterReasoning;
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            if (first) {
+              controller.enqueue({ type: "reasoning-start", id: "r1" });
+              controller.enqueue({
+                type: "reasoning-delta",
+                id: "r1",
+                delta: "signed-thought"
+              });
+              controller.enqueue({
+                type: "reasoning-end",
+                id: "r1",
+                providerMetadata: { test: { signature: "sig-r1" } }
+              });
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId: "tc-r1",
+                toolName: "echo",
+                input: JSON.stringify({ message: "hello" })
+              });
+              controller.enqueue({
+                type: "finish",
+                finishReason: v3FinishReason("tool-calls"),
+                usage: v3Usage(10, 5)
+              });
+            } else if (failSecond) {
+              controller.enqueue({
+                type: "error",
+                error: new Error("the second call failed")
+              });
+            } else {
+              controller.enqueue({ type: "text-start", id: "t2" });
+              controller.enqueue({
+                type: "text-delta",
+                id: "t2",
+                delta: "done"
+              });
+              controller.enqueue({ type: "text-end", id: "t2" });
+              controller.enqueue({
+                type: "finish",
+                finishReason: v3FinishReason("stop"),
+                usage: v3Usage(10, 5)
+              });
+            }
+            controller.close();
+          }
+        });
+        return Promise.resolve({ stream });
+      }
+    } as LanguageModel;
+  }
+
+  #lookupModel(): LanguageModel {
+    return {
+      specificationVersion: "v3",
+      provider: "test",
+      modelId: "mock-lookup-on-continue",
+      supportedUrls: {},
+      doGenerate() {
+        throw new Error("doGenerate not implemented");
+      },
+      doStream: (options: Record<string, unknown>) => {
+        const prompt = JSON.stringify(
+          (options as { prompt?: unknown[] }).prompt ?? []
+        );
+        this._lookupPrompts.push(prompt);
+        const call = !prompt.includes("tc-echo-1")
+          ? { id: "tc-echo-1", name: "echo", input: '{"message":"hi"}' }
+          : this._keepHistory && !prompt.includes("tc-lookup-1")
+            ? { id: "tc-lookup-1", name: "lookup", input: "{}" }
+            : undefined;
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            if (call) {
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId: call.id,
+                toolName: call.name,
+                input: call.input
+              });
+            } else {
+              controller.enqueue({ type: "text-start", id: "t" });
+              controller.enqueue({ type: "text-delta", id: "t", delta: "ok" });
+              controller.enqueue({ type: "text-end", id: "t" });
+            }
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason(call ? "tool-calls" : "stop"),
+              usage: v3Usage(10, 5)
+            });
+            controller.close();
+          }
+        });
+        return Promise.resolve({ stream });
+      }
+    } as LanguageModel;
+  }
+
+  async continueForTest(): Promise<string> {
+    return (await this.runTurn({ continuation: true })).status;
+  }
+
+  override configureSession(session: Session): Session {
+    return session.withContext("notes", {
+      description: "Notes the tool keeps",
+      maxTokens: 200
+    });
+  }
+
+  #writingTools(): ToolSet {
+    return {
+      echo: tool({
+        description: "Echo a message back",
+        inputSchema: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => {
+          await this.context.setBlock("notes", "the tool wrote this");
+          return `echo-written: ${message}`;
+        }
+      })
+    };
+  }
 }

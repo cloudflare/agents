@@ -24,6 +24,7 @@ export {
   ThinkContinueOverrideTestAgent,
   ThinkPropsTestAgent,
   ThinkToolsTestAgent,
+  ThinkRewriteContextTestAgent,
   ThinkFiberTestAgent,
   ThinkClientToolsAgent,
   ThinkSessionTestAgent,
@@ -89,6 +90,7 @@ import type {
   ThinkContinueOverrideTestAgent,
   ThinkPropsTestAgent,
   ThinkToolsTestAgent,
+  ThinkRewriteContextTestAgent,
   ThinkFiberTestAgent,
   ThinkClientToolsAgent,
   ThinkSessionTestAgent,
@@ -256,6 +258,7 @@ export type Env = {
   ThinkContinueOverrideTestAgent: DurableObjectNamespace<ThinkContinueOverrideTestAgent>;
   ThinkPropsTestAgent: DurableObjectNamespace<ThinkPropsTestAgent>;
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
+  ThinkRewriteContextTestAgent: DurableObjectNamespace<ThinkRewriteContextTestAgent>;
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
   ThinkClientToolsAgent: DurableObjectNamespace<ThinkClientToolsAgent>;
   ThinkSessionTestAgent: DurableObjectNamespace<ThinkSessionTestAgent>;

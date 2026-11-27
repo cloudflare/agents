@@ -4,6 +4,7 @@ import {
   readUIMessageStream,
   stepCountIs,
   streamText,
+  type LanguageModelUsage,
   type ModelMessage,
   type ToolSet,
   type UIMessage,
@@ -250,6 +251,10 @@ type LiveRun = {
   built?: SessionBuild;
   /** The reply as the loop holds it: everything streamed so far. */
   reply?: UIMessage;
+  /** Whether this run's reasoning is kept from the client and storage. */
+  hideReasoning?: boolean;
+  /** How many of the reply's parts were stored before this run began. */
+  storedParts?: number;
   /** Settles when the attempt has returned. */
   readonly done: Promise<void>;
 };
@@ -2071,6 +2076,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const messageId = continuing?.id ?? crypto.randomUUID();
     let reply = continuing;
     live.reply = reply;
+    live.storedParts = continuing?.parts.length ?? 0;
     let steps = 0;
     /** Whether this attempt made progress the transcript does not hold. */
     let progressed = false;
@@ -2129,6 +2135,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 break;
               }
               chunks.push(chunk);
+              live.hideReasoning = model.hideReasoning;
+              if (model.hideReasoning && chunk.type.startsWith("reasoning")) {
+                continue;
+              }
               yield chunk;
             }
           } catch (error) {
@@ -2190,7 +2200,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             step: steps - 1,
             message: reply,
             finishReason:
-              finish.type === "finish" ? finish.finishReason : undefined
+              finish.type === "finish" ? finish.finishReason : undefined,
+            usage: await model.usage()
           });
           continue;
         }
@@ -2241,7 +2252,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     stopSignal: AbortSignal
   ): Promise<{
     readonly stream: AsyncIterable<UIMessageChunk>;
+    /**
+     * Whether the call's reasoning stays out of the turn's stream: the
+     * loop's own reply keeps it, for the next call (a provider's signed
+     * reasoning), as the AI SDK keeps it between steps.
+     */
+    readonly hideReasoning: boolean;
     readonly error: () => unknown;
+    /** The call's token usage, once its stream ended. */
+    readonly usage: () => Promise<LanguageModelUsage | undefined>;
   }> {
     const { session, operationId, built, placed } = turn;
     const { tools } = built;
@@ -2336,6 +2355,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }));
     let modelError: unknown;
     const result = streamText({
+      // First, so none of the harness's own arguments below is overridden.
+      ...config.callSettings,
       model,
       ...(effectiveSystem !== undefined && { system: effectiveSystem }),
       messages,
@@ -2363,11 +2384,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const stream = result.toUIMessageStream({
       originalMessages: [] as UIMessage[],
       generateMessageId: () => messageId,
+
       // The participant who started the turn runs its client tools.
       messageMetadata: ({ part }) =>
         part.type === "start" && owner !== undefined ? { owner } : undefined
     });
     return {
+      hideReasoning: config.sendReasoning === false,
       stream: (async function* () {
         try {
           for await (const chunk of stream) yield chunk;
@@ -2375,7 +2398,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           modelError ??= error;
         }
       })(),
-      error: () => modelError
+      error: () => modelError,
+      // A failed call may have none; the step goes on without it.
+      usage: () =>
+        Promise.resolve(result.usage).then(
+          (usage) => usage,
+          () => undefined
+        )
     };
   }
 
@@ -2652,7 +2681,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           );
     const open =
       streamId !== undefined && streams.getStream(streamId) !== undefined;
-    let message = live?.reply;
+    // The loop's own reply, without the reasoning the turn didn't send.
+    let message =
+      live?.reply && live.hideReasoning
+        ? {
+            ...live.reply,
+            // Only this run's: reasoning stored before it stays.
+            parts: live.reply.parts.filter(
+              (part, at) =>
+                part.type !== "reasoning" || at < (live.storedParts ?? 0)
+            )
+          }
+        : live?.reply;
     if (!message && legacy) {
       const existing = await stored(legacy.messageId);
       message =

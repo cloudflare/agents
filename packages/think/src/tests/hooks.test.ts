@@ -377,6 +377,115 @@ describe("Think — beforeStep hook", () => {
     expect(log[0].text).toBe("Async override applied");
   });
 
+  it("sends a step's structured system message", async () => {
+    const agent = await freshToolAgent("hook-bs-system");
+    await agent.setStepSystemForTest("Answer in JSON");
+    await agent.testChat("call echo");
+    const [first] = await agent.getToolPrompts();
+    expect(first).toContain("Answer in JSON");
+  });
+
+  it("sends a rewritten turn's tool result when the tool changed the context", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-bt-rewrite-ctx-${crypto.randomUUID()}`
+    );
+    await agent.rewriteTurnMessagesForTest();
+    await agent.testChat("the original ask");
+    const prompts = await agent.getToolPrompts();
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    // The call after the tool has its result, not only the rewritten ask.
+    expect(prompts[1]).toContain("the rewritten ask");
+    expect(prompts[1]).toContain("echo-written:");
+  });
+
+  it("keeps reasoning stored earlier when a continuation that hides reasoning fails", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-hidden-reasoning-cont-${crypto.randomUUID()}`
+    );
+    await agent.useReasoningModelForTest();
+    await agent.testChat("think, then echo");
+    expect(JSON.stringify(await agent.getMessages())).toContain(
+      "signed-thought"
+    );
+    await agent.stopSendingReasoningForTest();
+    await agent.failAfterReasoningForTest();
+    await agent.continueForTest();
+    expect(JSON.stringify(await agent.getMessages())).toContain(
+      "signed-thought"
+    );
+  });
+
+  it("stores no unsent reasoning for a turn that fails after it", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-hidden-reasoning-fail-${crypto.randomUUID()}`
+    );
+    await agent.hideReasoningForTest();
+    await agent.failAfterReasoningForTest();
+    await agent.testChat("think, then echo, then fail");
+    const messages = (await agent.getMessages()) as UIMessage[];
+    // The reply up to the failure is kept, the tool's result in it...
+    const reply = messages.find((m) => m.role === "assistant");
+    expect(JSON.stringify(reply?.parts)).toContain("echo-written:");
+    // ...without the reasoning the turn never sent.
+    expect(JSON.stringify(messages)).not.toContain("signed-thought");
+  });
+
+  it("keeps unsent reasoning for the turn's next model call", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-hidden-reasoning-${crypto.randomUUID()}`
+    );
+    await agent.hideReasoningForTest();
+    const result = await agent.testChat("think, then echo");
+    expect(result.done).toBe(true);
+    // The client stream has none of it...
+    expect(JSON.stringify(result.events)).not.toContain("signed-thought");
+    // ...but the call after the tool sends it back, as a provider's signed
+    // reasoning must be.
+    const prompts = await agent.getReasoningPrompts();
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("signed-thought");
+    // With the provider's signature on it.
+    expect(prompts[1]).toContain("sig-r1");
+  });
+
+  it("sends a continued rewritten turn's earlier tool call once", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-bt-rewrite-cont-${crypto.randomUUID()}`
+    );
+    await agent.lookupOnContinueForTest();
+    await agent.testChat("the first ask");
+    await agent.rewriteKeepingHistoryForTest();
+    await agent.continueForTest();
+    const prompts = await agent.getLookupPrompts();
+    // echo, its answer; then the continuation's lookup call, and the call
+    // after lookup.
+    expect(prompts).toHaveLength(4);
+    const count = (prompt: string) => prompt.split('"tc-echo-1"').length - 1;
+    // The echo call and its result, once each.
+    expect(count(prompts[2])).toBe(2);
+    expect(count(prompts[3])).toBe(2);
+  });
+
+  it("keeps the messages beforeTurn rewrote for every model call of the turn", async () => {
+    const agent = await freshToolAgent("hook-bt-rewrite");
+    await agent.rewriteTurnMessagesForTest();
+    await agent.testChat("the original ask");
+    const prompts = await agent.getToolPrompts();
+    // The tool call, then the answer after its result.
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    for (const prompt of prompts) {
+      expect(prompt).toContain("the rewritten ask");
+      expect(prompt).not.toContain("the original ask");
+    }
+    // The second call has the tool's result too.
+    expect(prompts[1]).toContain("echo");
+  });
+
   it("ends a step that ran a tool before the next step's beforeStep", async () => {
     const agent = await freshToolAgent("hook-bs-order");
     await agent.testChat("Run a tool");
