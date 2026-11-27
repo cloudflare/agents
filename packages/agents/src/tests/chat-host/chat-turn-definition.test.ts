@@ -225,7 +225,8 @@ describe("chatTurnDefinition", () => {
         streams: instance.streams,
         sessions: instance.sessions,
         kv: instance.kv,
-        session: "s1"
+        session: "s1",
+        emit: (type, payload) => void instance.events.push({ type, payload })
       },
       host
     );
@@ -295,6 +296,9 @@ describe("chatTurnDefinition", () => {
       expect(exhausted).toEqual([
         { reason: "max_attempts_exceeded", attempt: 3 }
       ]);
+      expect(
+        instance.events.find((event) => event.type === "chat:recovery:failed")
+      ).toMatchObject({ payload: { reason: "max_attempts_exceeded" } });
       expect(instance.calls).toEqual([]);
       expect(
         await instance.streams.status(chatTurnStreamId("run-1"))
@@ -320,6 +324,16 @@ describe("chatTurnDefinition", () => {
       expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
       // The first recovery of the turn, whatever the run's attempt number.
       expect(recoveries).toEqual([1]);
+      // The recovery is published, start to end.
+      expect(
+        instance.events
+          .map((event) => event.type)
+          .filter((type) => type.startsWith("chat:recovery:"))
+      ).toEqual([
+        "chat:recovery:detected",
+        "chat:recovery:attempt",
+        "chat:recovery:completed"
+      ]);
     });
   });
 

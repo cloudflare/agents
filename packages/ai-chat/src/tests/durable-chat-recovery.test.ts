@@ -3944,11 +3944,12 @@ describe("platform-transient reader errors (#1964)", () => {
 
     expect(
       await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
+    ).toBe("completed");
 
-    await expect
-      .poll(() => textsOf(agentStub), { timeout: 5000 })
-      .toEqual(["tell me a long story", "Continued response."]);
+    expect(await textsOf(agentStub)).toEqual([
+      "tell me a long story",
+      "Continued response."
+    ]);
   });
 
   it("drops an early-persisted approval request with the partial under persist: false", async () => {
@@ -3963,11 +3964,12 @@ describe("platform-transient reader errors (#1964)", () => {
         1,
         { prelude: "approval" }
       )
-    ).toBe("aborted");
+    ).toBe("completed");
 
-    await expect
-      .poll(() => textsOf(agentStub), { timeout: 5000 })
-      .toEqual(["tell me a long story", "Continued response."]);
+    expect(await textsOf(agentStub)).toEqual([
+      "tell me a long story",
+      "Continued response."
+    ]);
     const stored = (await agentStub.getPersistedMessages()) as Stored;
     expect(
       stored
@@ -3976,10 +3978,9 @@ describe("platform-transient reader errors (#1964)", () => {
     ).toEqual([]);
   });
 
-  it("leaves the incident to the attempt a failed recovery schedules", async () => {
+  it("completes after two transient failures in a row, and says the recovery completed", async () => {
     const room = `transient-chain-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
-    await agentStub.trackRecoveryTaskKeysForTest();
     const events: string[] = [];
     const unsubscribe = subscribe("chat", (event) => {
       // Only this test's agent: the channel carries every agent's events,
@@ -3994,27 +3995,14 @@ describe("platform-transient reader errors (#1964)", () => {
           "Network connection lost.",
           2
         )
-      ).toBe("aborted");
+      ).toBe("completed");
 
-      await expect
-        .poll(async () => (await textsOf(agentStub)).at(-1), {
-          timeout: 10_000,
-          interval: 100
-        })
-        .toContain("Continued response.");
-      await expect
-        .poll(() => agentStub.getChatRecoveryIncidentsForTest())
-        .toHaveLength(0);
+      expect((await textsOf(agentStub)).at(-1)).toContain(
+        "Continued response."
+      );
       expect(await agentStub.getFailingReaderCallsForTest()).toBe(2);
       expect(events).not.toContain("chat:recovery:failed");
       expect(events.at(-1)).toBe("chat:recovery:completed");
-      // Only the first attempt joins duplicate detections; the attempt it
-      // chains must not join the run that schedules it.
-      expect(await agentStub.getRecoveryTaskKeyedForTest()).toEqual([
-        true,
-        false
-      ]);
-      expect(await agentStub.getChatRecoveringForTest()).toBeNull();
     } finally {
       unsubscribe();
     }

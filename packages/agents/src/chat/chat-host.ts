@@ -1406,6 +1406,9 @@ export function chatTurnDefinition(
             });
       if (evaluated) {
         step.checkpoint.set(INCIDENT_CHECKPOINT, evaluated.incident as never);
+        for (const { type, ...event } of evaluated.events) {
+          deps.emit?.(type, event);
+        }
       }
       const exhausted = recovery === false || evaluated?.exhausted === true;
       const attempt = evaluated?.incident.attempt ?? step.attempt;
@@ -1440,7 +1443,18 @@ export function chatTurnDefinition(
         if (decision?.persist === false) await dropPartial();
         const writer = await deps.streams.open(streamId, { tag: requestId });
         writer.error("interrupted");
+        const ended = {
+          incidentId: requestId,
+          requestId,
+          attempt,
+          maxAttempts,
+          recoveryKind: partial ? "continue" : "retry"
+        };
         if (!evaluated?.exhausted) {
+          deps.emit?.("chat:recovery:skipped", {
+            ...ended,
+            reason: "continue_disabled"
+          });
           return report({
             requestId,
             status: "error",
@@ -1451,6 +1465,10 @@ export function chatTurnDefinition(
         }
         // The budget is spent: the app is told why, and the client gets the
         // message the app chose for it.
+        deps.emit?.("chat:recovery:failed", {
+          ...ended,
+          reason: evaluated.incident.reason ?? "max_attempts_exceeded"
+        });
         try {
           await budget.onExhausted?.({
             incidentId: requestId,
@@ -2054,6 +2072,18 @@ export function chatTurnDefinition(
       reply && reply.parts.length > 0
         ? await storeReply(writer as StreamWriter, reply)
         : (writer?.close({ discard: true }), undefined);
+    // A turn that was recovered on the way says so, as it always has.
+    const recovered =
+      step.checkpoint.get<ChatRecoveryIncident>(INCIDENT_CHECKPOINT);
+    if (recovered) {
+      deps.emit?.("chat:recovery:completed", {
+        incidentId: requestId,
+        requestId,
+        attempt: recovered.attempt,
+        maxAttempts: recovered.maxAttempts,
+        recoveryKind: recovered.recoveryKind
+      });
+    }
     return report({
       requestId,
       status: "completed",
