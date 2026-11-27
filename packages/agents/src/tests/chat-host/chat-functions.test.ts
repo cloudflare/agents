@@ -1994,4 +1994,82 @@ describe("chat functions over a minimal host", () => {
       });
     });
   });
+
+  it("a programmatic turn runs under the id it is given, retained, with its metadata and checkpoint", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const respond = instance.host.respond;
+      let progress: unknown;
+      instance.host.respond = async (call) => {
+        // A tool reports progress through the run's checkpoint; a reader
+        // outside the run sees it while the run is live.
+        call.checkpoint.set("agentTool:progress", { done: 1 });
+        progress = instance.tasks.checkpointOf(
+          call.requestId,
+          "agentTool:progress"
+        );
+        return respond(call);
+      };
+      const { requestId } = await submitTurn(
+        instance.deps,
+        instance.lane,
+        {
+          trigger: "server",
+          messages: [
+            { id: "u1", role: "user", parts: [{ type: "text", text: "Go" }] }
+          ]
+        },
+        {
+          requestId: "agent-tool:run-1",
+          retain: true,
+          metadata: { agentTool: { runId: "run-1" } }
+        }
+      );
+      expect(requestId).toBe("agent-tool:run-1");
+      await instance.tasks.wait(requestId);
+      expect(instance.tasks.peek(requestId)).toMatchObject({
+        status: "completed",
+        metadata: { agentTool: { runId: "run-1" } }
+      });
+      expect(progress).toEqual({ done: 1 });
+      instance.host.respond = respond;
+    });
+  });
+
+  it("a cancel carries the caller's reason to the run", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let called!: () => void;
+      const inRespond = new Promise<void>((resolve) => (called = resolve));
+      const respond = instance.host.respond;
+      instance.host.respond = async (call) => {
+        called();
+        await new Promise<void>((resolve) =>
+          call.signal.addEventListener("abort", () => resolve(), { once: true })
+        );
+        return respond(call);
+      };
+      const { requestId } = await submitTurn(
+        instance.deps,
+        instance.lane,
+        {
+          trigger: "server",
+          messages: [
+            { id: "u1", role: "user", parts: [{ type: "text", text: "Go" }] }
+          ]
+        },
+        { retain: true }
+      );
+      await inRespond;
+      await cancelTurn(instance.deps, requestId, "parent cancelled");
+      await instance.tasks.wait(requestId);
+      expect(instance.tasks.peek(requestId)).toMatchObject({
+        status: "aborted",
+        reason: "parent cancelled"
+      });
+      instance.host.respond = respond;
+    });
+  });
 });
