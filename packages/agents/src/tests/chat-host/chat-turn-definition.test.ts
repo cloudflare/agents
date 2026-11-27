@@ -1637,22 +1637,11 @@ describe("chatTurnDefinition", () => {
         { type: "text-delta", id: "t1", delta: "b" },
         { type: "text-delta", id: "t1", delta: "c" }
       ]);
-      // A few milliseconds after the burst the batch still holds the later
-      // deltas: a model that streams every few ms is not quiet (a pause that
-      // short would otherwise write each chunk as its own row)...
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      // The model is quiet now: after it, everything it sent is stored.
+      await new Promise((resolve) => setTimeout(resolve, 10));
       expect(
-        (await turn.stored()).filter((t) => t === "text-delta").length
-      ).toBeLessThan(3);
-      // ...and once the model has been quiet a while, everything it sent is
-      // stored.
-      await vi.waitFor(
-        async () =>
-          expect(
-            (await turn.stored()).filter((t) => t === "text-delta")
-          ).toHaveLength(3),
-        { timeout: 2000 }
-      );
+        (await turn.stored()).filter((t) => t === "text-delta")
+      ).toHaveLength(3);
       await turn.finish();
     });
   });
@@ -2479,6 +2468,60 @@ describe("chatTurnDefinition", () => {
       expect(JSON.stringify(await session.getMessage("a1"))).toContain(
         "output-available"
       );
+    });
+  });
+
+  it("a model that pauses every few milliseconds has its buffer written at most every 50 ms, not once per chunk", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const sent: number[] = [];
+      const pending = chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1"
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              for (let i = 0; i < 6; i++) {
+                yield { type: "text-delta", id: "t1", delta: `${i}` } as never;
+                sent.push(i);
+                await new Promise((resolve) => setTimeout(resolve, 3));
+              }
+              await held;
+              yield { type: "text-end", id: "t1" } as never;
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("pf-1", 1));
+      await vi.waitFor(() => expect(sent).toHaveLength(6));
+      // Within 50 ms of the first pause's write, the later deltas wait.
+      const stored = instance.streams
+        .__DO_NOT_USE_WILL_BREAK__sync()
+        .bounds(chatTurnStreamId("pf-1"));
+      const written = instance.streams
+        .__DO_NOT_USE_WILL_BREAK__sync()
+        .readChunks(chatTurnStreamId("pf-1"), stored.oldest, 100).length;
+      expect(written).toBeLessThan(8);
+      // Once the window passes, all of it is written.
+      await vi.waitFor(
+        () =>
+          expect(
+            instance.streams
+              .__DO_NOT_USE_WILL_BREAK__sync()
+              .readChunks(chatTurnStreamId("pf-1"), 0, 100).length
+          ).toBe(8),
+        { timeout: 2000 }
+      );
+      release();
+      await pending;
     });
   });
 });
