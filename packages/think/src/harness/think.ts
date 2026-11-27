@@ -2862,10 +2862,19 @@ export class Think<
         settled?.status === "done" && settled.messageId !== undefined
           ? this.#transcript.messages.find((m) => m.id === settled.messageId)
           : undefined;
+      // A `beforeTurn` that asked for structured output gets it parsed.
+      const output =
+        settled?.status === "done"
+          ? this.harness.operationOutput(
+              this.harness.session().id,
+              result.requestId
+            )
+          : undefined;
       return {
         ...result,
         continuation: true,
-        ...(message && { message: message as unknown as SessionMessage })
+        ...(message && { message: message as unknown as SessionMessage }),
+        ...(output !== undefined && { output })
       };
     }
     // As saveMessages: a turn stopped before it starts builds nothing.
