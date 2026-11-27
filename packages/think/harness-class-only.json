@@ -193,5 +193,89 @@
     "test": "Think — onChatRecovery > sweeps incidents that have been inactive past the TTL",
     "reason": "the class's incident TTL sweep over seeded private incident rows (`seedIncidentForTest`)",
     "mechanicsOnly": true
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > replaces an aged file part with the exact eviction marker",
+    "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > leaves the exact marker in an aged file part and keeps its prose"
+    }
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > writes raw decoded bytes to the Workspace with the right mime type",
+    "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > writes the raw decoded bytes to the Workspace"
+    }
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts a data-URL string nested in a tool output",
+    "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > evicts a data URL nested in a tool output and keeps the output's shape"
+    }
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > leaves recent messages alone",
+    "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > leaves the recent messages alone, even with keepRecentMessages 0"
+    }
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > starts a pass where the last one got to, so it re-reads only new rows",
+    "reason": "Pins how many stored rows a pass reads after a pass that evicted nothing (the cursor's cost), through Think's private _evictAgedMediaBestEffort seam; nothing an app can observe. The cursor after an eviction is shown through passes that run on their own in 'mediaEviction — a pass that runs on its own > a backlog pass reads only what is new since the cursor, not the whole path again'.",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts a payload larger than one row, leaving the bytes in one place",
+    "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > evicts a payload larger than one row and leaves the bytes in one place"
+    }
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > bounds each pass and drains the reported backlog",
+    "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > drains a backlog on its own when each pass is bounded"
+    }
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > reaches older media past large text rows that fill a pass",
+    "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > reaches older media past large text rows that fill a pass"
+    }
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > mediaEviction:false keeps the image visible to the model",
+    "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > keeps the image with mediaEviction false: no pass is scheduled"
+    }
+  },
+  {
+    "file": "periphery-modules.test.ts",
+    "test": "ThinkConfigStore > stores, reads and deletes keys",
+    "reason": "Pins ThinkConfigStore's own get, set and delete of arbitrary keys through Think's private _cfConfig. An app only reaches the store through configure() and getConfig(), which never delete; nothing an app can observe.",
+    "mechanicsOnly": true
   }
 ]
