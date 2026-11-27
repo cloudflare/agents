@@ -105,7 +105,36 @@ export class ThinkContextOverflow {
    */
   beginRun(baseline: number): void {
     this.#baseline = baseline;
+    this.#runBaseline = baseline;
+    this.#compactedHead = undefined;
     this.#proactiveCompactions = 0;
+  }
+
+  /** Where the run's own steps begin in the messages it started with. */
+  #runBaseline = 0;
+
+  /** The head the last proactive compaction of this run built, if any. */
+  #compactedHead: ModelMessage[] | undefined;
+
+  /**
+   * Whether the step's messages already start with the compacted head: AI
+   * SDK 7 carries a step's `messages` override into later steps; AI SDK 6
+   * gives each step the run's original messages and its steps again.
+   */
+  #carried(messages: readonly ModelMessage[]): boolean {
+    const head = this.#compactedHead;
+    if (!head) return true;
+    return (
+      messages.length >= head.length &&
+      JSON.stringify(messages.slice(0, head.length)) === JSON.stringify(head)
+    );
+  }
+
+  /** This run's in-flight steps, in the frame the step's messages are in. */
+  #inFlight(messages: readonly ModelMessage[]): ModelMessage[] {
+    return messages.slice(
+      this.#carried(messages) ? this.#baseline : this.#runBaseline
+    );
   }
 
   /**
@@ -240,17 +269,23 @@ export class ThinkContextOverflow {
   ): Promise<ModelMessage[] | undefined> {
     const guard = this.#options.config()?.proactive;
     if (!guard || guard.maxInputTokens <= 0) return undefined;
+    // Once compacted, a later step sends the compacted head too: on AI SDK
+    // 6, where the override isn't carried, it is spliced in again.
+    const keep = (): ModelMessage[] | undefined =>
+      this.#compactedHead && !this.#carried(event.messages)
+        ? [...this.#compactedHead, ...this.#inFlight(event.messages)]
+        : undefined;
     // The proactive cap is independent of the reactive budget, so an app can
     // use either layer alone and tune each freely.
     if (this.#proactiveCompactions >= Math.max(1, guard.maxCompactions ?? 1))
-      return undefined;
+      return keep();
 
     const prev = event.steps?.at(-1);
     const used = prev?.usage?.inputTokens ?? prev?.usage?.totalTokens;
-    if (used == null || !Number.isFinite(used)) return undefined;
+    if (used == null || !Number.isFinite(used)) return keep();
 
     const headroom = guard.headroom ?? 0.9;
-    if (used < guard.maxInputTokens * headroom) return undefined;
+    if (used < guard.maxInputTokens * headroom) return keep();
 
     try {
       // Count the ATTEMPT (not just successful shortenings) before compacting.
@@ -259,17 +294,16 @@ export class ThinkContextOverflow {
       // emitting `chat:context:compacted` — on every step.
       this.#proactiveCompactions++;
       const shortened = await this.compact("proactive");
-      if (!shortened) return undefined;
+      if (!shortened) return keep();
 
       // Rebuild the compacted head, then splice this turn's in-flight steps
       // (which are not yet persisted to the session) back onto the tail.
+      const tail = this.#inFlight(event.messages);
       const head = await this.#options.rebuildMessages();
-      const tail = event.messages.slice(this.#baseline);
-      // Re-baseline so a second guard fire this turn keeps the new tail. This
-      // relies on the AI SDK carrying the returned `messages` override into
-      // the next step's `event.messages` (locked by the "fires twice in one
-      // turn" test in assistant-agent-loop.test.ts).
+      // Re-baseline so a second guard fire this turn keeps the new tail, and
+      // keep the head for later steps on an AI SDK that doesn't carry it.
       this.#baseline = head.length;
+      this.#compactedHead = head;
       return [...head, ...tail];
     } catch (err) {
       console.warn(
