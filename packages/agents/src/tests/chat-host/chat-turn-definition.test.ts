@@ -1033,4 +1033,87 @@ describe("chatTurnDefinition", () => {
       });
     });
   });
+
+  it("a server tool that runs longer than the stall timeout is not a stall", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            async start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "slow",
+                input: {}
+              });
+              // The tool runs for five stall timeouts.
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              controller.enqueue({
+                type: "tool-output-available",
+                toolCallId: "c1",
+                output: "done"
+              });
+              controller.close();
+            }
+          }),
+        options: { recovery: { stallTimeoutMs: 20 } }
+      })({ trigger: "server" }, laterAttempt("slow-1", 1));
+      expect(result).toMatchObject({ status: "completed" });
+      const reply = (await instance.sessions
+        .session("s1")
+        .getMessage("a1")) as unknown as {
+        parts: Array<{ toolCallId?: string; state?: string }>;
+      };
+      expect(reply.parts.find((p) => p.toolCallId === "c1")?.state).toBe(
+        "output-available"
+      );
+    });
+  });
+
+  it("an approved tool cut off by a reset is reported interrupted, not run again", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-gate",
+            toolCallId: "c1",
+            state: "approval-responded",
+            input: {},
+            approval: { id: "ap1", approved: true }
+          }
+        ]
+      } as never);
+      // The tool-answer turn that runs the approved tool was cut off.
+      const checkpoint = new Map<string, unknown>([
+        ["chat:base", { id: "a1", parts: 1 }]
+      ]);
+      const cut = await instance.streams.open(chatTurnStreamId("ap-1"), {
+        tag: "ap-1"
+      });
+      cut.append({ type: "start", messageId: "a1" } as never);
+      await definitionOf(instance, instance.host)(
+        { trigger: "tool-answer" },
+        laterAttempt("ap-1", 2, new AbortController().signal, checkpoint)
+      );
+      const part = (
+        instance.calls[0].messages.find((m) => m.id === "a1") as unknown as {
+          parts: Array<{ toolCallId?: string; state?: string }>;
+        }
+      ).parts.find((p) => p.toolCallId === "c1");
+      expect(part?.state).toBe("output-error");
+    });
+  });
 });

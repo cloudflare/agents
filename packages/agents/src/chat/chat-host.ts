@@ -172,16 +172,35 @@ function watchStall(
 ): ReadableStream<UIMessageChunk> {
   if (!ms || ms <= 0) return chunks;
   const reader = chunks.getReader();
+  // Tool calls asked and not answered yet: while one runs, the model is
+  // silent by design, and only the model's silence is a stall.
+  const running = new Set<string>();
   return new ReadableStream<UIMessageChunk>({
     async pull(controller) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const stalled = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new StreamStalledError(ms)), ms);
+        if (running.size === 0) {
+          timer = setTimeout(() => reject(new StreamStalledError(ms)), ms);
+        }
       });
       try {
         const next = await Promise.race([reader.read(), stalled]);
-        if (next.done) controller.close();
-        else controller.enqueue(next.value);
+        if (next.done) {
+          controller.close();
+          return;
+        }
+        const id = (next.value as { toolCallId?: unknown }).toolCallId;
+        if (typeof id === "string") {
+          if (next.value.type === "tool-input-available") running.add(id);
+          else if (
+            next.value.type === "tool-output-available" ||
+            next.value.type === "tool-output-error" ||
+            next.value.type === "tool-output-denied"
+          ) {
+            running.delete(id);
+          }
+        }
+        controller.enqueue(next.value);
       } catch (error) {
         void reader.cancel(error).catch(() => {});
         controller.error(error);
@@ -284,7 +303,12 @@ function isCutOffTool(part: UIMessage["parts"][number]): boolean {
   return (
     typeof type === "string" &&
     (type.startsWith("tool-") || type === "dynamic-tool") &&
-    (state === "input-streaming" || state === "input-available")
+    (state === "input-streaming" ||
+      state === "input-available" ||
+      // Approved: it ran, or was about to, in the turn that was cut off.
+      (state === "approval-responded" &&
+        (part as { approval?: { approved?: unknown } }).approval?.approved ===
+          true))
   );
 }
 
