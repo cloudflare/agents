@@ -10,6 +10,7 @@ import {
   DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS
 } from "./agent-options";
 import { MAX_SERIALIZED_BYTES } from "./tasks/serialization";
+import { TaskCancellation } from "./tasks/replay";
 import { TaskSettlement } from "./tasks/settlement";
 import type { Tasks } from "./tasks/tasks";
 import type { TaskJson, TaskRecord, TaskStep } from "./tasks/types";
@@ -146,6 +147,20 @@ type AgentToolTaskLocal = {
 };
 
 /** The agent options agent tools read. */
+
+/**
+ * A stop's reason as text, for the run's error and the cancel sent to the
+ * child (an RPC argument). The chat module stops a turn with a
+ * `TaskCancellation`, which is neither an Error nor serializable.
+ */
+function stopText(reason: unknown): string {
+  if (reason instanceof TaskCancellation) {
+    return reason.reason ?? "The operation was aborted";
+  }
+  if (reason instanceof Error) return reason.message;
+  if (reason === undefined || reason === null) return "cancelled";
+  return String(reason);
+}
 export type AgentToolParentOptions = Pick<
   ResolvedAgentOptions,
   | "detachedMaxBudgetMs"
@@ -233,6 +248,13 @@ export class AgentToolParent {
    * yet, so concurrent calls count them against `maxConcurrentAgentTools`.
    * Each leaves when its call returns.
    */
+  /**
+   * Awaited runs a caller in this isolate waits on, and those of them a
+   * clear deleted (by agent type): the caller reports the clear, not a run
+   * that vanished.
+   */
+  private readonly _agentToolAwaited = new Set<string>();
+  private readonly _agentToolClearedWhileAwaited = new Map<string, string>();
   private readonly _agentToolRunsStarting = new Set<string>();
   /** Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
@@ -313,6 +335,7 @@ export class AgentToolParent {
           });
         }
       }
+      this._agentToolAwaited.add(runId);
       return this._waitAgentToolTask<Output>(runId);
     }
 
@@ -495,30 +518,31 @@ export class AgentToolParent {
     const signal = local.signal;
     const onAbort = () => {
       void this.host.tasks
-        .cancel(
-          runId,
-          signal?.reason instanceof Error
-            ? signal.reason.message
-            : String(signal?.reason ?? "cancelled")
-        )
+        .cancel(runId, stopText(signal?.reason))
         .catch(() => {});
       void this.host.children
         .resolve(metadata.agentType, runId)
         .then((child) =>
           this._asAgentToolChildAdapter(child).cancelAgentToolRun(
             runId,
-            signal?.reason
+            stopText(signal?.reason)
           )
         )
         .catch(() => {});
     };
-    await this.host.tasks.run(AGENT_TOOL_TASK, null, {
-      runId,
-      metadata,
-      retain: true,
-      start: "now",
-      local
-    });
+    this._agentToolAwaited.add(runId);
+    try {
+      await this.host.tasks.run(AGENT_TOOL_TASK, null, {
+        runId,
+        metadata,
+        retain: true,
+        start: "now",
+        local
+      });
+    } catch (error) {
+      this._agentToolAwaited.delete(runId);
+      throw error;
+    }
     if (signal?.aborted) onAbort();
     else signal?.addEventListener("abort", onAbort, { once: true });
     let result: RunAgentToolResult<Output>;
@@ -575,10 +599,26 @@ export class AgentToolParent {
   private async _waitAgentToolTask<Output>(
     runId: string
   ): Promise<RunAgentToolResult<Output>> {
-    const record = await this.host.tasks.wait(runId);
+    let record: TaskRecord | null;
+    try {
+      record = await this.host.tasks.wait(runId);
+    } finally {
+      this._agentToolAwaited.delete(runId);
+    }
     const settled = record && this._agentToolTaskResult<Output>(record);
     if (record && settled) {
+      this._agentToolClearedWhileAwaited.delete(runId);
       return this._agentToolResultWithOutput<Output>(record, settled);
+    }
+    const cleared = this._agentToolClearedWhileAwaited.get(runId);
+    if (cleared !== undefined) {
+      this._agentToolClearedWhileAwaited.delete(runId);
+      return {
+        runId,
+        agentType: cleared,
+        status: "aborted",
+        error: AGENT_TOOL_CLEARED_REASON
+      };
     }
     return {
       runId,
@@ -800,16 +840,15 @@ export class AgentToolParent {
       result: RunAgentToolResult;
       sequence: number;
     }> => {
-      await adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      await adapter
+        .cancelAgentToolRun(runId, stopText(signal.reason))
+        .catch(() => {});
       return {
         result: {
           runId,
           agentType,
           status: "aborted",
-          error:
-            signal.reason instanceof Error
-              ? signal.reason.message
-              : String(signal.reason ?? "cancelled")
+          error: stopText(signal.reason)
         },
         sequence
       };
@@ -833,7 +872,9 @@ export class AgentToolParent {
     }
 
     const onAbort = () => {
-      void adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      void adapter
+        .cancelAgentToolRun(runId, stopText(signal.reason))
+        .catch(() => {});
     };
     signal.addEventListener("abort", onAbort, { once: true });
     try {
@@ -963,7 +1004,9 @@ export class AgentToolParent {
     }
     const { adapter, inspection } = reached;
     const onAbort = () => {
-      void adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      void adapter
+        .cancelAgentToolRun(runId, stopText(signal.reason))
+        .catch(() => {});
     };
     signal.addEventListener("abort", onAbort, { once: true });
     try {
@@ -991,13 +1034,15 @@ export class AgentToolParent {
     { result: RunAgentToolResult; sequence: number } | TaskSettlement
   > {
     if (signal.aborted) {
-      await adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      await adapter
+        .cancelAgentToolRun(runId, stopText(signal.reason))
+        .catch(() => {});
       return {
         result: {
           runId,
           agentType: meta.agentType,
           status: "aborted",
-          error: String(signal.reason ?? "cancelled")
+          error: stopText(signal.reason)
         },
         sequence: 1
       };
@@ -1905,6 +1950,9 @@ export class AgentToolParent {
       // The run goes before its child is cleaned up, so a reset during the
       // cleanup leaves no cleared run behind (one a reset cut off inside the
       // cancel is dropped when the runs are next listed).
+      if (this._agentToolAwaited.has(row.run_id)) {
+        this._agentToolClearedWhileAwaited.set(row.run_id, row.agent_type);
+      }
       this.host.tasks.deleteRun(row.run_id);
       if (open === "pending" || open === "running") {
         try {
@@ -2476,13 +2524,34 @@ export class AgentToolParent {
           connection
         )
       : sequence;
+    // A child whose chunk log carries its milestones (an AIChatAgent run's
+    // kept stream) has replayed them already.
+    const replayed = new Set<number>();
+    for (const chunk of chunks ?? []) {
+      if (!chunk.body.includes(AGENT_TOOL_MILESTONE_PART)) continue;
+      try {
+        const parsed = JSON.parse(chunk.body) as {
+          type?: unknown;
+          data?: { sequence?: unknown };
+        };
+        if (
+          parsed.type === AGENT_TOOL_MILESTONE_PART &&
+          typeof parsed.data?.sequence === "number"
+        ) {
+          replayed.add(parsed.data.sequence);
+        }
+      } catch {
+        // Not JSON: not a milestone.
+      }
+    }
     return this._broadcastAgentToolMilestones(
       adapter,
       row,
       next,
       replay,
       connection,
-      deadline?.()
+      deadline?.(),
+      replayed
     );
   }
 
@@ -2499,7 +2568,9 @@ export class AgentToolParent {
     sequence: number,
     replay?: true,
     connection?: Connection,
-    timeoutMs?: number
+    timeoutMs?: number,
+    /** Milestone sequences the replayed chunks carried already. */
+    replayed?: ReadonlySet<number>
   ): Promise<number> {
     // Read-only: replaying milestones must never seal a stale child run.
     const inspection = await this._settleWithinRecoveryTimeout(
@@ -2508,6 +2579,7 @@ export class AgentToolParent {
     );
     const milestones: AgentToolMilestone[] = inspection?.milestones ?? [];
     for (const milestone of milestones) {
+      if (replayed?.has(milestone.sequence)) continue;
       this._broadcastAgentToolEvent(
         row.parent_tool_call_id ?? undefined,
         sequence,
@@ -2598,6 +2670,8 @@ export class AgentToolParent {
     // produces output (a silent/hung child forwards nothing → no credit → the
     // parent still exhausts on its own no-progress timer).
     let forwardedSinceProgress = false;
+    // Where the child's numbering meets this run's, at its first stored chunk.
+    let childBase: number | undefined;
     const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     try {
       const forwardChunk = (chunk: AgentToolStoredChunk) => {
@@ -2608,6 +2682,15 @@ export class AgentToolParent {
         const lifecycle = isAgentToolLifecycleChunk(chunk.body);
         const unstoredId =
           typeof chunk.unstoredId === "string" ? chunk.unstoredId : undefined;
+        // A stored chunk keeps the child's own place for it, from where the
+        // first one met this run's numbering: a child whose stream stores
+        // its milestone frames (an AIChatAgent run) numbers them, and a
+        // later replay does too.
+        if (unstoredId === undefined && typeof chunk.sequence === "number") {
+          // Met at the first chunk that has a place, a leading milestone too.
+          childBase ??= next - chunk.sequence;
+          if (!lifecycle) next = Math.max(next, chunk.sequence + childBase);
+        }
         const chunkSequence =
           lifecycle || unstoredId !== undefined ? next : next++;
         if (cursor) cursor.next = next;

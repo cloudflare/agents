@@ -16,9 +16,13 @@ import {
 } from "agents";
 import { describe, expect, it, vi, onTestFinished } from "vitest";
 import type { Env } from "./worker";
-import { connectChatWS, socketBarrier } from "./test-utils";
 
 type ParentStub = DurableObjectStub & {
+  childFacetCarryForTest(): Promise<{
+    status: string | undefined;
+    tablesLeft: string[];
+    rowsLeft: number;
+  }>;
   resetChildForTest(childName: string): Promise<void>;
   seedChildLegacyRequestContextForTest(childName: string): Promise<void>;
   childLegacyRequestContextForTest(childName: string): Promise<{
@@ -37,6 +41,8 @@ type ParentStub = DurableObjectStub & {
       chunkDelayMs?: number;
       structured?: boolean;
       streamError?: string;
+      toolThenText?: boolean;
+      milestoneAfterMs?: number;
     },
     runId?: string
   ): Promise<RunAgentToolResult>;
@@ -181,35 +187,6 @@ type ParentStub = DurableObjectStub & {
     milestoneBody: string,
     runId?: string
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
-  coldCounterChildReattachForTest(afterSequence?: number): Promise<{
-    drained: number[];
-    liveSequenceAfterDrain: number | undefined;
-    postRestart: { sequence: number; body: string } | null;
-  }>;
-  terminalOnlyChildAfterRecoveredTurnForTest(): Promise<{
-    afterRebind: boolean;
-    afterClose: boolean;
-  }>;
-  progressDuringChildDrainForTest(): Promise<string[]>;
-  skippedChunkChildReattachForTest(): Promise<
-    Array<{ sequence: number; delta?: string; unstored: boolean }>
-  >;
-  broadcastDuringChildInspectionForTest(): Promise<{
-    drained: number[];
-    postRestart: { sequence: number; body: string } | null;
-  }>;
-  inspectStaleChildRunReadOnlyForTest(): Promise<{
-    reported: string | undefined;
-    stored: string | undefined;
-  }>;
-  reconcileEvictedErroredChildForTest(): Promise<{
-    before: string | null;
-    assistantText: string;
-    inspection: AgentToolRunInspection | null;
-  }>;
-  cancelledTailerStarvationChildForTest(): Promise<{
-    siblingBodyAfterCancel: string | null;
-  }>;
   inspectChild(runId: string): Promise<AgentToolRunInspection | null>;
   getChildChunks(
     runId: string,
@@ -264,11 +241,6 @@ type ParentStub = DurableObjectStub & {
     },
     runId?: string
   ): Promise<AgentToolRunInspection>;
-  childAgentToolRunsMapSizeForTest(runId: string): Promise<number>;
-  childResolveAfterRestartForTest(
-    runId: string,
-    requestId: string
-  ): Promise<{ running: string | null; unknown: string | null }>;
   childRunWithDateInputForTest(): Promise<unknown>;
   childRunWithCircularOutputForTest(): Promise<{
     status: string | undefined;
@@ -280,6 +252,11 @@ type ParentStub = DurableObjectStub & {
     userTexts: string[];
     chatCalls: string[];
   }>;
+  childCancelFinishedRunForTest(): Promise<{
+    status: string | undefined;
+    after: string | undefined;
+    nextTurn: string;
+  }>;
   childSignalCancelsQueuedRunForTest(): Promise<{
     atAbort: AgentToolRunInspection | null;
     userTexts: string[];
@@ -289,7 +266,6 @@ type ParentStub = DurableObjectStub & {
     storedWhileQueued: unknown;
     second: { status: string | undefined; error: string | undefined };
   }>;
-  childCancelStartingRunForTest(): Promise<string | null>;
   driveFacetRecoveryOomSealForTest(
     executing: { childName: string; incidentId: string },
     pending: { childName: string; incidentId: string }
@@ -737,6 +713,15 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(carried.releasedRuns).toBe(0);
   });
 
+  it("in a sub-agent, carries released rows and empties their table instead of dropping it", async () => {
+    const result = await (await getParent()).childFacetCarryForTest();
+    expect(result).toEqual({
+      status: "completed",
+      tablesLeft: ["cf_ai_chat_agent_tool_runs"],
+      rowsLeft: 0
+    });
+  });
+
   it("runs an AIChatAgent child and returns summary, output, events, and chunks", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
@@ -753,7 +738,8 @@ describe("AIChatAgent as an agent-tool child", () => {
 
     const events = await parent.getEventsForTest();
     // The reply's own start (with its message id) comes first, then the
-    // model's five chunks.
+    // model's five chunks: what a live parent gets, also when the run
+    // settled before its parent followed it (its stream is kept).
     expect(events.map((event) => event.event.kind)).toEqual([
       "started",
       "chunk",
@@ -798,6 +784,68 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(laterChunks.every((chunk) => chunk.sequence > 0)).toBe(true);
     // afterSequence is a per-chunk cursor: everything past sequence 0.
     expect(laterChunks).toEqual(chunks.slice(1));
+  });
+
+  // With no delay the turn writes its last chunks as it ends: the parent
+  // still gets every one.
+  it.each([30, 0])(
+    "forwards every step of a multi-step reply to its parent (%i ms between chunks)",
+    async (chunkDelayMs) => {
+      const parent = await getParent();
+      const runId = crypto.randomUUID();
+      const result = await parent.runChild(
+        {
+          prompt: "look it up",
+          chunkDelayMs,
+          toolThenText: true,
+          milestoneAfterMs: 50
+        },
+        runId
+      );
+      expect(result.status).toBe("completed");
+      const chunks = (await parent.getEventsForTest())
+        .filter((event) => event.event.kind === "chunk")
+        .map(
+          (event) =>
+            (
+              JSON.parse(
+                (event.event as { kind: "chunk"; body: string }).body
+              ) as { type: string }
+            ).type
+        );
+      // The tool step (with the milestone reported meanwhile), then the
+      // text step, then the finish.
+      expect(chunks).toContain("data-agent-milestone");
+      expect(chunks).toContain("tool-output-available");
+      expect(chunks).toContain("text-delta");
+      expect(chunks.filter((type) => type === "finish-step")).toHaveLength(2);
+      expect(chunks.at(-1)).toBe("finish");
+    }
+  );
+
+  it("forwards the reply's finish to a parent that follows the run live", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+    // Slow chunks: the parent follows the run while it streams.
+    const result = await parent.runChild(
+      { prompt: "stream slowly", chunkDelayMs: 30 },
+      runId
+    );
+    expect(result.status).toBe("completed");
+    const chunks = (await parent.getEventsForTest())
+      .filter((event) => event.event.kind === "chunk")
+      .map(
+        (event) =>
+          (
+            JSON.parse(
+              (event.event as { kind: "chunk"; body: string }).body
+            ) as { type: string }
+          ).type
+      );
+    // Live: the model's two deltas (a replay of the stored reply has one),
+    // and the message ends with its finish.
+    expect(chunks.filter((type) => type === "text-delta")).toHaveLength(2);
+    expect(chunks.at(-1)).toBe("finish");
   });
 
   it("forwards a chunk that lands in the tail attach window (#1589)", async () => {
@@ -868,150 +916,6 @@ describe("AIChatAgent as an agent-tool child", () => {
       .map((event) => (event.event as { kind: "chunk"; body: string }).body);
     expect(chunkBodies).toContain(progressBody);
     expect(chunkBodies).toContain(milestoneBody);
-  });
-
-  it("realigns the live sequence on a cold-counter re-attach so post-restart chunks forward", async () => {
-    // After the CHILD's Durable Object restarts / wakes from hibernation, its
-    // in-memory live sequence map is cold while the durable backlog sits at N.
-    // Chat-recovery resumes the turn and the parent re-attaches via
-    // `tailAgentToolRun` WITHOUT re-running `startAgentToolRun` (which seeds the
-    // counter). The tail must realign the live counter to N+1 after draining, so
-    // the recovered turn's NEW broadcasts forward at N+1 instead of restarting
-    // at 0 and being silently dropped by the high-water dedupe (which would
-    // leave the parent stuck with no post-restart chunks).
-    const parent = await getParent();
-
-    const { drained, liveSequenceAfterDrain, postRestart } =
-      await parent.coldCounterChildReattachForTest();
-
-    // Backlog replayed in order, then the counter realigned to right after it.
-    expect(drained).toEqual([0, 1, 2]);
-    expect(liveSequenceAfterDrain).toBe(3);
-    // The post-restart broadcast forwards at the realigned sequence (3), not 0.
-    expect(postRestart).toMatchObject({
-      sequence: 3,
-      body: JSON.stringify({
-        type: "tool-output-available",
-        toolCallId: "post-restart",
-        output: "ok"
-      })
-    });
-  });
-
-  it("realigns a cold counter when re-attaching after the last stored chunk", async () => {
-    // Parent recovery re-attaches with `afterSequence` = the last stored index,
-    // so nothing is drained; the counter must still realign past the backlog.
-    const parent = await getParent();
-
-    const { drained, liveSequenceAfterDrain, postRestart } =
-      await parent.coldCounterChildReattachForTest(2);
-
-    expect(drained).toEqual([]);
-    expect(liveSequenceAfterDrain).toBe(3);
-    expect(postRestart).toMatchObject({ sequence: 3 });
-  });
-
-  it("forwards progress and stored chunks exactly once across a tail's drain", async () => {
-    // Progress frames aren't stored, so they must not shift the live numbering
-    // of later stored chunks or be deduped against a stored position.
-    const parent = await getParent();
-    const bodies = await parent.progressDuringChildDrainForTest();
-
-    const parsed = bodies.map(
-      (body) =>
-        JSON.parse(body) as {
-          type: string;
-          delta?: string;
-          data?: { message?: string };
-        }
-    );
-    expect(
-      parsed.filter((chunk) => chunk.type === "text-delta").map((c) => c.delta)
-    ).toEqual(["a", "b"]);
-    expect(
-      parsed
-        .filter((chunk) => chunk.type === "data-agent-progress")
-        .map((chunk) => chunk.data?.message)
-    ).toEqual(["during-drain"]);
-  });
-
-  it("keeps stored numbering across a re-attach after a chunk too large to store", async () => {
-    const parent = await getParent();
-    expect(await parent.skippedChunkChildReattachForTest()).toEqual([
-      { sequence: 0, unstored: false },
-      { sequence: 1, delta: "a", unstored: false },
-      { sequence: 2, delta: "c", unstored: false },
-      { sequence: 3, delta: "<oversized>", unstored: true },
-      { sequence: 3, delta: "d", unstored: false }
-    ]);
-  });
-
-  it("forwards a chunk broadcast while a cold re-attach's inspection is pending", async () => {
-    const parent = await getParent();
-    const { drained, postRestart } =
-      await parent.broadcastDuringChildInspectionForTest();
-
-    expect(drained).toEqual([0, 1, 2]);
-    expect(postRestart).toMatchObject({
-      sequence: 3,
-      body: JSON.stringify({
-        type: "text-delta",
-        id: "t",
-        delta: "post-restart"
-      })
-    });
-  });
-
-  it("inspects a stale run read-only when asked not to reconcile", async () => {
-    const parent = await getParent();
-    expect(await parent.inspectStaleChildRunReadOnlyForTest()).toEqual({
-      reported: "running",
-      stored: "running"
-    });
-  });
-
-  it("reconciles a child evicted after a stream error as error, not completed", async () => {
-    // The turn broadcast an error chunk and persisted an assistant reply, but
-    // the child was evicted before the finalizer sealed the row `error`.
-    const parent = await getParent();
-    const { before, assistantText, inspection } =
-      await parent.reconcileEvictedErroredChildForTest();
-
-    expect(before).toBe("running");
-    expect(assistantText).toContain("Sorry, something went wrong.");
-    expect(inspection).toMatchObject({
-      status: "error",
-      error: "model exploded"
-    });
-  });
-
-  it("drops a terminal-only run from suppression once its recovered turn settles", async () => {
-    const parent = await getParent();
-    expect(await parent.terminalOnlyChildAfterRecoveredTurnForTest()).toEqual({
-      afterRebind: true,
-      afterClose: false
-    });
-  });
-
-  it("does not starve sibling tailers when one tailer's consumer cancels", async () => {
-    // Two parents tail the same run; one consumer cancels its reader. The
-    // cancelled tailer must detach (not linger as a zombie forwarder), and the
-    // tail's `controller.close()` must be guarded — otherwise the next broadcast
-    // throws while emitting to the cancelled stream and that exception escapes
-    // `interceptAgentToolBroadcast`'s forward loop, starving every sibling tailer
-    // of the chunk. The surviving tailer must still receive the broadcast.
-    const parent = await getParent();
-
-    const { siblingBodyAfterCancel } =
-      await parent.cancelledTailerStarvationChildForTest();
-
-    expect(siblingBodyAfterCancel).toBe(
-      JSON.stringify({
-        type: "tool-output-available",
-        toolCallId: "sibling",
-        output: "ok"
-      })
-    );
   });
 
   it("finalizes lifecycle hooks and terminal events during parent recovery reconciliation", async () => {
@@ -1414,40 +1318,6 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result).toMatchObject({ runId, status: "completed" });
   });
 
-  it("does not leak request-id cache entries for unrelated turns (#1575)", async () => {
-    const parent = await getParent();
-    const runId = crypto.randomUUID();
-
-    // The injected unrelated-turn error frame negatively-caches a (null)
-    // entry in the child's request-id map while the run is in flight.
-    const result = await parent.runChildWithInjectedUnrelatedError(
-      { prompt: "stay healthy", chunkDelayMs: 60 },
-      100,
-      runId
-    );
-    expect(result).toMatchObject({ runId, status: "completed" });
-
-    // Once the run ends and no runs remain in flight, the map must be fully
-    // cleared — null entries must not accumulate for the DO's lifetime.
-    expect(await parent.childAgentToolRunsMapSizeForTest(runId)).toBe(0);
-  });
-
-  it("attributes frames via the persisted request id after a DO restart (#1575)", async () => {
-    const parent = await getParent();
-    const runId = crypto.randomUUID();
-    const requestId = crypto.randomUUID();
-
-    // The run row persisted request_id at turn start; after a restart the
-    // in-memory map is empty, so attribution must fall back to SQL.
-    const resolved = await parent.childResolveAfterRestartForTest(
-      runId,
-      requestId
-    );
-
-    expect(resolved.running).toBe(runId);
-    expect(resolved.unknown).toBeNull();
-  });
-
   it("marks an in-band stream error as error with no tailer attached (#1575)", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
@@ -1600,6 +1470,14 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
   });
 
+  it("a cancel for a run that already finished aborts no other turn", async () => {
+    const result = await (await getParent()).childCancelFinishedRunForTest();
+    expect(result.status).toBe("completed");
+    // The finished run is left as it was, and the next turn runs.
+    expect(result.after).toBe("completed");
+    expect(result.nextTurn).toBe("completed");
+  });
+
   it("the parent's signal cancels a queued run at once, and the run never starts", async () => {
     const result = await (
       await getParent()
@@ -1621,43 +1499,5 @@ describe("AIChatAgent as an agent-tool child", () => {
     // request context, while the run waits or while it runs.
     expect(result.storedWhileQueued).toBeUndefined();
     expect(result.second).toEqual({ status: "error", error: "boom" });
-  });
-
-  it("treats a starting run as open: a cancel settles it", async () => {
-    await expect(
-      (await getParent()).childCancelStartingRunForTest()
-    ).resolves.toBe("aborted");
-  });
-
-  it("keeps suppressing a recovered terminal-only child's chunks after a restart (#2298)", async () => {
-    async function recoveredChunksBroadcast(
-      eventDelivery: "full" | "terminal"
-    ): Promise<number> {
-      const room = crypto.randomUUID();
-      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-      let chunks = 0;
-      const seen: unknown[] = [];
-      ws.addEventListener("message", (e: MessageEvent) => {
-        const frame = JSON.parse(e.data as string) as { id?: string };
-        seen.push(frame);
-        if (frame.id === "recovered-request") chunks++;
-      });
-      const child = (await getAgentByName(
-        env.TestChatAgent,
-        room
-      )) as unknown as {
-        broadcastRecoveredAgentToolChunkForTest(
-          eventDelivery: "full" | "terminal"
-        ): Promise<void>;
-      };
-      await child.broadcastRecoveredAgentToolChunkForTest(eventDelivery);
-      // The broadcast's frames are in by the barrier's echo.
-      await socketBarrier(ws, seen);
-      ws.close(1000);
-      return chunks;
-    }
-
-    expect(await recoveredChunksBroadcast("full")).toBe(1);
-    expect(await recoveredChunksBroadcast("terminal")).toBe(0);
   });
 });

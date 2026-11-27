@@ -34,6 +34,103 @@ function runText(
     .join("");
 }
 
+describe("a replay of a child whose chunk log carries its milestones", () => {
+  it("numbers live chunks as the child's stream does when a milestone comes first", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `live-positions-lead-${crypto.randomUUID()}`
+    );
+    const milestoneBody = JSON.stringify({
+      type: "data-agent-milestone",
+      data: { name: "begin", sequence: 0, at: 1 }
+    });
+    const { live, replay } = await agent.captureLiveAndReplayForTest({
+      runId: "run-live-positions-lead",
+      chunkBodies: [milestoneBody, textStart, textDelta("a"), textDelta("b")]
+    });
+    const positions = (frames: AgentToolEventMessage[]) =>
+      frames
+        .filter((frame) => frame.event.kind === "chunk")
+        .map((frame) => frame.sequence);
+    expect(new Set(positions(live)).size).toBe(4);
+    expect(positions(replay)).toEqual(positions(live));
+  });
+
+  it("numbers live chunks as the child's stream does, a stored milestone included", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `live-positions-${crypto.randomUUID()}`
+    );
+    const milestoneBody = JSON.stringify({
+      type: "data-agent-milestone",
+      data: { name: "found", sequence: 0, at: 1 }
+    });
+    const { live, replay } = await agent.captureLiveAndReplayForTest({
+      runId: "run-live-positions",
+      chunkBodies: [textStart, milestoneBody, textDelta("a"), textDelta("b")]
+    });
+    const positions = (frames: AgentToolEventMessage[]) =>
+      frames
+        .filter((frame) => frame.event.kind === "chunk")
+        .map((frame) => frame.sequence);
+    // Each chunk at its own place, once: live as a later replay gives it.
+    expect(new Set(positions(live)).size).toBe(4);
+    expect(positions(replay)).toEqual(positions(live));
+  });
+
+  it("sends each milestone once", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `replay-kept-milestone-${crypto.randomUUID()}`
+    );
+    const milestoneBody = JSON.stringify({
+      type: "data-agent-milestone",
+      data: { name: "found", sequence: 0, at: 1 }
+    });
+    const { replay } = await agent.captureLiveAndReplayForTest({
+      runId: "run-kept-milestone",
+      chunkBodies: [textStart, milestoneBody, textDelta("done")],
+      milestones: [{ beforeChunk: 99, name: "found" }]
+    });
+    const milestones = replay.filter(
+      (frame) =>
+        frame.event.kind === "chunk" &&
+        (frame.event as { body: string }).body.includes("data-agent-milestone")
+    );
+    expect(milestones).toHaveLength(1);
+  });
+});
+
+describe("an awaited agent-tool run cleared while it runs", () => {
+  it("resolves aborted as cleared, with its agent type, at the root", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `clear-awaited-${crypto.randomUUID()}`
+    );
+    expect(await agent.clearWhileAwaitedForTest()).toEqual({
+      status: "aborted",
+      error: "agent tool run cleared",
+      agentType: "TestAgentToolStubChild"
+    });
+  });
+});
+
+describe("an awaited agent-tool run stopped by its caller", () => {
+  // The chat module stops a turn with a `TaskCancellation`, not an Error:
+  // the run's error is its reason, and the child's run is cancelled.
+  it("cancels the child and reports the stop's reason when the signal carries a TaskCancellation", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `stop-cancellation-${crypto.randomUUID()}`
+    );
+    expect(await agent.stopRunWithTaskCancellationForTest()).toEqual({
+      status: "aborted",
+      error: "stopped",
+      child: "aborted"
+    });
+  });
+});
+
 describe("agent-tool live/replay sequencing", () => {
   it("replay after a mid-stream milestone neither duplicates nor drops text (#2364)", async () => {
     const agent = await getAgentByName(

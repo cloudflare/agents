@@ -1,9 +1,11 @@
 import type {
   UIMessage,
+  UIMessageChunk,
   GenerateTextOnFinishCallback,
   TextUIPart,
   ToolSet
 } from "ai";
+import { FIBER_TASK } from "agents/internal";
 import {
   Agent,
   isPlatformTransientError,
@@ -53,8 +55,23 @@ import {
 } from "agents/chat";
 import {
   sendIfOpen,
-  AgentToolRuns,
-  createAgentToolRunStore,
+  AgentToolProgressEmitter,
+  abortReasonText,
+  agentToolTurnChunks,
+  agentToolTurnId,
+  agentToolTurnOf,
+  cancelAgentToolTurn,
+  carryForwardAgentToolRuns,
+  inspectAgentToolTurn,
+  liveTurnsOf,
+  recordAgentToolProgress,
+  progressCreditOf,
+  reclaimAgentToolStreams,
+  RELEASED_AI_CHAT_AGENT_TOOL_TABLES,
+  releasedAgentToolRunOfRequest,
+  releasedAgentToolRunWaiting,
+  startAgentToolTurn,
+  tailAgentToolTurn,
   clientResolvableToolNames,
   settleInterruptedReply,
   type MessagePart
@@ -101,8 +118,6 @@ import { nanoid } from "nanoid";
 import {
   cancelTurn,
   CHAT_CLEARED,
-  chatTurnStreamId,
-  type AgentToolStreams,
   forgetTab,
   resumeChat,
   chatClientView,
@@ -290,6 +305,9 @@ export { createToolsFromClientSchemas } from "agents/chat";
  * @template Env Environment type containing bindings
  */
 /** The chat module's turn definition, as AIChatAgent registers it. */
+/** The least time between two progress credits from agent-tool children. */
+const AGENT_TOOL_PROGRESS_CREDIT_MS = 5_000;
+
 const CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
 
 export class AIChatAgent<
@@ -397,7 +415,7 @@ export class AIChatAgent<
     connections: () => this.getConnections(),
     reachesUnlisted: () => broadcastReachesUnlistedSockets(this),
     observed: () =>
-      this._agentToolRuns.intercepting ||
+      this._agentToolTailWaits.size > 0 ||
       this.broadcast !== AIChatAgent.prototype.broadcast,
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
@@ -419,116 +437,92 @@ export class AIChatAgent<
   }
 
   /**
-   * Everything this agent does when a parent runs it as a tool: the run
-   * table, the run's life, what the parent reads, and progress. Shared with
-   * `@cloudflare/think`; this class supplies only what differs.
+   * `reportProgress`: frames coalesced as the release did, kept on the run's
+   * metadata and put on its live reply, so a parent following it and this
+   * agent's tabs see them as they come.
    */
-  private readonly _agentToolRuns: AgentToolRuns = new AgentToolRuns({
-    store: createAgentToolRunStore(() => this.ctx.storage.sql, {
-      runs: "cf_ai_chat_agent_tool_runs",
-      milestones: "cf_ai_chat_agent_tool_milestones",
-      requestIndex: "idx_ai_chat_agent_tool_request_id",
-      turnDefinition: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME
-    }),
-    // SEAM (arch's 6f/R3 ruling): agent tools mapped onto the chat module,
-    // in this one place. R3-identity (#3346) deletes it.
-    streams: () => this._agentToolStreams(),
-    storage: () => this.ctx.storage,
-    responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-    resetError: "Agent tool run was skipped because the chat was cleared.",
-    turnGeneration: () => this._chatClears,
-    keepAliveWhile: (fn) => this.keepAliveWhile(fn),
-    generateRequestId: () => nanoid(),
-    activeRequestId: () => this._runningChatTurn(),
-    broadcastChunk: (requestId, body) =>
-      this._frames.broadcast({
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-        id: requestId,
-        body,
-        done: false
-      }),
-    collectResult: (runId, input) => {
-      const messagesAfterStart = this._agentToolRuns.messagesSinceStart(
-        runId,
-        this.messages
-      );
-      const output = this.getAgentToolOutput(
-        { runId, input },
-        messagesAfterStart
-      );
-      return {
-        output,
-        summary: this.getAgentToolSummary(
-          { runId, input },
-          output,
-          messagesAfterStart
-        )
-      };
+  private readonly _agentToolProgress = new AgentToolProgressEmitter({
+    resolveActiveRun: () => {
+      const requestId = this._runningChatTurn();
+      if (!requestId) return null;
+      const meta = agentToolTurnOf(this._chatDeps(), requestId);
+      return meta ? { runId: meta.runId, requestId } : null;
     },
-    messages: () => this.messages,
-    // The same as a client's stop for the request (#1630).
-    cancelRequest: (requestId, reason) =>
-      this._holdForStop(
-        cancelTurn(
-          this._chatDeps(),
-          requestId,
-          reason === undefined ? undefined : String(reason)
-        ).then(() => {})
-      )
+    broadcast: (_requestId, body) => {
+      liveTurnsOf(this.streams)
+        .get(this._chatDeps().session ?? "")
+        ?.inject(JSON.parse(body) as UIMessageChunk);
+    },
+    persistSnapshot: (runId, snapshot, at) => {
+      recordAgentToolProgress(this._chatDeps(), agentToolTurnId(runId), {
+        kind: "progress",
+        snapshot: { ...snapshot, at }
+      });
+    },
+    persistMilestone: (runId, name, data, at) => {
+      const id = agentToolTurnId(runId);
+      const fields = (
+        this.tasks.peek(id)?.metadata as
+          | { agentTool?: Record<string, unknown> }
+          | undefined
+      )?.agentTool;
+      const sequence = Object.keys(fields ?? {}).filter((key) =>
+        key.startsWith("milestone:")
+      ).length;
+      recordAgentToolProgress(this._chatDeps(), id, {
+        kind: "milestone",
+        milestone: {
+          name,
+          sequence,
+          at,
+          ...(data !== undefined && { data })
+        } as AgentToolMilestone
+      });
+      return sequence;
+    }
   });
 
   /**
-   * SEAM: an agent-tool run's turn, told when it reaches the front of the
-   * lane (its record notes the start; `false` means it was cancelled).
+   * Tails waiting for an agent-tool turn's stream to open, by the turn's
+   * id: its first frame wakes them.
    */
-  private readonly _agentToolTurnStarts = new Map<string, () => boolean>();
+  private readonly _agentToolTailWaits = new Map<string, Set<() => void>>();
 
-  /** SEAM: chat clears so far, the generation agent tools compare. */
-  private _chatClears = 0;
+  /**
+   * The input of each agent-tool run started in this isolate, as it was
+   * passed (its output hook gets it so), until its turn ends.
+   */
+  private readonly _agentToolInputs = new Map<string, unknown>();
 
-  /** SEAM: the chat turn running now, if any. */
+  /** The released agent-tool run tables carried forward (reads await it). */
+  private _agentToolRunsCarried: Promise<void> | undefined;
+
+  /** When the running turn was last credited for its agent-tool child. */
+  private _lastProgressCreditAt = 0;
+
+  /**
+   * An agent-tool child this agent's turn waits on streamed: that counts as
+   * the turn's progress, so its no-progress window does not run out while
+   * the child works. At most one credit per 5 s, as released.
+   */
+  protected override async _onAgentToolStreamProgress(): Promise<void> {
+    const now = Date.now();
+    if (now - this._lastProgressCreditAt < AGENT_TOOL_PROGRESS_CREDIT_MS)
+      return;
+    const requestId = this._runningChatTurn();
+    if (!requestId) return;
+    this._lastProgressCreditAt = now;
+    this.tasks.patchMetadata(requestId, "chat", {
+      progressCredit: progressCreditOf(this._chatDeps(), requestId) + 1
+    });
+  }
+
+  /** The chat turn running now, if any. */
   private _runningChatTurn(): string | null {
     return (
       this._openChatTurns().find((run) => run.status === "running")?.runId ??
       null
     );
-  }
-
-  /** SEAM: a turn's chunks, as agent tools read them, from its stream. */
-  private _agentToolStreams(): AgentToolStreams {
-    const sync = this.streams.__DO_NOT_USE_WILL_BREAK__sync();
-    return {
-      flushBuffer: () => sync.flush(),
-      latestStreamInfoForRequest: (requestId) => {
-        const id = chatTurnStreamId(requestId);
-        return sync.getStream(id) ? { id } : null;
-      },
-      storedChunks: function* (streamId) {
-        let from = 0;
-        for (;;) {
-          const rows = sync.readChunks(streamId, from, 256);
-          for (const row of rows) {
-            yield { body: row.chunk, chunk_index: row.seq };
-          }
-          if (rows.length < 256) return;
-          from = rows[rows.length - 1].seq + 1;
-        }
-      },
-      // Resolved on each use, so read now: the turn running on the lane,
-      // else the newest turn stream still open (a turn cut off by a reset
-      // until its run is attempted again).
-      activeRequestId:
-        this._runningChatTurn() ??
-        sync
-          .listRows()
-          .find(
-            (row) =>
-              row.state === "streaming" &&
-              row.stream_id.startsWith("chat-turn:")
-          )
-          ?.stream_id.slice("chat-turn:".length) ??
-        null
-    };
   }
 
   /**
@@ -546,8 +540,39 @@ export class AIChatAgent<
     this._carryLastTerminal();
     // ai-chat 0.12.x: a turn left cut off (fiber row, incident, recovery
     // runs, stream rows) → a chat-turn run under its request id
-    // (turn-task's step goes here). An open agent-tool turn → run
-    // `agent-tool:<runId>` (with #3346).
+    // (turn-task's step goes here).
+    // ai-chat 0.12.x: the agent-tool run tables → chat-turn runs
+    // `agent-tool:<runId>`, then the tables are dropped.
+    this._agentToolRunsCarried = this._carryForwardAgentToolChildRuns();
+  }
+
+  /**
+   * The carry-forward of the released run tables, finished. A carry that
+   * failed is logged, not thrown at every read: the runs it carried read
+   * as they are.
+   */
+  private async _agentToolCarry(): Promise<void> {
+    try {
+      await this._agentToolRunsCarried;
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] agent-tool runs carry-forward failed",
+        error
+      );
+    }
+  }
+
+  /** The agent-tool runs a released version kept, onto this version's runs. */
+  private async _carryForwardAgentToolChildRuns(): Promise<void> {
+    await carryForwardAgentToolRuns(
+      this._chatDeps(),
+      this.ctx.storage.sql,
+      RELEASED_AI_CHAT_AGENT_TOOL_TABLES,
+      CHAT_TURN_DEFINITION,
+      (requestId) => this._releasedTurnWaits(requestId),
+      // A sub-agent (a facet) empties them; only a root drops them.
+      () => !this._isFacetForCarry()
+    );
   }
 
   private _carryLastTerminal(): void {
@@ -562,6 +587,93 @@ export class AIChatAgent<
       ...(last.messageIds && { messageIds: last.messageIds })
     });
     kv.delete(CHAT_LAST_TERMINAL_KEY);
+  }
+
+  /** Whether this agent runs as a facet (a sub-agent). */
+  private _isFacetForCarry(): boolean {
+    return (this as unknown as { _isFacet?: boolean })._isFacet === true;
+  }
+
+  /** Whether a released turn of `requestId` is still to be carried. */
+  private _releasedTurnWaits(requestId: string): boolean {
+    const fiber = (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME;
+    for (const record of this.tasks.peekList({
+      definition: [fiber, CHAT_RECOVERY_TASK_NAME, FIBER_TASK],
+      status: ["pending", "running"]
+    })) {
+      if (
+        (record.metadata as { requestId?: unknown } | undefined)?.requestId ===
+        requestId
+      ) {
+        return true;
+      }
+      const input = this.tasks.inputOf<{
+        name?: unknown;
+        data?: { originalRequestId?: unknown };
+      }>(record.runId);
+      // A released turn scheduled for recovery, or its fiber row carried
+      // onto Tasks.
+      if (
+        input?.data?.originalRequestId === requestId ||
+        input?.name === `${fiber}:${requestId}`
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * A released turn that is not carried on (the app declined it, or the
+   * conversation moved on): its request ends, and an agent-tool run it
+   * belonged to ends as an error, so its parent stops waiting.
+   */
+  private async _endUncarriedTurn(
+    requestId: string,
+    key: { requestId: string; metadata?: Record<string, TaskJson> }
+  ): Promise<void> {
+    this._frames.endUnstarted(null, requestId, "aborted");
+    if (!key.metadata) return;
+    await this.tasks.importRun({
+      runId: key.requestId,
+      definition: CHAT_TURN_DEFINITION,
+      status: "error",
+      attempt: 1,
+      retain: true,
+      metadata: key.metadata,
+      error: "Agent tool run was not recovered after the upgrade.",
+      createdAt: Date.now()
+    });
+    await this._carryForwardAgentToolChildRuns();
+  }
+
+  /**
+   * The run id and metadata a released turn of `requestId` is carried
+   * under: its open agent-tool run's, so that run carries on, or its own.
+   */
+  private _carriedTurnKey(requestId: string): {
+    requestId: string;
+    metadata?: Record<string, TaskJson>;
+  } {
+    const run = releasedAgentToolRunOfRequest(
+      this.ctx.storage.sql,
+      RELEASED_AI_CHAT_AGENT_TOOL_TABLES.runs,
+      requestId
+    );
+    if (!run) return { requestId };
+    return {
+      requestId: agentToolTurnId(run.runId),
+      metadata: {
+        agentTool: {
+          runId: run.runId,
+          startMessageId: null,
+          ...(run.terminalOnly && { terminalOnly: true })
+        },
+        // Its reply's stream is kept for its parent, as every agent-tool
+        // turn's is.
+        chat: { keepStream: true }
+      }
+    };
   }
 
   private _restoreRequestContext(): void {
@@ -857,8 +969,8 @@ export class AIChatAgent<
       streams: this.streams,
       sessions: this.sessions,
       kv: this.ctx.storage.kv,
-      // A turn's frames go out through `broadcast`, which agent-tool runs
-      // observe (SEAM, until #3346).
+      // A turn's frames go out through `broadcast` (a terminal-only
+      // agent-tool run's chunks stop there).
       webSockets: {
         getConnections: () => this.getConnections(),
         broadcast: (text, without) => this.broadcast(text, without)
@@ -955,12 +1067,6 @@ export class AIChatAgent<
         ) {
           this._emit("message:request");
         }
-        // SEAM: an agent-tool run's turn has started.
-        const started = this._agentToolTurnStarts.get(call.requestId);
-        if (started) {
-          this._agentToolTurnStarts.delete(call.requestId);
-          if (!started()) return undefined;
-        }
         // `getCurrentAgent()` in `onChatMessage` and its tools names the tab
         // that sent the request (or answered the call), when it is here.
         const originId = (
@@ -1024,18 +1130,31 @@ export class AIChatAgent<
       hooks: {
         onResponse: async (result) => {
           this._shownQueued.delete(result.requestId);
-          // SEAM: a turn an agent-tool run started before a reset has no
-          // runner left to settle the run: once the turn leaves the lane,
-          // the run is settled from what the turn stored.
-          const toolRun = this._agentToolRuns.runForRequest(result.requestId);
+          const toolRun = agentToolTurnOf(this._chatDeps(), result.requestId);
           if (toolRun) {
-            const run = this._agentToolRuns.store.read(toolRun);
-            if (run && this._agentToolRuns.isStale(run)) {
-              void this.tasks
-                .wait(result.requestId)
-                .then(() => this._agentToolRuns.reconcileStale(toolRun))
-                .catch(() => {});
+            this._agentToolProgress.forget(toolRun.runId);
+            // A completed run's output and summary, made once from its reply
+            // and kept on the run, as the release stored them.
+            if (result.status === "completed") {
+              this.tasks.patchMetadata(result.requestId, "agentTool", {
+                result: this._agentToolResult(
+                  toolRun.runId,
+                  toolRun
+                ) as TaskJson
+              });
             }
+            // What a recovery declined to keep, kept with the run so a
+            // replay after it settled skips it too.
+            const discarded = this.tasks.checkpointOf<number>(
+              result.requestId,
+              "chat:discarded"
+            );
+            if (discarded) {
+              this.tasks.patchMetadata(result.requestId, "agentTool", {
+                discarded
+              });
+            }
+            this._agentToolInputs.delete(toolRun.runId);
           }
           const waiter = this._turnWaiters.get(result.requestId);
           // No caller waits on it (a tab's request): nothing gets it.
@@ -1209,10 +1328,40 @@ export class AIChatAgent<
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    // A chunk of a terminal-only agent-tool run is forwarded to the run's
-    // tailers, not broadcast.
-    if (this._agentToolRuns.intercept(msg)) return;
+    // A chunk of a terminal-only agent-tool run reaches its parent through
+    // the run's stream, not this agent's tabs.
+    if (typeof msg === "string" && msg.includes('"id":"agent-tool:')) {
+      if (this._agentToolFrame(msg) === "suppress") return;
+    }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * An agent-tool turn's frame: it wakes the tails waiting for the turn's
+   * stream, and a chunk of a terminal-only run is not for this agent's tabs.
+   */
+  private _agentToolFrame(msg: string): "suppress" | "send" {
+    let frame: { type?: unknown; id?: unknown; done?: unknown };
+    try {
+      frame = JSON.parse(msg) as typeof frame;
+    } catch {
+      return "send";
+    }
+    if (
+      frame.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+      typeof frame.id !== "string"
+    ) {
+      return "send";
+    }
+    const waiting = this._agentToolTailWaits.get(frame.id);
+    if (waiting) {
+      this._agentToolTailWaits.delete(frame.id);
+      for (const wake of waiting) wake();
+    }
+    return frame.done !== true &&
+      agentToolTurnOf(this._chatDeps(), frame.id)?.terminalOnly === true
+      ? "suppress"
+      : "send";
   }
 
   constructor(ctx: AgentContext, env: Env) {
@@ -1233,10 +1382,6 @@ export class AIChatAgent<
             // Session storage is Sessions' business and is initialized by its
             // capability `onStart`; the constructor never reads or writes the
             // transcript. Legacy lift and hydration happen in `onStart`.
-
-            // Created here, as always, so the run table exists on every
-            // agent whether or not it ever runs as a tool.
-            this._agentToolRuns.store.ensure();
           }
         );
 
@@ -1601,7 +1746,6 @@ export class AIChatAgent<
   private async _clearFromTab(connection: Connection): Promise<void> {
     // The chat module's lane: its turns end, waiting or running.
     this._shownQueued.clear();
-    this._chatClears++;
     await clearChat(this._chatDeps(), this._chatLane());
     this.resetTurnState();
     await this.#session.clearMessages();
@@ -1640,12 +1784,13 @@ export class AIChatAgent<
    */
   protected resetTurnState(): void {
     // The chat module's turns end as a clear ends them (nothing they stream
-    // is kept), and agent-tool runs see a reset (SEAM: the clear count).
-    this._chatClears++;
+    // is kept); an agent-tool run's turn ends with them.
     this._holdForStop(
-      stopAllTurns(this._chatDeps(), this._chatLane(), CHAT_CLEARED)
+      stopAllTurns(this._chatDeps(), this._chatLane(), CHAT_CLEARED).then(
+        // The replies settled agent-tool runs kept go with the chat.
+        () => reclaimAgentToolStreams(this._chatDeps())
+      )
     );
-    this._agentToolRuns.chatReset();
     this._chatResponses.length = 0;
   }
 
@@ -1823,7 +1968,7 @@ export class AIChatAgent<
     progress: AgentToolProgress<T>,
     options?: { persist?: boolean }
   ): Promise<void> {
-    const result = this._agentToolRuns.reportProgress(progress, options);
+    const result = this._agentToolProgress.report(progress, options);
     if (result === "inactive") {
       console.warn(
         "[ai-chat] reportProgress() was called outside of an active agent-tool run; ignoring. Call it from within an onChatMessage turn that is running as a sub-agent."
@@ -2110,66 +2255,235 @@ export class AIChatAgent<
       eventDelivery?: AgentToolEventDelivery;
     }
   ): Promise<AgentToolRunInspection> {
-    return this._agentToolRuns.start(
-      options.runId,
+    await this._agentToolCarry();
+    const { runId } = options;
+    if (options.signal?.aborted) {
+      return {
+        runId,
+        status: "aborted",
+        startedAt: Date.now(),
+        error: abortReasonText(options.signal.reason) ?? "cancelled"
+      };
+    }
+    // The run is a server turn on the chat's lane under its own id. It
+    // carries the run's input as its body and no client's tools.
+    this._agentToolInputs.set(runId, input);
+    await startAgentToolTurn(
+      this._chatDeps(),
+      this._chatLane(),
+      runId,
+      this.formatAgentToolInput(input, { runId }),
       {
-        input,
         terminalOnly: options.eventDelivery === "terminal",
-        signal: options.signal
-      },
-      // SEAM: the run's turn is a server turn on the chat's lane, under the
-      // run's request id. It carries the run's input as its body and no
-      // client tools (`[]`, not the stored ones: the release's `null`).
-      ({ requestId, signal, shouldStart }) => {
-        this._agentToolTurnStarts.set(requestId, shouldStart);
-        return this._serverTurn(
-          {
-            trigger: "server",
-            messages: [
-              this.formatAgentToolInput(input, { runId: options.runId })
-            ],
-            body: { agentToolInput: input as never },
-            clientTools: []
-          },
-          // Its parent reads the turn's chunks after it ended.
-          {
-            requestId,
-            ...(signal && { signal }),
-            metadata: { chat: { keepStream: true } }
-          }
-        ).finally(() => this._agentToolTurnStarts.delete(requestId));
+        startMessageId: this.messages.at(-1)?.id ?? null,
+        body: { agentToolInput: input as never }
+      }
+    );
+    // Marked cancelled in the abort itself; the stop follows.
+    options.signal?.addEventListener(
+      "abort",
+      () =>
+        void this._holdForStop(
+          cancelAgentToolTurn(
+            this._chatDeps(),
+            runId,
+            abortReasonText(options.signal?.reason) ?? "cancelled"
+          ).then(() => {})
+        ),
+      { once: true }
+    );
+    return (
+      (await this.inspectAgentToolRun(runId)) ?? {
+        runId,
+        status: "running",
+        startedAt: Date.now()
       }
     );
   }
 
   async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
-    this._agentToolRuns.cancel(runId, reason);
+    await this._agentToolCarry();
+    await this._holdForStop(
+      cancelAgentToolTurn(
+        this._chatDeps(),
+        runId,
+        abortReasonText(reason) ?? "cancelled"
+      ).then(() => {})
+    );
   }
 
   async inspectAgentToolRun(
     runId: string,
-    options?: { reconcile?: boolean }
+    _options?: { reconcile?: boolean }
   ): Promise<AgentToolRunInspection | null> {
-    return this._agentToolRuns.inspect(runId, options);
+    await this._agentToolCarry();
+    const deps = this._chatDeps();
+    // A released run whose turn is still to be carried: it runs.
+    const waiting = releasedAgentToolRunWaiting(
+      this.ctx.storage.sql,
+      RELEASED_AI_CHAT_AGENT_TOOL_TABLES.runs,
+      runId
+    );
+    if (waiting && !this.tasks.peek(agentToolTurnId(runId))) {
+      return { runId, status: "running", startedAt: waiting.startedAt };
+    }
+    const inspection = inspectAgentToolTurn(deps, runId, () =>
+      this._agentToolResult(
+        runId,
+        agentToolTurnOf(deps, agentToolTurnId(runId))
+      )
+    );
+    // A clear ends the run as the release recorded it: skipped, an error.
+    return inspection?.status === "aborted" && inspection.error === CHAT_CLEARED
+      ? {
+          ...inspection,
+          status: "error",
+          error: "Agent tool run was skipped because the chat was cleared."
+        }
+      : inspection;
+  }
+
+  /**
+   * Run `runId`'s output and summary, from its input message on (a turn
+   * that ended while it was queued is not the run's), else from what came
+   * after the newest message when it was submitted.
+   */
+  private _agentToolResult(
+    runId: string,
+    meta: { startMessageId: string | null; inputMessageId?: string } | undefined
+  ): { output: unknown; summary: string | null } {
+    const input = this._agentToolInputs.has(runId)
+      ? this._agentToolInputs.get(runId)
+      : (
+          this.tasks.inputOf<ChatTurnInput>(agentToolTurnId(runId))?.body as
+            | { agentToolInput?: unknown }
+            | undefined
+        )?.agentToolInput;
+    const inputAt = meta?.inputMessageId
+      ? this.messages.findIndex((m) => m.id === meta.inputMessageId)
+      : -1;
+    const start = meta?.startMessageId
+      ? this.messages.findIndex((m) => m.id === meta.startMessageId)
+      : -1;
+    const messagesAfterStart =
+      inputAt >= 0
+        ? this.messages.slice(inputAt)
+        : this.messages.slice(start + 1);
+    let output = this.getAgentToolOutput({ runId, input }, messagesAfterStart);
+    // An output JSON cannot hold is kept as its string.
+    try {
+      JSON.stringify(output);
+    } catch {
+      output = String(output);
+    }
+    return {
+      output,
+      summary:
+        this.getAgentToolSummary(
+          { runId, input },
+          output,
+          messagesAfterStart
+        ) ?? null
+    };
   }
 
   async getAgentToolChunks(
     runId: string,
     options?: { afterSequence?: number }
   ): Promise<AgentToolStoredChunk[]> {
-    return this._agentToolRuns.chunks(runId, options);
+    await this._agentToolCarry();
+    return agentToolTurnChunks(this._chatDeps(), runId, options);
   }
 
   async tailAgentToolRun(
     runId: string,
     options?: { afterSequence?: number; signal?: AbortSignal }
   ): Promise<ReadableStream<AgentToolStoredChunk>> {
+    await this._agentToolCarry();
+    const tail = await tailAgentToolTurn(this._chatDeps(), runId, options);
     // The stream carries newline-delimited JSON; the RPC boundary types it
     // as the chunks it encodes.
-    return this._agentToolRuns.tail(runId, options, {
-      chunks: (id, chunkOptions) => this.getAgentToolChunks(id, chunkOptions),
-      inspect: (id) => this.inspectAgentToolRun(id)
-    }) as unknown as ReadableStream<AgentToolStoredChunk>;
+    if (tail) return tail as unknown as ReadableStream<AgentToolStoredChunk>;
+    // Returned at once, so the parent's deadlines apply from here: a turn
+    // that has not opened its stream is waited for in the first read.
+    let inner: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        inner ??= (
+          await this._agentToolTailOnceOpen(runId, options)
+        ).getReader();
+        const next = await inner.read();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+      cancel: async (reason) => {
+        await inner?.cancel(reason);
+      }
+    });
+    return stream as unknown as ReadableStream<AgentToolStoredChunk>;
+  }
+
+  /**
+   * Run `runId`'s tail once its turn has opened its stream (its first frame
+   * wakes the wait), or the chunks it has when it ended or was stopped.
+   */
+  private async _agentToolTailOnceOpen(
+    runId: string,
+    options?: { afterSequence?: number; signal?: AbortSignal }
+  ): Promise<ReadableStream<Uint8Array>> {
+    const id = agentToolTurnId(runId);
+    const open = () => {
+      const status = this.tasks.peek(id)?.status;
+      return status === "pending" || status === "running";
+    };
+    if (open() && !options?.signal?.aborted) {
+      let wake!: () => void;
+      const started = new Promise<void>((resolve) => (wake = resolve));
+      const waits = this._agentToolTailWaits.get(id) ?? new Set();
+      waits.add(wake);
+      this._agentToolTailWaits.set(id, waits);
+      const stopped = new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), {
+          once: true
+        })
+      );
+      try {
+        await Promise.race([
+          started,
+          this.tasks.wait(id).then(() => {}),
+          stopped
+        ]);
+      } finally {
+        waits.delete(wake);
+        if (waits.size === 0 && this._agentToolTailWaits.get(id) === waits) {
+          this._agentToolTailWaits.delete(id);
+        }
+      }
+      if (!options?.signal?.aborted) {
+        const tail = await tailAgentToolTurn(this._chatDeps(), runId, options);
+        if (tail) return tail;
+      }
+    }
+    // Not streaming: the chunks there are, page by page, then the end.
+    const encoder = new TextEncoder();
+    let after = options?.afterSequence;
+    return new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        const page = await this.getAgentToolChunks(runId, {
+          ...(after !== undefined && { afterSequence: after })
+        });
+        if (page.length === 0) {
+          controller.close();
+          return;
+        }
+        after = page[page.length - 1].sequence;
+        controller.enqueue(
+          encoder.encode(
+            page.map((chunk) => `${JSON.stringify(chunk)}\n`).join("")
+          )
+        );
+      }
+    });
   }
 
   private static _extractLatestAssistantText(
@@ -2369,7 +2683,8 @@ export class AIChatAgent<
     attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
     const { requestId } = turn;
-    if (await this.tasks.get(requestId)) return;
+    const key = this._carriedTurnKey(requestId);
+    if (await this.tasks.get(key.requestId)) return;
     const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
       "__cfAIChatFiberSnapshot",
       turn.persisted,
@@ -2433,7 +2748,7 @@ export class AIChatAgent<
       // The app's hook failed: the turn is not continued, and what was
       // streamed stays stored.
       console.error("[AIChatAgent] onChatRecovery threw", error);
-      this._frames.endUnstarted(null, requestId, "aborted");
+      await this._endUncarriedTurn(requestId, key);
       return;
     }
     // "Do not keep it" drops what this turn streamed, unless that holds a
@@ -2459,7 +2774,7 @@ export class AIChatAgent<
       droppable ? before : leaf
     );
     if (plan.action === "skip") {
-      this._frames.endUnstarted(null, requestId, "aborted");
+      await this._endUncarriedTurn(requestId, key);
       return;
     }
 
@@ -2482,17 +2797,26 @@ export class AIChatAgent<
             ...context
           },
       {
-        requestId,
+        requestId: key.requestId,
         // A carried turn takes its place in the lane: it is not a new
         // message that could skip the ones waiting.
         arrival: "queue",
-        // The user messages the request came from, so its end names them.
-        ...(snapshot?.originMessageIds &&
-          snapshot.originMessageIds.length > 0 && {
-            metadata: { chat: { messageIds: snapshot.originMessageIds } }
-          })
+        // An agent-tool run's turn: its run, kept for its parent.
+        ...(key.metadata && { retain: true }),
+        metadata: {
+          ...key.metadata,
+          // The user messages the request came from, so its end names them.
+          ...(snapshot?.originMessageIds &&
+            snapshot.originMessageIds.length > 0 && {
+              chat: {
+                ...(key.metadata?.chat as Record<string, TaskJson> | undefined),
+                messageIds: snapshot.originMessageIds
+              }
+            })
+        }
       }
     );
+    if (key.metadata) await this._carryForwardAgentToolChildRuns();
   }
 
   /**
@@ -2508,14 +2832,15 @@ export class AIChatAgent<
     // An old payload may not name its request: the turn still runs.
     const requestId = data.originalRequestId ?? nanoid();
     await this._forgetReleasedIncidents(requestId);
-    if (await this.tasks.get(requestId)) return;
+    const key = this._carriedTurnKey(requestId);
+    if (await this.tasks.get(key.requestId)) return;
     const leaf = await this.#session.getLatestLeaf();
     // Only while the message it was scheduled for is still the latest: a
     // conversation that moved on has nothing of this turn's to finish.
     const target =
       kind === "continue" ? data.targetAssistantId : data.targetUserId;
     if (!leaf || (target !== undefined && leaf.id !== target)) {
-      this._frames.endUnstarted(null, requestId, "aborted");
+      await this._endUncarriedTurn(requestId, key);
       return;
     }
     const body = data.lastBody ?? this._requestContextNow().body;
@@ -2534,14 +2859,22 @@ export class AIChatAgent<
         ? { trigger: "server", mode: "continue", ...context }
         : { trigger: "submit-message", questionId: leaf.id, ...context },
       {
-        requestId,
+        requestId: key.requestId,
         arrival: "queue",
-        ...(data.originMessageIds &&
-          data.originMessageIds.length > 0 && {
-            metadata: { chat: { messageIds: data.originMessageIds } }
-          })
+        ...(key.metadata && { retain: true }),
+        metadata: {
+          ...key.metadata,
+          ...(data.originMessageIds &&
+            data.originMessageIds.length > 0 && {
+              chat: {
+                ...(key.metadata?.chat as Record<string, TaskJson> | undefined),
+                messageIds: data.originMessageIds
+              }
+            })
+        }
       }
     );
+    if (key.metadata) await this._carryForwardAgentToolChildRuns();
   }
 
   /**

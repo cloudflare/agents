@@ -589,6 +589,58 @@ describe("chatTurnDefinition", () => {
     });
   });
 
+  it("counts a credit the host gave the turn as progress: an agent-tool child it waits on streamed", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      // The turn streamed nothing of its own since the window opened, but
+      // its child did: the host credited the turn.
+      await instance.tasks.importRun({
+        runId: "run-1",
+        definition: "chat",
+        status: "running",
+        attempt: 2,
+        metadata: { chat: { progressCredit: 1_000 } },
+        createdAt: Date.now()
+      });
+      const reasons: string[] = [];
+      const kept = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 1,
+            maxAttempts: 10,
+            status: "attempting",
+            firstSeenAt: Date.now() - 20 * 60_000,
+            lastAttemptAt: Date.now() - 60_000,
+            // Counted at the last attempt, past the no-progress window
+            // (as in "after the no-progress window" above, which gives up).
+            progress: 1_000,
+            workBaseline: 1_000,
+            lastProgressAt: Date.now() - 10 * 60_000
+          }
+        ]
+      ]);
+      await definitionOf(instance, {
+        ...instance.host,
+        options: {
+          recovery: {
+            onExhausted: (context) => void reasons.push(context.reason)
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, kept)
+      );
+      // Recovered, not given up for lack of progress.
+      expect(reasons).toEqual([]);
+      expect(instance.calls.length).toBeGreaterThan(0);
+    });
+  });
+
   it("counts attempts that come within half a minute without progress as one: a reconnect storm does not spend the budget", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {

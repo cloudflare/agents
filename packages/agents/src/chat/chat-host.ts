@@ -664,6 +664,20 @@ export interface ChatTurnInput {
   readonly storeContext?: true;
 }
 
+/**
+ * @internal The progress credits a host gave turn `requestId` (run
+ * metadata `chat.progressCredit`): an agent-tool child the turn waits on
+ * streamed, which counts as the turn's progress, as released.
+ */
+export function progressCreditOf(deps: ChatDeps, requestId: string): number {
+  const credit = (
+    deps.tasks.peek(requestId)?.metadata?.chat as
+      | { progressCredit?: unknown }
+      | undefined
+  )?.progressCredit;
+  return typeof credit === "number" ? credit : 0;
+}
+
 /** The stream id a turn's reply is written under. */
 export function chatTurnStreamId(requestId: string): string {
   return `chat-turn:${requestId}`;
@@ -1651,8 +1665,12 @@ export function chatTurnDefinition(
                       })
                   }
                 : null,
-              // Progress is every chunk streamed, so a little more counts.
-              currentProgress: streamedCount,
+              // Progress is every chunk streamed, so a little more counts,
+              // and every credit the host gave the turn (an agent-tool
+              // child it waits on streamed, run metadata
+              // `chat.progressCredit`).
+              currentProgress:
+                streamedCount + progressCreditOf(deps, requestId),
               awaitingClientInteraction: awaitsClient,
               now: Date.now(),
               onShouldKeepRecoveringError: (error) =>
