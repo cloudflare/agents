@@ -3,6 +3,7 @@ import { tool } from "ai";
 import { AgentContextProvider, type ContextConfig } from "agents/context";
 import { z } from "zod";
 import { Think } from "../../think";
+import { PASS_JOB_ID } from "../../media-eviction";
 import type { MediaEvictionConfig, ThinkSession } from "../../think";
 
 /**
@@ -169,7 +170,7 @@ export class ThinkPromptCacheTestAgent extends Think {
       const queued =
         this.sql<{ count: number }>`
           SELECT COUNT(*) AS count FROM cf_agents_jobs
-          WHERE id = ${"think-media-eviction:pass"}
+          WHERE id = ${PASS_JOB_ID}
         `[0]?.count ?? 0;
       if (queued === 0) return;
       if (Date.now() > deadline) {
