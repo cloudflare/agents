@@ -305,4 +305,70 @@ describe("chat recovery, through public behaviour", () => {
       expect(entry.incidentId).toBe(incident.incidentId);
     }
   }, 30_000);
+
+  // Successors of the budget and seal tests (think-session, "Think —
+  // onChatRecovery"): when recovery gives up, and what onExhausted is told.
+  describe("the recovery budget", () => {
+    async function recoverUntil(
+      name: string,
+      options: {
+        afterParts: number;
+        stalledCalls: number;
+        maxAttempts: number;
+        keepRecovering?: boolean;
+      },
+      done: (progress: {
+        recoveryCalls: unknown[];
+        exhausted: unknown[];
+        lastAssistantText: string;
+      }) => boolean
+    ) {
+      const agent = await freshAgent(name);
+      await agent.armLastingStallForTest({ ...options, timeoutMs: 50 });
+      await agent.testChat("stall, then recover");
+      let progress = await agent.recoveryProgressForTest();
+      await vi.waitFor(
+        async () => {
+          progress = await agent.recoveryProgressForTest();
+          expect(done(progress)).toBe(true);
+        },
+        { timeout: 20_000, interval: 50 }
+      );
+      return progress;
+    }
+
+    it("gives up through onExhausted with max_attempts_exceeded once the attempts are spent", async () => {
+      const progress = await recoverUntil(
+        "budget-spent",
+        { afterParts: 0, stalledCalls: 10, maxAttempts: 2 },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.exhausted).toHaveLength(1);
+      const [given] = progress.exhausted;
+      expect(given?.reason).toBe("max_attempts_exceeded");
+      expect(given?.terminalMessage.length).toBeGreaterThan(0);
+      expect(given?.recoveryRootRequestId).toBe(
+        progress.recoveryCalls[0]?.recoveryRootRequestId
+      );
+      expect(progress.recoveryCalls.length).toBeLessThanOrEqual(2);
+    }, 30_000);
+
+    it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
+      const progress = await recoverUntil(
+        "budget-declined",
+        {
+          afterParts: 0,
+          stalledCalls: 10,
+          maxAttempts: 10,
+          keepRecovering: false
+        },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
+        "recovery_aborted"
+      ]);
+    }, 30_000);
+  });
 });
