@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
 import type { MediaEvictionConfig } from "../think";
 import { hasEvictableMedia } from "../media-eviction";
+import { subscribe } from "agents/observability";
 
 /**
  * Media eviction as a CONTEXT-WINDOW technique (#1710).
@@ -34,6 +35,8 @@ type MediaEvictionStub = {
     allSame: boolean;
   } | null>;
   resyncForTest(): Promise<number>;
+  seedLargeTextBelowMediaForTest(largeRows: number): Promise<void>;
+  evictionPassQueuedForTest(): Promise<boolean>;
 };
 
 function uniqueName(prefix: string): string {
@@ -575,6 +578,118 @@ describe("mediaEviction — a pass that runs on its own", () => {
     // cursor stale, the backlog pass would read the whole path again (1,216).
     expect(await agent.storedPathRowsReadForTest()).toBeLessThan(1000);
   }, 30_000);
+
+  it("evicts a payload larger than one row and leaves the bytes in one place", async () => {
+    const agent = await evictionAgent(uniqueName("auto-split"));
+    // Seeded with eviction off, so the split is seen before any pass.
+    await agent.setMediaEvictionForTest(false);
+    await agent.seedMediaHistoryForTest("m", SPLIT_MEDIA_CHARS);
+    expect(await agent.getContinuationRowCountForTest()).toBeGreaterThan(0);
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    await agent.resyncForTest();
+    await vi.waitFor(
+      async () => {
+        const m0 = await agent.getStoredMessageForTest("m0");
+        expect(m0?.parts[1]).toEqual({
+          type: "text",
+          text: `[evicted image/png, ${SPLIT_PAYLOAD_BYTES} bytes; preserved at /workspace/attachments/evicted/m0-0.png]`
+        });
+        expect(
+          JSON.stringify(await agent.getStoredMessageForTest("m1"))
+        ).toContain("[evicted image/png,");
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    // Both rewritten rows are small again: the Workspace file is the only
+    // copy of the bytes.
+    expect(await agent.getContinuationRowCountForTest()).toBe(0);
+    expect(
+      (
+        await agent.readEvictedFileForTest(
+          "/workspace/attachments/evicted/m0-0.png"
+        )
+      )?.byteLength
+    ).toBe(SPLIT_PAYLOAD_BYTES);
+  }, 30_000);
+
+  it("drains a backlog on its own when each pass is bounded", async () => {
+    // One row per pass: each pass evicts one message, and the second media
+    // row is evicted without another request from the test: a pass that
+    // made progress schedules the next.
+    const name = uniqueName("auto-backlog");
+    const passes: number[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.name === name && event.type === "chat:media:evicted") {
+        passes.push((event.payload as { messages: number }).messages);
+      }
+    });
+    try {
+      const agent = await evictionAgent(name);
+      // Seeded with eviction off, so its appends schedule nothing; one
+      // refresh then asks for one pass. On Think only the chain asks for
+      // more; the harness-backed Think's view also re-reads after the
+      // pass's own rewrite, and that refresh asks too.
+      await agent.setMediaEvictionForTest(false);
+      await agent.seedMediaHistoryForTest();
+      await agent.setMediaEvictionForTest({
+        ...AGED_POLICY,
+        maxRowsPerPass: 1
+      });
+      await agent.resyncForTest();
+      await vi.waitFor(
+        async () => {
+          for (const id of ["m0", "m1"]) {
+            const message = await agent.getStoredMessageForTest(id);
+            expect(JSON.stringify(message)).toContain("[evicted image/png,");
+          }
+          // A pass reports after its rewrites, so wait for both reports.
+          expect(passes).toHaveLength(2);
+        },
+        { timeout: 10_000, interval: 100 }
+      );
+      expect(passes).toEqual([1, 1]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("reaches older media past large text rows that fill a pass", async () => {
+    const agent = await evictionAgent(uniqueName("auto-large-text"));
+    await agent.setMediaEvictionForTest({ ...AGED_POLICY, maxRowsPerPass: 2 });
+    // The large text rows are older than the media, so a pass, which works
+    // oldest first, fills up on them before it gets to the media.
+    await agent.seedLargeTextBelowMediaForTest(3);
+    // A pass that fills up on text evicts nothing and schedules no other;
+    // the next refresh asks again, and the cursor has moved past the text.
+    await vi.waitFor(
+      async () => {
+        await agent.resyncForTest();
+        expect(
+          JSON.stringify(await agent.getStoredMessageForTest("media"))
+        ).toContain("[evicted image/png,");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("keeps the image with mediaEviction false: no pass is scheduled", async () => {
+    const agent = await evictionAgent(uniqueName("auto-disabled"));
+    await agent.setMediaEvictionForTest(false);
+    await agent.seedMediaHistoryForTest();
+    // A pass is scheduled, if at all, by the appends just made; with
+    // eviction off none is, and a refresh asks for none either.
+    await agent.resyncForTest();
+    expect(await agent.evictionPassQueuedForTest()).toBe(false);
+    const m0 = await agent.getStoredMessageForTest("m0");
+    expect((m0?.parts[1] as { url: string } | undefined)?.url).toBe(
+      `data:image/png;base64,${"A".repeat(16_000)}`
+    );
+    expect(
+      await agent.readEvictedFileForTest(
+        "/workspace/attachments/evicted/m0-0.png"
+      )
+    ).toBeNull();
+  });
 
   it("leaves the recent messages alone, even with keepRecentMessages 0", async () => {
     const agent = await evictedOnItsOwn("auto-recent", {

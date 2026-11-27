@@ -16354,6 +16354,49 @@ export class ThinkMediaEvictionAgent extends Think {
    * protected fillers. Large rows are read to look for media, so they count
    * toward `maxRowsPerPass`.
    */
+  /**
+   * Large text-only rows, then an aged media row, then four protected
+   * fillers: the text rows are older, so a pass that works oldest first
+   * reaches them before the media.
+   */
+  async seedLargeTextBelowMediaForTest(largeRows: number): Promise<void> {
+    for (let i = 0; i < largeRows; i++) {
+      await this.appendMessageToHistory({
+        id: `text-${i}`,
+        role: i % 2 === 0 ? "assistant" : "user",
+        parts: [{ type: "text", text: "x".repeat(BIG_MEDIA_CHARS) }]
+      } as UIMessage);
+    }
+    await this.appendMessageToHistory({
+      id: "media",
+      role: "user",
+      parts: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `filler-${i}`,
+        role: i % 2 === 0 ? "assistant" : "user",
+        parts: [{ type: "text", text: `filler ${i}` }]
+      } as UIMessage);
+    }
+  }
+
+  /** Whether a media-eviction pass job is queued on this object. */
+  async evictionPassQueuedForTest(): Promise<boolean> {
+    return (
+      (this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_jobs
+        WHERE id = ${"think-media-eviction:pass"}
+      `[0]?.count ?? 0) > 0
+    );
+  }
+
   async seedLargeTextAboveMediaForTest(largeRows: number): Promise<void> {
     await this.appendMessageToHistory({
       id: "media",
