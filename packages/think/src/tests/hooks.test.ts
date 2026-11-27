@@ -399,6 +399,18 @@ describe("Think — beforeStep hook", () => {
     expect(prompts[1]).toContain("echo-written:");
   });
 
+  it("stores no unsent reasoning for a turn that fails after it", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-hidden-reasoning-fail-${crypto.randomUUID()}`
+    );
+    await agent.hideReasoningForTest();
+    await agent.failAfterReasoningForTest();
+    await agent.testChat("think, then echo, then fail");
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(JSON.stringify(messages)).not.toContain("signed-thought");
+  });
+
   it("keeps unsent reasoning for the turn's next model call", async () => {
     const agent = await getAgentByName(
       env.ThinkRewriteContextTestAgent,
@@ -414,6 +426,8 @@ describe("Think — beforeStep hook", () => {
     const prompts = await agent.getReasoningPrompts();
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toContain("signed-thought");
+    // With the provider's signature on it.
+    expect(prompts[1]).toContain("sig-r1");
   });
 
   it("sends a continued rewritten turn's earlier tool call once", async () => {

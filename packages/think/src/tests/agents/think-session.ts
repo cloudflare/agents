@@ -17574,6 +17574,12 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
   }
 
   private _hiddenReasoning = false;
+  private _failAfterReasoning = false;
+
+  /** The call after the tool fails, ending the turn with an error. */
+  async failAfterReasoningForTest(): Promise<void> {
+    this._failAfterReasoning = true;
+  }
   private _reasoningPrompts: string[] = [];
 
   /** The model reasons, calls echo, then answers; reasoning isn't sent. */
@@ -17631,6 +17637,7 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
           JSON.stringify((options as { prompt?: unknown[] }).prompt ?? [])
         );
         const first = calls === 1;
+        const failSecond = this._failAfterReasoning;
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue({ type: "stream-start", warnings: [] });
@@ -17641,7 +17648,11 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
                 id: "r1",
                 delta: "signed-thought"
               });
-              controller.enqueue({ type: "reasoning-end", id: "r1" });
+              controller.enqueue({
+                type: "reasoning-end",
+                id: "r1",
+                providerMetadata: { test: { signature: "sig-r1" } }
+              });
               controller.enqueue({
                 type: "tool-call",
                 toolCallId: "tc-r1",
@@ -17652,6 +17663,11 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
                 type: "finish",
                 finishReason: v3FinishReason("tool-calls"),
                 usage: v3Usage(10, 5)
+              });
+            } else if (failSecond) {
+              controller.enqueue({
+                type: "error",
+                error: new Error("the second call failed")
               });
             } else {
               controller.enqueue({ type: "text-start", id: "t2" });

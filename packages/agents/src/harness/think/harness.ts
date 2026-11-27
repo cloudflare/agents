@@ -251,6 +251,8 @@ type LiveRun = {
   built?: SessionBuild;
   /** The reply as the loop holds it: everything streamed so far. */
   reply?: UIMessage;
+  /** Whether the reply's reasoning is kept from the client and storage. */
+  hideReasoning?: boolean;
   /** Settles when the attempt has returned. */
   readonly done: Promise<void>;
 };
@@ -2130,6 +2132,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 break;
               }
               chunks.push(chunk);
+              live.hideReasoning = model.hideReasoning;
               if (model.hideReasoning && chunk.type.startsWith("reasoning")) {
                 continue;
               }
@@ -2675,7 +2678,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           );
     const open =
       streamId !== undefined && streams.getStream(streamId) !== undefined;
-    let message = live?.reply;
+    // The loop's own reply, without the reasoning the turn didn't send.
+    let message =
+      live?.reply && live.hideReasoning
+        ? {
+            ...live.reply,
+            parts: live.reply.parts.filter((part) => part.type !== "reasoning")
+          }
+        : live?.reply;
     if (!message && legacy) {
       const existing = await stored(legacy.messageId);
       message =
