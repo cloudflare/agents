@@ -39,6 +39,7 @@ import {
 } from "../../chat/client-tools";
 import type { StreamChunkData } from "../../chat/message-builder";
 import {
+  chatRecoveryGaveUp,
   chatTurnDefinition,
   chatTurnStreamId,
   type ChatHost,
@@ -265,7 +266,8 @@ class ModelCallError extends Error {
     readonly kind: ThinkErrorClass,
     readonly error: unknown
   ) {
-    super(errorText(error));
+    // The cause is where a provider's retry-after is looked for.
+    super(errorText(error), { cause: error });
   }
 }
 
@@ -1464,7 +1466,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
     // The definition gave up on an interrupted turn, past the budget or as
     // `onRecovery` chose: its partial is stored already.
-    if (result.error === TURN_NOT_CONTINUED) {
+    if (result.error === TURN_NOT_CONTINUED || chatRecoveryGaveUp(run)) {
       return {
         status: "unanswered",
         reason: "interrupted",

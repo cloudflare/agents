@@ -9,6 +9,7 @@ import {
   cancelTurn,
   chatDispatch,
   clearChat,
+  forgetTab,
   replayTurn,
   resumeChat,
   submitTurn
@@ -17,6 +18,7 @@ import {
   type ChatHooks,
   chatTurnDefinition,
   chatTurnStreamId,
+  offeredIn,
   parkedIn
 } from "../../chat/chat-host";
 import { TaskSettlement } from "../../tasks/settlement";
@@ -3049,6 +3051,102 @@ describe("chat functions over a minimal host", () => {
         JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "nobody" })
       );
       expect(sent).toEqual([]);
+    });
+  });
+
+  it("a closed tab is forgotten: it waits for no stream and is offered none", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      const sent: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-gone", sent)
+      );
+      expect(offeredIn(instance.streams).get("tab-gone")).toBe("r1");
+      forgetTab(instance.deps, "tab-gone");
+      expect(offeredIn(instance.streams).has("tab-gone")).toBe(false);
+      expect(parkedIn(instance.streams, "s1").has("tab-gone")).toBe(false);
+      release();
+      await instance.resultFor("r1");
+    });
+  });
+
+  it("every tab is sent the message a tool answer updated, and a repeated answer sends nothing", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-pick",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      const sent: Array<Record<string, unknown>> = [];
+      instance.tabs.push(recordingTab("tab-w", sent));
+      const answer = {
+        kind: "result" as const,
+        toolCallId: "c1",
+        output: { ok: true }
+      };
+      expect(await answerTool(instance.deps, instance.lane, answer)).toBe(true);
+      expect(sent).toEqual([
+        expect.objectContaining({
+          type: "cf_agent_message_updated",
+          message: expect.objectContaining({ id: "a1" })
+        })
+      ]);
+      expect(await answerTool(instance.deps, instance.lane, answer)).toBe(
+        false
+      );
+      expect(sent).toHaveLength(1);
+    });
+  });
+
+  it("a tab that stops a waiting request it did not send is told it ended", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      // Sent by a tab that has gone; stopped by another.
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-gone", []),
+        chatRequestWith("r2", "u2", "two")
+      );
+      const sent: Array<Record<string, unknown>> = [];
+      const stopper = recordingTab("tab-stop", sent);
+      instance.tabs.push(stopper);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        stopper,
+        JSON.stringify({ type: "cf_agent_chat_request_cancel", id: "r2" })
+      );
+      expect(sent).toContainEqual(
+        expect.objectContaining({ id: "r2", done: true, outcome: "aborted" })
+      );
+      release();
+      await instance.resultFor("r2");
     });
   });
 });

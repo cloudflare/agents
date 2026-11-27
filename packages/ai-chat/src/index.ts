@@ -41,6 +41,7 @@ import {
   classifyProviderError,
   reconcileOrphanPartial,
   CHAT_REQUEST_CONTEXT_KEY,
+  CHAT_STASH_CHECKPOINT,
   requestContextFromLegacy,
   storableRequestContext,
   interruptedToolPartAsError,
@@ -52,10 +53,7 @@ import {
 import {
   aiSdkRecoveryCodec,
   ResumeHandshake,
-  dispatchChatProtocol,
-  rejectionMessage,
   releaseChatConnection,
-  type ChatProtocolHost,
   sendIfOpen,
   ChatTurns,
   AgentToolRuns,
@@ -127,7 +125,6 @@ import {
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
-  originMessageIds,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
@@ -153,6 +150,7 @@ import {
   cancelTurn,
   chatTurnStreamId,
   type AgentToolStreams,
+  forgetTab,
   resumeChat,
   chatClientView,
   hasPendingToolInteraction,
@@ -346,6 +344,9 @@ export { createToolsFromClientSchemas } from "agents/chat";
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
+/** The chat module's turn definition, as AIChatAgent registers it. */
+const CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
+
 /**
  * What `AIChatAgent` stores with a client request's admission record, to run
  * it again after an isolate reset. See `ChatTurns.resumeAdmissions`.
@@ -626,12 +627,7 @@ export class AIChatAgent<
   private _clientView<TMessage extends { id: string }>(
     messages: readonly TMessage[]
   ): { messages: TMessage[]; queuedMessageIds?: string[] } {
-    return chatClientView(
-      this.tasks,
-      AIChatAgent.CHAT_TURN_DEFINITION,
-      "",
-      messages
-    );
+    return chatClientView(this.tasks, CHAT_TURN_DEFINITION, "", messages);
   }
 
   /** Lazily-built shared resume-handshake driver (Tier-2). */
@@ -762,6 +758,22 @@ export class AIChatAgent<
    */
   /** The carry-forward of an earlier release's rows, while it runs (tests await it). */
   private _requestContextCarried: Promise<void> | undefined;
+
+  /**
+   * The upgrade from a released version: each step turns rows that version
+   * kept into the chat module's own, and drops them. Runs in the
+   * constructor, before the Tasks capability starts runs, so a run it
+   * creates is there when the lane is drained. Each step is cheap when it
+   * has nothing to do (one read that finds no table or no row).
+   */
+  private _upgradeReleasedRows(): void {
+    // ai-chat 0.12.x: `cf_ai_chat_request_context` → the session value.
+    this._restoreRequestContext();
+    // ai-chat 0.12.x: a turn left cut off (fiber row, incident, recovery
+    // runs, stream rows) → a chat-turn run under its request id
+    // (turn-task's step goes here). An open agent-tool turn → run
+    // `agent-tool:<runId>` (with #3346).
+  }
 
   private _restoreRequestContext(): void {
     const stored = this.#session.internal_configNow(CHAT_REQUEST_CONTEXT_KEY);
@@ -965,11 +977,11 @@ export class AIChatAgent<
     inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt
   });
 
-  /** The Task definition each chat turn runs as (the chat module's). */
-  static readonly CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
-
   /** Whether each running call continues a reply, for `onChatResponse`. */
   private readonly _callContinues = new Map<string, boolean>();
+
+  /** What `onError` threw in place of a turn's error, for its waiting caller. */
+  private readonly _onErrorReplaced = new Map<string, unknown>();
 
   /** Turns whose `onChatMessage` answered with a reply, until they end. */
   private readonly _answered = new Set<string>();
@@ -1043,6 +1055,12 @@ export class AIChatAgent<
     );
     const result = await Promise.race([ended, settled]);
     this._turnWaiters.delete(requestId);
+    // `onError` replaced what `onChatMessage` threw: the caller gets that.
+    if (this._onErrorReplaced.has(requestId)) {
+      const replaced = this._onErrorReplaced.get(requestId);
+      this._onErrorReplaced.delete(requestId);
+      throw replaced;
+    }
     // Skipped before anything ran: no request is named.
     const ranNothing =
       result.status === "skipped" &&
@@ -1094,7 +1112,7 @@ export class AIChatAgent<
           }
         : concurrency;
     return {
-      definition: AIChatAgent.CHAT_TURN_DEFINITION,
+      definition: CHAT_TURN_DEFINITION,
       lane: "chat",
       arrival
     };
@@ -1102,7 +1120,7 @@ export class AIChatAgent<
 
   /** How the chat module asks this agent for a reply and tells it the end. */
   private _chatHost(): ChatHost {
-    const recovery = this.chatRecovery;
+    const agent = this;
     return {
       respond: async (call) => {
         // Apps read the transcript the call is for from `this.messages`.
@@ -1147,28 +1165,57 @@ export class AIChatAgent<
             if (connection.id === originId) originConnection = connection;
           }
         }
+        // `this.stash(data)` in the app's turn is kept with the turn's run,
+        // and comes back as `recoveryData` if the turn is recovered.
         const ask = () =>
-          this.onChatMessage(async () => {}, {
-            requestId: call.requestId,
-            abortSignal: call.signal,
-            // No client tools reach `onChatMessage` as none, as before.
-            ...(call.clientTools.length > 0 && {
-              clientTools: [...call.clientTools]
-            }),
-            // A request with no custom fields has no body, as before.
-            ...(call.body !== undefined &&
-              Object.keys(call.body).length > 0 && { body: { ...call.body } }),
-            continuation: call.mode === "continue"
-          });
-        const response = await agentContext.run(
-          {
-            agent: this,
-            connection: originConnection,
-            request: undefined,
-            email: undefined
-          },
-          ask
-        );
+          this._withFiberStash(
+            {
+              id: call.requestId,
+              signal: call.signal,
+              stash: (data) =>
+                call.checkpoint.set(CHAT_STASH_CHECKPOINT, data as never)
+            },
+            () =>
+              this.onChatMessage(async () => {}, {
+                requestId: call.requestId,
+                abortSignal: call.signal,
+                // No client tools reach `onChatMessage` as none, as before.
+                ...(call.clientTools.length > 0 && {
+                  clientTools: [...call.clientTools]
+                }),
+                // A request with no custom fields has no body, as before.
+                ...(call.body !== undefined &&
+                  Object.keys(call.body).length > 0 && {
+                    body: { ...call.body }
+                  }),
+                continuation: call.mode === "continue"
+              })
+          );
+        let response: Awaited<ReturnType<typeof ask>>;
+        try {
+          response = await agentContext.run(
+            {
+              agent: this,
+              connection: originConnection,
+              request: undefined,
+              email: undefined
+            },
+            ask
+          );
+        } catch (error) {
+          // `onError` observes what `onChatMessage` threw and may replace it
+          // by throwing; the turn ends with the original either way, and a
+          // caller waiting on it (`saveMessages`, `continueLastTurn`) gets
+          // the replacement. A stop is not an error.
+          if (!call.signal.aborted) {
+            try {
+              await this.onError(error);
+            } catch (replaced) {
+              this._onErrorReplaced.set(call.requestId, replaced);
+            }
+          }
+          throw error;
+        }
         // It answered with a reply: however that reply ends, the hook
         // hears of it.
         if (response) this._answered.add(call.requestId);
@@ -1178,6 +1225,8 @@ export class AIChatAgent<
         onResponse: async (result) => {
           this._shownQueued.delete(result.requestId);
           const waiter = this._turnWaiters.get(result.requestId);
+          // No caller waits on it (a tab's request): nothing gets it.
+          if (!waiter) this._onErrorReplaced.delete(result.requestId);
           this._turnWaiters.delete(result.requestId);
           // Whether the model was asked: a turn stopped before it started
           // reports nothing to `onChatResponse`.
@@ -1186,7 +1235,8 @@ export class AIChatAgent<
           const continuation =
             this._callContinues.get(result.requestId) ?? false;
           this._callContinues.delete(result.requestId);
-          this.messages = (await this.#session.getHistory()) as UIMessage[];
+          // `this.messages` follows storage through the Sessions change feed
+          // (`mirrorTranscript`): the turn's writes are in it already.
           if (result.status === "error") {
             this._emit("message:error", { error: result.error ?? "" });
           } else if (result.messageId !== undefined) {
@@ -1241,21 +1291,33 @@ export class AIChatAgent<
         },
         sanitizeForPersistence: (message) =>
           this._sanitizeMessageForPersistence(message),
-        onRecovery: (context) => this.onChatRecovery(context)
+        onRecovery: (context) => this.onChatRecovery(context),
+        // What the provider's error says: a rate limit or a transient
+        // failure goes into bounded chat recovery, like a dropped stream
+        // (#1964). An in-band error is the provider's answer.
+        classifyError: (error, inBand) =>
+          (!inBand && isRecoverableStreamReadError(error)) ||
+          isTransientProviderError(error)
+            ? "transient"
+            : "terminal"
       },
       options: {
         hydrationByteBudget: this.hydrationByteBudget,
         ...(this.maxPersistedMessages !== undefined && {
           maxPersistedMessages: this.maxPersistedMessages
         }),
-        recovery:
-          typeof recovery === "object"
-            ? {
-                ...(recovery.maxAttempts !== undefined && {
-                  maxAttempts: recovery.maxAttempts
-                })
-              }
-            : {}
+        // The app's whole budget: the turn definition applies it. A stream
+        // that sends nothing for the app's stall timeout is interrupted.
+        // Read when a turn runs, so a value set after construction holds.
+        get recovery() {
+          const recovery = agent.chatRecovery;
+          return {
+            ...(typeof recovery === "object" && recovery),
+            ...(agent.chatStreamStallTimeoutMs > 0 && {
+              stallTimeoutMs: agent.chatStreamStallTimeoutMs
+            })
+          };
+        }
       }
     };
   }
@@ -1296,9 +1358,9 @@ export class AIChatAgent<
     );
     // The chat module's turn definition: every new turn runs here.
     this.tasks.register(
-      AIChatAgent.CHAT_TURN_DEFINITION,
+      CHAT_TURN_DEFINITION,
       chatTurnDefinition(this._chatDeps(), this._chatHost(), {
-        name: AIChatAgent.CHAT_TURN_DEFINITION
+        name: CHAT_TURN_DEFINITION
       })
     );
     // The recovery Task, which only finishes runs an earlier version
@@ -1389,9 +1451,10 @@ export class AIChatAgent<
           }
         );
 
-        // The last request context, read now: boot recovery runs before
-        // onStart and needs the client tools.
-        this._restoreRequestContext();
+        // Rows an earlier release left, carried forward once, before any
+        // turn runs: the request context, and (turn-task's step) a turn
+        // that release left cut off.
+        this._upgradeReleasedRows();
 
         // Initialize resumable stream manager (creates its own tables + restores state)
         this._withAgentSpan(
@@ -1456,17 +1519,22 @@ export class AIChatAgent<
       // sent the message list, so it knows which messages are queued.
       // The HTTP transcript has the stored messages only; this list names
       // the queued ones, which a tab keeps apart and draws last.
-      if (this._queuedMessageIds().size > 0) {
-        this._frames.send(connection, {
-          type: MessageType.CF_AGENT_CHAT_MESSAGES,
-          connect: true,
-          ...this._clientView(this.messages)
-        });
+      // One read of the lane answers both questions below.
+      const open = this._openChatTurns();
+      if (open.some((run) => run.status === "pending")) {
+        const view = this._clientView(this.messages);
+        if (view.queuedMessageIds) {
+          this._frames.send(connection, {
+            type: MessageType.CF_AGENT_CHAT_MESSAGES,
+            connect: true,
+            ...view
+          });
+        }
       }
 
       // A turn streams or waits to: the tab is offered its stream, or told
       // to wait for it (#1784) and offered it when it starts.
-      if (this._openChatTurns().length > 0) {
+      if (open.length > 0) {
         await resumeChat(this._chatDeps(), this._chatLane(), connection);
       } else {
         // No active stream to resume: if a recovery is in progress (between
@@ -1498,110 +1566,12 @@ export class AIChatAgent<
         this._resumeHandshake(),
         connection.id
       );
+      // The chat module forgets the tab: it waits for no stream.
+      forgetTab(this._chatDeps(), connection.id);
       return _onClose(connection, code, reason, wasClean);
     };
 
     const _onMessage = this.onMessage.bind(this);
-    const protocol: ChatProtocolHost<Connection> = {
-      turns: this._turns,
-      resumeHandshake: () => this._resumeHandshake(),
-      emit: (type, payload) => this._emit(type, payload),
-      chatRequest: (connection, request) =>
-        this._withAgentSpan(
-          "chat_interaction",
-          "interaction",
-          {
-            "cloudflare.agents.component": "ai_chat",
-            "cloudflare.agents.turn.request_id": request.requestId
-          },
-          async () => {
-            const { requestId, trigger } = request;
-            const messages = autoTransformMessages(request.messages);
-            const requestOriginIds = originMessageIds(request.messages);
-            if (requestOriginIds) {
-              this._frames.requestOrigins.set(requestId, requestOriginIds);
-            }
-            try {
-              await this._turns.runClientRequest(
-                this._clientChatRequest({
-                  requestId,
-                  trigger,
-                  messages,
-                  clientTools: request.clientTools,
-                  body: request.body,
-                  connection,
-                  // What was stored when a regenerate arrived: its turn may
-                  // delete these, but never a question another tab sent
-                  // after it.
-                  regenerate:
-                    trigger === "regenerate-message"
-                      ? this._regenerateAdmission(messages)
-                      : null,
-                  originMessageIds: requestOriginIds
-                })
-              );
-            } finally {
-              this._frames.requestOrigins.delete(requestId);
-            }
-          }
-        ),
-      frames: this._frames,
-      rejectedChatRequest: (_connection, rejection) => {
-        const error = rejectionMessage(rejection);
-        console.warn(
-          `[AIChatAgent] Ignoring chat request ${rejection.requestId}: ${error}`
-        );
-        this._emit("chat:request:failed", {
-          requestId: rejection.requestId,
-          stage: "parse",
-          messagesPersisted: false,
-          error
-        });
-        return error;
-      },
-      clear: async (connection) => {
-        // The chat module's lane: its turns end, waiting or running.
-        this._shownQueued.clear();
-        this._chatClears++;
-        await clearChat(this._chatDeps(), this._chatLane());
-        this.resetTurnState();
-        await this.#session.clearMessages();
-        // Drop any pending terminal record (#1645) so a stale exhaustion
-        // can't replay onto a freshly-cleared (empty) conversation when a
-        // client reconnects and runs the resume probe.
-        await clearChatTerminal(this.ctx.storage);
-        clearRecentChatTerminals(this.ctx.storage.kv);
-        this._replyStreams.clearAll();
-        this._pendingResumeConnections.clear();
-        this._preStream.releaseAwaiting();
-        this._preStream.reset();
-        this._turns.clearRequestContext();
-        // `clearMessages()` above emptied `this.messages` through the
-        // change feed.
-        this._frames.broadcast({ type: MessageType.CF_AGENT_CHAT_CLEAR }, [
-          connection.id
-        ]);
-        this._emit("message:clear");
-      },
-      messages: async (connection, messages) => {
-        // A message a waiting request holds is stored when its turn
-        // starts, not because a tab sent it back.
-        const queued = this._queuedMessageIds();
-        const transformedMessages = autoTransformMessages(messages).filter(
-          (message) => !queued.has(message.id)
-        );
-        await this.persistMessages(transformedMessages, [connection.id]);
-      },
-      applyToolUpdate: (update) => this._applyToolPartUpdate(update),
-      continuation: (connection, answer) => ({
-        connection,
-        errorPrefix:
-          answer === "tool-approval"
-            ? "[AIChatAgent] Tool approval continuation failed:"
-            : "[AIChatAgent] Tool continuation failed:"
-      }),
-      enqueueInteraction: (run) => this._enqueueInteractionApply(run)
-    };
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       if (!this._cf_connectionTargetsSubAgent(connection)) {
         // The chat module answers the chat protocol; a clear and a tab's
@@ -1631,7 +1601,17 @@ export class AIChatAgent<
           }
           return;
         }
-        if (await dispatchChatProtocol(connection, message, protocol)) return;
+        if (event?.type === "clear") {
+          await this._clearFromTab(connection);
+          return;
+        }
+        if (event?.type === "messages") {
+          await this._messagesFromTab(
+            connection,
+            event.messages as UIMessage[]
+          );
+          return;
+        }
       }
       return _onMessage(connection, message);
     };
@@ -1952,27 +1932,6 @@ export class AIChatAgent<
     }
 
     return [...this.messages, inFlight];
-  }
-
-  /**
-   * What a regenerate needs to know about when it arrived: the messages it
-   * keeps, and the stored user messages it did not send. A question another
-   * tab sends later is in neither, and makes the regenerate skip.
-   */
-  private _regenerateAdmission(messages: UIMessage[]): {
-    keepIds: string[];
-    storedUserIds: Set<string>;
-  } {
-    const keepIds = messages.map((message) => message.id);
-    const keep = new Set(keepIds);
-    return {
-      keepIds,
-      storedUserIds: new Set(
-        this.messages
-          .filter((message) => message.role === "user" && !keep.has(message.id))
-          .map((message) => message.id)
-      )
-    };
   }
 
   /**
@@ -2526,7 +2485,7 @@ export class AIChatAgent<
   /** The chat's turns that wait or run in its lane. */
   protected _openChatTurns(): readonly { runId: string; status: string }[] {
     return this.tasks.peekList({
-      definition: AIChatAgent.CHAT_TURN_DEFINITION,
+      definition: CHAT_TURN_DEFINITION,
       lane: "chat",
       status: ["pending", "running"],
       results: false,
@@ -2577,6 +2536,46 @@ export class AIChatAgent<
         setTimeout(resolve, Math.min(left ?? 50, 50))
       );
     }
+  }
+
+  /** A tab cleared the chat. */
+  private async _clearFromTab(connection: Connection): Promise<void> {
+    // The chat module's lane: its turns end, waiting or running.
+    this._shownQueued.clear();
+    this._chatClears++;
+    await clearChat(this._chatDeps(), this._chatLane());
+    this.resetTurnState();
+    await this.#session.clearMessages();
+    // Drop any pending terminal record (#1645) so a stale exhaustion
+    // can't replay onto a freshly-cleared (empty) conversation when a
+    // client reconnects and runs the resume probe.
+    await clearChatTerminal(this.ctx.storage);
+    clearRecentChatTerminals(this.ctx.storage.kv);
+    this._replyStreams.clearAll();
+    this._pendingResumeConnections.clear();
+    this._preStream.releaseAwaiting();
+    this._preStream.reset();
+    this._turns.clearRequestContext();
+    // `clearMessages()` above emptied `this.messages` through the
+    // change feed.
+    this._frames.broadcast({ type: MessageType.CF_AGENT_CHAT_CLEAR }, [
+      connection.id
+    ]);
+    this._emit("message:clear");
+  }
+
+  /** A tab sent its transcript back. */
+  private async _messagesFromTab(
+    connection: Connection,
+    messages: UIMessage[]
+  ): Promise<void> {
+    // A message a waiting request holds is stored when its turn
+    // starts, not because a tab sent it back.
+    const queued = this._queuedMessageIds();
+    const transformedMessages = autoTransformMessages(messages).filter(
+      (message) => !queued.has(message.id)
+    );
+    await this.persistMessages(transformedMessages, [connection.id]);
   }
 
   /**
@@ -4631,24 +4630,6 @@ export class AIChatAgent<
           message
         })
     });
-  }
-
-  /**
-   * Serialize a client-tool result/approval apply behind any in-flight apply
-   * (#1649, defensive). Each apply is a read-modify-write of the message and
-   * parallel tool results arrive as independent WebSocket messages. The
-   * queue makes each read-modify-write commit atomically, in arrival order.
-   *
-   * `ChatTurns.pendingInteraction` is set to the newest link so the barrier's
-   * single-slot wake-up observes the latest apply; because the chain is serial,
-   * awaiting it transitively waits for every predecessor.
-   *
-   * @internal
-   */
-  protected _enqueueInteractionApply(
-    apply: () => Promise<boolean>
-  ): Promise<boolean> {
-    return this._turns.enqueueInteraction(apply);
   }
 
   private async _reply(

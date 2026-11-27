@@ -6,35 +6,6 @@ import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS, socketBarrier } from "./test-utils";
 import { MessageType } from "../types";
 
-/**
- * Wait until the recovery is over: its incident has a final status, no
- * chat-turn run (the attempt's own included) is open or waiting out a
- * backoff, and the chat is idle. A stop writes the final status while the
- * attempt still runs, so the status alone ends too early.
- */
-async function recoveryEnded(agentStub: {
-  getChatRecoveryIncidentsForTest(): Promise<unknown>;
-  chatTurnRunsInFlightForTest(): Promise<number>;
-  waitForIdleForTest(): Promise<unknown>;
-}): Promise<void> {
-  await expect
-    .poll(
-      async () =>
-        (
-          (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-            status?: string;
-          }>
-        )[0]?.status,
-      { timeout: 10_000 }
-    )
-    .toMatch(/^(skipped|exhausted|completed|failed)$/);
-  // Pending includes a run waiting out a backoff.
-  await expect
-    .poll(() => agentStub.chatTurnRunsInFlightForTest(), { timeout: 10_000 })
-    .toBe(0);
-  await agentStub.waitForIdleForTest();
-}
-
 /** Every frame `ws` receives from now on, parsed. */
 function seenFrames(ws: WebSocket): unknown[] {
   const frames: unknown[] = [];
@@ -318,6 +289,18 @@ interface ChatRecoveryTestStub {
     backingOffAtStop: number;
   }>;
   getFailingReaderCallsForTest(): Promise<number>;
+  startFailingReaderTurnForTest(
+    message: string,
+    turns: number,
+    options?: {
+      responseHeaders?: Record<string, string>;
+      waitsAtLeastMs?: number;
+    }
+  ): Promise<string>;
+  startedFailingTurnStatusForTest(): Promise<string>;
+  endedRequestIdsForTest(): Promise<string[]>;
+  endRetryWaitsForTest(): Promise<number>;
+  openChatLaneRunsForTest(): Promise<number>;
   setStashData(data: unknown): Promise<void>;
   trackRecoveryTaskKeysForTest(): Promise<void>;
   getRecoveryTaskKeyedForTest(): Promise<boolean[]>;
@@ -341,21 +324,6 @@ async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
  * `endRecoveryBackoffsForTest()` when the recovery is to run.
  */
 const HELD_BACKOFF = { responseHeaders: { "retry-after": "60" } };
-
-/**
- * Wait until the cut-off turn's run is waiting out its recovery's backoff:
- * the turn's result comes back before its run gets there.
- */
-async function recoveryBacksOff(agentStub: {
-  backingOffChatTurnRunsForTest(): Promise<number>;
-}): Promise<void> {
-  await vi.waitFor(
-    async () => {
-      expect(await agentStub.backingOffChatTurnRunsForTest()).toBe(1);
-    },
-    { timeout: 10_000, interval: 20 }
-  );
-}
 
 describe("onChatRecovery", () => {
   function makeChunks(
@@ -2535,110 +2503,6 @@ describe("onChatRecovery", () => {
     expect(parked?.reason).toBe("awaiting_client_interaction");
   });
 
-  it("PARKS a continuation (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {
-    const agentStub = await getTestAgent(`stable-park-${crypto.randomUUID()}`);
-    await agentStub.setForceStableTimeoutForTest(true);
-
-    // The turn is parked on a CLIENT-tool `input-available` orphan: the SPA will
-    // replay the tool-result after reconnect, so `waitUntilStable` timing out is
-    // expected (the human hasn't answered), NOT churn.
-    await agentStub.setRequestContextForTest(undefined, [
-      { name: "chooseOption" }
-    ]);
-    await agentStub.persistPendingToolCallForTest(
-      "assistant-park",
-      "chooseOption"
-    );
-
-    await agentStub.seedIncidentForTest({
-      incidentId: "inc-park",
-      requestId: "root-park",
-      recoveryKind: "continue",
-      attempt: 1,
-      maxAttempts: 6,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now()
-    });
-
-    const continueData = {
-      incidentId: "inc-park",
-      originalRequestId: "root-park",
-      targetAssistantId: "assistant-park"
-    };
-    await agentStub.preScheduleRecoveryContinueForTest(continueData);
-    await agentStub.runChatRecoveryContinueDirectForTest(continueData);
-
-    // No NEW reschedule row (only the pre-scheduled executing row remains) and
-    // the attempt count did NOT advance — the stable-timeout budget was not
-    // spent. The incident is parked `skipped` for the client's eventual replay.
-    expect(
-      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
-    ).toBe(1);
-    const parked = await agentStub.getIncidentForTest("inc-park");
-    expect(parked?.attempt).toBe(1);
-    expect(parked?.status).toBe("skipped");
-    expect(parked?.reason).toBe("awaiting_client_interaction");
-  });
-
-  it("does not continue a reply the client's answer already continued", async () => {
-    const room = `answer-during-wait-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-
-    // The cut-off reply ended on a client tool call, and its recovery is
-    // scheduled.
-    await agentStub.setRequestContextForTest(undefined, [
-      { name: "chooseOption" }
-    ]);
-    await agentStub.persistPendingToolCallForTest(
-      "assistant-answered",
-      "chooseOption"
-    );
-    await agentStub.seedIncidentForTest({
-      incidentId: "inc-answered",
-      requestId: "root-answered",
-      recoveryKind: "continue",
-      attempt: 1,
-      maxAttempts: 6,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now()
-    });
-
-    // The recovery attempt starts and waits for the client.
-    const attempt = agentStub
-      .runChatRecoveryContinueDirectForTest({
-        incidentId: "inc-answered",
-        originalRequestId: "root-answered",
-        targetAssistantId: "assistant-answered"
-      })
-      .then(() => "done");
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
-
-    // The tab reconnects and answers. The answer's continuation runs.
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    ws.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_TOOL_RESULT,
-        toolCallId: "call_assistant-answered",
-        toolName: "chooseOption",
-        output: { choice: "a" },
-        autoContinue: true
-      })
-    );
-
-    // The chat settles and the attempt ends without asking the model again.
-    expect(await attempt).toBe("done");
-    ws.close(1000);
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-    const incident = await agentStub.getIncidentForTest("inc-answered");
-    expect(incident?.status).toBe("skipped");
-    expect(incident?.reason).toBe("continued_by_interaction");
-  }, 15_000);
-
   it.each<{
     name: string;
     recoveryKind: "retry" | "continue";
@@ -2712,61 +2576,6 @@ describe("onChatRecovery", () => {
     },
     15_000
   );
-
-  it("files a turn interrupted while a recovery attempt waits under its own request, not the attempt's", async () => {
-    const room = `interrupted-during-wait-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-    await agentStub.seedIncidentForTest({
-      incidentId: "inc-waiting",
-      requestId: "root-waiting",
-      recoveryKind: "continue",
-      attempt: 1,
-      maxAttempts: 6,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now()
-    });
-
-    await agentStub.trackRecoveryTaskKeysForTest();
-
-    // A recovery attempt starts and waits for the chat to settle.
-    await agentStub.holdStableWaitForTest();
-    const attempt = agentStub
-      .runChatRecoveryContinueDirectForTest({
-        incidentId: "inc-waiting",
-        originalRequestId: "root-waiting",
-        targetAssistantId: "assistant-gone"
-      })
-      .then(() => "done");
-    await expect
-      .poll(() => agentStub.isStableWaitHeldForTest(), { timeout: 5000 })
-      .toBe(true);
-
-    // Meanwhile another turn runs and is cut off by a transient error.
-    expect(
-      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
-
-    // It opened its own incident, rooted at its own request, as a first
-    // attempt: not a chained attempt of the recovery that is waiting.
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        incidentId: string;
-        requestId: string;
-        recoveryRootRequestId?: string;
-        status: string;
-      }>;
-    const own = incidents.find(
-      (incident) => incident.incidentId !== "inc-waiting"
-    );
-    expect(own).toBeDefined();
-    expect(own?.recoveryRootRequestId).toBe(own?.requestId);
-    expect(own?.recoveryRootRequestId).not.toBe("root-waiting");
-    expect(await agentStub.getRecoveryTaskKeyedForTest()).toEqual([true]);
-
-    await agentStub.releaseStableWaitForTest();
-    expect(await attempt).toBe("done");
-  }, 15_000);
 
   it("RECOVERS a dead SERVER-tool orphan on continue (repairs to errored, then continues) instead of waiting-then-exhausting", async () => {
     const agentStub = await getTestAgent(
@@ -3098,204 +2907,61 @@ describe("onChatRecovery", () => {
   // record, so a client that (re)connects afterward and runs the standard
   // resume probe is told RESUME_NONE and the failed turn stays frozen.
   // This drives the real WebSocket reconnect protocol against a real DO.
-  it("replays the terminal exhaustion to a client that reconnects after it ended (#1645)", async () => {
+  it("tells a tab that reconnects the app's terminal message for a turn whose recovery gave up (#1645)", async () => {
     const room = `terminal-reconnect-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
-
     const TERMINAL = "Recovery exhausted — the assistant could not finish.";
-
-    // Drive a turn to exhaustion while no client is connected (deploy-churn /
-    // reconnect-storm shape): the terminal broadcast lands on nobody.
-    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
-    await agentStub.setForceStableTimeoutForTest(true);
-    await agentStub.seedIncidentForTest({
-      incidentId: "inc-reconnect",
-      requestId: "root-reconnect",
-      recoveryKind: "continue",
-      attempt: 6,
-      maxAttempts: 6,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now()
-    });
-    await agentStub.runChatRecoveryContinueDirectForTest({
-      incidentId: "inc-reconnect",
-      originalRequestId: "root-reconnect",
-      targetAssistantId: "a-reconnect"
+    await agentStub.setChatRecoveryConfigForTest({
+      maxAttempts: 1,
+      terminalMessage: TERMINAL
     });
 
-    // Sanity: the turn really did terminalize.
-    expect(await agentStub.getExhaustedContextsForTest()).toHaveLength(1);
-
-    // A client now connects — it was NOT present during exhaustion — and runs
-    // the standard reconnect probe the transport sends on every mount. We mirror
-    // the real WebSocketChatTransport handshake exactly: send RESUME_REQUEST,
-    // and on STREAM_RESUMING reply with STREAM_RESUME_ACK so the (resumed)
-    // stream can deliver its terminal error frame — the only path that becomes
-    // useChat.error on a reconnected client.
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    const received: Array<Record<string, unknown>> = [];
-    ws.addEventListener("message", (e) => {
-      let frame: Record<string, unknown>;
-      try {
-        frame = JSON.parse(e.data as string) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-      received.push(frame);
-      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
-        ws.send(
-          JSON.stringify({
-            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-            id: frame.id
-          })
-        );
-      }
-    });
-
-    ws.send(
-      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
-    );
-
-    // The handshake's answer: the terminal frame, or "nothing to resume".
-    // If neither comes, the expectation below says which frames did.
-    await vi
-      .waitFor(
-        () => {
-          expect(
-            received.some(
-              (frame) =>
-                frame.type === MessageType.CF_AGENT_STREAM_RESUME_NONE ||
-                (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-                  frame.done === true)
-            )
-          ).toBe(true);
-        },
-        { timeout: 10_000, interval: 20 }
-      )
-      .catch(() => {});
-    ws.close(1000);
-
-    // EXPECTATION (#1645): the reconnecting client learns the turn failed —
-    // it receives the configured terminal error frame, not a bare RESUME_NONE.
-    const terminal = received.find(
-      (m) =>
-        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        m.error === true &&
-        m.done === true
-    );
+    // Every attempt streams a little and stalls: the budget is spent with no
+    // client connected.
     expect(
-      terminal,
-      `expected a terminal error frame on reconnect; received frame types: ${JSON.stringify(
-        received.map((m) => m.type)
-      )}`
-    ).toBeTruthy();
-    expect(terminal?.body).toBe(TERMINAL);
-  }, 30_000);
+      await agentStub.driveStallingTurnForTest({
+        timeoutMs: 100,
+        hangTurns: 20
+      })
+    ).toBe("error");
+    const [requestId] = await agentStub.endedRequestIdsForTest();
+
+    const asked = await endsOnReconnect(room, [requestId]);
+    expect(
+      asked.end,
+      `expected the request's end on reconnect; received frame types: ${JSON.stringify(asked.types)}`
+    ).toMatchObject({
+      id: requestId,
+      done: true,
+      error: true,
+      body: TERMINAL
+    });
+  }, 15_000);
 
   // #1645 (clear-on-success): the durable terminal record must be superseded
   // when a LATER turn succeeds — including a turn driven purely server-side via
   // `saveMessages` (no client request in between, which is the only path that
   // would otherwise clear it). Otherwise the stale exhaustion replays to the
   // next client to connect, even though the conversation has since recovered.
-  it("clears the terminal record when a later server-side turn succeeds (#1645)", async () => {
-    const room = `terminal-cleared-${crypto.randomUUID()}`;
+  it("still tells a tab how its request ended after a later turn succeeded (#1645)", async () => {
+    const room = `terminal-kept-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
+    const STREAM_ERROR = "Provider returned HTTP 500.";
+    expect(await agentStub.driveErroredTurnForTest(STREAM_ERROR)).toBe("error");
+    const [requestId] = await agentStub.endedRequestIdsForTest();
 
-    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
-
-    // Drive a turn to exhaustion while no client is connected → record written.
-    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
-    await agentStub.setForceStableTimeoutForTest(true);
-    await agentStub.seedIncidentForTest({
-      incidentId: "inc-cleared",
-      requestId: "root-cleared",
-      recoveryKind: "continue",
-      attempt: 6,
-      maxAttempts: 6,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now()
-    });
-    await agentStub.runChatRecoveryContinueDirectForTest({
-      incidentId: "inc-cleared",
-      originalRequestId: "root-cleared",
-      targetAssistantId: "a-cleared"
-    });
-
-    // Precondition: the terminal record is durably present.
-    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
-      body: TERMINAL
-    });
-
-    // A later turn succeeds — but driven purely server-side (`saveMessages`),
-    // NOT via a client `CF_AGENT_USE_CHAT_REQUEST`. The request handler's clear
-    // never runs; only the response-hook drain loop can supersede the record.
-    await agentStub.setForceStableTimeoutForTest(false);
+    // A later turn of the server's own completes.
     expect(await agentStub.driveSuccessfulTurnForTest()).toBe("completed");
 
-    // The stale exhaustion is gone, so a reconnecting client won't see it.
-    expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
-
-    // End-to-end: a client connecting now and running the standard resume probe
-    // is told RESUME_NONE — no terminal error frame replays.
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    const received: Array<Record<string, unknown>> = [];
-    ws.addEventListener("message", (e) => {
-      let frame: Record<string, unknown>;
-      try {
-        frame = JSON.parse(e.data as string) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-      received.push(frame);
-      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
-        ws.send(
-          JSON.stringify({
-            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-            id: frame.id
-          })
-        );
-      }
+    // Each request's end is kept under its own id: the later success does
+    // not drop it.
+    const asked = await endsOnReconnect(room, [requestId]);
+    expect(asked.end).toMatchObject({
+      id: requestId,
+      done: true,
+      error: true,
+      body: STREAM_ERROR
     });
-
-    ws.send(
-      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
-    );
-    // The resume request's answer: RESUME_NONE, or a terminal replay (which
-    // the ACK starts, after any barrier's echo). Then the barrier.
-    await vi.waitFor(() =>
-      expect(
-        received.some(
-          (m) =>
-            m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE ||
-            (m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-              m.done === true)
-        )
-      ).toBe(true)
-    );
-    await socketBarrier(ws, received);
-    ws.close(1000);
-
-    const terminal = received.find(
-      (m) =>
-        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        m.error === true &&
-        m.done === true
-    );
-    expect(
-      terminal,
-      `expected NO terminal error frame after a successful turn; received frame types: ${JSON.stringify(
-        received.map((m) => m.type)
-      )}`
-    ).toBeUndefined();
-    expect(
-      received.some((m) => m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE)
-    ).toBe(true);
   });
 
   // #1645 (clear-on-abort): an ABORTED server-side turn must also supersede the
@@ -3304,57 +2970,15 @@ describe("onChatRecovery", () => {
   // client-submit path clears eagerly, so this gap is reachable only for turns
   // driven purely server-side (`saveMessages` / `continueLastTurn` with an
   // external abort signal).
-  it("clears the terminal record when a later server-side turn is aborted (#1645)", async () => {
-    const room = `terminal-aborted-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-
-    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
-
-    // Drive a turn to exhaustion while no client is connected → record written.
-    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
-    await agentStub.setForceStableTimeoutForTest(true);
-    await agentStub.seedIncidentForTest({
-      incidentId: "inc-aborted",
-      requestId: "root-aborted",
-      recoveryKind: "continue",
-      attempt: 6,
-      maxAttempts: 6,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now()
-    });
-    await agentStub.runChatRecoveryContinueDirectForTest({
-      incidentId: "inc-aborted",
-      originalRequestId: "root-aborted",
-      targetAssistantId: "a-aborted"
-    });
-
-    // Precondition: the terminal record is durably present.
-    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
-      body: TERMINAL
-    });
-
-    // A later turn is ABORTED — driven purely server-side (`saveMessages`
-    // with a signal), NOT via a client request. The stop lands once the
-    // turn's message is stored and before the model is called, so no reply
-    // path runs: the turn core must supersede the record itself.
-    await agentStub.setForceStableTimeoutForTest(false);
-    const aborted = await agentStub.driveAbortedTurnForTest("after-store");
-    expect(aborted).toMatchObject({ status: "aborted", chatCalls: 0 });
-    expect(aborted.userTexts).toContain("hello");
-
-    // The stale exhaustion is gone, so a reconnecting client won't replay it.
-    expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
-  });
-
   // A turn stopped before it starts stores nothing and calls nothing. The
   // conversation did not move, so the record of the failure before it stays
   // for a client that reconnects.
-  it("keeps the terminal record when a later server-side turn is stopped before it starts (#1645)", async () => {
+  it("still tells a tab how its request ended after a later turn was stopped before it started (#1645)", async () => {
     const room = `terminal-untouched-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
     const STREAM_ERROR = "Provider returned HTTP 500.";
     expect(await agentStub.driveErroredTurnForTest(STREAM_ERROR)).toBe("error");
+    const [requestId] = await agentStub.endedRequestIdsForTest();
 
     const aborted = await agentStub.driveAbortedTurnForTest("before");
     expect(aborted).toEqual({
@@ -3363,7 +2987,11 @@ describe("onChatRecovery", () => {
       chatCalls: 0
     });
 
-    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+    const asked = await endsOnReconnect(room, [requestId]);
+    expect(asked.end).toMatchObject({
+      id: requestId,
+      done: true,
+      error: true,
       body: STREAM_ERROR
     });
   });
@@ -3373,76 +3001,32 @@ describe("onChatRecovery", () => {
   // just broadcast transiently — otherwise a client disconnected at that moment
   // never learns the turn failed and stays frozen on reconnect. Brings ai-chat
   // to parity with Think's `_fireResponseHook`, which records on `error`.
-  it("records a durable terminal for a non-exhaustion error and replays it on reconnect (#1645)", async () => {
+  it("tells a tab that reconnects how the request it waited on ended in error (#1645)", async () => {
     const room = `terminal-error-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
-
     const STREAM_ERROR = "Provider returned HTTP 500.";
 
-    // Drive a turn that ends in a terminal stream error, purely server-side
-    // (no client connected at the moment of failure).
+    // A turn ends in a stream error with no client connected.
     expect(await agentStub.driveErroredTurnForTest(STREAM_ERROR)).toBe("error");
+    const [requestId] = await agentStub.endedRequestIdsForTest();
 
-    // The error is durably recorded (not just broadcast transiently).
-    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+    // A tab that was waiting on that request reconnects and asks: it learns
+    // the turn failed, rather than being told nothing streams.
+    const asked = await endsOnReconnect(room, [requestId]);
+    expect(
+      asked.end,
+      `expected the request's end on reconnect; received frame types: ${JSON.stringify(asked.types)}`
+    ).toMatchObject({
+      id: requestId,
+      done: true,
+      error: true,
       body: STREAM_ERROR
     });
 
-    // End-to-end: a client connecting now and running the standard resume probe
-    // learns the turn failed — it receives the terminal error frame rather than
-    // a bare RESUME_NONE that would leave it frozen.
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    const received: Array<Record<string, unknown>> = [];
-    ws.addEventListener("message", (e) => {
-      let frame: Record<string, unknown>;
-      try {
-        frame = JSON.parse(e.data as string) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-      received.push(frame);
-      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
-        ws.send(
-          JSON.stringify({
-            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-            id: frame.id
-          })
-        );
-      }
-    });
-
-    ws.send(
-      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
-    );
-    // The terminal replay the ACK starts, then the barrier.
-    await vi.waitFor(() =>
-      expect(
-        received.some(
-          (m) =>
-            m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-            m.error === true &&
-            m.done === true
-        )
-      ).toBe(true)
-    );
-    await socketBarrier(ws, received);
-    ws.close(1000);
-
-    const terminal = received.find(
-      (m) =>
-        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        m.error === true &&
-        m.done === true
-    );
-    expect(
-      terminal,
-      `expected a terminal error frame on reconnect; received frame types: ${JSON.stringify(
-        received.map((m) => m.type)
-      )}`
-    ).toBeDefined();
-    expect(terminal?.body).toBe(STREAM_ERROR);
+    // A tab that names no request learns nothing of ended ones.
+    const unnamed = await endsOnReconnect(room, []);
+    expect(unnamed.end).toBeUndefined();
+    expect(unnamed.types).toContain(MessageType.CF_AGENT_STREAM_RESUME_NONE);
   });
 
   // #1645 (clear-on-chat-clear): clearing the conversation must also drop the
@@ -3497,16 +3081,7 @@ describe("onChatRecovery", () => {
 // chunks is aborted and routed into the SAME bounded-recovery machinery a
 // deploy/eviction interruption uses, instead of leaving the turn hung forever.
 describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
-  it("a stop that lands while the stall is routed closes the stream", async () => {
-    const agentStub = await getTestAgent(`stall-stop-${crypto.randomUUID()}`);
-    const result = await agentStub.stopWhileStallRoutedForTest();
-    expect(result.outcomes).toEqual(["stopped"]);
-    expect(result.status).toBe("aborted");
-    // No tab is offered the cut-off stream later.
-    expect(result.streamOpen).toBe(false);
-  });
-
-  it("routes a stalled live stream into bounded recovery (schedules a continuation)", async () => {
+  it("retries a stalled live stream inside the turn, which completes with the partial kept", async () => {
     const room = `stall-route-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
 
@@ -3530,22 +3105,8 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     // The stall is observable, as in `Think`.
     expect(stalled).toEqual([expect.objectContaining({ timeoutMs: 150 })]);
 
-    // This attempt did not terminalize — the scheduled continuation owns the
-    // real outcome, so the server-side turn reports "aborted".
-    expect(status).toBe("aborted");
-
-    // The stall opened a bounded-recovery incident through the shared engine —
-    // a `continue` incident, exactly like a deploy interruption (rather than
-    // leaking a terminal error). The scheduled `_chatRecoveryContinue` row is
-    // consumed by the delay-0 alarm, so the durable incident (not the transient
-    // schedule row) is the stable evidence the stall was routed.
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        recoveryKind: string;
-        status: string;
-      }>;
-    expect(incidents.length).toBeGreaterThanOrEqual(1);
-    expect(incidents[0].recoveryKind).toBe("continue");
+    // The stalled attempt is retried inside the turn, which completes.
+    expect(status).toBe("completed");
 
     // The partial generated before the stall was persisted (not lost), so the
     // continuation re-anchors onto it rather than re-running from scratch.
@@ -3575,82 +3136,12 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
         timeoutMs: 100,
         hangTurns: 20
       })
-    ).toBe("aborted");
+    ).toBe("error");
 
-    await expect
-      .poll(
-        async () =>
-          (
-            (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-              reason?: string;
-            }>
-          )[0]?.reason,
-        { timeout: 10_000, interval: 100 }
-      )
-      .toBe("max_attempts_exceeded");
-    expect(await agentStub.getOnChatMessageCallCount()).toBeLessThanOrEqual(3);
-  }, 15_000);
-
-  it("keeps the give-up's terminal record when the stalled turn it happened in ends", async () => {
-    const agentStub = await getTestAgent(
-      `stall-terminal-${crypto.randomUUID()}`
-    );
-    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
-
-    expect(
-      await agentStub.driveStallingTurnForTest({
-        timeoutMs: 100,
-        hangTurns: 20
-      })
-    ).toBe("aborted");
-    await expect
-      .poll(
-        async () =>
-          (
-            (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-              status?: string;
-            }>
-          )[0]?.status,
-        { timeout: 10_000, interval: 100 }
-      )
-      .toBe("exhausted");
-    // The turn that stalled last ends aborted after the give-up. A tab that
-    // connects now must still learn the turn gave up.
+    // The first attempt and two recoveries of it, and no more afterwards.
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(3);
     await agentStub.waitForIdleForTest();
-    // The aborted turn's response drain runs after the queue is idle, and
-    // could still clear the record: wait for it, then check.
-    await expect
-      .poll(() => agentStub.isChatResponseDrainIdleForTest(), { timeout: 5000 })
-      .toBe(true);
-    expect(await agentStub.getPendingChatTerminalForTest()).not.toBeNull();
-  }, 15_000);
-
-  it("keeps an incident given up when the recovered turn that gave up returns", async () => {
-    const agentStub = await getTestAgent(`stall-sealed-${crypto.randomUUID()}`);
-    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
-
-    expect(
-      await agentStub.driveStallingTurnForTest({
-        timeoutMs: 100,
-        hangTurns: 20
-      })
-    ).toBe("aborted");
-
-    const incidents = async () =>
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        status: string;
-        reason?: string;
-      }>;
-    await expect
-      .poll(async () => (await incidents())[0]?.reason, {
-        timeout: 10_000,
-        interval: 100
-      })
-      .toBe("max_attempts_exceeded");
-    // The last recovery attempt's turn stalled with the budget spent and
-    // gave up. The attempt then returns, and must not mark it "failed".
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    expect((await incidents())[0]?.status).toBe("exhausted");
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(3);
   }, 15_000);
 
   it("passes a healthy (non-stalling) stream through unchanged when the watchdog is armed", async () => {
@@ -3687,13 +3178,89 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
   });
 });
 
+/**
+ * A tab connects and asks about the requests it still waits on, as the
+ * client does after a reconnect. Returns the end frame it was given for one
+ * of them, if any, and the types of every frame it got.
+ */
+async function endsOnReconnect(
+  room: string,
+  requestIds: string[]
+): Promise<{ end?: Record<string, unknown>; types: unknown[] }> {
+  const { ws } = await connectChatWS(
+    `/agents/chat-recovery-test-agent/${room}`
+  );
+  const received: Array<Record<string, unknown>> = [];
+  const answered = new Promise<void>((resolve) => {
+    ws.addEventListener("message", (event: MessageEvent) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(event.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        // An ended request is offered like a stream: accept it.
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
+      if (
+        frame.type === MessageType.CF_AGENT_STREAM_RESUME_NONE ||
+        (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.done === true)
+      ) {
+        resolve();
+      }
+    });
+  });
+  ws.send(
+    JSON.stringify({
+      type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+      requestIds,
+      probeId: crypto.randomUUID()
+    })
+  );
+  await answered;
+  await socketBarrier(ws, received);
+  ws.close(1000);
+  return {
+    end: received.find(
+      (frame) =>
+        frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        frame.done === true
+    ),
+    types: received.map((frame) => frame.type)
+  };
+}
+
+/** The text of every stored assistant message, joined. */
+async function storedAssistantText(agentStub: {
+  getPersistedMessages(): Promise<unknown>;
+}): Promise<string> {
+  return (
+    (await agentStub.getPersistedMessages()) as Array<{
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    }>
+  )
+    .filter((message) => message.role === "assistant")
+    .flatMap((message) => message.parts)
+    .map((part) => part.text ?? "")
+    .join("");
+}
+
 describe("provider errors the chat turn reads itself", () => {
   it.each([
     ["a rate limit", 429, "Rate limit reached for requests"],
     ["an overloaded provider", 529, "Overloaded"],
     ["a server error", 503, "Service unavailable"]
   ])(
-    "routes %s mid-stream into bounded recovery",
+    "retries %s mid-stream inside the turn, which completes",
     async (_what, status, msg) => {
       const agentStub = await getTestAgent(
         `provider-error-${status}-${crypto.randomUUID()}`
@@ -3702,12 +3269,11 @@ describe("provider errors the chat turn reads itself", () => {
         await agentStub.driveFailingReaderTurnForTest(msg, 1, {
           statusCode: status
         })
-      ).toBe("aborted");
-      const incidents =
-        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-          recoveryKind: string;
-        }>;
-      expect(incidents.length).toBeGreaterThanOrEqual(1);
+      ).toBe("completed");
+      // The failed attempt's text is kept and the retry's follows it.
+      const reply = await storedAssistantText(agentStub);
+      expect(reply).toContain("partial before failure");
+      expect(reply).toContain("Continued response.");
     }
   );
 
@@ -3715,24 +3281,20 @@ describe("provider errors the chat turn reads itself", () => {
     const agentStub = await getTestAgent(
       `provider-error-streamtext-${crypto.randomUUID()}`
     );
+    // Read as transient: the turn is retried and completes.
     expect(await agentStub.driveStreamTextProviderErrorForTest(429, true)).toBe(
-      "aborted"
+      "completed"
     );
-    expect(
-      ((await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]).length
-    ).toBeGreaterThanOrEqual(1);
   });
 
   it("reads an in-stream overload the app's onError sends as JSON", async () => {
     const agentStub = await getTestAgent(
       `provider-error-overload-${crypto.randomUUID()}`
     );
+    // Read as transient: the turn is retried and completes.
     expect(await agentStub.driveStreamTextProviderErrorForTest(0, true)).toBe(
-      "aborted"
+      "completed"
     );
-    expect(
-      ((await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]).length
-    ).toBeGreaterThanOrEqual(1);
   });
 
   it("cannot read a provider error that toUIMessageStreamResponse() masked", async () => {
@@ -3743,7 +3305,6 @@ describe("provider errors the chat turn reads itself", () => {
     expect(
       await agentStub.driveStreamTextProviderErrorForTest(429, false)
     ).toBe("error");
-    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([]);
   });
 
   it("leaves an error the provider says nothing about terminal", async () => {
@@ -3755,41 +3316,22 @@ describe("provider errors the chat turn reads itself", () => {
         statusCode: 401
       })
     ).toBe("error");
-    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([]);
   });
 });
 
 describe("platform-transient reader errors (#1964)", () => {
-  it("routes a dropped connection mid-stream into bounded recovery", async () => {
+  it("retries a dropped connection mid-stream inside the turn, which completes", async () => {
     const agentStub = await getTestAgent(
       `transient-reader-${crypto.randomUUID()}`
     );
 
     expect(
       await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
+    ).toBe("completed");
 
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        recoveryKind: string;
-      }>;
-    expect(incidents.length).toBeGreaterThanOrEqual(1);
-    expect(incidents[0].recoveryKind).toBe("continue");
-
-    type Stored = Array<{
-      role: string;
-      parts: Array<{ type: string; text?: string }>;
-    }>;
-    const assistantText = async () =>
-      ((await agentStub.getPersistedMessages()) as Stored)
-        .filter((m) => m.role === "assistant")
-        .flatMap((m) => m.parts)
-        .map((p) => p.text ?? "")
-        .join("");
-    await expect
-      .poll(assistantText, { timeout: 5000 })
-      .toContain("Continued response.");
-    expect(await assistantText()).toContain("partial before failure");
+    const reply = await storedAssistantText(agentStub);
+    expect(reply).toContain("partial before failure");
+    expect(reply).toContain("Continued response.");
   });
 
   it.each([
@@ -3810,13 +3352,7 @@ describe("platform-transient reader errors (#1964)", () => {
           1,
           { prelude, priorAssistant }
         )
-      ).toBe("aborted");
-
-      const incidents =
-        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-          recoveryKind: string;
-        }>;
-      expect(incidents[0]?.recoveryKind).toBe("retry");
+      ).toBe("completed");
 
       type Stored = Array<{
         id: string;
@@ -3858,17 +3394,12 @@ describe("platform-transient reader errors (#1964)", () => {
       await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
     ).toBe("error");
 
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        status: string;
-      }>;
-    expect(incidents.map((i) => i.status)).toEqual(["skipped"]);
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
   });
 
-  it("passes the live turn's checkpoint and start time to onChatRecovery", async () => {
+  it("passes what the turn stashed and its start time to onChatRecovery", async () => {
     const agentStub = await getTestAgent(
       `transient-context-${crypto.randomUUID()}`
     );
@@ -3884,56 +3415,29 @@ describe("platform-transient reader errors (#1964)", () => {
       recoveryData: unknown;
       createdAt: number;
     }>;
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        firstSeenAt: number;
-      }>;
     expect(contexts).toHaveLength(1);
     expect(contexts[0].recoveryData).toEqual({ responseId: "r-123" });
     expect(contexts[0].createdAt).toBeGreaterThanOrEqual(before);
-    expect(contexts[0].createdAt).toBeLessThan(incidents[0].firstSeenAt);
+    // When the turn began, not when its recovery did.
+    expect(contexts[0].createdAt).toBeLessThanOrEqual(Date.now());
   });
 
-  it.each<{ name: string; headers: Record<string, string>; delay: number }>([
-    { name: "retry-after", headers: { "retry-after": "7" }, delay: 7 },
-    { name: "retry-after-ms", headers: { "retry-after-ms": "4200" }, delay: 5 },
-    {
-      name: "a wait past the cap",
-      headers: { "retry-after": "600" },
-      delay: 60
-    }
-  ])(
-    "waits as long as the provider asked before recovering: $name",
-    async ({ headers, delay }) => {
-      const agentStub = await getTestAgent(
-        `transient-retry-after-${crypto.randomUUID()}`
-      );
-      expect(
-        await agentStub.driveFailingReaderTurnForTest(
-          "Network connection lost.",
-          1,
-          { responseHeaders: headers }
-        )
-      ).toBe("aborted");
-      expect(await agentStub.getScheduledRecoveryDelayForTest()).toBe(delay);
-    }
-  );
-
   it("ends a transient failure the app declines to continue as the stream error, and records it", async () => {
-    const agentStub = await getTestAgent(
-      `transient-declined-${crypto.randomUUID()}`
-    );
+    const room = `transient-declined-record-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
     await agentStub.setRecoveryOverride({ continue: false });
 
     expect(
       await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
     ).toBe("error");
 
-    // Nothing is scheduled, and a client that was away learns what happened.
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "continue_disabled" }]);
-    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+    // A tab that waited on it and was away learns what happened.
+    const [requestId] = await agentStub.endedRequestIdsForTest();
+    const asked = await endsOnReconnect(room, [requestId]);
+    expect(asked.end).toMatchObject({
+      id: requestId,
+      done: true,
+      error: true,
       body: "Network connection lost."
     });
   });
@@ -3949,19 +3453,9 @@ describe("platform-transient reader errors (#1964)", () => {
         "Network connection lost.",
         10
       )
-    ).toBe("aborted");
+    ).toBe("error");
 
-    await expect
-      .poll(
-        async () =>
-          (
-            (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-              reason?: string;
-            }>
-          )[0]?.reason,
-        { timeout: 15_000, interval: 200 }
-      )
-      .toBe("max_attempts_exceeded");
+    // The first attempt and two recoveries of it: the budget.
     expect(await agentStub.getFailingReaderCallsForTest()).toBe(3);
   }, 20_000);
 
@@ -4002,11 +3496,12 @@ describe("platform-transient reader errors (#1964)", () => {
 
     expect(
       await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
+    ).toBe("completed");
 
-    await expect
-      .poll(() => textsOf(agentStub), { timeout: 5000 })
-      .toEqual(["tell me a long story", "Continued response."]);
+    expect(await textsOf(agentStub)).toEqual([
+      "tell me a long story",
+      "Continued response."
+    ]);
   });
 
   it("drops an early-persisted approval request with the partial under persist: false", async () => {
@@ -4021,11 +3516,12 @@ describe("platform-transient reader errors (#1964)", () => {
         1,
         { prelude: "approval" }
       )
-    ).toBe("aborted");
+    ).toBe("completed");
 
-    await expect
-      .poll(() => textsOf(agentStub), { timeout: 5000 })
-      .toEqual(["tell me a long story", "Continued response."]);
+    expect(await textsOf(agentStub)).toEqual([
+      "tell me a long story",
+      "Continued response."
+    ]);
     const stored = (await agentStub.getPersistedMessages()) as Stored;
     expect(
       stored
@@ -4034,10 +3530,9 @@ describe("platform-transient reader errors (#1964)", () => {
     ).toEqual([]);
   });
 
-  it("leaves the incident to the attempt a failed recovery schedules", async () => {
+  it("completes after two transient failures in a row, and says the recovery completed", async () => {
     const room = `transient-chain-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
-    await agentStub.trackRecoveryTaskKeysForTest();
     const events: string[] = [];
     const unsubscribe = subscribe("chat", (event) => {
       // Only this test's agent: the channel carries every agent's events,
@@ -4052,571 +3547,130 @@ describe("platform-transient reader errors (#1964)", () => {
           "Network connection lost.",
           2
         )
-      ).toBe("aborted");
+      ).toBe("completed");
 
-      await expect
-        .poll(async () => (await textsOf(agentStub)).at(-1), {
-          timeout: 10_000,
-          interval: 100
-        })
-        .toContain("Continued response.");
-      await expect
-        .poll(() => agentStub.getChatRecoveryIncidentsForTest())
-        .toHaveLength(0);
+      expect((await textsOf(agentStub)).at(-1)).toContain(
+        "Continued response."
+      );
       expect(await agentStub.getFailingReaderCallsForTest()).toBe(2);
       expect(events).not.toContain("chat:recovery:failed");
       expect(events.at(-1)).toBe("chat:recovery:completed");
-      // Only the first attempt joins duplicate detections; the attempt it
-      // chains must not join the run that schedules it.
-      expect(await agentStub.getRecoveryTaskKeyedForTest()).toEqual([
-        true,
-        false
-      ]);
-      expect(await agentStub.getChatRecoveringForTest()).toBeNull();
     } finally {
       unsubscribe();
     }
   }, 20_000);
 
-  it("does not run a backed-off recovery the user cancelled", async () => {
-    const room = `transient-cancel-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-
-    // The recovery's backoff is held, so the stop lands inside it.
-    expect(
-      await agentStub.driveFailingReaderTurnForTest(
-        "Network connection lost.",
-        2,
-        HELD_BACKOFF
-      )
-    ).toBe("aborted");
-    await recoveryBacksOff(agentStub);
-    const [incident] =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        requestId: string;
-        recoveryRootRequestId?: string;
-      }>;
-
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    const frames: Array<Record<string, unknown>> = [];
-    const stoppedId = incident.recoveryRootRequestId ?? incident.requestId;
-    const ended = new Promise<void>((resolve) => {
-      ws.addEventListener("message", (event: MessageEvent) => {
-        const frame = JSON.parse(event.data as string) as Record<
-          string,
-          unknown
-        >;
-        frames.push(frame);
-        if (
-          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-          frame.id === stoppedId &&
-          frame.done === true
-        ) {
-          resolve();
-        }
-      });
-    });
-    ws.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
-        id: stoppedId
-      })
-    );
-    await ended;
-    ws.close(1000);
-
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
-    // Nothing of the recovery ran yet, so the stop itself ends the request:
-    // the tab gets its terminal, not a "recovering" that never resolves.
-    expect(frames).toContainEqual(
-      expect.objectContaining({
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-        id: stoppedId,
-        done: true,
-        outcome: "aborted"
-      })
-    );
-    expect(await agentStub.getChatRecoveringForTest()).toBeNull();
-    // Past the backoff: whatever still waited one out runs now, and the
-    // cancelled attempt does not run the model again.
-    await agentStub.endRecoveryBackoffsForTest();
-    await agentStub.waitForIdleForTest();
-    expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-  }, 30_000);
-
-  it("answers a question sent while a stalled reply's recovery backs off from a transient throw after the recovered reply", async () => {
-    const room = `stall-throw-question-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-
-    // The turn stalls; its recovery's attempt then fails on the platform
-    // after its handoff, and a replacement attempt is scheduled.
-    await agentStub.armTransientInRecoveryForTest();
-    await agentStub.driveStallingTurnForTest();
-    for (let i = 0; i < 400; i++) {
-      const incidents =
-        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-          status: string;
-          deferredError?: string;
-        }>;
-      if (
-        incidents[0]?.status === "scheduled" &&
-        incidents[0].deferredError !== undefined
-      ) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    // The recovery's attempt failed on the platform after its handoff,
-    // and its replacement waits out its delay.
-    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([
-      expect.objectContaining({ status: "scheduled" })
-    ]);
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
-
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    const done = new Promise<void>((resolve) => {
-      ws.addEventListener("message", (event: MessageEvent) => {
-        const frame = JSON.parse(event.data as string) as {
-          type?: string;
-          id?: string;
-          done?: boolean;
-        };
-        if (
-          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-          frame.id === "req-second" &&
-          frame.done
-        ) {
-          resolve();
-        }
-      });
-    });
-    ws.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
-        id: "req-second",
-        init: {
-          method: "POST",
-          body: JSON.stringify({
-            messages: [
-              ...stored,
-              {
-                id: "user-second",
-                role: "user",
-                parts: [{ type: "text", text: "Never mind, something else" }]
-              }
-            ]
-          })
-        }
-      })
-    );
-    await done;
-    await agentStub.waitForIdleForTest();
-    ws.close(1000);
-
-    expect(
-      await agentStub.getChatRecoveryIncidentsForTest()
-    ).not.toContainEqual(expect.objectContaining({ status: "skipped" }));
-    const after = (await agentStub.getPersistedMessages()) as ChatMessage[];
-    const at = after.findIndex((m) => m.id === "user-second");
-    expect(at).toBeGreaterThan(0);
-    expect(
-      after
-        .slice(0, at)
-        .flatMap((m) => m.parts)
-        .map((p) => (p as { text?: string }).text ?? "")
-        .join("")
-    ).toContain("Continued response.");
-    expect(after.at(-1)?.role).toBe("assistant");
-  }, 20_000);
-
-  it("keeps the lane for a replacement attempt the platform defers before its handoff", async () => {
-    const room = `stall-throw-defer-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-
-    // The turn stalls; its recovery fails on the platform after its handoff.
-    // The replacement then fails on the platform before its handoff past its
-    // step's retries (a first try and 3 retries), so Tasks defers its run.
-    await agentStub.armTransientInRecoveryForTest(3);
-    await agentStub.driveStallingTurnForTest();
-    for (let i = 0; i < 1000; i++) {
-      if (
-        (await agentStub.throwsBeforeHandoffLeftForTest()) === 0 &&
-        (await agentStub.openAttemptRunsForTest()).length === 1
-      ) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(await agentStub.throwsBeforeHandoffLeftForTest()).toBe(0);
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
-
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    let answered = false;
-    const done = new Promise<void>((resolve) => {
-      ws.addEventListener("message", (event: MessageEvent) => {
-        const frame = JSON.parse(event.data as string) as {
-          type?: string;
-          id?: string;
-          done?: boolean;
-        };
-        if (
-          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-          frame.id === "req-second" &&
-          frame.done
-        ) {
-          answered = true;
-          resolve();
-        }
-      });
-    });
-    ws.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
-        id: "req-second",
-        init: {
-          method: "POST",
-          body: JSON.stringify({
-            messages: [
-              ...stored,
-              {
-                id: "user-second",
-                role: "user",
-                parts: [{ type: "text", text: "Never mind, something else" }]
-              }
-            ]
-          })
-        }
-      })
-    );
-    // The question is admitted (its lane run is open beside the parked
-    // turn's) or already answered.
-    for (let i = 0; i < 400; i++) {
-      if (answered || (await agentStub.openChatTurnRunsForTest()) >= 2) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(answered || (await agentStub.openChatTurnRunsForTest()) >= 2).toBe(
-      true
-    );
-    // The platform recovers: the deferred replacement runs again.
-    await agentStub.runOpenAttemptRunsForTest();
-    await done;
-    await agentStub.waitForIdleForTest();
-    ws.close(1000);
-
-    expect(
-      await agentStub.getChatRecoveryIncidentsForTest()
-    ).not.toContainEqual(expect.objectContaining({ status: "skipped" }));
-    const after = (await agentStub.getPersistedMessages()) as ChatMessage[];
-    const at = after.findIndex((m) => m.id === "user-second");
-    expect(at).toBeGreaterThan(0);
-    expect(
-      after
-        .slice(0, at)
-        .flatMap((m) => m.parts)
-        .map((p) => (p as { text?: string }).text ?? "")
-        .join("")
-    ).toContain("Continued response.");
-    expect(after.at(-1)?.role).toBe("assistant");
-  }, 30_000);
-
-  it("frees the lane at once for a stop that lands before the cut-off turn's run starts its backoff", async () => {
-    const room = `transient-cancel-window-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-
-    // The stop is issued as soon as the turn's result is back: its run has
-    // not started waiting out the recovery's backoff yet.
-    const stopped = await agentStub.driveFailingReaderTurnThenStopForTest(
-      "Network connection lost.",
-      HELD_BACKOFF
-    );
-    expect(stopped).toMatchObject({ status: "aborted", backingOffAtStop: 0 });
-    // The stop is the recovery's outcome.
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
-    expect(await agentStub.getChatRecoveringForTest()).toBeNull();
-
-    // The run finds the recovery stopped and ends without waiting out the
-    // held backoff, so nothing queued behind it waits either. Nothing ends
-    // that backoff here: only the run ending by itself empties the count.
-    await vi.waitFor(
-      async () => {
-        expect(await agentStub.openChatTurnRunsForTest()).toBe(0);
-      },
-      { timeout: 10_000, interval: 20 }
-    );
-    expect(await agentStub.backingOffChatTurnRunsForTest()).toBe(0);
-    await agentStub.waitForIdleForTest();
-    // The model is not called again.
-    expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
-  }, 30_000);
-
-  it("ends the turn's run when the user stops a recovery waiting out its backoff", async () => {
+  it("ends the turn's run when the user stops it while it waits for its next attempt", async () => {
     const room = `transient-cancel-run-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
 
-    // The recovery's backoff is held: only the stop can end the run.
-    expect(
-      await agentStub.driveFailingReaderTurnForTest(
-        "Network connection lost.",
-        1,
-        HELD_BACKOFF
-      )
-    ).toBe("aborted");
-    // The turn's own run keeps the attempt and sleeps out its backoff. The
-    // stop ends a run that is sleeping, so it is sent once the run is.
-    await recoveryBacksOff(agentStub);
-    expect(await agentStub.openChatTurnRunsForTest()).toBe(1);
-    const [incident] =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        requestId: string;
-        recoveryRootRequestId?: string;
-      }>;
-    const stoppedId = incident.recoveryRootRequestId ?? incident.requestId;
+    // The wait for the next attempt is a minute: only the stop can end it.
+    const stoppedId = await agentStub.startFailingReaderTurnForTest(
+      "Network connection lost.",
+      1,
+      HELD_BACKOFF
+    );
 
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
     );
-    const ended = new Promise<void>((resolve) => {
-      ws.addEventListener("message", (event: MessageEvent) => {
-        const frame = JSON.parse(event.data as string) as {
-          type?: string;
-          id?: string;
-          done?: boolean;
-        };
-        if (
-          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-          frame.id === stoppedId &&
-          frame.done
-        ) {
-          resolve();
-        }
-      });
-    });
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
         id: stoppedId
       })
     );
-    await ended;
+    // The stop ends the turn: its caller gets its result now, not in a
+    // minute.
+    expect(await agentStub.startedFailingTurnStatusForTest()).toBe("aborted");
     ws.close(1000);
 
-    // Nothing holds the lane for the stopped recovery: a question sent now
-    // does not wait for its backoff. The stop ends the run beside sending
-    // the terminal frame, so wait for the run to go.
-    await vi.waitFor(
-      async () => {
-        expect(await agentStub.openChatTurnRunsForTest()).toBe(0);
-      },
-      { timeout: 10_000, interval: 20 }
-    );
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
+    // Its run is gone (nothing holds the lane for a minute), and the model
+    // was not asked again.
+    expect(await agentStub.openChatLaneRunsForTest()).toBe(0);
+    expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
   }, 30_000);
 
   // Replays of paths the chat recovery model (verify-chat) found.
-  it("stops a recovery the user cancels while it waits on the model", async () => {
+  it("stops a turn the user cancels while its next attempt waits on the model", async () => {
     const room = `transient-cancel-running-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
 
-    // Turn 1 is cut off; the agent stores the partial reply and schedules
-    // recovery.
-    expect(
-      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
-    const [incident] =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        requestId: string;
-        recoveryRootRequestId?: string;
-      }>;
-
-    // The recovery task fires and its continuation waits on the model.
+    // The first attempt is cut off; the next one starts three seconds later
+    // and is held on the model.
+    const stoppedId = await agentStub.startFailingReaderTurnForTest(
+      "Network connection lost.",
+      1,
+      { responseHeaders: { "retry-after": "3" }, waitsAtLeastMs: 1_000 }
+    );
     await agentStub.holdNextTurnForTest();
     await expect
-      .poll(() => agentStub.isTurnHeldForTest(), { timeout: 5000 })
+      .poll(() => agentStub.isTurnHeldForTest(), { timeout: 10_000 })
       .toBe(true);
 
-    // A tab presses stop: it knows the turn by its original request id.
+    // A tab presses stop: it knows the turn by its request id.
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
     );
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
-        id: incident.recoveryRootRequestId ?? incident.requestId
+        id: stoppedId
       })
     );
     await socketBarrier(ws, seenFrames(ws));
-
     // The model answers.
     await agentStub.releaseHeldTurnForTest();
-    await agentStub.waitForIdleForTest();
+    expect(await agentStub.startedFailingTurnStatusForTest()).toBe("aborted");
     ws.close(1000);
 
-    const texts = (
-      (await agentStub.getPersistedMessages()) as Array<{
-        role: string;
-        parts: Array<{ text?: string }>;
-      }>
-    )
-      .flatMap((m) => m.parts)
-      .map((p) => p.text ?? "")
-      .join("");
-    expect(texts).not.toContain("Continued response.");
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
-  }, 10_000);
+    // What the stopped attempt would have said is not in the reply.
+    expect(await storedAssistantText(agentStub)).not.toContain(
+      "Continued response."
+    );
+    expect(await agentStub.openChatLaneRunsForTest()).toBe(0);
+  }, 20_000);
 
-  it("records a stop by the continuation's own request id as a stop, not a failure", async () => {
-    const room = `transient-cancel-own-id-${crypto.randomUUID()}`;
+  it("abortAllRequests() stops a turn that waits for its next attempt", async () => {
+    const room = `transient-stop-all-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
 
-    // Turn 1 is cut off and its recovery is scheduled.
-    expect(
-      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
-
-    // The recovery task fires and its continuation waits on the model.
-    await agentStub.holdNextTurnForTest();
-    await expect
-      .poll(() => agentStub.isTurnHeldForTest(), { timeout: 5000 })
-      .toBe(true);
-
-    // A tab stops the continuation by the continuation's own request id,
-    // the id its first frame carries.
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
+    // The wait for the next attempt is a minute: only the stop can end it.
+    await agentStub.startFailingReaderTurnForTest(
+      "Network connection lost.",
+      1,
+      HELD_BACKOFF
     );
-    ws.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
-        id: await agentStub.heldTurnRequestIdForTest()
-      })
-    );
-    await socketBarrier(ws, seenFrames(ws));
-    await agentStub.releaseHeldTurnForTest();
-    await agentStub.waitForIdleForTest();
-    ws.close(1000);
 
-    await expect
-      .poll(() => agentStub.getChatRecoveryIncidentsForTest(), {
-        timeout: 3000
-      })
-      .toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
-  }, 10_000);
-
-  it("honors a stop that lands while the recovery waits for a stable chat", async () => {
-    const room = `transient-cancel-stable-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-
-    // Turn 1 is cut off and its recovery is scheduled.
-    expect(
-      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
-    const [incident] =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        requestId: string;
-        recoveryRootRequestId?: string;
-      }>;
-
-    // The recovery task fires and waits for the chat to settle.
-    await agentStub.holdStableWaitForTest();
-    await expect
-      .poll(() => agentStub.isStableWaitHeldForTest(), { timeout: 5000 })
-      .toBe(true);
-
-    // A tab presses stop; then the wait times out.
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    ws.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
-        id: incident.recoveryRootRequestId ?? incident.requestId
-      })
-    );
-    await socketBarrier(ws, seenFrames(ws));
-    await agentStub.releaseStableWaitForTest();
-    await recoveryEnded(agentStub);
-    ws.close(1000);
-
-    // No further attempt ran, and the stop is what the incident records.
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
-  }, 10_000);
-
-  it("abortAllRequests() stops a recovery that waits for a stable chat", async () => {
-    const room = `transient-stop-all-stable-${crypto.randomUUID()}`;
-    const agentStub = await getTestAgent(room);
-
-    // Turn 1 is cut off and its recovery is scheduled.
-    expect(
-      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("aborted");
-
-    // The recovery task fires and waits for the chat to settle.
-    await agentStub.holdStableWaitForTest();
-    await expect
-      .poll(() => agentStub.isStableWaitHeldForTest(), { timeout: 5000 })
-      .toBe(true);
-
-    // The app stops everything. No turn is running: the attempt is all
-    // there is to stop.
+    // The app stops everything. No model call is running: the waiting turn
+    // is all there is to stop.
     await agentStub.abortAllRequestsForTest();
-    await agentStub.releaseStableWaitForTest();
-    await recoveryEnded(agentStub);
 
-    // No further attempt ran, and the stop is what the incident records.
+    expect(await agentStub.startedFailingTurnStatusForTest()).toBe("aborted");
+    expect(await agentStub.openChatLaneRunsForTest()).toBe(0);
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
-  }, 10_000);
+  }, 20_000);
 
   it.each([
     ["once", 1],
     ["again while it recovers", 2]
   ])(
-    "answers a question sent during a recovery's backoff after the recovered reply, cut off %s",
+    "answers a question sent while a turn waits for its next attempt after that turn's reply, cut off %s",
     async (_, cuts) => {
       const room = `transient-newer-question-${crypto.randomUUID()}`;
       const agentStub = await getTestAgent(room);
 
-      // Turn 1 is cut off and its recovery is scheduled, with its backoff
-      // held. With two cuts, the recovered reply is cut off too and recovers
-      // again, after a second held backoff.
-      expect(
-        await agentStub.driveFailingReaderTurnForTest(
-          "Network connection lost.",
-          cuts,
-          HELD_BACKOFF
-        )
-      ).toBe("aborted");
-      await recoveryBacksOff(agentStub);
+      // The first turn is cut off and waits a minute for its next attempt.
+      // With two cuts, that attempt is cut off too and waits again.
+      await agentStub.startFailingReaderTurnForTest(
+        "Network connection lost.",
+        cuts,
+        HELD_BACKOFF
+      );
       const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
 
-      // A tab sends a second question during the backoff. It waits in the
-      // lane behind the recovery, which holds it (ChatOrder).
+      // A tab sends a second question during the wait. It waits in the lane
+      // behind the first turn, which holds it (ChatOrder).
       const { ws } = await connectChatWS(
         `/agents/chat-recovery-test-agent/${room}`
       );
@@ -4640,10 +3694,6 @@ describe("platform-transient reader errors (#1964)", () => {
           answered = true;
         }
       });
-      // Still in the first backoff: the recovered reply has not started.
-      expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([
-        expect.objectContaining({ status: "scheduled", attempt: 1 })
-      ]);
       ws.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
@@ -4658,18 +3708,18 @@ describe("platform-transient reader errors (#1964)", () => {
       // off: its lane run is open beside that turn's, and nothing ran.
       await vi.waitFor(
         async () => {
-          expect(await agentStub.openChatTurnRunsForTest()).toBe(2);
+          expect(await agentStub.openChatLaneRunsForTest()).toBe(2);
         },
         { timeout: 10_000, interval: 20 }
       );
       expect(answered).toBe(false);
       expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
 
-      // Now the backoffs end, one for each cut: the recovery runs, and the
-      // question after it.
+      // Now the waits end, one for each cut: the first turn is finished,
+      // and the question is answered after it.
       await vi.waitFor(
         async () => {
-          await agentStub.endRecoveryBackoffsForTest();
+          await agentStub.endRetryWaitsForTest();
           expect(answered).toBe(true);
         },
         { timeout: 10_000, interval: 50 }
@@ -4693,16 +3743,4 @@ describe("platform-transient reader errors (#1964)", () => {
     // Above the three bounded waits (10 s each) taken together.
     60_000
   );
-
-  it("delivers a terminal error when routing into recovery throws", async () => {
-    const agentStub = await getTestAgent(
-      `transient-route-throws-${crypto.randomUUID()}`
-    );
-    await agentStub.failNextIncidentBeginForTest();
-
-    expect(
-      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("error");
-    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(0);
-  });
 });

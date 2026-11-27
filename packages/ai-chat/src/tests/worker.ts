@@ -1,5 +1,8 @@
 import {
   CHAT_REQUEST_CONTEXT_KEY,
+  answerTool,
+  type ChatDeps,
+  type ChatLane,
   continueRequestsOf,
   type ChatTurnInput
 } from "agents/chat";
@@ -43,11 +46,8 @@ import type {
 import {
   CHAT_RECOVERY_TASK_NAME,
   recentChatTerminal,
-  toolResultUpdate,
-  type ChatTurns,
   type ReplyFlushState,
   type ReplyStreams,
-  type ToolPartUpdate,
   REPLAY_CHUNK_BYTES,
   CHAT_RECOVERY_PROGRESS_KEY,
   turnSignal
@@ -140,6 +140,9 @@ type ContinuationStateForTest = {
 };
 
 /** What `agent`'s auto-continuation holds: armed, next, running. */
+/** AIChatAgent's chat-turn definition name (internal to ai-chat). */
+const CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
+
 /** The test definition that holds a chat's lane. */
 const HELD_LANE_DEFINITION = "__cf_test_held_lane";
 const heldLaneRegistered = new WeakSet<AIChatAgent>();
@@ -183,7 +186,7 @@ function continuationStateForTest(
 function queuedTurnCountForTest(agent: AIChatAgent): number {
   // The chat's lane: its turns and a test run holding it.
   return agent.tasks.peekList({
-    definition: [AIChatAgent.CHAT_TURN_DEFINITION, HELD_LANE_DEFINITION],
+    definition: [CHAT_TURN_DEFINITION, HELD_LANE_DEFINITION],
     lane: "chat",
     status: ["pending", "running"],
     results: false
@@ -1347,31 +1350,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
     overrideState?: "output-error",
     errorText?: string
   ): Promise<boolean> {
-    const self = this as unknown as {
-      _applyToolPartUpdate(
-        update: ToolPartUpdate
-      ): Promise<{ status: "changed" | "unchanged" | "missing" }>;
-      _turns: {
-        applyInteraction(
-          apply: () => Promise<unknown>,
-          autoContinue: boolean,
-          spec: () => never,
-          enqueue: (run: () => Promise<boolean>) => Promise<boolean>
-        ): Promise<boolean>;
-      };
-    };
     void toolName;
-    return self._turns.applyInteraction(
-      () =>
-        self._applyToolPartUpdate(
-          toolResultUpdate(toolCallId, output, overrideState, errorText)
-        ),
-      false,
-      () => {
-        throw new Error("no continuation without autoContinue");
-      },
-      (run) => this._enqueueInteractionApply(run)
-    );
+    // The chat module's tool answer, with no continuation.
+    const deps = (this as unknown as { _chatDeps(): ChatDeps })._chatDeps();
+    const lane = (this as unknown as { _chatLane(): ChatLane })._chatLane();
+    return answerTool(deps, lane, {
+      kind: "result",
+      toolCallId,
+      output,
+      ...(overrideState && { state: overrideState }),
+      ...(errorText !== undefined && { errorText })
+    });
   }
 
   private _getChainedContinuationRegressionResponse(): Response | undefined {
@@ -1778,27 +1767,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     };
     await this.persistMessages([messageWithToolOutput]);
     return messageWithToolOutput;
-  }
-
-  /**
-   * Drives two overlapping read-modify-write applies through the
-   * interaction-apply queue (#1649). Each apply reads a shared counter, yields
-   * across an async gap, then writes `read + 1`. Without serialization both
-   * read 0 before either writes, so the result is 1 (one update clobbered).
-   * With serialization the second apply waits for the first, yielding 2.
-   */
-  async testInteractionApplySerialization(): Promise<number> {
-    let shared = 0;
-    const rmw = (gapMs: number) => async () => {
-      const read = shared;
-      await new Promise((resolve) => setTimeout(resolve, gapMs));
-      shared = read + 1;
-      return true;
-    };
-    const first = this._enqueueInteractionApply(rmw(30));
-    const second = this._enqueueInteractionApply(rmw(0));
-    await Promise.all([first, second]);
-    return shared;
   }
 
   // Resumable streaming test helpers
@@ -2236,7 +2204,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     };
     const run = tasks.run;
     tasks.run = (...args: unknown[]) => {
-      if (args[0] !== AIChatAgent.CHAT_TURN_DEFINITION) {
+      if (args[0] !== CHAT_TURN_DEFINITION) {
         return run.apply(this.tasks, args);
       }
       tasks.run = run;
@@ -2255,13 +2223,14 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   /** The client requests waiting on the chat lane, in order. */
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
+      // A request that waits is its chat-turn run on the lane that has not
+      // started (the running turn is not a record).
       return this.sql<{ request_id: string; stopped: number | null }>`
-        SELECT json_extract(metadata, '$.requestId') AS request_id,
+        SELECT run_id AS request_id,
                json_extract(metadata, '$.chat.stopped') AS stopped
         FROM cf_agents_task_runs
-        WHERE lane = 'chat' AND status IN ('pending', 'running')
-          AND json_type(input, '$.admission') IS NOT NULL
-          AND json_type(checkpoint, '$.snapshot') IS NULL
+        WHERE lane = 'chat' AND status = 'pending'
+          AND definition = ${CHAT_TURN_DEFINITION}
         ORDER BY seq
       `.map((row) => ({
         requestId: row.request_id,
@@ -3669,7 +3638,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._saveFromNextResponse = true;
   }
 
+  private _endedRequestIds: string[] = [];
+
+  /** The request ids of the turns that have ended, oldest first. */
+  endedRequestIdsForTest(): string[] {
+    return this._endedRequestIds;
+  }
+
   protected override async onChatResponse(_result: ChatResponseResult) {
+    this._endedRequestIds.push(_result.requestId);
     if (this._clearDuringResponseHook) {
       this._clearDuringResponseHook = false;
       this.resetTurnState();
@@ -4591,6 +4568,96 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    * The chat turns' Task runs not yet settled: a turn a replay could
    * recover. A run started only for a recovery attempt is not one.
    */
+  private _startedFailingTurn: Promise<string> | null = null;
+
+  /**
+   * Start a turn whose reply fails with `message`, and return once its run
+   * waits for its next attempt (hold that wait with a `retry-after` header).
+   * Returns the turn's request id; `startedFailingTurnStatusForTest` gives
+   * how it ended.
+   */
+  async startFailingReaderTurnForTest(
+    message: string,
+    turns: number,
+    options: {
+      responseHeaders?: Record<string, string>;
+      /** How far ahead the next attempt must be for the turn to count as waiting. */
+      waitsAtLeastMs?: number;
+    } = {}
+  ): Promise<string> {
+    this._failingTurn = {
+      message,
+      remaining: turns,
+      prelude: "partial",
+      responseHeaders: options.responseHeaders
+    };
+    this._startedFailingTurn = this.saveMessages((current) => [
+      ...current,
+      {
+        id: `u-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "tell me a long story" }]
+      }
+    ]).then(
+      (result) => result.status,
+      (error) => `threw: ${String(error)}`
+    );
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const [waiting] = this.sql<{ run_id: string }>`
+        SELECT run_id FROM cf_agents_task_runs
+        WHERE lane = 'chat' AND status IN ('pending', 'running')
+          AND next_at > ${Date.now() + (options.waitsAtLeastMs ?? 5_000)}
+      `;
+      if (waiting) return waiting.run_id;
+      if (Date.now() > deadline) {
+        throw new Error("the failing turn's run never waited for a retry");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  /** How the turn `startFailingReaderTurnForTest` started ended. */
+  async startedFailingTurnStatusForTest(): Promise<string> {
+    if (!this._startedFailingTurn) throw new Error("no turn was started");
+    return this._startedFailingTurn;
+  }
+
+  /**
+   * End the wait of every chat turn that waits for its next attempt: the
+   * attempt is made due and the alarm run. Returns how many waited.
+   */
+  async endRetryWaitsForTest(): Promise<number> {
+    const past = Date.now() - 1_000;
+    const waiting = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
+      WHERE lane = 'chat' AND status IN ('pending', 'running')
+        AND next_at > ${Date.now() + 1_000}
+    `;
+    for (const { run_id } of waiting) {
+      this.sql`
+        UPDATE cf_agents_task_runs SET next_at = ${past}
+        WHERE run_id = ${run_id}
+      `;
+      this.sql`
+        UPDATE cf_agents_jobs SET time = ${past}
+        WHERE id = ${`task:${run_id}`}
+      `;
+    }
+    if (waiting.length > 0) await this.alarm();
+    return waiting.length;
+  }
+
+  /** Chat turn runs of the chat lane that have not ended. */
+  openChatLaneRunsForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE lane = 'chat' AND status IN ('pending', 'running')
+      `[0]?.count ?? 0
+    );
+  }
+
   openChatTurnRunsForTest(): number {
     return (
       this.sql<{ count: number }>`
@@ -5789,26 +5856,24 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   /** Start a turn whose caller pins its own body, as an agent-tool run does. */
   startPinnedTurnForTest(body: Record<string, unknown>): void {
+    // A server turn that brings its own body and no client tools (as an
+    // agent-tool run's turn does): the chat module's turn on the lane.
     this._pinnedTurnForTest = (
       this as unknown as {
-        _runProgrammaticMessagesTurn(
-          requestId: string,
-          messages: (current: ChatMessage[]) => ChatMessage[],
-          options: { body: Record<string, unknown>; clientTools: null }
-        ): Promise<SaveMessagesResult>;
+        _serverTurn(input: ChatTurnInput): Promise<SaveMessagesResult>;
       }
-    )._runProgrammaticMessagesTurn(
-      crypto.randomUUID(),
-      (current) => [
-        ...current,
+    )._serverTurn({
+      trigger: "server",
+      messages: [
         {
           id: `pinned-${crypto.randomUUID()}`,
           role: "user",
           parts: [{ type: "text", text: "pinned turn" }]
         }
       ],
-      { body, clientTools: null }
-    );
+      body,
+      clientTools: []
+    });
   }
 
   async awaitPinnedTurnForTest(): Promise<string> {
@@ -6339,26 +6404,23 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
     } finally {
       this._shouldThrow = false;
     }
-    // The caller hears of the failure from its turn; the turn's run fails
-    // just after, and onError hears of it then.
-    for (let i = 0; i < 200 && this._onErrorSeen.length < 2; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    const internals = this as unknown as {
-      _chatTurnFibers: { liveTurns: Map<string, unknown> };
-      _turns: { aborts: { size: number } };
-      _turnQueue: { isActive: boolean };
-    };
+    // The chat module's state once the turn ended: no open turn, no run
+    // holding a checkpoint.
+    const open = (
+      this as unknown as {
+        _openChatTurns(): readonly { status: string }[];
+      }
+    )._openChatTurns();
     return {
       thrown,
       onErrorSeen: [...this._onErrorSeen],
-      liveRecoveryTurns: internals._chatTurnFibers.liveTurns.size,
+      liveRecoveryTurns: open.length,
       checkpointEntries: this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE checkpoint IS NOT NULL
       `[0].n,
       fibers: this.getActiveFibers().length,
-      abortControllers: internals._turns.aborts.size,
-      queueIdle: !internals._turnQueue.isActive
+      abortControllers: open.filter((run) => run.status === "running").length,
+      queueIdle: open.length === 0
     };
   }
 
@@ -6446,35 +6508,25 @@ export class AsyncStartAdmissionAgent extends SlowStreamAgent {
    */
   async seedQueuedRequestForTest(requestId: string): Promise<void> {
     const id = `u-${requestId}`;
-    const nonce = crypto.randomUUID();
-    await this.tasks.get(nonce);
-    const input = {
-      requestId,
-      continuation: false,
-      nonce,
-      lane: true,
-      admission: {
-        messages: [
-          { id, role: "user", parts: [{ type: "text", text: requestId }] }
-        ],
-        afterUserId: null,
-        decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-        payload: {
-          trigger: "submit-message",
-          body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 },
-          clientTools: undefined
-        }
-      }
+    await this.tasks.get(requestId);
+    // A request waiting on the chat's lane, as a reset leaves it before it
+    // started: its turn run, with the question it stores when it starts.
+    const input: ChatTurnInput = {
+      trigger: "submit-message",
+      questionId: id,
+      messages: [
+        { id, role: "user", parts: [{ type: "text", text: requestId }] }
+      ],
+      body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 }
     };
     const now = Date.now();
-    // Its run on the chat lane, as a reset leaves it before it started.
     this.sql`
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, next_at, cancel_requested, created_at, updated_at, lane, seq)
       VALUES
-        (${`chat_${nonce}`}, ${AIChatAgent.CHAT_FIBER_NAME},
-         ${JSON.stringify(input)}, 'pending', ${JSON.stringify({ requestId })},
+        (${requestId}, ${CHAT_TURN_DEFINITION},
+         ${JSON.stringify(input)}, 'pending', NULL,
          NULL, 0, 0, ${now}, 0, ${now}, ${now}, 'chat',
          (SELECT coalesce(MAX(seq), 0) + 1 FROM cf_agents_task_runs
           WHERE lane = 'chat'))

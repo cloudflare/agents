@@ -78,7 +78,7 @@ describe("originating message ids on terminal frames (#2280)", () => {
     ws.close(1000);
   });
 
-  it("carries the ids onto a recovered turn's successor request", async () => {
+  it("carries the ids onto the end of a turn recovered inside its run", async () => {
     const room = crypto.randomUUID();
     const agent = await getAgentByName(env.ChatRecoveryTestAgent, room);
     await (
@@ -89,37 +89,15 @@ describe("originating message ids on terminal frames (#2280)", () => {
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
     );
-    const successorTerminals: ResponseFrame[] = [];
-    ws.addEventListener("message", (e: MessageEvent) => {
-      const frame = JSON.parse(e.data as string) as ResponseFrame;
-      if (
-        frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        frame.id !== "req-stall" &&
-        frame.done
-      ) {
-        successorTerminals.push(frame);
-      }
-    });
-
-    const first = waitForTerminal(ws, "req-stall");
+    // The stalled attempt is retried inside the same run, under the same
+    // request id: its one end names the request's messages.
+    const end = waitForTerminal(ws, "req-stall");
     sendChat(ws, "req-stall", [user("msg-s")]);
-    expect(await first).toMatchObject({
-      messageIds: ["msg-s"],
-      outcome: "recovering"
-    });
-
-    for (let i = 0; i < 60 && successorTerminals.length === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    expect(successorTerminals.length).toBeGreaterThan(0);
-    for (const frame of successorTerminals) {
-      expect(frame.messageIds).toEqual(["msg-s"]);
-    }
-
+    expect(await end).toMatchObject({ messageIds: ["msg-s"] });
     ws.close(1000);
   });
 
-  it("carries the ids onto a turn re-run after its reader failed before any part", async () => {
+  it("carries the ids onto the end of a turn re-run after its reader failed before any part", async () => {
     const room = crypto.randomUUID();
     const agent = await getAgentByName(env.ChatRecoveryTestAgent, room);
     await (
@@ -130,30 +108,9 @@ describe("originating message ids on terminal frames (#2280)", () => {
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
     );
-    const successorTerminals: ResponseFrame[] = [];
-    ws.addEventListener("message", (e: MessageEvent) => {
-      const frame = JSON.parse(e.data as string) as ResponseFrame;
-      if (
-        frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        frame.id !== "req-drop" &&
-        frame.done
-      ) {
-        successorTerminals.push(frame);
-      }
-    });
-
-    const first = waitForTerminal(ws, "req-drop");
+    const end = waitForTerminal(ws, "req-drop");
     sendChat(ws, "req-drop", [user("msg-r")]);
-    expect((await first).messageIds).toEqual(["msg-r"]);
-
-    for (let i = 0; i < 100 && successorTerminals.length === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    expect(successorTerminals.length).toBeGreaterThan(0);
-    for (const frame of successorTerminals) {
-      expect(frame.messageIds).toEqual(["msg-r"]);
-    }
-
+    expect((await end).messageIds).toEqual(["msg-r"]);
     ws.close(1000);
   });
 

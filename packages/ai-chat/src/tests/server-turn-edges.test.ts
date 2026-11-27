@@ -68,40 +68,6 @@ function scheduledContinue(incidentId: string) {
   };
 }
 
-describe("a continuation takes a reply over from its scheduled recovery", () => {
-  it.each(["nothing", "throw"] as const)(
-    "not when its onChatMessage ends before a reply (%s)",
-    async (how) => {
-      const { stub } = await agent();
-      await stub.persistMessages(exchange);
-      await stub.seedIncidentForTest(scheduledContinue("inc-open"));
-
-      // The app continues the reply itself, and its model call fails or
-      // returns nothing. The reply still needs its recovery.
-      await stub.endNextTurnBeforeReplyForTest(how);
-      await stub.continueLastTurnForTest();
-
-      expect(await stub.getOnChatMessageCallCount()).toBe(1);
-      expect(await stub.getIncidentForTest("inc-open")).toMatchObject({
-        status: "scheduled"
-      });
-    }
-  );
-
-  it("once its onChatMessage returned a reply", async () => {
-    const { stub } = await agent();
-    await stub.persistMessages(exchange);
-    await stub.seedIncidentForTest(scheduledContinue("inc-taken"));
-
-    expect(await stub.continueLastTurnForTest()).toBe("completed");
-
-    expect(await stub.getIncidentForTest("inc-taken")).toMatchObject({
-      status: "skipped",
-      reason: "continued_by_interaction"
-    });
-  });
-});
-
 describe("a turn that finished before a clear", () => {
   it("is completed when the clear lands while onChatResponse runs", async () => {
     const { stub } = await agent();
@@ -116,18 +82,17 @@ describe("a turn that finished before a clear", () => {
   });
 });
 
-describe("why a turn is aborted", () => {
-  it("says interrupted for a turn that was cut off and handed to recovery", async () => {
+describe("a turn recovery finishes", () => {
+  it("a turn that was cut off and recovered inside its run reports completed, not interrupted", async () => {
     const { stub } = await agent();
     await stub.armFailingReaderForTest("Network connection lost.");
 
     const result = await stub.saveSyntheticUserMessage("hello");
 
-    // Nobody stopped it, and recovery then finishes the reply.
-    expect(result).toMatchObject({ status: "aborted", reason: "interrupted" });
-    await expect
-      .poll(() => stub.getOnChatMessageCallCount(), { timeout: 8000 })
-      .toBe(2);
+    // Nobody stopped it: recovery finishes the reply inside the same turn,
+    // and the caller is told how the turn ended.
+    expect(result).toMatchObject({ status: "completed" });
+    expect(await stub.getOnChatMessageCallCount()).toBe(2);
     await stub.waitForIdleForTest();
   });
 });

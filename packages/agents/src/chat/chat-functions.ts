@@ -187,6 +187,10 @@ export async function submitTurn(
     retain: options.retain ?? false,
     ...(metadata !== undefined && { metadata }),
     policy: arrival === "merge" ? "latest" : arrival,
+    // Its caller is here: the turn may start during startup too, so a host
+    // that waits for it in its own start (an app's `onStart`) is not held
+    // until the start it waits in has finished.
+    local: {},
     ...(options.requestId !== undefined && { runId: options.requestId }),
     ...(options.idempotencyKey !== undefined && {
       idempotencyKey: options.idempotencyKey
@@ -249,7 +253,9 @@ function endUnstarted(
   deps: ChatDeps,
   requestId: string,
   outcome: "skipped" | "aborted",
-  metadata: Readonly<Record<string, unknown>> | undefined
+  metadata: Readonly<Record<string, unknown>> | undefined,
+  /** A tab that asked for this end (it stopped the request), told too. */
+  asker?: Connection
 ): void {
   const origin = originOf(metadata);
   const messageIds = messageIdsOf(metadata);
@@ -265,7 +271,11 @@ function endUnstarted(
   const text = frameText(frame as { type: string });
   if (text === undefined || !deps.webSockets) return;
   for (const connection of deps.webSockets.getConnections()) {
-    if (origin === undefined || connection.id === origin) {
+    if (
+      origin === undefined ||
+      connection.id === origin ||
+      connection.id === asker?.id
+    ) {
       sendIfOpen(connection, text);
     }
   }
@@ -275,7 +285,9 @@ function endUnstarted(
 export async function cancelTurn(
   deps: ChatDeps,
   requestId: string,
-  reason = "chat turn cancelled"
+  reason = "chat turn cancelled",
+  /** The tab that asked for the stop: it is told the request ended. */
+  asker?: Connection
 ): Promise<boolean> {
   // A turn stopped before it started keeps its place in the lane: when its
   // turn comes it stores its question, unanswered, and ends (the mark is on
@@ -287,7 +299,7 @@ export async function cancelTurn(
       [STOPPED_METADATA.field]: true
     });
     if (marked) {
-      endUnstarted(deps, requestId, "aborted", record.metadata);
+      endUnstarted(deps, requestId, "aborted", record.metadata, asker);
     }
     return marked;
   }
@@ -332,6 +344,15 @@ export async function stopAllTurns(
       });
     }
   }
+}
+
+/**
+ * A tab closed: it waits for no stream and is offered none (the chat's
+ * in-memory records of it go).
+ */
+export function forgetTab(deps: ChatDeps, connectionId: string): void {
+  parkedIn(deps.streams, deps.session ?? "").delete(connectionId);
+  offeredIn(deps.streams).delete(connectionId);
 }
 
 /** Clear the chat: no waiting or running turn goes on, and the transcript is emptied. */
@@ -582,6 +603,16 @@ async function applyAnswer(
     };
     await session.upsertMessage(next as never);
     await storeTools();
+    // Every tab sees the call answered.
+    const updated = frameText({
+      type: CHAT_MESSAGE_TYPES.MESSAGE_UPDATED,
+      message: next
+    } as { type: string });
+    if (updated !== undefined && deps.webSockets) {
+      for (const connection of deps.webSockets.getConnections()) {
+        sendIfOpen(connection, updated);
+      }
+    }
     // Only the latest reply continues: once a later message moved the chat
     // on, an answer for an older call is stored and nothing more.
     if (i !== history.length - 1) {
@@ -982,7 +1013,7 @@ export async function chatDispatch(
           });
         }
       }
-      await cancelTurn(deps, event.id);
+      await cancelTurn(deps, event.id, undefined, connection);
       return true;
     }
     case "cancel-continuation": {

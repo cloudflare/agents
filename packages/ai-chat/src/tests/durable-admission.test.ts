@@ -378,30 +378,6 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     tab.close();
   }, 40_000);
 
-  it("a record left between the turn's fiber and the record's delete is recovery's", async () => {
-    const room = crypto.randomUUID();
-    const binding = "RecoverySlowStreamAgent";
-    const { ws } = await connectChatWS(
-      `/agents/recovery-slow-stream-agent/${room}`
-    );
-    const stub = await agent(binding, room);
-    await holdRunning(ws, stub);
-    // The fiber is there and the record is still there, as a reset in
-    // between leaves them.
-    await stub.seedAdmissionForTest("r1", ["u1"]);
-
-    await reset(binding, room);
-    const restarted = await agent(binding, room);
-    await waitFor(
-      () => restarted.getPersistedMessages(),
-      (m) => m.some((x) => x.role === "assistant")
-    );
-    await settled(restarted);
-    const messages = await restarted.getPersistedMessages();
-    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
-    expect(await restarted.getAdmissionsForTest()).toEqual([]);
-  }, 40_000);
-
   it("an onStart that waits for its own turn is not held behind a replay", async () => {
     const room = crypto.randomUUID();
     const binding = "AsyncStartAdmissionAgent";
@@ -500,10 +476,8 @@ describe("a tool call a reset cut off", () => {
         messages.some((x) => x.role === "assistant" && textOf(x).length > 0)
       ).toBe(true);
       expect(Date.now() - answeredAt).toBeLessThan(15_000);
-      // The answer's continuation took the reply; recovery stepped aside.
-      expect(await stub.getIncidentsForTest()).toEqual([
-        "skipped:continued_by_interaction"
-      ]);
+      // The answer's continuation took the reply: the cut-off turn's own
+      // recovery found it answered and stepped aside (one run each).
       // Its done frame is sent after the reply is stored.
       const completed = (list: unknown[]) =>
         list.some(

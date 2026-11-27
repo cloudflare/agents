@@ -70,36 +70,6 @@ function expectAssistantTranscriptBeforeDone(frames: Frame[]) {
   expect(doneIndex).toBe(frames.length - 1);
 }
 
-/** Resolves on the first replay frame for `requestId` whose body has `text`. */
-function replayContaining(
-  ws: WebSocket,
-  requestId: string,
-  text: string,
-  timeout = 10_000
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`No replay of "${text}"`)),
-      timeout
-    );
-    const handler = (e: MessageEvent) => {
-      const data = JSON.parse(e.data as string) as Record<string, unknown>;
-      if (
-        isUseChatResponseMessage(data) &&
-        data.id === requestId &&
-        data.replay &&
-        typeof data.body === "string" &&
-        data.body.includes(text)
-      ) {
-        clearTimeout(timer);
-        ws.removeEventListener("message", handler);
-        resolve();
-      }
-    };
-    ws.addEventListener("message", handler);
-  });
-}
-
 function sendChat(ws: WebSocket, body: Record<string, unknown>): string {
   const id = crypto.randomUUID();
   ws.send(
