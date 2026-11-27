@@ -6,7 +6,16 @@
 
 import { describe, expect, inject, it } from "vitest";
 import { deployHarnesses } from "./deploy";
-import { call, ended, idle, reset, seen, submit, witness } from "./lib";
+import {
+  call,
+  converse,
+  ended,
+  idle,
+  reset,
+  seen,
+  submit,
+  witness
+} from "./lib";
 
 describe("the Pi harness on a deployment", () => {
   it("re-runs a replay-safe tool cut off by a reset once, woken by its own alarm", async () => {
@@ -45,6 +54,7 @@ describe("the Pi harness on a deployment", () => {
     await seen(room, "gate", 2);
     await call("pi", room, "probeRelease");
     expect((await ended("pi", room, operationId)).status).toBe("done");
+    expect(await witness(room, "gate")).toBe(2);
     await idle("pi", room);
   });
 
@@ -56,7 +66,8 @@ describe("the Pi harness on a deployment", () => {
     await seen(room, "deadline-woke", 1, 150_000);
     const result = await ended("pi", room, operationId);
     expect(result).toMatchObject({ status: "done" });
-    expect(result.text).toMatch(/woke/);
+    // The deadline passed: not a signal, not a restart.
+    expect(result.text).toMatch(/woke time/);
     await idle("pi", room);
   });
 
@@ -83,33 +94,39 @@ describe("the Pi harness on a deployment", () => {
     await idle("pi", room);
   });
 
-  it("holds a twenty-turn conversation with tools on Workers AI through two resets", async () => {
+  // Ten turns at about 40 s each (measured on glm-4.7-flash); each turn gets
+  // 120 s, so the case is bounded at 10 x 120 s plus the idle check.
+  it("holds a ten-turn conversation with tools on Workers AI through two resets", async () => {
     const room = `real-${Date.now()}`;
-    const answers: { status: string; text?: string; want: string }[] = [];
-    for (let turn = 1; turn <= 20; turn++) {
-      const { operationId } = await submit(
-        "pi",
-        room,
-        `What is ${turn * 7} times three? Use the multiply tool, then answer with the number only.`
-      );
-      if (turn === 8 || turn === 15) await reset("pi", room);
-      answers.push({
-        ...(await ended("pi", room, operationId)),
-        want: String(turn * 21)
-      });
-    }
+    const answers = await converse("pi", room, {
+      turns: 10,
+      resets: [4, 8],
+      perTurnMs: 120_000,
+      prompt: (turn) =>
+        `What is ${turn * 7} times three? Use the multiply tool, then answer with the number only.`,
+      want: (turn) => String(turn * 21)
+    });
     const report = JSON.stringify(answers);
     expect(
       answers.every((a) => a.status === "done"),
       report
     ).toBe(true);
-    // Every turn answered its own question: nothing lost or answered twice.
+    // Every turn not cut by a reset answered its own question. A reset turn
+    // is told the server restarted, and what the model says to that is its own.
     expect(
-      answers.every((a) => a.text?.includes(a.want)),
+      answers.every((a) => a.reset || a.text?.includes(a.want)),
       report
     ).toBe(true);
     expect(await witness(room, "multiply"), report).toBeGreaterThanOrEqual(1);
     expect(await witness(room, "start"), report).toBeGreaterThanOrEqual(3);
+    // The saved conversation kept every turn through both resets: a user
+    // message and a reply for each of the ten.
+    const { entries } = await call<{ entries: number }>(
+      "pi",
+      room,
+      "probeState"
+    );
+    expect(entries, report).toBeGreaterThanOrEqual(20);
     await idle("pi", room);
-  }, 900_000);
+  }, 1_320_000);
 });

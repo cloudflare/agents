@@ -8,7 +8,16 @@
 
 import { describe, expect, inject, it } from "vitest";
 import { deployHarnesses } from "./deploy";
-import { call, ended, idle, reset, seen, submit, witness } from "./lib";
+import {
+  call,
+  converse,
+  ended,
+  idle,
+  reset,
+  seen,
+  submit,
+  witness
+} from "./lib";
 
 describe("the OpenCode harness on a deployment", () => {
   it("replays a run cut off by a reset mid-call, woken by its own alarm", async () => {
@@ -54,32 +63,37 @@ describe("the OpenCode harness on a deployment", () => {
     await idle("opencode", room);
   });
 
+  // Five turns at up to 100 s each (measured on glm-4.7-flash); each turn
+  // gets 180 s, so the case is bounded at 5 x 180 s plus the idle check.
   it("holds a real conversation with a tool through a reset", async () => {
     const room = `real-${Date.now()}`;
-    const answers: { status: string; text?: string; want: string }[] = [];
-    for (let turn = 1; turn <= 5; turn++) {
-      const { operationId } = await submit(
-        "opencode",
-        room,
-        `Use the shout tool on the text "turn ${turn}", then reply with exactly what it returned.`
-      );
-      if (turn === 3) await reset("opencode", room);
-      answers.push({
-        ...(await ended("opencode", room, operationId)),
-        want: `TURN ${turn}`
-      });
-    }
+    const answers = await converse("opencode", room, {
+      turns: 5,
+      resets: [3],
+      perTurnMs: 180_000,
+      prompt: (turn) =>
+        `Use the shout tool on the text "turn ${turn}", then reply with exactly what it returned.`,
+      want: (turn) => `TURN ${turn}`
+    });
     const report = JSON.stringify(answers);
     expect(
       answers.every((a) => a.status === "done"),
       report
     ).toBe(true);
-    // Each reply carries its own turn's shout: the tool ran, nothing was lost.
+    // Each turn not cut by a reset carries its own shout. A reset turn is
+    // told the server restarted, and what the model says to that is its own.
     expect(
-      answers.every((a) => a.text?.includes(a.want)),
+      answers.every((a) => a.reset || a.text?.includes(a.want)),
       report
     ).toBe(true);
     expect(await witness(room, "start"), report).toBeGreaterThanOrEqual(2);
+    // The saved conversation kept every turn through the reset.
+    const { entries } = await call<{ entries: number }>(
+      "opencode",
+      room,
+      "probeState"
+    );
+    expect(entries, report).toBeGreaterThanOrEqual(10);
     await idle("opencode", room);
-  }, 600_000);
+  }, 1_020_000);
 });

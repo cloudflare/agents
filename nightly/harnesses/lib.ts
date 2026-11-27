@@ -57,14 +57,63 @@ export async function until<T>(
 export function ended(
   kind: Kind,
   room: string,
-  operationId: string
+  operationId: string,
+  timeoutMs = 240_000
 ): Promise<Result> {
   return until(
     () => call<Result>(kind, room, "probeWait", operationId),
     () => true,
     `${operationId} to end`,
-    240_000
+    timeoutMs
   );
+}
+
+export type Answer = Result & {
+  turn: number;
+  want: string;
+  ms: number;
+  reset: boolean;
+};
+
+/**
+ * A real-model conversation, one turn at a time, each with its own deadline.
+ * A turn that misses it fails with the turn number, the answers so far and
+ * the probe's state, so a slow night shows how far it got.
+ */
+export async function converse(
+  kind: Kind,
+  room: string,
+  opts: {
+    turns: number;
+    resets: number[];
+    perTurnMs: number;
+    prompt: (turn: number) => string;
+    want: (turn: number) => string;
+  }
+): Promise<Answer[]> {
+  const answers: Answer[] = [];
+  for (let turn = 1; turn <= opts.turns; turn++) {
+    const start = Date.now();
+    const reset = opts.resets.includes(turn);
+    try {
+      const { operationId } = await submit(kind, room, opts.prompt(turn));
+      if (reset) await reset_(kind, room);
+      const result = await ended(kind, room, operationId, opts.perTurnMs);
+      answers.push({
+        ...result,
+        turn,
+        want: opts.want(turn),
+        ms: Date.now() - start,
+        reset
+      });
+    } catch (e) {
+      const state = await call(kind, room, "probeState").catch(String);
+      throw new Error(
+        `turn ${turn} of ${opts.turns} missed its ${opts.perTurnMs} ms: ${String(e)}; answers so far: ${JSON.stringify(answers)}; state: ${JSON.stringify(state)}`
+      );
+    }
+  }
+  return answers;
 }
 
 /**
@@ -116,6 +165,8 @@ export function seen(
 }
 
 /** Reset the object; the call itself fails with the reset. */
+const reset_ = (kind: Kind, room: string) => reset(kind, room);
+
 export async function reset(kind: Kind, room: string) {
   await call(kind, room, "probeReset").catch(() => undefined);
 }
