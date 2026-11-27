@@ -1137,6 +1137,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
+   * @internal The chunks an operation's reply has streamed so far, while it
+   * runs: none once its reply is stored, or for an operation that never ran.
+   */
+  async operationChunks(
+    session: ThinkSessionId,
+    operationId: string
+  ): Promise<UIMessageChunk[]> {
+    await this.lifecycle.ready();
+    return this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+  }
+
+  /**
    * @internal An operation's status with its run's times, key and
    * metadata, for the harness-backed Think's submissions.
    */

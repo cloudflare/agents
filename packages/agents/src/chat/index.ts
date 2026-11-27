@@ -588,3 +588,5 @@ export { backoffDelay } from "../retries";
  */
 export { broadcastReachesUnlistedSockets } from "../dynamic-agents/unlisted-sockets";
 export { runningChatTurn } from "./chat-host";
+
+export { chunksOfMessage } from "./message-chunks";

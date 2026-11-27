@@ -109,6 +109,8 @@ import { ThinkSession } from "../session";
 import { ThinkConfigStore } from "../config-store";
 import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "../system-prompt";
 import { Think as LegacyThink } from "../think";
+import type { AgentToolRunInspection, AgentToolStoredChunk } from "agents";
+import { chunksOfMessage } from "agents/chat";
 import {
   isCompactionMessage,
   type Session,
@@ -2365,6 +2367,179 @@ export class Think<
       return handled ?? onRequest(request);
     };
   }
+  // ── As an agent tool ────────────────────────────────────────────────
+  // A parent runs this agent as a tool through these methods. The run is
+  // one operation of the root session, `agent-tool:<runId>`, so every
+  // attempt of its turn (a reset replays it) stays that run.
+
+  /** The message an agent-tool run's input becomes. */
+  protected formatAgentToolInput(input: unknown): UIMessage {
+    const text =
+      typeof input === "string" ? input : JSON.stringify(input, null, 2);
+    return {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+  }
+
+  /** A completed agent-tool run's output. Default: none. */
+  protected getAgentToolOutput(_runId: string): unknown {
+    return undefined;
+  }
+
+  /** A completed agent-tool run's summary. Default: its reply's text. */
+  protected getAgentToolSummary(runId: string, output: unknown): string {
+    const text = this.#agentToolReplyText.get(runId);
+    if (text) return text;
+    if (typeof output === "string") return output;
+    if (output !== undefined) {
+      try {
+        return JSON.stringify(output);
+      } catch {
+        return String(output);
+      }
+    }
+    return "";
+  }
+
+  /** The text of each settled agent-tool run's reply, while it is read. */
+  readonly #agentToolReplyText = new Map<string, string>();
+
+  async startAgentToolRun(
+    input: unknown,
+    options: {
+      runId: string;
+      signal?: AbortSignal;
+      eventDelivery?: "full" | "terminal";
+    }
+  ): Promise<AgentToolRunInspection> {
+    const session = this.harness.session();
+    const operationId = agentToolOperationId(options.runId);
+    // A start of a run this agent has returns it.
+    if (!(await this.harness.inspection(session.id, operationId))) {
+      await this.#sync();
+      await session.submit([this.formatAgentToolInput(input)], {
+        operationId,
+        metadata: {
+          agentTool: {
+            runId: options.runId,
+            startMessageId: this.messages.at(-1)?.id ?? null,
+            ...(options.eventDelivery === "terminal" && {
+              terminalOnly: true
+            })
+          }
+        }
+      });
+    }
+    // SAFETY: submitted above, or there already.
+    return (await this.inspectAgentToolRun(
+      options.runId
+    )) as AgentToolRunInspection;
+  }
+
+  async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
+    const text =
+      reason instanceof Error
+        ? reason.message
+        : reason === undefined || reason === null
+          ? undefined
+          : String(reason);
+    await this.harness.abort(
+      this.harness.session().id,
+      agentToolOperationId(runId),
+      text
+    );
+  }
+
+  async inspectAgentToolRun(
+    runId: string
+  ): Promise<AgentToolRunInspection | null> {
+    const status = await this.harness.inspection(
+      this.harness.session().id,
+      agentToolOperationId(runId)
+    );
+    if (!status) return null;
+    const base = {
+      runId,
+      requestId: agentToolOperationId(runId),
+      startedAt: status.startedAt ?? status.createdAt,
+      ...(status.settledAt !== undefined && {
+        completedAt: status.settledAt
+      })
+    };
+    if (status.status === "queued" || status.status === "running") {
+      return { ...base, status: "running" };
+    }
+    if (status.status === "done") {
+      // The stored reply's text: what the transcript kept of it.
+      const reply = status.messageId
+        ? this.messages.find((message) => message.id === status.messageId)
+        : undefined;
+      const text = reply?.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .filter((part) => part.length > 0)
+        .join("\n");
+      if (text) this.#agentToolReplyText.set(runId, text);
+      try {
+        const output = this.getAgentToolOutput(runId);
+        return {
+          ...base,
+          status: "completed",
+          output,
+          summary: this.getAgentToolSummary(runId, output)
+        };
+      } finally {
+        this.#agentToolReplyText.delete(runId);
+      }
+    }
+    const reason = status.status === "unanswered" ? status.reason : undefined;
+    // A turn reset skips the run, as on Think: an error, not a cancel.
+    if (status.abortReason === SKIPPED_BY_RESET) {
+      return {
+        ...base,
+        status: "error",
+        error: "Agent tool run was skipped before the child could finish."
+      };
+    }
+    if (status.abortReason !== undefined || reason === "aborted") {
+      return {
+        ...base,
+        status: "aborted",
+        ...(status.abortReason !== undefined && { error: status.abortReason })
+      };
+    }
+    return {
+      ...base,
+      status: "error",
+      error: reason ?? "Agent tool run failed"
+    };
+  }
+
+  async getAgentToolChunks(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<AgentToolStoredChunk[]> {
+    const session = this.harness.session().id;
+    const operationId = agentToolOperationId(runId);
+    const after = options?.afterSequence ?? -1;
+    let chunks = await this.harness.operationChunks(session, operationId);
+    if (chunks.length === 0) {
+      // Settled: the reply is stored and its stream gone. A replay from the
+      // start gets the reply; a reader with a position saw it live.
+      if (after >= 0) return [];
+      const status = await this.harness.inspection(session, operationId);
+      const messageId =
+        status?.status === "done" ? status.messageId : undefined;
+      const message = messageId
+        ? this.messages.find((candidate) => candidate.id === messageId)
+        : undefined;
+      chunks = message ? chunksOfMessage(message) : [];
+    }
+    return chunks
+      .map((chunk, sequence) => ({ sequence, body: JSON.stringify(chunk) }))
+      .filter((chunk) => chunk.sequence > after);
+  }
 }
 
 /**
@@ -2393,6 +2568,11 @@ function stubUnsupported(target: object, legacy: object): void {
 }
 
 stubUnsupported(Think.prototype, LegacyThink.prototype);
+
+/** The operation an agent-tool run is. */
+function agentToolOperationId(runId: string): string {
+  return `agent-tool:${runId}`;
+}
 
 /** A step that ended, waiting for its tools when it called any. */
 type OpenStep = {
