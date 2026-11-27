@@ -28,6 +28,8 @@ The reset fuzz, on the fault Worker: four rooms at once (Think and AIChatAgent, 
 
 The choices come from one seed, printed at the start. Each tab and the resetter draw from their own stream, so `FUZZ_SEED` replays their choices; the server's timing still varies, and tool answers are drawn per call id, which the server makes up. A red run prints the seed, the violations and the last of the driver's trace.
 
+`FUZZ_MINUTES` must be 2 or more: the first reset comes 30 to 90 s in, and a run without one fails.
+
 ```sh
 cd nightly
 pnpm run fuzz                                  # six minutes
