@@ -464,6 +464,17 @@ export type ThinkHarnessHooks = {
    */
   readonly storedReply?: (message: UIMessage) => UIMessage;
   /**
+   * @internal Metadata for the reply's finish, asked once as the turn's
+   * stream ends (an answer, or a wait for a client or an approval).
+   */
+  readonly finishMetadata?: (context: {
+    readonly session: ThinkSessionId;
+    readonly operationId: string;
+  }) =>
+    | Record<string, unknown>
+    | undefined
+    | Promise<Record<string, unknown> | undefined>;
+  /**
    * @internal The turn's model loop ended with an answer. Throw to fail the
    * operation with the error's message instead.
    */
