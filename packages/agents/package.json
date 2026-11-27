@@ -519,11 +519,6 @@
       "import": "./dist/experimental/channels/slack/index.js",
       "require": "./dist/experimental/channels/slack/index.js"
     },
-    "./experimental/channels/telegram": {
-      "types": "./dist/experimental/channels/telegram/index.d.ts",
-      "import": "./dist/experimental/channels/telegram/index.js",
-      "require": "./dist/experimental/channels/telegram/index.js"
-    },
     "./experimental/channels/web": {
       "types": "./dist/experimental/channels/web/index.d.ts",
       "import": "./dist/experimental/channels/web/index.js",

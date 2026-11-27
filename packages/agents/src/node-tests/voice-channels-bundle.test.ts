@@ -44,7 +44,7 @@ describe("Voice and Channels bundle isolation", () => {
     const inputs = await bundledInputs("src/experimental/channels/index.ts");
     expect(inputs).not.toContain("postal-mime");
     expect(inputs).not.toMatch(/node_modules[/+](ai|@tanstack)/);
-    for (const channel of ["slack", "telegram", "email"]) {
+    for (const channel of ["slack", "email"]) {
       expect(inputs).not.toContain(`src/experimental/channels/${channel}/`);
     }
     // The gateway reads the Web Channel's identity header, nothing more.
@@ -58,6 +58,5 @@ describe("Voice and Channels bundle isolation", () => {
     );
     expect(inputs).toContain("postal-mime");
     expect(inputs).not.toContain("src/experimental/channels/slack/");
-    expect(inputs).not.toContain("src/experimental/channels/telegram/");
   });
 });

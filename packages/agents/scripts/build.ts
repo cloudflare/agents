@@ -72,7 +72,6 @@ const entries = [
   "src/experimental/channels/index.ts",
   "src/experimental/channels/email/index.ts",
   "src/experimental/channels/slack/index.ts",
-  "src/experimental/channels/telegram/index.ts",
   "src/experimental/channels/web/index.ts",
   "src/experimental/channels/web/client.ts",
   "src/experimental/channels/web/ai-sdk.ts"

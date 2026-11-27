@@ -134,7 +134,6 @@ import { useVoiceAgent } from "agents/voice/react";
 import { ChannelGateway, Channels } from "agents/experimental/channels";
 import { email } from "agents/experimental/channels/email";
 import { slack } from "agents/experimental/channels/slack";
-import { telegram } from "agents/experimental/channels/telegram";
 ```
 
 See the [Voice](../../docs/agents/voice.md) reference.
