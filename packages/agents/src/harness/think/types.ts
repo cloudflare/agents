@@ -505,6 +505,8 @@ export type ThinkHarnessHooks = {
   readonly onContextOverflow?: (context: {
     readonly session: ThinkSessionId;
     readonly operationId: string;
+    /** Aborts when the operation is stopped. */
+    readonly signal: AbortSignal;
   }) => Promise<boolean>;
   /** After an operation settles. */
   readonly onTurnEnd?: (context: ThinkTurnEndContext) => void | Promise<void>;
@@ -514,7 +516,11 @@ export type ThinkHarnessHooks = {
     context: ThinkHookContext
   ) => void | Promise<void>;
   /** Classify a model call's error. Default: everything is `fail`. */
-  readonly classifyError?: (error: unknown) => ThinkErrorClass;
+  readonly classifyError?: (
+    error: unknown,
+    /** @internal The model call's operation, for a host that stops it. */
+    context?: { readonly session: ThinkSessionId; readonly operationId: string }
+  ) => ThinkErrorClass;
   /**
    * Decide what to do with an interrupted model call. Default: `continue`
    * while within `recovery.maxAttempts`.
