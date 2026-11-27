@@ -21,3 +21,10 @@ Chat recovery after a restart or a dropped stream.
 - An agent-tool run on a sub-agent whose chat recovery gave up before running a turn now ends `error`; it stayed `running`.
 - A tool cut off by a reset after reporting only progress (an `async function*` `execute`) is reported interrupted, not given its progress as its result.
 - `chatRecovery.stableTimeoutMs` is deprecated and has no effect: a recovered turn is the next attempt of the turn's own run, so there is no wait for a stable chat before it continues.
+- An `AIChatAgent` turn that is recovered keeps its request id and ends once, so a tab no longer sees an end with `outcome: "recovering"` followed by a new request.
+- `saveMessages` and `continueLastTurn` resolve once recovery has finished the turn, with how it ended, instead of with `reason: "interrupted"`.
+- `onError` hears of an `onChatMessage` failure once per turn, where a recovered `continueLastTurn` reported it twice.
+- Recovery no longer calls an overridden `continueLastTurn` or `waitUntilStable`: an interrupted turn is retried or continued as attempts of its own run.
+- An `AIChatAgent` server tool cut off by a reset is reported to the model as interrupted, not run again, unless it is marked safe to repeat.
+- A turn cut off before the upgrade is carried onto the new chat module under its request id, with the recovery budget of a new turn.
+- A stopped reply that was waiting to be retried is stored before the next request's question, and every tab is told the request ended.

@@ -20,4 +20,8 @@
 - A tool answer that arrives while a continuation runs now schedules the next continuation, whose turn waits behind the running one. It starts one coalesce window after the reply ends, and a stop that drops it reports its own request id instead of `null`.
 - A tab that asks to resume right after answering a client tool is told to wait for the continuation, even when the answer is still being stored; it used to be told there was nothing to resume.
 - A resume request that names several requests gets the end of each one that ended, not only the newest, also when the tab is parked on a continuation or offered a pending error.
-- `AIChatAgent` runs its turns as durable Task runs on the shared chat module, one implementation with `Think`'s harness. A request whose `onChatMessage` returns no response now ends with `outcome: "skipped"`. Turns store their messages directly, so a `persistMessages` override no longer sees a turn's writes. A request context over the row budget is no longer kept in memory.
+- `AIChatAgent` runs its turns as durable Task runs on the shared chat module, one implementation with `Think`'s harness.
+- An `AIChatAgent` request whose `onChatMessage` returns no response ends with `outcome: "skipped"`.
+- `AIChatAgent` turns store their messages directly, so a `persistMessages` override no longer sees a turn's writes.
+- A request context over the row budget is no longer kept in memory.
+- A tab that reconnects learns how a request ended by naming it in its resume request, as the client does, and is no longer sent the last request's end.
