@@ -22,6 +22,7 @@ const REWRITE_KEY = "test:rewrite";
 const SWEEP_KEY = "test:sweep-settled";
 const GRANT_CONTEXT_KEY = "test:grant-context";
 const MODEL_FAILS_KEY = "test:model-fails";
+const MODEL_HOLD_KEY = "test:model-hold";
 
 function finish(controller: ReadableStreamDefaultController, reason: string) {
   controller.enqueue({
@@ -93,11 +94,34 @@ const quiet: StreamCallback = {
 };
 
 export class ThinkHarnessActionsAgent extends Think {
-  override getModel(): LanguageModel {
+  override getModel(): LanguageModel | Promise<LanguageModel> {
     if (this.ctx.storage.kv.get<boolean>(MODEL_FAILS_KEY)) {
       throw new Error("no model today");
     }
+    if (this.ctx.storage.kv.get<boolean>(MODEL_HOLD_KEY)) {
+      this.ctx.storage.kv.put(MODEL_HOLD_KEY, false);
+      this.#modelEntered = true;
+      return new Promise((resolve) => {
+        this.#releaseModel = () => resolve(actionModel());
+      });
+    }
     return actionModel();
+  }
+
+  #modelEntered = false;
+  #releaseModel: (() => void) | undefined;
+
+  /** The next `getModel()` waits until released. */
+  holdModelForTest(): void {
+    this.ctx.storage.kv.put(MODEL_HOLD_KEY, true);
+  }
+
+  modelEnteredForTest(): boolean {
+    return this.#modelEntered;
+  }
+
+  releaseModelForTest(): void {
+    this.#releaseModel?.();
   }
 
   /** From now on, `getModel()` throws. */
@@ -145,7 +169,8 @@ export class ThinkHarnessActionsAgent extends Think {
   override authorizeTurn(ctx: TurnContext): ActionAuthorizationDecision {
     this.ctx.storage.kv.put(GRANT_CONTEXT_KEY, {
       trigger: ctx.trigger ?? null,
-      hasSignal: ctx.abortSignal instanceof AbortSignal
+      hasSignal: ctx.abortSignal instanceof AbortSignal,
+      ...(ctx.abortSignal?.aborted && { aborted: true })
     });
     const grant = this.ctx.storage.kv.get<string[]>(GRANT_KEY);
     return grant === undefined
@@ -199,7 +224,9 @@ export class ThinkHarnessActionsAgent extends Think {
   }
 
   /** What `authorizeTurn` was last told about its turn. */
-  grantContext(): { trigger: string | null; hasSignal: boolean } | undefined {
+  grantContext():
+    | { trigger: string | null; hasSignal: boolean; aborted?: true }
+    | undefined {
     return this.ctx.storage.kv.get(GRANT_CONTEXT_KEY);
   }
 

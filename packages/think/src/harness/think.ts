@@ -515,12 +515,19 @@ export class Think<
    */
   readonly #grantSignals = new Map<string, AbortController>();
 
-  #grantSignal(operationId: string): AbortSignal {
-    let controller = this.#grantSignals.get(operationId);
-    if (!controller) {
-      controller = new AbortController();
-      this.#grantSignals.set(operationId, controller);
+  async #grantSignal(operationId: string): Promise<AbortSignal> {
+    const kept = this.#grantSignals.get(operationId);
+    if (kept) return kept.signal;
+    // An operation that already ended (stopped while the grant was being
+    // prepared) gets a signal that says so, and nothing is kept for it.
+    const status = await this.harness.session().inspect(operationId);
+    if (status && status.status !== "queued" && status.status !== "running") {
+      return stoppedStatus(status)
+        ? AbortSignal.abort()
+        : new AbortController().signal;
     }
+    const controller = new AbortController();
+    this.#grantSignals.set(operationId, controller);
     return controller.signal;
   }
   /**
@@ -729,7 +736,7 @@ export class Think<
               trigger:
                 this.#turns.get(call.operationId)?.trigger ??
                 "auto-continuation",
-              abortSignal: this.#grantSignal(call.operationId)
+              abortSignal: await this.#grantSignal(call.operationId)
             } as unknown as TurnContext;
           });
           const decision = await this.#beforeToolCall(call);
@@ -967,7 +974,8 @@ export class Think<
         this.#webRequests.delete(event.status.operationId);
         const grant = this.#grantSignals.get(event.status.operationId);
         if (grant) {
-          if (event.status.status === "unanswered") grant.abort();
+          // As Think's turn signal: it fires on a stop, not on a failure.
+          if (stoppedStatus(event.status)) grant.abort();
           this.#grantSignals.delete(event.status.operationId);
         }
         // A call the operation left without an afterToolCall is forgotten.
@@ -3541,6 +3549,14 @@ function withOperationIds<
       streamId: operationIdOf(ctx.requestId)
     })
   };
+}
+
+/** Whether an operation's status says it was stopped (not failed). */
+function stoppedStatus(status: { status: string; reason?: string }): boolean {
+  return (
+    status.status === "unanswered" &&
+    (status.reason === "aborted" || status.reason === "withdrawn")
+  );
 }
 
 /**

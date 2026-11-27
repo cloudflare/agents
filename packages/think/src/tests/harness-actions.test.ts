@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PendingApproval } from "../think";
 
 type ActionsStub = {
@@ -21,6 +21,10 @@ type ActionsStub = {
     { trigger: string | null; hasSignal: boolean } | undefined
   >;
   failModelForTest(): Promise<void>;
+  holdModelForTest(): Promise<void>;
+  modelEnteredForTest(): Promise<boolean>;
+  releaseModelForTest(): Promise<void>;
+  abortAllRequests(): Promise<void>;
   rejectExecution(
     executionId: string,
     reason?: string,
@@ -239,6 +243,27 @@ describe("harness-backed Think: actions that need a human", () => {
     expect(await fresh.grantContext()).toEqual({
       trigger: "auto-continuation",
       hasSignal: true
+    });
+  });
+
+  it("gives a grant an aborted signal when its operation was stopped while getModel() ran", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    await fresh.holdModelForTest();
+    const approved = fresh.approveExecution(pending.executionId);
+    await vi.waitFor(async () =>
+      expect(await fresh.modelEnteredForTest()).toBe(true)
+    );
+    await fresh.abortAllRequests();
+    await fresh.releaseModelForTest();
+    await approved;
+    expect(await fresh.grantContext()).toMatchObject({
+      hasSignal: true,
+      aborted: true
     });
   });
 
