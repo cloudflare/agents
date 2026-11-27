@@ -225,7 +225,8 @@ describe("chatTurnDefinition", () => {
         streams: instance.streams,
         sessions: instance.sessions,
         kv: instance.kv,
-        session: "s1"
+        session: "s1",
+        emit: (type, payload) => void instance.events.push({ type, payload })
       },
       host
     );
@@ -244,15 +245,60 @@ describe("chatTurnDefinition", () => {
     }
   }
 
-  it("gives up on a cut-off turn past its attempt budget", async () => {
+  it("gives up on a cut-off turn past its attempt budget, with the app's message and reason", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await cutOff(instance, "run-1");
+      const exhausted: Array<{ reason: string; attempt: number }> = [];
+      // Two attempts were made before, the last a minute ago, and none has
+      // streamed more since the first was counted.
+      const counted = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 2,
+            maxAttempts: 2,
+            status: "attempting",
+            firstSeenAt: Date.now() - 120_000,
+            lastAttemptAt: Date.now() - 60_000,
+            lastProgressAt: Date.now() - 120_000,
+            progress: 1_000,
+            workBaseline: 0
+          }
+        ]
+      ]);
       const result = await definitionOf(instance, {
         ...instance.host,
-        options: { recovery: { maxAttempts: 2 } }
-      })({ trigger: "submit-message" }, laterAttempt("run-1", 3));
-      expect(result).toMatchObject({ requestId: "run-1", status: "error" });
+        options: {
+          recovery: {
+            maxAttempts: 2,
+            terminalMessage: "Sorry, that did not work.",
+            onExhausted: (context) => {
+              exhausted.push({
+                reason: context.reason,
+                attempt: context.attempt
+              });
+            }
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, counted)
+      );
+      expect(result).toMatchObject({
+        requestId: "run-1",
+        status: "error",
+        error: "Sorry, that did not work."
+      });
+      expect(exhausted).toEqual([
+        { reason: "max_attempts_exceeded", attempt: 3 }
+      ]);
+      expect(
+        instance.events.find((event) => event.type === "chat:recovery:failed")
+      ).toMatchObject({ payload: { reason: "max_attempts_exceeded" } });
       expect(instance.calls).toEqual([]);
       expect(
         await instance.streams.status(chatTurnStreamId("run-1"))
@@ -260,6 +306,138 @@ describe("chatTurnDefinition", () => {
       // What it streamed stays stored.
       const history = await instance.sessions.session("s1").getHistory();
       expect(JSON.stringify(history)).toContain("Hel");
+    });
+  });
+
+  it("continues a turn cut off for the fourth time: the budget is ten attempts without progress", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const recoveries: number[] = [];
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          ...instance.host.hooks,
+          onRecovery: (context) => void recoveries.push(context.attempt)
+        }
+      })({ trigger: "submit-message" }, laterAttempt("run-1", 4));
+      expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
+      // The first recovery of the turn, whatever the run's attempt number.
+      expect(recoveries).toEqual([1]);
+      // The recovery is published, start to end.
+      expect(
+        instance.events
+          .map((event) => event.type)
+          .filter((type) => type.startsWith("chat:recovery:"))
+      ).toEqual([
+        "chat:recovery:detected",
+        "chat:recovery:attempt",
+        "chat:recovery:completed"
+      ]);
+    });
+  });
+
+  it("ends a recovery the app declines with the failure that led to it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      // The attempt before failed with a provider's transient error.
+      const kept = new Map<string, unknown>([
+        ["chat:failed", { text: "Network connection lost.", retries: 0 }]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          ...instance.host.hooks,
+          onRecovery: () => ({ continue: false })
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 2, undefined, kept)
+      );
+      expect(result).toMatchObject({
+        requestId: "run-1",
+        status: "error",
+        error: "Network connection lost."
+      });
+      expect(instance.calls).toEqual([]);
+    });
+  });
+
+  it("bounds recovery attempts that keep failing the same way by maxAttempts, however fast they come", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const reasons: string[] = [];
+      // One attempt was counted a moment ago, and two recovery attempts
+      // have failed with a transient error since.
+      const kept = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 1,
+            maxAttempts: 2,
+            status: "attempting",
+            firstSeenAt: Date.now() - 2_000,
+            lastAttemptAt: Date.now() - 1_000,
+            progress: 1_000,
+            workBaseline: 0
+          }
+        ],
+        ["chat:failed", { text: "Network connection lost.", retries: 2 }]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: {
+          recovery: {
+            maxAttempts: 2,
+            onExhausted: (context) => void reasons.push(context.reason)
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 4, undefined, kept)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "error" });
+      expect(reasons).toEqual(["max_attempts_exceeded"]);
+      expect(instance.calls).toEqual([]);
+    });
+  });
+
+  it("starts the attempt count again when the cut-off attempt streamed more", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      // Two attempts were counted when nothing had been streamed yet.
+      const counted = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "retry",
+            attempt: 2,
+            maxAttempts: 2,
+            status: "attempting",
+            firstSeenAt: Date.now() - 120_000,
+            lastAttemptAt: Date.now() - 60_000,
+            progress: 0,
+            workBaseline: 0
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: { recovery: { maxAttempts: 2 } }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, counted)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
+      expect(counted.get("chat:incident")).toMatchObject({ attempt: 1 });
     });
   });
 
@@ -291,12 +469,62 @@ describe("chatTurnDefinition", () => {
         options: { recovery: { stallTimeoutMs: 20 } }
       })({ trigger: "server" }, laterAttempt("run-2", 1));
       expect(result).toBeInstanceOf(TaskSettlement);
+      // The stall is published, with the timeout that caught it.
+      expect(
+        instance.events.filter((event) => event.type === "chat:stream:stalled")
+      ).toEqual([
+        {
+          type: "chat:stream:stalled",
+          payload: { requestId: "run-2", timeoutMs: 20 }
+        }
+      ]);
       // The stream stays open for the next attempt to continue.
       expect(
         await instance.streams.status(chatTurnStreamId("run-2"))
       ).toMatchObject({ state: "streaming" });
     });
   });
+
+  it.each([
+    { name: "retry-after", headers: { "retry-after": "7" }, seconds: 7 },
+    {
+      name: "retry-after-ms",
+      headers: { "retry-after-ms": "4200" },
+      seconds: 5
+    },
+    {
+      name: "a wait past the cap",
+      headers: { "retry-after": "600" },
+      seconds: 60
+    }
+  ])(
+    "waits as long as the provider asked before the next attempt: $name",
+    async ({ headers, seconds }) => {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        await instance.lifecycle.start();
+        const before = Date.now();
+        const result = await definitionOf(instance, {
+          respond: async () =>
+            new ReadableStream({
+              start(controller) {
+                controller.error(
+                  Object.assign(new Error("Rate limit reached"), {
+                    responseHeaders: headers
+                  })
+                );
+              }
+            }),
+          hooks: { classifyError: () => "transient" }
+        })({ trigger: "server" }, laterAttempt("run-2", 1));
+        const after = Date.now();
+        expect(result).toBeInstanceOf(TaskSettlement);
+        const wakeAt = (result as TaskSettlement).wakeAt ?? 0;
+        expect(wakeAt).toBeGreaterThanOrEqual(before + seconds * 1000);
+        expect(wakeAt).toBeLessThanOrEqual(after + seconds * 1000);
+      });
+    }
+  );
 
   it("asks the model again once after making room for a context overflow", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());

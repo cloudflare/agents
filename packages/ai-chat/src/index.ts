@@ -1044,7 +1044,7 @@ export class AIChatAgent<
 
   /** How the chat module asks this agent for a reply and tells it the end. */
   private _chatHost(): ChatHost {
-    const recovery = this.chatRecovery;
+    const agent = this;
     return {
       respond: async (call) => {
         // Apps read the transcript the call is for from `this.messages`.
@@ -1183,21 +1183,33 @@ export class AIChatAgent<
         },
         sanitizeForPersistence: (message) =>
           this._sanitizeMessageForPersistence(message),
-        onRecovery: (context) => this.onChatRecovery(context)
+        onRecovery: (context) => this.onChatRecovery(context),
+        // What the provider's error says: a rate limit or a transient
+        // failure goes into bounded chat recovery, like a dropped stream
+        // (#1964). An in-band error is the provider's answer.
+        classifyError: (error, inBand) =>
+          (!inBand && isRecoverableStreamReadError(error)) ||
+          isTransientProviderError(error)
+            ? "transient"
+            : "terminal"
       },
       options: {
         hydrationByteBudget: this.hydrationByteBudget,
         ...(this.maxPersistedMessages !== undefined && {
           maxPersistedMessages: this.maxPersistedMessages
         }),
-        recovery:
-          typeof recovery === "object"
-            ? {
-                ...(recovery.maxAttempts !== undefined && {
-                  maxAttempts: recovery.maxAttempts
-                })
-              }
-            : {}
+        // The app's whole budget: the turn definition applies it. A stream
+        // that sends nothing for the app's stall timeout is interrupted.
+        // Read when a turn runs, so a value set after construction holds.
+        get recovery() {
+          const recovery = agent.chatRecovery;
+          return {
+            ...(typeof recovery === "object" && recovery),
+            ...(agent.chatStreamStallTimeoutMs > 0 && {
+              stallTimeoutMs: agent.chatStreamStallTimeoutMs
+            })
+          };
+        }
       }
     };
   }
