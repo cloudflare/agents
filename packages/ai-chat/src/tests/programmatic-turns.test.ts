@@ -9,8 +9,16 @@ function connectSlowStream(room: string) {
   return connectChatWS(`/agents/slow-stream-agent/${room}`);
 }
 
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Bounds for waits on the agent, inside the 10 s test timeout. */
+const BOUNDS = { timeout: 5_000, interval: 20 };
+
+/** Wait until the agent holds no abort controller. */
+async function abortControllersCleared(agent: {
+  getAbortControllerCount(): Promise<number>;
+}): Promise<void> {
+  await vi.waitFor(async () => {
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  }, BOUNDS);
 }
 
 function sendChatRequest(
@@ -44,13 +52,20 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The first request is held mid-stream until the programmatic message
+    // is queued behind it.
+    await agentStub.holdStreamForTest("req-programmatic-1");
+    onTestFinished(() => agentStub.releaseStreamForTest("req-programmatic-1"));
     sendChatRequest(ws, "req-programmatic-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 8,
       chunkDelayMs: 100
     });
-
-    await delay(60);
+    await vi.waitFor(async () => {
+      expect(await agentStub.isStreamHeldForTest("req-programmatic-1")).toBe(
+        true
+      );
+    }, BOUNDS);
 
     const queuedPromise = agentStub.enqueueSyntheticUserMessage(
       "Scheduled follow-up",
@@ -64,20 +79,32 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     );
     const waitForIdlePromise = agentStub.waitForIdleForTest();
 
-    await delay(100);
+    // Queued behind the held request (the count includes the running turn).
+    await vi.waitFor(async () => {
+      expect(await agentStub.queuedTurnCountForTest()).toBe(2);
+    }, BOUNDS);
 
     expect(await agentStub.getStartedRequestIds()).toEqual([
       "req-programmatic-1"
     ]);
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
 
-    await expect(
-      Promise.race([
-        waitForIdlePromise.then(() => "idle"),
-        delay(100).then(() => "pending")
-      ])
-    ).resolves.toBe("pending");
+    // The idle wait has not settled: a round trip to the agent, while the
+    // turn is held, comes back first.
+    let idleSettled = false;
+    // Rejections are the awaited promise's to report, not this observer's.
+    void waitForIdlePromise.then(
+      () => {
+        idleSettled = true;
+      },
+      () => {}
+    );
+    expect(await agentStub.isStreamHeldForTest("req-programmatic-1")).toBe(
+      true
+    );
+    expect(idleSettled).toBe(false);
 
+    await agentStub.releaseStreamForTest("req-programmatic-1");
     const queuedResult = await queuedPromise;
     await waitForIdlePromise;
 
@@ -175,7 +202,7 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
       expect(
         await agentStub.isStreamHeldForTest("req-programmatic-clear-1")
       ).toBe(true);
-    });
+    }, BOUNDS);
 
     const queuedPromise = agentStub.enqueueSyntheticUserMessage("Skipped", {
       body: {
@@ -188,7 +215,7 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     // The programmatic turn waits in the queue behind the held one.
     await vi.waitFor(async () => {
       expect(await agentStub.queuedTurnCountForTest()).toBe(2);
-    });
+    }, BOUNDS);
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
@@ -214,19 +241,20 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     const { ws: observerWs } = await connectSlowStream(room);
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // The reply is held mid-stream, so the clear cuts it off.
+    await agentStub.holdStreamForTest("next");
+    onTestFinished(() => agentStub.releaseStreamForTest("next"));
     const running = agentStub.enqueueSyntheticUserMessage("Cut off", {
       body: { format: "plaintext", chunkCount: 20, chunkDelayMs: 50 }
     });
-    await expect
-      .poll(async () => (await agentStub.getStartedRequestIds()).length, {
-        timeout: 3000
-      })
-      .toBe(1);
-    await delay(120);
+    await vi.waitFor(async () => {
+      expect(await agentStub.isStreamHeldForTest("next")).toBe(true);
+    }, BOUNDS);
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
     await clearBroadcast;
+    await agentStub.releaseStreamForTest("next");
 
     // A clear is not the caller's stop: the same status as a clear that
     // lands before the reply starts.
@@ -280,9 +308,7 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     // Registry must be drained — the controller for this request id
     // was created (so getExistingSignal observers see consistent
     // state) and removed in the inner `finally` block.
-    await delay(100);
-    const count = await agentStub.getAbortControllerCount();
-    expect(count).toBe(0);
+    await abortControllersCleared(agentStub);
   });
 
   it("stores nothing and never calls onChatMessage for a pre-aborted signal", async () => {
@@ -389,9 +415,7 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     expect(result.status).toBe("aborted");
 
     // Registry drains.
-    await delay(100);
-    const count = await agentStub.getAbortControllerCount();
-    expect(count).toBe(0);
+    await abortControllersCleared(agentStub);
   });
 
   it("post-completion abort is a no-op (listener cleanup, no leaked controllers)", async () => {
@@ -408,9 +432,7 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
 
     expect(result.status).toBe("completed");
 
-    await delay(100);
-    const count = await agentStub.getAbortControllerCount();
-    expect(count).toBe(0);
+    await abortControllersCleared(agentStub);
   });
 
   it("public abortAllRequests() cancels a programmatic turn", async () => {
