@@ -196,6 +196,9 @@ const READ_PAGE = 50;
  */
 const TOOL_STEP = { retries: { limit: 1 }, timeout: 2 ** 31 - 1 } as const;
 
+const INPUT_CUT_OFF_ERROR =
+  "The tool call's input was cut off before it was complete, so the tool did not run.";
+
 const INTERRUPTED_TOOL_ERROR =
   "The tool call was interrupted before it finished, because the agent restarted. It may or may not have taken effect.";
 
@@ -1575,13 +1578,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         repairInterruptedToolPart: (part) => {
           const name = toolNameOf(part as ToolCallPart);
           const tool = Object.hasOwn(tools, name) ? tools[name] : undefined;
-          if (tool && toolRecovery(tool) === "rerun") return part;
+          // A call whose input was still streaming was never made: the
+          // model is told so, whatever the tool's recovery.
+          const streaming =
+            (part as { state?: unknown }).state === "input-streaming";
+          if (tool && !streaming && toolRecovery(tool) === "rerun") return part;
           return {
             ...part,
             state: "output-error",
-            errorText: tool
-              ? INTERRUPTED_TOOL_ERROR
-              : `Tool "${name}" is no longer available.`
+            errorText: !tool
+              ? `Tool "${name}" is no longer available.`
+              : streaming
+                ? INPUT_CUT_OFF_ERROR
+                : INTERRUPTED_TOOL_ERROR
           } as InterruptedToolPart;
         }
       }

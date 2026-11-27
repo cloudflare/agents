@@ -573,7 +573,13 @@ describe("ThinkHarness durability", () => {
       status: "done",
       text: "tool said: released after 2 runs"
     });
-    expect(await stub.gateRuns()).toBe(2);
+    expect(await stub.gateRuns()).toBe(2); // The run after the reset is the tool step's second attempt, for both
+    // of its hooks.
+    expect(await stub.toolAttempts()).toEqual([
+      "before gate_safe:1",
+      "before gate_safe:2",
+      "after gate_safe:2"
+    ]);
   });
 
   it("answers a call to a tool the next attempt no longer has, instead of waiting for it", async () => {
@@ -1065,6 +1071,17 @@ describe("ThinkHarness durability", () => {
     const result = await stub.wait(receipt.operationId);
     expect(result.status).toBe("done");
     expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+  });
+
+  it("tells the model a call whose input a stall cut off did not run, even for a tool safe to rerun", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    const receipt = await stub.submit("stall in safe input");
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect(await stub.gateRuns()).toBe(0);
+    expect((await stub.messages())[1]).toMatch(
+      /^assistant: \[gate_safe output-error\] tool said: error: The tool call's input was cut off/
+    );
   });
 
   it("keeps a finished tool's result when the other call of its step fails the turn", async () => {

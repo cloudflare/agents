@@ -74,6 +74,8 @@ type StreamPart =
   | { type: "text-delta"; id: string; delta: string }
   | { type: "text-end"; id: string }
   | { type: "tool-call"; toolCallId: string; toolName: string; input: string }
+  | { type: "tool-input-start"; id: string; toolName: string }
+  | { type: "tool-input-delta"; id: string; delta: string }
   | {
       type: "finish";
       finishReason: { raw: string; unified: "stop" | "tool-calls" };
@@ -516,6 +518,25 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([
           { name: "ask", input: { question: "again?" }, id: "reused-call" }
         ]);
+      } else if (text === "stall in safe input") {
+        const held = this.#slowHeld;
+        return new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "safe-1",
+              toolName: "gate_safe"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "safe-1",
+              delta: "{"
+            });
+            await held;
+            controller.close();
+          }
+        });
       } else if (text === "slow then multiply") {
         return this.#slow(3);
       } else if (text === "slow") {
