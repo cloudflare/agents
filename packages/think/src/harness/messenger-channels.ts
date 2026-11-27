@@ -18,13 +18,22 @@ import type { ThinkHarness } from "agents/harness/think";
 import {
   chatSdkChannel,
   deliverToSurfaces,
+  deliveryDefinition,
   registerDeliverySink,
+  releaseDelivery,
   sendDelivery
 } from "agents/internal";
 import {
+  CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
+  type ChatRecoveryIncident
+} from "agents/chat";
+import {
   migrateLegacyRecoveredReplies,
   RECOVERED_REPLY_SINK,
-  recoveredReplySink
+  recoveredReplyId,
+  recoveredReplyOutcome,
+  recoveredReplySink,
+  type RecoveredReplyClaim
 } from "../messengers/recovered-reply";
 import {
   Channels,
@@ -90,6 +99,15 @@ export type ThinkMessengerChannels = {
    * think@0.24.0 kept under `cf_think_messenger_recovery:`. Called at start.
    */
   importReleasedReplies(): Promise<void>;
+  /**
+   * TEMPORARY: remove in the next minor. Release the reply held for a
+   * think@0.24.0 recovery incident with its outcome.
+   */
+  releaseReleasedReply(
+    incidentId: string,
+    outcome: "completed" | "interrupted",
+    text?: string
+  ): Promise<void>;
   /** Where a notice to messenger `id`'s `thread` is posted, if anywhere. */
   noticeSurface(
     id: string,
@@ -438,6 +456,34 @@ export function messengerChannels(options: {
     })
   );
 
+  /** Whether a think@0.24.0 recovery incident is over (or never was). */
+  async function incidentGone(incidentId: string): Promise<boolean> {
+    const incident = await options.storage.get<ChatRecoveryIncident>(
+      CHAT_RECOVERY_INCIDENT_KEY_PREFIX + encodeURIComponent(incidentId)
+    );
+    return (
+      !incident ||
+      incident.status === "skipped" ||
+      incident.status === "exhausted"
+    );
+  }
+
+  /** Release the reply held for `incidentId`, as Think releases it. */
+  async function release(
+    incidentId: string,
+    outcome: "completed" | "interrupted",
+    text?: string
+  ): Promise<void> {
+    const id = recoveredReplyId(incidentId);
+    const claim = options.tasks.inputOf<RecoveredReplyClaim>(id);
+    if (!claim) return;
+    await releaseDelivery(
+      options.tasks,
+      id,
+      recoveredReplyOutcome(claim, outcome, text)
+    );
+  }
+
   /** Drain the thread `asker` names, in the background. */
   function drainLater(asker: ChannelMessageSurface): void {
     const definition = definitions.find((d) => d.id === asker.channelKey);
@@ -478,17 +524,37 @@ export function messengerChannels(options: {
       return options.kv.get<MessengerContext>(contextKey(messageId));
     },
     async importReleasedReplies() {
+      // As Think moves them: settled ones are delivered; one whose incident
+      // still recovers is held, at once, so a release finds it; the rest
+      // are apologized for.
       await migrateLegacyRecoveredReplies(
         options.storage,
-        async () => true,
+        incidentGone,
         (id, claim, progress) =>
-          sendDelivery(options.tasks, RECOVERED_REPLY_SINK, id, claim, {
-            sentAt: Date.now(),
-            attempts: 0,
-            progress
-          })
+          progress.outcome === undefined
+            ? sendDelivery(options.tasks, RECOVERED_REPLY_SINK, id, claim)
+            : sendDelivery(options.tasks, RECOVERED_REPLY_SINK, id, claim, {
+                sentAt: Date.now(),
+                attempts: 0,
+                progress
+              })
       );
+      // A held reply whose incident is gone: nothing will release it now.
+      const prefix = recoveredReplyId("");
+      for (const held of options.tasks.peekList({
+        definition: deliveryDefinition(RECOVERED_REPLY_SINK),
+        status: ["pending"],
+        parked: true,
+        results: false
+      })) {
+        const incidentId = held.runId.slice(prefix.length);
+        if (await incidentGone(incidentId)) {
+          await release(incidentId, "interrupted");
+        }
+      }
     },
+    releaseReleasedReply: (incidentId, outcome, text) =>
+      release(incidentId, outcome, text),
     noticeSurface(id, thread) {
       const definition = definitions.find((d) => d.id === id);
       if (!definition || thread === undefined) return undefined;

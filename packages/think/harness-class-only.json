@@ -547,51 +547,6 @@
   },
   {
     "file": "messengers.test.ts",
-    "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes on start for a pending reply whose incident is gone",
-    "reason": "calls the class's private start step `_replayMessengerRecoveryDeliveries` and waits on its delivery run (`tasks.peek` of `recoveredReplyId`); the successor seeds the same released row and restarts the object",
-    "successor": {
-      "file": "messengers.test.ts",
-      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
-    }
-  },
-  {
-    "file": "messengers.test.ts",
-    "test": "think messengers core > recovered replies reach the thread (#2106) > keeps a pending reply on start while its incident is still recovering",
-    "reason": "holds a released reply for the class's own recovery incident (`cf:chat-recovery:incident:`), which the previous engine ran; after the move that recovery does not run (left-over jobs complete without doing anything), so the shell apologizes, as for an incident that is gone",
-    "successor": {
-      "file": "messengers.test.ts",
-      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
-    }
-  },
-  {
-    "file": "messengers.test.ts",
-    "test": "think messengers core > recovered replies reach the thread (#2106) > holds a migrated reply whose incident still recovers, so recovery's release delivers it",
-    "reason": "releases the held delivery through the class's private `_releaseMessengerRecovery` after its private start step; the shell has no previous-engine recovery to release it, so a released reply left unsettled is apologized for",
-    "successor": {
-      "file": "messengers.test.ts",
-      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
-    }
-  },
-  {
-    "file": "messengers.test.ts",
-    "test": "think messengers core > recovered replies reach the thread (#2106) > resumes a multi-post recovered reply after its last checkpoint",
-    "reason": "calls the class's private start step `_replayMessengerRecoveryDeliveries`; the successor seeds the same released row (cursor 1) and restarts the object",
-    "successor": {
-      "file": "messengers.test.ts",
-      "test": "think messengers core > recovered replies reach the thread (#2106) > posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart"
-    }
-  },
-  {
-    "file": "messengers.test.ts",
-    "test": "think messengers core > recovered replies reach the thread (#2106) > posts each chunk once when overlapping deliveries share a recovered reply",
-    "reason": "releases the class's held delivery twice at once beside its private start step (`releaseDelivery`, `_replayMessengerRecoveryDeliveries`); the successor delivers a released reply's posts each once, from its cursor",
-    "successor": {
-      "file": "messengers.test.ts",
-      "test": "think messengers core > recovered replies reach the thread (#2106) > posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart"
-    }
-  },
-  {
-    "file": "messengers.test.ts",
     "test": "think messengers core > recovered replies reach the thread (#2106) > releases the reply with its outcome before recovery reports completion",
     "reason": "reads the class's staged reply state (`tasks.checkpointOf` of `recoveredReplyId`) when its recovery emits `chat:recovery:completed`",
     "successor": {
