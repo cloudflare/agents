@@ -3687,7 +3687,8 @@ export class Think<
     const lastStep =
       final !== undefined &&
       step.toolChoice === undefined &&
-      turn.step >= (config.maxSteps ?? this.maxSteps) - 1;
+      // The turn's own limit: its override, else its channel's, as Think.
+      turn.step >= (this.#turnMaxSteps ?? this.maxSteps) - 1;
     const pinned = final && { type: "tool" as const, toolName: final.name };
     const toolChoice = lastStep
       ? pinned

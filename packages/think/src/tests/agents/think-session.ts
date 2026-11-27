@@ -11265,6 +11265,17 @@ const HOLD_AFTER_RESET_KEY = "test:hold-chunks-after-reset";
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
 
+  // A channel that permits one step, for a structured turn's pin.
+  override configureChannels() {
+    return {
+      brief: {
+        kind: "web" as const,
+        ingress: { transport: "websocket" as const },
+        maxTurns: 1
+      }
+    };
+  }
+
   /**
    * A test can hold the next onChatRecovery (to cut the recovery attempt
    * there with a reset, as the platform does). Kept in storage, across resets.
@@ -12518,6 +12529,25 @@ export class ThinkProgrammaticTestAgent extends Think {
         {
           id: crypto.randomUUID(),
           role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ],
+      options
+    );
+  }
+
+  /** A submission whose user message came in on `channel`. */
+  async testSubmitOnChannel(
+    text: string,
+    channel: string,
+    options?: { submissionId?: string; metadata?: Record<string, unknown> }
+  ): Promise<SubmitMessagesResult> {
+    return this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          metadata: { channel },
           parts: [{ type: "text" as const, text }]
         }
       ],
