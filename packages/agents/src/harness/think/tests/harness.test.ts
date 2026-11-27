@@ -977,8 +977,8 @@ describe("ThinkHarness durability", () => {
     const receipt = await stub.submit("gate then slow");
     await stub.gateStarted(1);
     await stub.release();
-    // The tool's result is in the transcript and the next call streams.
-    await stub.streamed();
+    // The tool's result is in the turn's stream and the next call streams.
+    await stub.streamed("text-delta");
 
     stub = await crash(name);
     await runDurableObjectAlarm(stub);
@@ -1086,6 +1086,33 @@ describe("ThinkHarness's own Tasks", () => {
     expect(await root.childGateRuns()).toBe(1);
     // The Agent's own Tasks holds none of the harness's runs.
     expect(await root.childAgentRuns()).toBe(0);
+  });
+
+  it("carries a released version's running turn forward in a sub-agent, reporting its started tool call", async () => {
+    const name = crypto.randomUUID();
+    let root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    const operationId = await root.childSubmit("gate");
+    await root.childGateStarted();
+
+    await abortAllDurableObjects();
+    root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    await root.childDowngradeToStore();
+    await abortAllDurableObjects();
+    root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    const result = root.childWait(operationId);
+    await runDurableObjectAlarm(root);
+    const settled = await result;
+    expect(settled.status).toBe("done");
+    expect(text(settled)).toMatch(
+      /^tool said: error: The tool call was interrupted/
+    );
+    expect(await root.childGateRuns()).toBe(1);
+    // A sub-agent empties the store's tables rather than dropping them.
+    expect(await root.childStoreTables()).toEqual({
+      cf_think_harness_store_log: 0,
+      cf_think_harness_store_operations: 0,
+      cf_think_harness_store_sessions: 0
+    });
   });
 });
 

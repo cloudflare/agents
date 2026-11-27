@@ -1,6 +1,7 @@
 import {
   asSchema,
   convertToModelMessages,
+  readUIMessageStream,
   stepCountIs,
   streamText,
   toUIMessageStream,
@@ -19,7 +20,7 @@ import { capabilitySchema } from "../../lifecycle/schema";
 import { REPLAY_ITEM_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
-import { backoffDelay, isPlatformFailure } from "../../retries";
+import { isPlatformFailure } from "../../retries";
 import {
   AttemptSupersededError,
   isTaskCancellation,
@@ -39,9 +40,15 @@ import {
 } from "../../chat/client-tools";
 import type { StreamChunkData } from "../../chat/message-builder";
 import {
-  ChatStreamStalledError,
-  iterateWithStallWatchdog
-} from "../../chat/stall-watchdog";
+  chatTurnDefinition,
+  chatTurnStreamId,
+  type ChatHost,
+  type ChatModelCall,
+  type ChatTurnInput,
+  type ChatTurnResult,
+  type InterruptedToolPart
+} from "../../chat/chat-host";
+import { TaskSettlement } from "../../tasks/settlement";
 import { StreamAccumulator } from "../../chat/stream-accumulator";
 import type {
   AgentHarness,
@@ -79,11 +86,7 @@ import {
   type ThinkSessionListener
 } from "./events";
 import { harnessHookRules } from "./extensions/hooks";
-import {
-  ExtensionManager,
-  type ExtensionBuild,
-  type RemindSection
-} from "./extensions/manager";
+import { ExtensionManager, type RemindSection } from "./extensions/manager";
 import { contextExtension, optionsExtension, resolve } from "./extensions/own";
 import { loadInProcess } from "./extensions/in-process";
 import { ReleasedRecords, type OperationInput } from "./records";
@@ -165,27 +168,22 @@ const CLIENT_TOOLS_KEY = "think-harness:client-tools";
 /** Open operations carried forward from the harness store at a time. */
 const CARRY_BATCH = 50;
 /** The checkpoint key a placed operation's progress is kept under. */
+/** The run checkpoint a released version's progress was carried into. */
 const TURN_KEY = "turn";
+/** The run checkpoint holding how a placed operation's turn runs. */
+const PLACED_KEY = "think:placed";
+/**
+ * The turn definition's run checkpoint naming the reply a turn continues,
+ * read to rebuild what a turn streamed outside its attempt.
+ */
+const CHAT_BASE_CHECKPOINT = "chat:base";
+/** The turn definition's error for a turn it did not continue. */
+const TURN_NOT_CONTINUED = "The turn was interrupted and not continued.";
 const DEFAULT_MAX_STEPS = 10;
 const DEFAULT_MAX_ATTEMPTS = 10;
-const DEFAULT_BACKOFF_MS = 1_000;
-const MAX_BACKOFF_MS = 60_000;
 const DEFAULT_STALL_TIMEOUT_MS = 120_000;
-const MAX_OVERFLOW_RETRIES = 1;
-/** Chunks packed into one stored stream segment. */
-const SEGMENT_CHUNKS = 10;
-/** Raw bytes packed into one stored segment before it is written. */
-const SEGMENT_MAX_BYTES = 256_000;
-/** Longest a streamed chunk waits in memory before it is written. */
-const FLUSH_AFTER_MS = 100;
-/** Segments read at a time when rebuilding an interrupted model call. */
+/** Stream chunks read at a time when rebuilding what a turn streamed. */
 const READ_PAGE = 50;
-/**
- * A server tool call's step: never retried by Tasks (the harness's tool
- * recovery decides what an interrupted call does), and never timed out
- * (the longest timer the runtime takes).
- */
-const TOOL_STEP = { retries: { limit: 1 }, timeout: 2 ** 31 - 1 } as const;
 
 const INTERRUPTED_TOOL_ERROR =
   "The tool call was interrupted before it finished, because the agent restarted. It may or may not have taken effect.";
@@ -199,25 +197,64 @@ type SessionBuild = {
   readonly allSections: string | undefined;
 };
 
+/** The operation a session is running in this isolate. */
 type LiveRun = {
   readonly operationId: string;
-  /** Chunks of the model call in progress. */
+  /** What the turn's stream holds, earlier attempts' chunks included. */
   partial: UIMessageChunk[];
-  /** Whether that call continues a message already persisted. */
+  /** Whether the turn continues a reply stored before it began. */
   continues: boolean;
   /** The tools this run resolved, which decide which calls are a client's. */
   tools?: ToolSet;
   /**
-   * The build an answer placed in this attempt made, which the attempt's
-   * model loop uses rather than building again.
+   * The build placing this attempt made, which the attempt's model loop
+   * uses rather than building again.
    */
   built?: SessionBuild;
-  /**
-   * The run was cancelled and its terminal report finished it from
-   * `partial`: the attempt, still unwinding, writes nothing more.
-   */
-  taken?: boolean;
+  /** The reply's id, once the loop has one. */
+  replyId?: string;
+  /** The reply as the loop holds it: everything streamed so far. */
+  reply?: UIMessage;
+  /** Settles when the attempt has returned. */
+  readonly done: Promise<void>;
 };
+
+/** How a placed operation's turn runs. */
+type PlacedTurn = {
+  readonly trigger: ChatModelCall["trigger"];
+  /** The user message the turn answers. */
+  readonly questionId?: string;
+  /** The participant who started the turn, who runs its client tools. */
+  readonly owner?: string;
+  /** Whether the turn continues a reply stored before it began. */
+  readonly continues: boolean;
+};
+
+/**
+ * An operation's placement, the run's `PLACED_KEY` checkpoint: how its turn
+ * runs, or how placing it ended it. Written in the transaction of the
+ * transcript write it goes with, so a reset leaves the two in step.
+ */
+type Placed = PlacedTurn | { readonly ended: OperationOutcome };
+
+/** What one attempt's loop runs with. */
+type TurnContext = {
+  readonly session: ThinkSessionId;
+  readonly operationId: string;
+  readonly built: SessionBuild;
+  readonly placed: PlacedTurn;
+  readonly live: LiveRun;
+};
+
+/** A model call's error, as the extensions classified it. */
+class ModelCallError extends Error {
+  constructor(
+    readonly kind: ThinkErrorClass,
+    readonly error: unknown
+  ) {
+    super(errorText(error));
+  }
+}
 
 /** An operation's input, as its run keeps it. */
 type OperationRunInput = {
@@ -242,9 +279,9 @@ type OperationOutcome =
     };
 
 /**
- * A placed operation's progress, the run's `turn` checkpoint. Written in
- * the transaction of the transcript or stream write it goes with, so a
- * reset leaves the two in step.
+ * A released version's progress for an open operation, carried forward
+ * into the run's `turn` checkpoint (`#carryForward`) and read once, when
+ * the run is placed (`#carryTurn`).
  */
 type TurnState = {
   /** The message a new assistant message is a child of. */
@@ -273,17 +310,6 @@ type TurnState = {
    * attempt finishes it as abandoned, with this reason.
    */
   readonly abandon?: string;
-};
-
-/** A change to a turn's progress; a field left out is unchanged. */
-type TurnChange = Partial<TurnState>;
-
-/** A placed operation: its run's input and progress. */
-type Turn = TurnState & {
-  readonly session: ThinkSessionId;
-  readonly operationId: string;
-  readonly input: OperationInput;
-  readonly source: "client" | "server";
 };
 
 /** A durable write: put messages and update operations, in one transaction. */
@@ -345,26 +371,6 @@ function endsAttempt(error: unknown, run: TaskStep): boolean {
     error instanceof AttemptSupersededError ||
     isPlatformFailure(error)
   );
-}
-
-function turnOf(
-  session: ThinkSessionId,
-  operationId: string,
-  stored: OperationRunInput,
-  state: TurnState
-): Turn {
-  return { ...state, session, operationId, ...stored };
-}
-
-function stateOf(turn: Turn): TurnState {
-  const {
-    session: _session,
-    operationId: _operationId,
-    input: _input,
-    source: _source,
-    ...state
-  } = turn;
-  return state;
 }
 
 function errorText(error: unknown): string {
@@ -500,6 +506,61 @@ function withOutcome(part: ToolCallPart, outcome: ToolOutcome): ToolCallPart {
         }
       : { ...part, state: "output-error", errorText: outcome.errorText }
   ) as ToolCallPart;
+}
+
+/**
+ * A message with every server tool call it left open (waiting to run, or
+ * approved) failed with `reason`.
+ */
+function settleOpenCalls(message: UIMessage, reason: string): UIMessage {
+  let settled = message;
+  for (const part of lastStep(message)) {
+    if (
+      isToolCallPart(part) &&
+      !part.providerExecuted &&
+      (part.state === "input-available" || part.state === "approval-responded")
+    ) {
+      settled = withToolPart(settled, part.toolCallId, (call) =>
+        withOutcome(call, { ok: false, errorText: reason })
+      );
+    }
+  }
+  return settled;
+}
+
+/**
+ * `message` continued by a model call's chunks, built as the turn
+ * definition builds the reply it stores.
+ */
+async function continued(
+  message: UIMessage | undefined,
+  chunks: readonly UIMessageChunk[]
+): Promise<UIMessage | undefined> {
+  let last = message;
+  for await (const snapshot of readUIMessageStream({
+    stream: new ReadableStream<UIMessageChunk>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      }
+    }),
+    ...(message && { message })
+  })) {
+    last = snapshot;
+  }
+  return last;
+}
+
+/** A value as JSON round-trips it; `undefined` stays itself. */
+function asJson(value: unknown): unknown {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+/** The client's tools in a build: the ones the harness does not run. */
+function clientToolsOf(tools: ToolSet): ClientToolSchema[] {
+  return Object.keys(tools)
+    .filter((name) => !isServerTool(tools, name))
+    .map((name) => ({ name }));
 }
 
 function asUIMessages(messages: readonly SessionMessage[]): UIMessage[] {
@@ -1166,7 +1227,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const partial = live
       ? [...live.partial]
       : running
-        ? this.#streamChunks(this.#state(running.runId)?.streamId)
+        ? this.#streamChunks(chatTurnStreamId(running.runId))
         : [];
     // The call in progress started with its owner.
     const started = partial.find((chunk) => chunk.type === "start");
@@ -1212,14 +1273,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         chunks: [...live.partial]
       };
     }
-    // Left by an eviction: the stream holds what was durable.
-    const state = this.#state(running.runId);
+    // Left by an eviction: the turn's stream holds what was durable.
+    const placed = this.#tasks.checkpointOf<Placed>(running.runId, PLACED_KEY);
     return {
       operationId,
       continuation:
-        state?.messageId != null &&
-        (await this.#handle(session).getMessage(state.messageId)) !== null,
-      chunks: this.#streamChunks(state?.streamId)
+        placed !== undefined && "continues" in placed && placed.continues,
+      chunks: this.#streamChunks(chatTurnStreamId(running.runId))
     };
   }
 
@@ -1291,75 +1351,120 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   // ── Running one operation ────────────────────────────────────────────────
 
   /**
-   * One attempt of an operation's run: place it if it is not yet, then
-   * take steps until the turn ends or waits. A later attempt, after a
-   * reset, picks up from the progress the last one wrote.
+   * One attempt of an operation's run. The first places it (what it brings
+   * goes into the transcript when its turn starts, not when it is
+   * accepted); every attempt then runs the chat module's turn definition,
+   * whose `respond` is the harness's model-and-tools loop. A later attempt,
+   * after a reset, finds the placement in the run's checkpoint and what the
+   * reply streamed so far in the turn's stream.
    */
   async #operate(
     stored: OperationRunInput,
     run: TaskStep
-  ): Promise<OperationOutcome> {
+  ): Promise<OperationOutcome | TaskSettlement> {
     const [session, operationId] = operationOf(run.id);
-    const live: LiveRun = { operationId, partial: [], continues: false };
+    let finish = () => {};
+    const live: LiveRun = {
+      operationId,
+      partial: [],
+      continues: false,
+      done: new Promise<void>((resolve) => {
+        finish = resolve;
+      })
+    };
     this.#live.set(session, live);
-    const state = run.checkpoint.get<TurnState>(TURN_KEY);
-    let turn = state && turnOf(session, operationId, stored, state);
     try {
-      if (turn?.ended) {
-        return outcomeOf(turn.ended, await this.#message(turn));
+      let placed = run.checkpoint.get<Placed>(PLACED_KEY);
+      if (!placed) {
+        // Carried forward from a released version, part way through.
+        const legacy = run.checkpoint.get<TurnState>(TURN_KEY);
+        placed = legacy
+          ? await this.#carryTurn(run, session, legacy, live)
+          : await this.#place(run, session, operationId, stored, live);
       }
-      if (turn?.abandon !== undefined) {
-        return this.#giveUp(run, turn, turn.abandon);
+      if ("ended" in placed) return placed.ended;
+      const built = live.built ?? (await this.#build(session));
+      live.tools = built.tools;
+      live.continues = placed.continues;
+      // What earlier attempts streamed, which this one continues.
+      if (run.attempt > 1) {
+        live.partial = this.#streamChunks(chatTurnStreamId(run.id));
       }
-      if (!turn) {
-        const placed = await this.#place(run, session, operationId, stored);
-        if ("status" in placed) return placed;
-        turn = placed;
-      }
-      const continuation = (await this.#message(turn)) !== undefined;
       this.#events.emit(session, {
         type: "run-start",
         operationId,
-        continuation
+        continuation: placed.continues || live.partial.length > 0
       });
       try {
-        return await this.#steps(run, turn, live);
+        const turn = chatTurnDefinition(
+          {
+            tasks: this.#tasks,
+            streams: this.#streams,
+            sessions: this.#sessions,
+            session
+          },
+          this.#chatHost(session, operationId, built, placed, live)
+        );
+        const input: ChatTurnInput = {
+          session,
+          trigger: placed.trigger,
+          ...(placed.questionId !== undefined && {
+            questionId: placed.questionId
+          }),
+          clientTools: clientToolsOf(built.tools)
+        };
+        const result = await turn(input, run);
+        if (result instanceof TaskSettlement) return result;
+        return await this.#outcome(run, session, result, live);
       } finally {
         this.#events.emit(session, { type: "run-end", operationId });
       }
     } catch (error) {
       if (endsAttempt(error, run)) throw error;
       console.error(`ThinkHarness operation ${operationId} failed`, error);
-      const current = run.checkpoint.get<TurnState>(TURN_KEY);
-      return this.#giveUp(
-        run,
-        current && turnOf(session, operationId, stored, current),
-        errorText(error)
-      );
+      return this.#giveUp(run, session, errorText(error), live);
     } finally {
       if (this.#live.get(session) === live) this.#live.delete(session);
+      finish();
     }
   }
 
+  /** How the turn definition's result ends the operation. */
+  async #outcome(
+    run: TaskStep,
+    session: ThinkSessionId,
+    result: ChatTurnResult,
+    live: LiveRun
+  ): Promise<OperationOutcome> {
+    if (result.status === "completed" || result.status === "skipped") {
+      const stored = result.messageId
+        ? await this.#handle(session).getMessage(result.messageId)
+        : null;
+      return outcomeOf({}, stored ? asUIMessage(stored) : undefined);
+    }
+    // The definition gave up on an interrupted turn, past the budget or as
+    // `onRecovery` chose: its partial is stored already.
+    if (result.error === TURN_NOT_CONTINUED) {
+      return {
+        status: "unanswered",
+        reason: "interrupted",
+        ...(live.reply && { messageId: live.reply.id })
+      };
+    }
+    return this.#giveUp(run, session, result.error ?? result.status, live);
+  }
+
   /**
-   * End the operation from inside its run: keep the partial answer, fail
-   * the tool calls it left open, and mark it ended with `reason`.
+   * End the operation from inside its run: keep what it streamed, fail the
+   * tool calls it left open, and settle it `unanswered` with `reason`.
    */
   async #giveUp(
     run: TaskStep,
-    turn: Turn | undefined,
-    reason: string
+    session: ThinkSessionId,
+    reason: string,
+    live: LiveRun
   ): Promise<OperationOutcome> {
-    const kept =
-      turn &&
-      (await this.#abandon(
-        turn.session,
-        stateOf(turn),
-        this.#streamChunks(turn.streamId),
-        reason,
-        run,
-        (change) => this.#write(run, turn, change)
-      ));
+    const kept = await this.#keepStreamed(run, session, run.id, reason, live);
     return {
       status: "unanswered",
       reason,
@@ -1367,85 +1472,114 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     };
   }
 
-  async #steps(
-    run: TaskStep,
-    first: Turn,
+  /**
+   * The chat module's host for one attempt: the harness's loop as
+   * `respond`, and the harness's hooks and recovery policy.
+   */
+  #chatHost(
+    session: ThinkSessionId,
+    operationId: string,
+    built: SessionBuild,
+    placed: PlacedTurn,
     live: LiveRun
-  ): Promise<OperationOutcome> {
-    let turn = first;
-    // One build per attempt: every model call and tool call of it sees the
-    // same tools and prompt. A change to them applies from the next turn.
-    const built = live.built ?? (await this.#build(first.session));
-    const tools = built.tools;
-    live.tools = tools;
-    for (;;) {
-      if (run.signal.aborted) throw run.signal.reason;
-      const message = await this.#message(turn);
-      // Read at every step, so a host that sets it from a turn's own
-      // configuration (a `beforeTurn` before the first model call) holds.
-      const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
-      const action = nextAction(
-        {
-          streamId: turn.streamId ?? undefined,
-          pendingModel: turn.pendingModel,
-          steps: turn.steps
+  ): ChatHost {
+    const { tools } = built;
+    const recovery = this.#options.recovery;
+    const hooks = this.#options.hooks;
+    return {
+      respond: async (call) =>
+        this.#respond(call, { session, operationId, built, placed, live }),
+      options: {
+        recovery: {
+          // The first attempt, then one per interruption it survives.
+          maxAttempts: (recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS) + 1,
+          stallTimeoutMs: recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS
+        }
+      },
+      hooks: {
+        transformChunk: (chunk) => {
+          live.partial.push(chunk);
+          this.#events.emit(session, { type: "chunk", operationId, chunk });
+          if (hooks?.onChunk) {
+            try {
+              hooks.onChunk({ session, operationId, chunk });
+            } catch (error) {
+              console.error("ThinkHarness onChunk hook failed", error);
+            }
+          }
+          return chunk;
         },
-        message,
-        (name, part) => answersHere(tools, name, part),
-        maxSteps
-      );
-      let next: Turn | OperationOutcome;
-      switch (action._tag) {
-        case "recover-model":
-          next = await this.#recoverModel(run, turn, message);
-          break;
-        case "call-model":
-          next = await this.#callModel(run, turn, message, tools, built, live);
-          break;
-        case "run-tools":
-          if (!message) return outcomeOf({}, message);
-          next = await this.#runTools(run, turn, message, action.calls, tools);
-          break;
-        case "await-input":
-        case "end":
-          return outcomeOf({}, message);
+        classifyError: (error) =>
+          error instanceof ModelCallError
+            ? error.kind === "retry"
+              ? "transient"
+              : error.kind === "context-overflow"
+                ? "overflow"
+                : "terminal"
+            : "terminal",
+        onContextOverflow: async () => {
+          try {
+            await this.#handle(session).compact();
+          } catch (error) {
+            console.warn("ThinkHarness could not compact the session", error);
+          }
+          return true;
+        },
+        onRecovery: async (context) => {
+          const partial =
+            context.partialParts.length > 0 && live.replyId !== undefined
+              ? ({
+                  id: live.replyId,
+                  role: "assistant",
+                  parts: context.partialParts
+                } as UIMessage)
+              : undefined;
+          const decision = await this.#extensions.hook("onRecovery", {
+            session,
+            operationId,
+            attempt: context.attempt - 1,
+            partial
+          });
+          return decision === "abandon" ? { continue: false } : undefined;
+        },
+        // A server tool call an interruption cut off is reported to the
+        // model as interrupted, unless its tool is safe to run again.
+        repairInterruptedToolPart: (part) => {
+          const name = toolNameOf(part as ToolCallPart);
+          const tool = Object.hasOwn(tools, name) ? tools[name] : undefined;
+          if (tool && toolRecovery(tool) === "rerun") return part;
+          return {
+            ...part,
+            state: "output-error",
+            errorText: tool
+              ? INTERRUPTED_TOOL_ERROR
+              : `Tool "${name}" is no longer available.`
+          } as InterruptedToolPart;
+        }
       }
-      if ("status" in next) return next;
-      turn = next;
-    }
+    };
   }
 
   /**
-   * Place an operation: write what it brings to the transcript and its
-   * progress, in one transaction. Returns the placed turn, or how the
-   * operation ended when placing ended it.
+   * Place an operation: write what it brings to the transcript, with the
+   * placement in the run's checkpoint, in one transaction. Returns how the
+   * turn runs, or how the operation ended when placing ended it.
    */
   async #place(
     run: TaskStep,
     session: ThinkSessionId,
     operationId: string,
-    stored: OperationRunInput
-  ): Promise<Turn | OperationOutcome> {
+    stored: OperationRunInput,
+    live: LiveRun
+  ): Promise<Placed> {
     const handle = this.#handle(session);
     const { input, source } = stored;
     const placed: UIMessage[] = [];
-    let turn: Turn | undefined;
+    let turn: Placed | undefined;
     let unanswered: string | undefined;
-
-    const progress = (change: TurnChange) => {
-      turn = this.#write(
-        run,
-        turnOf(session, operationId, stored, {
-          parentId: null,
-          messageId: null,
-          streamId: null,
-          pendingModel: true,
-          steps: 0,
-          interruptions: 0,
-          overflowRetries: 0
-        }),
-        change
-      );
+    const progress = (next: Placed) => {
+      turn = next;
+      run.checkpoint.set(PLACED_KEY, next);
     };
 
     switch (input.kind) {
@@ -1477,7 +1611,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             parentId = message.id;
             placed.push(message);
           }
-          progress({ parentId: last.id, messageId: crypto.randomUUID() });
+          progress({
+            trigger: "submit-message",
+            questionId: last.id,
+            continues: false,
+            ...(input.owner !== undefined && { owner: input.owner })
+          });
         });
         break;
       }
@@ -1488,13 +1627,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         // The answered message is published before the model loop runs, if
         // it runs at all: watches read its client tools from these. The
         // loop uses this build too.
-        // Only this operation's own run: one cancelled while it built must
-        // not hand its build to the next turn.
-        const live = this.#live.get(session);
-        if (live?.operationId === operationId) {
-          live.tools = tools;
-          live.built = built;
-        }
+        live.tools = tools;
+        live.built = built;
         const answer = input.answer;
         if (answer.type === "tool-result" && source === "client") {
           // A client answers only its own tools. A server tool's result
@@ -1538,6 +1672,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             (name, part) => answersHere(tools, name, part),
             Number.POSITIVE_INFINITY
           )._tag !== "await-input";
+        const owner = ownerOf(answered.metadata);
         await this.#commit(run, session, undefined, (put) => {
           put(answered);
           placed.push(answered);
@@ -1545,8 +1680,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           // with the answered message.
           progress(
             continues
-              ? { messageId: answered.id }
-              : { messageId: answered.id, pendingModel: false, ended: {} }
+              ? {
+                  trigger: "tool-answer",
+                  continues: true,
+                  ...(owner !== undefined && { owner })
+                }
+              : { ended: outcomeOf({}, answered) }
           );
         });
         break;
@@ -1560,8 +1699,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "not_found";
           break;
         }
-        await this.#commit(run, session, undefined, () =>
-          progress({ parentId: target, messageId: crypto.randomUUID() })
+        this.lifecycle.storage.transactionSync(() =>
+          progress({
+            trigger: "regenerate-message",
+            questionId: target,
+            continues: false
+          })
         );
         break;
       }
@@ -1571,13 +1714,22 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "not_found";
           break;
         }
-        await this.#commit(run, session, undefined, () =>
-          latest.role === "assistant"
-            ? progress({ messageId: latest.id })
-            : progress({
-                parentId: latest.id,
-                messageId: crypto.randomUUID()
-              })
+        const owner = ownerOf(latest.metadata);
+        this.lifecycle.storage.transactionSync(() =>
+          progress(
+            latest.role === "assistant"
+              ? {
+                  // Continuing a reply is the turn a tool answer runs.
+                  trigger: "tool-answer",
+                  continues: true,
+                  ...(owner !== undefined && { owner })
+                }
+              : {
+                  trigger: "submit-message",
+                  questionId: latest.id,
+                  continues: false
+                }
+          )
         );
         break;
       }
@@ -1587,44 +1739,257 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       this.#events.emit(session, { type: "message", message, operationId });
     }
     if (unanswered !== undefined || !turn) {
-      return { status: "unanswered", reason: unanswered ?? "not_found" };
+      return {
+        ended: { status: "unanswered", reason: unanswered ?? "not_found" }
+      };
     }
-    if (turn.ended) return outcomeOf(turn.ended, placed.at(-1));
+    const result: Placed = turn;
+    if ("ended" in result) return result;
     this.#events.emit(session, {
       type: "operation",
       status: { operationId, status: "placed" }
     });
-    return turn;
+    return result;
   }
 
-  // ── Model calls ──────────────────────────────────────────────────────────
+  /**
+   * Place a turn a released version left part way, from its progress: keep
+   * what its interrupted model call streamed, report the tool calls it had
+   * started as interrupted, and continue its reply, in one transaction with
+   * the placement.
+   */
+  async #carryTurn(
+    run: TaskStep,
+    session: ThinkSessionId,
+    state: TurnState,
+    live: LiveRun
+  ): Promise<Placed> {
+    const handle = this.#handle(session);
+    const stored =
+      state.messageId === null
+        ? null
+        : await handle.getMessage(state.messageId);
+    const existing = stored ? asUIMessage(stored) : undefined;
+    if (state.ended) return { ended: outcomeOf(state.ended, existing) };
+    const chunks = this.#streamChunks(state.streamId);
+    let reply = existing;
+    if (chunks.length > 0) {
+      const rebuilt = accumulate(
+        state.messageId ?? crypto.randomUUID(),
+        existing,
+        chunks
+      );
+      if (rebuilt) reply = settledPartial(rebuilt);
+    }
+    if (state.abandon !== undefined) {
+      const reason = state.abandon;
+      const kept = reply && settleOpenCalls(reply, reason);
+      const keep = kept && hasContent(kept) ? kept : undefined;
+      let ended: Placed = {
+        ended: {
+          status: "unanswered",
+          reason,
+          ...(keep && { messageId: keep.id })
+        }
+      };
+      await this.#commit(run, session, state.streamId ?? undefined, (put) => {
+        if (keep) put(keep, { parentId: state.parentId ?? undefined });
+        run.checkpoint.set(PLACED_KEY, ended);
+      });
+      if (keep) {
+        this.#events.emit(session, { type: "message", message: keep });
+      } else {
+        ended = { ended: { status: "unanswered", reason } };
+      }
+      return ended;
+    }
+    const built = await this.#build(session);
+    live.built = built;
+    if (reply) {
+      for (const toolCallId of state.started ?? []) {
+        reply = withToolPart(reply, toolCallId, (part) => {
+          const name = toolNameOf(part);
+          const tool = Object.hasOwn(built.tools, name)
+            ? built.tools[name]
+            : undefined;
+          return part.state === "input-available" &&
+            !(tool && toolRecovery(tool) === "rerun")
+            ? withOutcome(part, {
+                ok: false,
+                errorText: INTERRUPTED_TOOL_ERROR
+              })
+            : part;
+        });
+      }
+    }
+    const keep = reply && hasContent(reply) ? reply : undefined;
+    const owner = ownerOf(keep?.metadata);
+    const placed: PlacedTurn = keep
+      ? {
+          trigger: "tool-answer",
+          continues: true,
+          ...(owner !== undefined && { owner })
+        }
+      : {
+          trigger: "submit-message",
+          ...(state.parentId !== null && { questionId: state.parentId }),
+          continues: false
+        };
+    await this.#commit(run, session, state.streamId ?? undefined, (put) => {
+      if (keep && keep !== existing) {
+        put(keep, { parentId: state.parentId ?? undefined });
+      }
+      run.checkpoint.set(PLACED_KEY, placed);
+    });
+    return placed;
+  }
+
+  // ── The model-and-tools loop ─────────────────────────────────────────────
 
   /**
-   * One model call. Its chunks go to a stream as they arrive; when it ends,
-   * the message is persisted and the stream discarded in one transaction.
-   * Returns the turn to go on with, or how the operation ended.
+   * The harness's `respond`: model calls and server tool calls, one step at
+   * a time, until the turn ends or waits for an answer. Every model call
+   * prepares the session's context and runs `beforeTurn`; every server
+   * tool call runs as a durable step of the turn's run, so a reset never
+   * runs a finished tool again.
    */
-  async #callModel(
-    run: TaskStep,
-    start: Turn,
+  async *#respond(
+    call: ChatModelCall,
+    turn: TurnContext
+  ): AsyncGenerator<UIMessageChunk> {
+    const { built, live } = turn;
+    const { tools } = built;
+    const continuing =
+      call.mode === "continue" ? call.messages.at(-1) : undefined;
+    const before = continuing ? call.messages.slice(0, -1) : [...call.messages];
+    const messageId = continuing?.id ?? crypto.randomUUID();
+    live.replyId = messageId;
+    let reply = continuing;
+    live.reply = reply;
+    let steps = 0;
+    let pendingModel = true;
+    let started = false;
+    let finish: UIMessageChunk = { type: "finish" };
+    const stop = new AbortController();
+    const signal = AbortSignal.any([call.signal, stop.signal]);
+    try {
+      for (;;) {
+        if (signal.aborted) return;
+        // Read at every step, so a host that sets it from a turn's own
+        // configuration (a `beforeTurn` before the first model call) holds.
+        const maxSteps = this.#options.maxSteps ?? DEFAULT_MAX_STEPS;
+        const action = nextAction(
+          { streamId: undefined, pendingModel, steps },
+          reply,
+          (name, part) => answersHere(tools, name, part),
+          maxSteps
+        );
+        if (action._tag === "call-model") {
+          const chunks: UIMessageChunk[] = [];
+          const model = await this.#modelCall(
+            call,
+            turn,
+            reply ? [...before, reply] : before,
+            reply,
+            messageId,
+            steps,
+            signal
+          );
+          for await (const chunk of untilAborted(model.stream, signal)) {
+            if (chunk.type === "start") {
+              if (started) continue;
+              started = true;
+            } else if (chunk.type === "finish") {
+              finish = chunk;
+              continue;
+            } else if (chunk.type === "error" || chunk.type === "abort") {
+              // The model's error is thrown below, out of band.
+              continue;
+            }
+            chunks.push(chunk);
+            yield chunk;
+          }
+          if (signal.aborted) return;
+          const failure = model.error();
+          if (failure !== undefined) {
+            try {
+              await this.#extensions.hook("onError", {
+                error: failure,
+                session: turn.session,
+                operationId: turn.operationId
+              });
+            } catch (error) {
+              console.error("ThinkHarness onError hook failed", error);
+            }
+            const kind =
+              (await this.#extensions.hook("classifyError", {
+                error: failure
+              })) ?? "fail";
+            throw new ModelCallError(kind, failure);
+          }
+          reply = await continued(reply, chunks);
+          if (!reply) throw new Error("The model call produced no message");
+          live.reply = reply;
+          steps += 1;
+          pendingModel = lastStep(reply).some(
+            (part) => isToolCallPart(part) && !part.providerExecuted
+          );
+          await this.#extensions.hook("onStepFinish", {
+            session: turn.session,
+            operationId: turn.operationId,
+            step: steps - 1,
+            message: reply,
+            finishReason:
+              finish.type === "finish" ? finish.finishReason : undefined
+          });
+          continue;
+        }
+        if (action._tag === "run-tools" && reply) {
+          const tooled = this.#runTools(
+            call,
+            turn,
+            reply,
+            action.calls,
+            signal
+          );
+          for (;;) {
+            const next = await tooled.next();
+            if (next.done) {
+              reply = next.value;
+              break;
+            }
+            yield next.value;
+          }
+          live.reply = reply;
+          continue;
+        }
+        yield finish;
+        return;
+      }
+    } finally {
+      stop.abort(new Error("The turn's stream ended"));
+    }
+  }
+
+  /**
+   * One model call: the session's context prepared, `beforeTurn` run, and
+   * the call streamed as UI message chunks.
+   */
+  async #modelCall(
+    call: ChatModelCall,
+    turn: TurnContext,
+    history: UIMessage[],
     existing: UIMessage | undefined,
-    tools: ToolSet,
-    prompt: Pick<ExtensionBuild, "system" | "remind" | "allSections">,
-    live: LiveRun
-  ): Promise<Turn | OperationOutcome> {
-    const { session, operationId } = start;
-    const messageId = start.messageId ?? crypto.randomUUID();
-    const owner = existing
-      ? ownerOf(existing.metadata)
-      : start.input.kind === "messages"
-        ? start.input.owner
-        : undefined;
+    messageId: string,
+    step: number,
+    signal: AbortSignal
+  ): Promise<{
+    readonly stream: AsyncIterable<UIMessageChunk>;
+    readonly error: () => unknown;
+  }> {
+    const { session, operationId, built, placed } = turn;
+    const { tools } = built;
     const hooks = this.#options.hooks;
-    const handle = this.#handle(session);
-    const parentId = start.parentId ?? undefined;
-    const history = asUIMessages(
-      await handle.getHistory({ leafId: existing ? existing.id : parentId })
-    );
     // Every call prepares the session's context. The call that starts a
     // turn records on its user message the prompt it is sent with and any
     // remind block that changed; every call sends the transcript as a
@@ -1636,13 +2001,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     let recordSent: PreparedTurn["recordSent"] | undefined;
     let blockReminder: string | null = null;
     let request = history;
-    let optionsSystem = prompt.system;
+    let optionsSystem = built.system;
     if (context) {
-      await this.#remindBlocks(context, prompt.remind);
+      await this.#remindBlocks(context, built.remind);
       const prepared = await context.prepareTurn({
         messages: history,
         // A call after an interruption is sent as the first attempt was.
-        retry: start.interruptions > 0
+        retry: call.attempt > 1 && step === 0
       });
       contextSystem = prepared.system;
       recordSent = prepared.recordSent;
@@ -1655,14 +2020,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (!context) {
       // Without a context a remind section has nowhere to be recorded, so
       // it is system text like the others, in its place.
-      optionsSystem = prompt.allSections;
+      optionsSystem = built.allSections;
     }
     const system = joinSystem(optionsSystem, contextSystem);
     const config =
       (await hooks?.beforeTurn?.({
         session,
         operationId,
-        step: start.steps,
+        step,
         continuation: existing !== undefined,
         messages: request,
         system,
@@ -1712,548 +2077,322 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         tools,
         ignoreIncompleteToolCalls: true
       }));
-
-    // A message a hook appended after the turn's parent, before the reply
-    // began (an extension's `sendMessage`), comes before the reply.
-    const replyParentId =
-      existing || parentId === undefined
-        ? parentId
-        : ((await appendedAfter(handle, parentId)) ?? parentId);
-
-    // The stream id is durable before the stream exists, so an eviction at
-    // any point leaves evidence the next attempt recovers from.
-    const streamId = `think:${crypto.randomUUID()}`;
-    const turn = this.#write(run, start, {
-      streamId,
-      messageId,
-      ...(replyParentId !== parentId && { parentId: replyParentId ?? null })
-    });
-    const writer = await this.#streams.open(streamId, {
-      tag: streamTag(session, operationId),
-      metadata: { session, operationId, messageId }
-    });
-
-    const stall = new AbortController();
-    const signal = AbortSignal.any([run.signal, stall.signal]);
     let modelError: unknown;
-    let final: UIMessage | undefined;
-    let finishReason: string | undefined;
-    let caught: unknown;
-    live.partial = [];
-    live.continues = existing !== undefined;
-    let segment: UIMessageChunk[] = [];
-    let segmentBytes = 0;
-    // Chunks are written in segments, for fewer storage writes, but never
-    // held longer than FLUSH_AFTER_MS: what a client has seen should be
-    // what recovery finds after an eviction.
-    let flushTimer: ReturnType<typeof setTimeout> | undefined;
-    const flush = () => {
-      if (flushTimer !== undefined) clearTimeout(flushTimer);
-      flushTimer = undefined;
-      // An abort's report took the chunks from memory and closed the stream.
-      if (segment.length === 0 || live.taken) return;
-      // SAFETY: UI message chunks are JSON by the AI SDK's contract.
-      writer.append(segment as unknown as StreamJson);
-      segment = [];
-      segmentBytes = 0;
-    };
-
-    try {
-      const result = streamText({
-        model,
-        ...(effectiveSystem !== undefined && { system: effectiveSystem }),
-        messages,
-        tools: offered,
-        ...(config.toolChoice !== undefined && {
-          toolChoice: config.toolChoice
-        }),
-        ...(config.providerOptions !== undefined && {
-          providerOptions: config.providerOptions
-        }),
-        ...(config.maxOutputTokens !== undefined && {
-          maxOutputTokens: config.maxOutputTokens
-        }),
-        ...(config.temperature !== undefined && {
-          temperature: config.temperature
-        }),
-        stopWhen: stepCountIs(1),
-        abortSignal: signal,
-        onError: ({ error }) => {
+    const result = streamText({
+      model,
+      ...(effectiveSystem !== undefined && { system: effectiveSystem }),
+      messages,
+      tools: offered,
+      ...(config.toolChoice !== undefined && {
+        toolChoice: config.toolChoice
+      }),
+      ...(config.providerOptions !== undefined && {
+        providerOptions: config.providerOptions
+      }),
+      ...(config.maxOutputTokens !== undefined && {
+        maxOutputTokens: config.maxOutputTokens
+      }),
+      ...(config.temperature !== undefined && {
+        temperature: config.temperature
+      }),
+      stopWhen: stepCountIs(1),
+      abortSignal: signal,
+      onError: ({ error }) => {
+        modelError ??= error;
+      }
+    });
+    const owner = placed.owner;
+    const stream = toUIMessageStream({
+      stream: result.stream,
+      tools: offered,
+      originalMessages: [] as UIMessage[],
+      generateMessageId: () => messageId,
+      // The participant who started the turn runs its client tools.
+      messageMetadata: ({ part }) =>
+        part.type === "start" && owner !== undefined ? { owner } : undefined
+    });
+    return {
+      stream: (async function* () {
+        try {
+          for await (const chunk of stream) yield chunk;
+        } catch (error) {
           modelError ??= error;
         }
-      });
-      const stream = toUIMessageStream({
-        stream: result.stream,
-        tools: offered,
-        // Only a continuation passes the transcript: the AI SDK continues
-        // the last message when it is the assistant's, which a new answer
-        // must not do (the last message may be a compaction summary).
-        originalMessages: existing ? history : [],
-        generateMessageId: () => messageId,
-        // The participant who started the turn runs its client tools.
-        messageMetadata: ({ part }) =>
-          part.type === "start" && owner !== undefined ? { owner } : undefined,
-        onEnd: ({ responseMessage }) => {
-          final = responseMessage;
-        }
-      });
-      const stallTimeoutMs =
-        this.#options.recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
-      for await (const chunk of untilAborted(
-        iterateWithStallWatchdog(stream, stallTimeoutMs, () =>
-          stall.abort(new ChatStreamStalledError("Model stream stalled"))
-        ),
-        run.signal
-      )) {
-        if (chunk.type === "finish") finishReason = chunk.finishReason;
-        live.partial.push(chunk);
-        segment.push(chunk);
-        segmentBytes += JSON.stringify(chunk).length;
-        if (
-          segment.length >= SEGMENT_CHUNKS ||
-          segmentBytes >= SEGMENT_MAX_BYTES
-        ) {
-          flush();
-        } else {
-          flushTimer ??= setTimeout(flush, FLUSH_AFTER_MS);
-        }
-        this.#events.emit(session, { type: "chunk", operationId, chunk });
-        if (hooks?.onChunk) {
-          try {
-            hooks.onChunk({ session, operationId, chunk });
-          } catch (error) {
-            console.error("ThinkHarness onChunk hook failed", error);
-          }
-        }
-      }
-    } catch (error) {
-      caught = error;
-    }
-    flush();
-    // Cancelled: the run's terminal report keeps the partial answer.
-    if (run.signal.aborted) throw run.signal.reason;
-
-    const message = final ?? accumulate(messageId, existing, live.partial);
-    const partial = message ? settledPartial(message) : undefined;
-    const keep = partial && hasContent(partial) ? partial : undefined;
-    const stalled =
-      caught instanceof ChatStreamStalledError || stall.signal.aborted;
-    const failure = stalled ? undefined : (modelError ?? caught);
-
-    if (stalled || failure !== undefined) {
-      if (failure !== undefined) {
-        try {
-          await this.#extensions.hook("onError", {
-            error: failure,
-            session,
-            operationId
-          });
-        } catch (error) {
-          console.error("ThinkHarness onError hook failed", error);
-        }
-      }
-      const kind = stalled
-        ? "retry"
-        : ((await this.#extensions.hook("classifyError", {
-            error: failure
-          })) ?? "fail");
-      if (
-        kind === "context-overflow" &&
-        turn.overflowRetries < MAX_OVERFLOW_RETRIES
-      ) {
-        let next = turn;
-        await this.#commit(run, session, streamId, (put) => {
-          if (keep) put(keep, { parentId: replyParentId });
-          next = this.#write(run, turn, {
-            streamId: null,
-            overflowRetries: turn.overflowRetries + 1
-          });
-        });
-        try {
-          await handle.compact();
-        } catch (error) {
-          console.warn("ThinkHarness could not compact the session", error);
-        }
-        return next;
-      }
-      if (kind === "retry") {
-        return this.#interrupted(run, turn, streamId, keep);
-      }
-      const reason = errorText(failure);
-      await this.#commit(run, session, streamId, (put) => {
-        if (keep) put(keep, { parentId: replyParentId });
-        this.#write(run, turn, { streamId: null, ended: { reason } });
-      });
-      return {
-        status: "unanswered",
-        reason,
-        ...(keep && { messageId: keep.id })
-      };
-    }
-
-    if (!message) throw new Error("The model call produced no message");
-    const toolCalls = lastStep(message).some(
-      (part) => isToolCallPart(part) && !part.providerExecuted
-    );
-    let next = turn;
-    await this.#commit(run, session, streamId, (put) => {
-      put(message, { parentId: replyParentId });
-      next = this.#write(run, turn, {
-        streamId: null,
-        steps: turn.steps + 1,
-        interruptions: 0,
-        pendingModel: toolCalls
-      });
-    });
-    live.partial = [];
-    live.continues = true;
-    this.#events.emit(session, { type: "message", message, operationId });
-    await this.#extensions.hook("onStepFinish", {
-      session,
-      operationId,
-      step: turn.steps,
-      message,
-      finishReason
-    });
-    return next;
+      })(),
+      error: () => modelError
+    };
   }
 
   /**
-   * A model call an eviction cut short: keep what it produced, then call
-   * the model again to continue the same message, within the budget.
+   * Run a model step's server tool calls, each as a durable step of the
+   * turn's run, and stream their results. A call that needs approval is
+   * asked for instead. Returns the reply with the results in it.
    */
-  async #recoverModel(
-    run: TaskStep,
-    turn: Turn,
-    existing: UIMessage | undefined
-  ): Promise<Turn | OperationOutcome> {
-    const streamId = turn.streamId;
-    if (streamId === null) return turn;
-    const chunks = this.#streamChunks(streamId);
-    const rebuilt =
-      chunks.length > 0
-        ? accumulate(turn.messageId ?? crypto.randomUUID(), existing, chunks)
-        : undefined;
-    const partial = rebuilt ? settledPartial(rebuilt) : undefined;
-    const keep = partial && hasContent(partial) ? partial : undefined;
-    return this.#interrupted(run, turn, streamId, keep);
-  }
-
-  /**
-   * Count an interruption, keep the partial, and decide whether to go on.
-   * A second interruption in a row waits out a backoff first, as a sleep
-   * of the run, which keeps the session's lane.
-   */
-  async #interrupted(
-    run: TaskStep,
-    turn: Turn,
-    streamId: string,
-    partial: UIMessage | undefined
-  ): Promise<Turn | OperationOutcome> {
-    const { session, operationId } = turn;
-    const recovery = this.#options.recovery;
-    const attempt = turn.interruptions + 1;
-    const maxAttempts = recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-    let decision: "continue" | "abandon" =
-      attempt > maxAttempts ? "abandon" : "continue";
-    if (decision === "continue") {
-      decision =
-        (await this.#extensions.hook("onRecovery", {
-          session,
-          operationId,
-          attempt,
-          partial
-        })) ?? "continue";
-    }
-    let next = turn;
-    await this.#commit(run, session, streamId, (put) => {
-      if (partial) put(partial, { parentId: turn.parentId ?? undefined });
-      next = this.#write(run, turn, {
-        streamId: null,
-        interruptions: attempt,
-        ...(decision === "abandon" && { ended: { reason: "interrupted" } })
-      });
-    });
-    if (partial) {
-      this.#events.emit(session, {
-        type: "message",
-        message: partial,
-        operationId
-      });
-    }
-    if (decision === "abandon") {
-      return {
-        status: "unanswered",
-        reason: "interrupted",
-        ...(next.messageId !== null && { messageId: next.messageId })
-      };
-    }
-    if (attempt > 1) {
-      await run.sleep(
-        `backoff:${turn.steps}:${attempt}`,
-        backoffDelay(attempt - 1, {
-          baseMs: recovery?.backoffMs ?? DEFAULT_BACKOFF_MS,
-          maxMs: MAX_BACKOFF_MS
-        })
-      );
-    }
-    return next;
-  }
-
-  // ── Tool calls ───────────────────────────────────────────────────────────
-
-  /**
-   * Run a model step's server tool calls, each as a step of the run: the
-   * step runs the tool and writes its result to the transcript, so a call
-   * whose step was started before and has no result was cut short.
-   */
-  async #runTools(
-    run: TaskStep,
-    start: Turn,
+  async *#runTools(
+    call: ChatModelCall,
+    turn: TurnContext,
     message: UIMessage,
     calls: readonly ToolCallPart[],
-    tools: ToolSet
-  ): Promise<Turn> {
-    const { session, operationId } = start;
-    const history = asUIMessages(
-      await this.#handle(session).getHistory({ leafId: message.id })
-    );
-    const modelMessages = await convertToModelMessages(history.slice(0, -1), {
+    signal: AbortSignal
+  ): AsyncGenerator<UIMessageChunk, UIMessage> {
+    const { session, operationId, built } = turn;
+    const { tools } = built;
+    const history = [...call.messages];
+    if (history.at(-1)?.id === message.id) history.pop();
+    const modelMessages = await convertToModelMessages(history, {
       tools,
       ignoreIncompleteToolCalls: true
     });
-    // The run owns this message while it runs tools; every completion
-    // updates this copy and persists it whole.
+    // Named by the reply's model step, which every attempt rebuilds the
+    // same: a provider may reuse a tool-call id in a later step.
+    const stepIndex = message.parts.filter(
+      (part) => part.type === "step-start"
+    ).length;
     let current = message;
-    let turn = start;
 
     const toRun: ToolCallPart[] = [];
-    const approvals: string[] = [];
-    for (const call of calls) {
-      const toolName = toolNameOf(call);
+    for (const part of calls) {
+      const toolName = toolNameOf(part);
       const tool = Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
-      if (!tool) {
-        toRun.push(call);
-        continue;
-      }
-      if (call.state === "input-available") {
+      if (tool && part.state === "input-available") {
         const needsApproval =
           (await this.#options.toolApproval?.({
             session,
             toolName,
-            toolCallId: call.toolCallId,
-            input: call.input
+            toolCallId: part.toolCallId,
+            input: part.input
           })) ||
-          (await toolNeedsApproval(tool, call.input, {
-            toolCallId: call.toolCallId,
+          (await toolNeedsApproval(tool, part.input, {
+            toolCallId: part.toolCallId,
             messages: modelMessages
           }));
         if (needsApproval) {
-          approvals.push(call.toolCallId);
+          const approvalId = `approval:${part.toolCallId}`;
+          current = withToolPart(
+            current,
+            part.toolCallId,
+            (toolPart) =>
+              // SAFETY: the new state is set with exactly the fields it
+              // requires.
+              ({
+                ...toolPart,
+                state: "approval-requested",
+                approval: { id: approvalId }
+              }) as ToolCallPart
+          );
+          yield {
+            type: "tool-approval-request",
+            approvalId,
+            toolCallId: part.toolCallId
+          } as UIMessageChunk;
           continue;
         }
       }
-      toRun.push(call);
-    }
-    if (approvals.length > 0) {
-      for (const toolCallId of approvals) {
-        current = withToolPart(
-          current,
-          toolCallId,
-          (part) =>
-            // SAFETY: the new state is set with exactly the fields it requires.
-            ({
-              ...part,
-              state: "approval-requested",
-              approval: { id: `approval:${toolCallId}` }
-            }) as ToolCallPart
-        );
-      }
-      const snapshot = current;
-      await this.#commit(run, session, undefined, (put) => put(snapshot));
-      this.#events.emit(session, {
-        type: "message",
-        message: snapshot,
-        operationId
-      });
+      toRun.push(part);
     }
 
-    const maxAttempts =
-      this.#options.recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-    await Promise.all(
-      toRun.map((call) => {
-        const toolName = toolNameOf(call);
-        const tool = Object.hasOwn(tools, toolName)
-          ? tools[toolName]
-          : undefined;
-        const { toolCallId } = call;
-        // A provider may reuse a tool-call id in a later model step.
-        return run.do(
-          `tool:${start.steps}:${toolCallId}`,
-          TOOL_STEP,
-          async ({ attempt: stepAttempt, signal }) => {
-            // Starts before this one, including one an earlier version
-            // recorded before the call became a step.
-            const attempt =
-              stepAttempt + (start.started?.includes(toolCallId) ? 1 : 0);
-            // Removed since the model was offered it, or never offered.
-            const unavailable: ToolOutcome = {
-              ok: false,
-              errorText: `Tool "${toolName}" is no longer available.`
-            };
-            let outcome: ToolOutcome | undefined;
-            if (!tool) {
-              outcome = unavailable;
-            } else if (
-              attempt > 1 &&
-              (toolRecovery(tool) === "report" || attempt - 1 >= maxAttempts)
-            ) {
-              // Started before, with no result in the transcript: an
-              // eviction cut it short.
-              outcome = { ok: false, errorText: INTERRUPTED_TOOL_ERROR };
-            }
-            let input: unknown = call.input;
-            if (!outcome && tool) {
+    const aborted = new Promise<"aborted">((resolveAbort) => {
+      if (signal.aborted) resolveAbort("aborted");
+      else {
+        signal.addEventListener("abort", () => resolveAbort("aborted"), {
+          once: true
+        });
+      }
+    });
+    const settled = await Promise.race([
+      aborted,
+      Promise.all(
+        toRun.map(async (part) => {
+          const toolName = toolNameOf(part);
+          const tool = Object.hasOwn(tools, toolName)
+            ? tools[toolName]
+            : undefined;
+          const { toolCallId } = part;
+          const recorded = await call.step(
+            `tool:${stepIndex}:${toolCallId}`,
+            async (): Promise<{ outcome: ToolOutcome; input: unknown }> => {
+              let input: unknown = part.input;
+              // Removed since the model was offered it, or never offered.
+              if (!tool) {
+                return {
+                  input,
+                  outcome: {
+                    ok: false,
+                    errorText: `Tool "${toolName}" is no longer available.`
+                  }
+                };
+              }
               const decision = await this.#extensions.hook("beforeToolCall", {
                 session,
                 operationId,
                 toolCallId,
                 toolName,
                 input,
-                attempt
+                attempt: call.attempt
               });
               if (decision?.action === "block") {
-                outcome = { ok: false, errorText: decision.reason };
-              } else if (decision?.action === "substitute") {
-                outcome = { ok: true, output: decision.output };
-              } else {
-                if (
-                  decision?.action === "run" &&
-                  decision.input !== undefined
-                ) {
-                  input = decision.input;
-                }
-                outcome = await executeTool(tool, input, {
-                  toolCallId,
-                  messages: modelMessages,
-                  abortSignal: signal,
-                  onPreliminary: (output) =>
-                    this.#events.emit(session, {
-                      type: "chunk",
-                      operationId,
-                      chunk: {
-                        type: "tool-output-available",
-                        toolCallId,
-                        output,
-                        preliminary: true
-                      }
-                    })
-                });
+                return {
+                  input,
+                  outcome: { ok: false, errorText: decision.reason }
+                };
               }
+              if (decision?.action === "substitute") {
+                return {
+                  input,
+                  outcome: { ok: true, output: decision.output }
+                };
+              }
+              if (decision?.action === "run" && decision.input !== undefined) {
+                input = decision.input;
+              }
+              const outcome = await executeTool(tool, input, {
+                toolCallId,
+                messages: modelMessages,
+                abortSignal: signal,
+                onPreliminary: (output) =>
+                  this.#events.emit(session, {
+                    type: "chunk",
+                    operationId,
+                    chunk: {
+                      type: "tool-output-available",
+                      toolCallId,
+                      output,
+                      preliminary: true
+                    }
+                  })
+              });
+              // Journaled as JSON: an output's own `toJSON` decides its form.
+              return {
+                input: asJson(input),
+                outcome: outcome.ok
+                  ? { ok: true, output: asJson(outcome.output) }
+                  : outcome
+              };
             }
-            // Aborted while it ran: the run's report settles the call.
-            if (signal.aborted) return;
-            const settled = outcome ?? unavailable;
-            await this.#extensions.hook("afterToolCall", {
-              session,
-              operationId,
-              toolCallId,
-              toolName,
-              input,
-              attempt,
-              ...settled
-            });
-            current = withToolPart(current, toolCallId, (part) =>
-              withOutcome(part, settled)
-            );
-            const snapshot = current;
-            await this.#commit(run, session, undefined, (put) => {
-              put(snapshot);
-              turn = this.#write(run, turn, { interruptions: 0 });
-            });
-            this.#events.emit(session, {
-              type: "chunk",
-              operationId,
-              chunk: settled.ok
-                ? {
-                    type: "tool-output-available",
-                    toolCallId,
-                    output: settled.output
-                  }
-                : {
-                    type: "tool-output-error",
-                    toolCallId,
-                    errorText: settled.errorText
-                  }
-            });
-            this.#events.emit(session, {
-              type: "message",
-              message: snapshot,
-              operationId
-            });
-          }
-        );
-      })
-    );
-    return turn;
+          );
+          if (signal.aborted) return undefined;
+          await this.#extensions.hook("afterToolCall", {
+            session,
+            operationId,
+            toolCallId,
+            toolName,
+            input: recorded.input,
+            attempt: call.attempt,
+            ...recorded.outcome
+          });
+          return { toolCallId, outcome: recorded.outcome };
+        })
+      )
+    ]);
+    // Aborted while they ran: the stop settles the calls.
+    if (settled === "aborted" || signal.aborted) return current;
+    for (const result of settled) {
+      if (!result) continue;
+      const { toolCallId, outcome } = result;
+      current = withToolPart(current, toolCallId, (part) =>
+        withOutcome(part, outcome)
+      );
+      yield outcome.ok
+        ? { type: "tool-output-available", toolCallId, output: outcome.output }
+        : {
+            type: "tool-output-error",
+            toolCallId,
+            errorText: outcome.errorText
+          };
+    }
+    return current;
   }
 
   // ── Settling ─────────────────────────────────────────────────────────────
 
   /**
-   * Finish an operation that cannot run on: keep what its interrupted
-   * model call produced (`chunks`), mark any tool call it left open as
-   * failed, and discard its stream. `progress` joins the write, for an
-   * attempt that ends the operation itself. Returns the operation's
-   * message as it is left.
+   * Keep what an operation that cannot run on streamed: its reply as this
+   * attempt holds it (`live`), or rebuilt from the turn's stream, with any
+   * server tool call it left open failed with `reason`; the stream is
+   * discarded in the same transaction. Returns the reply as it is left.
    */
-  async #abandon(
+  async #keepStreamed(
+    run: TaskStep | undefined,
     session: ThinkSessionId,
-    state: TurnState | undefined,
-    chunks: readonly UIMessageChunk[],
+    runId: string,
     reason: string,
-    run?: TaskStep,
-    progress?: (change: TurnChange) => void
+    live?: LiveRun
   ): Promise<UIMessage | undefined> {
-    if (!state) return undefined;
-    const stored =
-      state.messageId === null
-        ? null
-        : await this.#handle(session).getMessage(state.messageId);
-    const existing = stored ? asUIMessage(stored) : undefined;
-    let message = existing;
-    if (chunks.length > 0) {
+    const handle = this.#handle(session);
+    const stored = async (id: string | null | undefined) => {
+      const message = id == null ? null : await handle.getMessage(id);
+      return message ? asUIMessage(message) : undefined;
+    };
+    // A run carried forward from a released version and not placed yet
+    // has that version's stream and progress.
+    const legacy =
+      live === undefined &&
+      this.#tasks.checkpointOf<Placed>(runId, PLACED_KEY) === undefined
+        ? this.#tasks.checkpointOf<TurnState>(runId, TURN_KEY)
+        : undefined;
+    const streamId = legacy
+      ? (legacy.streamId ?? undefined)
+      : chatTurnStreamId(runId);
+    const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
+    const chunks =
+      streamId === undefined
+        ? []
+        : this.#streamChunks(streamId).filter(
+            (chunk) => chunk.type !== "error"
+          );
+    const open =
+      streamId !== undefined && streams.getStream(streamId) !== undefined;
+    let message = live?.reply;
+    if (!message && legacy) {
+      const existing = await stored(legacy.messageId);
+      message =
+        chunks.length > 0
+          ? accumulate(
+              legacy.messageId ?? crypto.randomUUID(),
+              existing,
+              chunks
+            )
+          : undefined;
+      if (message) message = settledPartial(message);
+    } else if (!message && chunks.length > 0) {
+      const start = chunks.find((chunk) => chunk.type === "start");
+      const id =
+        start?.type === "start" && start.messageId !== undefined
+          ? start.messageId
+          : undefined;
+      // A reply the turn continues is its base, as it was when the turn
+      // began (the turn definition's record of it).
+      const base = this.#tasks.checkpointOf<{ id: string; parts: number }>(
+        runId,
+        CHAT_BASE_CHECKPOINT
+      );
+      const existing = base && (await stored(base.id));
       const rebuilt = accumulate(
-        state.messageId ?? crypto.randomUUID(),
-        existing,
+        id ?? crypto.randomUUID(),
+        existing && base
+          ? { ...existing, parts: existing.parts.slice(0, base.parts) }
+          : undefined,
         chunks
       );
-      if (rebuilt) message = settledPartial(rebuilt);
+      message = rebuilt && settledPartial(rebuilt);
     }
-    if (message) {
-      for (const part of lastStep(message)) {
-        if (
-          isToolCallPart(part) &&
-          !part.providerExecuted &&
-          (part.state === "input-available" ||
-            part.state === "approval-responded")
-        ) {
-          message = withToolPart(message, part.toolCallId, (call) =>
-            withOutcome(call, { ok: false, errorText: reason })
-          );
-        }
+    const drop = () => {
+      if (streamId !== undefined && streams.getStream(streamId)) {
+        streams.deleteUnchecked(streamId);
       }
+    };
+    const keep = message && settleOpenCalls(message, reason);
+    if (!keep || !hasContent(keep)) {
+      drop();
+      return undefined;
     }
-    const keep =
-      message && hasContent(message) && message !== existing
-        ? message
-        : undefined;
-    await this.#commit(run, session, state.streamId ?? undefined, (put) => {
-      if (keep) put(keep, { parentId: state.parentId ?? undefined });
-      progress?.({ streamId: null, ended: { reason } });
-    });
-    if (keep) this.#events.emit(session, { type: "message", message: keep });
-    return keep ?? existing;
+    await this.#commit(run, session, open ? streamId : undefined, (put) =>
+      put(keep, legacy?.parentId ? { parentId: legacy.parentId } : {})
+    );
+    // A stream the turn errored is not settled again by the commit.
+    drop();
+    this.#events.emit(session, { type: "message", message: keep });
+    return keep;
   }
 
   /**
@@ -2292,20 +2431,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         : null;
       if (stored) message = asUIMessage(stored);
     } else {
-      const state = this.#state(record.runId);
-      // An attempt still unwinding here has the chunks it has not written.
+      // A stopped attempt still unwinding in this isolate keeps what it
+      // streamed itself; anything it left is kept from the turn's stream.
       const live = this.#live.get(session);
-      let chunks: readonly UIMessageChunk[];
-      if (live?.operationId === operationId) {
-        live.taken = true;
-        chunks = live.partial;
-      } else {
-        chunks = this.#streamChunks(state?.streamId);
+      if (record.status === "aborted" && live?.operationId === operationId) {
+        await live.done;
       }
-      message = await this.#abandon(
+      message = await this.#keepStreamed(
+        undefined,
         session,
-        state,
-        chunks,
+        record.runId,
         result.status === "unanswered"
           ? (result.reason ?? "unanswered")
           : "unanswered"
@@ -2406,21 +2541,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       merged.push(next);
     }
     return merged;
-  }
-
-  /** A placed operation's progress, read from outside its attempt. */
-  #state(runId: string): TurnState | undefined {
-    return this.#tasks.checkpointOf<TurnState>(runId, TURN_KEY);
-  }
-
-  /**
-   * Write a turn's progress to its run's checkpoint: synchronous, so it
-   * joins the transaction a transcript write or stream cutover runs in.
-   */
-  #write(run: TaskStep, turn: Turn, change: TurnChange): Turn {
-    const next = { ...turn, ...change };
-    run.checkpoint.set(TURN_KEY, stateOf(next));
-    return next;
   }
 
   /** The Sessions handle for a session, configured on first use. */
@@ -2581,13 +2701,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       this.#options.configureSession?.(handle, session);
     }
     return handle;
-  }
-
-  /** A turn's assistant message, once it has one. */
-  async #message(turn: Turn): Promise<UIMessage | undefined> {
-    if (turn.messageId === null) return undefined;
-    const message = await this.#handle(turn.session).getMessage(turn.messageId);
-    return message ? asUIMessage(message) : undefined;
   }
 
   /**
@@ -2793,9 +2906,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     for (;;) {
       const rows = streams.readChunks(streamId, from, READ_PAGE);
       for (const row of rows) {
-        // SAFETY: the harness writes each segment as UIMessageChunk[].
-        const segment = JSON.parse(row.chunk) as UIMessageChunk[];
-        chunks.push(...segment);
+        // SAFETY: a stored chunk is a UI message chunk, or a segment of
+        // them as released versions wrote it.
+        const stored = JSON.parse(row.chunk) as
+          | UIMessageChunk
+          | UIMessageChunk[];
+        if (Array.isArray(stored)) chunks.push(...stored);
+        else chunks.push(stored);
       }
       if (rows.length < READ_PAGE) return chunks;
       from = (rows.at(-1)?.seq ?? from) + 1;
@@ -2909,25 +3026,6 @@ function answersHere(
   );
 }
 
-/**
- * The latest message, when only user messages follow `parentId` up to it:
- * what a hook appended after the turn's parent. Otherwise nothing.
- */
-async function appendedAfter(
-  handle: Session,
-  parentId: string
-): Promise<string | undefined> {
-  const leaf = await handle.getLatestLeaf();
-  if (!leaf || leaf.id === parentId) return undefined;
-  const path = await handle.getHistory({ leafId: leaf.id });
-  const at = path.findIndex((message) => message.id === parentId);
-  if (at === -1) return undefined;
-  const after = path.slice(at + 1);
-  return after.length > 0 && after.every((message) => message.role === "user")
-    ? leaf.id
-    : undefined;
-}
-
 /** Each tool's hash, made once per tool object. */
 const toolHashes = new WeakMap<object, Promise<string>>();
 
@@ -2985,10 +3083,6 @@ function toolRecovery(tool: object): ToolRecovery {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function streamTag(session: ThinkSessionId, operationId: string): string {
-  return `think:${JSON.stringify([session, operationId])}`;
 }
 
 /** A session's `SESSION_KEY` value. */

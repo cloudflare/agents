@@ -267,7 +267,6 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       seen.push(`${status.operationId}:${status.status}`);
       this.ctx.storage.kv.put(SUBMISSION_STATUS_KEY, seen);
     },
-    recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
       beforeTurn: async ({ toolSet, session, system: built }) => {
@@ -881,66 +880,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
    * untouched: their format did not change.
    */
   downgradeToStore(abandonReason: string | null = null): void {
-    // The released version kept no schema version for the harness.
-    forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
-    const sql = this.ctx.storage.sql;
-    const store = openHarnessStore(this.ctx.storage, {
-      prefix: SHARED_STORE_PREFIX
-    });
-    const runs = sql
-      .exec<{
-        run_id: string;
-        input: string;
-        status: string;
-        checkpoint: string | null;
-      }>(
-        `SELECT run_id, input, status, checkpoint FROM cf_agents_task_runs
-         WHERE definition = '__cf_think_harness_operation'
-           AND status IN ('pending', 'running')
-         ORDER BY seq`
-      )
-      .toArray();
-    for (const run of runs) {
-      // SAFETY: the harness names its runs [session, operation id] and
-      // stores { input, source } with a `turn` checkpoint.
-      const [session, id] = JSON.parse(run.run_id) as [string, string];
-      const { input, source } = JSON.parse(run.input) as {
-        input: JsonValue;
-        source: string;
-      };
-      const turn = (
-        run.checkpoint
-          ? (JSON.parse(run.checkpoint) as { turn?: Record<string, JsonValue> })
-          : {}
-      ).turn;
-      store.createSession({ id: session });
-      store.enqueue({
-        session,
-        id,
-        input,
-        meta: { source, ...turn, abandonReason }
-      });
-      if (run.status === "running") store.start(session, id);
-      const started = sql
-        .exec<{ step_name: string }>(
-          `SELECT step_name FROM cf_agents_task_steps
-           WHERE run_id = ? AND state = 'running'`,
-          run.run_id
-        )
-        .toArray()
-        .map((step) => step.step_name.split(":").slice(2).join(":"));
-      store.setSessionState(session, {
-        clientTools: [],
-        toolCalls: Object.fromEntries(
-          started.map((toolCallId) => [
-            toolCallId,
-            { operationId: id, attempts: 1 }
-          ])
-        )
-      });
-      sql.exec("DELETE FROM cf_agents_task_steps WHERE run_id = ?", run.run_id);
-      sql.exec("DELETE FROM cf_agents_task_runs WHERE run_id = ?", run.run_id);
-    }
+    downgradeToStore(this.ctx, this.lifecycle, this.harness, abandonReason);
   }
 
   /** The harness's tables that are left, by name. */
@@ -1228,11 +1168,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** Resolve once a model call's chunks are durable in its stream. */
-  async streamed(): Promise<void> {
+  /** Wait until a stream holds a chunk, or one whose JSON has `text`. */
+  async streamed(text?: string): Promise<void> {
     for (let i = 0; i < 300; i++) {
       const rows = this.ctx.storage.sql
         .exec<{ n: number }>(
-          `SELECT COUNT(*) AS n FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`
+          `SELECT COUNT(*) AS n FROM cf_agents_stream_blocks${HARNESS_SUFFIX}
+           WHERE instr(body, ?) > 0`,
+          text ?? ""
         )
         .one();
       if (rows.n > 0) return;
@@ -1658,6 +1601,11 @@ export class ThinkHarnessFacetChild extends Agent<Cloudflare.Env> {
     });
   }
 
+  /** Rewrite the open runs as the released version's store had them. */
+  downgradeToStore(): void {
+    downgradeToStore(this.ctx, this.lifecycle, this.harness, null);
+  }
+
   /** The harness store's tables left here, with their row counts. */
   storeTables(): Record<string, number> {
     const sql = this.ctx.storage.sql;
@@ -1713,6 +1661,10 @@ export class ThinkHarnessFacetRoot extends Agent<Cloudflare.Env> {
     await (await this.#child()).seedReleasedStore();
   }
 
+  async childDowngradeToStore(): Promise<void> {
+    await (await this.#child()).downgradeToStore();
+  }
+
   async childStoreTables(): Promise<Record<string, number>> {
     return (await this.#child()).storeTables();
   }
@@ -1722,6 +1674,91 @@ export class ThinkHarnessFacetRoot extends Agent<Cloudflare.Env> {
   }
 }
 
+/**
+ * Rewrite a harness's open runs as the released version's store recorded
+ * them, as `ThinkHarnessTestObject.downgradeToStore` describes.
+ */
+function downgradeToStore(
+  ctx: DurableObjectState,
+  lifecycle: Parameters<typeof forgetSchemaVersion>[0],
+  harness: ThinkHarness,
+  abandonReason: string | null
+): void {
+  // The released version kept no schema version for the harness.
+  forgetSchemaVersion(lifecycle, harness.capabilityId);
+  const sql = ctx.storage.sql;
+  const store = openHarnessStore(ctx.storage, {
+    prefix: SHARED_STORE_PREFIX
+  });
+  const runs = sql
+    .exec<{
+      run_id: string;
+      input: string;
+      status: string;
+      checkpoint: string | null;
+    }>(
+      `SELECT run_id, input, status, checkpoint FROM cf_agents_task_runs
+       WHERE definition = '__cf_think_harness_operation'
+         AND status IN ('pending', 'running')
+       ORDER BY seq`
+    )
+    .toArray();
+  for (const run of runs) {
+    // SAFETY: the harness names its runs [session, operation id] and
+    // stores { input, source } with a `turn` checkpoint.
+    const [session, id] = JSON.parse(run.run_id) as [string, string];
+    const { input, source } = JSON.parse(run.input) as {
+      input: JsonValue;
+      source: string;
+    };
+    const checkpoint = run.checkpoint
+      ? (JSON.parse(run.checkpoint) as Record<string, JsonValue>)
+      : {};
+    // A placed run's progress as the released version recorded it: the
+    // question, and the stream its model call was writing.
+    const placed = checkpoint["think:placed"] as
+      | { questionId?: string }
+      | undefined;
+    const turn =
+      (checkpoint.turn as Record<string, JsonValue> | undefined) ??
+      (placed && {
+        parentId: placed.questionId ?? null,
+        messageId: null,
+        streamId: `chat-turn:${run.run_id}`,
+        pendingModel: true,
+        steps: 0,
+        interruptions: 0,
+        overflowRetries: 0
+      });
+    store.createSession({ id: session });
+    store.enqueue({
+      session,
+      id,
+      input,
+      meta: { source, ...turn, abandonReason }
+    });
+    if (run.status === "running") store.start(session, id);
+    const started = sql
+      .exec<{ step_name: string }>(
+        `SELECT step_name FROM cf_agents_task_steps
+         WHERE run_id = ? AND state = 'running'`,
+        run.run_id
+      )
+      .toArray()
+      .map((step) => step.step_name.split(":").slice(2).join(":"));
+    store.setSessionState(session, {
+      clientTools: [],
+      toolCalls: Object.fromEntries(
+        started.map((toolCallId) => [
+          toolCallId,
+          { operationId: id, attempts: 1 }
+        ])
+      )
+    });
+    sql.exec("DELETE FROM cf_agents_task_steps WHERE run_id = ?", run.run_id);
+    sql.exec("DELETE FROM cf_agents_task_runs WHERE run_id = ?", run.run_id);
+  }
+}
 /** The table suffix of the instances the harness composes. */
 const HARNESS_SUFFIX = "__c_think_2dharness";
 
