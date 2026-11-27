@@ -843,24 +843,37 @@ export async function chatDispatch(
       const question = [...request.messages]
         .reverse()
         .find((m) => m.role === "user");
-      await submitTurn(
-        deps,
-        lane,
-        {
-          trigger: request.trigger,
-          messages: request.messages,
-          ...(question && { questionId: question.id }),
-          ...(request.clientTools && { clientTools: request.clientTools }),
-          body: request.body
-        },
-        {
-          requestId: request.requestId,
-          // The tab that sent it, for an end its turn never sends.
-          metadata: { chat: { origin: connection.id } },
-          ...(request.trigger === "submit-message" &&
-            lane.arrival && { arrival: lane.arrival })
-        }
-      );
+      try {
+        await submitTurn(
+          deps,
+          lane,
+          {
+            trigger: request.trigger,
+            messages: request.messages,
+            ...(question && { questionId: question.id }),
+            ...(request.clientTools && { clientTools: request.clientTools }),
+            body: request.body
+          },
+          {
+            requestId: request.requestId,
+            // The tab that sent it, for an end its turn never sends.
+            metadata: { chat: { origin: connection.id } },
+            ...(request.trigger === "submit-message" &&
+              lane.arrival && { arrival: lane.arrival })
+          }
+        );
+      } catch (error) {
+        // A request that cannot be accepted (its record cannot be written)
+        // ends at once on its tab, with the reason.
+        const text = frameText({
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+          id: event.id,
+          body: error instanceof Error ? error.message : String(error),
+          done: true,
+          error: true
+        } as { type: string });
+        if (text !== undefined) sendIfOpen(connection, text);
+      }
       return true;
     }
     case "cancel": {

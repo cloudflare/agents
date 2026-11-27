@@ -185,6 +185,42 @@ export interface ChatHost {
   readonly options?: ChatOptions;
 }
 
+/**
+ * @internal The list a tab is sent: `messages` (the stored transcript),
+ * then the messages the waiting turns of chat `session` hold, in lane order,
+ * named in `queuedMessageIds` (a tab keeps them apart and draws them last).
+ */
+export function chatClientView<TMessage extends { id: string }>(
+  tasks: Tasks,
+  definition: string,
+  session: string,
+  messages: readonly TMessage[],
+  defaultSession = ""
+): { messages: TMessage[]; queuedMessageIds?: string[] } {
+  const known = new Set(messages.map((message) => message.id));
+  const queued: TMessage[] = [];
+  for (const run of tasks.peekList({
+    definition,
+    status: ["pending"],
+    results: false,
+    order: "oldest"
+  })) {
+    const input = tasks.inputOf<ChatTurnInput>(run.runId);
+    if ((input?.session ?? defaultSession) !== session) continue;
+    for (const message of input?.messages ?? []) {
+      if (known.has(message.id)) continue;
+      known.add(message.id);
+      queued.push(message as unknown as TMessage);
+    }
+  }
+  return queued.length > 0
+    ? {
+        messages: [...messages, ...queued],
+        queuedMessageIds: queued.map((message) => message.id)
+      }
+    : { messages: [...messages] };
+}
+
 /** @internal The user messages a client request came from, as its run notes them. */
 export function messageIdsOf(
   metadata: Readonly<Record<string, unknown>> | undefined
@@ -834,7 +870,6 @@ export function chatTurnDefinition(
   input: unknown,
   step: TaskStep
 ) => Promise<ChatTurnResult | TaskSettlement> {
-  void options;
   return async (input, step) => {
     const given = (input ?? {}) as ChatTurnInput;
     const requestId = step.id;
@@ -1011,9 +1046,19 @@ export function chatTurnDefinition(
       const sendTranscript = async (exceptOrigin: boolean) => {
         const sockets = deps.webSockets;
         if (!sockets) return;
+        const history = (await session.getHistory()) as UIMessage[];
+        // With the messages the waiting requests hold, named as queued.
         const text = frameText({
           type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
-          messages: await session.getHistory()
+          ...(options.name
+            ? chatClientView(
+                deps.tasks,
+                options.name,
+                sessionId,
+                history,
+                deps.session ?? ""
+              )
+            : { messages: history })
         } as { type: string });
         if (text === undefined) return;
         for (const connection of sockets.getConnections()) {

@@ -2695,4 +2695,61 @@ describe("chat functions over a minimal host", () => {
       await cleared;
     });
   });
+
+  it("a request whose record cannot be written ends on its tab with an error frame", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const failing = {
+        ...instance.deps,
+        tasks: new Proxy(instance.tasks, {
+          get(target, key, receiver) {
+            if (key === "run") {
+              return async () => {
+                throw new Error("SQLITE_TOOBIG: string or blob too big");
+              };
+            }
+            const value = Reflect.get(target, key, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+        })
+      };
+      await chatDispatch(
+        failing,
+        instance.lane,
+        recordingTab("tab-x", sent),
+        chatRequestWith("r1", "u1", "Hi")
+      );
+      expect(sent).toContainEqual(
+        expect.objectContaining({ id: "r1", done: true, error: true })
+      );
+      expect(String(sent[0].body)).toContain("SQLITE_TOOBIG");
+    });
+  });
+
+  it("the list sent with a reply names the messages of waiting requests as queued", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const watching: Array<Record<string, unknown>> = [];
+      instance.tabs.push(recordingTab("tab-b", watching));
+      const finish = await holdFirstTurn(instance, instance.lane);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-c", []),
+        chatRequestWith("r2", "u2", "two")
+      );
+      await finish();
+      const lists = watching.filter(
+        (frame) => frame.type === "cf_agent_chat_messages"
+      );
+      expect(
+        lists.some(
+          (frame) => JSON.stringify(frame.queuedMessageIds) === '["u2"]'
+        )
+      ).toBe(true);
+    });
+  });
 });

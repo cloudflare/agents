@@ -2236,8 +2236,9 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     };
     const run = tasks.run;
     tasks.run = (...args: unknown[]) => {
-      const input = args[1] as { admission?: unknown } | undefined;
-      if (!input?.admission) return run.apply(this.tasks, args);
+      if (args[0] !== AIChatAgent.CHAT_TURN_DEFINITION) {
+        return run.apply(this.tasks, args);
+      }
       tasks.run = run;
       return Promise.reject(new Error("SQLITE_TOOBIG: string or blob too big"));
     };

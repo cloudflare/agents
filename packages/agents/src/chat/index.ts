@@ -594,6 +594,7 @@ export { broadcastReachesUnlistedSockets } from "../dynamic-agents/unlisted-sock
  * not a public API.
  */
 export {
+  chatClientView,
   chatTurnDefinition,
   chatTurnStreamId,
   continueRequestsOf,

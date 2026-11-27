@@ -151,6 +151,7 @@ import type {
 import { nanoid } from "nanoid";
 import {
   cancelTurn,
+  chatClientView,
   chatDispatch,
   stopAllTurns,
   submitTurn,
@@ -621,23 +622,12 @@ export class AIChatAgent<
   private _clientView<TMessage extends { id: string }>(
     messages: readonly TMessage[]
   ): { messages: TMessage[]; queuedMessageIds?: string[] } {
-    const known = new Set(messages.map((message) => message.id));
-    const queued: TMessage[] = [];
-    for (const run of this._openChatTurns()) {
-      if (run.status !== "pending") continue;
-      for (const message of this.tasks.inputOf<ChatTurnInput>(run.runId)
-        ?.messages ?? []) {
-        if (known.has(message.id)) continue;
-        known.add(message.id);
-        queued.push(message as unknown as TMessage);
-      }
-    }
-    return queued.length > 0
-      ? {
-          messages: [...messages, ...queued],
-          queuedMessageIds: queued.map((message) => message.id)
-        }
-      : { messages: [...messages] };
+    return chatClientView(
+      this.tasks,
+      AIChatAgent.CHAT_TURN_DEFINITION,
+      "",
+      messages
+    );
   }
 
   /** Lazily-built shared resume-handshake driver (Tier-2). */
@@ -933,6 +923,9 @@ export class AIChatAgent<
   /** Whether each running call continues a reply, for `onChatResponse`. */
   private readonly _callContinues = new Map<string, boolean>();
 
+  /** Requests that waited behind another, so every tab was shown them queued. */
+  private readonly _shownQueued = new Set<string>();
+
   /** Deliveries of `onChatResponse` not finished yet: the chat is not stable. */
   private readonly _responseDeliveries = new Set<Promise<void>>();
 
@@ -1062,7 +1055,12 @@ export class AIChatAgent<
               | { chat?: { origin?: string } }
               | undefined
           )?.chat?.origin;
-          this._frames.broadcastMessages(this.messages, origin ? [origin] : []);
+          // A tab shown its request as queued is told when it joins, too.
+          const shown = this._shownQueued.delete(call.requestId);
+          this._frames.broadcastMessages(
+            this.messages,
+            origin && !shown ? [origin] : []
+          );
         }
         this._callContinues.set(call.requestId, call.mode === "continue");
         if (
@@ -1084,6 +1082,7 @@ export class AIChatAgent<
       },
       hooks: {
         onResponse: async (result) => {
+          this._shownQueued.delete(result.requestId);
           const waiter = this._turnWaiters.get(result.requestId);
           this._turnWaiters.delete(result.requestId);
           // Whether the model was asked: a turn stopped before it started
@@ -1470,6 +1469,7 @@ export class AIChatAgent<
       },
       clear: async (connection) => {
         // The chat module's lane: its turns end, waiting or running.
+        this._shownQueued.clear();
         await clearChat(this._chatDeps(), this._chatLane());
         this.resetTurnState();
         await this.#session.clearMessages();
@@ -1534,6 +1534,7 @@ export class AIChatAgent<
             this.tasks.peek(event.id)?.status === "pending"
           ) {
             this._frames.broadcastMessages(this.messages, [connection.id]);
+            this._shownQueued.add(event.id);
           }
           return;
         }
