@@ -905,6 +905,35 @@ describe("chatTurnDefinition", () => {
     });
   });
 
+  it("gives up a turn whose model keeps failing transiently before it streams, at maxAttempts", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const kept = new Map<string, unknown>();
+      const definition = definitionOf(instance, {
+        respond: async () => {
+          throw new Error("overloaded");
+        },
+        hooks: { classifyError: () => "transient" },
+        options: {
+          recovery: { maxAttempts: 2, terminalMessage: "Gave up." }
+        }
+      });
+      const first = await definition(
+        { trigger: "server" },
+        laterAttempt("run-pre", 1, undefined, kept)
+      );
+      expect(first).toBeInstanceOf(TaskSettlement);
+      // The second failure spends the budget: the turn ends, and the lane
+      // is free for the next request.
+      const second = await definition(
+        { trigger: "server" },
+        laterAttempt("run-pre", 2, undefined, kept)
+      );
+      expect(second).toMatchObject({ status: "error", error: "Gave up." });
+    });
+  });
+
   it("treats a stream that stalls as interrupted, to retry after a backoff", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
@@ -1386,6 +1415,41 @@ describe("chatTurnDefinition", () => {
         laterAttempt("g-1", 1)
       );
       expect(instance.calls[0].messages.map((m) => m.id)).toEqual(["u1"]);
+    });
+  });
+
+  it("keeps a partial that holds a settled tool result when onRecovery says not to keep it (#1631)", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const cut = await instance.streams.open(chatTurnStreamId("run-s"), {
+        tag: "run-s"
+      });
+      for (const chunk of [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "s1",
+          toolName: "chargeCard",
+          input: {}
+        },
+        { type: "tool-output-available", toolCallId: "s1", output: "ok" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Char" }
+      ]) {
+        cut.append(chunk as never);
+      }
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: { onRecovery: () => ({ continue: true, persist: false }) }
+      })({ trigger: "submit-message" }, laterAttempt("run-s", 2));
+      // The tool already ran: its result stays, and the reply is continued
+      // rather than asked again.
+      expect(instance.calls[0]).toMatchObject({ mode: "continue" });
+      const reply = (await instance.sessions
+        .session("s1")
+        .getMessage("a1")) as unknown as { parts: Array<{ type: string }> };
+      expect(reply.parts.map((part) => part.type)).toContain("tool-chargeCard");
     });
   });
 

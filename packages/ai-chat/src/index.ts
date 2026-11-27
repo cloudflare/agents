@@ -864,6 +864,8 @@ export class AIChatAgent<
         getConnections: () => this.getConnections(),
         broadcast: (text, without) => this.broadcast(text, without)
       },
+      sanitizeForPersistence: (message) =>
+        this._sanitizeMessageForPersistence(message),
       emit: (type, payload) => {
         this._emit(type as ObservabilityEvent["type"], payload);
         // The live "recovering" status (#1620): on while a turn's recovery

@@ -88,6 +88,12 @@ export interface ChatDeps {
     type: `chat:${string}`,
     payload: Record<string, unknown>
   ) => void;
+  /**
+   * What a host does to a message before it is stored (the hosts'
+   * `sanitizeMessageForPersistence`), for a message the chat functions
+   * write outside a turn: a tab's tool answer. Absent: stored as it is.
+   */
+  readonly sanitizeForPersistence?: (message: UIMessage) => UIMessage;
 }
 
 /**
@@ -1324,11 +1330,47 @@ export function chatTurnDefinition(
     // A failure worth another attempt: the stream stays open, and the next
     // attempt continues it after a backoff, asking the app and the budget. A recovery attempt that fails this way counts against
     // `maxAttempts`, however little time passed.
-    const tryAgainAfter = (error: unknown) => {
+    const tryAgainAfter = async (error: unknown) => {
       const before = step.checkpoint.get<{ failures: number; retries: number }>(
         FAILED_CHECKPOINT
       );
       const failures = (before?.failures ?? 0) + 1;
+      // A turn that has streamed nothing is not seen by the next attempt's
+      // budget (it reads the stream): it is given up here once it has
+      // failed `maxAttempts` times, so it cannot hold the lane for good.
+      if (failures >= maxAttempts && !(await deps.streams.status(streamId))) {
+        const reason = "max_attempts_exceeded";
+        const ended = {
+          incidentId: requestId,
+          requestId,
+          attempt: failures,
+          maxAttempts,
+          recoveryKind: "retry" as const
+        };
+        deps.emit?.("chat:recovery:failed", { ...ended, reason });
+        try {
+          await budget.onExhausted?.({
+            ...ended,
+            recoveryRootRequestId: requestId,
+            streamId,
+            createdAt: step.createdAt,
+            partialText: "",
+            partialParts: [],
+            reason,
+            terminalMessage: budget.terminalMessage
+          });
+        } catch (failure) {
+          console.error(
+            "[agents/chat] chatRecovery onExhausted hook threw",
+            failure
+          );
+        }
+        return report({
+          requestId,
+          status: "error",
+          error: budget.terminalMessage
+        });
+      }
       step.checkpoint.set(FAILED_CHECKPOINT, {
         text: error instanceof Error ? error.message : String(error),
         // Until the next attempt has looked: this one ended itself.
@@ -1407,6 +1449,9 @@ export function chatTurnDefinition(
       });
     }
     let partial: UIMessage | undefined;
+    // The cut-off reply holds a tool's result: the tool ran, so the reply
+    // is kept even when the app says not to keep it (#1631).
+    let settledWork = false;
     if (earlier) {
       // Chunks an earlier attempt streamed and recovery discarded are not
       // part of the reply.
@@ -1416,6 +1461,13 @@ export function chatTurnDefinition(
       const streamedCount =
         (step.checkpoint.get<number>(DISCARDED_CHECKPOINT) ?? 0) +
         stored.length;
+      // What this run streamed, not the reply it extends: a tool's result.
+      settledWork = stored.some(
+        (chunk) =>
+          chunk.type === "tool-output-available" ||
+          chunk.type === "tool-output-error" ||
+          chunk.type === "tool-output-denied"
+      );
       // A reply this run continues (a tool answer's) is the base the stream
       // extends: its first `parts` parts as they were when the run began.
       const base = step.checkpoint.get<{ id: string; parts: number }>(
@@ -1598,7 +1650,7 @@ export function chatTurnDefinition(
       }
       if (exhausted || decision?.continue === false) {
         // falls through below
-      } else if (decision?.persist === false) {
+      } else if (decision?.persist === false && !settledWork) {
         // Continue without what was streamed: the question is answered
         // again.
         await dropPartial();
@@ -1607,7 +1659,7 @@ export function chatTurnDefinition(
       if (exhausted || decision?.continue === false) {
         // Given up: what was streamed stays stored (unless the app said
         // not to keep it), and the turn ends as an error.
-        if (decision?.persist === false) await dropPartial();
+        if (decision?.persist === false && !settledWork) await dropPartial();
         const writer = await deps.streams.open(streamId, { tag: requestId });
         writer.error("interrupted");
         const ended = {

@@ -35,7 +35,7 @@ import { mergeUserMessages } from "./merge-user-messages";
 import { originMessageIds } from "./origin-message-ids";
 import { messageIdsOf } from "./chat-host";
 import { sendIfOpen } from "./connection";
-import { CHAT_MESSAGE_TYPES } from "./protocol";
+import { CHAT_MESSAGE_TYPES, STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { parseChatRequest } from "./protocol-dispatch";
 import {
   CHAT_REQUEST_CONTEXT_KEY as REQUEST_CONTEXT_KEY,
@@ -606,10 +606,12 @@ async function applyAnswer(
       continue;
     }
     if (!applied.changed) return false;
-    const next = {
+    const answered = {
       ...message,
       parts: applied.parts as unknown as UIMessage["parts"]
     };
+    // Stored and sent as the host stores any message.
+    const next = deps.sanitizeForPersistence?.(answered) ?? answered;
     await session.upsertMessage(next as never);
     await storeTools();
     // Every tab sees the call answered.
@@ -809,10 +811,13 @@ export async function resumeChat(
     );
     return;
   }
+  // Nothing streams, waits or ended for it: the chat is idle, the only
+  // answer by which a tab lets go of a turn it still shows (#1914).
   sendIfOpen(
     connection,
     JSON.stringify({
       type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
+      reason: STREAM_RESUME_NONE_REASONS.IDLE,
       ...(probeId && { probeId })
     })
   );
@@ -991,6 +996,12 @@ export async function chatDispatch(
       return true;
     }
     case "cancel": {
+      // A tab stops only the chat's turns: the id it names may be any run
+      // of the agent's Tasks.
+      const named = deps.tasks.peek(event.id);
+      if (named !== undefined && named.definition !== lane.definition) {
+        return true;
+      }
       // A stop of the turn that streams drops what its answers asked to
       // continue; other replies keep theirs.
       const live = liveTurnsOf(deps.streams).get(deps.session ?? "");

@@ -1869,6 +1869,31 @@ describe("chat functions over a minimal host", () => {
     return requestId;
   }
 
+  it("a tab's stop names only a chat turn: another Task run of the agent is left alone", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      instance.tasks.register("__cf_test_app_job", async () =>
+        TaskSettlement.retry(Date.now() + 60_000)
+      );
+      await instance.lifecycle.start();
+      const { runId } = await instance.tasks.run(
+        "__cf_test_app_job",
+        {} as never,
+        {
+          start: "now"
+        }
+      );
+      expect(instance.tasks.peek(runId)?.status).toBe("pending");
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({ type: "cf_agent_chat_request_cancel", id: runId })
+      );
+      expect(instance.tasks.peek(runId)?.status).toBe("pending");
+    });
+  });
+
   it("a stop while a turn waits out its retry backoff stores what it streamed and settles its stream", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
@@ -2146,7 +2171,7 @@ describe("chat functions over a minimal host", () => {
         "p2"
       );
       expect(later).toEqual([
-        { type: "cf_agent_stream_resume_none", probeId: "p2" }
+        { type: "cf_agent_stream_resume_none", reason: "idle", probeId: "p2" }
       ]);
     });
   });
@@ -2202,7 +2227,9 @@ describe("chat functions over a minimal host", () => {
         undefined,
         ["r1"]
       );
-      expect(sent).toEqual([{ type: "cf_agent_stream_resume_none" }]);
+      expect(sent).toEqual([
+        { type: "cf_agent_stream_resume_none", reason: "idle" }
+      ]);
     });
   });
 
