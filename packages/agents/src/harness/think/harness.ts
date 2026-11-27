@@ -42,6 +42,7 @@ import {
   chatRecoveryGaveUp,
   chatTurnDefinition,
   chatTurnStreamId,
+  CHAT_REQUEST_CONTEXT_KEY,
   messageIdsOf,
   type ChatHost,
   type ChatModelCall,
@@ -216,6 +217,8 @@ type SessionBuild = {
   readonly system: string | undefined;
   readonly remind: readonly RemindSection[];
   readonly allSections: string | undefined;
+  /** The client tools the session's client declared, as it declared them. */
+  readonly clientTools: readonly ClientToolSchema[];
 };
 
 /** The operation a session is running in this isolate. */
@@ -632,13 +635,6 @@ function asJson(value: unknown): unknown {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
-/** The client's tools in a build: the ones the harness does not run. */
-function clientToolsOf(tools: ToolSet): ClientToolSchema[] {
-  return Object.keys(tools)
-    .filter((name) => !isServerTool(tools, name))
-    .map((name) => ({ name }));
-}
-
 function asUIMessages(messages: readonly SessionMessage[]): UIMessage[] {
   // SAFETY: every message in a ThinkHarness session was written by the
   // harness from a UIMessage, and Sessions returns what was written.
@@ -783,18 +779,58 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           const clientTools = (input as { readonly clientTools?: unknown })
             .clientTools;
           if (isOperationRunInput(input)) {
+            // A server turn takes the tools the chat's request context
+            // holds, as a host turn does: the ones the last taken answer
+            // or request declared (H2c). None is kept after a clear.
+            if (
+              input.source === "server" &&
+              run.checkpoint.get(PLACED_KEY) === undefined
+            ) {
+              const handle = this.#handle(this.#operationOf(run.id)[0]);
+              const context = await handle.internal_config(
+                CHAT_REQUEST_CONTEXT_KEY
+              );
+              const tools = context
+                ? (JSON.parse(context) as { readonly clientTools?: unknown })
+                    .clientTools
+                : undefined;
+              if (Array.isArray(tools)) {
+                await handle.internal_setConfig(
+                  CLIENT_TOOLS_KEY,
+                  JSON.stringify(tools)
+                );
+              }
+            }
             return this.#operate(input, run);
           }
           const session = this.#operationOf(run.id)[0];
-          // Once, when the request is placed: a later attempt has them.
-          if (
-            Array.isArray(clientTools) &&
-            run.checkpoint.get(PLACED_KEY) === undefined
-          ) {
-            await this.#handle(session).internal_setConfig(
-              CLIENT_TOOLS_KEY,
-              JSON.stringify(clientTools)
-            );
+          // Once, when the request is placed (a later attempt has them):
+          // a tab's request runs with exactly the tools it sent; a
+          // continuation or a server turn with the ones the chat's request
+          // context holds, which a taken answer updates and a clear drops.
+          if (run.checkpoint.get(PLACED_KEY) === undefined) {
+            const handle = this.#handle(session);
+            const trigger = (input as { readonly trigger?: unknown }).trigger;
+            const fromTab =
+              trigger === "submit-message" || trigger === "regenerate-message";
+            let tools: unknown = fromTab ? (clientTools ?? []) : undefined;
+            if (!fromTab) {
+              const context = await handle.internal_config(
+                CHAT_REQUEST_CONTEXT_KEY
+              );
+              tools = context
+                ? (JSON.parse(context) as { readonly clientTools?: unknown })
+                    .clientTools
+                : undefined;
+            }
+            // A continuation whose answer declared none keeps the ones the
+            // session has.
+            if (Array.isArray(tools)) {
+              await handle.internal_setConfig(
+                CLIENT_TOOLS_KEY,
+                JSON.stringify(tools)
+              );
+            }
           }
           const stored = operationInputOf(input);
           if (stored.input.kind !== "messages") {
@@ -1338,6 +1374,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     };
   }
 
+  /**
+   * @internal A chat clear through the shared dispatch (H2c): the client
+   * tools a tab declared go with the transcript, as the chat's request
+   * context does.
+   */
+  async forgetClientTools(session: ThinkSessionId): Promise<void> {
+    await this.#handle(session).internal_setConfig(CLIENT_TOOLS_KEY, "[]");
+  }
+
   /** @internal Which of `ids` a session already stores (key probes). */
   async storedIds(
     session: ThinkSessionId,
@@ -1649,7 +1694,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           ...(placed.questionId !== undefined && {
             questionId: placed.questionId
           }),
-          clientTools: clientToolsOf(built.tools)
+          // As declared, schemas and all: the turn keeps them as the
+          // chat's request context, which later turns read.
+          clientTools: [...built.clientTools]
         };
         const result = await turn(input, run);
         if (result instanceof TaskSettlement) return result;
@@ -3110,11 +3157,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       await this.#handle(session).internal_config(CLIENT_TOOLS_KEY);
     // A client's declaration that is not a list declares nothing.
     const parsed: unknown = declared === null ? [] : JSON.parse(declared);
-    const client = createToolsFromClientSchemas(
-      // SAFETY: the list a client declared, as `enqueue` stored it; before
-      // this value existed the harness store read it the same way.
-      Array.isArray(parsed) ? (parsed as ClientToolSchema[]) : []
-    );
+    // SAFETY: the list a client declared, as `enqueue` stored it; before
+    // this value existed the harness store read it the same way.
+    const clientTools = Array.isArray(parsed)
+      ? (parsed as ClientToolSchema[])
+      : [];
+    const client = createToolsFromClientSchemas(clientTools);
     // Client tools go last, as in Think. A client cannot replace a server
     // tool: the server's definition, its execute and its approval policy
     // win on a name clash.
@@ -3128,7 +3176,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       merged[name] = tool;
     }
-    return { tools: merged, system, remind, allSections };
+    return {
+      tools: merged,
+      system,
+      remind,
+      allSections,
+      // The ones a server tool's name did not shadow.
+      clientTools: clientTools.filter(
+        (tool) => !Object.hasOwn(tools, tool.name)
+      )
+    };
   }
 
   /**

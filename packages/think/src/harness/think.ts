@@ -1487,6 +1487,10 @@ export class Think<
           message
         )
       ) {
+        // A clear drops the client tools the tabs declared, with the chat.
+        if (typeof message === "string" && message.includes("chat_clear")) {
+          await this.harness.forgetClientTools(session);
+        }
         return;
       }
       for (const handlers of this.#handlers) {
