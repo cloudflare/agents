@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, onTestFinished, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import {
@@ -9,6 +9,39 @@ import {
   waitUntilHandled
 } from "./test-utils";
 import { getAgentByName } from "agents";
+
+/** Bounds for waits on the agent, inside the 10 s test timeout. */
+const BOUNDS = { timeout: 5_000, interval: 20 };
+
+/**
+ * Cancel `requestId` mid-stream: its stream is held after its first chunk,
+ * the cancel is handled, and then the stream may go on (and sees it).
+ */
+async function cancelMidStream(
+  ws: WebSocket,
+  room: string,
+  requestId: string,
+  send: () => void
+): Promise<void> {
+  const agent = await getAgentByName(env.SlowStreamAgent, room);
+  await agent.holdStreamForTest(requestId);
+  onTestFinished(() => agent.releaseStreamForTest(requestId));
+  send();
+  await vi.waitFor(async () => {
+    expect(await agent.isStreamHeldForTest(requestId)).toBe(true);
+  }, BOUNDS);
+  sendCancel(ws, requestId);
+  await waitUntilHandled(agent, MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, 1);
+  await agent.releaseStreamForTest(requestId);
+}
+
+/** Wait until the agent holds no abort controller. */
+async function abortControllersCleared(room: string): Promise<void> {
+  const agent = await getAgentByName(env.SlowStreamAgent, room);
+  await vi.waitFor(async () => {
+    expect(await agent.getAbortControllerCount()).toBe(0);
+  }, BOUNDS);
+}
 
 /**
  * Helper: connect to the SlowStreamAgent
@@ -193,15 +226,13 @@ describe("Cancel request", () => {
     const collecting = collectMessages(ws);
 
     // Send a slow plaintext streaming request (100 chunks × 50ms = ~5s total)
-    sendChatRequest(ws, requestId, [userMessage], {
-      format: "plaintext",
-      chunkCount: 100,
-      chunkDelayMs: 50
-    });
-
-    // Wait for a few chunks to arrive, then cancel
-    await new Promise((r) => setTimeout(r, 300));
-    sendCancel(ws, requestId);
+    await cancelMidStream(ws, room, requestId, () =>
+      sendChatRequest(ws, requestId, [userMessage], {
+        format: "plaintext",
+        chunkCount: 100,
+        chunkDelayMs: 50
+      })
+    );
 
     const { messages, timedOut } = await collecting;
     expect(timedOut).toBe(false);
@@ -236,15 +267,13 @@ describe("Cancel request", () => {
 
     const collecting = collectMessages(ws);
 
-    sendChatRequest(ws, requestId, [userMessage], {
-      format: "sse",
-      chunkCount: 100,
-      chunkDelayMs: 50
-    });
-
-    // Wait for some chunks then cancel
-    await new Promise((r) => setTimeout(r, 300));
-    sendCancel(ws, requestId);
+    await cancelMidStream(ws, room, requestId, () =>
+      sendChatRequest(ws, requestId, [userMessage], {
+        format: "sse",
+        chunkCount: 100,
+        chunkDelayMs: 50
+      })
+    );
 
     const { messages, timedOut } = await collecting;
     expect(timedOut).toBe(false);
@@ -268,27 +297,20 @@ describe("Cancel request", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
 
-    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
-
     const requestId = "req-cancel-cleanup";
     const collecting = collectMessages(ws);
 
-    sendChatRequest(ws, requestId, [userMessage], {
-      format: "plaintext",
-      chunkCount: 100,
-      chunkDelayMs: 50
-    });
-
-    await new Promise((r) => setTimeout(r, 300));
-    sendCancel(ws, requestId);
+    await cancelMidStream(ws, room, requestId, () =>
+      sendChatRequest(ws, requestId, [userMessage], {
+        format: "plaintext",
+        chunkCount: 100,
+        chunkDelayMs: 50
+      })
+    );
 
     await collecting;
 
-    // Allow cleanup to complete
-    await new Promise((r) => setTimeout(r, 200));
-
-    const count = await agentStub.getAbortControllerCount();
-    expect(count).toBe(0);
+    await abortControllersCleared(room);
 
     ws.close(1000);
   });
@@ -300,15 +322,14 @@ describe("Cancel request", () => {
     const requestId = "req-cancel-with-signal";
     const collecting = collectMessages(ws);
 
-    sendChatRequest(ws, requestId, [userMessage], {
-      format: "plaintext",
-      useAbortSignal: true,
-      chunkCount: 100,
-      chunkDelayMs: 50
-    });
-
-    await new Promise((r) => setTimeout(r, 300));
-    sendCancel(ws, requestId);
+    await cancelMidStream(ws, room, requestId, () =>
+      sendChatRequest(ws, requestId, [userMessage], {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 100,
+        chunkDelayMs: 50
+      })
+    );
 
     const { messages, timedOut } = await collecting;
     expect(timedOut).toBe(false);
@@ -319,10 +340,7 @@ describe("Cancel request", () => {
     expect(doneMsg).toBeDefined();
 
     // Abort controller should be cleaned up
-    await new Promise((r) => setTimeout(r, 200));
-    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
-    const count = await agentStub.getAbortControllerCount();
-    expect(count).toBe(0);
+    await abortControllersCleared(room);
 
     ws.close(1000);
   });
@@ -364,10 +382,7 @@ describe("Cancel request", () => {
     expect(textDeltas.length).toBe(3);
 
     // Abort controller should be cleaned up
-    await new Promise((r) => setTimeout(r, 100));
-    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
-    const count = await agentStub.getAbortControllerCount();
-    expect(count).toBe(0);
+    await abortControllersCleared(room);
 
     ws.close(1000);
   });
