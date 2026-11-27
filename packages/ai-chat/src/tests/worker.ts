@@ -2736,29 +2736,15 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
    * overlapping submit before asserting on which turns ran.
    */
   getOverlappingSubmitCountForTest(): number {
-    return this._overlappingSubmits.count;
+    // Every chat request after the first arrives while a turn waits or runs
+    // in these tests: the barrier waits until the agent took them all.
+    const requests = this._requestsTaken.filter(
+      (type) => type === MessageType.CF_AGENT_USE_CHAT_REQUEST
+    ).length;
+    return Math.max(0, requests - 1);
   }
 
-  /** Counts the client requests that arrive under a superseding strategy. */
-  private readonly _overlappingSubmits = ((turns: {
-    runClientRequest(request: {
-      onDecision?(decision: { strategy: unknown }): void;
-    }): Promise<void>;
-  }) => {
-    const counter = { count: 0 };
-    const run = turns.runClientRequest.bind(turns);
-    turns.runClientRequest = (request) =>
-      run({
-        ...request,
-        onDecision: (decision) => {
-          const { strategy } = decision;
-          if (strategy !== null && strategy !== "queue" && strategy !== "drop")
-            counter.count++;
-          request.onDecision?.(decision);
-        }
-      });
-    return counter;
-  })((this as unknown as { _turns: never })._turns);
+  private readonly _requestsTaken = recordHandledMessages(this);
 
   resetTurnStateForTest(): void {
     this.resetTurnState();

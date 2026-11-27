@@ -2519,4 +2519,30 @@ describe("chat functions over a minimal host", () => {
       ).toBe(context);
     });
   });
+
+  it("a request's end frame names the user messages it came from", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const sender = {
+        id: "tab-a",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      } as unknown as Connection;
+      instance.tabs.push(sender);
+      const done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        sender,
+        chatRequestWith("r1", "u1", "Hi")
+      );
+      await done;
+      expect(sent.find((frame) => frame.done === true)).toMatchObject({
+        id: "r1",
+        messageIds: ["u1"]
+      });
+    });
+  });
 });

@@ -30,6 +30,8 @@ import {
   type ChatRecentTerminal
 } from "./recent-terminals";
 import { mergeUserMessages } from "./merge-user-messages";
+import { originMessageIds } from "./origin-message-ids";
+import { messageIdsOf } from "./chat-host";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { parseChatRequest } from "./protocol-dispatch";
@@ -95,7 +97,10 @@ export async function submitTurn(
   // already hold as they are, since a tab sends its whole list.
   const fresh: UIMessage[] = [];
   const arrival = options.arrival ?? "queue";
-  const replaced: Array<{ id: string; origin: string | undefined }> = [];
+  const replaced: Array<{
+    id: string;
+    metadata: Readonly<Record<string, unknown>> | undefined;
+  }> = [];
   // A turn that replaces the waiting ones answers their questions too: it
   // carries their messages, which they would have stored when they started.
   if (arrival !== "queue" && arrival !== "drop") {
@@ -114,7 +119,7 @@ export async function submitTurn(
       }
       replaced.push({
         id: waiting.runId,
-        origin: originOf(deps.tasks.peek(waiting.runId)?.metadata)
+        metadata: deps.tasks.peek(waiting.runId)?.metadata
       });
       for (const message of deps.tasks.inputOf<ChatTurnInput>(waiting.runId)
         ?.messages ?? []) {
@@ -157,17 +162,24 @@ export async function submitTurn(
     : given;
   // A regenerate notes the questions the chat held when it arrived: one sent
   // after it makes it skip.
+  // A client's request notes the user messages it came from: its end
+  // frames echo them (`messageIds`), so the tab can tell which send ended.
+  const origins =
+    given.trigger === "submit-message" || given.trigger === "regenerate-message"
+      ? originMessageIds(input.messages)
+      : undefined;
+  const chat: Record<string, TaskJson> = {
+    ...((options.metadata?.chat as Record<string, TaskJson>) ?? {}),
+    ...(origins && { messageIds: origins }),
+    ...(given.trigger === "regenerate-message" && {
+      questions: ((await session.getHistory()) as UIMessage[])
+        .filter((message) => message.role === "user")
+        .map((message) => message.id)
+    })
+  };
   const metadata =
-    given.trigger === "regenerate-message"
-      ? {
-          ...options.metadata,
-          chat: {
-            ...((options.metadata?.chat as Record<string, TaskJson>) ?? {}),
-            questions: ((await session.getHistory()) as UIMessage[])
-              .filter((message) => message.role === "user")
-              .map((message) => message.id)
-          }
-        }
+    Object.keys(chat).length > 0
+      ? { ...options.metadata, chat }
       : options.metadata;
   const receipt = await deps.tasks.run(lane.definition, run as never, {
     lane: lane.lane,
@@ -196,10 +208,10 @@ export async function submitTurn(
   // The tab that sent a replaced or dropped request learns it ended
   // without a reply (its turn never runs to say so).
   if (dropped) {
-    endUnstarted(deps, receipt.runId, "skipped", originOf(options.metadata));
+    endUnstarted(deps, receipt.runId, "skipped", metadata);
   } else {
     for (const run of replaced) {
-      endUnstarted(deps, run.id, "skipped", run.origin);
+      endUnstarted(deps, run.id, "skipped", run.metadata);
     }
   }
   return { requestId: receipt.runId, ...(dropped && { dropped: true }) };
@@ -222,14 +234,17 @@ function endUnstarted(
   deps: ChatDeps,
   requestId: string,
   outcome: "skipped" | "aborted",
-  origin: string | undefined
+  metadata: Readonly<Record<string, unknown>> | undefined
 ): void {
+  const origin = originOf(metadata);
+  const messageIds = messageIdsOf(metadata);
   const frame = {
     type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
     id: requestId,
     body: "",
     done: true,
-    outcome
+    outcome,
+    ...(messageIds && { messageIds })
   };
   recordRecentChatTerminal(deps.kv, frame);
   const text = frameText(frame as { type: string });
@@ -257,7 +272,7 @@ export async function cancelTurn(
       [STOPPED_METADATA.field]: true
     });
     if (marked) {
-      endUnstarted(deps, requestId, "aborted", originOf(record.metadata));
+      endUnstarted(deps, requestId, "aborted", record.metadata);
     }
     return marked;
   }

@@ -67,6 +67,8 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
   get kv() {
     return this.ctx.storage.kv;
   }
+  /** The tabs the registered turn definition sends its frames to. */
+  readonly tabs: Array<import("agents").Connection> = [];
   /** The `chat:*` events the chat functions published, in order. */
   readonly events: Array<{ type: string; payload: Record<string, unknown> }> =
     [];
@@ -77,6 +79,7 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
       sessions: this.sessions,
       kv: this.ctx.storage.kv,
       session: "s1",
+      webSockets: { getConnections: () => this.tabs },
       emit: (type: string, payload: Record<string, unknown>) => {
         this.events.push({ type, payload });
       }

@@ -185,6 +185,15 @@ export interface ChatHost {
   readonly options?: ChatOptions;
 }
 
+/** @internal The user messages a client request came from, as its run notes them. */
+export function messageIdsOf(
+  metadata: Readonly<Record<string, unknown>> | undefined
+): string[] | undefined {
+  const ids = (metadata?.chat as { messageIds?: unknown } | undefined)
+    ?.messageIds;
+  return Array.isArray(ids) && ids.length > 0 ? (ids as string[]) : undefined;
+}
+
 /** The reason a chat clear cancels its turns with. */
 export const CHAT_CLEARED = "chat cleared";
 
@@ -807,7 +816,10 @@ export function chatTurnDefinition(
             id: requestId,
             body: "",
             done: true,
-            outcome: "skipped"
+            outcome: "skipped",
+            ...(messageIdsOf(deps.tasks.peek(requestId)?.metadata) && {
+              messageIds: messageIdsOf(deps.tasks.peek(requestId)?.metadata)
+            })
           };
           const text = frameText(frame);
           if (deps.webSockets && text !== undefined) {
@@ -917,23 +929,27 @@ export function chatTurnDefinition(
       if (parked.size > 0) {
         releaseParked(parked, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
       }
-      // A continuation's end says so, as its other frames do.
+      // A continuation's end says so, as its other frames do; a client
+      // request's end names the messages it came from.
       const continuation =
         run.trigger === "tool-answer" || run.mode === "continue";
+      const messageIds = messageIdsOf(deps.tasks.peek(requestId)?.metadata);
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
           body: result.error ?? "",
           done: true,
           error: result.status === "error",
           outcome: result.status,
-          ...(continuation && { continuation: true })
+          ...(continuation && { continuation: true }),
+          ...(messageIds && { messageIds })
         });
       } else {
         send({
           body: "",
           done: true,
           outcome: result.status,
-          ...(continuation && { continuation: true })
+          ...(continuation && { continuation: true }),
+          ...(messageIds && { messageIds })
         });
       }
       await host.hooks?.onResponse?.(result);

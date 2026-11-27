@@ -996,8 +996,13 @@ export class AIChatAgent<
     const arrival: ChatArrival =
       typeof concurrency === "object"
         ? {
+            // A missing or invalid window falls back to the default.
             debounceMs:
-              concurrency.debounceMs ?? AIChatAgent.MESSAGE_DEBOUNCE_MS
+              typeof concurrency.debounceMs === "number" &&
+              Number.isFinite(concurrency.debounceMs) &&
+              concurrency.debounceMs >= 0
+                ? concurrency.debounceMs
+                : AIChatAgent.MESSAGE_DEBOUNCE_MS
           }
         : concurrency;
     return {
