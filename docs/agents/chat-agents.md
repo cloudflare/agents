@@ -636,8 +636,10 @@ The usual rules still apply after the reset:
 - A stop by the request id, sent before or after the reset, ends the request `aborted` without calling the model.
 - A clear deletes every record, so nothing that was waiting runs afterwards.
 - A request a later one superseded under `"latest"`, `"merge"` or `"debounce"` stays superseded.
-- A new request that arrives before the waiting ones have run lets them go first, without waiting for the recovery. The recovery then finds the conversation has moved on, as it does for any new message.
+- A new request that arrives before the waiting ones have run queues behind them, and they all wait for the recovered reply.
 - A waiting request is replayed however long it waited. One whose conversation gained a user message no waiting request holds (a release without these records ran in between and answered something newer) does not run: its message is stored after what is there, and it ends `skipped`. Only a clear discards a waiting message.
+
+The same order holds with no reset. When a stall, a transient provider error or a dropped stream cuts a turn off, its recovery waits out a backoff and then continues the reply. A message sent during that wait is answered after the recovered reply, even when the recovered reply is cut off again and recovers once more. A stop during the wait ends the recovery, and what is queued behind it runs at once.
 
 A `saveMessages()` or `continueLastTurn()` call that is waiting in the queue stores nothing until its turn starts, so a reset loses nothing of it. Its caller's promise rejects with the reset, and the caller decides whether to call again.
 
