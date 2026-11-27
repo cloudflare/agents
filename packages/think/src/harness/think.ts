@@ -218,6 +218,9 @@ function taskStatusesFor(
   return [...out];
 }
 
+/** What a `chat()` caller is told when a reset cuts its turn off. As on Think. */
+const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
+
 /** A programmatic turn stopped, or cleared by a reset, before it began. */
 function cutOffBeforeStart(cut: "stopped" | "cleared"): SaveMessagesResult {
   return cut === "cleared"
@@ -1362,9 +1365,18 @@ export class Think<
     callback: StreamCallback,
     options?: ChatOptions
   ): Promise<void> {
-    // A chat stopped before it starts hears nothing, as on Think.
-    if (await this.#cutOffByStop(options?.signal)) return;
+    const cut = await this.#cutOffByStop(options?.signal);
     const operationId = crypto.randomUUID();
+    if (cut) {
+      // As on Think: the caller hears the request start. One its own signal
+      // stopped hears nothing more; one a reset cut off is told the chat was
+      // cleared, since a silent end would read as an answer.
+      await callback.onStart({ requestId: operationId });
+      if (cut === "cleared" && !options?.signal?.aborted) {
+        await callback.onError(CHAT_CLEARED_ERROR);
+      }
+      return;
+    }
     const messages =
       typeof userMessage === "function"
         ? await userMessage(this.messages)

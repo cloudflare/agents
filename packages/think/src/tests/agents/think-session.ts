@@ -11365,6 +11365,36 @@ export class ThinkProgrammaticTestAgent extends Think {
     this.resetTurnState();
   }
 
+  /** What a `chat()` started between two resets, or with a stopped signal, hears. */
+  async chatCutOffForTest(how: "reset" | "signal"): Promise<{
+    started: boolean;
+    done: boolean;
+    error: string | null;
+  }> {
+    const callback = new TestCollectingCallback();
+    let started = false;
+    const onStart = callback.onStart.bind(callback);
+    callback.onStart = (event) => {
+      started = true;
+      return onStart(event);
+    };
+    if (how === "signal") {
+      const controller = new AbortController();
+      controller.abort();
+      await this.chat("never runs", callback, { signal: controller.signal });
+    } else {
+      this.resetTurnState();
+      const chatting = this.chat("between the resets", callback);
+      this.resetTurnState();
+      await chatting;
+    }
+    return {
+      started,
+      done: callback.doneCalled,
+      error: callback.errorMessage ?? null
+    };
+  }
+
   /** A turn saved between two resets, in the same call. */
   async saveBetweenResetsForTest(): Promise<string> {
     this.resetTurnState();

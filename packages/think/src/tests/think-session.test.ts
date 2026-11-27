@@ -3273,6 +3273,24 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(await agent.saveRightAfterResetForTest()).toBe("completed");
   });
 
+  it("tells a chat a second reset cut off that the chat was cleared", async () => {
+    const agent = await freshProgrammaticAgent("chat-between-resets");
+    expect(await agent.chatCutOffForTest("reset")).toEqual({
+      started: true,
+      done: false,
+      error: "The chat was cleared before the turn finished."
+    });
+  });
+
+  it("starts a chat whose signal had already aborted, then tells it nothing", async () => {
+    const agent = await freshProgrammaticAgent("chat-pre-aborted");
+    expect(await agent.chatCutOffForTest("signal")).toEqual({
+      started: true,
+      done: false,
+      error: null
+    });
+  });
+
   it("a second reset skips a turn saved after the first", async () => {
     const agent = await freshProgrammaticAgent("save-between-resets");
     expect(await agent.saveBetweenResetsForTest()).toBe("skipped");
