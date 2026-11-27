@@ -27,15 +27,14 @@ import {
 import type { WebSocketHandlers } from "agents/websockets";
 import {
   convertToModelMessages,
+  getToolName,
+  isToolUIPart,
   type LanguageModel,
   type ToolSet,
   type TypedToolCall,
   type UIMessage
 } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
-import { anthropic } from "workers-ai-provider/anthropic";
-import { openai } from "workers-ai-provider/openai";
-import { isWorkersAIModelId } from "../model";
+import { ThinkModelResolver } from "../model";
 import {
   reconcileScheduledTasks,
   type ThinkScheduledTasks
@@ -76,6 +75,7 @@ import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
 import { ThinkConfigStore } from "../config-store";
+import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "../system-prompt";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
 import { Context, type ContextConfig } from "agents/context";
@@ -276,10 +276,15 @@ export class Think<
   readonly #submissionStatuses = new SubmissionStatusQueue();
   /** Skills from `getSkills()`, loaded in onStart as Think loads them. */
   readonly #skills = new ThinkSkills();
-  #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
   /** Think's `think_config` rows, the table and migration Think has. */
   readonly #config = new ThinkConfigStore();
   #configCache: unknown = null;
+  /** Builds string models through one cached default provider, as Think. */
+  readonly #models = new ThinkModelResolver({
+    binding: () => this.getAIBinding(),
+    gateway: (model) => this.getGateway(model),
+    sessionAffinity: () => this.sessionAffinity
+  });
 
   constructor(ctx: AgentContext, env: Env) {
     snapshotDeclaredMembers(new.target.prototype);
@@ -410,21 +415,19 @@ export class Think<
         },
         onStepFinish: async ({ message, finishReason, operationId, step }) => {
           await this.#chunkHooks;
+          const result = stepResultOf(message);
           await this.#extensionHooks.stepFinish({
             stepNumber: step,
             finishReason: finishReason ?? "unknown",
-            text: message.parts
-              .map((part) => (part.type === "text" ? part.text : ""))
-              .join(""),
-            reasoningText: undefined,
-            toolCalls: [],
-            toolResults: []
+            ...result
             // SAFETY: the fields a step snapshot reads are all here.
           } as unknown as StepContext);
-          return this.onStepFinish({
+          return this.onStepEnd({
+            ...result,
             response: { messages: [] },
             finishReason,
             message,
+            stepNumber: step,
             requestId: operationId
           } as unknown as StepContext);
         },
@@ -620,28 +623,27 @@ export class Think<
 
   getAIBinding(): Ai {
     const binding = (this.env as { AI?: Ai }).AI;
-    if (!binding)
-      throw new Error('Think needs a Workers AI binding named "AI"');
+    if (!binding) {
+      throw new Error(
+        "Think's default model provider needs a Workers AI binding named " +
+          '"AI". Add `"ai": { "binding": "AI" }` to wrangler.jsonc, override ' +
+          "getAIBinding() to return your binding, or override getModel() to " +
+          "return a LanguageModel."
+      );
+    }
     return binding;
   }
 
-  getGateway(_model: string): undefined {
+  getGateway(_model: string): GatewayOptions | undefined {
     return undefined;
   }
 
   resolveModel(model: ThinkModel): LanguageModel {
-    if (typeof model !== "string") return model;
-    this.#defaultProvider ??= createWorkersAI({
-      binding: this.getAIBinding(),
-      providers: [openai, anthropic]
-    });
-    return isWorkersAIModelId(model)
-      ? this.#defaultProvider(model, { sessionAffinity: this.sessionAffinity })
-      : this.#defaultProvider(model);
+    return this.#models.resolve(model);
   }
 
   getSystemPrompt(): string {
-    return "You are a helpful assistant.";
+    return DEFAULT_SYSTEM_PROMPT;
   }
 
   getTools(): ToolSet {
@@ -786,6 +788,12 @@ export class Think<
 
   afterToolCall(_ctx: ToolCallResultContext): void | Promise<void> {}
 
+  /** After each step, as in Think. */
+  onStepEnd(ctx: StepContext): void | Promise<void> {
+    return this.onStepFinish(ctx);
+  }
+
+  /** @deprecated Prefer `onStepEnd`, as in Think. */
   onStepFinish(_ctx: StepContext): void | Promise<void> {}
 
   onChunk(_ctx: ChunkContext): void | Promise<void> {}
@@ -1399,8 +1407,11 @@ export class Think<
       trigger: "submission",
       continuation: turn.continuation
     };
+    // As in Think: the capability block for the turn's tools follows the
+    // prompt, unless a `beforeTurn` gives its own.
+    const base = turn.system ?? this.getSystemPrompt();
     const context = {
-      system: turn.system ?? this.getSystemPrompt(),
+      system: systemPromptForTurn(base, tools),
       messages: await convertToModelMessages([...turn.messages], {
         tools,
         ignoreIncompleteToolCalls: true
@@ -1435,9 +1446,13 @@ export class Think<
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
     this.#turnMaxSteps = config.maxSteps;
-    // Nothing to change: neither the subclass nor an extension set a field.
-    if (!own && Object.keys(config).length === 0) return;
-    const system = config.instructions ?? config.system;
+    const system =
+      config.instructions ??
+      config.system ??
+      systemPromptForTurn(
+        base,
+        config.tools ? { ...tools, ...config.tools } : tools
+      );
     return {
       ...(config.model !== undefined && {
         model: this.resolveModel(config.model)
@@ -1570,6 +1585,48 @@ function stubUnsupported(target: object, legacy: object): void {
 stubUnsupported(Think.prototype, LegacyThink.prototype);
 
 /** The fields `folded` set or changed relative to `own`. */
+/**
+ * What a step's part of the reply says, in the AI SDK's step terms: its
+ * text, reasoning, the tool calls it made and the results it has.
+ */
+function stepResultOf(message: UIMessage) {
+  let start = -1;
+  message.parts.forEach((part, index) => {
+    if (part.type === "step-start") start = index;
+  });
+  const parts = message.parts.slice(start + 1);
+  const toolCalls: unknown[] = [];
+  const toolResults: unknown[] = [];
+  for (const part of parts) {
+    if (!isToolUIPart(part)) continue;
+    const toolName = getToolName(part);
+    toolCalls.push({
+      type: "tool-call",
+      toolCallId: part.toolCallId,
+      toolName,
+      input: part.input
+    });
+    if (part.state === "output-available") {
+      toolResults.push({
+        type: "tool-result",
+        toolCallId: part.toolCallId,
+        toolName,
+        input: part.input,
+        output: part.output
+      });
+    }
+  }
+  return {
+    text: parts.map((part) => (part.type === "text" ? part.text : "")).join(""),
+    reasoningText:
+      parts
+        .map((part) => (part.type === "reasoning" ? part.text : ""))
+        .join("") || undefined,
+    toolCalls,
+    toolResults
+  };
+}
+
 function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
   const changes: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(folded)) {
