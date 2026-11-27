@@ -1338,6 +1338,35 @@ function createAbortAwareMockModel(
   } as LanguageModel;
 }
 
+/** A model that streams `text`, then reports `message` as an in-band error. */
+function createInBandErrorAfterTextMockModel(
+  text: string,
+  message: string
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-in-band-error-after-text",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    async doStream() {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t-1" });
+          controller.enqueue({ type: "text-delta", id: "t-1", delta: text });
+          controller.enqueue({ type: "text-end", id: "t-1" });
+          controller.enqueue({ type: "error", error: new Error(message) });
+          controller.close();
+        }
+      });
+      return { stream };
+    }
+  } as LanguageModel;
+}
+
 /** A model that streams two chunks of `text`, then fails with `message`. */
 function createMidStreamErrorMockModel(
   text: string,
@@ -4549,6 +4578,126 @@ export class ThinkTestAgent extends Think {
    * from `beforeTurn`, so the turn fails the way a provider's would, on
    * Think and on the harness-backed Think alike.
    */
+  /**
+   * Two chats, the second waiting behind the first, and a clear. With
+   * `cancelFirst`, the first's caller cancels it just before the clear.
+   */
+  async clearWithQueuedChatForTest(cancelFirst: boolean): Promise<{
+    responses: string[];
+    first: { done: boolean; error: string | null };
+    second: { done: boolean; error: string | null };
+  }> {
+    this._responseLog = [];
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    this._turnConfigOverride = {
+      model: createAbortAwareMockModel("stream", () => markStarted())
+    };
+    const first = new TestCollectingCallback();
+    const second = new TestCollectingCallback();
+    // The second request has been accepted, and waits behind the first,
+    // once its caller hears it start.
+    let markQueued = () => {};
+    const queued = new Promise<void>((resolve) => {
+      markQueued = resolve;
+    });
+    const onStart = second.onStart.bind(second);
+    second.onStart = (event) => {
+      markQueued();
+      return onStart(event);
+    };
+    try {
+      const running = this.chat("first", first);
+      await started;
+      const waiting = this.chat("second", second);
+      await queued;
+      // Think hears the start before it admits the request: wait until the
+      // request waits on the chat lane behind the first. The harness-backed
+      // Think has accepted it by the time it reports the start.
+      if ((this as unknown as { _turnQueue?: unknown })._turnQueue) {
+        const deadline = Date.now() + 5000;
+        for (;;) {
+          const [row] = this.sql<{ count: number }>`
+            SELECT COUNT(*) AS count FROM cf_agents_task_runs
+            WHERE lane = 'chat' AND status = 'pending'
+          `;
+          if ((row?.count ?? 0) > 0) break;
+          if (Date.now() >= deadline) {
+            throw new Error("the second chat never waited on the lane");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+      if (cancelFirst) void this.cancelChat(first.requestId ?? "");
+      await this.clearMessages();
+      await Promise.all([running, waiting]);
+      await this._waitForTurnQueueIdleForTest();
+      const view = (callback: TestCollectingCallback) => ({
+        done: callback.doneCalled,
+        error: callback.errorMessage ?? null
+      });
+      return {
+        responses: this._responseLog.map((response) => response.status),
+        first: view(first),
+        second: view(second)
+      };
+    } finally {
+      this._turnConfigOverride = null;
+    }
+  }
+
+  /** The response hooks of a chat turn the chat is cleared under. */
+  async clearDuringChatForTest(): Promise<{
+    responses: string[];
+    done: boolean;
+    error: string | null;
+  }> {
+    this._responseLog = [];
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    this._turnConfigOverride = {
+      model: createAbortAwareMockModel("stream", () => markStarted())
+    };
+    const callback = new TestCollectingCallback();
+    try {
+      const turn = this.chat("cleared under me", callback);
+      await started;
+      await this.clearMessages();
+      await turn;
+      await this._waitForTurnQueueIdleForTest();
+      return {
+        responses: this._responseLog.map((response) => response.status),
+        done: callback.doneCalled,
+        error: callback.errorMessage ?? null
+      };
+    } finally {
+      this._turnConfigOverride = null;
+    }
+  }
+
+  /**
+   * A turn whose model writes some text, then reports an in-band error, from
+   * the model `beforeTurn` gives: public on both configs.
+   */
+  async testChatWithInBandModelError(
+    text: string,
+    errorMessage: string
+  ): Promise<TestChatResult> {
+    this._responseLog = [];
+    this._turnConfigOverride = {
+      model: createInBandErrorAfterTextMockModel(text, errorMessage)
+    };
+    try {
+      return await this.testChat("trigger in-band error");
+    } finally {
+      this._turnConfigOverride = null;
+    }
+  }
+
   async testChatWithModelError(errorMessage?: string): Promise<TestChatResult> {
     this._turnConfigOverride = {
       model: createMidStreamErrorMockModel(
