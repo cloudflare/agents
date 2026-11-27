@@ -300,6 +300,12 @@ export type ThinkTurnConfig = {
   readonly callSettings?: ThinkCallSettings;
   /** @internal Whether reasoning reaches the stream; default true. */
   readonly sendReasoning?: boolean;
+  /**
+   * @internal The AI SDK's structured output spec (`Output.object(...)`),
+   * passed to `streamText`. The last model call's parsed output is the
+   * operation's `output`; one that does not parse fails the operation.
+   */
+  readonly output?: unknown;
 };
 
 /**

@@ -1575,10 +1575,16 @@ export class Think<
       result.status === "done" && result.messageId !== undefined
         ? this.#transcript.messages.find((m) => m.id === result.messageId)
         : undefined;
+    // A `beforeTurn` that asked for structured output gets it parsed.
+    const output =
+      result.status === "done"
+        ? this.harness.operationOutput(session.id, receipt.operationId)
+        : undefined;
     return {
       ...saveResult(result),
       continuation: wait.continuation === true,
-      ...(message && { message: message as unknown as SessionMessage })
+      ...(message && { message: message as unknown as SessionMessage }),
+      ...(output !== undefined && { output })
     };
   }
 
@@ -2280,6 +2286,7 @@ export class Think<
       }),
       // The rest of Think's call settings, as `streamText` takes them.
       ...(Object.keys(callSettings).length > 0 && { callSettings }),
+      ...(config.output !== undefined && { output: config.output }),
       sendReasoning: config.sendReasoning ?? this.sendReasoning
     } as ThinkTurnConfig;
   }

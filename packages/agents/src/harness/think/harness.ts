@@ -249,6 +249,8 @@ type LiveRun = {
   built?: SessionBuild;
   /** The reply as the loop holds it: everything streamed so far. */
   reply?: UIMessage;
+  /** The structured output the last model call parsed, if it asked. */
+  output?: TaskJson;
   /** Settles when the attempt has returned. */
   readonly done: Promise<void>;
 };
@@ -307,6 +309,7 @@ type OperationOutcome =
       readonly status: "done";
       readonly text: string;
       readonly messageId?: string;
+      readonly output?: TaskJson;
     }
   | {
       readonly status: "unanswered";
@@ -1522,7 +1525,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       const stored = result.messageId
         ? await this.#handle(session).getMessage(result.messageId)
         : null;
-      return outcomeOf({}, stored ? asUIMessage(stored) : undefined);
+      const outcome = outcomeOf({}, stored ? asUIMessage(stored) : undefined);
+      return outcome.status === "done" && live.output !== undefined
+        ? { ...outcome, output: live.output }
+        : outcome;
     }
     // The definition gave up on an interrupted turn, past the budget or as
     // `onRecovery` chose: its partial is stored already.
@@ -2070,6 +2076,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           pendingModel = lastStep(reply).some(
             (part) => isToolCallPart(part) && !part.providerExecuted
           );
+          // The answer, not a tool call: its structured output, if asked.
+          if (!pendingModel && model.output) {
+            try {
+              live.output = asJson(await model.output()) as TaskJson;
+            } catch (error) {
+              throw new ModelCallError("fail", error);
+            }
+          }
           await this.#extensions.hook("onStepFinish", {
             session: turn.session,
             operationId: turn.operationId,
@@ -2131,6 +2145,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     readonly error: () => unknown;
     /** The call's token usage, once its stream ended. */
     readonly usage: () => Promise<LanguageModelUsage | undefined>;
+    /** The call's parsed structured output, when `output` asked for one. */
+    readonly output?: () => Promise<unknown>;
   }> {
     const { session, operationId, built, placed } = turn;
     const { tools } = built;
@@ -2243,6 +2259,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       ...(config.temperature !== undefined && {
         temperature: config.temperature
       }),
+      // SAFETY: the AI SDK's own output spec, as `beforeTurn` gave it.
+      ...(config.output !== undefined && { output: config.output as never }),
       stopWhen: stepCountIs(1),
       abortSignal: signal,
       onError: ({ error }) => {
@@ -2268,6 +2286,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         }
       })(),
       error: () => modelError,
+      ...(config.output !== undefined && {
+        output: () => Promise.resolve(result.output as unknown)
+      }),
       // A failed call may have none; the step goes on without it.
       usage: () =>
         Promise.resolve(result.usage).then(
@@ -2680,6 +2701,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /** A settled operation's result, from its run. */
+  /**
+   * @internal The structured output a settled operation's last model call
+   * parsed (its `beforeTurn` asked with `output`), or undefined.
+   */
+  operationOutput(
+    session: ThinkSessionId,
+    operationId: string
+  ): TaskJson | undefined {
+    const record = this.#tasks.peek(runIdOf(session, operationId));
+    if (record?.status !== "completed") return undefined;
+    // SAFETY: the handler's result is an OperationOutcome.
+    const outcome = record.result as OperationOutcome;
+    return outcome.status === "done" ? outcome.output : undefined;
+  }
+
   #result(record: TaskRecord): ThinkOperationResult {
     const [session, operationId] = operationOf(record.runId);
     const unanswered = (reason: string | undefined): ThinkOperationResult => ({
