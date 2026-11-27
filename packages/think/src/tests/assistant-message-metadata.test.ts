@@ -372,4 +372,17 @@ describe("Think — server-authored assistant-message metadata", () => {
       { type: "finish", continuation: false }
     ]);
   });
+
+  it("writes the finish metadata on a reply that pauses for an approval", async () => {
+    const room = crypto.randomUUID();
+    const agent = await getAgentByName(env.ThinkClientToolsAgent, room);
+    await agent.setMessageMetadataMode(true);
+    await agent.setServerApprovalToolMode(true);
+    const ws = await connectWS(room);
+    await runTurn(ws, "update my trigger");
+    const paused = await waitForAssistant(agent);
+    // The reply ended waiting for the approval; it still got its finish.
+    expect(paused.metadata).toMatchObject({ source: "server" });
+    ws.close();
+  });
 });

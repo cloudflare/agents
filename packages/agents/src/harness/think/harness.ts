@@ -2721,6 +2721,23 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             throw new ModelCallError("fail", error);
           }
         }
+        // The reply's finish: the host may add metadata to it once, here,
+        // where the loop knows no model call follows.
+        const extra = await this.#options.hooks?.finishMetadata?.({
+          session: turn.session,
+          operationId: turn.operationId
+        });
+        if (extra && finish.type === "finish") {
+          finish = {
+            ...finish,
+            messageMetadata: {
+              ...(finish.messageMetadata as
+                | Record<string, unknown>
+                | undefined),
+              ...extra
+            }
+          };
+        }
         yield finish;
         return;
       }
