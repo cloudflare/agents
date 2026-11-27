@@ -1291,6 +1291,24 @@ export class OverflowRecoveryTestAgent extends Think {
     };
   }
 
+  /**
+   * The proactive guard armed for a tool, tool, text turn that compacts
+   * once, for turns a client starts; a fresh model per turn.
+   */
+  async armProactiveForTest(): Promise<void> {
+    this.proactiveMode = true;
+    this.proactiveMultiFire = true;
+    this.compactionNoOp = false;
+    this.contextOverflow = {
+      proactive: { maxInputTokens: 10, maxCompactions: 1 }
+    };
+    this._model = undefined;
+  }
+
+  async getMessageIdsForTest(): Promise<Array<{ id: string; role: string }>> {
+    return this.messages.map((m) => ({ id: m.id, role: m.role }));
+  }
+
   /** The ids of each branch a compaction was given. */
   compactedBranches: string[][] = [];
 
