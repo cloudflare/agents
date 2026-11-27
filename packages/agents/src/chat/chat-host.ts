@@ -334,6 +334,51 @@ class StreamStalledError extends Error {
   }
 }
 
+/**
+ * `chunks` until `signal` aborts: then the model's stream is cancelled and
+ * this one closes, so a model that ignores its signal cannot hold a stopped
+ * turn open.
+ */
+function untilStopped(
+  chunks: ReadableStream<UIMessageChunk>,
+  signal: AbortSignal
+): ReadableStream<UIMessageChunk> {
+  const reader = chunks.getReader();
+  let onAbort: (() => void) | undefined;
+  return new ReadableStream<UIMessageChunk>({
+    start(controller) {
+      onAbort = () => {
+        void reader.cancel(signal.reason).catch(() => {});
+        try {
+          controller.close();
+        } catch {
+          // Already closed or errored.
+        }
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    },
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (signal.aborted) return;
+        if (next.done) {
+          signal.removeEventListener("abort", onAbort!);
+          controller.close();
+        } else controller.enqueue(next.value);
+      } catch (error) {
+        if (signal.aborted) return;
+        signal.removeEventListener("abort", onAbort!);
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      signal.removeEventListener("abort", onAbort!);
+      return reader.cancel(reason);
+    }
+  });
+}
+
 /** `chunks`, erroring with a stall when nothing arrives for `ms`. */
 function watchStall(
   chunks: ReadableStream<UIMessageChunk>,
@@ -645,12 +690,14 @@ function chunksOf(
   if ("toUIMessageStream" in source) return source.toUIMessageStream();
   // A `text/event-stream` body is a UI message stream; any other body is
   // plain text, one text part.
-  const iterable: AsyncIterable<UIMessageChunk> =
-    source instanceof Response
-      ? source.body
-        ? (responseSource(source, source.body, requestId)
-            .chunks as AsyncIterable<UIMessageChunk>)
-        : (async function* () {})()
+  const response =
+    source instanceof Response && source.body
+      ? responseSource(source, source.body, requestId)
+      : undefined;
+  const iterable: AsyncIterable<UIMessageChunk> = response
+    ? (response.chunks as AsyncIterable<UIMessageChunk>)
+    : source instanceof Response
+      ? (async function* () {})()
       : source;
   const iterator = iterable[Symbol.asyncIterator]();
   return new ReadableStream<UIMessageChunk>({
@@ -660,6 +707,9 @@ function chunksOf(
       else controller.enqueue(next.value);
     },
     async cancel() {
+      // A body read that is waiting holds the generator: the body itself is
+      // cancelled, which ends that read.
+      response?.cancel?.();
       await iterator.return?.();
     }
   });
@@ -1218,7 +1268,7 @@ export function chatTurnDefinition(
         (run.clientTools ?? []).map((tool) => tool.name)
       );
       const recorded = watchStall(
-        chunksOf(source, requestId),
+        untilStopped(chunksOf(source, requestId), step.signal),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
         // An approved call of the reply continued runs with no new input.
         (continuing?.parts ?? []).flatMap((part) => {

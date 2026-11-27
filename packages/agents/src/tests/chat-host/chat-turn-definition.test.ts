@@ -1,5 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
   CHAT_CLEARED,
@@ -1728,6 +1728,53 @@ describe("chatTurnDefinition", () => {
       expect(JSON.stringify(await session.getMessage("a1"))).toContain(
         "output-error"
       );
+    });
+  });
+
+  it("a stop ends a turn whose model ignores its signal and never ends", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const stop = new AbortController();
+      let cancelled = false;
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1"
+        },
+        {
+          // An event stream, as a model's HTTP response is.
+          respond: async () =>
+            new Response(
+              new ReadableStream({
+                start(controller) {
+                  for (const chunk of [
+                    { type: "start", messageId: "a1" },
+                    { type: "text-start", id: "t1" },
+                    { type: "text-delta", id: "t1", delta: "so far" }
+                  ]) {
+                    controller.enqueue(
+                      new TextEncoder().encode(
+                        `data: ${JSON.stringify(chunk)}\n\n`
+                      )
+                    );
+                  }
+                  // The user stops it once its first text is out.
+                  setTimeout(() => stop.abort("stopped by the user"), 20);
+                },
+                cancel() {
+                  cancelled = true;
+                }
+              }),
+              { headers: { "Content-Type": "text/event-stream" } }
+            )
+        }
+      )({ trigger: "server" }, laterAttempt("st-1", 1, stop.signal));
+      expect(result).toMatchObject({ status: "aborted" });
+      await vi.waitFor(() => expect(cancelled).toBe(true));
     });
   });
 });
