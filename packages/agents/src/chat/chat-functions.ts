@@ -487,11 +487,16 @@ export async function chatDispatch(
       );
       return true;
     }
-    case "cancel":
-      // A stop also drops what earlier answers asked to continue.
-      continueRequestsOf(deps.streams).clear();
+    case "cancel": {
+      // A stop of the turn that streams drops what its answers asked to
+      // continue; other replies keep theirs.
+      const live = liveTurnsOf(deps.streams).get(deps.session ?? "");
+      const replyId = live?.requestId === event.id ? live.replyId() : undefined;
+      if (replyId !== undefined)
+        continueRequestsOf(deps.streams).delete(replyId);
       await cancelTurn(deps, event.id);
       return true;
+    }
     case "cancel-continuation": {
       continueRequestsOf(deps.streams).clear();
       // A stop from a tab that waits for a tool continuation: the
