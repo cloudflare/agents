@@ -2331,6 +2331,44 @@ describe("Think durable submissions", () => {
     });
   });
 
+  it("fails a structured workflow turn that ends without its final answer", async () => {
+    const agent = await freshAgent();
+    // A plain-text answer: the model never calls the final-answer tool.
+    await agent.testSubmitMessages("answer in text", {
+      submissionId: "sub-no-final-answer",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-no-answer",
+            stepName: "draft-report",
+            eventType: "think-prompt-no-answer"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+    const event = await waitForWorkflowEvent(
+      agent,
+      (entry) => entry.event.type === "think-prompt-no-answer"
+    );
+    expect(event.event.payload).toMatchObject({
+      submissionId: "sub-no-final-answer",
+      status: "error",
+      error: expect.stringMatching(
+        /without calling the think_final_answer tool/
+      )
+    });
+  }, 30_000);
+
   it("delivers a structured output that fits a workflow event, and fails one that does not with the reason", async () => {
     const agent = await freshAgent();
     const prompt = (id: string, eventType: string) => ({

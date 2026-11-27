@@ -2677,6 +2677,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           progressed = true;
           continue;
         }
+        // The model's answer ended the turn (not a wait for a client): the
+        // host may still fail it, as Think fails a structured turn that
+        // never gave its answer.
+        if (action._tag === "end") {
+          try {
+            await this.#options.hooks?.beforeTurnEnd?.({
+              session: turn.session,
+              operationId: turn.operationId,
+              ...(reply && { message: reply })
+            });
+          } catch (error) {
+            throw new ModelCallError("fail", error);
+          }
+        }
         yield finish;
         return;
       }
