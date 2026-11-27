@@ -27,3 +27,4 @@ Chat recovery after a restart or a dropped stream.
 - Recovery no longer calls an overridden `continueLastTurn` or `waitUntilStable`: an interrupted turn is retried or continued as attempts of its own run.
 - A turn cut off before the upgrade is carried onto the new chat module under its request id, with the recovery budget of a new turn.
 - A stopped reply that was waiting to be retried is stored before the next request's question, and every tab is told the request ended.
+- A parent `AIChatAgent` turn that waits on an agent-tool child no longer counts the child's streamed output as its own recovery progress, so a parent turn cut off while it waits is given up by its own no-progress window.
