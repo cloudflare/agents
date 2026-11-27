@@ -2225,7 +2225,8 @@ export class Tasks<
    * newest first. An empty `status` list matches nothing.
    */
   peekList(options: {
-    definition: string;
+    /** One definition, or several read together in one query. */
+    definition: string | readonly string[];
     /** Only runs of this lane. */
     lane?: string;
     status?: readonly TaskStatus[];
@@ -2247,9 +2248,18 @@ export class Tasks<
     limit?: number;
   }): TaskRecord[] {
     if (options.status?.length === 0) return [];
-    const params: (string | number)[] = [options.definition];
+    const definitions =
+      typeof options.definition === "string"
+        ? [options.definition]
+        : options.definition;
+    if (definitions.length === 0) return [];
+    const params: (string | number)[] = [...definitions];
     const withResults = options.results !== false;
-    let query = `SELECT ${withResults ? "*" : RUN_LIST_COLUMNS} FROM ${this.#tables.runs} WHERE definition = ?`;
+    let query = `SELECT ${withResults ? "*" : RUN_LIST_COLUMNS} FROM ${this.#tables.runs} WHERE ${
+      definitions.length === 1
+        ? "definition = ?"
+        : `definition IN (${definitions.map(() => "?").join(", ")})`
+    }`;
     if (options.lane !== undefined) {
       query += " AND lane = ?";
       params.push(options.lane);

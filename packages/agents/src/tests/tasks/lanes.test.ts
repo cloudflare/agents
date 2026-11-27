@@ -279,6 +279,50 @@ describe("Tasks lanes", () => {
     );
   });
 
+  it("lists the runs of several definitions in one read", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        await instance.lifecycle.start();
+        await instance.tasks.run("laned", { label: "a" }, { runId: "a" });
+        await instance.tasks.run("__cf_echo" as never, "xy" as never, {
+          runId: "e"
+        });
+        await until(
+          async () => (await instance.tasks.get("e"))?.status === "completed"
+        );
+        const sql = state.storage.sql as unknown as {
+          exec: (query: string, ...rest: unknown[]) => unknown;
+        };
+        const exec = sql.exec.bind(sql);
+        const queries: string[] = [];
+        sql.exec = (query: string, ...rest: unknown[]) => {
+          queries.push(query);
+          return exec(query, ...rest);
+        };
+        let both: string[];
+        try {
+          both = instance.tasks
+            .peekList({ definition: ["laned", "__cf_echo"], order: "oldest" })
+            .map((record) => record.runId);
+        } finally {
+          sql.exec = exec;
+        }
+        expect(both).toEqual(["a", "e"]);
+        expect(queries).toHaveLength(1);
+        expect(
+          instance.tasks.peekList({ definition: [] }).map((r) => r.runId)
+        ).toEqual([]);
+        expect(
+          instance.tasks
+            .peekList({ definition: "__cf_echo" })
+            .map((r) => r.runId)
+        ).toEqual(["e"]);
+      }
+    );
+  });
+
   it("starts nothing in a held lane until it is released", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
