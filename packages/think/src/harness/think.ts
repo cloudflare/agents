@@ -126,7 +126,11 @@ import {
   loadThinkExtensions,
   ThinkExtensionHooks
 } from "../extensions/wiring";
-import type { ExtensionConfig, OnStartDegradation } from "../turn-types";
+import type {
+  ExtensionConfig,
+  MessageMetadataCallback,
+  OnStartDegradation
+} from "../turn-types";
 import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
@@ -398,6 +402,12 @@ export class Think<
 
   /** How a messenger thread's burst of messages is answered, as on Think. */
   messengerConcurrency: MessengerConcurrency = DEFAULT_MESSENGER_CONCURRENCY;
+
+  /**
+   * Metadata for every assistant message, as on Think. A turn's
+   * `beforeTurn` may return its own `messageMetadata` instead.
+   */
+  messageMetadata?: MessageMetadataCallback;
 
   readonly harness: ThinkHarness;
   readonly #chat: ThinkChat;
@@ -3583,6 +3593,7 @@ export class Think<
     // As in Think: recorded once the turn is prepared, so a continuation
     // never extends a turn whose preparation threw.
     if (first) this.#lastTurnChannel = this.#turnChannel.channelId;
+    const writer = config.messageMetadata ?? this.messageMetadata;
     const sentSystem =
       final && typeof system === "string"
         ? [system, thinkFinalAnswerInstruction(final.name)]
@@ -3613,7 +3624,17 @@ export class Think<
       // The rest of Think's call settings, as `streamText` takes them.
       ...(Object.keys(callSettings).length > 0 && { callSettings }),
       ...(config.output !== undefined && { output: config.output }),
-      sendReasoning: config.sendReasoning ?? this.sendReasoning
+      sendReasoning: config.sendReasoning ?? this.sendReasoning,
+      // As in Think: the turn's writer, else the agent's, told whether the
+      // turn continues a reply.
+      ...(writer && {
+        messageMetadata: ({ part }: { readonly part: unknown }) =>
+          writer({
+            // SAFETY: the parts are the AI SDK's stream parts.
+            part: part as Parameters<MessageMetadataCallback>[0]["part"],
+            continuation: turn.continuation
+          })
+      })
     } as ThinkTurnConfig;
   }
 

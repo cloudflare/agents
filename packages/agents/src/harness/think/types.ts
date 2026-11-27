@@ -328,6 +328,14 @@ export type ThinkTurnConfig = {
   /** @internal Whether reasoning reaches the stream; default true. */
   readonly sendReasoning?: boolean;
   /**
+   * @internal Metadata for the reply from the model's stream parts, as
+   * the AI SDK's `toUIMessageStream({ messageMetadata })` takes it. It is
+   * merged onto the reply's metadata.
+   */
+  readonly messageMetadata?: (options: {
+    readonly part: { readonly type: string };
+  }) => Record<string, unknown> | undefined;
+  /**
    * @internal The AI SDK's structured output spec (`Output.object(...)`),
    * passed to `streamText`. The last model call's parsed output is the
    * operation's `output`; one that does not parse fails the operation.
