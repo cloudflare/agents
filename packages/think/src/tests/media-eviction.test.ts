@@ -636,6 +636,8 @@ describe("mediaEviction — a pass that runs on its own", () => {
             const message = await agent.getStoredMessageForTest(id);
             expect(JSON.stringify(message)).toContain("[evicted image/png,");
           }
+          // A pass reports after its rewrites, so wait for both reports.
+          expect(passes).toHaveLength(2);
         },
         { timeout: 10_000, interval: 100 }
       );
