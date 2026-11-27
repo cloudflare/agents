@@ -307,12 +307,22 @@ describe("an upgrade from the latest release, mid-turn", () => {
       runsOf(p, "call").map((r) => r.id),
       breakdown
     ).toContain("main");
-    // Every call answered one of the submissions, and no turn ran twice on
-    // one build.
+    // Every call answered one of the submissions, or continued the one the
+    // deploy cut off (recovery asks the model to continue where it stopped),
+    // and no turn ran twice on one build.
+    const isContinue = (id: string) =>
+      id.startsWith("main|Continue your previous response");
     expect(
-      turns.every((r) => r.n === 1 && /\|submission [123]$/.test(r.id)),
+      turns.every(
+        (r) =>
+          r.n === 1 && (/\|submission [123]$/.test(r.id) || isContinue(r.id))
+      ),
       breakdown
     ).toBe(true);
+    expect(
+      turns.filter((r) => isContinue(r.id)).length,
+      breakdown
+    ).toBeLessThanOrEqual(1);
     for (const n of [1, 2, 3]) {
       expect(
         turns.some((r) => r.id.endsWith(`|submission ${n}`)),
