@@ -6446,35 +6446,25 @@ export class AsyncStartAdmissionAgent extends SlowStreamAgent {
    */
   async seedQueuedRequestForTest(requestId: string): Promise<void> {
     const id = `u-${requestId}`;
-    const nonce = crypto.randomUUID();
-    await this.tasks.get(nonce);
-    const input = {
-      requestId,
-      continuation: false,
-      nonce,
-      lane: true,
-      admission: {
-        messages: [
-          { id, role: "user", parts: [{ type: "text", text: requestId }] }
-        ],
-        afterUserId: null,
-        decision: { strategy: null, overlapping: false, debounceUntilMs: null },
-        payload: {
-          trigger: "submit-message",
-          body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 },
-          clientTools: undefined
-        }
-      }
+    await this.tasks.get(requestId);
+    // A request waiting on the chat's lane, as a reset leaves it before it
+    // started: its turn run, with the question it stores when it starts.
+    const input: ChatTurnInput = {
+      trigger: "submit-message",
+      questionId: id,
+      messages: [
+        { id, role: "user", parts: [{ type: "text", text: requestId }] }
+      ],
+      body: { format: "sse", chunkCount: 3, chunkDelayMs: 10 }
     };
     const now = Date.now();
-    // Its run on the chat lane, as a reset leaves it before it started.
     this.sql`
       INSERT INTO cf_agents_task_runs
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, next_at, cancel_requested, created_at, updated_at, lane, seq)
       VALUES
-        (${`chat_${nonce}`}, ${AIChatAgent.CHAT_FIBER_NAME},
-         ${JSON.stringify(input)}, 'pending', ${JSON.stringify({ requestId })},
+        (${requestId}, ${AIChatAgent.CHAT_TURN_DEFINITION},
+         ${JSON.stringify(input)}, 'pending', NULL,
          NULL, 0, 0, ${now}, 0, ${now}, ${now}, 'chat',
          (SELECT coalesce(MAX(seq), 0) + 1 FROM cf_agents_task_runs
           WHERE lane = 'chat'))
