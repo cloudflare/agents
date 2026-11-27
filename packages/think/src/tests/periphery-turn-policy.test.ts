@@ -38,6 +38,41 @@ function stepEvent(inputTokens: number, messages: ModelMessage[]) {
 }
 
 describe("ThinkContextOverflow", () => {
+  it("keeps the compacted head on a later step whether or not the AI SDK carried it", async () => {
+    const original: ModelMessage[] = [
+      { role: "user", content: "earlier question" },
+      { role: "assistant", content: "earlier answer" },
+      { role: "user", content: "now" }
+    ];
+    const step1: ModelMessage = { role: "assistant", content: "step 1" };
+    const step2: ModelMessage = { role: "assistant", content: "step 2" };
+    const fresh = () => {
+      const { guard } = overflow({
+        proactive: { maxInputTokens: 10, maxCompactions: 1 }
+      });
+      guard.beginRun(original.length);
+      return guard;
+    };
+    // Before step 2: compacts, and sends the head with step 1.
+    const guard6 = fresh();
+    const compacted = await guard6.compactBeforeStep(
+      stepEvent(10, [...original, step1])
+    );
+    expect(compacted).toEqual([{ role: "user", content: "summary" }, step1]);
+    // AI SDK 6: step 3 gets the run's original messages again.
+    expect(
+      await guard6.compactBeforeStep(stepEvent(10, [...original, step1, step2]))
+    ).toEqual([{ role: "user", content: "summary" }, step1, step2]);
+    // AI SDK 7: step 3 gets the override, carried; nothing to change.
+    const guard7 = fresh();
+    const head = await guard7.compactBeforeStep(
+      stepEvent(10, [...original, step1])
+    );
+    expect(
+      await guard7.compactBeforeStep(stepEvent(10, [...(head ?? []), step2]))
+    ).toBeUndefined();
+  });
+
   it("is off without config", () => {
     const { guard } = overflow(undefined);
     expect(guard.reactiveEnabled).toBe(false);
