@@ -68,5 +68,7 @@ export {
   ThinkUpgradeTestAgent,
   ThinkUpgradeCustomStoreTestAgent
 } from "./prompt-cache";
+export { ThinkUpgradeResponseHookAgent } from "./upgrade-response-hook";
+export { ThinkUpgradeFrozenPromptAgent } from "./upgrade-frozen-prompt";
 export { ThinkPrefixChangedAgent } from "./prefix-changed";
 export { ThinkHarnessActionsAgent } from "./harness-actions";

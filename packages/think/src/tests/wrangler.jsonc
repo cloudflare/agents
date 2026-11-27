@@ -256,6 +256,14 @@
         "name": "ThinkUpgradeCustomStoreTestAgent"
       },
       {
+        "class_name": "ThinkUpgradeResponseHookAgent",
+        "name": "ThinkUpgradeResponseHookAgent"
+      },
+      {
+        "class_name": "ThinkUpgradeFrozenPromptAgent",
+        "name": "ThinkUpgradeFrozenPromptAgent"
+      },
+      {
         "class_name": "ThinkMediaEvictionAutoAgent",
         "name": "ThinkMediaEvictionAutoAgent"
       },
@@ -353,6 +361,8 @@
         "ThinkPromptCacheTestAgent",
         "ThinkUpgradeTestAgent",
         "ThinkUpgradeCustomStoreTestAgent",
+        "ThinkUpgradeResponseHookAgent",
+        "ThinkUpgradeFrozenPromptAgent",
         "ThinkMediaEvictionAutoAgent",
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",
