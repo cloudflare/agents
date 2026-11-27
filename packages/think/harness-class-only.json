@@ -514,5 +514,14 @@
     "test": "Think — onChatRecovery > a progressing turn survives past the old wall-clock ceiling (rfc-chat-recovery-work-budget)",
     "reason": "needs an incident first seen 30 minutes ago (a seeded private incident row), which no test can reach in time; drives `beginIncident`. The work budget that replaced the ceiling is asserted in chat-recovery-public.test.ts ('seals a turn that keeps making progress once the work budget is spent')",
     "mechanicsOnly": true
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)",
+    "reason": "a platform deferral injected into the class's scheduled recovery callback (private), with a seeded running submission",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays running when a reset also cuts its recovery, then completes once"
+    }
   }
 ]

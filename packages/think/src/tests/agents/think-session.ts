@@ -11042,6 +11042,30 @@ const HOLD_AFTER_RESET_KEY = "test:hold-chunks-after-reset";
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
 
+  /**
+   * A test can hold the next onChatRecovery (to cut the recovery attempt
+   * there with a reset, as the platform does). Kept in storage, across resets.
+   */
+  override async onChatRecovery(
+    _ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    const kv = this.ctx.storage.kv;
+    if (kv.get<boolean>("test:hold-recovery")) {
+      kv.delete("test:hold-recovery");
+      kv.put("test:recovery-held", true);
+      await new Promise<never>(() => {});
+    }
+    return {};
+  }
+
+  async holdRecoveryOnceForTest(): Promise<void> {
+    this.ctx.storage.kv.put("test:hold-recovery", true);
+  }
+
+  async recoveryHeldForTest(): Promise<boolean> {
+    return this.ctx.storage.kv.get<boolean>("test:recovery-held") === true;
+  }
+
   /** Keep-alive holds taken since construction (each pushes a job). */
   private _keepAliveHolds = 0;
 
