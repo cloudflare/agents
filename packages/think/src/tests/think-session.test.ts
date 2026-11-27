@@ -2391,6 +2391,17 @@ describe("Think — onChatResponse", () => {
     expect(log[0].error).toContain("Boom");
   });
 
+  it("fires onChatResponse for a failed turn that wrote text, even when its error reads like a never-ran reason", async () => {
+    const agent = await freshAgent("hook-error-reads-empty");
+
+    await agent.testChatWithModelError("empty");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].message.parts.length).toBeGreaterThan(0);
+  });
+
   it("should fire onChatResponse with error status when in-band error arrives before any parts", async () => {
     const room = "hook-inband-error";
     const observedTypes: string[] = [];
