@@ -304,5 +304,14 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > onChatRecovery's context after a reset > tells onChatRecovery the partial a reset cut off mid-reply"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > { continue: false } persists but does not schedule continuation",
+    "reason": "an interrupted turn built from seeded private stream and fiber rows (`insertInterruptedStream`), recovered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > keeps the partial but runs no continuation when onChatRecovery says continue: false"
+    }
   }
 ]

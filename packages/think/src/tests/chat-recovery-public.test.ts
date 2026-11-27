@@ -12,6 +12,96 @@ async function freshAgent(name: string) {
   return getAgentByName(env.ThinkTestAgent, `${name}-${crypto.randomUUID()}`);
 }
 
+/** Reset the agent's isolate mid-turn, as an eviction does, and wait for
+ * the next start's recovery to ask onChatRecovery. */
+async function resetDuringTurn(
+  name: string,
+  chunksBeforeReset: number,
+  answer?: { continue?: boolean; persist?: boolean }
+) {
+  const room = `${name}-${crypto.randomUUID()}`;
+  const agent = () => getAgentByName(env.ThinkTestAgent, room);
+  if (answer) await (await agent()).answerRecoveryForTest(answer);
+  const startedAt = Date.now();
+  if (chunksBeforeReset === 0) {
+    // No stream at all: the model call waits on the provider.
+    await (await agent()).hangModelAtConnectForTest();
+  } else {
+    await (
+      await agent()
+    ).useSlowModelForTest(
+      ["one ", "two ", "three ", "four ", "five ", "six "],
+      150
+    );
+  }
+  const res = await exports.default.fetch(
+    `http://example.com/agents/think-test-agent/${room}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  const ws = res.webSocket;
+  if (!ws) throw new Error("no socket");
+  ws.accept();
+  const requestId = crypto.randomUUID();
+  let chunks = 0;
+  ws.addEventListener("message", (event) => {
+    const frame = JSON.parse(String(event.data)) as {
+      type?: string;
+      body?: string;
+      done?: boolean;
+    };
+    if (frame.type !== "cf_agent_use_chat_response" || frame.done) return;
+    if (frame.body?.includes("text-delta")) chunks++;
+  });
+  ws.send(
+    JSON.stringify({
+      type: "cf_agent_use_chat_request",
+      id: requestId,
+      init: {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [
+            {
+              id: crypto.randomUUID(),
+              role: "user",
+              parts: [{ type: "text", text: "reset me" }]
+            }
+          ]
+        })
+      }
+    })
+  );
+  // Mid-reply: after some text. Before the first chunk: while the model
+  // call waits on the provider, before any stream.
+  await vi.waitFor(
+    async () => {
+      expect(
+        chunksBeforeReset === 0
+          ? await (await agent()).modelConnectingForTest()
+          : chunks >= chunksBeforeReset
+      ).toBe(true);
+    },
+    { timeout: 10_000, interval: 10 }
+  );
+  const resetAt = Date.now();
+  await (await agent()).resetIsolateForTest().catch(() => undefined);
+  ws.close();
+  // The next start recovers the turn and asks onChatRecovery.
+  let calls: Array<{
+    partialText: string;
+    streamId: string;
+    createdAt: number;
+    recoveryRootRequestId: string;
+  }> = [];
+  await vi.waitFor(
+    async () => {
+      calls = [...(await (await agent()).recoveryCallsForTest())];
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+    },
+    { timeout: 15_000, interval: 50 }
+  );
+  return { requestId, calls, startedAt, resetAt, agent };
+}
+
 describe("chat recovery, through public behaviour", () => {
   it("continues a stalled turn and calls onChatRecovery with its partial", async () => {
     const agent = await freshAgent("recover-stall");
@@ -168,89 +258,6 @@ describe("chat recovery, through public behaviour", () => {
   // The same context after a real reset of the isolate mid-turn, as an
   // eviction or a deploy leaves a turn: the recovery runs on the next start.
   describe("onChatRecovery's context after a reset", () => {
-    async function resetDuringTurn(name: string, chunksBeforeReset: number) {
-      const room = `${name}-${crypto.randomUUID()}`;
-      const agent = () => getAgentByName(env.ThinkTestAgent, room);
-      const startedAt = Date.now();
-      if (chunksBeforeReset === 0) {
-        // No stream at all: the model call waits on the provider.
-        await (await agent()).hangModelAtConnectForTest();
-      } else {
-        await (
-          await agent()
-        ).useSlowModelForTest(
-          ["one ", "two ", "three ", "four ", "five ", "six "],
-          150
-        );
-      }
-      const res = await exports.default.fetch(
-        `http://example.com/agents/think-test-agent/${room}`,
-        { headers: { Upgrade: "websocket" } }
-      );
-      const ws = res.webSocket;
-      if (!ws) throw new Error("no socket");
-      ws.accept();
-      const requestId = crypto.randomUUID();
-      let chunks = 0;
-      ws.addEventListener("message", (event) => {
-        const frame = JSON.parse(String(event.data)) as {
-          type?: string;
-          body?: string;
-          done?: boolean;
-        };
-        if (frame.type !== "cf_agent_use_chat_response" || frame.done) return;
-        if (frame.body?.includes("text-delta")) chunks++;
-      });
-      ws.send(
-        JSON.stringify({
-          type: "cf_agent_use_chat_request",
-          id: requestId,
-          init: {
-            method: "POST",
-            body: JSON.stringify({
-              messages: [
-                {
-                  id: crypto.randomUUID(),
-                  role: "user",
-                  parts: [{ type: "text", text: "reset me" }]
-                }
-              ]
-            })
-          }
-        })
-      );
-      // Mid-reply: after some text. Before the first chunk: while the model
-      // call waits on the provider, before any stream.
-      await vi.waitFor(
-        async () => {
-          expect(
-            chunksBeforeReset === 0
-              ? await (await agent()).modelConnectingForTest()
-              : chunks >= chunksBeforeReset
-          ).toBe(true);
-        },
-        { timeout: 10_000, interval: 10 }
-      );
-      const resetAt = Date.now();
-      await (await agent()).resetIsolateForTest().catch(() => undefined);
-      ws.close();
-      // The next start recovers the turn and asks onChatRecovery.
-      let calls: Array<{
-        partialText: string;
-        streamId: string;
-        createdAt: number;
-        recoveryRootRequestId: string;
-      }> = [];
-      await vi.waitFor(
-        async () => {
-          calls = [...(await (await agent()).recoveryCallsForTest())];
-          expect(calls.length).toBeGreaterThanOrEqual(1);
-        },
-        { timeout: 15_000, interval: 50 }
-      );
-      return { requestId, calls, startedAt, resetAt };
-    }
-
     it("tells onChatRecovery the partial a reset cut off mid-reply", async () => {
       const { requestId, calls } = await resetDuringTurn("reset-mid", 2);
       const [first] = calls;
@@ -358,6 +365,59 @@ describe("chat recovery, through public behaviour", () => {
       expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
         "recovery_aborted"
       ]);
+    }, 30_000);
+  });
+
+  // Successors of the persist/continue tests (think-session, "Think —
+  // onChatRecovery"): what a reset-interrupted turn leaves when
+  // onChatRecovery declines.
+  describe("onChatRecovery's answer after a reset", () => {
+    async function settle(
+      agent: () => Promise<{
+        getMessages(): Promise<unknown[]>;
+        waitUntilStable(o: { timeout: number }): Promise<boolean>;
+      }>
+    ) {
+      await vi.waitFor(
+        async () => {
+          expect(
+            await (await agent()).waitUntilStable({ timeout: 2_000 })
+          ).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      return (await (await agent()).getMessages()) as Array<{
+        role: string;
+        parts: Array<{ type: string; text?: string }>;
+      }>;
+    }
+
+    it("keeps the partial but runs no continuation when onChatRecovery says continue: false", async () => {
+      const { agent } = await resetDuringTurn("answer-no-continue", 2, {
+        continue: false
+      });
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      const text = messages[1]?.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      // Only what the reset left: the reply was not continued.
+      expect(text).toMatch(/^one /);
+      expect(text).not.toContain("six");
+    }, 30_000);
+
+    it("keeps nothing and runs nothing when onChatRecovery says persist: false, continue: false", async () => {
+      const { agent } = await resetDuringTurn("answer-drop", 2, {
+        persist: false,
+        continue: false
+      });
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual(["user"]);
     }, 30_000);
   });
 });
