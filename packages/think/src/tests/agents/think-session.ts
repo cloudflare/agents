@@ -2593,6 +2593,33 @@ export class ThinkTestAgent extends Think {
     return this.ctx.storage.kv.get<string[]>("test:response-hook-calls") ?? [];
   }
 
+  private _continuationHoldForTest:
+    | { reached: boolean; released: Promise<void> }
+    | undefined;
+  private _releaseContinuationForTest: (() => void) | undefined;
+
+  /** The next recovery turn waits in beforeTurn until released. */
+  async holdNextRecoveryTurnForTest(): Promise<void> {
+    const hold = {
+      reached: false,
+      released: new Promise<void>((resolve) => {
+        this._releaseContinuationForTest = resolve;
+      })
+    };
+    this._continuationHoldForTest = hold;
+    this._heldContinuationForTest = hold;
+  }
+  private _heldContinuationForTest: { reached: boolean } | undefined;
+
+  /** Whether the held recovery turn has reached beforeTurn. */
+  async recoveryTurnHeldForTest(): Promise<boolean> {
+    return this._heldContinuationForTest?.reached === true;
+  }
+
+  async releaseRecoveryTurnForTest(): Promise<void> {
+    this._releaseContinuationForTest?.();
+  }
+
   /** The next reply stalls once after two chunks, and recovery retries it. */
   async stallNextReplyOnceForTest(): Promise<void> {
     this._stallAfterChunks = 2;
@@ -2680,6 +2707,12 @@ export class ThinkTestAgent extends Think {
   override beforeTurn(
     ctx: TurnContext
   ): TurnConfig | void | Promise<TurnConfig | void> {
+    const continuationHold = this._continuationHoldForTest;
+    if (continuationHold && ctx.trigger?.startsWith("recovery")) {
+      this._continuationHoldForTest = undefined;
+      continuationHold.reached = true;
+      return continuationHold.released.then(() => this.beforeTurn(ctx));
+    }
     if (this._beforeTurnAbortWait) {
       const signal = ctx.abortSignal;
       this._beforeTurnAbortWait();

@@ -4,7 +4,7 @@
  */
 
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import type {
@@ -139,6 +139,9 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
     });
 
     await agent.armStallOnceForTest(1, 50);
+    // The recovery's own turn waits until the outcome is read: once it
+    // completes, the cut-off stream is gone.
+    await agent.holdNextRecoveryTurnForTest();
     const first = await sendAndWaitForDone(ws, "req-stall", [user("msg-s")]);
     expect(first.at(-1)).toMatchObject({
       messageIds: ["msg-s"],
@@ -147,16 +150,20 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
     // A resume replaying this stream must report the same outcome.
     expect(await agent.getStreamOutcomeForTest("req-stall")).toBe("recovering");
 
-    for (let i = 0; i < 50 && successorTerminals.length === 0; i++) {
-      await agent.runStallContinuationForTest();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    expect(successorTerminals.length).toBeGreaterThan(0);
+    await vi.waitFor(
+      async () => expect(await agent.recoveryTurnHeldForTest()).toBe(true),
+      { timeout: 10_000, interval: 20 }
+    );
+    await agent.releaseRecoveryTurnForTest();
+    await vi.waitFor(
+      () => expect(successorTerminals.length).toBeGreaterThan(0),
+      { timeout: 10_000, interval: 20 }
+    );
     for (const frame of successorTerminals) {
       expect(frame.messageIds).toEqual(["msg-s"]);
     }
     ws.close();
-  });
+  }, 20_000);
 
   it("echoes the ids on the error terminal and in the durable terminal record", async () => {
     const { agent, ws } = await freshAgent();
