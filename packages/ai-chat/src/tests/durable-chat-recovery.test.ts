@@ -15,7 +15,6 @@ import { MessageType } from "../types";
 async function recoveryEnded(agentStub: {
   getChatRecoveryIncidentsForTest(): Promise<unknown>;
   chatTurnRunsInFlightForTest(): Promise<number>;
-  backingOffChatTurnRunsForTest(): Promise<number>;
   waitForIdleForTest(): Promise<unknown>;
 }): Promise<void> {
   await expect
@@ -29,13 +28,9 @@ async function recoveryEnded(agentStub: {
       { timeout: 10_000 }
     )
     .toMatch(/^(skipped|exhausted|completed|failed)$/);
+  // Pending includes a run waiting out a backoff.
   await expect
-    .poll(
-      async () =>
-        (await agentStub.chatTurnRunsInFlightForTest()) +
-        (await agentStub.backingOffChatTurnRunsForTest()),
-      { timeout: 10_000 }
-    )
+    .poll(() => agentStub.chatTurnRunsInFlightForTest(), { timeout: 10_000 })
     .toBe(0);
   await agentStub.waitForIdleForTest();
 }
