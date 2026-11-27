@@ -397,17 +397,21 @@ export class ExtensionRuntime<
     const key = runningKey(call);
     this.#running.set(key, controller);
     try {
-      const result: unknown = await execute(input, {
+      const returned: unknown = execute(input, {
         toolCallId: call.id,
         messages: call.messages,
         abortSignal: controller.signal,
         context: undefined,
         ...(invoke && { invoke })
       } as Parameters<typeof execute>[1]);
+      // As in the AI SDK: only an iterable `execute` returns streams; a
+      // promise of one is its last value, with no outputs on the way.
+      const streams = isAsyncIterable(returned);
+      const result: unknown = await returned;
       if (!isAsyncIterable(result)) return { ok: true, output: result };
       let last: unknown;
       for await (const output of result) {
-        await onOutput(output);
+        if (streams) await onOutput(output);
         last = output;
       }
       return { ok: true, output: last };

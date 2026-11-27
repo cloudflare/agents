@@ -9849,6 +9849,9 @@ export class ThinkToolsTestAgent extends Think {
     if (this._repairToolCalls) {
       return createToolCallingMockModel('```json\n{"message":"repaired"}\n```');
     }
+    if (this._invalidToolInput) {
+      return createToolCallingMockModel("not json at all");
+    }
     if (
       this._echoExecuteMode === "validated-output" ||
       this._rewriteTurnMessagesForTest ||
@@ -10939,6 +10942,12 @@ export class ThinkToolsTestAgent extends Think {
 
   private _turnStopCondition: TurnConfig["stopWhen"];
   private _repairToolCalls = false;
+  private _invalidToolInput = false;
+
+  /** The model calls echo with input that doesn't parse. */
+  async useInvalidToolInputForTest(): Promise<void> {
+    this._invalidToolInput = true;
+  }
 
   /** Enables deterministic malformed tool-call repair inside the test agent. */
   async enableToolCallRepairForTest(): Promise<void> {
@@ -11049,7 +11058,8 @@ export class ThinkToolsTestAgent extends Think {
             ...("toolName" in part && { toolName: part.toolName }),
             ...("input" in part && { input: part.input }),
             ...("output" in part && { output: part.output }),
-            ...("delta" in part && { delta: true })
+            ...("delta" in part && { delta: true }),
+            ...("invalid" in part && { invalid: part.invalid })
           }
         : { type: part.type }
     );

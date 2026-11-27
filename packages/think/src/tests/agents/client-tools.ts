@@ -12,6 +12,7 @@ import { Think } from "../../think";
 import { getCurrentAgent } from "agents";
 import type {
   ChatErrorContext,
+  ChunkContext,
   ChatResponseResult,
   MessageConcurrency,
   StreamCallback,
@@ -1091,6 +1092,17 @@ export class ThinkClientToolsAgent extends Think {
         }
       };
     }
+  }
+
+  private _chunkParts: string[] = [];
+
+  override onChunk(ctx: ChunkContext): void {
+    this._chunkParts.push(JSON.stringify(ctx.chunk));
+  }
+
+  /** Every part `onChunk` was given, as JSON. */
+  async getChunkPartsForTest(): Promise<string[]> {
+    return this._chunkParts;
   }
 
   async setMessageMetadataMode(value: boolean): Promise<void> {
