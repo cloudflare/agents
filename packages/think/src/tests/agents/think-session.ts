@@ -17275,6 +17275,47 @@ export class ThinkWindowedHydrationAgent extends Think {
    * and still land: the row is updated even though `this.messages` never
    * held it.
    */
+  /**
+   * Store a reply whose client tool call waits for its result, then four
+   * ~30 KB messages after it, which push it out of the 64 KB window. Public
+   * Session writes only.
+   */
+  async seedClientCallOutsideWindowForTest(): Promise<void> {
+    await this.session.appendMessage({
+      id: "old-owner",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-old",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "late" }
+        }
+      ]
+    } as unknown as UIMessage);
+    for (let i = 0; i < 4; i++) {
+      await this.session.appendMessage({
+        id: `after-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `after ${i} ${"y".repeat(30_000)}` }]
+      });
+    }
+  }
+
+  /** The stored state of tool call `toolCallId` in message `messageId`. */
+  async storedToolStateForTest(
+    messageId: string,
+    toolCallId: string
+  ): Promise<string | undefined> {
+    const stored = await this.session.getMessage(messageId);
+    const part = stored?.parts.find(
+      (candidate) =>
+        (candidate as { toolCallId?: string }).toolCallId === toolCallId
+    ) as { state?: string } | undefined;
+    return part?.state;
+  }
+
   async applyToolResultOutsideWindowForTest(): Promise<{
     inCache: boolean;
     cacheCoversPath: boolean;

@@ -28,133 +28,133 @@
   },
   {
     "file": "hooks.test.ts",
-    "test": "Think — host bridge methods > _insideInferenceLoop is false outside a turn",
+    "test": "Think \u2014 host bridge methods > _insideInferenceLoop is false outside a turn",
     "reason": "reads the class's private `_insideInferenceLoop` flag (`isInsideInferenceLoop`), the seam `addMessages` uses to hold its broadcast mid-turn",
     "successor": {
       "file": "hooks.test.ts",
-      "test": "Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
+      "test": "Think \u2014 host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
     }
   },
   {
     "file": "hooks.test.ts",
-    "test": "Think — host bridge methods > _insideInferenceLoop is false after a completed turn",
+    "test": "Think \u2014 host bridge methods > _insideInferenceLoop is false after a completed turn",
     "reason": "reads the class's private `_insideInferenceLoop` flag (`isInsideInferenceLoop`), the seam `addMessages` uses to hold its broadcast mid-turn",
     "successor": {
       "file": "hooks.test.ts",
-      "test": "Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
+      "test": "Think \u2014 host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — dynamic configuration > should not let legacy config overwrite newer think_config values on rerun",
+    "test": "Think \u2014 dynamic configuration > should not let legacy config overwrite newer think_config values on rerun",
     "reason": "Reruns the legacy config lift through Think's private _migrateLegacyConfigToThinkTable seam.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — dynamic configuration > keeps newer config when a restart lifts the legacy row again"
+      "test": "Think \u2014 dynamic configuration > keeps newer config when a restart lifts the legacy row again"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > should use context blocks in system prompt assembly even when called directly",
+    "test": "Think \u2014 context blocks > should use context blocks in system prompt assembly even when called directly",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends the context blocks, loaded on their own"
+      "test": "Think \u2014 the system prompt a turn sends > sends the context blocks, loaded on their own"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > should render empty writable blocks in system prompt",
+    "test": "Think \u2014 context blocks > should render empty writable blocks in system prompt",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends an empty writable block"
+      "test": "Think \u2014 the system prompt a turn sends > sends an empty writable block"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > keeps Think's default prompt out when a skills agent does not override getSystemPrompt",
+    "test": "Think \u2014 context blocks > keeps Think's default prompt out when a skills agent does not override getSystemPrompt",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends the skill catalog without Think's default prompt when getSystemPrompt is not overridden"
+      "test": "Think \u2014 the system prompt a turn sends > sends the skill catalog without Think's default prompt when getSystemPrompt is not overridden"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > puts an overridden getSystemPrompt above the skills block",
+    "test": "Think \u2014 context blocks > puts an overridden getSystemPrompt above the skills block",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends an overridden getSystemPrompt above the skill catalog"
+      "test": "Think \u2014 the system prompt a turn sends > sends an overridden getSystemPrompt above the skill catalog"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > keeps an inherited or class-field getSystemPrompt alongside skills",
+    "test": "Think \u2014 context blocks > keeps an inherited or class-field getSystemPrompt alongside skills",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends an inherited or class-field getSystemPrompt above the skill catalog"
+      "test": "Think \u2014 the system prompt a turn sends > sends an inherited or class-field getSystemPrompt above the skill catalog"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > loads skills from files in the Workspace and follows edits without rebuilding the prompt",
+    "test": "Think \u2014 context blocks > loads skills from files in the Workspace and follows edits without rebuilding the prompt",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > keeps the system prompt the same while Workspace skills change"
+      "test": "Think \u2014 the system prompt a turn sends > keeps the system prompt the same while Workspace skills change"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > folds a changed skills catalog into the prompt when history is cleared",
+    "test": "Think \u2014 context blocks > folds a changed skills catalog into the prompt when history is cleared",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > folds a changed skill catalog into the system prompt once history is cleared"
+      "test": "Think \u2014 the system prompt a turn sends > folds a changed skill catalog into the system prompt once history is cleared"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — async configureSession > should have working context blocks from async config",
+    "test": "Think \u2014 async configureSession > should have working context blocks from async config",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends the context blocks of an async configureSession"
+      "test": "Think \u2014 the system prompt a turn sends > sends the context blocks of an async configureSession"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — error handling > should recover and continue chatting after error",
+    "test": "Think \u2014 error handling > should recover and continue chatting after error",
     "reason": "the turn's failure is injected through the class's private `_transformInferenceResult` seam (`_errorConfig`, via `testChatWithError`)",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — error handling > answers the next turn after a model failure"
+      "test": "Think \u2014 error handling > answers the next turn after a model failure"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — error handling > should persist partial assistant message on error",
+    "test": "Think \u2014 error handling > should persist partial assistant message on error",
     "reason": "the turn's failure is injected through the class's private `_transformInferenceResult` seam (`_errorConfig`, via `testChatWithError`)",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — error handling > keeps the partial reply of a turn whose model reports an error"
+      "test": "Think \u2014 error handling > keeps the partial reply of a turn whose model reports an error"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — error handling > bridges an in-band stream error to chat:request:failed",
+    "test": "Think \u2014 error handling > bridges an in-band stream error to chat:request:failed",
     "reason": "the in-band error is fed through the class's private `_pumpReply` (`runInBandStreamErrorForTest`)",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — error handling > bridges an in-band stream error to chat:request:failed on the RPC path"
+      "test": "Think \u2014 error handling > bridges an in-band stream error to chat:request:failed on the RPC path"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > marks the incident failed when onChatRecovery throws",
+    "test": "Think \u2014 onChatRecovery > marks the incident failed when onChatRecovery throws",
     "reason": "seeds a fiber row and reads the class's recovery incident records (cf:chat-recovery:incident:*)",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -163,113 +163,113 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatResponse > should report in-band stream errors through RPC chat onError",
+    "test": "Think \u2014 onChatResponse > should report in-band stream errors through RPC chat onError",
     "reason": "it reads the stream's status from the class's private reply-stream records (`_replyStreams`, via `getLatestStreamStatusForTest`)",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability"
+      "test": "Think \u2014 onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — chatRecovery > hands off recovery after the durable turn run exists and before turn completion",
+    "test": "Think \u2014 chatRecovery > hands off recovery after the durable turn run exists and before turn completion",
     "reason": "when the recovery handoff is accepted relative to the durable turn run (`recoveryAcceptanceForTest`: acceptedBeforeCompletion, durableAtAcceptance): the class's handoff timing",
     "mechanicsOnly": true
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — chatRecovery > keeps pre-handoff failure on the current Task and replaces only post-handoff failure",
+    "test": "Think \u2014 chatRecovery > keeps pre-handoff failure on the current Task and replaces only post-handoff failure",
     "reason": "the transport the class uses for recovery work, counted as Tasks and schedules before and after the handoff (`testRecoveryDispatchHandoffForTest`)",
     "mechanicsOnly": true
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > deletes the incident record once recovery completes",
+    "test": "Think \u2014 onChatRecovery > deletes the incident record once recovery completes",
     "reason": "the class's private incident row is deleted on completion (`beginIncidentForTest`, `updateIncidentForTest`, `getChatRecoveryIncidentsForTest`)",
     "mechanicsOnly": true
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > sweeps incidents that have been inactive past the TTL",
+    "test": "Think \u2014 onChatRecovery > sweeps incidents that have been inactive past the TTL",
     "reason": "the class's incident TTL sweep over seeded private incident rows (`seedIncidentForTest`)",
     "mechanicsOnly": true
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > replaces an aged file part with the exact eviction marker",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > replaces an aged file part with the exact eviction marker",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > leaves the exact marker in an aged file part and keeps its prose"
+      "test": "mediaEviction \u2014 a pass that runs on its own > leaves the exact marker in an aged file part and keeps its prose"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > writes raw decoded bytes to the Workspace with the right mime type",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > writes raw decoded bytes to the Workspace with the right mime type",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > writes the raw decoded bytes to the Workspace"
+      "test": "mediaEviction \u2014 a pass that runs on its own > writes the raw decoded bytes to the Workspace"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts a data-URL string nested in a tool output",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > evicts a data-URL string nested in a tool output",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > evicts a data URL nested in a tool output and keeps the output's shape"
+      "test": "mediaEviction \u2014 a pass that runs on its own > evicts a data URL nested in a tool output and keeps the output's shape"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > leaves recent messages alone",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > leaves recent messages alone",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > leaves the recent messages alone, even with keepRecentMessages 0"
+      "test": "mediaEviction \u2014 a pass that runs on its own > leaves the recent messages alone, even with keepRecentMessages 0"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > starts a pass where the last one got to, so it re-reads only new rows",
-    "reason": "Pins how many stored rows a pass reads after a pass that evicted nothing (the cursor's cost), through Think's private _evictAgedMediaBestEffort seam; nothing an app can observe. The cursor after an eviction is shown through passes that run on their own in 'mediaEviction — a pass that runs on its own > a backlog pass reads only what is new since the cursor, not the whole path again'.",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > starts a pass where the last one got to, so it re-reads only new rows",
+    "reason": "Pins how many stored rows a pass reads after a pass that evicted nothing (the cursor's cost), through Think's private _evictAgedMediaBestEffort seam; nothing an app can observe. The cursor after an eviction is shown through passes that run on their own in 'mediaEviction \u2014 a pass that runs on its own > a backlog pass reads only what is new since the cursor, not the whole path again'.",
     "mechanicsOnly": true
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts a payload larger than one row, leaving the bytes in one place",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > evicts a payload larger than one row, leaving the bytes in one place",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > evicts a payload larger than one row and leaves the bytes in one place"
+      "test": "mediaEviction \u2014 a pass that runs on its own > evicts a payload larger than one row and leaves the bytes in one place"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > bounds each pass and drains the reported backlog",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > bounds each pass and drains the reported backlog",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > drains a backlog on its own when each pass is bounded"
+      "test": "mediaEviction \u2014 a pass that runs on its own > drains a backlog on its own when each pass is bounded"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > reaches older media past large text rows that fill a pass",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > reaches older media past large text rows that fill a pass",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > reaches older media past large text rows that fill a pass"
+      "test": "mediaEviction \u2014 a pass that runs on its own > reaches older media past large text rows that fill a pass"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > mediaEviction:false keeps the image visible to the model",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > mediaEviction:false keeps the image visible to the model",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > keeps the image with mediaEviction false: no pass is scheduled"
+      "test": "mediaEviction \u2014 a pass that runs on its own > keeps the image with mediaEviction false: no pass is scheduled"
     }
   },
   {
@@ -280,7 +280,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > fires onChatRecovery for an interrupted fiber",
+    "test": "Think \u2014 onChatRecovery > fires onChatRecovery for an interrupted fiber",
     "reason": "an interrupted turn built from seeded private stream and fiber rows (`insertInterruptedStream`, `insertInterruptedFiber`), recovered by hand (`triggerFiberRecovery`)",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -289,7 +289,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > recovers a pre-stream interrupted chat fiber from its early snapshot",
+    "test": "Think \u2014 onChatRecovery > recovers a pre-stream interrupted chat fiber from its early snapshot",
     "reason": "a seeded private fiber snapshot with no stream rows, recovered by hand",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -298,7 +298,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > exposes recoveryRootRequestId on the onChatRecovery context (#1631)",
+    "test": "Think \u2014 onChatRecovery > exposes recoveryRootRequestId on the onChatRecovery context (#1631)",
     "reason": "a seeded private incident and fiber, recovered by hand",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -343,7 +343,7 @@
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > a second pass is a cheap no-op",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > a second pass is a cheap no-op",
     "reason": "Pins the pass's own bookkeeping through Think's private _evictAgedMediaBestEffort seam: a second pass over rows the first already rewrote evicts nothing and reports no backlog; nothing an app can observe.",
     "mechanicsOnly": true
   },
@@ -385,7 +385,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > { continue: false } persists but does not schedule continuation",
+    "test": "Think \u2014 onChatRecovery > { continue: false } persists but does not schedule continuation",
     "reason": "an interrupted turn built from seeded private stream and fiber rows (`insertInterruptedStream`), recovered by hand",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -394,7 +394,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > retries a pre-stream interrupted user turn by default without duplicating the user message",
+    "test": "Think \u2014 onChatRecovery > retries a pre-stream interrupted user turn by default without duplicating the user message",
     "reason": "an interrupted turn built from a seeded private fiber (`insertInterruptedFiber`), recovered by hand",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -403,7 +403,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > continues a regeneration interrupted after partial output on its new branch (#2028)",
+    "test": "Think \u2014 onChatRecovery > continues a regeneration interrupted after partial output on its new branch (#2028)",
     "reason": "an interrupted regeneration built from seeded private stream rows (`insertInterruptedStream`), recovered by hand (`runScheduledRecoveryRetryForTest`)",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -412,8 +412,8 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > re-throws a memory-limit reset from a recovery callback without writing anything (#2613)",
-    "reason": "a memory-limit reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` › `isDurableObjectMemoryLimitReset`.",
+    "test": "Think \u2014 onChatRecovery > re-throws a memory-limit reset from a recovery callback without writing anything (#2613)",
+    "reason": "a memory-limit reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` \u203a `isDurableObjectMemoryLimitReset`.",
     "successor": {
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
@@ -421,8 +421,8 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > re-throws a deploy code-update reset (preserve the row to re-run on the fresh isolate) and does NOT terminalize",
-    "reason": "a code-update reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` › `isDurableObjectCodeUpdateReset`.",
+    "test": "Think \u2014 onChatRecovery > re-throws a deploy code-update reset (preserve the row to re-run on the fresh isolate) and does NOT terminalize",
+    "reason": "a code-update reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` \u203a `isDurableObjectCodeUpdateReset`.",
     "successor": {
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
@@ -430,8 +430,8 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize",
-    "reason": "a storage-reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` › `isDurableObjectStorageReset`.",
+    "test": "Think \u2014 onChatRecovery > re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize",
+    "reason": "a storage-reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` \u203a `isDurableObjectStorageReset`.",
     "successor": {
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
@@ -439,34 +439,34 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — waitUntilStable > detects a pending CLIENT-tool interaction (the SPA can still replay the tool-result)",
+    "test": "Think \u2014 waitUntilStable > detects a pending CLIENT-tool interaction (the SPA can still replay the tool-result)",
     "reason": "Sets the client's tools through Think's private _turns (setRequestContextForTest).",
     "successor": {
       "file": "client-tools.test.ts",
-      "test": "Think — a call to a tool the client sent > waits on a call to a tool the client sent in its request"
+      "test": "Think \u2014 a call to a tool the client sent > waits on a call to a tool the client sent in its request"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — waitUntilStable > does NOT block stability on a dead SERVER-tool input-available orphan",
+    "test": "Think \u2014 waitUntilStable > does NOT block stability on a dead SERVER-tool input-available orphan",
     "reason": "Sets the client's tools through Think's private _turns and stores the reply through the private _settleInterruptedReply.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — waitUntilStable > does not wait on a stored unanswered call to a server tool: nothing will answer it"
+      "test": "Think \u2014 waitUntilStable > does not wait on a stored unanswered call to a server tool: nothing will answer it"
     }
   },
   {
     "file": "ws-web-channel.test.ts",
-    "test": "Think — WebSocket chat runs on the web channel (#2255) > continues a regeneration of another channel's message on web",
+    "test": "Think \u2014 WebSocket chat runs on the web channel (#2255) > continues a regeneration of another channel's message on web",
     "reason": "reads the class's private `_channelForAutoContinuation`, the channel a tool-result continuation would take",
     "successor": {
       "file": "ws-web-channel.test.ts",
-      "test": "Think — WebSocket chat runs on the web channel (#2255) > continues a web regeneration of another channel's message on web"
+      "test": "Think \u2014 WebSocket chat runs on the web channel (#2255) > continues a web regeneration of another channel's message on web"
     }
   },
   {
     "file": "ws-web-channel.test.ts",
-    "test": "Think — WebSocket chat runs on the web channel (#2255) > extends the channel an explicit-channel continuation ran on",
+    "test": "Think \u2014 WebSocket chat runs on the web channel (#2255) > extends the channel an explicit-channel continuation ran on",
     "reason": "reads the class's private `_channelForAutoContinuation`, the channel a tool-result continuation would take",
     "successor": {
       "file": "channel-threading.test.ts",
@@ -475,25 +475,25 @@
   },
   {
     "file": "ws-web-channel.test.ts",
-    "test": "Think — WebSocket chat runs on the web channel (#2255) > keeps the previous turn's channel when a turn fails in beforeTurn",
+    "test": "Think \u2014 WebSocket chat runs on the web channel (#2255) > keeps the previous turn's channel when a turn fails in beforeTurn",
     "reason": "reads the class's private `_channelForAutoContinuation`, the channel a tool-result continuation would take",
     "successor": {
       "file": "ws-web-channel.test.ts",
-      "test": "Think — WebSocket chat runs on the web channel (#2255) > continues a voice reply on voice after its web regeneration fails in beforeTurn"
+      "test": "Think \u2014 WebSocket chat runs on the web channel (#2255) > continues a voice reply on voice after its web regeneration fails in beforeTurn"
     }
   },
   {
     "file": "ws-web-channel.test.ts",
-    "test": "Think — WebSocket chat runs on the web channel (#2255) > resolves a queued continuation's channel when it runs, not when it is admitted",
+    "test": "Think \u2014 WebSocket chat runs on the web channel (#2255) > resolves a queued continuation's channel when it runs, not when it is admitted",
     "reason": "holds the class's private `_turnQueue` with a blocker so the continuations queue behind it",
     "successor": {
       "file": "ws-web-channel.test.ts",
-      "test": "Think — WebSocket chat runs on the web channel (#2255) > resolves a continuation's channel when it runs, behind another"
+      "test": "Think \u2014 WebSocket chat runs on the web channel (#2255) > resolves a continuation's channel when it runs, behind another"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > retries a pre-stream interrupted regeneration as a new branch (#2028)",
+    "test": "Think \u2014 onChatRecovery > retries a pre-stream interrupted regeneration as a new branch (#2028)",
     "reason": "an interrupted regeneration built from a seeded private fiber snapshot, recovered by hand (`runScheduledRecoveryRetryForTest`)",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -502,7 +502,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > retries an interrupted opened stream with no assistant content",
+    "test": "Think \u2014 onChatRecovery > retries an interrupted opened stream with no assistant content",
     "reason": "an interrupted turn built from seeded private stream rows with no text, recovered by hand",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -511,7 +511,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > re-throws a \"This script has been upgraded\" supersede (defer + re-run) and does NOT terminalize",
+    "test": "Think \u2014 onChatRecovery > re-throws a \"This script has been upgraded\" supersede (defer + re-run) and does NOT terminalize",
     "reason": "a superseded-isolate error injected into the class's scheduled recovery callback (private); a code update supersedes the isolate, which the successor stands for with a reset while onChatRecovery runs",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -520,7 +520,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > keeps a messenger reply pending while the platform re-runs recovery",
+    "test": "Think \u2014 onChatRecovery > keeps a messenger reply pending while the platform re-runs recovery",
     "reason": "a code-update reset error injected into the class's scheduled recovery callback (private), with a seeded messenger delivery",
     "successor": {
       "file": "messengers.test.ts",
@@ -529,7 +529,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)",
+    "test": "Think \u2014 onChatRecovery > leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)",
     "reason": "a platform deferral injected into the class's scheduled recovery callback (private), with a seeded running submission",
     "successor": {
       "file": "submissions.test.ts",
@@ -538,20 +538,20 @@
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts media a late update puts on a row the cache does not hold",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > evicts media a late update puts on a row the cache does not hold",
     "reason": "Runs each pass by hand through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > evicts media a late update puts on a row the view does not hold"
+      "test": "mediaEviction \u2014 a pass that runs on its own > evicts media a late update puts on a row the view does not hold"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — waitUntilStable > detects a pending CLIENT-tool interaction living ONLY in the in-flight accumulator (mid-stream, pre-persist)",
+    "test": "Think \u2014 waitUntilStable > detects a pending CLIENT-tool interaction living ONLY in the in-flight accumulator (mid-stream, pre-persist)",
     "reason": "Seeds Think's private in-flight accumulator and client tools (_turns).",
     "successor": {
       "file": "client-tools.test.ts",
-      "test": "Think — a client tool's call while its reply streams > waits on it before the reply is stored"
+      "test": "Think \u2014 a client tool's call while its reply streams > waits on it before the reply is stored"
     }
   },
   {
@@ -637,7 +637,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > marks the root submission errored when a chained continuation is abandoned (recovery disabled)",
+    "test": "Think \u2014 onChatRecovery > marks the root submission errored when a chained continuation is abandoned (recovery disabled)",
     "reason": "a `running` submission seeded in the class's shape (`seedRunningSubmissionForTest`), with an interrupted continuation's stream and fiber row inserted by hand",
     "successor": {
       "file": "submissions.test.ts",
@@ -646,83 +646,104 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > reschedules a pre-stream retry that times out waiting for stable state, within the attempt budget",
+    "test": "Think \u2014 onChatRecovery > reschedules a pre-stream retry that times out waiting for stable state, within the attempt budget",
     "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
     "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > reschedules a continuation that times out waiting for stable state, within the attempt budget",
+    "test": "Think \u2014 onChatRecovery > reschedules a continuation that times out waiting for stable state, within the attempt budget",
     "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
     "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > exhausts via onExhausted once the stable-state continue budget is spent",
+    "test": "Think \u2014 onChatRecovery > exhausts via onExhausted once the stable-state continue budget is spent",
     "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
     "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > exhausts via onExhausted once the stable-state retry budget is spent",
+    "test": "Think \u2014 onChatRecovery > exhausts via onExhausted once the stable-state retry budget is spent",
     "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
     "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > terminalizes a stable-state give-up even when the incident record is missing (silent-drop guard)",
+    "test": "Think \u2014 onChatRecovery > terminalizes a stable-state give-up even when the incident record is missing (silent-drop guard)",
     "reason": "a `running` submission seeded in the class's shape (`seedRunningSubmissionForTest`), the recovery callback run by hand (`runChatRecoveryContinueForTestWith`) with an incident id whose record was never written, and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
     "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > a genuinely superseding user turn marks the submission skipped, not errored",
+    "test": "Think \u2014 onChatRecovery > a genuinely superseding user turn marks the submission skipped, not errored",
     "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand, with a newer user leaf persisted by hand",
     "ruledOut": "a later request waits behind the recovery on the chat lane, so a recovery never finds a newer user leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov). On Think: submissions.test.ts 'a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order', which passes on both configs"
   },
   {
     "file": "channel-recovery.test.ts",
-    "test": "recovery × channels > re-applies channel policy when CONTINUING a recovered partial turn",
+    "test": "recovery \u00d7 channels > re-applies channel policy when CONTINUING a recovered partial turn",
     "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
     "successor": {
       "file": "channel-recovery.test.ts",
-      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+      "test": "recovery \u00d7 channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
   },
   {
     "file": "channel-recovery.test.ts",
-    "test": "recovery × channels > re-applies channel policy when RETRYING a recovered pre-stream turn",
+    "test": "recovery \u00d7 channels > re-applies channel policy when RETRYING a recovered pre-stream turn",
     "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
     "successor": {
       "file": "channel-recovery.test.ts",
-      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+      "test": "recovery \u00d7 channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
   },
   {
     "file": "channel-recovery.test.ts",
-    "test": "recovery × channels > re-applies the channel TOOL policy (not just instructions) on a recovered continue turn",
+    "test": "recovery \u00d7 channels > re-applies the channel TOOL policy (not just instructions) on a recovered continue turn",
     "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
     "successor": {
       "file": "channel-recovery.test.ts",
-      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+      "test": "recovery \u00d7 channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
   },
   {
     "file": "channel-recovery.test.ts",
-    "test": "recovery × channels > falls back to default policy when the recovered turn has NO channel stamp",
+    "test": "recovery \u00d7 channels > falls back to default policy when the recovered turn has NO channel stamp",
     "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
     "successor": {
       "file": "channel-recovery.test.ts",
-      "test": "recovery × channels, after a real reset > recovers a turn with no channel stamp on no channel"
+      "test": "recovery \u00d7 channels, after a real reset > recovers a turn with no channel stamp on no channel"
     }
   },
   {
     "file": "channel-recovery.test.ts",
-    "test": "recovery × channels > composes channel re-resolution AND agent-tool request_id rebind on the SAME recovered turn",
+    "test": "recovery \u00d7 channels > composes channel re-resolution AND agent-tool request_id rebind on the SAME recovered turn",
     "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`; the successor covers its channel half, not the agent-tool rebind",
     "successor": {
       "file": "channel-recovery.test.ts",
-      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+      "test": "recovery \u00d7 channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+    }
+  },
+  {
+    "file": "hydration-budget.test.ts",
+    "test": "hydrationByteBudget \u2014 windowed hydration (#1710) > does not re-hydrate a window after appends at its tail",
+    "reason": "a re-hydration count per request, which nothing exposes: the start span reports only the start's hydration",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "hydration-budget.test.ts",
+    "test": "hydrationByteBudget \u2014 windowed hydration (#1710) > re-windows after a batch of short messages outgrows the allowance",
+    "reason": "a re-hydration count per request, which nothing exposes: the start span reports only the start's hydration",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "hydration-budget.test.ts",
+    "test": "hydrationByteBudget \u2014 windowed hydration (#1710) > applies a tool result to a row the hydration window no longer holds",
+    "reason": "the class's private tool update (`_applyToolUpdateToMessages`) and its cache's coverage flag (`_cfTranscript.coversActivePath`)",
+    "successor": {
+      "file": "hydration-budget.test.ts",
+      "test": "hydrationByteBudget \u2014 windowed hydration (#1710) > stores a client's tool result for a call older than the hydration window"
     }
   }
 ]

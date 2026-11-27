@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
@@ -113,6 +113,45 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(result.coversAfterSync).toBe(true);
     expect(result.coversAfterUpdate).toBe(false);
     expect(result.coversAfterMultibyteAppend).toBe(false);
+  });
+
+  it("stores a client's tool result for a call older than the hydration window", async () => {
+    const room = uniqueName("windowed-tool-result");
+    const agent = (await getAgentByName(
+      env.ThinkWindowedHydrationAgent,
+      room
+    )) as unknown as WindowedHydrationStub & {
+      seedClientCallOutsideWindowForTest(): Promise<void>;
+      storedToolStateForTest(
+        messageId: string,
+        toolCallId: string
+      ): Promise<string | undefined>;
+    };
+    await agent.seedClientCallOutsideWindowForTest();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-windowed-hydration-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket;
+    if (!ws) throw new Error("no socket");
+    ws.accept();
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "tc-old",
+        toolName: "client_action",
+        output: "late result",
+        autoContinue: false
+      })
+    );
+    const deadline = Date.now() + 10_000;
+    let state = await agent.storedToolStateForTest("old-owner", "tc-old");
+    while (state !== "output-available" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      state = await agent.storedToolStateForTest("old-owner", "tc-old");
+    }
+    ws.close();
+    expect(state).toBe("output-available");
   });
 
   it("applies a tool result to a row the hydration window no longer holds", async () => {
