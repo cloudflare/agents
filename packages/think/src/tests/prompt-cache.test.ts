@@ -122,6 +122,17 @@ describe("prompt-cache prefix stability (#2200)", () => {
     expect(report.at(-1)!.requestChars).toBeLessThan(10_000);
   });
 
+  it("rewrites the prefix once when media is evicted by passes that run on their own", async () => {
+    const report = await measure(`prefix-media-own-${crypto.randomUUID()}`, {
+      turns: 8,
+      firstTurnMediaChars: 50_000,
+      mediaEviction: { keepRecentMessages: 2, minPartBytes: 10_000 },
+      evictOnItsOwn: true
+    });
+    expect(prefixBreaks(report)).toHaveLength(1);
+    expect(report.at(-1)!.requestChars).toBeLessThan(10_000);
+  });
+
   it("evicts media sent every turn once per truncation step, at defaults (#2356)", async () => {
     const report = await measure("prefix-media-every-turn", {
       turns: 16,
@@ -130,6 +141,21 @@ describe("prompt-cache prefix stability (#2200)", () => {
     });
     expect(prefixBreaks(report)).toEqual([10, 14]);
     // Media on the most recent 11 messages is never evicted, whatever turn.
+    expect(report.at(-1)!.requestChars).toBeGreaterThan(5 * 50_000);
+    expect(report.at(-1)!.requestChars).toBeLessThan(12 * 50_000);
+  });
+
+  it("evicts media sent every turn once per truncation step, by passes that run on their own", async () => {
+    const report = await measure(
+      `prefix-media-every-turn-own-${crypto.randomUUID()}`,
+      {
+        turns: 16,
+        everyTurnMediaChars: 50_000,
+        mediaEviction: {},
+        evictOnItsOwn: true
+      }
+    );
+    expect(prefixBreaks(report)).toEqual([10, 14]);
     expect(report.at(-1)!.requestChars).toBeGreaterThan(5 * 50_000);
     expect(report.at(-1)!.requestChars).toBeLessThan(12 * 50_000);
   });

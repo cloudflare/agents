@@ -22,6 +22,11 @@ export type PromptCacheScenario = {
   everyTurnMediaChars?: number;
   /** Run a Think media eviction pass after each turn. */
   mediaEviction?: MediaEvictionConfig;
+  /**
+   * With `mediaEviction`: let passes run on their own, as an app's do, and
+   * wait after each turn until none is queued, instead of running one.
+   */
+  evictOnItsOwn?: boolean;
   /** Compact every older message into one summary past this token estimate. */
   compactAfterTokens?: number;
   /** Override `truncationStep`. */
@@ -153,6 +158,27 @@ export class ThinkPromptCacheTestAgent extends Think {
     return this._requests[index] ?? [];
   }
 
+  /**
+   * Wait until no media-eviction pass job is queued on this object. A pass
+   * runs as a job on the Agent queue and deletes its row when it ends, and a
+   * pass that leaves a backlog queues the next one first.
+   */
+  async evictionPassesSettledForTest(): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const queued =
+        this.sql<{ count: number }>`
+          SELECT COUNT(*) AS count FROM cf_agents_jobs
+          WHERE id = ${"think-media-eviction:pass"}
+        `[0]?.count ?? 0;
+      if (queued === 0) return;
+      if (Date.now() > deadline) {
+        throw new Error("media eviction passes did not settle within 5 s");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
   async measurePromptCacheForTest(
     scenario: PromptCacheScenario
   ): Promise<PromptCacheTurn[]> {
@@ -197,7 +223,11 @@ export class ThinkPromptCacheTestAgent extends Think {
         });
       }
       await this.saveMessages([{ id: `u${turn}`, role: "user", parts }]);
-      if (scenario.mediaEviction) await this._evictAgedMediaBestEffort();
+      if (scenario.mediaEviction && scenario.evictOnItsOwn) {
+        await this.evictionPassesSettledForTest();
+      } else if (scenario.mediaEviction) {
+        await this._evictAgedMediaBestEffort();
+      }
 
       const current = this._requests[before];
       const previous = this._requests[before - 1];

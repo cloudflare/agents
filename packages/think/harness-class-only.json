@@ -346,5 +346,23 @@
     "test": "mediaEviction — aged media leaves the conversation (#1710) > a second pass is a cheap no-op",
     "reason": "Pins the pass's own bookkeeping through Think's private _evictAgedMediaBestEffort seam: a second pass over unchanged rows reads and writes nothing; nothing an app can observe.",
     "mechanicsOnly": true
+  },
+  {
+    "file": "prompt-cache.test.ts",
+    "test": "prompt-cache prefix stability (#2200) > rewrites the prefix once when media is evicted",
+    "reason": "Runs each pass by hand through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "prompt-cache.test.ts",
+      "test": "prompt-cache prefix stability (#2200) > rewrites the prefix once when media is evicted by passes that run on their own"
+    }
+  },
+  {
+    "file": "prompt-cache.test.ts",
+    "test": "prompt-cache prefix stability (#2200) > evicts media sent every turn once per truncation step, at defaults (#2356)",
+    "reason": "Runs each pass by hand through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "prompt-cache.test.ts",
+      "test": "prompt-cache prefix stability (#2200) > evicts media sent every turn once per truncation step, by passes that run on their own"
+    }
   }
 ]
