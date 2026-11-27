@@ -416,6 +416,11 @@ export class TestAgentToolReplayAgent extends Agent {
     await this.waitForOpenRunForTest(runId);
     await this.tasks.cancel(runId, "agent tool run cleared");
     await first.catch(() => {});
+    // A fresh child for the second dispatch: what is under test is that
+    // the parent starts the id afresh instead of returning the clear's
+    // `aborted`. (The old child's own run would answer for the id; a child
+    // outliving its delete on a deployment is RUNTIME-FACTS P4.)
+    await this.deleteSubAgent(TestAgentToolStubChild, runId);
     const again = await this.runAgentTool(TestAgentToolStubChild, {
       runId,
       input: { chunkBodies: [], summary: "again" } satisfies StubRunInput
@@ -428,6 +433,33 @@ export class TestAgentToolReplayAgent extends Agent {
     while (!this.tasks.peek(runId) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+  }
+
+  /**
+   * A detached run as a reset between its accept and its child's start
+   * leaves it: the task open, the child never given the run.
+   */
+  async acceptDetachedWithoutChildForTest(runId: string): Promise<void> {
+    const now = Date.now();
+    await this.tasks.importRun({
+      runId,
+      definition: "__cf_agent_tool_detached",
+      metadata: {
+        agentType: "TestAgentToolStubChild",
+        displayOrder: 0,
+        startedAt: now,
+        detached: { onFinish: "onDetachedDone", maxBudgetAt: now + 3_600_000 }
+      },
+      retain: true,
+      createdAt: now,
+      status: "running",
+      attempt: 1
+    });
+  }
+
+  /** The child of `runId` loses its run, as a deleted child would. */
+  async dropChildForTest(runId: string): Promise<void> {
+    await this.deleteSubAgent(TestAgentToolStubChild, runId);
   }
 
   /** A detached run's state; waits for its report once it settled. */

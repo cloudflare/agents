@@ -192,6 +192,49 @@ describe("detached agent-tool runs on Tasks", () => {
     ).toEqual([]);
   });
 
+  it("ends a run whose child never took it (a reset between the accept and the child's start)", async () => {
+    const agent = await parent("detached-never-started");
+    await agent.acceptDetachedWithoutChildForTest("run-never");
+    expect((await agent.checkDetachedForTest("run-never")).status).toBe(
+      "completed"
+    );
+    expect(statuses(await agent.getDetachedDeliveryLog(), "run-never")).toEqual(
+      ["error"]
+    );
+  });
+
+  it("settles a run that gave up, with no second callback, when its child has no run left", async () => {
+    const agent = await parent("detached-gave-up-no-child");
+    await agent.startDetachedForTest(
+      "run-gave-up-gone",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
+    );
+    expect(await agent.checkDetachedForTest("run-gave-up-gone")).toMatchObject({
+      status: "pending",
+      waitReason: "park"
+    });
+    await agent.dropChildForTest("run-gave-up-gone");
+    expect((await agent.checkDetachedForTest("run-gave-up-gone")).status).toBe(
+      "completed"
+    );
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "run-gave-up-gone")
+    ).toEqual(["interrupted"]);
+    // It settles as the give-up it delivered: over its budget.
+    expect(
+      (await agent.captureReplayTerminalEventsForTest()).filter(
+        (event) => "runId" in event && event.runId === "run-gave-up-gone"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        kind: "interrupted",
+        reason: "budget-exceeded",
+        childStillRunning: false
+      })
+    ]);
+  });
+
   it("settles an unconfirmed give-up once a later check reads the give-up's own abort (#2769)", async () => {
     const agent = await parent("detached-unconfirmed");
     await agent.startDetachedForTest(
@@ -209,6 +252,17 @@ describe("detached agent-tool runs on Tasks", () => {
     expect(
       statuses(await agent.getDetachedDeliveryLog(), "run-unconfirmed")
     ).toEqual(["interrupted"]);
+    expect(
+      (await agent.captureReplayTerminalEventsForTest()).filter(
+        (event) => "runId" in event && event.runId === "run-unconfirmed"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        kind: "interrupted",
+        reason: "budget-exceeded",
+        childStillRunning: false
+      })
+    ]);
   });
 
   it("delivers the real result when the child finishes before the give-up's cancel lands (#2768)", async () => {
