@@ -2601,6 +2601,34 @@ describe("Think — onChatResponse", () => {
     }
   });
 
+  // The successor of the test above through public behaviour: what the
+  // caller, the response hook and observability see, without the class's
+  // stream records.
+  it("reports an in-band stream error to the RPC caller, the response hook and observability", async () => {
+    const room = "hook-rpc-inband-error-public";
+    const observedTypes: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      if (event.agent === "ThinkTestAgent" && event.name === room) {
+        observedTypes.push(event.type);
+      }
+    });
+    const agent = await freshAgent(room);
+
+    try {
+      await agent.setInBandErrorResponse("RPC in-band error");
+      const result = await agent.testChat("trigger rpc in-band error");
+
+      expect(result.done).toBe(false);
+      expect(result.error).toContain("RPC in-band error");
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.map((entry) => entry.status)).toEqual(["error"]);
+      expect(log[0].error).toContain("RPC in-band error");
+      expect(observedTypes).toContain("message:error");
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("should propagate RPC in-band stream errors when onError rethrows", async () => {
     const agent = await freshAgent("hook-rpc-inband-error-rethrow");
 
