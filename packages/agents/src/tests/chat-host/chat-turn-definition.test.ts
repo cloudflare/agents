@@ -355,6 +355,7 @@ describe("chatTurnDefinition", () => {
       await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
         await instance.lifecycle.start();
         const seen: Array<string | undefined> = [];
+        let made: ReadableStream | undefined;
         const chunks = [
           { type: "start", messageId: "a1" },
           { type: "text-start", id: "t1" },
@@ -366,7 +367,7 @@ describe("chatTurnDefinition", () => {
           respond: async () => {
             if (kind === "a stream") {
               let next = 0;
-              return new ReadableStream({
+              return (made = new ReadableStream({
                 // Each chunk is made when it is asked for.
                 pull(controller) {
                   seen.push(runningChatTurn());
@@ -374,7 +375,7 @@ describe("chatTurnDefinition", () => {
                     controller.enqueue(chunks[next++] as never);
                   } else controller.close();
                 }
-              });
+              }));
             }
             if (kind === "a response") {
               const encoder = new TextEncoder();
@@ -402,8 +403,16 @@ describe("chatTurnDefinition", () => {
               }
             })();
             if (kind === "an async iterable") return iterable;
+            // An iterator that says something else: it must not be read.
+            const other = (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Wrong" } as never;
+              yield { type: "text-end", id: "t1" } as never;
+              yield { type: "finish" } as never;
+            })();
             // Both shapes at once: the method is the one that is read.
-            return Object.assign(iterable, {
+            return Object.assign(other, {
               toUIMessageStream: () => {
                 seen.push(runningChatTurn());
                 let next = 0;
@@ -420,6 +429,11 @@ describe("chatTurnDefinition", () => {
           }
         })({ trigger: "server" }, laterAttempt(`run-read-${kind}`, 1));
         expect(result).toMatchObject({ status: "completed" });
+        const stored = await instance.sessions.session("s1").getHistory();
+        expect(JSON.stringify(stored.at(-1))).toContain("Hi");
+        expect(JSON.stringify(stored.at(-1))).not.toContain("Wrong");
+        // The host's own stream is not left locked once it was read.
+        if (kind === "a stream") expect(made?.locked).toBe(false);
         expect(seen.length).toBeGreaterThanOrEqual(chunks.length);
         expect(new Set(seen)).toEqual(new Set([`run-read-${kind}`]));
       });

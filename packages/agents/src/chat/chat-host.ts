@@ -451,8 +451,10 @@ function insideTurn(
   return new ReadableStream<UIMessageChunk>({
     async pull(controller) {
       const next = await runningTurn.run(requestId, () => reader.read());
-      if (next.done) controller.close();
-      else controller.enqueue(next.value);
+      if (!next.done) return controller.enqueue(next.value);
+      // Read to its end: the host's stream is not left locked.
+      reader.releaseLock();
+      controller.close();
     },
     cancel: (reason) => runningTurn.run(requestId, () => reader.cancel(reason))
   });
