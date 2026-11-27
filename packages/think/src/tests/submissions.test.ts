@@ -327,6 +327,18 @@ async function chunkStreamHeld(agent: ThinkSubmissionTestStub): Promise<void> {
   );
 }
 
+/**
+ * Wait until no Tasks run is open: every turn, recovery and status report
+ * has ended. Holds on the harness-backed Think as well, which has no turn
+ * queue to wait on.
+ */
+async function tasksIdle(agent: ThinkSubmissionTestStub): Promise<void> {
+  await vi.waitFor(
+    async () => expect(await agent.isTasksIdleForTest()).toBe(true),
+    { timeout: 10_000, interval: 20 }
+  );
+}
+
 /** Wait until the held `onSubmissionStatus` call is running. */
 async function statusHookHeld(agent: ThinkSubmissionTestStub): Promise<void> {
   await vi.waitFor(
@@ -521,7 +533,7 @@ describe("Think durable submissions", () => {
       // The submission names the reply it ended with.
       expect(done?.messageId).toBe(stored[1].id);
       // And it is terminal for good: nothing runs it again.
-      await restarted.waitForIdleForTest();
+      await tasksIdle(restarted);
       expect(
         (await restarted.getStoredMessages()).map((message) => message.role)
       ).toEqual(["user", "assistant"]);
@@ -597,7 +609,7 @@ describe("Think durable submissions", () => {
       }>;
       expect(
         parts.filter((part) => part.type.startsWith("tool-"))
-      ).toMatchObject([{ state: "output-available" }]);
+      ).toMatchObject([{ state: "output-available", output: "echo: hello" }]);
       expect(
         parts.some(
           (part) => part.type === "text" && part.text === "Done with tools"
@@ -628,7 +640,7 @@ describe("Think durable submissions", () => {
       // The recovered reply ends after the cancel: it must not write a
       // completion over it.
       await restarted.releaseChunksForTest();
-      await restarted.waitForIdleForTest();
+      await tasksIdle(restarted);
       await expect(
         restarted.inspectSubmissionForTest("sub-evicted-cancel")
       ).resolves.toMatchObject({ status: "aborted", error: "stop" });
