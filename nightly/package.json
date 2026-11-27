@@ -6,7 +6,8 @@
   "scripts": {
     "faults": "vitest run -c faults/vitest.config.ts",
     "upgrade": "vitest run -c upgrade/vitest.config.ts",
-    "harnesses": "vitest run -c harnesses/vitest.config.ts"
+    "harnesses": "vitest run -c harnesses/vitest.config.ts",
+    "soak": "vitest run -c soak/vitest.config.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.0",

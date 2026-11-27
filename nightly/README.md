@@ -52,3 +52,12 @@ cd nightly
 pnpm run harnesses                       # both suites
 pnpm run harnesses --project opencode    # one
 ```
+
+## soak
+
+Think on a real Workers AI model (`glm-4.7-flash`): three rooms of twelve turns each. The turns cycle through a plain question, a server tool, a client tool the tab answers, a tool that needs approval (the tab approves it) and a submission, and two replies per room are cut off by a reset. The model's words are never checked. What must hold: every message the user sent is in the transcript once, in order; every one is answered; no tool call ran twice; every submission completed; the object restarted for each reset; and the fault suite's checks.
+
+```sh
+cd nightly
+SOAK_LOG=/tmp/soak.log pnpm run soak   # SOAK_LOG: one line per turn, for watching a run
+```
