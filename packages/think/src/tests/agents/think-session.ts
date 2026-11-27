@@ -1338,6 +1338,44 @@ function createAbortAwareMockModel(
   } as LanguageModel;
 }
 
+/** A model that streams two chunks of `text`, then fails with `message`. */
+function createMidStreamErrorMockModel(
+  text: string,
+  message: string
+): LanguageModel {
+  const half = Math.max(1, Math.floor(text.length / 2));
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-mid-stream-error",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    async doStream() {
+      // One part per read, and the failure only on the read after the two
+      // chunks, so the reader has taken them before the stream fails.
+      const parts: unknown[] = [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "t-1" },
+        { type: "text-delta", id: "t-1", delta: text.slice(0, half) },
+        { type: "text-delta", id: "t-1", delta: text.slice(half) }
+      ];
+      const stream = new ReadableStream(
+        {
+          pull(controller) {
+            const part = parts.shift();
+            if (part === undefined) controller.error(new Error(message));
+            else controller.enqueue(part);
+          }
+        },
+        { highWaterMark: 0 }
+      );
+      return { stream };
+    }
+  } as LanguageModel;
+}
+
 /** Sentinel error class to distinguish simulated errors in tests */
 class SimulatedChatError extends Error {
   constructor(message: string) {
@@ -4503,6 +4541,25 @@ export class ThinkTestAgent extends Think {
       return await this.testChat("trigger error");
     } finally {
       this._errorConfig = null;
+    }
+  }
+
+  /**
+   * A turn whose model stream fails after two text chunks. The model comes
+   * from `beforeTurn`, so the turn fails the way a provider's would, on
+   * Think and on the harness-backed Think alike.
+   */
+  async testChatWithModelError(errorMessage?: string): Promise<TestChatResult> {
+    this._turnConfigOverride = {
+      model: createMidStreamErrorMockModel(
+        this._response,
+        errorMessage ?? "Mock error"
+      )
+    };
+    try {
+      return await this.testChat("trigger error");
+    } finally {
+      this._turnConfigOverride = null;
     }
   }
 

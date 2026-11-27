@@ -434,7 +434,7 @@ describe("Think — error handling", () => {
   it("should handle errors and return error message", async () => {
     const agent = await freshAgent("err-basic");
 
-    const result = await agent.testChatWithError("LLM exploded");
+    const result = await agent.testChatWithModelError("LLM exploded");
 
     expect(result.done).toBe(false);
     expect(result.error).toContain("LLM exploded");
@@ -463,7 +463,7 @@ describe("Think — error handling", () => {
   it("should log errors via onChatError hook", async () => {
     const agent = await freshAgent("err-hook");
 
-    await agent.testChatWithError("Custom error for hook");
+    await agent.testChatWithModelError("Custom error for hook");
 
     const errorLog = await agent.getChatErrorLog();
     expect(errorLog).toHaveLength(1);
@@ -1402,6 +1402,26 @@ describe("Think — error handling", () => {
 
     const stored = (await agent.getStoredMessages()) as UIMessage[];
     expect(stored).toHaveLength(4);
+  });
+
+  // The successor of the test above through public behaviour: the failure
+  // is the model's own, from the model `beforeTurn` gives.
+  it("answers the next turn after a model failure", async () => {
+    const agent = await freshAgent("err-recover-model");
+
+    const errResult = await agent.testChatWithModelError("Temporary failure");
+    expect(errResult.done).toBe(false);
+    expect(errResult.error).toContain("Temporary failure");
+
+    const okResult = await agent.testChat("After error");
+    expect(okResult.done).toBe(true);
+
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored.map((message) => message.role).slice(-2)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(stored.at(-1)?.parts.length).toBeGreaterThan(0);
   });
 });
 
@@ -2363,12 +2383,23 @@ describe("Think — onChatResponse", () => {
   it("should fire onChatResponse with error status on failure", async () => {
     const agent = await freshAgent("hook-error");
 
-    await agent.testChatWithError("Boom");
+    await agent.testChatWithModelError("Boom");
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log).toHaveLength(1);
     expect(log[0].status).toBe("error");
     expect(log[0].error).toContain("Boom");
+  });
+
+  it("fires onChatResponse for a failed turn that wrote text, even when its error reads like a never-ran reason", async () => {
+    const agent = await freshAgent("hook-error-reads-empty");
+
+    await agent.testChatWithModelError("empty");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].message.parts.length).toBeGreaterThan(0);
   });
 
   it("should fire onChatResponse with error status when in-band error arrives before any parts", async () => {

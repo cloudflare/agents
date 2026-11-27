@@ -124,5 +124,14 @@
       "file": "think-session.test.ts",
       "test": "Think — the system prompt a turn sends > sends the context blocks of an async configureSession"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > should recover and continue chatting after error",
+    "reason": "the turn's failure is injected through the class's private `_transformInferenceResult` seam (`_errorConfig`, via `testChatWithError`)",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — error handling > answers the next turn after a model failure"
+    }
   }
 ]
