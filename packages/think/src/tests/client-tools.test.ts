@@ -2045,6 +2045,60 @@ describe("Think — auto-continuation", () => {
     }
   }, 20000);
 
+  // Successor of the next test through a real batch: once the last result
+  // of a parallel batch arrives, waitUntilStable reports stable only after
+  // the continuation it arms has run.
+  it("reports stable only after the continuation the batch's last result armed has run", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await agent.setTextOnlyMode(true);
+    await agent.persistToolCallMessage([
+      makeUserMessage("use two tools"),
+      {
+        id: "assistant-stable-armed",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-one",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "one" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-two",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "two" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+    await agent.clearResponseLog();
+    const result = (toolCallId: string) =>
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      });
+    ws.send(result("tc-one"));
+    await handled(agent, MSG_TOOL_RESULT);
+    ws.send(result("tc-two"));
+    await handled(agent, MSG_TOOL_RESULT, 2);
+
+    // Asked the moment the batch completes: stable means the continuation
+    // has run, not that it has yet to start.
+    expect(await agent.waitUntilStableForTest({ timeout: 15_000 })).toBe(true);
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.filter((entry) => entry.continuation)).toHaveLength(1);
+    await closeWS(ws);
+  });
+
   it("waitUntilStable does not report stable while an auto-continuation is armed (#1650)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
