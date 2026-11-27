@@ -1,6 +1,6 @@
 import { CHAT_REQUEST_CONTEXT_KEY } from "../../chat";
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Connection } from "agents";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
@@ -2264,6 +2264,73 @@ describe("chat functions over a minimal host", () => {
       });
       release();
       expect(open).toHaveLength(2);
+    });
+  });
+
+  it("a stop drops the continuation an answer already started for the reply that streams", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(
+        instance,
+        [
+          { type: "start", messageId: "a1" },
+          {
+            type: "tool-input-available",
+            toolCallId: "c1",
+            toolName: "ask",
+            input: {}
+          }
+        ],
+        [],
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: "r1",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "u1",
+                  role: "user",
+                  parts: [{ type: "text", text: "Hi" }]
+                }
+              ],
+              clientTools: [{ name: "ask" }]
+            })
+          }
+        })
+      );
+      // The batch's only call is answered: its continuation waits behind
+      // the reply. Then the user stops the reply.
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        toolResult("c1", true)
+      );
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({ type: "cf_agent_chat_request_cancel", id: "r1" })
+      );
+      release();
+      await instance.resultFor("r1");
+      await vi.waitFor(() =>
+        expect(
+          instance.tasks.peekList({
+            definition: instance.lane.definition,
+            lane: instance.lane.lane,
+            status: ["pending", "running"],
+            results: false
+          })
+        ).toHaveLength(0)
+      );
+      expect(
+        instance.calls.filter((c) => c.trigger === "tool-answer")
+      ).toHaveLength(0);
+      expect(instance.events.map((e) => e.payload.reason)).toEqual(["stopped"]);
     });
   });
 });

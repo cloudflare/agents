@@ -307,7 +307,16 @@ export async function stopAllTurns(
     results: false,
     order: "oldest"
   })) {
+    const continuation =
+      run.status === "pending" &&
+      deps.tasks.inputOf<ChatTurnInput>(run.runId)?.trigger === "tool-answer";
     await cancelTurn(deps, run.runId, reason);
+    if (continuation) {
+      deps.emit?.("chat:continuation:dropped", {
+        requestId: run.runId,
+        reason: "stopped"
+      });
+    }
   }
 }
 
@@ -806,6 +815,27 @@ export async function chatDispatch(
           reason: "stopped",
           stoppedRequestId: event.id
         });
+      }
+      // A continuation an answer already started for that reply, waiting
+      // behind it, goes too.
+      if (replyId !== undefined) {
+        for (const run of deps.tasks.peekList({
+          definition: lane.definition,
+          lane: lane.lane,
+          status: ["pending"],
+          results: false
+        })) {
+          const input = deps.tasks.inputOf<ChatTurnInput>(run.runId);
+          if (input?.trigger !== "tool-answer" || input.replyId !== replyId) {
+            continue;
+          }
+          await cancelTurn(deps, run.runId);
+          deps.emit?.("chat:continuation:dropped", {
+            requestId: run.runId,
+            reason: "stopped",
+            stoppedRequestId: event.id
+          });
+        }
       }
       await cancelTurn(deps, event.id);
       return true;
