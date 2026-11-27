@@ -215,6 +215,20 @@ async function seedSubmissionForTest(
         `a ${options.status} submission cannot be seeded on the harness-backed Think`
       );
     }
+    // A submission the harness accepts has its own times and no progress
+    // or error: a seed that asks for them needs the class's row.
+    const unsupported = [
+      options.createdAt !== undefined && "createdAt",
+      options.startedAt != null && "startedAt",
+      options.settledAt != null && "settledAt",
+      options.error != null && "error",
+      Object.keys(options.progress ?? {}).length > 0 && "progress"
+    ].filter(Boolean);
+    if (unsupported.length > 0) {
+      throw new Error(
+        `a pending submission cannot be seeded with ${unsupported.join(", ")} on the harness-backed Think`
+      );
+    }
     const session = shell.harness.session();
     await session.submit(options.messages ?? [], {
       operationId: options.submissionId,
@@ -10021,6 +10035,13 @@ export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
   }
 }
 
+/** Where {@link ThinkProgrammaticTestAgent} keeps its tool model's setup. */
+const RECOVERY_TOOL_MODEL_KEY = "test:recovery-tool-model";
+/** And how many times that model's tool ran. */
+const RECOVERY_TOOL_EXECUTIONS_KEY = "test:recovery-tool-executions";
+/** Where {@link ThinkProgrammaticTestAgent} keeps a hold across a reset. */
+const HOLD_AFTER_RESET_KEY = "test:hold-chunks-after-reset";
+
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
 
@@ -10078,7 +10099,6 @@ export class ThinkProgrammaticTestAgent extends Think {
   } | null = null;
   private _failNextContinueTransient: string | null = null;
   private _useRecoveryToolModel = false;
-  private _recoveryToolExecutions = 0;
   private _coldRpcOnStartCount = 0;
 
   override onStart(): void {
@@ -10127,7 +10147,38 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   override getModel(): LanguageModel {
-    if (this._useRecoveryToolModel) return createToolCallingMockModel();
+    const toolModel = this._recoveryToolModelForTest();
+    if (toolModel) {
+      const model = createToolCallingMockModel();
+      if (!toolModel.resetAfterTool) return model;
+      // Reset this isolate once, as the model is asked again with the
+      // tool's result: the tool has run and its step is stored.
+      const streams = model as unknown as {
+        doStream(options: { prompt?: unknown[] }): Promise<unknown>;
+      };
+      return {
+        ...(model as object),
+        doStream: async (options: { prompt?: unknown[] }) => {
+          const answered = (options.prompt ?? []).some(
+            (message) =>
+              typeof message === "object" &&
+              message !== null &&
+              (message as { role?: unknown }).role === "tool"
+          );
+          if (answered) {
+            this.ctx.storage.kv.put(RECOVERY_TOOL_MODEL_KEY, {
+              resetAfterTool: false
+            });
+            // What is written so far is on disk, as it is a moment later
+            // in a real reset: the abort alone would drop it.
+            await this.ctx.storage.sync();
+            this.ctx.abort("test: forced reset");
+            throw new Error("test: forced reset");
+          }
+          return streams.doStream(options);
+        }
+      } as unknown as LanguageModel;
+    }
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -10136,6 +10187,18 @@ export class ThinkProgrammaticTestAgent extends Think {
     }
     if (this._finalAnswerResponse !== undefined) {
       return createFinalAnswerMockModel(this._finalAnswerResponse);
+    }
+    // A hold kept for the isolate after a reset: taken once, by the first
+    // model call of that isolate.
+    const kept = this.ctx.storage.kv.get<{
+      chunks: string[];
+      delayMs: number;
+      after: number;
+    }>(HOLD_AFTER_RESET_KEY);
+    if (kept && !this._delayedChunks) {
+      this.ctx.storage.kv.delete(HOLD_AFTER_RESET_KEY);
+      this._delayedChunks = { chunks: kept.chunks, delayMs: kept.delayMs };
+      void this.holdChunksAfterForTest(kept.after);
     }
     if (this._delayedChunks) {
       return createDelayedMultiChunkMockModel(
@@ -10147,26 +10210,54 @@ export class ThinkProgrammaticTestAgent extends Think {
     return createMockModel(this._programmaticResponse);
   }
 
+  /** The tool-calling model's setup: kept in storage, so a reset keeps it. */
+  private _recoveryToolModelForTest(): { resetAfterTool: boolean } | undefined {
+    return (
+      this.ctx.storage.kv.get<{ resetAfterTool: boolean }>(
+        RECOVERY_TOOL_MODEL_KEY
+      ) ?? (this._useRecoveryToolModel ? { resetAfterTool: false } : undefined)
+    );
+  }
+
   override getTools(): ToolSet {
-    if (!this._useRecoveryToolModel) return {};
+    if (!this._recoveryToolModelForTest()) return {};
     return {
       echo: tool({
         description: "Persist one recovery test side effect",
         inputSchema: z.object({ message: z.string() }),
         execute: ({ message }: { message: string }) => {
-          this._recoveryToolExecutions++;
+          // Counted in storage: the count outlives a reset.
+          this.ctx.storage.kv.put(
+            RECOVERY_TOOL_EXECUTIONS_KEY,
+            this._recoveryToolExecutionCount() + 1
+          );
           return `echo: ${message}`;
         }
       })
     };
   }
 
-  async useRecoveryToolModelForTest(): Promise<void> {
+  private _recoveryToolExecutionCount(): number {
+    return this.ctx.storage.kv.get<number>(RECOVERY_TOOL_EXECUTIONS_KEY) ?? 0;
+  }
+
+  /**
+   * Answer with a tool call, then text.
+   *
+   * @param options.resetAfterTool - Reset this isolate once, when the model
+   *   is asked again with the tool's result.
+   */
+  async useRecoveryToolModelForTest(
+    options: { resetAfterTool?: boolean } = {}
+  ): Promise<void> {
     this._useRecoveryToolModel = true;
+    this.ctx.storage.kv.put(RECOVERY_TOOL_MODEL_KEY, {
+      resetAfterTool: options.resetAfterTool === true
+    });
   }
 
   async getRecoveryToolExecutionsForTest(): Promise<number> {
-    return this._recoveryToolExecutions;
+    return this._recoveryToolExecutionCount();
   }
 
   async getMessagesForTest(): Promise<UIMessage[]> {
@@ -10539,6 +10630,25 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _chunkHold: ChunkHoldForTest | null = null;
 
   /** Hold the next delayed-chunk streams after `after` chunks. */
+  /** Reset this agent's isolate, as an eviction or a deploy does. */
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
+
+  /**
+   * Make the first reply the isolate after a reset streams a slow one that
+   * waits after `after` chunks, as {@link setDelayedChunkResponse} and
+   * {@link holdChunksAfterForTest} do for this isolate. Kept in storage: the
+   * reset drops everything this object holds in memory.
+   */
+  async holdChunksAfterResetForTest(
+    chunks: string[],
+    delayMs: number,
+    after: number
+  ): Promise<void> {
+    this.ctx.storage.kv.put(HOLD_AFTER_RESET_KEY, { chunks, delayMs, after });
+  }
+
   async holdChunksAfterForTest(after: number): Promise<void> {
     let open = () => {};
     const released = new Promise<void>((resolve) => {
@@ -11780,7 +11890,8 @@ export class ThinkProgrammaticTestAgent extends Think {
         })
       },
       error: options.errorMessage,
-      createdAt: now,
+      // Only when asked for: the seed defaults it to now.
+      createdAt: options.createdAt,
       startedAt: status === "running" ? now : null,
       settledAt: options.completedAt
     });

@@ -1,1 +1,83 @@
-[]
+[
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > runs an interrupted submission again when its messages were not applied",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`) and the private `_recoverSubmissionsOnStart`",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > finishes it once: one question, one reply, and the submission completed"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > completes recovered chat fiber submissions through scheduled continuation",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`) and the class's fiber recovery entry (`recoverChatFiberForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > finishes it once: one question, one reply, and the submission completed"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not error running submissions while recovered continuation is scheduled",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`), class recovery attempts scheduled by hand, and the private `_recoverSubmissionsOnStart`",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > finishes it once: one question, one reply, and the submission completed"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not let recovered continuation overwrite a cancelled submission",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`) and the class's recovery callback run by hand (`continueRecoveredChatForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays aborted when it is cancelled while its reply is being recovered"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not let a recovered retry overwrite cancellation before callback delivery",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`) and a class recovery retry scheduled and run by hand",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays aborted when it is cancelled while its reply is being recovered"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > aborts an active recovered continuation without a late overwrite",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`) and the class's recovery callback run by hand (`cancelDuringRecoveredContinuationForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays aborted when it is cancelled while its reply is being recovered"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > preserves a successful tool result across an exact storage reset and never re-executes the tool",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`) and a private seam that fails the class's recovered continue (`failNextRecoveredContinueForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > keeps a tool's result and does not run the tool again"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not error running submissions while a recovered retry is pending on tasks with the original request identity",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`), a class recovery retry run scheduled by hand, and the private `_recoverSubmissionsOnStart`",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > is never reported as failed while its reply is being recovered"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not error running submissions while a recovered retry is pending on tasks with the successor request identity",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`), a class recovery retry run scheduled by hand, and the private `_recoverSubmissionsOnStart`",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > is never reported as failed while its reply is being recovered"
+    }
+  }
+]
