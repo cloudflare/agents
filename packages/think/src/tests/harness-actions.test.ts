@@ -11,6 +11,7 @@ type ActionsStub = {
   resetForTest(): Promise<void>;
   grantForTest(permissions: string[] | undefined): Promise<void>;
   toolOutputs(): Promise<unknown[]>;
+  rewriteForTest(amount: number): Promise<void>;
   pendingApprovals(executionId?: string): Promise<PendingApproval[]>;
   approveExecution(executionId: string): Promise<unknown>;
   rejectExecution(
@@ -132,6 +133,20 @@ describe("harness-backed Think: actions that need a human", () => {
     expect(await fresh.toolOutputs()).toEqual([
       expect.objectContaining({
         error: expect.objectContaining({ name: "ActionAuthorizationError" })
+      })
+    ]);
+  });
+
+  it("does not run an approved action whose input beforeToolCall changed", async () => {
+    const think = await agent();
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    await think.rewriteForTest(500);
+    await think.approveExecution(pending.executionId);
+    expect(await think.charged()).toBe(0);
+    expect(await think.toolOutputs()).toEqual([
+      expect.objectContaining({
+        error: expect.objectContaining({ name: "ActionApprovalInputError" })
       })
     ]);
   });

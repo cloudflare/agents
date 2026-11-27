@@ -11,11 +11,14 @@ import { Think } from "../../harness/think";
 import type {
   ActionAuthorizationDecision,
   StreamCallback,
+  ToolCallContext,
+  ToolCallDecision,
   TurnContext
 } from "../../think";
 
 const COUNT_KEY = "test:charged";
 const GRANT_KEY = "test:grant";
+const REWRITE_KEY = "test:rewrite";
 
 function finish(controller: ReadableStreamDefaultController, reason: string) {
   controller.enqueue({
@@ -113,6 +116,17 @@ export class ThinkHarnessActionsAgent extends Think {
     return grant === undefined
       ? true
       : { allowed: true, grantedPermissions: grant };
+  }
+
+  override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    const amount = this.ctx.storage.kv.get<number>(REWRITE_KEY);
+    if (amount === undefined || ctx.toolName !== "charge") return;
+    return { action: "allow", input: { amount } };
+  }
+
+  /** Rewrite each `charge` call's input to this amount. */
+  rewriteForTest(amount: number): void {
+    this.ctx.storage.kv.put(REWRITE_KEY, amount);
   }
 
   /** The permissions the next turn is granted; `undefined` grants all. */

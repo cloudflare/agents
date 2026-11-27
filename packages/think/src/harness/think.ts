@@ -67,11 +67,16 @@ import { skillsExtension } from "./extensions/skills";
 import { sandboxedExtensions } from "./extensions/sandboxed";
 import { actionsExtension } from "./extensions/actions";
 import {
+  actionApprovalInputErrorEnvelope,
   compileActionTools,
   normalizeActionAuthorization,
   type ActionToolHost
 } from "../action-tools";
-import { createEffectState, registerEffectTask } from "../action-ledger";
+import {
+  createEffectState,
+  registerEffectTask,
+  stableStringify
+} from "../action-ledger";
 import { runLedgeredAction } from "../action-run";
 import type {
   Action,
@@ -658,6 +663,25 @@ export class Think<
               }) as unknown as TurnContext
           );
           const decision = await this.#beforeToolCall(call);
+          // As in Think: an approved action runs with the input a human
+          // approved, or not at all.
+          if (
+            decision?.action === "run" &&
+            decision.input !== undefined &&
+            this.#actionMetadata.has(call.toolName)
+          ) {
+            const approved = await this.#approvedInput(call.toolCallId);
+            if (
+              approved.found &&
+              stableStringify(decision.input) !==
+                stableStringify(approved.input)
+            ) {
+              return {
+                action: "substitute",
+                output: actionApprovalInputErrorEnvelope()
+              };
+            }
+          }
           // As in Think: extensions hear of a call that runs, with the
           // input it runs with.
           if (!decision || decision.action === "run") {
@@ -2508,6 +2532,27 @@ export class Think<
         temperature: config.temperature
       })
     };
+  }
+
+  /** The input a human approved for a call, from the latest reply. */
+  async #approvedInput(
+    toolCallId: string
+  ): Promise<{ found: false } | { found: true; input: unknown }> {
+    const leaf = await (await this.#rootHandle()).getLatestLeaf();
+    for (const part of leaf?.parts ?? []) {
+      const record = part as {
+        toolCallId?: unknown;
+        input?: unknown;
+        approval?: { approved?: unknown };
+      };
+      if (
+        record.toolCallId === toolCallId &&
+        record.approval?.approved === true
+      ) {
+        return { found: true, input: record.input };
+      }
+    }
+    return { found: false };
   }
 
   async #beforeToolCall(call: {
