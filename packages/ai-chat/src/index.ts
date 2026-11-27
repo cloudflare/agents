@@ -906,6 +906,29 @@ export class AIChatAgent<
   /** Whether each running call continues a reply, for `onChatResponse`. */
   private readonly _callContinues = new Map<string, boolean>();
 
+  /** `onChatResponse` results waiting for their turn to leave the lane. */
+  private readonly _chatResponses: ChatResponseResult[] = [];
+
+  private async _deliverChatResponses(): Promise<void> {
+    if (this._insideResponseHook) return;
+    this._insideResponseHook = true;
+    try {
+      await this.keepAliveWhile(async () => {
+        for (;;) {
+          const next = this._chatResponses.shift();
+          if (!next) return;
+          try {
+            await this.onChatResponse(next);
+          } catch (error) {
+            console.error("[AIChatAgent] onChatResponse failed:", error);
+          }
+        }
+      });
+    } finally {
+      this._insideResponseHook = false;
+    }
+  }
+
   /** Callers waiting for the end of a turn they started, by request id. */
   private readonly _turnWaiters = new Map<
     string,
@@ -1021,24 +1044,35 @@ export class AIChatAgent<
             waiter?.(result);
             return;
           }
+          // A continuation that failed before it stored anything reports
+          // the reply it was continuing.
           const message =
             result.messageId !== undefined
               ? ((await this.#session.getMessage(
                   result.messageId
                 )) as UIMessage | null)
-              : null;
+              : continuation && result.status === "error"
+                ? ([...this.messages]
+                    .reverse()
+                    .find((m) => m.role === "assistant") ?? null)
+                : null;
           if (!message) {
             waiter?.(result);
             return;
           }
           waiter?.(result);
-          await this.onChatResponse({
+          // Delivered once the turn has left the lane, so the hook may start
+          // a turn of its own; one at a time, never inside another.
+          this._chatResponses.push({
             message,
             requestId: result.requestId,
             continuation,
             status: result.status,
             ...(result.error !== undefined && { error: result.error })
           });
+          void this.tasks
+            .wait(result.requestId)
+            .then(() => this._deliverChatResponses());
         },
         sanitizeForPersistence: (message) =>
           this._sanitizeMessageForPersistence(message),

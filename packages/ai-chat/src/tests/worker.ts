@@ -193,12 +193,10 @@ function queuedTurnCountForTest(agent: AIChatAgent): number {
 /** `agent` has no onChatResponse result waiting or being delivered. */
 function chatResponseDrainIdleForTest(agent: AIChatAgent): boolean {
   const drain = agent as unknown as {
-    _pendingChatResponseResults: unknown[];
+    _chatResponses: unknown[];
     _insideResponseHook: boolean;
   };
-  return (
-    drain._pendingChatResponseResults.length === 0 && !drain._insideResponseHook
-  );
+  return drain._chatResponses.length === 0 && !drain._insideResponseHook;
 }
 
 /**

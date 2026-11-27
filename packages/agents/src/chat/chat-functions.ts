@@ -805,7 +805,11 @@ export async function chatDispatch(
       // A stop of the turn that streams drops what its answers asked to
       // continue; other replies keep theirs.
       const live = liveTurnsOf(deps.streams).get(deps.session ?? "");
-      const replyId = live?.requestId === event.id ? live.replyId() : undefined;
+      // The reply the stopped turn extends: the one it streams, or, for a
+      // continuation that has not streamed yet, the one it continues.
+      const replyId =
+        (live?.requestId === event.id ? live.replyId() : undefined) ??
+        deps.tasks.inputOf<ChatTurnInput>(event.id)?.replyId;
       if (
         replyId !== undefined &&
         continueRequestsOf(deps.streams).delete(replyId)

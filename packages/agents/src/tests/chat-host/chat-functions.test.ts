@@ -2333,4 +2333,82 @@ describe("chat functions over a minimal host", () => {
       expect(instance.events.map((e) => e.payload.reason)).toEqual(["stopped"]);
     });
   });
+
+  it("a stop of a continuation that has not streamed drops the next continuation of its reply", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          },
+          {
+            type: "tool-other",
+            toolCallId: "c2",
+            state: "approval-responded",
+            input: {},
+            approval: { id: "ap-2", approved: true }
+          }
+        ]
+      } as never);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const respond = instance.host.respond;
+      (instance.host as { respond: typeof respond }).respond = async (call) => {
+        await gate;
+        return respond(call);
+      };
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c1", output: {} },
+        { autoContinue: true }
+      );
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c2", output: {} },
+        { autoContinue: true }
+      );
+      const [first] = instance.tasks.peekList({
+        definition: instance.lane.definition,
+        lane: instance.lane.lane,
+        status: ["running"],
+        results: false
+      });
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({
+          type: "cf_agent_chat_request_cancel",
+          id: first.runId
+        })
+      );
+      release();
+      await vi.waitFor(() =>
+        expect(
+          instance.tasks.peekList({
+            definition: instance.lane.definition,
+            lane: instance.lane.lane,
+            status: ["pending", "running"],
+            results: false
+          })
+        ).toHaveLength(0)
+      );
+      expect(instance.calls).toHaveLength(1);
+    });
+  });
 });
