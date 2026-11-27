@@ -560,6 +560,8 @@ export class Think<
         messages?: TurnConfig["messages"];
         /** How many parts of a continued reply the rewrite already had. */
         replyParts?: number;
+        /** Whether the turn continues a reply (its first call's value). */
+        continuation?: boolean;
         /** The proactive compactions the turn tried (`contextOverflow`). */
         proactive?: number;
         /** The history a proactive compaction left, for the turn's later calls. */
@@ -3683,6 +3685,16 @@ export class Think<
     // never extends a turn whose preparation threw.
     if (first) this.#lastTurnChannel = this.#turnChannel.channelId;
     const writer = config.messageMetadata ?? this.messageMetadata;
+    // Whether the turn continues a reply, as Think tells the writer: the
+    // turn's own value, from its first call, not each call's.
+    if (first && this.#ownTurn) {
+      this.#ownTurn.continuation = turn.continuation;
+    }
+    const turnContinuation = this.#ownTurn?.continuation ?? turn.continuation;
+    const lastAllowed = turn.step >= (config.maxSteps ?? this.maxSteps) - 1;
+    const endsTurn = (part: unknown) =>
+      lastAllowed ||
+      (part as { finishReason?: string }).finishReason !== "tool-calls";
     const sentSystem =
       final && typeof system === "string"
         ? [system, thinkFinalAnswerInstruction(final.name)]
@@ -3717,12 +3729,19 @@ export class Think<
       // As in Think: the turn's writer, else the agent's, told whether the
       // turn continues a reply.
       ...(writer && {
-        messageMetadata: ({ part }: { readonly part: unknown }) =>
-          writer({
+        messageMetadata: ({ part }: { readonly part: unknown }) => {
+          // As Think's one stream for the whole turn: the writer hears the
+          // turn's start once, on its first call, and its finish once, on
+          // the call that ends it (not a tool round's).
+          const kind = (part as { type?: string }).type;
+          if (kind === "start" && turn.step > 0) return undefined;
+          if (kind === "finish" && !endsTurn(part)) return undefined;
+          return writer({
             // SAFETY: the parts are the AI SDK's stream parts.
             part: part as Parameters<MessageMetadataCallback>[0]["part"],
-            continuation: turn.continuation
-          })
+            continuation: turnContinuation
+          });
+        }
       })
     } as ThinkTurnConfig;
   }
