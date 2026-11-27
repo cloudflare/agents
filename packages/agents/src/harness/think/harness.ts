@@ -377,10 +377,28 @@ function operationInputOf(input: unknown): OperationRunInput {
     readonly trigger?: string;
   };
   if (value.input !== undefined) return value as OperationRunInput;
-  const body = (input as { readonly body?: unknown }).body;
+  const chat = input as {
+    readonly body?: unknown;
+    readonly trigger?: string;
+    readonly mode?: string;
+    readonly replyId?: string;
+  };
+  const body = chat.body;
+  // What the tab asked for, as the harness's own operation kinds: a
+  // regeneration, a continuation (after a tool answer the dispatch has
+  // applied, or of a cut-off reply), or new messages.
+  const operation: OperationInput =
+    chat.trigger === "regenerate-message"
+      ? { kind: "regenerate" }
+      : chat.mode === "continue" ||
+          chat.trigger === "tool-answer" ||
+          (value.messages ?? []).length === 0
+        ? { kind: "continue" }
+        : { kind: "messages", messages: value.messages ?? [] };
   return {
-    input: { kind: "messages", messages: value.messages ?? [] },
-    source: "client",
+    input: operation,
+    // A turn the host started itself is the server's, as on the harness.
+    source: chat.trigger === "server" ? "server" : "client",
     ...(body !== null &&
       typeof body === "object" &&
       !Array.isArray(body) && { body: body as Record<string, unknown> })
