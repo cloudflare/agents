@@ -1,5 +1,6 @@
 import {
   CHAT_REQUEST_CONTEXT_KEY,
+  chatTurnStreamId,
   answerTool,
   type ChatDeps,
   type ChatLane,
@@ -46,8 +47,6 @@ import type {
 import {
   CHAT_RECOVERY_TASK_NAME,
   recentChatTerminal,
-  type ReplyFlushState,
-  type ReplyStreams,
   REPLAY_CHUNK_BYTES,
   CHAT_RECOVERY_PROGRESS_KEY,
   turnSignal
@@ -542,26 +541,31 @@ export type Env = {
  * Store a chunk the way a reply does (`ReplyStreams.store`), with one flush
  * state per stream, for tests that write a stream by hand.
  */
-const testFlushStates = new Map<string, ReplyFlushState>();
 function storeStreamChunk(
   agent: AIChatAgent<Env>,
   streamId: string,
   body: string
 ): number | undefined {
-  const streams = (agent as unknown as { _replyStreams: ReplyStreams })
-    ._replyStreams;
-  let state = testFlushStates.get(streamId);
-  if (!state) {
-    state = { chunksSinceFlush: 0, hasFlushedContent: false };
-    testFlushStates.set(streamId, state);
-  }
-  let chunk: { type: string };
-  try {
-    chunk = JSON.parse(body) as { type: string };
-  } catch {
-    chunk = { type: "" };
-  }
-  return streams.store(streamId, chunk, body, state);
+  // The chat module's stream of the turn (the seam's agent tools read it).
+  const sync = agent.streams.__DO_NOT_USE_WILL_BREAK__sync();
+  const bytes = new TextEncoder().encode(body).byteLength;
+  if (bytes > sync.maxChunkBytes) return undefined;
+  return sync.appendJson(streamId, body, bytes, {
+    maxChunks: 10,
+    maxBytes: 512 * 1024
+  });
+}
+
+/** Open the chat module's stream for turn `requestId`, as a turn does. */
+function startTurnStreamForTest(
+  agent: AIChatAgent<Env>,
+  requestId: string
+): string {
+  const sync = agent.streams.__DO_NOT_USE_WILL_BREAK__sync();
+  sync.ensureTables();
+  const id = chatTurnStreamId(requestId);
+  if (!sync.getStream(id)) sync.insertStream(id, requestId, undefined);
+  return id;
 }
 
 /**
@@ -7082,7 +7086,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   private _turnStoreCountsForTest(): { taskRuns: number; fibers: number } {
     const taskRuns = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
-      WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME}
+      WHERE definition = ${CHAT_TURN_DEFINITION}
         AND status IN ('pending', 'running')
     `;
     const fibers = this.sql<{ count: number }>`
@@ -7550,9 +7554,11 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       const requestId =
         this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
       if (requestId) {
-        const streamId =
-          this._replyStreams.latestStreamInfoForRequest(requestId)?.id;
-        if (streamId) return { requestId, streamId };
+        // The chat module's stream of the run's turn, once it is open.
+        const streamId = chatTurnStreamId(requestId);
+        if (this.streams.__DO_NOT_USE_WILL_BREAK__sync().getStream(streamId)) {
+          return { requestId, streamId };
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
@@ -7633,7 +7639,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "cold-realign-run";
     const requestId = "cold-realign-req";
-    const streamId = this["_replyStreams"].start(requestId);
+    const streamId = startTurnStreamForTest(this, requestId);
     const backlog = [
       JSON.stringify({ type: "text-start" }),
       JSON.stringify({ type: "text-delta", delta: "a" }),
@@ -7642,7 +7648,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     for (const body of backlog) {
       await storeStreamChunk(this, streamId, body);
     }
-    this["_replyStreams"].flushBuffer();
+    this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7728,7 +7734,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   async progressDuringDrainForTest(): Promise<string[]> {
     const runId = "progress-drain-run";
     const requestId = "progress-drain-req";
-    const streamId = this["_replyStreams"].start(requestId);
+    const streamId = startTurnStreamForTest(this, requestId);
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7760,7 +7766,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     }
     broadcast(progress("before-attach"));
     await storeStreamChunk(this, streamId, stored[2]);
-    this["_replyStreams"].flushBuffer();
+    this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(progress("during-drain"));
@@ -7804,7 +7810,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   > {
     const runId = "skipped-chunk-run";
     const requestId = "skipped-chunk-req";
-    const streamId = this["_replyStreams"].start(requestId);
+    const streamId = startTurnStreamForTest(this, requestId);
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -7830,7 +7836,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     await send(delta("a"));
     await send(oversized);
     await storeStreamChunk(this, streamId, delta("c"));
-    this["_replyStreams"].flushBuffer();
+    this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
     broadcast(delta("c"));
@@ -7886,14 +7892,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "inspect-pending-run";
     const requestId = "inspect-pending-req";
-    const streamId = this["_replyStreams"].start(requestId);
+    const streamId = startTurnStreamForTest(this, requestId);
     const backlog = ["a", "b", "c"].map((delta) =>
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of backlog) {
       await storeStreamChunk(this, streamId, body);
     }
-    this["_replyStreams"].flushBuffer();
+    this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
@@ -8029,15 +8035,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       release = resolve;
     });
     // Hold the run's lifecycle at the point its turn hands back.
+    // The run's turn is a chat-module server turn (`_serverTurn`).
     const self = this as unknown as {
-      _runProgrammaticMessagesTurn: (
-        ...args: unknown[]
-      ) => Promise<SaveMessagesResult>;
+      _serverTurn: (...args: unknown[]) => Promise<SaveMessagesResult>;
     };
-    const runTurn = self._runProgrammaticMessagesTurn.bind(this);
-    self._runProgrammaticMessagesTurn = async (...args) => {
+    const runTurn = self._serverTurn.bind(this);
+    self._serverTurn = async (...args) => {
       const result = await runTurn(...args);
-      self._runProgrammaticMessagesTurn = runTurn;
+      self._serverTurn = runTurn;
       reached();
       await released;
       return result;
@@ -8109,13 +8114,13 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }> {
     const runId = "starve-run";
     const requestId = "starve-req";
-    const streamId = this["_replyStreams"].start(requestId);
+    const streamId = startTurnStreamForTest(this, requestId);
     await storeStreamChunk(
       this,
       streamId,
       JSON.stringify({ type: "text-start" })
     );
-    this["_replyStreams"].flushBuffer();
+    this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
     this.sql`
       insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
       values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})

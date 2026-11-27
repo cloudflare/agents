@@ -3149,4 +3149,35 @@ describe("chat functions over a minimal host", () => {
       await instance.resultFor("r2");
     });
   });
+
+  it("a turn submitted with chat.keepStream keeps its stream, completed, after its reply is stored", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const done = instance.nextResult();
+      await submitTurn(
+        instance.deps,
+        instance.lane,
+        { trigger: "server" },
+        { requestId: "kept", metadata: { chat: { keepStream: true } } }
+      );
+      await done;
+      expect(
+        (await instance.streams.status(chatTurnStreamId("kept")))?.state
+      ).toBe("completed");
+      const other = instance.nextResult();
+      await submitTurn(
+        instance.deps,
+        instance.lane,
+        { trigger: "server" },
+        {
+          requestId: "dropped"
+        }
+      );
+      await other;
+      expect(
+        await instance.streams.status(chatTurnStreamId("dropped"))
+      ).toBeFalsy();
+    });
+  });
 });
