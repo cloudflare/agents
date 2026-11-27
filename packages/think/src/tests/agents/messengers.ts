@@ -776,6 +776,14 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return JSON.stringify(rows).includes(text);
   }
 
+  /** Whether any delivery run kept (if any is) holds `text`. */
+  async deliveryRowsHoldForTest(text: string): Promise<boolean> {
+    const rows = this.sql<Record<string, unknown>>`
+      SELECT * FROM cf_agents_task_runs WHERE definition LIKE '__cf_delivery:%'
+    `;
+    return JSON.stringify(rows).includes(text);
+  }
+
   /** Messenger reply runs not yet settled. */
   async openReplyRunsForTest(): Promise<number> {
     return (

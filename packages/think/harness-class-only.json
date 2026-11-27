@@ -367,5 +367,59 @@
       "file": "messengers.test.ts",
       "test": "think messengers core > recovered replies reach the thread (#2106) > posts the recovered answer instead of the apology (conversation: self)"
     }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > drains messages queued behind a reply recovered after a restart",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly; the successor queues a message behind a reply and resets the object mid-reply",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > answers messages queued behind a reply given up",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, calling the class sink's `onGiveUp`",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > answers messages queued behind a completed reply",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, at the class's `completed` stage",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > keeps queued messages behind a recovered reply that will be retried",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, with a failed post the class's reply run retries; the shell's delivery retries on its own and the queue drains once the reset's turn settles",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > drains queued messages once a failed recovery is not retried",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, with a failed post the class's reply run gives up",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > keeps no message text with a reply once it is answered",
+    "reason": "reads the class's kept reply-run rows (`__cf_delivery:messenger-reply`); the shell keeps no reply run once delivered",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > keeps no message text in a delivery once the reply is answered"
+    }
   }
 ]

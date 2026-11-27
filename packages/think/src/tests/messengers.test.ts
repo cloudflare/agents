@@ -1905,6 +1905,36 @@ describe("think messengers core", () => {
       expect(await agent.replyRowsHoldForTest("42 Main Street")).toBe(false);
     });
 
+    it("keeps no message text in a delivery once the reply is answered", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `private-delivery-${crypto.randomUUID()}`
+      );
+      const response = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            id: "p2",
+            text: "my address is 42 Main Street",
+            threadId: "fake:dm-private"
+          }),
+          method: "POST"
+        }
+      );
+      await response.text();
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const asked = (await agent.getRecorded("prompt")).length > 0;
+        if (asked && (await agent.openReplyRunsForTest()) === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(await agent.getAdapterCalls()).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
+      expect(await agent.deliveryRowsHoldForTest("42 Main Street")).toBe(false);
+    });
+
     it("answers a repeated reply id once, after the first was answered", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,
