@@ -9,7 +9,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
-import type { UIMessage, UIMessageChunk } from "ai";
+import type { UIMessage } from "ai";
 import type {
   AgentToolMilestone,
   AgentToolProgressSnapshot,
@@ -28,6 +28,15 @@ import {
 
 /** The most of a released summary a run too large to carry whole keeps. */
 const OVERSIZED_SUMMARY_CHARS = 16_000;
+
+/**
+ * The tables `@cloudflare/ai-chat` 0.12.x kept its agent-tool child runs
+ * in, which the upgrade carries forward and empties.
+ */
+export const RELEASED_AI_CHAT_AGENT_TOOL_TABLES = {
+  runs: "cf_ai_chat_agent_tool_runs",
+  milestones: "cf_ai_chat_agent_tool_milestones"
+} as const;
 
 /** The chat-turn run id of agent-tool run `runId`. */
 export function agentToolTurnId(runId: string): string {

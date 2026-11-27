@@ -35,6 +35,27 @@ function runText(
 }
 
 describe("a replay of a child whose chunk log carries its milestones", () => {
+  it("numbers live chunks as the child's stream does when a milestone comes first", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `live-positions-lead-${crypto.randomUUID()}`
+    );
+    const milestoneBody = JSON.stringify({
+      type: "data-agent-milestone",
+      data: { name: "begin", sequence: 0, at: 1 }
+    });
+    const { live, replay } = await agent.captureLiveAndReplayForTest({
+      runId: "run-live-positions-lead",
+      chunkBodies: [milestoneBody, textStart, textDelta("a"), textDelta("b")]
+    });
+    const positions = (frames: AgentToolEventMessage[]) =>
+      frames
+        .filter((frame) => frame.event.kind === "chunk")
+        .map((frame) => frame.sequence);
+    expect(new Set(positions(live)).size).toBe(4);
+    expect(positions(replay)).toEqual(positions(live));
+  });
+
   it("numbers live chunks as the child's stream does, a stored milestone included", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,

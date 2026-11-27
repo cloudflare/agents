@@ -261,6 +261,7 @@ export {
   inspectAgentToolTurn,
   reclaimAgentToolStreams,
   recordAgentToolProgress,
+  RELEASED_AI_CHAT_AGENT_TOOL_TABLES,
   releasedAgentToolRunOfRequest,
   releasedAgentToolRunWaiting,
   startAgentToolTurn,

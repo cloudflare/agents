@@ -7,8 +7,6 @@ import {
   type ChatModelCall
 } from "../../chat/chat-host";
 import { submitTurn } from "../../chat/chat-functions";
-import { applyChunkToParts } from "../../chat/message-builder";
-import type { UIMessage } from "ai";
 import {
   agentToolTurnChunks,
   agentToolTurnId,

@@ -2686,13 +2686,10 @@ export class AgentToolParent {
         // first one met this run's numbering: a child whose stream stores
         // its milestone frames (an AIChatAgent run) numbers them, and a
         // later replay does too.
-        if (
-          !lifecycle &&
-          unstoredId === undefined &&
-          typeof chunk.sequence === "number"
-        ) {
+        if (unstoredId === undefined && typeof chunk.sequence === "number") {
+          // Met at the first chunk that has a place, a leading milestone too.
           childBase ??= next - chunk.sequence;
-          next = Math.max(next, chunk.sequence + childBase);
+          if (!lifecycle) next = Math.max(next, chunk.sequence + childBase);
         }
         const chunkSequence =
           lifecycle || unstoredId !== undefined ? next : next++;

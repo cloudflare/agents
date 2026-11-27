@@ -5,6 +5,7 @@ import type {
   TextUIPart,
   ToolSet
 } from "ai";
+import { FIBER_TASK } from "agents/internal";
 import {
   Agent,
   isPlatformTransientError,
@@ -66,6 +67,7 @@ import {
   recordAgentToolProgress,
   progressCreditOf,
   reclaimAgentToolStreams,
+  RELEASED_AI_CHAT_AGENT_TOOL_TABLES,
   releasedAgentToolRunOfRequest,
   releasedAgentToolRunWaiting,
   startAgentToolTurn,
@@ -565,10 +567,7 @@ export class AIChatAgent<
     await carryForwardAgentToolRuns(
       this._chatDeps(),
       this.ctx.storage.sql,
-      {
-        runs: "cf_ai_chat_agent_tool_runs",
-        milestones: "cf_ai_chat_agent_tool_milestones"
-      },
+      RELEASED_AI_CHAT_AGENT_TOOL_TABLES,
       CHAT_TURN_DEFINITION,
       (requestId) => this._releasedTurnWaits(requestId),
       // A sub-agent (a facet) empties them; only a root drops them.
@@ -599,7 +598,7 @@ export class AIChatAgent<
   private _releasedTurnWaits(requestId: string): boolean {
     const fiber = (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME;
     for (const record of this.tasks.peekList({
-      definition: [fiber, CHAT_RECOVERY_TASK_NAME],
+      definition: [fiber, CHAT_RECOVERY_TASK_NAME, FIBER_TASK],
       status: ["pending", "running"]
     })) {
       if (
@@ -609,24 +608,19 @@ export class AIChatAgent<
         return true;
       }
       const input = this.tasks.inputOf<{
+        name?: unknown;
         data?: { originalRequestId?: unknown };
       }>(record.runId);
-      if (input?.data?.originalRequestId === requestId) return true;
+      // A released turn scheduled for recovery, or its fiber row carried
+      // onto Tasks.
+      if (
+        input?.data?.originalRequestId === requestId ||
+        input?.name === `${fiber}:${requestId}`
+      ) {
+        return true;
+      }
     }
-    const ledger = this.ctx.storage.sql
-      .exec(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_runs'"
-      )
-      .toArray();
-    return (
-      ledger.length > 0 &&
-      this.ctx.storage.sql
-        .exec(
-          "SELECT 1 FROM cf_agents_runs WHERE name = ? LIMIT 1",
-          `${fiber}:${requestId}`
-        )
-        .toArray().length > 0
-    );
+    return false;
   }
 
   /**
@@ -663,7 +657,7 @@ export class AIChatAgent<
   } {
     const run = releasedAgentToolRunOfRequest(
       this.ctx.storage.sql,
-      "cf_ai_chat_agent_tool_runs",
+      RELEASED_AI_CHAT_AGENT_TOOL_TABLES.runs,
       requestId
     );
     if (!run) return { requestId };
@@ -2327,7 +2321,7 @@ export class AIChatAgent<
     // A released run whose turn is still to be carried: it runs.
     const waiting = releasedAgentToolRunWaiting(
       this.ctx.storage.sql,
-      "cf_ai_chat_agent_tool_runs",
+      RELEASED_AI_CHAT_AGENT_TOOL_TABLES.runs,
       runId
     );
     if (waiting && !this.tasks.peek(agentToolTurnId(runId))) {

@@ -112,3 +112,9 @@ export {
 } from "../experimental/channels/chat-sdk";
 export { chunksOfMessage } from "./message-chunks";
 export { REPLAY_PAGE_BYTES, utf8Length } from "./platform-limits";
+
+/**
+ * @internal The Tasks definition a released fiber row is carried onto (its
+ * name in the run's input), for a host that looks for one it still owes.
+ */
+export { FIBER_TASK } from "../fiber-runs";
