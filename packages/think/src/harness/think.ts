@@ -107,7 +107,8 @@ import type {
   ToolCallResultContext,
   TurnConfig,
   TurnContext,
-  TurnInputMessages
+  TurnInputMessages,
+  TurnTrigger
 } from "../think";
 
 const { snapshot: snapshotDeclaredMembers, isOverridden: isMethodOverridden } =
@@ -298,15 +299,27 @@ export class Think<
   readonly #config = new ThinkConfigStore();
   #configCache: unknown = null;
   /**
+   * What started each operation (Think's `TurnTrigger`) and its turn's
+   * abort signal, by operation id, until it settles.
+   */
+  readonly #turns = new Map<
+    string,
+    { readonly trigger: TurnTrigger; readonly abort: AbortController }
+  >();
+  /**
    * A step that called tools, by operation, until its tools ran: at most
    * one per running operation, removed when it ends.
    */
   readonly #openSteps = new Map<string, OpenStep>();
   /**
    * The input the model gave each running tool call, by call id, from
-   * `beforeToolCall` to `afterToolCall`, which removes it.
+   * `beforeToolCall` to `afterToolCall`, which removes it; what an
+   * operation leaves goes when it settles.
    */
-  readonly #modelInputs = new Map<string, unknown>();
+  readonly #modelInputs = new Map<
+    string,
+    { readonly operationId: string; readonly input: unknown }
+  >();
   /** Builds string models through one cached default provider, as Think. */
   readonly #models = new ThinkModelResolver({
     binding: () => this.getAIBinding(),
@@ -434,9 +447,8 @@ export class Think<
               ? { output: result.output }
               : { error: result.errorText })
           });
-          const modelInput = this.#modelInputs.has(result.toolCallId)
-            ? this.#modelInputs.get(result.toolCallId)
-            : result.input;
+          const kept = this.#modelInputs.get(result.toolCallId);
+          const modelInput = kept ? kept.input : result.input;
           this.#modelInputs.delete(result.toolCallId);
           return this.afterToolCall({
             toolName: result.toolName,
@@ -525,6 +537,24 @@ export class Think<
         this.#running = undefined;
         this.#extensionTurn = undefined;
         this.#turnMaxSteps = undefined;
+      }
+      // A settled operation's turn is over: its signal fires if it was cut
+      // short, and it is forgotten.
+      if (
+        event.type === "operation" &&
+        (event.status.status === "done" || event.status.status === "unanswered")
+      ) {
+        const turn = this.#turns.get(event.status.operationId);
+        if (turn && event.status.status === "unanswered") {
+          turn.abort.abort(event.status.reason);
+        }
+        this.#turns.delete(event.status.operationId);
+        // A call the operation left without an afterToolCall is forgotten.
+        for (const [toolCallId, kept] of this.#modelInputs) {
+          if (kept.operationId === event.status.operationId) {
+            this.#modelInputs.delete(toolCallId);
+          }
+        }
       }
     });
     this.lifecycle.use(this.harness);
@@ -794,6 +824,16 @@ export class Think<
   ): ToolCallDecision | void | Promise<ToolCallDecision | void> {}
 
   afterToolCall(_ctx: ToolCallResultContext): void | Promise<void> {}
+
+  /** An operation's trigger and signal: a submission unless set first. */
+  #turnOf(operationId: string) {
+    let turn = this.#turns.get(operationId);
+    if (!turn) {
+      turn = { trigger: "submission", abort: new AbortController() };
+      this.#turns.set(operationId, turn);
+    }
+    return turn;
+  }
 
   /** End the operation's open step, if any, from `message`. */
   async #endStep(operationId: string, message: UIMessage): Promise<void> {
@@ -1406,6 +1446,10 @@ export class Think<
       typeof userMessage === "function"
         ? await userMessage(this.messages)
         : toInput(userMessage);
+    this.#turns.set(operationId, {
+      trigger: "rpc",
+      abort: new AbortController()
+    });
     options?.signal?.addEventListener(
       "abort",
       () => void this.harness.session().abort(operationId),
@@ -1494,9 +1538,10 @@ export class Think<
     const chosen = await this.getModel();
     let resolved: LanguageModel | undefined;
     const resolveDefault = () => (resolved ??= this.resolveModel(chosen));
+    const identity = this.#turnOf(turn.operationId);
     this.#running = {
       requestId: turn.operationId,
-      trigger: "submission",
+      trigger: identity.trigger,
       continuation: turn.continuation
     };
     // As in Think: the capability block for the turn's tools follows the
@@ -1514,6 +1559,7 @@ export class Think<
       },
       continuation: turn.continuation,
       requestId: turn.operationId,
+      trigger: identity.trigger,
       abortSignal: turn.signal
     };
     const own = await this.beforeTurn(context);
@@ -1579,7 +1625,10 @@ export class Think<
   }): Promise<ThinkToolCallDecision | void> {
     // `afterToolCall` sees the input the model gave, as in Think, even when
     // the call runs with one `beforeToolCall` substituted.
-    this.#modelInputs.set(call.toolCallId, call.input);
+    this.#modelInputs.set(call.toolCallId, {
+      operationId: call.operationId,
+      input: call.input
+    });
     let decision: ToolCallDecision | void;
     try {
       decision = await this.beforeToolCall({
@@ -1591,8 +1640,9 @@ export class Think<
         requestId: call.operationId
       } as unknown as ToolCallContext);
     } catch (error) {
-      // As a throwing `execute`: the call settles as a tool error.
-      return { action: "block", reason: errorText(error) };
+      // As a throwing `execute`: the call settles as a tool error, with
+      // the error as the AI SDK words it in Think.
+      return { action: "block", reason: String(error) };
     }
     if (!decision) return;
     switch (decision.action) {
