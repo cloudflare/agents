@@ -1410,4 +1410,37 @@ describe("chat functions over a minimal host", () => {
       await instance.resultFor("r1");
     });
   });
+
+  it("a finished step is written before the model is called again", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "start-step" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Step one" },
+        { type: "text-end", id: "t1" },
+        { type: "finish-step" }
+      ]);
+      const stop = new AbortController();
+      const types: string[] = [];
+      try {
+        for await (const batch of instance.streams.readBatches(
+          chatTurnStreamId("r1"),
+          { signal: stop.signal, onUpToDate: () => stop.abort() }
+        )) {
+          for (const item of batch)
+            types.push((item.chunk as { type: string }).type);
+          if (stop.signal.aborted) break;
+        }
+      } catch (error) {
+        if (!stop.signal.aborted) throw error;
+      }
+      expect(types).toContain("text-delta");
+      expect(types).toContain("finish-step");
+      release();
+      await instance.resultFor("r1");
+    });
+  });
 });
