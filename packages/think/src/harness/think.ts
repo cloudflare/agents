@@ -13,6 +13,12 @@ import {
   type ConnectionContext,
   type WSMessage
 } from "agents";
+import {
+  DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
+  type ChatRecoveryConfig,
+  type ChatRecoveryContext,
+  type ChatRecoveryOptions
+} from "agents/chat";
 import type {
   ChatResponseResult,
   SaveMessagesOptions,
@@ -466,7 +472,12 @@ export class Think<
         this.#submissionStatuses.run(status.operationId, () =>
           this.#submissionStatus(status)
         ),
+      // Think's `chatRecovery`, read when a run starts, as on Think.
+      get recovery() {
+        return self.#recoveryOptions();
+      },
       hooks: {
+        onRecovery: (context) => this.#onRecovery(context),
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
           // The step's chunks reach extensions before its tool calls do.
@@ -1660,6 +1671,63 @@ export class Think<
   // Scheduler jobs that the previous engine queued call these by name. The
   // turns they would have recovered are gone after the move, so each
   // completes without doing anything instead of failing on retry.
+  /**
+   * As on Think: whether and how often an interrupted turn is attempted
+   * again. `true` keeps the default budget.
+   */
+  chatRecovery: ChatRecoveryConfig | false = true;
+
+  /**
+   * As on Think: decide what an interrupted turn does. Return
+   * `{ continue: false }` to give it up; the default continues it within
+   * the `chatRecovery` budget.
+   */
+  protected async onChatRecovery(
+    _ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions | void> {
+    return {};
+  }
+
+  #recoveryOptions(): { maxAttempts?: number } | undefined {
+    const config = this.chatRecovery;
+    if (config === false) return { maxAttempts: 0 };
+    if (config === true || config.maxAttempts === undefined) return undefined;
+    return { maxAttempts: config.maxAttempts };
+  }
+
+  async #onRecovery(context: {
+    readonly operationId: string;
+    readonly attempt: number;
+    readonly partial: UIMessage | undefined;
+  }): Promise<"continue" | "abandon"> {
+    const parts = [...(context.partial?.parts ?? [])];
+    const config = this.chatRecovery;
+    const decision = await this.onChatRecovery({
+      // One incident per operation: the harness attempts an operation
+      // again until it is answered or given up.
+      incidentId: context.operationId,
+      recoveryRootRequestId: context.operationId,
+      attempt: context.attempt,
+      maxAttempts:
+        config === false
+          ? 0
+          : config === true
+            ? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS
+            : (config.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS),
+      recoveryKind: parts.length > 0 ? "continue" : "retry",
+      streamId: context.operationId,
+      requestId: context.operationId,
+      partialText: parts
+        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .join(""),
+      partialParts: parts,
+      recoveryData: null,
+      messages: [...this.messages],
+      createdAt: Date.now()
+    });
+    return decision?.continue === false ? "abandon" : "continue";
+  }
+
   async _chatRecoveryRetry(): Promise<void> {}
   async _chatRecoveryContinue(): Promise<void> {}
   async _cfRetryMessengerRecoveryDelivery(): Promise<void> {}
