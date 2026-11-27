@@ -16,6 +16,12 @@
  * runtime throws). Its row names the deployed verify scenario that covers it
  * on both Thinks, and the PR and head that scenario passed on; the score
  * counts it apart too.
+ *
+ * A ruled-out test asserts something an app could see that a written ruling
+ * says the new core will not do, or cannot reach. Its row cites the ruling;
+ * the reviewer checks the citation, and that the test asserts that behaviour
+ * and nothing else. The score counts it apart, and H11 checks each cited
+ * ruling's changeset line against these rows.
  */
 import { existsSync, readFileSync } from "node:fs";
 
@@ -48,9 +54,27 @@ export type ClassOnlyEntry = ClassOnlyTest &
         successor: { file: string; test: string };
         mechanicsOnly?: never;
         probeCovered?: never;
+        ruledOut?: never;
       }
-    | { mechanicsOnly: true; successor?: never; probeCovered?: never }
-    | { probeCovered: ProbeCoverage; successor?: never; mechanicsOnly?: never }
+    | {
+        mechanicsOnly: true;
+        successor?: never;
+        probeCovered?: never;
+        ruledOut?: never;
+      }
+    | {
+        probeCovered: ProbeCoverage;
+        successor?: never;
+        mechanicsOnly?: never;
+        ruledOut?: never;
+      }
+    | {
+        /** The written ruling, with who made it and when. */
+        ruledOut: string;
+        successor?: never;
+        mechanicsOnly?: never;
+        probeCovered?: never;
+      }
   );
 
 /** Whether an entry is mechanics-only: class-only with no successor. */
@@ -65,6 +89,13 @@ export function isProbeCovered(
   entry: ClassOnlyEntry
 ): entry is ClassOnlyTest & { probeCovered: ProbeCoverage } {
   return entry.probeCovered !== undefined;
+}
+
+/** Whether an entry is ruled out: a written ruling, no successor. */
+export function isRuledOut(
+  entry: ClassOnlyEntry
+): entry is ClassOnlyTest & { ruledOut: string } {
+  return entry.ruledOut !== undefined;
 }
 
 /** Whether an entry has a successor test. */
@@ -115,6 +146,7 @@ export function readClassOnly(file: string): {
       successor?: { file?: unknown; test?: unknown };
       mechanicsOnly?: unknown;
       probeCovered?: { scenario?: unknown; verified?: unknown };
+      ruledOut?: unknown;
     };
     const successor = entry.successor ?? {};
     const label = isText(entry.test) ? `"${entry.test}"` : `entry ${index + 1}`;
@@ -128,11 +160,32 @@ export function readClassOnly(file: string): {
       );
       return;
     }
+    if (entry.ruledOut !== undefined) {
+      if (
+        !isText(entry.ruledOut) ||
+        entry.successor !== undefined ||
+        entry.mechanicsOnly !== undefined ||
+        entry.probeCovered !== undefined
+      ) {
+        problems.push(
+          `${label}: a ruled-out entry has ruledOut: "<the written ruling>", and no successor, mechanicsOnly or probeCovered`
+        );
+        return;
+      }
+      entries.push({
+        file: entry.file,
+        test: entry.test,
+        reason: entry.reason,
+        ruledOut: entry.ruledOut
+      });
+      return;
+    }
     if (entry.probeCovered !== undefined) {
       const probe = entry.probeCovered ?? {};
       if (
         entry.successor !== undefined ||
         entry.mechanicsOnly !== undefined ||
+        entry.ruledOut !== undefined ||
         !isText(probe.scenario) ||
         !isText(probe.verified) ||
         !VERIFIED.test(probe.verified)
@@ -167,7 +220,7 @@ export function readClassOnly(file: string): {
     }
     if (!isText(successor.file) || !isText(successor.test)) {
       problems.push(
-        `${label}: needs a successor (file and test), mechanicsOnly: true, or probeCovered`
+        `${label}: needs a successor (file and test), mechanicsOnly: true, probeCovered or ruledOut`
       );
       return;
     }
@@ -272,9 +325,11 @@ export function classOnlyTable(entries: readonly ClassOnlyEntry[]): string {
   const rows = entries.map((entry) =>
     isMechanicsOnly(entry)
       ? `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | none: mechanics only | |`
-      : isProbeCovered(entry)
-        ? `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | probe: verify's \`${cell(entry.probeCovered.scenario)}\`, passed on ${cell(entry.probeCovered.verified)} | |`
-        : `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | \`${entry.successor.file}\`: ${cell(entry.successor.test)} | ${counts.get(testId(entry.successor.file, entry.successor.test))} |`
+      : isRuledOut(entry)
+        ? `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | ruled out: ${cell(entry.ruledOut)} | |`
+        : isProbeCovered(entry)
+          ? `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | probe: verify's \`${cell(entry.probeCovered.scenario)}\`, passed on ${cell(entry.probeCovered.verified)} | |`
+          : `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | \`${entry.successor.file}\`: ${cell(entry.successor.test)} | ${counts.get(testId(entry.successor.file, entry.successor.test))} |`
   );
   return `
 ## Class-only tests
@@ -291,6 +346,9 @@ successor; its row says what private thing it pins.
 A probe-covered test is reached only by a platform fault a Workers test
 cannot raise; its row names the deployed verify scenario that covers it on
 both Thinks, and the PR and head it passed on.
+
+A ruled-out test asserts what a written ruling says the new core will not
+do or cannot reach; its row cites the ruling.
 
 The last column is how many class-only tests the successor stands for, at
 most ${MAX_ENTRIES_PER_SUCCESSOR}.
