@@ -894,6 +894,58 @@ function promptLinesForTest(callOptions: MockModelCallOptions): string[] {
   });
 }
 
+/**
+ * `model`, except that each call's stream sends its first `afterParts`
+ * parts after `stream-start` and then nothing more, until the call is
+ * aborted: a model stream that stalls.
+ */
+function stallingModelForTest(
+  model: LanguageModel,
+  afterParts: number
+): LanguageModel {
+  const inner = model as unknown as {
+    doStream(options: { abortSignal?: AbortSignal }): Promise<{
+      stream: ReadableStream<{ type: string }>;
+    }>;
+  };
+  return {
+    ...(model as object),
+    async doStream(options: { abortSignal?: AbortSignal }) {
+      const { stream } = await inner.doStream(options);
+      const reader = stream.getReader();
+      let sent = 0;
+      return {
+        stream: new ReadableStream<{ type: string }>({
+          async pull(controller) {
+            if (sent >= afterParts) {
+              // Silence until the watchdog aborts the call.
+              await new Promise<void>((resolve) => {
+                if (options.abortSignal?.aborted) resolve();
+                options.abortSignal?.addEventListener(
+                  "abort",
+                  () => resolve(),
+                  {
+                    once: true
+                  }
+                );
+              });
+              controller.error(options.abortSignal?.reason);
+              return;
+            }
+            const next = await reader.read();
+            if (next.done) {
+              controller.close();
+              return;
+            }
+            if (next.value.type !== "stream-start") sent++;
+            controller.enqueue(next.value);
+          }
+        })
+      };
+    }
+  } as LanguageModel;
+}
+
 /** Create a streaming text model with static or prompt-derived output. */
 export function createMockModel(
   response: string | ((callOptions: MockModelCallOptions) => string),
@@ -5806,6 +5858,24 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): ThinkModel {
+    const model = this._baseModelForTest();
+    // The harness-backed Think has no `_transformInferenceResult`: a stall
+    // armed by a test is the model's own silence there.
+    if (
+      this._stallAfterChunks == null ||
+      !isHarnessBackedForTest(this) ||
+      typeof model === "string"
+    ) {
+      return model;
+    }
+    if (this._stallAttemptsRemaining != null) {
+      if (this._stallAttemptsRemaining <= 0) return model;
+      this._stallAttemptsRemaining--;
+    }
+    return stallingModelForTest(model, this._stallAfterChunks);
+  }
+
+  private _baseModelForTest(): ThinkModel {
     if (this._stringModelForTest) return this._stringModelForTest;
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
