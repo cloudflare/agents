@@ -11,7 +11,8 @@ import {
   type AgentContext,
   type Connection,
   type ConnectionContext,
-  type WSMessage
+  type WSMessage,
+  callable
 } from "agents";
 import {
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
@@ -2831,4 +2832,13 @@ function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
   }
   // SAFETY: every key is one of `folded`'s, a TurnConfig's.
   return changes as TurnConfig;
+}
+
+// The approval methods are client-callable, as on Think.
+for (const method of [
+  Think.prototype.pendingApprovals,
+  Think.prototype.approveExecution,
+  Think.prototype.rejectExecution
+]) {
+  callable()(method, undefined as unknown as ClassMethodDecoratorContext);
 }

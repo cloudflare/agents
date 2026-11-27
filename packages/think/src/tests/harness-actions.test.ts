@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { PendingApproval } from "../think";
@@ -169,5 +169,35 @@ describe("harness-backed Think: actions that need a human", () => {
     await think.resetForTest().catch(() => {});
     const [after] = await (await agent(name)).pendingApprovals();
     expect(after.descriptor.permissions).toEqual(["billing:charge:5"]);
+  });
+
+  it("answers the approval methods over a tab's RPC", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-harness-actions-agent/${name}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const call = (method: string, args: unknown[]) =>
+      new Promise<Record<string, unknown>>((resolve) => {
+        const id = crypto.randomUUID();
+        ws.addEventListener("message", (event) => {
+          const frame = JSON.parse(String(event.data)) as Record<
+            string,
+            unknown
+          >;
+          if (frame.type === "rpc" && frame.id === id) resolve(frame);
+        });
+        ws.send(JSON.stringify({ type: "rpc", id, method, args }));
+      });
+    const listed = await call("pendingApprovals", []);
+    expect(listed.success).toBe(true);
+    const [pending] = listed.result as PendingApproval[];
+    const approved = await call("approveExecution", [pending.executionId]);
+    expect(approved).toMatchObject({ success: true, result: { charged: 5 } });
+    ws.close();
   });
 });
