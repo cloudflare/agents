@@ -2586,4 +2586,34 @@ describe("chat functions over a minimal host", () => {
       );
     });
   });
+
+  it("the other tabs get the stored transcript with the reply before the end frame", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const asked: Array<Record<string, unknown>> = [];
+      const watching: Array<Record<string, unknown>> = [];
+      const sender = recordingTab("tab-a", asked);
+      instance.tabs.push(sender, recordingTab("tab-b", watching));
+      const done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        sender,
+        chatRequestWith("r1", "u1", "Hi")
+      );
+      await done;
+      const list = watching.findIndex(
+        (frame) =>
+          frame.type === "cf_agent_chat_messages" &&
+          JSON.stringify(frame).includes("reply-1")
+      );
+      const end = watching.findIndex((frame) => frame.done === true);
+      expect(list).toBeGreaterThanOrEqual(0);
+      expect(list).toBeLessThan(end);
+      expect(
+        asked.some((frame) => frame.type === "cf_agent_chat_messages")
+      ).toBe(false);
+    });
+  });
 });

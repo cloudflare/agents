@@ -731,6 +731,52 @@ export function retryingTurn(
   };
 }
 
+/**
+ * `chunks`, with the start of a text or reasoning part a model's deltas came
+ * without (some send `text-delta` alone, or with no id) put in front of its
+ * first delta, as the hosts' message builder accepted them.
+ */
+function withPartStarts(
+  chunks: ReadableStream<UIMessageChunk>,
+  requestId: string
+): ReadableStream<UIMessageChunk> {
+  const open = new Set<string>();
+  return chunks.pipeThrough(
+    new TransformStream<UIMessageChunk, UIMessageChunk>({
+      transform(chunk, controller) {
+        const kind =
+          chunk.type === "text-start" ||
+          chunk.type === "text-delta" ||
+          chunk.type === "text-end"
+            ? "text"
+            : chunk.type === "reasoning-start" ||
+                chunk.type === "reasoning-delta" ||
+                chunk.type === "reasoning-end"
+              ? "reasoning"
+              : undefined;
+        if (kind === undefined) {
+          controller.enqueue(chunk);
+          return;
+        }
+        const given = (chunk as { id?: unknown }).id;
+        const id = typeof given === "string" ? given : `${requestId}-${kind}`;
+        const key = `${kind}:${id}`;
+        const next = (
+          given === id ? chunk : { ...chunk, id }
+        ) as UIMessageChunk;
+        if (chunk.type === `${kind}-start`) open.add(key);
+        else if (!open.has(key)) {
+          if (chunk.type === `${kind}-end`) return;
+          open.add(key);
+          controller.enqueue({ type: `${kind}-start`, id } as UIMessageChunk);
+        }
+        if (chunk.type === `${kind}-end`) open.delete(key);
+        controller.enqueue(next);
+      }
+    })
+  );
+}
+
 /** Read what `respond` returned as UI message chunks. */
 function chunksOf(
   source: ChatModelStream,
@@ -942,6 +988,32 @@ export function chatTurnDefinition(
       const continuation =
         run.trigger === "tool-answer" || run.mode === "continue";
       const messageIds = messageIdsOf(deps.tasks.peek(requestId)?.metadata);
+      // The tabs get the stored transcript with the reply: before the end
+      // frame for a reply that finished (the other tabs; the one that asked
+      // read it from the stream), after it for a stop, so what the stream
+      // showed and the transcript did not keep is dropped, not merged with
+      // the stream a tab still reads.
+      const origin = (
+        deps.tasks.peek(requestId)?.metadata?.chat as
+          | { origin?: unknown }
+          | undefined
+      )?.origin;
+      const sendTranscript = async (exceptOrigin: boolean) => {
+        const sockets = deps.webSockets;
+        if (!sockets) return;
+        const text = frameText({
+          type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
+          messages: await session.getHistory()
+        } as { type: string });
+        if (text === undefined) return;
+        for (const connection of sockets.getConnections()) {
+          if (exceptOrigin && connection.id === origin) continue;
+          sendIfOpen(connection, text);
+        }
+      };
+      if (result.messageId !== undefined && result.status !== "aborted") {
+        await sendTranscript(true);
+      }
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
           body: result.error ?? "",
@@ -960,6 +1032,7 @@ export function chatTurnDefinition(
           ...(messageIds && { messageIds })
         });
       }
+      if (result.status === "aborted") await sendTranscript(false);
       await host.hooks?.onResponse?.(result);
       return result;
     };
@@ -1506,7 +1579,10 @@ export function chatTurnDefinition(
         (run.clientTools ?? []).map((tool) => tool.name)
       );
       const recorded = watchStall(
-        untilStopped(chunksOf(source, requestId), step.signal),
+        untilStopped(
+          withPartStarts(chunksOf(source, requestId), requestId),
+          step.signal
+        ),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
         // An approved call of the reply continued runs with no new input.
         (continuing?.parts ?? []).flatMap((part) => {
@@ -1609,6 +1685,35 @@ export function chatTurnDefinition(
           }
         })
       );
+      // What the reply streamed so far, stored as it ends cut off (a stop or
+      // a failure): an open text part closed, reasoning it ends in dropped
+      // (no provider takes a reply that ends that way), nothing stored when
+      // it then holds nothing.
+      const keepSoFar = async (
+        failed?: string
+      ): Promise<string | undefined> => {
+        const soFar = await messageOf(streamOf(seen), continuing).catch(
+          () => continuing
+        );
+        const settled =
+          soFar &&
+          stripTrailingReasoning({
+            ...soFar,
+            parts: soFar.parts.map(
+              (part) => settleInterruptedPart(part as never) as typeof part
+            )
+          });
+        const keep =
+          settled && !replyIsRemovedAsEmpty(settled)
+            ? repairCutOffTools(settled, host.hooks, run.clientTools ?? [])
+            : undefined;
+        // A failure with nothing to keep leaves its stream errored.
+        if (!keep && failed !== undefined) {
+          out.error(failed);
+          return undefined;
+        }
+        return storeReply(out, keep);
+      };
       try {
         reply = await messageOf(recorded, continuing, (snapshot) => {
           parts = snapshot.parts;
@@ -1628,26 +1733,7 @@ export function chatTurnDefinition(
             return report({ requestId, status: "skipped" });
           }
           // A stopped turn keeps what it streamed, as a stored reply.
-          const soFar = await messageOf(streamOf(seen), continuing).catch(
-            () => continuing
-          );
-          // Nothing writes into it again: an open text part is closed, and
-          // reasoning it ends in is dropped (no provider takes a reply that
-          // ends that way). One that holds nothing then is not stored.
-          const settled =
-            soFar &&
-            stripTrailingReasoning({
-              ...soFar,
-              parts: soFar.parts.map(
-                (part) => settleInterruptedPart(part as never) as typeof part
-              )
-            });
-          const kept = await storeReply(
-            out,
-            settled && !replyIsRemovedAsEmpty(settled)
-              ? repairCutOffTools(settled, host.hooks, run.clientTools ?? [])
-              : undefined
-          );
+          const kept = await keepSoFar();
           return report({
             requestId,
             status: "aborted",
@@ -1676,8 +1762,15 @@ export function chatTurnDefinition(
           if (step.attempt < maxAttempts) return interrupted();
         }
         const text = error instanceof Error ? error.message : String(error);
-        out.error(text);
-        return report({ requestId, status: "error", error: text });
+        // A failed reply keeps what it streamed too, and the tabs see it
+        // stored before the error frame.
+        const kept = await keepSoFar(text);
+        return report({
+          requestId,
+          status: "error",
+          error: text,
+          ...(kept && { messageId: kept })
+        });
       }
     }
 

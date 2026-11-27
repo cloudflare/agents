@@ -338,7 +338,11 @@ describe("chatTurnDefinition", () => {
       const tab = {
         id: "tab-1",
         readyState: 1,
-        send: (text: string) => sent.push(JSON.parse(text))
+        send: (text: string) => {
+          // The response frames: the transcript lists are another test's.
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response") sent.push(frame);
+        }
       };
       await chatTurnDefinition(
         {
@@ -1658,7 +1662,11 @@ describe("chatTurnDefinition", () => {
       const tab = {
         id: "tab-1",
         readyState: 1,
-        send: (text: string) => sent.push(JSON.parse(text))
+        send: (text: string) => {
+          // The response frames: the transcript lists are another test's.
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response") sent.push(frame);
+        }
       };
       const stop = new AbortController();
       const result = await chatTurnDefinition(
@@ -1930,5 +1938,69 @@ describe("chatTurnDefinition", () => {
         }
       });
     }
+  });
+
+  it("text deltas a model sends with no start and no id are stored as one text part", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      instance.reply = [
+        { type: "start", messageId: "a1" },
+        { type: "text-delta", delta: "Hello " } as never,
+        { type: "text-delta", delta: "there" } as never,
+        { type: "finish" }
+      ];
+      const runId = await runTurn(instance, { trigger: "server" });
+      expect(await instance.resultFor(runId)).toMatchObject({
+        status: "completed"
+      });
+      const reply = await instance.sessions.session("s1").getMessage("a1");
+      expect(
+        (
+          reply as unknown as { parts: Array<{ type: string; text?: string }> }
+        ).parts
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+      ).toEqual(["Hello there"]);
+    });
+  });
+
+  it("a reply the model fails partway keeps what it streamed, stored before the error frame", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Partial" } as never;
+              throw new Error("The provider failed");
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("er-1", 1));
+      expect(result).toMatchObject({ status: "error", messageId: "a1" });
+      const reply = await instance.sessions.session("s1").getMessage("a1");
+      expect(JSON.stringify(reply)).toContain("Partial");
+      const list = sent.findIndex((f) => f.type === "cf_agent_chat_messages");
+      const end = sent.findIndex((f) => f.done === true);
+      expect(list).toBeGreaterThanOrEqual(0);
+      expect(list).toBeLessThan(end);
+    });
   });
 });

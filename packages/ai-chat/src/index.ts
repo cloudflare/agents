@@ -1063,13 +1063,6 @@ export class AIChatAgent<
             this._callContinues.get(result.requestId) ?? false;
           this._callContinues.delete(result.requestId);
           this.messages = (await this.#session.getHistory()) as UIMessage[];
-          // After a stop's terminal frame every tab gets the list: what the
-          // stream showed and the transcript did not keep (reasoning it
-          // ended in) is dropped. A list before the frame would be merged
-          // with the stream a tab still reads.
-          if (result.status === "aborted") {
-            this._frames.broadcastMessages(this.messages);
-          }
           if (result.status === "error") {
             this._emit("message:error", { error: result.error ?? "" });
           } else if (result.messageId !== undefined) {
