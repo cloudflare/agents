@@ -1236,6 +1236,29 @@ describe("think messengers core", () => {
       expect(calls.at(-1)?.content).toBe("Got it");
     });
 
+    it("answers a webhook its platform sent twice once", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "twice-sent"
+      );
+      for (let i = 0; i < 2; i++) {
+        const response = await agent.fetch(
+          "https://example.com/messengers/fake/webhook",
+          {
+            body: JSON.stringify({
+              id: "d1",
+              text: "hello",
+              threadId: "fake:dm"
+            }),
+            method: "POST"
+          }
+        );
+        await response.text();
+      }
+      expect(await agent.getRecorded("prompt")).toEqual(["hello"]);
+      expect(await agent.getPostThreadsForTest()).toEqual(["fake:dm"]);
+    });
+
     it("posts each reply only to the thread that asked", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,

@@ -34,6 +34,15 @@ import {
   type ThinkMessengers
 } from "../messengers/chat-sdk";
 import {
+  INTERRUPTED_MESSENGER_RESPONSE,
+  messengerReplyRecoveryMode,
+  reviveMessengerEvent
+} from "../messengers/delivery";
+import {
+  RELEASED_REPLY_DEFINITION,
+  releasedSnapshot
+} from "../messengers/reply-task";
+import {
   toMessengerUserMessage,
   type MessengerEvent
 } from "../messengers/events";
@@ -76,6 +85,8 @@ export function messengerChannels(options: {
   root(): boolean;
   /** Where each turn's asker is kept, so a reply after a reset finds it. */
   kv: SyncKvStorage;
+  /** Where think@0.24.0 kept the replies it left unfinished. */
+  storage: DurableObjectStorage;
   /** The Think object: Chat SDK state lives on its sub-agents. */
   parent: unknown;
   /** Read when the first webhook arrives, as Think reads it at start. */
@@ -240,6 +251,31 @@ export function messengerChannels(options: {
       }
     }
   }
+
+  // TEMPORARY: remove in the next minor after this ships. A reply
+  // think@0.24.0 left unfinished: answered again if no text of it went out,
+  // apologized for if some did, as Think does; a completed one posts
+  // nothing more.
+  options.tasks.register(RELEASED_REPLY_DEFINITION, async (_input, step) => {
+    const key = `__cf_messenger_recovery:${step.id}`;
+    const snapshot = releasedSnapshot(await options.storage.get(key));
+    const event = snapshot && reviveMessengerEvent(snapshot.event);
+    const definition =
+      event && definitions.find((d) => d.id === event.messengerId);
+    if (snapshot && event && definition) {
+      const mode = messengerReplyRecoveryMode(snapshot.stage);
+      if (mode === "answer") await answer(definition, event);
+      if (mode === "apologize") {
+        await chat().initialize();
+        await definition.adapter.postMessage(event.thread.id, {
+          markdown:
+            definition.delivery?.interruptedResponseText ??
+            INTERRUPTED_MESSENGER_RESPONSE
+        });
+      }
+    }
+    await options.storage.delete(key);
+  });
 
   let made: Chat<Record<string, Adapter>> | undefined;
   const chat = () =>

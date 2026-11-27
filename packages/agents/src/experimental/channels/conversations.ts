@@ -665,5 +665,12 @@ function conversationOf(tag: string | undefined): string | undefined {
 
 /** Whether a chunk completes something a later run would not repeat. */
 function finishesSomething(chunk: ResponseChunk): boolean {
-  return chunk.type === "text-end" || chunk.type.startsWith("tool-");
+  return (
+    chunk.type === "text-end" ||
+    // A call whose input is still arriving is not made yet: the rerun
+    // makes it again.
+    (chunk.type.startsWith("tool-") &&
+      chunk.type !== "tool-input-start" &&
+      chunk.type !== "tool-input-delta")
+  );
 }

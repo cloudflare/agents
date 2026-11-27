@@ -944,6 +944,7 @@ export class Think<
       tasks: this.tasks,
       root: () => this.parentPath.length === 0,
       kv: this.ctx.storage.kv,
+      storage: this.ctx.storage,
       parent: this,
       concurrency: () => this.messengerConcurrency
     });
