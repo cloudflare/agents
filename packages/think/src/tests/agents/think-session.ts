@@ -677,9 +677,10 @@ async function runQueuedRecoveryTaskForTest(
 }
 
 async function waitForThinkIdleForTest(agent: Think): Promise<void> {
+  // The harness-backed Think (`pnpm test:harness`) has no turn queue.
   await (
-    agent as unknown as { _turnQueue: { waitForIdle(): Promise<void> } }
-  )._turnQueue.waitForIdle();
+    agent as unknown as { _turnQueue?: { waitForIdle(): Promise<void> } }
+  )._turnQueue?.waitForIdle();
 }
 
 /**
@@ -16345,6 +16346,16 @@ export class ThinkAdmissionTestAgent extends Think {
   }
 
   /** The client requests waiting on the chat lane, in order. */
+  /**
+   * Whether this Think keeps a waiting request as an admission record on the
+   * chat lane. The harness-backed Think (`pnpm test:harness`) does not.
+   */
+  admissionsRecordedForTest(): boolean {
+    return (
+      (this as unknown as { _turnQueue?: unknown })._turnQueue !== undefined
+    );
+  }
+
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
       return this.sql<{ request_id: string; stopped: number | null }>`
