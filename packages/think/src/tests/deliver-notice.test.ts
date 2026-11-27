@@ -83,4 +83,42 @@ describe("deliverNotice", () => {
     const error = await agent.deliverNoticeErrorForTest("hi", "telegram");
     expect(error).toMatch(/cannot resolve a delivery surface/);
   });
+
+  it("posts a messenger notice to its thread as given, and records it only with informModel", async () => {
+    const agent = await getAgentByName(
+      env.ThinkMessengerDeliveryTestAgent,
+      `notice-${crypto.randomUUID()}`
+    );
+    const quiet = await agent.deliverNoticeForTest("17. done", {
+      channel: "fake",
+      thread: "fake:dm-notice"
+    });
+    expect(quiet).toEqual([]);
+    const told = await agent.deliverNoticeForTest("18. done", {
+      channel: "fake",
+      thread: "fake:dm-notice",
+      informModel: true
+    });
+    expect(told).toEqual(["[Delivered to the user out of band] 18. done"]);
+    // Posted as the plain strings given, to that thread.
+    expect(await agent.getAdapterCalls()).toEqual([
+      { kind: "post", content: "17. done" },
+      { kind: "post", content: "18. done" }
+    ]);
+    expect(await agent.getPostThreadsForTest()).toEqual([
+      "fake:dm-notice",
+      "fake:dm-notice"
+    ]);
+    expect(await agent.getPostShapesForTest()).toEqual(["text", "text"]);
+  });
+
+  it("asks for a thread for a messenger notice out of a turn", async () => {
+    const agent = await getAgentByName(
+      env.ThinkMessengerDeliveryTestAgent,
+      `notice-no-thread-${crypto.randomUUID()}`
+    );
+    await expect(agent.deliverNoticeWithoutThreadForTest()).resolves.toMatch(
+      /pass \{ thread \}/
+    );
+  });
 });

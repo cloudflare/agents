@@ -50,6 +50,8 @@ import {
   type MessengerConcurrency,
   type ThinkMessengers
 } from "../messengers";
+import { deliverChannelNotice } from "../channels/runtime";
+import type { DeliverNoticeOptions } from "../turn-types";
 import {
   messengerChannels,
   type ThinkMessengerChannels
@@ -1071,6 +1073,36 @@ export class Think<
   }
   getMessengers(): ThinkMessengers {
     return {};
+  }
+
+  /**
+   * Post a notice outside a turn, as Think does: to the web transcript
+   * (`"web"`, the default) as an assistant message that starts no turn, or
+   * to a messenger's `thread`.
+   */
+  async deliverNotice(
+    text: string | { markdown: string },
+    options?: DeliverNoticeOptions
+  ): Promise<void> {
+    const channelId = options?.channel ?? "web";
+    await deliverChannelNotice(text, options, {
+      channelId,
+      // Only the messengers so far (configureChannels() comes with C6): it
+      // names what a notice to one of them lacks.
+      registry: new Map(
+        (this.#messengers?.ids ?? []).map((id) => [id, { kind: "messenger" }])
+      ) as never,
+      surface: async () =>
+        this.#messengers?.noticeSurface(channelId, options?.thread) as never,
+      addMessages: (messages) => this.addMessages(messages),
+      emit: (event) => {
+        const emit = this._emit as unknown as (
+          type: string,
+          payload: Record<string, unknown>
+        ) => void;
+        emit.call(this, event.type, event.payload);
+      }
+    });
   }
   configureChannels():
     | Record<string, unknown>

@@ -798,6 +798,21 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     ].length;
   }
 
+  /** A notice to a messenger with no thread; returns the error's text. */
+  async deliverNoticeWithoutThreadForTest(): Promise<string> {
+    try {
+      await this.deliverNotice("hi", { channel: "fake" });
+      return "delivered";
+    } catch (error) {
+      return String(error);
+    }
+  }
+
+  /** Whether each post was plain text or Markdown, in order. */
+  getPostShapesForTest(): string[] {
+    return this.ctx.storage.kv.get<string[]>("post-shapes") ?? [];
+  }
+
   /** The thread of every post, in order. */
   getPostThreadsForTest(): string[] {
     return this.ctx.storage.kv.get<string[]>("post-threads") ?? [];
@@ -913,6 +928,10 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         this.ctx.storage.kv.put("post-threads", [
           ...this.getPostThreadsForTest(),
           threadId
+        ]);
+        this.ctx.storage.kv.put("post-shapes", [
+          ...(this.ctx.storage.kv.get<string[]>("post-shapes") ?? []),
+          typeof message === "string" ? "text" : "markdown"
         ]);
         return { id: "reply", raw: {}, threadId };
       },
