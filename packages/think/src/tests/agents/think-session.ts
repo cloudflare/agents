@@ -11273,6 +11273,10 @@ export class ThinkProgrammaticTestAgent extends Think {
     _ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
     const kv = this.ctx.storage.kv;
+    // Recovery gives up and keeps the partial (`giveUpRecoveryForTest`).
+    if (kv.get<boolean>("test:give-up-recovery")) {
+      return { persist: true, continue: false };
+    }
     if (kv.get<boolean>("test:hold-recovery")) {
       kv.delete("test:hold-recovery");
       kv.put("test:recovery-held", true);
@@ -11838,15 +11842,6 @@ export class ThinkProgrammaticTestAgent extends Think {
   /** Recovery gives up after a reset, keeping the partial (in storage). */
   async giveUpRecoveryForTest(): Promise<void> {
     this.ctx.storage.kv.put("test:give-up-recovery", true);
-  }
-
-  override async onChatRecovery(
-    ctx: ChatRecoveryContext
-  ): Promise<ChatRecoveryOptions | void> {
-    if (this.ctx.storage.kv.get<boolean>("test:give-up-recovery")) {
-      return { persist: true, continue: false };
-    }
-    return super.onChatRecovery(ctx);
   }
 
   private _turnConfigForTest: TurnConfig | null = null;
