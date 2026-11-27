@@ -643,5 +643,41 @@
       "file": "submissions.test.ts",
       "test": "Think durable submissions > a submission whose isolate is evicted while it runs > ends failed, not running, when a reset cuts its recovered reply and the next recovery declines"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > reschedules a pre-stream retry that times out waiting for stable state, within the attempt budget",
+    "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
+    "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > reschedules a continuation that times out waiting for stable state, within the attempt budget",
+    "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
+    "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > exhausts via onExhausted once the stable-state continue budget is spent",
+    "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
+    "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > exhausts via onExhausted once the stable-state retry budget is spent",
+    "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
+    "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > terminalizes a stable-state give-up even when the incident record is missing (silent-drop guard)",
+    "reason": "a `running` submission seeded in the class's shape (`seedRunningSubmissionForTest`), the recovery callback run by hand (`runChatRecoveryContinueForTestWith`) with an incident id whose record was never written, and the stable-state wait forced to time out (`setForceStableTimeoutForTest`)",
+    "ruledOut": "stableTimeoutMs has no effect on the new core: no recovery attempt waits for stable state there (lead, 27 Nov 11:25; arch ruling (std theme f), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > a genuinely superseding user turn marks the submission skipped, not errored",
+    "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand, with a newer user leaf persisted by hand",
+    "ruledOut": "a later request waits behind the recovery on the chat lane, so a recovery never finds a newer user leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov). On Think: submissions.test.ts 'a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order', which passes on both configs"
   }
 ]

@@ -19,6 +19,7 @@ import {
   classOnlyTable,
   isMechanicsOnly,
   isProbeCovered,
+  isRuledOut,
   readClassOnly,
   testId
 } from "./harness-class-only";
@@ -39,12 +40,14 @@ type Scoreboard = {
   needThink: number;
   /** Of those, the ones that pass against the harness-backed Think. */
   needThinkPassed: number;
-  /** Tests left out of both: class-only, each with a successor, mechanics-only or probe-covered. */
+  /** Tests left out of both: class-only, each with a successor, mechanics-only, probe-covered or ruled out. */
   classOnly: number;
   /** Of those, the mechanics-only ones, which have no successor. */
   mechanicsOnly: number;
   /** Of those, the probe-covered ones: a deployed scenario, no successor. */
   probeCovered: number;
+  /** Of those, the ruled-out ones: a written ruling, no successor. */
+  ruledOut: number;
   files: Record<string, { total: number; passed: number }>;
   passing: string[];
 };
@@ -131,6 +134,7 @@ const withoutThink = passedIn(absentFile);
 const classOnly = readClassOnly(classOnlyJson);
 const mechanicsOnly = classOnly.entries.filter(isMechanicsOnly).length;
 const probeCovered = classOnly.entries.filter(isProbeCovered).length;
+const ruledOut = classOnly.entries.filter(isRuledOut).length;
 const classOnlyIds = new Set(
   classOnly.entries.map((entry) => testId(entry.file, entry.test))
 );
@@ -169,6 +173,7 @@ const scoreboard: Scoreboard = {
   classOnly: classOnlyIds.size,
   mechanicsOnly,
   probeCovered,
+  ruledOut,
   files: Object.fromEntries(
     Object.entries(files).sort(([a], [b]) => a.localeCompare(b))
   ),
@@ -179,7 +184,8 @@ const percent = (passed: number, total: number) =>
   total === 0 ? "0%" : `${Math.floor((passed / total) * 100)}%`;
 const apart = [
   ...(mechanicsOnly > 0 ? [`${mechanicsOnly} of them mechanics-only`] : []),
-  ...(probeCovered > 0 ? [`${probeCovered} probe-covered`] : [])
+  ...(probeCovered > 0 ? [`${probeCovered} probe-covered`] : []),
+  ...(ruledOut > 0 ? [`${ruledOut} ruled out`] : [])
 ];
 const headline =
   apart.length === 0
