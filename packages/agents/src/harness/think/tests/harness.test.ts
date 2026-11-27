@@ -435,6 +435,13 @@ describe("ThinkHarness turns", () => {
     expect(text(await stub.prompt("after"))).toBe("echo: after");
   });
 
+  it("tries a turn again after a platform transient instead of failing it", async () => {
+    const stub = fresh();
+    const result = await stub.prompt("transient once");
+    expect(result.status).toBe("done");
+    expect(text(result)).toBe("echo: transient once");
+  });
+
   it("takes a client tool declaration that is not a list as none", async () => {
     const stub = fresh();
     expect(await stub.declareMalformedClientTools()).toBe("done");

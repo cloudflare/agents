@@ -440,6 +440,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     .use(this.webSockets)
     .use(this.chat);
 
+  #transientThrown = false;
+
   #reply(prompt: PromptMessage[]): ReadableStream<StreamPart> {
     const last = prompt.filter((m) => m.role !== "system").at(-1);
     let parts: StreamPart[];
@@ -568,6 +570,13 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         return this.#slow(12);
       } else if (text === "slow-short") {
         return this.#slow(2);
+      } else if (text === "transient once" && !this.#transientThrown) {
+        // A platform blip on the first call only: the turn is tried again.
+        this.#transientThrown = true;
+        parts = [
+          { type: "stream-start", warnings: [] },
+          { type: "error", error: new Error("Network connection lost.") }
+        ];
       } else if (text === "fail and stay open") {
         // A provider that reports an in-band error and never closes.
         return new ReadableStream({

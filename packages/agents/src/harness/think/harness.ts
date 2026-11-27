@@ -20,7 +20,7 @@ import { capabilitySchema } from "../../lifecycle/schema";
 import { REPLAY_ITEM_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
-import { isPlatformFailure } from "../../retries";
+import { isPlatformFailure, isPlatformTransientError } from "../../retries";
 import {
   AttemptSupersededError,
   isTaskCancellation,
@@ -2129,7 +2129,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             steps,
             AbortSignal.any([signal, stall.signal]),
             call.signal
-          );
+          ).catch((error: unknown) => {
+            // A platform transient (a storage blip, a lost connection) while
+            // preparing the call is not the app's error: the turn is tried
+            // again within its budget, as Think does.
+            if (isPlatformTransientError(error)) {
+              throw new ModelCallError("retry", error);
+            }
+            throw error;
+          });
           // An error the model streamed in band, if it sent one.
           let inBand: Error | undefined;
           const stallTimeoutMs =
@@ -2186,10 +2194,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             } catch (error) {
               console.error("ThinkHarness onError hook failed", error);
             }
-            const kind =
-              (await this.#extensions.hook("classifyError", {
-                error: failure
-              })) ?? "fail";
+            const kind = isPlatformTransientError(failure)
+              ? "retry"
+              : ((await this.#extensions.hook("classifyError", {
+                  error: failure
+                })) ?? "fail");
             if (kind === "context-overflow" && progressed) {
               // This attempt ran model calls or tools the transcript does
               // not hold yet: make room, then continue from what it
