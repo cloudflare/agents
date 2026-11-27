@@ -3749,6 +3749,26 @@ export class Think<
     );
   }
 
+  /**
+   * A detached run's delivery that could land mid-turn (`serialize`) waits
+   * for the turn running now to end, as Think runs it between turns; an
+   * explicit cancel may come from inside a turn, so it runs at once.
+   */
+  protected override async _runDetachedDelivery(
+    invoke: () => Promise<void>,
+    options?: { serialize?: boolean }
+  ): Promise<void> {
+    if (options?.serialize) {
+      const session = this.harness.session();
+      for (const operation of await session.pending()) {
+        if (operation.status === "running") {
+          await session.wait(operation.operationId);
+        }
+      }
+    }
+    await super._runDetachedDelivery(invoke, options);
+  }
+
   // ── As an agent tool ────────────────────────────────────────────────
   // A parent runs this agent as a tool through these methods. The run is
   // one operation of the root session, `agent-tool:<runId>`, so every

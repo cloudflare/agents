@@ -724,5 +724,14 @@
       "file": "channel-recovery.test.ts",
       "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > serializes a fast-path/backbone detached delivery behind an active turn",
+    "reason": "the class's turn queue (`_turnQueue.enqueue`) held by hand, and its protected `_runDetachedDelivery` called directly",
+    "successor": {
+      "file": "detached-reconcile-lane.test.ts",
+      "test": "Think detached delivery and the chat lane > does not hold the alarm on a detached delivery that waits for a busy chat lane"
+    }
   }
 ]
