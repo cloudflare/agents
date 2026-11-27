@@ -65,6 +65,17 @@ import { workspaceExtension } from "./extensions/workspace";
 import { fetchExtension } from "./extensions/fetch";
 import { skillsExtension } from "./extensions/skills";
 import { sandboxedExtensions } from "./extensions/sandboxed";
+import { actionsExtension } from "./extensions/actions";
+import { compileActionTools, type ActionToolHost } from "../action-tools";
+import { createEffectState, registerEffectTask } from "../action-ledger";
+import { runLedgeredAction } from "../action-run";
+import type {
+  Action,
+  ActionApprovalDescriptor,
+  ActionAuthorizationContext,
+  ActionAuthorizationDecision,
+  CompiledActionMetadata
+} from "../actions";
 import {
   callThinkHostApi,
   createThinkHostApi,
@@ -157,6 +168,8 @@ import type {
   TurnConfig,
   TurnContext,
   TurnInputMessages,
+  PendingApproval,
+  RejectExecutionOptions,
   TurnTrigger
 } from "../think";
 
@@ -479,6 +492,16 @@ export class Think<
     gateway: (model) => this.getGateway(model),
     sessionAffinity: () => this.sessionAffinity
   });
+  /** The action ledger's coalescing, as on Think. */
+  readonly #effects = createEffectState();
+  /** Each approval-gated action's summary, permissions and risk. */
+  readonly #actionMetadata = new Map<string, CompiledActionMetadata>();
+  /**
+   * The descriptors of calls asked for approval since this isolate started.
+   * After a restart a pending call's descriptor is computed again from its
+   * action and input.
+   */
+  readonly #actionDescriptors = new Map<string, ActionApprovalDescriptor>();
 
   constructor(ctx: AgentContext, env: Env) {
     snapshotDeclaredMembers(new.target.prototype);
@@ -496,6 +519,7 @@ export class Think<
         (error) => this.onError(error)
       )
     );
+    registerEffectTask(this.tasks, this.#effects);
     const self = this;
     this.harness = new ThinkHarness({
       // The Agent's own Tasks, which Think's runs already use.
@@ -534,7 +558,17 @@ export class Think<
               ).call(this, "tool:fetch", { ...event })
           )
         },
-        // The sandboxed extensions' tools follow the agent's own, as in
+        // The actions follow the agent's own tools, as in Think.
+        {
+          name: "actions",
+          after: true,
+          extension: actionsExtension(
+            () => this.getActions(),
+            this.#actionToolHost,
+            this.#actionMetadata
+          )
+        },
+        // The sandboxed extensions' tools follow the actions, as in
         // Think. Then skills, then MCP tools.
         {
           name: "sandboxed",
@@ -1068,8 +1102,142 @@ export class Think<
   getExtensions(): ExtensionConfig[] {
     return [];
   }
-  getActions(): Record<string, unknown> | Promise<Record<string, unknown>> {
+  getActions(): Record<string, Action> | Promise<Record<string, Action>> {
     return {};
+  }
+
+  /**
+   * Authorize a single action call, as on Think. The default allows it.
+   */
+  authorizeAction(
+    _ctx: ActionAuthorizationContext
+  ): ActionAuthorizationDecision | Promise<ActionAuthorizationDecision> {
+    return true;
+  }
+
+  /** As on Think: how long a stale claim of a keyed action is held. */
+  actionLedgerPendingRetryLeaseMs: number | false = 5 * 60 * 1000;
+
+  /** What the actions call on this agent. */
+  readonly #actionToolHost: ActionToolHost = {
+    agent: this as unknown as LegacyThink,
+    env: () => this.env as Cloudflare.Env,
+    requestId: () => "",
+    // An approved call runs without asking again: the harness decides that
+    // from its answered approval.
+    isApproved: () => false,
+    grantedPermissions: () => undefined,
+    authorizeAction: (ctx) => this.authorizeAction(ctx),
+    recordApprovalDescriptor: (toolCallId, descriptor) =>
+      this.#actionDescriptors.set(toolCallId, descriptor),
+    recordReplyAttachment: () => {},
+    runLedgered: (args) =>
+      runLedgeredAction(
+        {
+          tasks: this.tasks,
+          effects: this.#effects,
+          pendingRetryLeaseMs: this.actionLedgerPendingRetryLeaseMs,
+          emit: (event) =>
+            (
+              this._emit as unknown as (
+                type: string,
+                payload: Record<string, unknown>
+              ) => void
+            ).call(this, event.type, event.payload),
+          attachments: { count: () => 0, truncate: () => {} }
+        },
+        args
+      )
+  };
+
+  /**
+   * Everything awaiting human approval: the action calls of the latest reply
+   * that wait for a decision, each with its descriptor. Resolve one with
+   * `approveExecution` or `rejectExecution`, by its `executionId`.
+   */
+  async pendingApprovals(executionId?: string): Promise<PendingApproval[]> {
+    if (this.#actionMetadata.size === 0) {
+      // A fresh isolate: compile the actions once for their metadata.
+      compileActionTools(
+        await this.getActions(),
+        this.#actionToolHost,
+        this.#actionMetadata
+      );
+    }
+    const out: PendingApproval[] = [];
+    for (const call of await this.harness.pendingApprovals(
+      this.harness.session().id
+    )) {
+      if (executionId !== undefined && call.approvalId !== executionId) {
+        continue;
+      }
+      const metadata = this.#actionMetadata.get(call.toolName);
+      if (!metadata) continue;
+      out.push({
+        executionId: call.approvalId,
+        source: "action",
+        descriptor: this.#actionDescriptors.get(call.toolCallId) ?? {
+          requestId: "",
+          toolCallId: call.toolCallId,
+          action: metadata.actionName,
+          summary: metadata.summary,
+          input: call.input,
+          permissions: [...(metadata.permissions ?? [])],
+          ...(metadata.risk !== undefined && { risk: metadata.risk }),
+          kind: metadata.kind
+        }
+      });
+    }
+    return out;
+  }
+
+  /** Approve a pending action call; the turn continues and runs it. */
+  async approveExecution(executionId: string): Promise<unknown> {
+    return this.#decide(executionId, true);
+  }
+
+  /**
+   * Reject a pending action call; the turn continues with the refusal, or
+   * waits for a later turn with `{ autoContinue: false }`.
+   */
+  async rejectExecution(
+    executionId: string,
+    reason?: string,
+    options?: RejectExecutionOptions
+  ): Promise<unknown> {
+    return this.#decide(executionId, false, reason, options?.autoContinue);
+  }
+
+  async #decide(
+    executionId: string,
+    approved: boolean,
+    reason?: string,
+    autoContinue?: boolean
+  ): Promise<unknown> {
+    const [pending] = await this.pendingApprovals(executionId);
+    if (!pending) {
+      return {
+        status: "error",
+        executionId,
+        error: `No pending approval "${executionId}"`
+      };
+    }
+    const session = this.harness.session();
+    const receipt = await session.submit(
+      {
+        type: "approval",
+        approvalId: executionId,
+        approved,
+        ...(reason !== undefined && { reason })
+      },
+      autoContinue === undefined ? {} : { autoContinue }
+    );
+    // Recorded, so the call is never listed again. A decision stopped
+    // before this point leaves the call pending with its descriptor.
+    this.#actionDescriptors.delete(pending.descriptor.toolCallId);
+    const result = await session.wait(receipt.operationId);
+    await this.#sync();
+    return saveResult(result);
   }
   getMessengers(): ThinkMessengers {
     return {};
@@ -1302,6 +1470,7 @@ export class Think<
   }
 
   async clearMessages(): Promise<void> {
+    this.#actionDescriptors.clear();
     this.#clearing++;
     this.#clears++;
     // As on Think, a turn started before the clear but not yet submitted is

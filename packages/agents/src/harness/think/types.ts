@@ -144,6 +144,19 @@ export type ThinkPendingOperation = {
   readonly status: "queued" | "running";
 };
 
+/**
+ * A tool call of a session's latest reply that waits for a person's
+ * decision. Answer it with an `approval` tool answer.
+ *
+ * @internal
+ */
+export type ThinkPendingApproval = {
+  readonly approvalId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly input: unknown;
+};
+
 /** The operation a session is running, mid model call. @experimental */
 export type ThinkInFlight = {
   readonly operationId: string;

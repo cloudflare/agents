@@ -57,8 +57,12 @@ export interface ActionToolHost {
     ctx: ActionContext;
     runAction: () => Promise<unknown>;
   }): Promise<unknown>;
-  /** Park a durable-pause action for approval; returns the tool output. */
-  parkDurablePause(args: {
+  /**
+   * Park a durable-pause action for approval; returns the tool output.
+   * Without it (on ThinkHarness), a durable-pause action asks for approval
+   * like an approval-gated one, and its tool call waits in the transcript.
+   */
+  parkDurablePause?(args: {
     toolName: string;
     input: unknown;
     ctx: ActionContext;
@@ -364,7 +368,8 @@ function actionToTool(
         approval !== undefined && kind !== "durable-pause"
     },
     inputSchema: config.inputSchema as never,
-    ...(approval !== undefined && kind !== "durable-pause"
+    ...((approval !== undefined && kind !== "durable-pause") ||
+    (kind === "durable-pause" && !host.parkDurablePause)
       ? {
           needsApproval: async (
             input: unknown,
@@ -398,7 +403,7 @@ function actionToTool(
             const needsApproval =
               typeof approval === "function"
                 ? await approval({ input, ctx })
-                : approval;
+                : (approval ?? true);
             if (needsApproval) {
               host.recordApprovalDescriptor(options.toolCallId, {
                 requestId: ctx.requestId,
@@ -410,7 +415,8 @@ function actionToTool(
                 ...(config.approvalRisk !== undefined && {
                   risk: config.approvalRisk
                 }),
-                kind: "approval-gated"
+                kind:
+                  kind === "durable-pause" ? "durable-pause" : "approval-gated"
               });
             }
             return needsApproval;
@@ -473,7 +479,7 @@ function actionToTool(
           return prepareActionOutputForModel(output);
         };
 
-        if (kind === "durable-pause") {
+        if (kind === "durable-pause" && host.parkDurablePause) {
           // The approval predicate gates whether to PARK (not whether an AI
           // SDK approval is needed). Absent → always park; a function may opt
           // a given input out of the human gate and run inline instead.

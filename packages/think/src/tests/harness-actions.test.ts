@@ -1,0 +1,94 @@
+import { env } from "cloudflare:workers";
+import { getAgentByName } from "agents";
+import { describe, expect, it } from "vitest";
+import type { PendingApproval } from "../think";
+
+type ActionsStub = {
+  say(text: string): Promise<void>;
+  charged(): Promise<number>;
+  toolStates(): Promise<string[]>;
+  lastText(): Promise<string>;
+  resetForTest(): Promise<void>;
+  pendingApprovals(executionId?: string): Promise<PendingApproval[]>;
+  approveExecution(executionId: string): Promise<unknown>;
+  rejectExecution(
+    executionId: string,
+    reason?: string,
+    options?: { autoContinue?: boolean }
+  ): Promise<unknown>;
+};
+
+async function agent(name = crypto.randomUUID()): Promise<ActionsStub> {
+  return (await getAgentByName(
+    env.ThinkHarnessActionsAgent,
+    name
+  )) as unknown as ActionsStub;
+}
+
+describe("harness-backed Think: actions that need a human", () => {
+  it("lists an approval-gated call with its descriptor, and runs it once on approve", async () => {
+    const think = await agent();
+    await think.say("charge 5");
+    expect(await think.charged()).toBe(0);
+    expect(await think.toolStates()).toEqual(["approval-requested"]);
+
+    const pending = await think.pendingApprovals();
+    expect(pending).toEqual([
+      {
+        executionId: expect.any(String),
+        source: "action",
+        descriptor: expect.objectContaining({
+          toolCallId: "call-1",
+          action: "charge",
+          summary: "Charge the customer's card",
+          input: { amount: 5 },
+          permissions: ["billing:charge"],
+          risk: "high",
+          kind: "approval-gated"
+        })
+      }
+    ]);
+
+    await think.approveExecution(pending[0].executionId);
+    expect(await think.charged()).toBe(1);
+    expect(await think.toolStates()).toEqual(["output-available"]);
+    expect(await think.lastText()).toContain("charged");
+    expect(await think.pendingApprovals()).toEqual([]);
+
+    // Deciding it again finds nothing to decide, and runs nothing.
+    expect(await think.approveExecution(pending[0].executionId)).toMatchObject({
+      status: "error"
+    });
+    expect(await think.charged()).toBe(1);
+  });
+
+  it("parks a durable-pause call for approval, and reports a rejection without running it", async () => {
+    const think = await agent();
+    await think.say("pause and charge 5");
+    const [pending] = await think.pendingApprovals();
+    expect(pending.descriptor).toMatchObject({
+      action: "pauseCharge",
+      summary: "Charge the card after a human approves",
+      kind: "durable-pause"
+    });
+
+    await think.rejectExecution(pending.executionId, "too much");
+    expect(await think.charged()).toBe(0);
+    expect(await think.toolStates()).toEqual(["output-denied"]);
+    expect(await think.pendingApprovals()).toEqual([]);
+  });
+
+  it("lists the same descriptor after a restart, from the action and its input", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [before] = await think.pendingApprovals();
+    // A fresh isolate has no descriptors in memory: listing computes them.
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    const [after] = await fresh.pendingApprovals();
+    expect(after).toEqual(before);
+    await fresh.approveExecution(after.executionId);
+    expect(await fresh.charged()).toBe(1);
+  });
+});
