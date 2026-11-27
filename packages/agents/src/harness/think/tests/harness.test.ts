@@ -861,6 +861,50 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
       "assistant: [compose approval-requested]"
     );
     expect(await stub.relayAborted()).toBe(true);
+    // Approved, the nested tool runs again on the approved path, and the
+    // approved call runs.
+    const [call] = await stub.lastToolCalls();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(approved.operationId))).toBe(
+      "tool said: did the dangerous thing"
+    );
+    expect(await stub.dangerousCount()).toBe(1);
+  });
+
+  it("doesn't give a call made in another order after an approval the result another call got", async () => {
+    const stub = fresh();
+    await stub.prompt("compose order");
+    const [call] = await stub.lastToolCalls();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    const said = text(await stub.wait(approved.operationId)) ?? "";
+    // b is now first: it isn't given a's result, nor a b's.
+    expect(said).not.toContain("b: label a");
+    expect(said).not.toContain("a: label b");
+    expect(said).toContain("different order");
+    expect(await stub.labelRuns()).toBe(2);
+  });
+
+  it("doesn't give a call made in another order after an eviction the result another call's step kept", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("compose order gate");
+    await stub.gateStarted(1);
+    stub = await crash(name);
+    await stub.release();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const said = text(await stub.wait(receipt.operationId)) ?? "";
+    expect(said).not.toContain("b: label a");
+    expect(said).not.toContain("a: label b");
+    expect(said).toContain("different order");
+    expect(await stub.labelRuns()).toBe(2);
   });
 
   it("asks for the approval at once while a sibling runs, and keeps the sibling's result when it settles", async () => {

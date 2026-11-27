@@ -59,6 +59,8 @@ const READ_RUNS_KEY = "read-runs";
 const RECEIPT_RUNS_KEY = "receipt-runs";
 const RECEIPT_HOPS_KEY = "receipt-hops";
 const PENDING_RUNS_KEY = "pending-runs";
+const ORDER_RUNS_KEY = "order-runs";
+const LABEL_RUNS_KEY = "label-runs";
 const PENDING_RELEASE_KEY = "pending-release";
 const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
@@ -278,7 +280,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               write: z.boolean().optional(),
               receipt: z.boolean().optional(),
               rounds: z.boolean().optional(),
-              pending: z.boolean().optional()
+              pending: z.boolean().optional(),
+              order: z.boolean().optional(),
+              orderGate: z.boolean().optional()
             }),
             execute: async (
               {
@@ -290,7 +294,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                 write,
                 receipt,
                 rounds,
-                pending
+                pending,
+                order,
+                orderGate
               },
               options
             ) => {
@@ -307,6 +313,22 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                 ]);
                 if (!written.ok) return written.errorText;
                 return done.ok ? `${written.output}` : done.errorText;
+              }
+              // Two calls whose order flips on the rerun, then an approval
+              // (or, with `orderGate`, the gate an eviction cuts short).
+              if (order || orderGate) {
+                const kv = this.ctx.storage.kv;
+                const runs = (kv.get<number>(ORDER_RUNS_KEY) ?? 0) + 1;
+                kv.put(ORDER_RUNS_KEY, runs);
+                const [first, second] = runs === 1 ? ["a", "b"] : ["b", "a"];
+                const one = await invoke("label", { label: first });
+                const two = await invoke("label", { label: second });
+                const last = orderGate
+                  ? await invoke("gate_safe", {})
+                  : await invoke("dangerous", {});
+                if (!last.ok) return last.errorText;
+                const said = (o: typeof one) => (o.ok ? o.output : o.errorText);
+                return `${first}: ${said(one)}; ${second}: ${said(two)}`;
               }
               // A write still running at the first approval, then a second
               // approval.
@@ -481,6 +503,19 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                   : new Promise((resolve) => setTimeout(resolve, 0)));
               }
               return "receipt";
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only: says the label it was given, and counts its runs.
+        label: {
+          ...tool({
+            description: "Say a label",
+            inputSchema: z.object({ label: z.string() }),
+            execute: async ({ label }) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(LABEL_RUNS_KEY, (kv.get<number>(LABEL_RUNS_KEY) ?? 0) + 1);
+              return `label ${label}`;
             }
           }),
           callers: ["code"] as const
@@ -895,7 +930,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               write: text === "compose write",
               receipt: text === "compose receipt",
               rounds: text === "compose rounds",
-              pending: text === "compose pending"
+              pending: text === "compose pending",
+              order: text === "compose order",
+              orderGate: text === "compose order gate"
             }
           }
         ]);
@@ -1195,6 +1232,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   composeAborted(): boolean {
     return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
+  }
+
+  labelRuns(): number {
+    return this.ctx.storage.kv.get<number>(LABEL_RUNS_KEY) ?? 0;
+  }
+
+  dangerousCount(): number {
+    return this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0;
   }
 
   pendingRuns(): number {

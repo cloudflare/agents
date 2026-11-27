@@ -697,13 +697,50 @@ function replyIdOf(chunks: readonly UIMessageChunk[]): string | undefined {
 function keptOutcome(
   outcome: ToolOutcome,
   scope: InvokeScope,
-  tool: Tool
-): ToolOutcome | undefined {
-  if (outcome.ok || !scope.parking.signal.aborted) return outcome;
+  tool: Tool,
+  toolCallId: string,
+  call: string
+): KeptOutcome | undefined {
+  // A call the parked one was made under is suspended by it, not cut short:
+  // it runs again on the approved path, its finished calls answered.
+  if (isAncestorOf(toolCallId, scope.parked?.toolCallId)) return undefined;
+  if (outcome.ok || !scope.parking.signal.aborted) return { ...outcome, call };
   return toolRecovery(tool) === "rerun"
     ? undefined
-    : { ok: false, errorText: PARK_CUT_ERROR };
+    : { ok: false, errorText: PARK_CUT_ERROR, call };
 }
+
+/** An outcome as a park or a step keeps it: with the call it was for. */
+type KeptOutcome = ToolOutcome & {
+  /** The call's tool and input (`callKey`). */
+  readonly call?: string;
+};
+
+/** The outcome a script is given, without what it was kept with. */
+function givenOutcome(kept: KeptOutcome): ToolOutcome {
+  const { call: _call, ...outcome } = kept;
+  return outcome as ToolOutcome;
+}
+
+/** Whether call `of` was made under `call`, by its path. */
+function isAncestorOf(call: string, of: string | undefined): boolean {
+  return of !== undefined && of.startsWith(`${call}/`);
+}
+
+/** Which call an outcome was for: its tool and the digest of its input. */
+function callKey(toolName: string, input: unknown): string {
+  let digest: string;
+  try {
+    digest = digestOf(asJson(input));
+  } catch {
+    digest = "unserializable";
+  }
+  return `${toolName}#${digest}`;
+}
+
+/** A call made where the run before made another: not run, not answered. */
+const DIVERGED_CALL_ERROR =
+  "This call was not run: the tool made its calls in a different order than the run before, and the call it made here then was another one.";
 
 /** A short digest of a value's JSON (FNV-1a), to tell two inputs apart. */
 function digestOf(value: unknown): string {
@@ -2772,27 +2809,39 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return async (toolName, input) => {
       const toolCallId = `${parent}/${++invoked}`;
       scope.signal.throwIfAborted();
-      const kept = Object.hasOwn(scope.seed, toolCallId)
+      const key = callKey(toolName, input);
+      const kept: KeptOutcome | undefined = Object.hasOwn(
+        scope.seed,
+        toolCallId
+      )
         ? scope.seed[toolCallId]
         : undefined;
       if (kept) {
         scope.made[toolCallId] = kept;
-        return kept;
+        // Kept for another call at this position: that one's, not this.
+        if (kept.call !== undefined && kept.call !== key) {
+          return { ok: false, errorText: DIVERGED_CALL_ERROR };
+        }
+        return givenOutcome(kept);
       }
       // Still running at the park and never settled: what it did is
       // unknown. Only a tool safe to rerun runs again.
-      if (scope.unknown?.has(toolCallId)) {
+      if (
+        scope.unknown?.has(toolCallId) &&
+        !isAncestorOf(toolCallId, scope.approved?.toolCallId)
+      ) {
         const known = Object.hasOwn(tools, toolName)
           ? tools[toolName]
           : undefined;
         if (!known || toolRecovery(known) !== "rerun") {
-          const interrupted: ToolOutcome = {
+          const interrupted: KeptOutcome = {
             ok: false,
-            errorText: PARK_CUT_ERROR
+            errorText: PARK_CUT_ERROR,
+            call: key
           };
           scope.made[toolCallId] = interrupted;
           scope.provisional.add(toolCallId);
-          return interrupted;
+          return givenOutcome(interrupted);
         }
       }
       // Parked: the calling tool is aborted; nothing after it runs.
@@ -2847,7 +2896,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         TOOL_STEP,
         // SAFETY: an outcome is the tool's JSON result or its error text,
         // as the transcript stores it.
-        (async ({ attempt, signal }: TaskStepAttempt): Promise<ToolOutcome> => {
+        (async ({ attempt, signal }: TaskStepAttempt): Promise<KeptOutcome> => {
           if (
             attempt > 1 &&
             (toolRecovery(tool) === "report" || attempt - 1 >= maxAttempts)
@@ -2905,7 +2954,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           });
           // Kept here, in the same turn of the event loop as the check
           // below, so a park's snapshot has it or its edit follows the park.
-          const kept = keptOutcome(outcome, scope, tool);
+          const kept = keptOutcome(outcome, scope, tool, toolCallId, key);
           scope.settled.set(toolCallId, kept);
           // Settled after its sibling parked: what that park kept gets it,
           // here, since the run that started it has ended. A later park of
@@ -2946,16 +2995,22 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               );
             });
           }
-          return outcome;
+          // The step keeps which call it ran, so a replay that reaches this
+          // position with another call doesn't take its result.
+          return { ...outcome, call: key };
         }) as unknown as (attempt: TaskStepAttempt) => Promise<TaskValue>
       );
       scope.running.set(toolCallId, step);
       try {
-        const outcome = (await step) as unknown as ToolOutcome;
+        const recorded = (await step) as unknown as KeptOutcome;
+        if (recorded.call !== undefined && recorded.call !== key) {
+          return { ok: false, errorText: DIVERGED_CALL_ERROR };
+        }
+        const outcome = givenOutcome(recorded);
         // A call the park cut short: a tool safe to rerun runs again after
         // the approval; any other is reported interrupted, since what it did
         // is unknown.
-        const kept = keptOutcome(outcome, scope, tool);
+        const kept = keptOutcome(outcome, scope, tool, toolCallId, key);
         if (kept) scope.made[toolCallId] = kept;
         return outcome;
       } finally {
@@ -3258,8 +3313,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 for (const [id, settled] of scope.settled) {
                   if (settled) calls[id] = settled;
                 }
+                // A call the parked one was made under is no sibling: it
+                // runs again on the approved path.
                 const inflight = [...scope.running.keys()].filter(
-                  (id) => !scope.settled.has(id)
+                  (id) =>
+                    !scope.settled.has(id) &&
+                    !isAncestorOf(id, pending.toolCallId)
                 );
                 const generation = crypto.randomUUID();
                 scope.kept = {
