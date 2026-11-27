@@ -80,14 +80,6 @@ export function readClassOnly(file: string): {
   return { entries, problems };
 }
 
-/**
- * What is wrong with the list against a run.
- *
- * @param inventory - Ids of every test the suite has.
- * @param passed - Ids of the tests that passed on the harness-backed Think.
- * @param withoutThink - Ids of the tests that pass when Think cannot be
- *   constructed: they do not exercise it, so none can be a successor.
- */
 /** The most class-only tests one successor may stand for. */
 export const MAX_ENTRIES_PER_SUCCESSOR = 4;
 
@@ -103,6 +95,21 @@ export function successorCounts(
   return counts;
 }
 
+/**
+ * What is wrong with the list against a run. A listed test must exist and
+ * must not pass on the harness-backed Think (one that passes is not
+ * class-only). Its successor must exist, not be class-only itself, pass on
+ * the harness-backed Think, exercise Think, and stand for at most
+ * {@link MAX_ENTRIES_PER_SUCCESSOR} listed tests.
+ *
+ * @param inventory - Ids of every test the suite has (the ordinary
+ *   suite's list).
+ * @param passed - Ids of the tests that passed in the run against the
+ *   harness-backed Think.
+ * @param withoutThink - Ids of the tests that passed in the run where
+ *   Think cannot be constructed: they do not exercise it, so none can be a
+ *   successor.
+ */
 export function checkClassOnly(
   entries: readonly ClassOnlyEntry[],
   inventory: ReadonlySet<string>,
