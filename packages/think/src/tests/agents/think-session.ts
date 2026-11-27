@@ -283,10 +283,18 @@ async function drainSubmissionInboxForTest(
   // A fresh start of Tasks: what is open gets its wake back.
   await (agent.tasks as unknown as { onStart(): Promise<void> }).onStart();
   const deadline = Date.now() + timeoutMs;
+  // On the harness-backed Think a submission is a harness operation, not a
+  // run of the class's definition: ask the agent which are still open.
+  const onHarness = "harness" in agent;
   for (;;) {
-    const open = submissionRecords(agent, ["pending", "running"]).filter(
-      (record) => record.waitReason !== "park"
-    );
+    const open = onHarness
+      ? await agent.listSubmissions({
+          status: ["pending", "running"],
+          limit: 100
+        })
+      : submissionRecords(agent, ["pending", "running"]).filter(
+          (record) => record.waitReason !== "park"
+        );
     if (open.length === 0) {
       // Let the last terminal report return.
       await new Promise((resolve) => setTimeout(resolve, 25));
