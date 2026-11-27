@@ -808,6 +808,73 @@ export class Think<
   /** Operations whose run continues a reply, until their turn ends. */
   readonly #continuing = new Set<string>();
 
+  /**
+   * `true` when the chat waits on a client: a tool call a client still has
+   * to answer, or an approval it still has to give, anywhere in the stored
+   * transcript, as on Think.
+   */
+  protected hasPendingInteraction(): boolean {
+    return this.messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        message.parts.some((part) => {
+          const state = (part as { state?: unknown }).state;
+          return (
+            "toolCallId" in part &&
+            (state === "input-available" || state === "approval-requested")
+          );
+        })
+    );
+  }
+
+  /**
+   * Wait until no turn runs or waits and nothing waits on a client, as on
+   * Think. `false` when `timeout` (ms) passes first.
+   */
+  protected async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    const deadline =
+      options?.timeout != null ? Date.now() + options.timeout : null;
+    const beforeDeadline = async <T>(work: Promise<T>): Promise<boolean> => {
+      if (deadline === null) {
+        await work;
+        return true;
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), left);
+      });
+      try {
+        return await Promise.race([work.then(() => true as const), timedOut]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const session = this.harness.session();
+    for (;;) {
+      const [open] = await session.pending();
+      if (open) {
+        if (!(await beforeDeadline(session.wait(open.operationId)))) {
+          return false;
+        }
+        continue;
+      }
+      await this.#sync();
+      if (!this.hasPendingInteraction()) return true;
+      // Still waiting for the client to answer.
+      if (
+        !(await beforeDeadline(
+          new Promise((resolve) => setTimeout(resolve, 100))
+        ))
+      ) {
+        return false;
+      }
+    }
+  }
+
   async getMessages(): Promise<UIMessage[]> {
     return this.harness.session().messages();
   }
@@ -925,17 +992,6 @@ export class Think<
   /** Messengers are not supported, so there is never a messenger turn. */
   getMessengerContext(): undefined {
     return undefined;
-  }
-
-  /** Whether the latest message has a tool call waiting on a client. */
-  protected hasPendingInteraction(): boolean {
-    const last = this.#messages.at(-1);
-    return (last?.parts ?? []).some(
-      (part) =>
-        "toolCallId" in part &&
-        (part.state === "input-available" ||
-          part.state === "approval-requested")
-    );
   }
 
   // ── Turns ─────────────────────────────────────────────────────────
