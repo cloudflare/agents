@@ -1,5 +1,6 @@
 import { CHAT_REQUEST_CONTEXT_KEY } from "../../chat";
 import {
+  abortAllDurableObjects,
   env,
   runDurableObjectAlarm,
   runInDurableObject
@@ -1934,6 +1935,211 @@ describe("chat functions over a minimal host", () => {
         )
       ).toBe(true);
     });
+  });
+
+  it("a tab that resumes while a recovered attempt streams gets that attempt's later chunks", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    const sent: Array<Record<string, unknown>> = [];
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => (held = resolve));
+    let alarm: Promise<unknown> | undefined;
+    await runInDurableObject(
+      stub,
+      async (instance: ChatTurnHostObject, state) => {
+        const requestId = await cutOffIntoBackoff(instance);
+        // Attempt 2 streams a chunk, then holds until the tab has resumed.
+        const respond = instance.host.respond.bind(instance.host);
+        (instance.host as { respond: typeof respond }).respond = async () =>
+          new ReadableStream({
+            async start(controller) {
+              controller.enqueue({
+                type: "text-delta",
+                id: "t1",
+                delta: " Again"
+              });
+              held();
+              await released;
+              controller.enqueue({
+                type: "text-delta",
+                id: "t1",
+                delta: " more"
+              });
+              controller.enqueue({ type: "text-end", id: "t1" });
+              controller.enqueue({ type: "finish" });
+              controller.close();
+            }
+          });
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET next_at = ? WHERE run_id = ?",
+          Date.now(),
+          requestId
+        );
+        await state.storage.setAlarm(Date.now());
+        (instance as unknown as { requestId: string }).requestId = requestId;
+      }
+    );
+    alarm = runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await holding;
+      const requestId = (instance as unknown as { requestId: string })
+        .requestId;
+      const back = recordingTab("tab-back", sent);
+      const send = back.send.bind(back);
+      (back as { send: typeof send }).send = (text: string) => {
+        send(text);
+        const frame = JSON.parse(text) as { type?: string; id?: string };
+        if (frame.type === "cf_agent_stream_resuming") {
+          void chatDispatch(
+            instance.deps,
+            instance.lane,
+            back,
+            JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+          );
+        }
+      };
+      instance.tabs.push(back);
+      await resumeChat(instance.deps, instance.lane, back, "p1", [requestId]);
+      // The replay of what streamed so far has reached the tab.
+      await vi.waitFor(() =>
+        expect(
+          sent.some((frame) => String(frame.body).includes('" Again"'))
+        ).toBe(true)
+      );
+      release();
+      await vi.waitFor(() =>
+        expect(sent.some((frame) => frame.done === true)).toBe(true)
+      );
+      // The chunk attempt 2 streamed after the tab resumed reached it.
+      expect(
+        sent.some(
+          (frame) =>
+            frame.type === "cf_agent_use_chat_response" &&
+            String(frame.body).includes('" more"')
+        )
+      ).toBe(true);
+    });
+    await alarm;
+  });
+
+  it("a tab that resumes while the attempt after a reset streams gets that attempt's later chunks", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.ChatTurnHostObject.getByName(name);
+    const sent: Array<Record<string, unknown>> = [];
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => (held = resolve));
+    let requestId = "";
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await instance.sessions.session("s1").appendMessage({
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Hi" }]
+      } as never);
+      // Attempt 1 streams some text, then never ends: the reset cuts it.
+      (instance.host as { respond: unknown }).respond = async () =>
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "start", messageId: "a1" });
+            controller.enqueue({ type: "text-start", id: "t1" });
+            controller.enqueue({ type: "text-delta", id: "t1", delta: "Part" });
+          }
+        });
+      const receipt = await instance.tasks.run(
+        instance.lane.definition,
+        { trigger: "submit-message", questionId: "u1" } as never,
+        { lane: instance.lane.lane, retain: false }
+      );
+      requestId = receipt.runId;
+      const streamId = `chat-turn:${requestId}`;
+      await vi.waitFor(async () => {
+        instance.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
+        expect((await instance.streams.status(streamId))?.state).toBe(
+          "streaming"
+        );
+        const stop = new AbortController();
+        let text = "";
+        try {
+          for await (const batch of instance.streams.readBatches(streamId, {
+            signal: stop.signal,
+            onUpToDate: () => stop.abort()
+          })) {
+            text += JSON.stringify(batch);
+            if (stop.signal.aborted) break;
+          }
+        } catch (error) {
+          if (!stop.signal.aborted) throw error;
+        }
+        expect(text).toContain("Part");
+      });
+    });
+    await abortAllDurableObjects();
+    const after = env.ChatTurnHostObject.getByName(name);
+    let alarm: Promise<unknown> | undefined;
+    await runInDurableObject(after, async (instance: ChatTurnHostObject) => {
+      // The attempt after the reset streams a chunk, then holds.
+      (instance.host as { respond: unknown }).respond = async () =>
+        new ReadableStream({
+          async start(controller) {
+            controller.enqueue({
+              type: "text-delta",
+              id: "t1",
+              delta: " Again"
+            });
+            held();
+            await released;
+            controller.enqueue({
+              type: "text-delta",
+              id: "t1",
+              delta: " more"
+            });
+            controller.enqueue({ type: "text-end", id: "t1" });
+            controller.enqueue({ type: "finish" });
+            controller.close();
+          }
+        });
+      await instance.lifecycle.start();
+    });
+    alarm = runDurableObjectAlarm(after);
+    await runInDurableObject(after, async (instance: ChatTurnHostObject) => {
+      await holding;
+      const back = recordingTab("tab-back", sent);
+      const send = back.send.bind(back);
+      (back as { send: typeof send }).send = (text: string) => {
+        send(text);
+        const frame = JSON.parse(text) as { type?: string; id?: string };
+        if (frame.type === "cf_agent_stream_resuming") {
+          void chatDispatch(
+            instance.deps,
+            instance.lane,
+            back,
+            JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+          );
+        }
+      };
+      instance.tabs.push(back);
+      await resumeChat(instance.deps, instance.lane, back, "p1", [requestId]);
+      await vi.waitFor(() =>
+        expect(
+          sent.some((frame) => String(frame.body).includes('" Again"'))
+        ).toBe(true)
+      );
+      release();
+      await vi.waitFor(() =>
+        expect(sent.some((frame) => frame.done === true)).toBe(true)
+      );
+      expect(
+        sent.some(
+          (frame) =>
+            frame.type === "cf_agent_use_chat_response" &&
+            String(frame.body).includes('" more"')
+        )
+      ).toBe(true);
+    });
+    await alarm;
   });
 
   it("a stop while a turn waits out its retry backoff tells every tab the request ended", async () => {
