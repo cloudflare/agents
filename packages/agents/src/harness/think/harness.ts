@@ -1756,6 +1756,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         }
       },
       hooks: {
+        ...(hooks?.storedReply && {
+          sanitizeForPersistence: (message: UIMessage) =>
+            hooks.storedReply?.(message) ?? message
+        }),
         transformChunk: (chunk) => {
           live.partial.push(chunk);
           this.#events.emit(session, { type: "chunk", operationId, chunk });

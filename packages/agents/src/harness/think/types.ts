@@ -450,6 +450,11 @@ export type ThinkHarnessHooks = {
   ) => void | Promise<void>;
   /** For each UI chunk the model streams. */
   readonly onChunk?: (context: ThinkChunkContext) => void;
+  /**
+   * @internal The reply as it is stored, for a host that keeps some of its
+   * parts out of the transcript. A reply left with no parts is not stored.
+   */
+  readonly storedReply?: (message: UIMessage) => UIMessage;
   /** After an operation settles. */
   readonly onTurnEnd?: (context: ThinkTurnEndContext) => void | Promise<void>;
   /** Observe a model call's error, before it is classified. */

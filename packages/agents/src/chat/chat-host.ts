@@ -580,11 +580,12 @@ export function chatTurnDefinition(
       out: StreamWriter,
       message: UIMessage | undefined
     ): Promise<string | undefined> => {
-      if (!message || message.parts.length === 0) {
+      const stored =
+        message && (host.hooks?.sanitizeForPersistence?.(message) ?? message);
+      if (!stored || stored.parts.length === 0) {
         out.close({ discard: true });
         return undefined;
       }
-      const stored = host.hooks?.sanitizeForPersistence?.(message) ?? message;
       const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
       let after: (() => Promise<void>) | undefined;
       try {
