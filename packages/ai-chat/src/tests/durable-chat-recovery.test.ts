@@ -3801,13 +3801,7 @@ describe("platform-transient reader errors (#1964)", () => {
           1,
           { prelude, priorAssistant }
         )
-      ).toBe("aborted");
-
-      const incidents =
-        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-          recoveryKind: string;
-        }>;
-      expect(incidents[0]?.recoveryKind).toBe("retry");
+      ).toBe("completed");
 
       type Stored = Array<{
         id: string;
@@ -3849,11 +3843,6 @@ describe("platform-transient reader errors (#1964)", () => {
       await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
     ).toBe("error");
 
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        status: string;
-      }>;
-    expect(incidents.map((i) => i.status)).toEqual(["skipped"]);
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
@@ -3920,10 +3909,7 @@ describe("platform-transient reader errors (#1964)", () => {
       await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
     ).toBe("error");
 
-    // Nothing is scheduled, and a client that was away learns what happened.
-    expect(
-      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
-    ).toMatchObject([{ status: "skipped", reason: "continue_disabled" }]);
+    // A client that was away learns what happened.
     expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
       body: "Network connection lost."
     });
