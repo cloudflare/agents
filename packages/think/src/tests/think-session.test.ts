@@ -534,6 +534,97 @@ describe("Think — error handling", () => {
     );
   });
 
+  // Successors of D140 and D142 through a tab's own socket.
+  it("reports each chat request from a tab whose body cannot be parsed, and runs nothing", async () => {
+    const room = `parse-failed-ws-${crypto.randomUUID()}`;
+    const events: Array<{ payload: { requestId?: string; stage?: string } }> =
+      [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed" && event.name === room) {
+        events.push(event);
+      }
+    });
+    try {
+      const ws = await connectThinkTestAgentWS(room);
+      for (const [id, body] of [
+        ["no-body", undefined],
+        ["bad-json", "{nope"],
+        ["no-messages", JSON.stringify({ text: "hi" })]
+      ] as const) {
+        ws.send(
+          JSON.stringify({
+            type: "cf_agent_use_chat_request",
+            id,
+            init: { method: "POST", ...(body !== undefined && { body }) }
+          })
+        );
+      }
+      await vi.waitFor(() => expect(events).toHaveLength(3), {
+        timeout: 5_000,
+        interval: 20
+      });
+      ws.close();
+    } finally {
+      unsubscribe();
+    }
+    expect(
+      events.map((event) => [event.payload.requestId, event.payload.stage])
+    ).toEqual([
+      ["no-body", "parse"],
+      ["bad-json", "parse"],
+      ["no-messages", "parse"]
+    ]);
+    const agent = await freshAgent(room);
+    expect(await agent.getChatErrorLog()).toHaveLength(3);
+    expect(await agent.getMessages()).toEqual([]);
+  });
+
+  it("reports a tab's tool result, tool approval and cancel, even with nothing to apply them to", async () => {
+    const room = `protocol-events-ws-${crypto.randomUUID()}`;
+    const types: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      if (event.name === room) types.push(event.type);
+    });
+    try {
+      const ws = await connectThinkTestAgentWS(room);
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "call-missing",
+          toolName: "pick",
+          output: 1
+        })
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_tool_approval",
+          toolCallId: "call-missing",
+          approved: true
+        })
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_chat_request_cancel",
+          id: "nothing-running"
+        })
+      );
+      await vi.waitFor(
+        () =>
+          expect(types).toEqual(
+            expect.arrayContaining([
+              "tool:result",
+              "tool:approval",
+              "message:cancel"
+            ])
+          ),
+        { timeout: 5_000, interval: 20 }
+      );
+      ws.close();
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("emits chat:request:failed when a chat stream fails", async () => {
     const agent = await freshAgent(`err-event-${crypto.randomUUID()}`);
     const events: Array<{
