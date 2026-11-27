@@ -231,10 +231,16 @@ export class ExtensionRuntime<
       (toolName, tool) => {
         kept.set(toolName, tool);
         const converted = this.#convert(tool);
+        // This name's own entry: the conversion is cached by tool, and two
+        // names may share one tool but not their callers.
+        const entry = {
+          ...converted.entry,
+          definition: { ...converted.entry.definition }
+        };
         if (converted.schema) {
           pending.push(
             converted.schema.then((schema) => {
-              converted.entry.inputSchema = schema;
+              entry.inputSchema = schema;
             })
           );
         }
@@ -242,13 +248,13 @@ export class ExtensionRuntime<
           pending.push(
             converted.outputSchema.then(
               (schema) => {
-                converted.entry.outputSchema = schema;
+                entry.outputSchema = schema;
               },
               (error: unknown) => this.#warnOutputSchema(toolName, error)
             )
           );
         }
-        return converted.entry;
+        return entry;
       },
       (toolName) => kept.delete(toolName)
     );

@@ -15,9 +15,8 @@
  * calls were made. The script runs on an `Executor` from
  * `@cloudflare/codemode`, which keeps nothing.
  *
- * @internal Not exported from any entry point. Imported only by a host
- * that installs it, so a harness without `@cloudflare/codemode` never
- * loads it.
+ * Exported from `agents/harness/think/extensions` (`codemode()`), its own
+ * entry, so a harness without `@cloudflare/codemode` never loads it.
  */
 import { DurableObject } from "cloudflare:workers";
 import {
@@ -373,7 +372,10 @@ export function codemodeTransforms(options: CodemodeOptions): ThinkExtension {
           };
           // An arrow function ends without its statement's semicolon,
           // which the executor would wrap inside its call.
-          const code = normalizeCode(input.code).replace(/;\s*$/, "");
+          const code = normalizeCode(input.code).replace(
+            /;(?:\s|\/\/[^\n]*|\/\*[\s\S]*?\*\/)*$/,
+            ""
+          );
           const ran = await options.executor.execute(code, [
             ...providers.values(),
             lookup

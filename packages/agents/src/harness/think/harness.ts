@@ -6,6 +6,7 @@ import {
   streamText,
   type LanguageModelUsage,
   type ModelMessage,
+  type Tool,
   type ToolSet,
   type UIMessage,
   type UIMessageChunk
@@ -253,6 +254,12 @@ type ParkedCall = {
     readonly toolName: string;
     readonly input: unknown;
   };
+  /**
+   * Calls still running when the tool parked. Each one's outcome is added
+   * to `calls` when it settles; one still here when the approval reruns
+   * the tool has an unknown outcome.
+   */
+  readonly inflight?: readonly string[];
 };
 
 /** What the `invoke`s under one tool call share. */
@@ -269,7 +276,15 @@ type InvokeScope = {
   readonly parking: AbortController;
   readonly park: () => void;
   /** Calls still running, which a park waits for before it keeps them. */
-  readonly running: Set<Promise<unknown>>;
+  readonly running: Map<string, Promise<unknown>>;
+  /** Calls whose outcome was unknown when the approval reran the tool. */
+  readonly unknown?: ReadonlySet<string>;
+  /** Where the park kept its calls, once it parked. */
+  kept?: {
+    readonly session: string;
+    readonly messageId: string;
+    readonly toolCallId: string;
+  };
 };
 
 /** What a call made after its tool parked gets. */
@@ -655,6 +670,33 @@ async function continued(
 function replyIdOf(chunks: readonly UIMessageChunk[]): string | undefined {
   const start = chunks.find((chunk) => chunk.type === "start");
   return start?.type === "start" ? start.messageId : undefined;
+}
+
+/**
+ * What a call's park keeps of its outcome: all of it, unless the park cut
+ * it short. Then a tool safe to rerun runs again (nothing kept), and any
+ * other is interrupted, since what it did is unknown.
+ */
+function keptOutcome(
+  outcome: ToolOutcome,
+  scope: InvokeScope,
+  tool: Tool
+): ToolOutcome | undefined {
+  if (outcome.ok || !scope.parking.signal.aborted) return outcome;
+  return toolRecovery(tool) === "rerun"
+    ? undefined
+    : { ok: false, errorText: INTERRUPTED_TOOL_ERROR };
+}
+
+/** A short digest of a value's JSON (FNV-1a), to tell two inputs apart. */
+function digestOf(value: unknown): string {
+  const text = JSON.stringify(value) ?? "";
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 /** A value as JSON round-trips it; `undefined` stays itself. */
@@ -2720,6 +2762,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         scope.made[toolCallId] = kept;
         return kept;
       }
+      // Still running at the park and never settled: what it did is
+      // unknown. Only a tool safe to rerun runs again.
+      if (scope.unknown?.has(toolCallId)) {
+        const known = Object.hasOwn(tools, toolName)
+          ? tools[toolName]
+          : undefined;
+        if (!known || toolRecovery(known) !== "rerun") {
+          const interrupted: ToolOutcome = {
+            ok: false,
+            errorText: INTERRUPTED_TOOL_ERROR
+          };
+          scope.made[toolCallId] = interrupted;
+          return interrupted;
+        }
+      }
       // Parked: the calling tool is aborted; nothing after it runs.
       if (scope.parked) throw new Error(PARKED_ERROR);
       const tool = Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
@@ -2828,20 +2885,45 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             attempt,
             ...outcome
           });
+          // Settled after its sibling parked: what the park kept gets it,
+          // here, since the run that started it has ended.
+          const at = scope.kept;
+          if (at) {
+            const kept = keptOutcome(outcome, scope, tool);
+            await this.#parkedEdit(at.session, at.messageId, async () => {
+              const stored = await this.#parkedCalls(at.session, at.messageId);
+              const call = stored[at.toolCallId];
+              if (!call) return;
+              stored[at.toolCallId] = {
+                ...call,
+                calls: kept
+                  ? { ...call.calls, [toolCallId]: kept }
+                  : call.calls,
+                inflight: (call.inflight ?? []).filter(
+                  (id) => id !== toolCallId
+                )
+              };
+              await this.#handle(at.session).internal_setAnnotation(
+                PARKED_KIND,
+                at.messageId,
+                JSON.stringify(stored)
+              );
+            });
+          }
           return outcome;
         }) as unknown as (attempt: TaskStepAttempt) => Promise<TaskValue>
       );
-      scope.running.add(step);
+      scope.running.set(toolCallId, step);
       try {
         const outcome = (await step) as unknown as ToolOutcome;
-        // Kept only if it finished on its own: a call the park cut short
-        // runs again after the approval.
-        if (outcome.ok || !scope.parking.signal.aborted) {
-          scope.made[toolCallId] = outcome;
-        }
+        // A call the park cut short: a tool safe to rerun runs again after
+        // the approval; any other is reported interrupted, since what it did
+        // is unknown.
+        const kept = keptOutcome(outcome, scope, tool);
+        if (kept) scope.made[toolCallId] = kept;
         return outcome;
       } finally {
-        scope.running.delete(step);
+        scope.running.delete(toolCallId);
       }
     };
   }
@@ -3083,11 +3165,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               const scope: InvokeScope = {
                 signal,
                 seed: kept?.calls ?? {},
+                ...(kept?.inflight &&
+                  kept.inflight.length > 0 && {
+                    unknown: new Set(kept.inflight)
+                  }),
                 ...(kept && { approved: kept.pending }),
                 made: {},
                 parking,
                 park: markParked,
-                running: new Set()
+                running: new Map()
               };
               const running = executeTool(tool, input, {
                 toolCallId,
@@ -3119,16 +3205,28 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               if (!outcome || scope.parked) {
                 const pending = scope.parked;
                 if (!pending) throw new Error("A tool parked without a call");
-                // Calls its siblings still run end first (the park aborted
-                // them), so what they did is kept and never made again.
-                while (scope.running.size > 0) {
-                  await Promise.allSettled([...scope.running]);
-                }
+                // The approval is asked at once. Calls its siblings still
+                // run are kept as running; each adds its outcome when it
+                // settles (the park aborted them).
                 await this.#park(session, current.id, toolCallId, {
                   calls: { ...scope.seed, ...scope.made },
-                  pending
+                  pending,
+                  ...(scope.running.size > 0 && {
+                    inflight: [...scope.running.keys()]
+                  })
                 });
-                return { parked: pending.toolCallId } as TaskJson;
+                scope.kept = {
+                  session,
+                  messageId: current.id,
+                  toolCallId
+                };
+                // The approval names the exact call it asks for, so an
+                // answer to an earlier request (other input at the same
+                // position) doesn't answer this one.
+                return {
+                  parked: pending.toolCallId,
+                  approval: `approval:${pending.toolCallId}#${digestOf(pending.input)}`
+                } as TaskJson;
               }
               // Run to the end: what it kept is no longer needed.
               if (kept) await this.#unpark(session, current.id, toolCallId);
@@ -3143,12 +3241,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             }
           )) as unknown as
             | { outcome: ToolOutcome; input: unknown; attempt?: number }
-            | { parked: string };
+            | { parked: string; approval?: string };
           if (signal.aborted) return;
           if ("parked" in recorded) {
             parkedCalls.push({
               toolCallId,
-              approvalId: `approval:${recorded.parked}`
+              approvalId: recorded.approval ?? `approval:${recorded.parked}`
             });
             return;
           }

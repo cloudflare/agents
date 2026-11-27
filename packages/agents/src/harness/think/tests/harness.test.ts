@@ -775,7 +775,9 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
       "assistant: [compose approval-requested]"
     );
     const [call] = await stub.lastToolCalls();
-    expect(call?.approvalId).toBe(`approval:${call?.toolCallId}/3`);
+    expect(
+      call?.approvalId?.startsWith(`approval:${call?.toolCallId}/3#`)
+    ).toBe(true);
     expect(await stub.tripledRuns()).toBe(1);
     expect(await stub.dangerousRuns()).toBe(0);
     // The parked tool was aborted, and what it called is kept.
@@ -840,6 +842,16 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     expect((await stub.messages()).at(-1)).toBe(
       "assistant: [compose approval-requested]"
     );
+    // The new request has its own id: the earlier answer doesn't apply.
+    const [again] = await stub.lastToolCalls();
+    expect(again?.approvalId).not.toBe(call?.approvalId);
+    const stale = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect((await stub.wait(stale.operationId)).status).toBe("unanswered");
+    expect(await stub.dangerousRuns()).toBe(0);
   });
 
   it("aborts a nested tool whose call parks, as it aborts the tool that called it", async () => {
@@ -851,14 +863,17 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     expect(await stub.relayAborted()).toBe(true);
   });
 
-  it("keeps a call still running when its sibling parks, so the rerun doesn't make it again", async () => {
+  it("asks for the approval at once while a sibling runs, and keeps the sibling's result when it settles", async () => {
     const stub = fresh();
     const receipt = await stub.submit("compose parallel");
     await stub.gateStarted(1);
-    await stub.release();
+    // The approval is asked before the sibling ends.
     await stub.wait(receipt.operationId);
     const [call] = await stub.lastToolCalls();
     expect(call?.approvalId).toBeDefined();
+    await stub.release();
+    // The sibling's result joins what the park kept (multiply, tripled, gate).
+    await vi.waitFor(async () => expect(await stub.parkedKept()).toBe(1));
     const approved = await stub.answer({
       type: "approval",
       approvalId: call?.approvalId ?? "",
@@ -867,9 +882,24 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     expect(await stub.wait(approved.operationId)).toMatchObject({
       status: "done"
     });
-    // The write ran once, before the park; its result was kept.
+    // The write ran once; its result was kept.
     expect(await stub.gateRuns()).toBe(1);
     expect(await stub.dangerousRuns()).toBe(1);
+  });
+
+  it("reports a write the park cut short as interrupted, and doesn't run it again", async () => {
+    const stub = fresh();
+    await stub.prompt("compose write");
+    const [call] = await stub.lastToolCalls();
+    expect(await stub.writeRuns()).toBe(1);
+    await stub.release();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(receipt.operationId))).toContain("interrupted");
+    expect(await stub.writeRuns()).toBe(1);
   });
 
   it("runs again a sibling the park cut short, rather than keep its abort", async () => {

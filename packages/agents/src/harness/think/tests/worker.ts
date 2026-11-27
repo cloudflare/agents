@@ -54,6 +54,7 @@ const SANDBOXED_KEY = "test:sandboxed";
 const TRIPLED_KEY = "test:tripled";
 const RELAY_ABORTED_KEY = "relay-aborted";
 const ABORTABLE_RUNS_KEY = "abortable-runs";
+const WRITE_RUNS_KEY = "write-runs";
 const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
@@ -268,13 +269,27 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               approve: z.boolean().optional(),
               parallel: z.boolean().optional(),
               relay: z.boolean().optional(),
-              abortable: z.boolean().optional()
+              abortable: z.boolean().optional(),
+              write: z.boolean().optional()
             }),
             execute: async (
-              { gate, approve, parallel, relay, abortable },
+              { gate, approve, parallel, relay, abortable, write },
               options
             ) => {
               const { invoke } = options as unknown as { invoke: ToolInvoke };
+              // A write the park cuts short.
+              if (write) {
+                const writing = invoke("abortable_write", {});
+                while (!this.ctx.storage.kv.get<number>(WRITE_RUNS_KEY)) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [written, done] = await Promise.all([
+                  writing,
+                  invoke("dangerous", {})
+                ]);
+                if (!written.ok) return written.errorText;
+                return done.ok ? done.output : done.errorText;
+              }
               // A sibling that stops when the park aborts it.
               if (abortable) {
                 const slow = invoke("abortable_slow", {});
@@ -351,6 +366,26 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                 await new Promise((resolve) => setTimeout(resolve, 5));
               }
               return "slow done";
+            }
+          }),
+          callers: ["code"] as const,
+          // Safe to run again: a park that cuts it short reruns it.
+          recovery: "rerun" as const
+        },
+        // Code-only, not safe to rerun: a write the park may cut short.
+        abortable_write: {
+          ...tool({
+            description: "Write, unless aborted",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(WRITE_RUNS_KEY, (kv.get<number>(WRITE_RUNS_KEY) ?? 0) + 1);
+              while (!kv.get(RELEASE_KEY)) {
+                if (options.abortSignal?.aborted)
+                  throw new Error("write aborted");
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              return "written";
             }
           }),
           callers: ["code"] as const
@@ -704,7 +739,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               approve: text === "compose approve",
               parallel: text === "compose parallel",
               relay: text === "compose relay",
-              abortable: text === "compose abortable"
+              abortable: text === "compose abortable",
+              write: text === "compose write"
             }
           }
         ]);
@@ -1004,6 +1040,25 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   composeAborted(): boolean {
     return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
+  }
+
+  writeRuns(): number {
+    return this.ctx.storage.kv.get<number>(WRITE_RUNS_KEY) ?? 0;
+  }
+
+  /** The calls the parked tools kept, across every annotation. */
+  parkedKept(): number {
+    let n = 0;
+    for (const row of this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM cf_agents_session_annotations WHERE kind = 'think:parked-calls'"
+    )) {
+      for (const call of Object.values(
+        JSON.parse(row.value) as Record<string, { calls: object }>
+      )) {
+        n += Object.keys(call.calls).length;
+      }
+    }
+    return n;
   }
 
   abortableRuns(): number {

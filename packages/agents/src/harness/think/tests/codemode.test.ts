@@ -73,6 +73,12 @@ describe("codemode as an extension", () => {
     expect(reply).toContain("Result: 1");
   });
 
+  it("runs an arrow function that ends with a semicolon and a comment", async () => {
+    const stub = fresh();
+    const reply = text(await stub.prompt("async () => 1; /* done */")) ?? "";
+    expect(reply).toContain("Result: 1");
+  });
+
   it("keeps two tools callable whose names sanitize alike", async () => {
     const stub = fresh();
     const reply =

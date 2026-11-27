@@ -363,6 +363,35 @@ describe("extensions: the build", () => {
     expect(ran).toEqual(["owner"]);
   });
 
+  it("changes the callers of one name only when two names share a tool", async () => {
+    const shared = tool({
+      description: "shared",
+      inputSchema: z.object({}),
+      execute: async () => "ok"
+    });
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "owner",
+      loadInProcess("owner", (ctx) =>
+        ctx.tools.transform((tools) => {
+          tools.set("lookup", shared);
+          tools.set("search", shared);
+        })
+      )
+    );
+    manager.load(
+      "later",
+      loadInProcess("later", (ctx) =>
+        ctx.tools.transform((tools) => {
+          tools.setCallers("search", ["code"]);
+        })
+      )
+    );
+    const { tools } = await manager.build("");
+    // lookup stays the model's; only search became code-only.
+    expect(Object.keys(modelTools(tools, undefined))).toEqual(["lookup"]);
+  });
+
   it("keeps a tool's schema when the extension that set it changes its callers at once", async () => {
     const manager = new ExtensionManager(harnessHookRules);
     manager.load(
