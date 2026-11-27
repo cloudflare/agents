@@ -6,12 +6,20 @@
  *                              harness-compat.json fails now
  *
  * The denominator is every test the normal suite collects, so a file that
- * fails to load under the harness counts all its tests as failing.
+ * fails to load under the harness counts all its tests as failing. Tests
+ * listed in harness-class-only.json are left out of the headline: each has
+ * a successor, which must exist and pass in the same run.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  checkClassOnly,
+  classOnlyTable,
+  readClassOnly,
+  testId
+} from "./harness-class-only";
 
 type ListedTest = { name: string; file: string };
 type AssertionResult = {
@@ -29,6 +37,8 @@ type Scoreboard = {
   needThink: number;
   /** Of those, the ones that pass against the harness-backed Think. */
   needThinkPassed: number;
+  /** Tests left out of both: class-only, each with a successor. */
+  classOnly: number;
   files: Record<string, { total: number; passed: number }>;
   passing: string[];
 };
@@ -36,6 +46,7 @@ type Scoreboard = {
 const packageDir = path.join(import.meta.dirname, "..");
 const scoreboardJson = path.join(packageDir, "harness-compat.json");
 const scoreboardMd = path.join(packageDir, "harness-compat.md");
+const classOnlyJson = path.join(packageDir, "harness-class-only.json");
 const check = process.argv.includes("--check");
 const work = mkdtempSync(path.join(tmpdir(), "think-harness-"));
 
@@ -67,7 +78,7 @@ function relative(file: string): string {
 }
 
 function id(file: string, name: string): string {
-  return `${relative(file)} > ${name}`;
+  return testId(relative(file), name);
 }
 
 // 1. Every test the normal suite has.
@@ -109,21 +120,34 @@ vitest(
 );
 const withoutThink = passedIn(absentFile);
 
-// 3. Score against the inventory.
+// 3. Score against the inventory. A class-only test is in the per-file
+// counts and in `passing` like any other, and out of the headline.
+const classOnly = readClassOnly(classOnlyJson);
+const classOnlyIds = new Set(
+  classOnly.entries.map((entry) => testId(entry.file, entry.test))
+);
+const classOnlyProblems = [
+  ...classOnly.problems,
+  ...checkClassOnly(
+    classOnly.entries,
+    new Set(inventory.map((test) => id(test.file, test.name))),
+    passedIds
+  )
+];
 const files: Scoreboard["files"] = {};
 const passing: string[] = [];
 let needThink = 0;
 let needThinkPassed = 0;
 for (const test of inventory) {
   const key = relative(test.file);
-  const testId = id(test.file, test.name);
+  const current = id(test.file, test.name);
   files[key] ??= { total: 0, passed: 0 };
   files[key].total += 1;
-  const needsThink = !withoutThink.has(testId);
+  const needsThink = !withoutThink.has(current) && !classOnlyIds.has(current);
   if (needsThink) needThink += 1;
-  if (passedIds.has(testId)) {
+  if (passedIds.has(current)) {
     files[key].passed += 1;
-    passing.push(testId);
+    passing.push(current);
     if (needsThink) needThinkPassed += 1;
   }
 }
@@ -133,6 +157,7 @@ const scoreboard: Scoreboard = {
   passed: passing.length,
   needThink,
   needThinkPassed,
+  classOnly: classOnlyIds.size,
   files: Object.fromEntries(
     Object.entries(files).sort(([a], [b]) => a.localeCompare(b))
   ),
@@ -141,9 +166,16 @@ const scoreboard: Scoreboard = {
 
 const percent = (passed: number, total: number) =>
   total === 0 ? "0%" : `${Math.floor((passed / total) * 100)}%`;
+const headline = `${needThinkPassed} of ${needThink} (${classOnlyIds.size} class-only, each with a successor)`;
 console.log(
-  `\nThink on ThinkHarness: ${needThinkPassed} of the ${needThink} tests that construct Think pass (${percent(needThinkPassed, needThink)}); ${scoreboard.passed} of all ${scoreboard.total}.`
+  `\nThink on ThinkHarness: ${headline} tests that construct Think pass (${percent(needThinkPassed, needThink)}); ${scoreboard.passed} of all ${scoreboard.total}.`
 );
+// A list that does not hold is never recorded, and fails the check.
+if (classOnlyProblems.length > 0) {
+  console.error("\nharness-class-only.json does not hold:");
+  for (const problem of classOnlyProblems) console.error(`  ${problem}`);
+  process.exit(1);
+}
 
 if (check) {
   const recorded = existsSync(scoreboardJson)
@@ -188,12 +220,17 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**${needThinkPassed} of the ${needThink} tests that construct Think pass (${percent(needThinkPassed, needThink)}).** Across the whole suite, ${scoreboard.passed} of ${scoreboard.total}.
+**${headline} tests that construct Think pass (${percent(needThinkPassed, needThink)}).** Across the whole suite, ${scoreboard.passed} of ${scoreboard.total}.
+
+A class-only test reaches its behaviour through something private to the
+Think class. It is left out of the headline, it has a successor that
+asserts the same behaviour through the public API, and it is listed at the
+end. The per-file counts below include it.
 
 | File | Passing | |
 | --- | --- | --- |
 ${rows.join("\n")}
-`
+${classOnlyTable(classOnly.entries)}`
 );
 spawnSync("pnpm", ["exec", "oxfmt", scoreboardMd, scoreboardJson], {
   cwd: packageDir,

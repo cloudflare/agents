@@ -13,7 +13,12 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**294 of the 1296 tests that construct Think pass (22%).** Across the whole suite, 589 of 1591.
+**321 of 1299 (0 class-only, each with a successor) tests that construct Think pass (24%).** Across the whole suite, 616 of 1594.
+
+A class-only test reaches its behaviour through something private to the
+Think class. It is left out of the headline, it has a successor that
+asserts the same behaviour through the public API, and it is listed at the
+end. The per-file counts below include it.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -22,7 +27,7 @@ supported by the harness-backed Think yet".
 | `actions-durable-pause.test.ts`        | 2 / 56   | 3%   |
 | `agent-tool-reattach-recovery.test.ts` | 0 / 2    | 0%   |
 | `agent-tool-rebind-noop.test.ts`       | 0 / 6    | 0%   |
-| `agent-tools.test.ts`                  | 12 / 67  | 17%  |
+| `agent-tools.test.ts`                  | 12 / 68  | 17%  |
 | `assistant-agent-loop.test.ts`         | 10 / 33  | 30%  |
 | `assistant-agent.test.ts`              | 5 / 5    | 100% |
 | `assistant-message-metadata.test.ts`   | 1 / 9    | 11%  |
@@ -32,13 +37,13 @@ supported by the harness-backed Think yet".
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 33 / 139 | 23%  |
+| `client-tools.test.ts`                 | 38 / 141 | 26%  |
 | `cold-rpc-initialization.test.ts`      | 4 / 4    | 100% |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
 | `deliver-notice.test.ts`               | 0 / 7    | 0%   |
 | `detached-reconcile-lane.test.ts`      | 0 / 1    | 0%   |
-| `durable-admission.test.ts`            | 4 / 9    | 44%  |
+| `durable-admission.test.ts`            | 3 / 9    | 33%  |
 | `empty-reply.test.ts`                  | 0 / 10   | 0%   |
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
@@ -50,7 +55,7 @@ supported by the harness-backed Think yet".
 | `fiber.test.ts`                        | 7 / 7    | 100% |
 | `harness-tool-recovery.test.ts`        | 2 / 2    | 100% |
 | `hooks.test.ts`                        | 55 / 149 | 36%  |
-| `hydration-budget.test.ts`             | 1 / 19   | 5%   |
+| `hydration-budget.test.ts`             | 2 / 19   | 10%  |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
 | `mcp-tool-materialization.test.ts`     | 5 / 5    | 100% |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
@@ -58,13 +63,13 @@ supported by the harness-backed Think yet".
 | `messengers.test.ts`                   | 79 / 111 | 71%  |
 | `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
 | `onconnect-broadcast.test.ts`          | 4 / 17   | 23%  |
-| `onstart-degraded.test.ts`             | 1 / 5    | 20%  |
+| `onstart-degraded.test.ts`             | 3 / 5    | 60%  |
 | `origin-message-ids.test.ts`           | 0 / 8    | 0%   |
 | `periphery-action-tools.test.ts`       | 9 / 9    | 100% |
 | `periphery-channels.test.ts`           | 12 / 12  | 100% |
 | `periphery-extensions.test.ts`         | 12 / 12  | 100% |
 | `periphery-inference.test.ts`          | 19 / 19  | 100% |
-| `periphery-modules.test.ts`            | 11 / 19  | 57%  |
+| `periphery-modules.test.ts`            | 12 / 19  | 63%  |
 | `periphery-transcript.test.ts`         | 12 / 12  | 100% |
 | `periphery-turn-policy.test.ts`        | 13 / 13  | 100% |
 | `prefix-changed.test.ts`               | 1 / 1    | 100% |
@@ -82,7 +87,7 @@ supported by the harness-backed Think yet".
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
 | `think-eviction.test.ts`               | 2 / 3    | 66%  |
-| `think-session.test.ts`                | 60 / 308 | 19%  |
+| `think-session.test.ts`                | 79 / 308 | 25%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
 | `workspace-tools.test.ts`              | 8 / 10   | 80%  |

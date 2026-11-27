@@ -1,8 +1,9 @@
 {
-  "total": 1591,
-  "passed": 589,
-  "needThink": 1296,
-  "needThinkPassed": 294,
+  "total": 1594,
+  "passed": 616,
+  "needThink": 1299,
+  "needThinkPassed": 321,
+  "classOnly": 0,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -25,7 +26,7 @@
       "passed": 0
     },
     "agent-tools.test.ts": {
-      "total": 67,
+      "total": 68,
       "passed": 12
     },
     "assistant-agent-loop.test.ts": {
@@ -65,8 +66,8 @@
       "passed": 8
     },
     "client-tools.test.ts": {
-      "total": 139,
-      "passed": 33
+      "total": 141,
+      "passed": 38
     },
     "cold-rpc-initialization.test.ts": {
       "total": 4,
@@ -90,7 +91,7 @@
     },
     "durable-admission.test.ts": {
       "total": 9,
-      "passed": 4
+      "passed": 3
     },
     "empty-reply.test.ts": {
       "total": 10,
@@ -138,7 +139,7 @@
     },
     "hydration-budget.test.ts": {
       "total": 19,
-      "passed": 1
+      "passed": 2
     },
     "max-concurrent-agent-tools.test.ts": {
       "total": 5,
@@ -170,7 +171,7 @@
     },
     "onstart-degraded.test.ts": {
       "total": 5,
-      "passed": 1
+      "passed": 3
     },
     "origin-message-ids.test.ts": {
       "total": 8,
@@ -194,7 +195,7 @@
     },
     "periphery-modules.test.ts": {
       "total": 19,
-      "passed": 11
+      "passed": 12
     },
     "periphery-transcript.test.ts": {
       "total": 12,
@@ -266,7 +267,7 @@
     },
     "think-session.test.ts": {
       "total": 308,
-      "passed": 60
+      "passed": 79
     },
     "turn-metadata.test.ts": {
       "total": 4,
@@ -337,6 +338,8 @@
     "client-tools.test.ts > Think — auto-continuation > continues after approving a tool that shares its message with a settled tool (#2185)",
     "client-tools.test.ts > Think — auto-continuation > does not continue a standalone errored tool (autoContinue:false, no opted-in sibling) (#1650)",
     "client-tools.test.ts > Think — auto-continuation > does not execute a rejected server approval tool and retains denial",
+    "client-tools.test.ts > Think — auto-continuation > is stable once a client's answer (approved: false) is applied with no continuation",
+    "client-tools.test.ts > Think — auto-continuation > is stable once a client's answer (approved: true) is applied with no continuation",
     "client-tools.test.ts > Think — auto-continuation > persists an approved server tool execution error as terminal output",
     "client-tools.test.ts > Think — auto-continuation > sends a failed continuation's error frame before onChatResponse returns (#2381)",
     "client-tools.test.ts > Think — auto-continuation > treats a pending approved tool as complete — no spurious transcript-repair backstop (#1627)",
@@ -345,6 +348,8 @@
     "client-tools.test.ts > Think — custom body via WebSocket > body is cleared when request has no custom fields",
     "client-tools.test.ts > Think — messageConcurrency > only applies to submit-message, not regenerate-message",
     "client-tools.test.ts > Think — messageConcurrency > post-clear submits are not treated as overlapping",
+    "client-tools.test.ts > Think — messageConcurrency > queue: processes all overlapping submits in order",
+    "client-tools.test.ts > Think — messageConcurrency > reports a cancelled running turn as aborted",
     "client-tools.test.ts > Think — onChatResponse via WebSocket > fires onChatResponse after WebSocket chat request",
     "client-tools.test.ts > Think — regeneration > multiple regenerations create multiple branches",
     "client-tools.test.ts > Think — regeneration > regenerate-message creates a sibling branch, not a replacement",
@@ -363,6 +368,7 @@
     "client-tools.test.ts > Think — tool result application > updates tool part to output-available",
     "client-tools.test.ts > Think — tool results with nothing to continue > a result for an older reply does not continue the newer reply",
     "client-tools.test.ts > Think — tool results with nothing to continue > a second tab's result for an answered call does not continue again",
+    "client-tools.test.ts > Think — waiting on a client after an upgrade > still waits on a tool the server declares and a client answers",
     "client-tools.test.ts > resume coordination during pending continuation > correlates idle STREAM_RESUME_NONE after a continuation completes",
     "client-tools.test.ts > resume coordination during pending continuation > does not send STREAM_RESUME_NONE for an immediate resume request after tool output",
     "cold-rpc-initialization.test.ts > native RPC initialization > hydrates persisted Think history before a cold host-bridge RPC",
@@ -377,7 +383,6 @@
     "context-upgrade.test.ts > Think context upgrade > stores the prompt only on the session, never in a _system_prompt row",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a clear before the replay drops it",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a record left between the turn's fiber and the record's delete is recovery's",
-    "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > runs however long it waited: its question is never dropped",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > submissions: one running and one pending at the reset each get their own reply, in order",
     "execute-tool.test.ts > execute tool on the codemode runtime > maps needsApproval AI SDK tools to requiresApproval — the call pauses durably",
     "execute-tool.test.ts > execute tool on the codemode runtime > one-liner: createExecuteTool(agent) runs without state.* and records on this.codemode",
@@ -552,6 +557,7 @@
     "hooks.test.ts > Think — tool-call hooks expose typed input/output > beforeToolCall and tool execute see the turn's request id",
     "hooks.test.ts > Think — tool-call hooks expose typed input/output > beforeToolCall receives toolName and typed input",
     "hydration-budget.test.ts > hydrationByteBudget — windowed hydration (#1710) > chat works on a windowed-boot agent and persists past the window",
+    "hydration-budget.test.ts > hydrationByteBudget — windowed hydration (#1710) > exposes degraded onStart steps via the public accessor",
     "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > DOES count an in-flight `running` run toward the cap",
     "mcp-tool-materialization.test.ts > Think MCP tool materialization > automatically exposes MCP tools by default for compatibility",
     "mcp-tool-materialization.test.ts > Think MCP tool materialization > hands the model an MCP tool's result when it calls one",
@@ -649,7 +655,9 @@
     "onconnect-broadcast.test.ts > chat frames with no client (#2724) > serializes no chat frame in a sub-agent no client has open",
     "onconnect-broadcast.test.ts > chat frames with no client (#2724) > serializes no chat frame when no client is connected",
     "onconnect-broadcast.test.ts > chat frames with no client (#2724) > still sends the frames to a connected client",
+    "onstart-degraded.test.ts > Think onStart degradation (#1710) > scheduled-task reconcile failure > agent starts and serves despite getScheduledTasks() throwing",
     "onstart-degraded.test.ts > Think onStart degradation (#1710) > scheduled-task reconcile failure > chat still works on the degraded agent",
+    "onstart-degraded.test.ts > Think onStart degradation (#1710) > scheduled-task reconcile failure > emits a chat:onstart:degraded observability event",
     "periphery-action-tools.test.ts > action context bindings > reads the agent's env when the action runs, not when it compiles",
     "periphery-action-tools.test.ts > action helpers > aborts on timeout",
     "periphery-action-tools.test.ts > action helpers > normalizes authorization decisions",
@@ -702,6 +710,7 @@
     "periphery-inference.test.ts > turn telemetry > builds v7 options with the runtime context included",
     "periphery-inference.test.ts > turn telemetry > keeps an explicit functionId",
     "periphery-inference.test.ts > turn telemetry > names the agent and turn, and lets the caller win",
+    "periphery-modules.test.ts > ThinkConfigStore > lifts legacy rows at startup, before any config read",
     "periphery-modules.test.ts > ThinkModelResolver > builds string models through one provider",
     "periphery-modules.test.ts > ThinkModelResolver > recognises Workers AI ids",
     "periphery-modules.test.ts > ThinkModelResolver > rejects a getGateway that returns a Promise",
@@ -820,6 +829,7 @@
     "think-session.test.ts > Think — addMessages > keeps the live view correct when an explicit parentId branches",
     "think-session.test.ts > Think — addMessages > persists durably and coherently when called mid-turn",
     "think-session.test.ts > Think — addMessages > updates in place in upsert mode",
+    "think-session.test.ts > Think — async configureSession > should have working context blocks from async config",
     "think-session.test.ts > Think — async configureSession > should initialize and chat with async configureSession",
     "think-session.test.ts > Think — async configureSession > should support multiple turns after async init",
     "think-session.test.ts > Think — async onChatResponse > awaits async hook before next turn starts",
@@ -830,10 +840,18 @@
     "think-session.test.ts > Think — chatRecovery > saveMessages with recovery wraps in fiber and cleans up",
     "think-session.test.ts > Think — context blocks > does not warn when classifyChatError is overridden",
     "think-session.test.ts > Think — context blocks > does not warn when reactive overflow recovery has no classifier: the provider's error is read",
+    "think-session.test.ts > Think — context blocks > folds a changed skills catalog into the prompt when history is cleared",
+    "think-session.test.ts > Think — context blocks > keeps Think's default prompt out when a skills agent does not override getSystemPrompt",
+    "think-session.test.ts > Think — context blocks > keeps an inherited or class-field getSystemPrompt alongside skills",
+    "think-session.test.ts > Think — context blocks > loads skills from files in the Workspace and follows edits without rebuilding the prompt",
+    "think-session.test.ts > Think — context blocks > puts an overridden getSystemPrompt above the skills block",
     "think-session.test.ts > Think — context blocks > should configure session with context blocks",
     "think-session.test.ts > Think — context blocks > should freeze system prompt from context blocks",
     "think-session.test.ts > Think — context blocks > should persist context block content across turns",
+    "think-session.test.ts > Think — context blocks > should render empty writable blocks in system prompt",
+    "think-session.test.ts > Think — context blocks > should use context blocks in system prompt assembly even when called directly",
     "think-session.test.ts > Think — continueLastTurn > should set continuation: true on continueLastTurn",
+    "think-session.test.ts > Think — continueLastTurn > should skip when no assistant message exists",
     "think-session.test.ts > Think — core > should accumulate messages across multiple turns",
     "think-session.test.ts > Think — core > should broadcast RPC chat message updates to connected clients",
     "think-session.test.ts > Think — core > should broadcast programmatic clearMessages to connected clients",
@@ -841,9 +859,17 @@
     "think-session.test.ts > Think — core > should clear all messages",
     "think-session.test.ts > Think — core > should forward routed props to onStart",
     "think-session.test.ts > Think — core > should return empty messages before first chat",
+    "think-session.test.ts > Think — dynamic configuration > should migrate legacy Think config out of assistant_config",
+    "think-session.test.ts > Think — dynamic configuration > should not let legacy config overwrite newer think_config values on rerun",
+    "think-session.test.ts > Think — dynamic configuration > should overwrite configuration on re-configure",
+    "think-session.test.ts > Think — dynamic configuration > should persist and retrieve typed configuration",
+    "think-session.test.ts > Think — dynamic configuration > should return null for unconfigured agent",
     "think-session.test.ts > Think — error handling > bounds a turn that streams a chunk and stalls on every attempt",
     "think-session.test.ts > Think — error handling > should persist partial assistant message on error",
     "think-session.test.ts > Think — error handling > surfaces the stall as a terminal error when onChatRecovery throws",
+    "think-session.test.ts > Think — getConfig inside configureSession > should fall back to default when no config is stored",
+    "think-session.test.ts > Think — getConfig inside configureSession > should not throw when getConfig() is called in configureSession on first start",
+    "think-session.test.ts > Think — getConfig inside configureSession > should read previously stored config inside configureSession",
     "think-session.test.ts > Think — onChatRecovery > a superseded continuation (leaf moved to another assistant message) skips benignly without erroring the submission",
     "think-session.test.ts > Think — onChatRecovery > does not continue a reply again when the recovery callback is delivered again after a reset cut its turn off",
     "think-session.test.ts > Think — pre-Sessions session API keeps working > accepts the positional appendMessage / getHistory / getRecentHistory forms",
@@ -862,6 +888,8 @@
     "think-session.test.ts > Think — tool call preservation > preserves earlier client-side tool results across turns",
     "think-session.test.ts > Think — waitUntilStable > detects pending approval",
     "think-session.test.ts > Think — waitUntilStable > returns false when no pending after tool result applied",
+    "think-session.test.ts > Think — waitUntilStable > returns true immediately when no pending interactions",
+    "think-session.test.ts > Think — waitUntilStable > returns true when no turns are active",
     "turn-metadata.test.ts > turn metadata > returns undefined when the latest user message carries none",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes submitMessages and waitForEvent results after copying serializable data",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes the submitMessages result before cancelling a timed-out prompt",
