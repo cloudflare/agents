@@ -21,4 +21,4 @@ Chat turns.
 - `AIChatAgent` turns store their messages directly, so a `persistMessages` override no longer sees a turn's writes.
 - A request context over the row budget is no longer kept in memory.
 - A tab that reconnects learns how a request ended by naming it in its resume request, as the client does; a tab that names none is told of the newest end only when it was an error.
-- A reply that completed is kept as stored, and the reasoning it ends in is left out of the model request only, so Anthropic accepts the request; a reply cut off in its reasoning is still removed. See [Reasoning at the end of a reply](https://github.com/cloudflare/agents/blob/main/docs/agents/client-tools-continuation.md#reasoning-at-the-end-of-a-reply).
+- A reply that completed is kept as stored, and `Think` leaves the reasoning it ends in out of the model request only; a reply cut off in its reasoning is still removed. See [Reasoning at the end of a reply](https://github.com/cloudflare/agents/blob/main/docs/agents/client-tools-continuation.md#reasoning-at-the-end-of-a-reply).

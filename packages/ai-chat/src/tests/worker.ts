@@ -849,6 +849,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return credit ?? 0;
   }
 
+  /** As an app's `persistMessages(this.messages)` call does. */
+  async persistCurrentMessagesForTest(): Promise<void> {
+    await this.persistMessages([...this.messages]);
+  }
+
   isModelCallHeldForTest(): boolean {
     return this._modelGate?.reached ?? false;
   }

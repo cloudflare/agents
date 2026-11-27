@@ -46,6 +46,7 @@ import {
 } from "./before-turn";
 import {
   replyIsRemovedAsEmpty,
+  requestMessages,
   stripTrailingReasoning
 } from "./repair-transcript";
 import { isReplayChunk, settleInterruptedPart } from "./message-builder";
@@ -135,8 +136,14 @@ export interface ChatModelCall {
   readonly questionId?: string;
   /** The assistant message a `continue` extends. */
   readonly replyId?: string;
-  /** Repaired transcript, ending at this turn's question or reply. */
+  /**
+   * What the model request is built from: the repaired transcript, ending
+   * at this turn's question or reply, without the reasoning a stored reply
+   * ends in ({@link requestMessages}).
+   */
   readonly messages: readonly UIMessage[];
+  /** The repaired transcript as it is stored, reasoning included. */
+  readonly transcript: readonly UIMessage[];
   readonly clientTools: readonly ClientToolSchema[];
   readonly body?: Readonly<Record<string, unknown>>;
   /** Aborted by a stop, a clear, a supersede or a cancel of the run. */
@@ -1966,10 +1973,9 @@ export function chatTurnDefinition(
     // Before the model is asked: a call the transcript leaves unanswered
     // that nothing will answer in time is settled (a provider rejects a
     // request holding a call with no result), and a reply that holds
-    // nothing is removed. The repaired transcript is stored, and the call
-    // sees it. A stored reply that ends in reasoning is kept as it is (it
-    // may have completed that way): the host leaves that reasoning out of
-    // the request it builds ({@link requestMessages}).
+    // nothing is removed. The repaired transcript is stored. A stored reply
+    // that ends in reasoning is kept as it is (it may have completed that
+    // way): the call's messages leave that reasoning out.
     const clientToolNames = new Set(
       (run.clientTools ?? []).map((tool) => tool.name)
     );
@@ -2040,7 +2046,8 @@ export function chatTurnDefinition(
       trigger: run.trigger ?? "submit-message",
       ...(run.questionId !== undefined && { questionId: run.questionId }),
       ...(partial && { replyId: partial.id }),
-      messages,
+      messages: requestMessages(messages, partial !== undefined),
+      transcript: messages,
       clientTools: run.clientTools ?? [],
       ...(run.body !== undefined && { body: run.body }),
       signal: step.signal,
@@ -2450,7 +2457,12 @@ export function chatTurnDefinition(
           // Room was made: ask the model again, once, with the transcript
           // as it is now.
           overflowTried = true;
-          call = { ...call, messages: await history() };
+          const transcript = await history();
+          call = {
+            ...call,
+            messages: requestMessages(transcript, partial !== undefined),
+            transcript
+          };
           continue;
         }
         if (verdict === "transient" && recovery !== false) {

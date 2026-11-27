@@ -42,7 +42,6 @@ import {
   classifyProviderError,
   reconcileOrphanPartial,
   CHAT_REQUEST_CONTEXT_KEY,
-  requestMessages,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   planInterruptedTurn,
   requestContextFromLegacy,
@@ -1041,7 +1040,7 @@ export class AIChatAgent<
       respond: async (call) => {
         // Apps read the transcript the call is for from `this.messages`.
         const before = this.messages;
-        this.messages = [...call.messages] as UIMessage[];
+        this.messages = [...call.transcript] as UIMessage[];
         // The other tabs learn what the turn stored or removed before it
         // asks the model (its question, a repaired reply): the whole list,
         // so each drops what is gone. The tab that sent it has it already.
@@ -1099,13 +1098,6 @@ export class AIChatAgent<
             continuation: call.mode === "continue"
           });
         let response: Awaited<ReturnType<typeof ask>>;
-        // The app builds its request from `this.messages`: while it does,
-        // they leave out the reasoning a stored reply ends in (a reply may
-        // complete that way, and Anthropic rejects such a request). The
-        // transcript keeps it.
-        const transcript = this.messages;
-        const request = requestMessages(transcript, call.mode === "continue");
-        this.messages = request;
         try {
           response = await agentContext.run(
             {
@@ -1129,8 +1121,6 @@ export class AIChatAgent<
             }
           }
           throw error;
-        } finally {
-          if (this.messages === request) this.messages = transcript;
         }
         // It answered with a reply: however that reply ends, the hook
         // hears of it.
