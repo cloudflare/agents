@@ -21,11 +21,26 @@ import {
   type Frame
 } from "../shared/probe";
 
-type Kind = "plain" | "weather" | "client" | "approve" | "submit";
-const KINDS: Kind[] = ["plain", "weather", "client", "approve", "submit"];
-const TURNS = 12;
+type Kind =
+  | "plain"
+  | "weather"
+  | "client"
+  | "approve"
+  | "submit"
+  | "extension"
+  | "helper";
+const KINDS: Kind[] = [
+  "plain",
+  "weather",
+  "client",
+  "approve",
+  "submit",
+  "extension",
+  "helper"
+];
+const TURNS = 14;
 /** Turns whose reply is cut off by a reset once it has started. */
-const RESETS = new Set([4, 9]);
+const RESETS = new Set([4, 9, 11]);
 const ROOMS = 3;
 
 function prompt(kind: Kind, turn: number): string {
@@ -40,6 +55,10 @@ function prompt(kind: Kind, turn: number): string {
       return `Turn ${turn}: delete the file /tmp/soak-${turn}.txt with deleteFile.`;
     case "submit":
       return `Turn ${turn}: say the word "queued".`;
+    case "extension":
+      return `Turn ${turn}: roll a six-sided die with the dice_rollDie tool and tell me the result.`;
+    case "helper":
+      return `Turn ${turn}: ask the helper agent what the capital of France is, using askHelper.`;
   }
 }
 
@@ -278,6 +297,23 @@ describe.concurrent("Think on a real model, through resets", () => {
         state.runs.filter((r) => r.n > 1),
         report
       ).toEqual([]);
+      // The extension loaded from source served its tool, and the helper
+      // sub-agent (a facet of the room) answered, at least once a room. An
+      // agent tool returns a failure as an object; a helper's answer is its
+      // reply text.
+      const outputs = (part: string) =>
+        state.messages.flatMap((m) =>
+          (m.parts as { type: string; state?: string; output?: unknown }[])
+            .filter((p) => p.type === part && p.state === "output-available")
+            .map((p) => p.output)
+        );
+      expect(outputs("tool-dice_rollDie").length, report).toBeGreaterThan(0);
+      expect(
+        outputs("tool-askHelper").some(
+          (o) => typeof o === "string" && o.trim() !== ""
+        ),
+        report
+      ).toBe(true);
       // One submission record per submitted turn, each completed.
       expect(state.submissions, report).toEqual(
         sent

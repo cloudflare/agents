@@ -10,7 +10,7 @@ export default defineConfig({
     retry: 0,
     hookTimeout: 300_000,
     // The rooms run at once, so the soak takes as long as its slowest room:
-    // twelve real-model turns, two through a reset, at most 30 minutes.
+    // fourteen real-model turns, three through a reset, at most 30 minutes.
     maxConcurrency: 3,
     testTimeout: 1_800_000
   }

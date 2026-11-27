@@ -1,9 +1,11 @@
 /**
  * The soak suite's Worker: a Think agent on a real Workers AI model, with a
- * server tool, a tool that needs the user's approval, and whatever client
- * tools the tab declares. It records what the faults suite's checks read
- * (chat events, responses, starts) and counts every server tool run by its
- * call id, so a call run twice shows.
+ * server tool, a tool that needs the user's approval, whatever client tools
+ * the tab declares, a tool from an extension loaded from source (run in a
+ * Dynamic Worker), and a helper Think agent it asks as a sub-agent (a
+ * facet). It records what the faults suite's checks read (chat events,
+ * responses, starts) and counts every server tool run by its call id, so a
+ * call run twice shows.
  *
  * `/ctl/think/<room>/<method>` (POST, a JSON array of arguments) calls the
  * object's `probe*` method.
@@ -11,6 +13,7 @@
 import { Think } from "@cloudflare/think";
 import type { ChatResponseResult } from "@cloudflare/think";
 import { getAgentByName, routeAgentRequest } from "agents";
+import { agentTool } from "agents/agent-tools";
 import { createAI } from "agents/models/ai-sdk";
 import { genericObservability } from "agents/observability";
 import type { Observability } from "agents/observability";
@@ -22,6 +25,7 @@ type Env = {
   PROBE_KEY: string;
   BUILD: string;
   AI: Ai;
+  LOADER: WorkerLoader;
   ProbeThink: DurableObjectNamespace<ProbeThink>;
 };
 
@@ -66,7 +70,45 @@ function recording(sql: Sql): Observability {
   };
 }
 
+/** An extension's source: one tool, run in its own Dynamic Worker. */
+const DICE_EXTENSION = `{
+  tools: {
+    rollDie: {
+      description: "Roll a die with the given number of sides and return the result.",
+      parameters: { sides: { type: "number" } },
+      required: ["sides"],
+      execute: async (args) => String(Math.min(4, args.sides))
+    }
+  },
+  hooks: {}
+}`;
+
+/** The helper the agent asks as a sub-agent; it runs as a facet of the room. */
+export class HelperThink extends Think<Env> {
+  readonly #ai = createAI({ binding: this.env.AI });
+  override getModel() {
+    return this.#ai(MODEL);
+  }
+  override getSystemPrompt() {
+    return "You are a helper. Answer the question in one short sentence.";
+  }
+}
+
 export class ProbeThink extends Think<Env> {
+  extensionLoader = this.env.LOADER;
+  override getExtensions() {
+    return [
+      {
+        manifest: {
+          name: "dice",
+          version: "1.0.0",
+          description: "Rolls dice",
+          permissions: {}
+        },
+        source: DICE_EXTENSION
+      }
+    ];
+  }
   override observability = recording(this.sql.bind(this) as Sql);
   readonly #ai = createAI({ binding: this.env.AI });
 
@@ -94,6 +136,10 @@ export class ProbeThink extends Think<Env> {
           countRun(sql, "getWeather", toolCallId);
           return { city, condition: "sunny", temperatureC: 21 };
         }
+      }),
+      askHelper: agentTool(HelperThink, {
+        description: "Ask the helper agent a question and get its answer.",
+        inputSchema: z.object({ question: z.string() })
       }),
       deleteFile: tool({
         description: "Delete a file by its path. Needs the user's approval.",

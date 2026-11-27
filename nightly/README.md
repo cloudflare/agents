@@ -55,7 +55,7 @@ pnpm run harnesses --project opencode    # one
 
 ## soak
 
-Think on a real Workers AI model (`glm-4.7-flash`): three rooms of twelve turns each. The turns cycle through a plain question, a server tool, a client tool the tab answers, a tool that needs approval (the tab approves it) and a submission, and two replies per room are cut off by a reset. The model's words are never checked. What must hold: every message the user sent is in the transcript once, in order; every one is answered; no tool call ran twice; every submission completed; the object restarted for each reset; and the fault suite's checks.
+Think on a real Workers AI model (`glm-4.7-flash`): three rooms of fourteen turns each, run at once. The turns cycle through a plain question, a server tool, a client tool the tab answers, a tool that needs approval (the tab approves it), a submission, a tool from an extension loaded from source (run in a Dynamic Worker), and a helper Think agent asked as a sub-agent (a facet of the room); three replies per room are cut off by a reset. The model's words are never checked. What must hold: every message the user sent is in the transcript once, in order; every one is answered; no tool call ran twice; every submission completed; the object restarted for each reset; and the fault suite's checks.
 
 ```sh
 cd nightly
