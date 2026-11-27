@@ -1057,7 +1057,29 @@ export function chatTurnDefinition(
     let reply: UIMessage | undefined;
     let overflowTried = false;
     for (;;) {
-      const source = await host.respond(call);
+      let source: ChatModelStream | undefined;
+      try {
+        source = await host.respond(call);
+      } catch (error) {
+        // `respond` failed before anything streamed: a stop ends the turn
+        // stopped, a transient failure retries, anything else ends it as
+        // an error with the failure's message.
+        if (step.signal.aborted) {
+          writer?.close({ discard: true });
+          return report({ requestId, status: "aborted" });
+        }
+        const verdict = host.hooks?.classifyError?.(error, false) ?? "terminal";
+        if (
+          verdict === "transient" &&
+          recovery !== false &&
+          step.attempt < maxAttempts
+        ) {
+          return interrupted();
+        }
+        const text = error instanceof Error ? error.message : String(error);
+        if (writer) writer.error(text);
+        return report({ requestId, status: "error", error: text });
+      }
       if (!source) {
         writer?.close({ discard: true });
         return report({ requestId, status: "skipped" });

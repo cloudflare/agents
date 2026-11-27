@@ -149,8 +149,10 @@ import type {
 } from "agents/chat";
 import { nanoid } from "nanoid";
 import {
+  cancelTurn,
   chatDispatch,
   chatTurnDefinition,
+  clearChat,
   parseProtocolMessage,
   type ChatArrival,
   type ChatDeps,
@@ -1259,6 +1261,8 @@ export class AIChatAgent<
         return error;
       },
       clear: async (connection) => {
+        // The chat module's lane: its turns end, waiting or running.
+        await clearChat(this._chatDeps(), this._chatLane());
         this.resetTurnState();
         await this.#session.clearMessages();
         // Drop any pending terminal record (#1645) so a stale exhaustion
@@ -2290,7 +2294,16 @@ export class AIChatAgent<
    * without requiring the caller to know the id.
    */
   protected abortRequest(requestId: string, reason?: unknown): void {
-    this._holdForStop(this._turns.cancel(requestId, reason));
+    this._holdForStop(
+      Promise.all([
+        this._turns.cancel(requestId, reason),
+        cancelTurn(
+          this._chatDeps(),
+          requestId,
+          reason === undefined ? undefined : String(reason)
+        )
+      ]).then(() => {})
+    );
   }
 
   /**
@@ -2343,7 +2356,14 @@ export class AIChatAgent<
    * {@link resetTurnState} for the full teardown that runs on `chat-clear`.
    */
   protected abortAllRequests(reason?: unknown): void {
-    this._holdForStop(this._turns.stopAll(reason));
+    const deps = this._chatDeps();
+    const why = reason === undefined ? undefined : String(reason);
+    this._holdForStop(
+      Promise.all([
+        this._turns.stopAll(reason),
+        ...this._openChatTurns().map((run) => cancelTurn(deps, run.runId, why))
+      ]).then(() => {})
+    );
   }
 
   /**

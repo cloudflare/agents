@@ -1625,4 +1625,20 @@ describe("chatTurnDefinition", () => {
       expect(ids[0]).toBe("u3");
     });
   });
+
+  it("a respond that throws before streaming ends the turn as an error with its message", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () => {
+          throw new Error("Simulated onChatMessage error");
+        }
+      })({ trigger: "server" }, laterAttempt("th-1", 1));
+      expect(result).toMatchObject({
+        status: "error",
+        error: "Simulated onChatMessage error"
+      });
+    });
+  });
 });
