@@ -564,8 +564,11 @@ export type {
   SkippedTurnReason
 } from "./lifecycle";
 export {
+  MODEL_RECENT_WINDOW,
   truncateOlderMessages,
   truncateOlderToolResults,
+  truncationKeepRecent,
+  truncationStepSize,
   type TruncateOptions,
   type TruncateToolResultsOptions
 } from "./truncate-older-messages";

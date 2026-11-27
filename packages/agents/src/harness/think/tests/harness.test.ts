@@ -7,6 +7,7 @@ import {
 } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../../../index";
+import type { ModelMessage } from "ai";
 import type { ThinkHarnessTestObject } from "./worker";
 
 function fresh(
@@ -1302,6 +1303,69 @@ describe("ThinkHarness durability", () => {
     expect(await stub.lastPromptText()).toBe(
       "system:You are a test.|assistant:[compacted]|user:overflow"
     );
+  });
+});
+
+describe("ThinkHarness truncationStep", () => {
+  const long = (letter: string) => letter.repeat(12_000);
+
+  it("sends older messages truncated by its step, and whole when it is unset", async () => {
+    const stepped = fresh();
+    await stepped.setTruncationStep(1);
+    const whole = fresh();
+    for (const letter of ["x", "y", "z"]) {
+      await stepped.prompt(long(letter));
+      await whole.prompt(long(letter));
+    }
+    // Five messages with four kept whole: the first, a user message, is
+    // cut. (The reply after it echoes it, so read the user message.)
+    expect(await stepped.lastPromptText()).not.toContain(`user:${long("x")}`);
+    expect(await stepped.lastPromptText()).toContain(`user:${long("z")}`);
+    expect(await whole.lastPromptText()).toContain(`user:${long("x")}`);
+  });
+
+  it("keeps a compacted retry's prompt: the cutoff is taken again", async () => {
+    const stub = fresh();
+    await stub.setTruncationStep(1);
+    for (const letter of ["x", "y", "z", "w"]) {
+      await stub.prompt(long(letter));
+    }
+    // Nine messages, cut at the fifth. The retry after compacting has two;
+    // the first call's cutoff would cut the prompt itself.
+    const prompt = `overflow ${long("o")}`;
+    const result = await stub.prompt(prompt);
+    expect(result).toMatchObject({ status: "done" });
+    expect(await stub.lastPromptText()).toBe(
+      `system:You are a test.|assistant:[compacted]|user:${prompt}`
+    );
+  });
+
+  it("keeps the notice of a change in the tools on a truncated request", async () => {
+    const stub = fresh();
+    await stub.setTruncationStep(1);
+    for (const letter of ["x", "y", "z"]) {
+      await stub.prompt(long(letter), "with-context");
+    }
+    await stub.addLateTool();
+    await stub.prompt("after", "with-context");
+    const last = await stub.lastPromptText();
+    expect(last).not.toContain(`user:${long("x")}`);
+    expect(last).toContain("The tools you can call changed");
+  });
+
+  it("sends the messages a beforeTurn returned as returned, with no cut on top", async () => {
+    const stub = fresh();
+    await stub.setTruncationStep(1);
+    const returned: ModelMessage[] = [
+      { role: "user", content: long("a") },
+      { role: "assistant", content: long("b") },
+      { role: "user", content: long("c") },
+      { role: "assistant", content: long("d") },
+      { role: "user", content: "now" }
+    ];
+    await stub.returnMessagesFromBeforeTurn(returned);
+    await stub.prompt("hello");
+    expect(await stub.lastPromptText()).toContain(long("a"));
   });
 });
 

@@ -4,7 +4,12 @@ import { AgentContextProvider, type ContextConfig } from "agents/context";
 import { z } from "zod";
 import { Think } from "../../think";
 import { PASS_JOB_ID } from "../../media-eviction";
-import type { MediaEvictionConfig, ThinkSession } from "../../think";
+import type {
+  MediaEvictionConfig,
+  ThinkSession,
+  TurnConfig,
+  TurnContext
+} from "../../think";
 
 /**
  * Prompt-cache prefix measurement (#2200). Providers cache on a byte-identical
@@ -135,6 +140,28 @@ export class ThinkPromptCacheTestAgent extends Think {
         return Promise.resolve({ stream });
       }
     } as LanguageModel;
+  }
+
+  /** When set, `beforeTurn` adds this user text to `ctx.messages` in place. */
+  private _editInPlace: string | null = null;
+
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+    const text = this._editInPlace;
+    if (text === null) return;
+    // Edited in place and returned as the same array.
+    ctx.messages.push({ role: "user", content: [{ type: "text", text }] });
+    return { messages: ctx.messages };
+  }
+
+  /** Run one turn whose `beforeTurn` edits `ctx.messages` in place. */
+  async editMessagesInPlaceForTest(text: string): Promise<string> {
+    this._editInPlace = text;
+    const before = this.requestCountForTest();
+    await this.saveMessages([
+      { id: "u0", role: "user", parts: [{ type: "text", text: "hello" }] }
+    ]);
+    this._editInPlace = null;
+    return JSON.stringify(this.requestForTest(before));
   }
 
   override getTools(): ToolSet {

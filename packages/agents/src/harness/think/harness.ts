@@ -56,6 +56,11 @@ import {
   iterateWithStallWatchdog
 } from "../../chat/stall-watchdog";
 import { StreamAccumulator } from "../../chat/stream-accumulator";
+import {
+  truncateOlderMessages,
+  truncateOlderToolResults,
+  truncationKeepRecent
+} from "../../chat/truncate-older-messages";
 import type {
   AgentHarness,
   HarnessInput,
@@ -665,6 +670,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     Set<"compaction" | "edit" | "delete">
   >();
   readonly #live = new Map<ThinkSessionId, LiveRun>();
+  /**
+   * Each running operation's truncation cutoff: the transcript index its
+   * first model call cut at, and the id of the message there. Recomputed
+   * when that message moved (a compaction) and after a reset; removed when
+   * the operation ends. Nothing is stored.
+   */
+  readonly #cutoffs = new Map<
+    string,
+    { readonly index: number; readonly firstKeptId: string | undefined }
+  >();
   readonly #configured = new Set<ThinkSessionId>();
   /** Each session's context, from the `context` option, built on first use. */
   readonly #contexts = new Map<ThinkSessionId, Context | undefined>();
@@ -2238,6 +2253,55 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
+   * How a model call's request is truncated, from the session's
+   * `truncationStep`: older messages cut at the operation's cutoff, and
+   * older tool results after conversion, as Think sends them. Unset, both
+   * return what they are given.
+   */
+  async #truncation(
+    session: ThinkSessionId,
+    turn: TurnContext,
+    history: readonly UIMessage[]
+  ): Promise<{
+    cut(messages: UIMessage[]): UIMessage[];
+    cutResults(models: ModelMessage[], messages: UIMessage[]): ModelMessage[];
+  }> {
+    const step = await resolve(this.#options.truncationStep, session);
+    if (step === undefined) {
+      return { cut: (messages) => messages, cutResults: (models) => models };
+    }
+    const key = runIdOf(session, turn.operationId);
+    // The operation's first call sets the cutoff; a later call extends
+    // that request with the operation's own messages, as one AI SDK call's
+    // steps do. It is set again when the message it starts at moved.
+    let kept = this.#cutoffs.get(key);
+    if (kept === undefined || history[kept.index]?.id !== kept.firstKeptId) {
+      const index = Math.max(
+        0,
+        history.length - truncationKeepRecent(history.length, step)
+      );
+      kept = { index, firstKeptId: history[index]?.id };
+      this.#cutoffs.set(key, kept);
+    }
+    const { index } = kept;
+    // Recent: what is at or after the cutoff, and whatever the request
+    // adds after the transcript (a reminder of its own).
+    const recent = (messages: readonly UIMessage[]) =>
+      Math.max(0, messages.length - index);
+    return {
+      cut: (messages) =>
+        truncateOlderMessages(messages, {
+          keepRecent: recent(messages),
+          toolOutputs: false
+        }) as UIMessage[],
+      cutResults: (models, messages) =>
+        truncateOlderToolResults(models, messages, {
+          keepRecent: recent(messages)
+        })
+    };
+  }
+
+  /**
    * One model call: the session's context prepared, `beforeTurn` run, and
    * the call streamed as UI message chunks.
    */
@@ -2302,6 +2366,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       optionsSystem = built.allSections;
     }
     const system = joinSystem(optionsSystem, contextSystem);
+    // Older messages are cut before `beforeTurn` sees them, as in Think.
+    // The cutoff counts the stored transcript, so a reminder carried as a
+    // message of its own does not move it.
+    const keep = await this.#truncation(session, turn, history);
+    request = keep.cut(request);
     const config =
       (await hooks?.beforeTurn?.({
         session,
@@ -2329,9 +2398,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         await textHash(effectiveSystem ?? "")
       );
       if (tooled.changed) {
-        request = withReminder(
-          asUIMessages(await context.project(history)),
-          [blockReminder, tooled.reminder].filter(Boolean).join("\n\n") || null
+        request = keep.cut(
+          withReminder(
+            asUIMessages(await context.project(history)),
+            [blockReminder, tooled.reminder].filter(Boolean).join("\n\n") ||
+              null
+          )
         );
         causes.push({ kind: "tools", ...tooled.changed });
       }
@@ -2351,12 +2423,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         causes
       });
     }
+    // Messages a `beforeTurn` returned are sent as returned.
     const messages: ModelMessage[] =
       config.messages ??
-      (await convertToModelMessages(request, {
-        tools,
-        ignoreIncompleteToolCalls: true
-      }));
+      keep.cutResults(
+        await convertToModelMessages(request, {
+          tools,
+          ignoreIncompleteToolCalls: true
+        }),
+        request
+      );
     let modelError: unknown;
     const result = streamText({
       // First, so none of the harness's own arguments below is overridden.
@@ -2776,6 +2852,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       return;
     }
     if (!TERMINAL.includes(record.status)) return;
+    this.#cutoffs.delete(record.runId);
     const result = this.#result(record);
     let message: UIMessage | undefined;
     if (record.status === "completed") {

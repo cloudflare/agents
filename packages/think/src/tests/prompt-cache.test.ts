@@ -79,6 +79,15 @@ describe("prompt-cache prefix stability (#2200)", () => {
     expect(last).toContain("Tuesday");
   });
 
+  it("sends the messages a beforeTurn edited in place and returned", async () => {
+    const agent = await getAgentByName(
+      env.ThinkPromptCacheTestAgent,
+      `edit-in-place-${crypto.randomUUID()}`
+    );
+    const request = await agent.editMessagesInPlaceForTest("edited in place");
+    expect(request).toContain("edited in place");
+  });
+
   it("rewrites truncated tool outputs once per step, not every turn", async () => {
     const report = await measure("prefix-tool-output", {
       turns: 16,

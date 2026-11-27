@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Agent } from "../../../index";
-import { tool, type UIMessage } from "ai";
+import { tool, type ModelMessage, type UIMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import type {
@@ -56,6 +56,10 @@ const ENDED_KEY = "test:ended";
 const LATE_TOOL_KEY = "test:late-tool";
 const HOLD_AFTER_KEY = "test:hold-after-tool-call";
 const EDIT_TOOLSET_KEY = "test:edit-toolset";
+/** The `truncationStep` option, once a test sets one. */
+const TRUNCATION_STEP_KEY = "test:truncation-step";
+/** Model messages a `beforeTurn` returns, once a test sets them. */
+const RETURNED_MESSAGES_KEY = "test:returned-messages";
 const WAIT_ON_SIGNAL_KEY = "test:before-turn-waits-on-signal";
 const SIGNAL_SEEN_KEY = "test:before-turn-signal-seen";
 const AFTER_KEY = "test:after-tool-call";
@@ -188,6 +192,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     tasks: this.tasks,
     system: "You are a test.",
     recovery: this.#recovery,
+    truncationStep: () => this.ctx.storage.kv.get<number>(TRUNCATION_STEP_KEY),
     model: new MockLanguageModelV4({
       doStream: async ({ prompt, tools }) => {
         // SAFETY: the mock's prompt is the provider's message list.
@@ -326,6 +331,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         if (this.ctx.storage.kv.get<boolean>(EDIT_TOOLSET_KEY)) {
           delete toolSet.multiply;
         }
+        const returned = this.ctx.storage.kv.get<ModelMessage[]>(
+          RETURNED_MESSAGES_KEY
+        );
+        if (returned) return { messages: returned };
         const system = this.ctx.storage.kv.get<string>(SYSTEM_KEY);
         const activeTools = this.ctx.storage.kv.get<string[]>(ACTIVE_TOOLS_KEY);
         if (!system && !activeTools) return undefined;
@@ -575,7 +584,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           { type: "stream-start", warnings: [] },
           { type: "error", error: new Error("model exploded") }
         ];
-      } else if (text === "overflow" && !this.#overflowed) {
+      } else if (text.startsWith("overflow") && !this.#overflowed) {
         this.#overflowed = true;
         parts = [
           { type: "stream-start", warnings: [] },
@@ -746,6 +755,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       ...message,
       parts: [{ type: "text", text }]
     });
+  }
+
+  setTruncationStep(step: number): void {
+    this.ctx.storage.kv.put(TRUNCATION_STEP_KEY, step);
+  }
+
+  returnMessagesFromBeforeTurn(messages: ModelMessage[]): void {
+    this.ctx.storage.kv.put(RETURNED_MESSAGES_KEY, messages);
   }
 
   addLateTool(): void {

@@ -646,6 +646,8 @@ export class Think<
         return frozen ? undefined : this.getSystemPrompt();
       },
       tools: () => this.getTools(),
+      // The harness cuts older messages as Think does, by its step.
+      truncationStep: () => this.truncationStep,
       // A turn's `beforeTurn` may set its own, as in Think.
       get maxSteps() {
         return self.#turnMaxSteps ?? self.maxSteps;
