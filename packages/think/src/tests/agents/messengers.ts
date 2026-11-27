@@ -202,7 +202,18 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         : undefined;
     // An agent named `slow-…` holds each model call until the test releases
     // it (`releaseSlowModelForTest`).
-    const slow = this.name.startsWith("slow-");
+    // An agent named `queue-slowreset-…` holds its first model call until
+    // the test releases it, then resets, mid-reply.
+    const slowReset =
+      this.name.startsWith("queue-slowreset-") &&
+      !this.ctx.storage.kv.get("reset-done")
+        ? async () => {
+            this.ctx.storage.kv.put("reset-done", true);
+            await this.ctx.storage.sync();
+            this.ctx.abort("reset mid-reply");
+          }
+        : undefined;
+    const slow = this.name.startsWith("slow-") || slowReset !== undefined;
     const held = () => this._slowModelHeld;
     return {
       specificationVersion: "v3",
@@ -219,6 +230,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         if (slow) {
           await held();
           recordEnd(prompt);
+          await slowReset?.();
         }
         const call = nextCall();
         const fails =

@@ -1984,6 +1984,41 @@ describe("think messengers core", () => {
       }
       expect(prompts).toEqual(["follow up"]);
     });
+
+    it("answers a message queued behind a reply a reset cut off", async () => {
+      const name = `queue-slowreset-${crypto.randomUUID()}`;
+      // A reset stub stays broken: each call takes a new one.
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      const send = async (id: string, text: string) =>
+        (await agent())
+          .fetch("https://example.com/messengers/fake/webhook", {
+            body: JSON.stringify({ id, text, threadId: "fake:dm" }),
+            method: "POST"
+          })
+          .catch(() => undefined);
+      const first = send("q1", "hello");
+      // The first reply holds its model call; the second message queues.
+      let prompts: string[] = [];
+      for (let i = 0; i < 100 && prompts.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        prompts = await (await agent()).getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["hello"]);
+      const r2 = await send("q2", "follow up");
+      console.log("DBG2", r2 ? `${r2.status} ${await r2.text()}` : "threw");
+      // Released, the first reply's turn resets mid-reply.
+      await (await agent()).releaseSlowModelForTest();
+      await first;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        prompts = await (await agent()).getRecorded("prompt");
+        if (prompts.includes("follow up")) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      console.log("DBG", JSON.stringify(prompts), JSON.stringify(await (await agent()).getAdapterCalls()));
+      expect(prompts).toContain("follow up");
+    }, 30_000);
   });
 
   it("separates text segments across tool-call boundaries (#1841)", async () => {
