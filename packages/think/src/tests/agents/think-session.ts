@@ -2709,10 +2709,18 @@ export class ThinkTestAgent extends Think {
       (data as { probe?: boolean } | undefined)?.probe &&
       this._probeAttempt
     ) {
-      this._probeAttempt.insideTurn =
+      // The guard a recovery's own turn meets: it reads the context
+      // itself, whether or not that turn is still the running one.
+      try {
         (
-          this as unknown as { _activeAdmittedTurn(): unknown }
-        )._activeAdmittedTurn() !== undefined;
+          this as unknown as {
+            _assertNotInsideAdmittedTurn(trigger: string): void;
+          }
+        )._assertNotInsideAdmittedTurn("recovery-continue");
+        this._probeAttempt.insideTurn = false;
+      } catch {
+        this._probeAttempt.insideTurn = true;
+      }
       return;
     }
     return super._chatRecoveryContinue(data);
