@@ -399,6 +399,23 @@ describe("Think — beforeStep hook", () => {
     expect(prompts[1]).toContain("echo-written:");
   });
 
+  it("keeps unsent reasoning for the turn's next model call", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-hidden-reasoning-${crypto.randomUUID()}`
+    );
+    await agent.hideReasoningForTest();
+    const result = await agent.testChat("think, then echo");
+    expect(result.done).toBe(true);
+    // The client stream has none of it...
+    expect(JSON.stringify(result.events)).not.toContain("signed-thought");
+    // ...but the call after the tool sends it back, as a provider's signed
+    // reasoning must be.
+    const prompts = await agent.getReasoningPrompts();
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("signed-thought");
+  });
+
   it("keeps the messages beforeTurn rewrote for every model call of the turn", async () => {
     const agent = await freshToolAgent("hook-bt-rewrite");
     await agent.rewriteTurnMessagesForTest();

@@ -17573,6 +17573,80 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
     return super.beforeTurn(ctx);
   }
 
+  private _hiddenReasoning = false;
+  private _reasoningPrompts: string[] = [];
+
+  /** The model reasons, calls echo, then answers; reasoning isn't sent. */
+  async hideReasoningForTest(): Promise<void> {
+    this._hiddenReasoning = true;
+    this.sendReasoning = false;
+  }
+
+  async getReasoningPrompts(): Promise<string[]> {
+    return this._reasoningPrompts;
+  }
+
+  override getModel(): LanguageModel {
+    if (!this._hiddenReasoning) return super.getModel();
+    let calls = 0;
+    return {
+      specificationVersion: "v3",
+      provider: "test",
+      modelId: "mock-reasoning-tool",
+      supportedUrls: {},
+      doGenerate() {
+        throw new Error("doGenerate not implemented");
+      },
+      doStream: (options: Record<string, unknown>) => {
+        calls++;
+        this._reasoningPrompts.push(
+          JSON.stringify((options as { prompt?: unknown[] }).prompt ?? [])
+        );
+        const first = calls === 1;
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            if (first) {
+              controller.enqueue({ type: "reasoning-start", id: "r1" });
+              controller.enqueue({
+                type: "reasoning-delta",
+                id: "r1",
+                delta: "signed-thought"
+              });
+              controller.enqueue({ type: "reasoning-end", id: "r1" });
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId: "tc-r1",
+                toolName: "echo",
+                input: JSON.stringify({ message: "hello" })
+              });
+              controller.enqueue({
+                type: "finish",
+                finishReason: v3FinishReason("tool-calls"),
+                usage: v3Usage(10, 5)
+              });
+            } else {
+              controller.enqueue({ type: "text-start", id: "t2" });
+              controller.enqueue({
+                type: "text-delta",
+                id: "t2",
+                delta: "done"
+              });
+              controller.enqueue({ type: "text-end", id: "t2" });
+              controller.enqueue({
+                type: "finish",
+                finishReason: v3FinishReason("stop"),
+                usage: v3Usage(10, 5)
+              });
+            }
+            controller.close();
+          }
+        });
+        return Promise.resolve({ stream });
+      }
+    } as LanguageModel;
+  }
+
   async continueForTest(): Promise<string> {
     return (await this.runTurn({ continuation: true })).status;
   }
