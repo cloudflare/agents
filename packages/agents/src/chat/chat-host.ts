@@ -237,6 +237,11 @@ export const CHAT_CLEARED = "chat cleared";
 export interface ParkedTab {
   readonly connection: Connection;
   readonly probeId?: string;
+  /**
+   * It asked to resume (it acks the offer and gets the replay), rather than
+   * waiting on a continuation its answer started (it gets the live frames).
+   */
+  readonly asked?: true;
 }
 
 /**
@@ -1034,8 +1039,9 @@ export function chatTurnDefinition(
     const parked = parkedIn(deps.streams, sessionId);
     const offerStream = () => {
       if (parked.size === 0) return;
-      for (const id of parked.keys())
-        offeredIn(deps.streams).set(id, requestId);
+      for (const [id, tab] of parked) {
+        if (tab.asked) offeredIn(deps.streams).set(id, requestId);
+      }
       releaseParked(parked, {
         type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
         id: requestId

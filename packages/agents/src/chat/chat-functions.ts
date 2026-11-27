@@ -734,7 +734,11 @@ export async function resumeChat(
         parked.delete(id);
       }
     }
-    parked.set(connection.id, { connection, ...(probeId && { probeId }) });
+    parked.set(connection.id, {
+      connection,
+      asked: true,
+      ...(probeId && { probeId })
+    });
     sendIfOpen(
       connection,
       JSON.stringify({
