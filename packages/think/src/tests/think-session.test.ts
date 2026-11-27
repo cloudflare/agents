@@ -1177,7 +1177,9 @@ describe("Think — error handling", () => {
     const agent = await freshAgent(room);
     await agent.armTransientErrorForTest({
       classification: "transient",
-      inStream: true
+      inStream: true,
+      // Read below from another call: it must not have run by then.
+      hold: true
     });
     const ws = await connectThinkTestAgentWS(room);
     try {

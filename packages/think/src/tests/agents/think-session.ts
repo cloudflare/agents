@@ -4545,7 +4545,13 @@ export class ThinkTestAgent extends Think {
     inStream?: boolean;
     afterChunks?: number;
     message?: string;
+    /**
+     * Hold the recovery attempt until {@link runScheduledRecoveryForTest}
+     * runs it: for a test that looks at it from another event.
+     */
+    hold?: boolean;
   }): Promise<void> {
+    if (options.hold) holdTurnAttemptsForTest(this);
     this._errorConfig = {
       afterChunks: options.afterChunks ?? 2,
       message: options.message ?? "upstream connection reset",
