@@ -829,6 +829,15 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       ...this.getTurnChannelsForTest(),
       this.activeChannel?.channelId ?? ""
     ]);
+    this.ctx.storage.kv.put("turn-threads", [
+      ...this.getTurnThreadsForTest(),
+      this.getMessengerContext()?.thread.id ?? ""
+    ]);
+  }
+
+  /** The messenger thread each turn had, as `beforeTurn` saw it. */
+  getTurnThreadsForTest(): string[] {
+    return this.ctx.storage.kv.get<string[]>("turn-threads") ?? [];
   }
 
   getTurnChannelsForTest(): string[] {

@@ -1532,6 +1532,13 @@ describe("think messengers core", () => {
       await expect(agent.getAdapterCalls()).resolves.toEqual([]);
     });
 
+    it("gives a messenger's turn its thread as the messenger context", async () => {
+      const agent = await sendBurst(`context-${crypto.randomUUID()}`, [
+        { id: "t1", text: "hello", threadId: "fake:dm-context" }
+      ]);
+      expect(await agent.getTurnThreadsForTest()).toEqual(["fake:dm-context"]);
+    });
+
     it("runs a messenger's turn on its channel", async () => {
       const agent = await sendBurst(`channel-${crypto.randomUUID()}`, [
         { id: "m1", text: "hello", threadId: "fake:dm" }

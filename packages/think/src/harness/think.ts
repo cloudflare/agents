@@ -52,6 +52,7 @@ import { ThinkModelResolver } from "../model";
 import {
   DEFAULT_MESSENGER_CONCURRENCY,
   type MessengerConcurrency,
+  type MessengerContext,
   type ThinkMessengers
 } from "../messengers";
 import { resolveChannels } from "../channels";
@@ -1002,6 +1003,7 @@ export class Think<
           if (stoppedStatus(event.status)) grant.abort();
           this.#grantSignals.delete(event.status.operationId);
         }
+        this.#messengerContexts.delete(event.status.operationId);
         // A call the operation left without an afterToolCall is forgotten.
         for (const [toolCallId, kept] of this.#modelInputs) {
           if (kept.operationId === event.status.operationId) {
@@ -2103,10 +2105,47 @@ export class Think<
     return message;
   }
 
-  /** Messengers are not supported, so there is never a messenger turn. */
-  getMessengerContext(): undefined {
-    return undefined;
+  /**
+   * The running messenger turn's context, as on Think; outside one, the
+   * latest message's.
+   */
+  getMessengerContext(): MessengerContext | undefined {
+    const running = this.#running?.requestId;
+    const active =
+      running !== undefined ? this.#messengerContexts.get(running) : undefined;
+    if (active) return active;
+    return messengerOf(this.messages.at(-1));
   }
+
+  /**
+   * Run a turn for a messenger event, as on Think: the context is kept on
+   * the user message, and the turn runs on the messenger's channel.
+   */
+  async chatWithMessengerContext(
+    userMessage: string | UIMessage,
+    callback: StreamCallback,
+    context: MessengerContext,
+    options?: ChatOptions
+  ): Promise<void> {
+    const messages = toInput(userMessage).map((message) =>
+      message.role === "user"
+        ? {
+            ...message,
+            metadata: {
+              ...(message.metadata as Record<string, unknown> | undefined),
+              messenger: context
+            }
+          }
+        : message
+    );
+    await this.chat(messages, callback, {
+      ...options,
+      channel: context.messengerId
+    });
+  }
+
+  /** Each running operation's messenger context; dropped at its end. */
+  #messengerContexts = new Map<string, MessengerContext>();
 
   /**
    * The tools a client answers, as on Think: those the last turn had that
@@ -2961,9 +3000,18 @@ export class Think<
         channel === undefined && user
           ? this.#messengers?.channelOf(user.id)
           : undefined;
+      // As in Think, the turn's messenger context: kept on its user
+      // message, or the webhook's, stamped with the channel.
+      const webhook = user ? this.#messengers?.contextOf(user.id) : undefined;
+      const context = messengerOf(user) ?? webhook;
+      if (context) this.#messengerContexts.set(turn.operationId, context);
       if (messenger !== undefined && user) {
         channel = messenger;
-        await this.#stamp(user.id, messenger);
+        await this.#stamp(
+          user.id,
+          messenger,
+          webhook && { messenger: webhook }
+        );
       }
       const emit = this._emit as unknown as (
         type: string,
@@ -3047,7 +3095,10 @@ export class Think<
       continuation: turn.continuation,
       requestId: turn.operationId,
       trigger: identity.trigger,
-      abortSignal: turn.signal
+      abortSignal: turn.signal,
+      ...(this.#messengerContexts.has(turn.operationId) && {
+        messenger: this.#messengerContexts.get(turn.operationId)
+      })
     };
     // As in Think, `beforeTurn` runs once per turn; the harness asks
     // before every model call, and later calls reuse what it returned.
@@ -3244,12 +3295,29 @@ export class Think<
   }
 
   /** Stamp `channel` on stored user message `id`, unless it has one. */
-  async #stamp(id: string, channel: string): Promise<void> {
+  async #stamp(
+    id: string,
+    channel: string,
+    extra?: Record<string, unknown>
+  ): Promise<void> {
     const handle = await this.#rootHandle();
     const stored = await handle.getMessage(id);
     if (!stored || stored.role !== "user") return;
     if (channelFromMessages([stored as UIMessage]) !== undefined) return;
-    const [stamped] = stampTurnContext([stored as UIMessage], channel);
+    const [stamped] = stampTurnContext(
+      [
+        extra
+          ? {
+              ...(stored as UIMessage),
+              metadata: {
+                ...(stored.metadata as Record<string, unknown> | undefined),
+                ...extra
+              }
+            }
+          : (stored as UIMessage)
+      ],
+      channel
+    );
     await handle.updateMessage(stamped as SessionMessage);
   }
 
@@ -3987,4 +4055,15 @@ function chatRequestId(message: WSMessage): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The messenger context a user message keeps, if any. */
+function messengerOf(
+  message: UIMessage | undefined
+): MessengerContext | undefined {
+  const messenger = (message?.metadata as { messenger?: unknown } | undefined)
+    ?.messenger;
+  return messenger && typeof messenger === "object"
+    ? (messenger as MessengerContext)
+    : undefined;
 }

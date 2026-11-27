@@ -34,7 +34,9 @@ import {
   type ThinkMessengers
 } from "../messengers/chat-sdk";
 import {
+  messengerContextFromEvent,
   toMessengerUserMessage,
+  type MessengerContext,
   type MessengerEvent
 } from "../messengers/events";
 
@@ -50,6 +52,8 @@ export type ThinkMessengerChannels = {
    * turn runs (the message's id is its event's).
    */
   channelOf(messageId: string): string | undefined;
+  /** The messenger context of user message `messageId`, while its turn runs. */
+  contextOf(messageId: string): MessengerContext | undefined;
   /** Where a notice to messenger `id`'s `thread` is posted, if anywhere. */
   noticeSurface(
     id: string,
@@ -152,6 +156,7 @@ export function messengerChannels(options: {
             if (update.type === "turn" && update.turn.status === "settled") {
               // Its replies have started: the asker is not read again.
               options.kv.delete(askerKey(update.turn.startedBy));
+              options.kv.delete(contextKey(update.turn.startedBy));
               for (const resolve of settled.get(update.turn.startedBy) ?? []) {
                 resolve();
               }
@@ -212,6 +217,8 @@ export function messengerChannels(options: {
     const turn = watchTurn(eventId);
     try {
       options.kv.put(askerKey(eventId), surface);
+      // As in Think, the turn's messenger context, from the event.
+      options.kv.put(contextKey(eventId), messengerContextFromEvent(event));
       await channels.receive(
         {
           type: "message",
@@ -237,6 +244,7 @@ export function messengerChannels(options: {
       // Also here: a repeated event's turn settled before it came, and will
       // not settle again.
       options.kv.delete(askerKey(eventId));
+      options.kv.delete(contextKey(eventId));
     } finally {
       turn.release();
       waiting.delete(mine);
@@ -261,6 +269,9 @@ export function messengerChannels(options: {
     channelOf(messageId) {
       return options.kv.get<ChannelMessageSurface>(askerKey(messageId))
         ?.channelKey;
+    },
+    contextOf(messageId) {
+      return options.kv.get<MessengerContext>(contextKey(messageId));
     },
     noticeSurface(id, thread) {
       const definition = definitions.find((d) => d.id === id);
@@ -301,6 +312,10 @@ type TurnWatch = { settled(): Promise<void>; release(): void };
 
 /** The key of the Channel that watches turns settle; not a messenger id. */
 const TURNS_KEY = "think:turns";
+
+function contextKey(eventId: string): string {
+  return `cf_think_messenger_context:${eventId}`;
+}
 
 function askerKey(eventId: string): string {
   return `cf_think_messenger_asker:${eventId}`;
