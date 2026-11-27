@@ -1217,8 +1217,6 @@ export class Think<
         error: `No pending approval "${executionId}"`
       };
     }
-    // A decided call is never listed again.
-    this.#actionDescriptors.delete(pending.descriptor.toolCallId);
     const session = this.harness.session();
     const receipt = await session.submit(
       {
@@ -1229,6 +1227,9 @@ export class Think<
       },
       autoContinue === undefined ? {} : { autoContinue }
     );
+    // Recorded, so the call is never listed again. A decision stopped
+    // before this point leaves the call pending with its descriptor.
+    this.#actionDescriptors.delete(pending.descriptor.toolCallId);
     const result = await session.wait(receipt.operationId);
     await this.#sync();
     return saveResult(result);
