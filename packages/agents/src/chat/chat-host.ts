@@ -1288,9 +1288,10 @@ export function chatTurnDefinition(
         if (live.get(liveKey)?.requestId === requestId) live.delete(liveKey);
         if (step.signal.aborted) {
           // A cleared chat keeps nothing of the turn.
+          // It ends `skipped`, as a turn a clear reaches before it starts.
           if (cancelReason(step.signal.reason) === CHAT_CLEARED) {
             out.close({ discard: true });
-            return report({ requestId, status: "aborted" });
+            return report({ requestId, status: "skipped" });
           }
           // A stopped turn keeps what it streamed, as a stored reply.
           const soFar = await messageOf(streamOf(seen), continuing).catch(

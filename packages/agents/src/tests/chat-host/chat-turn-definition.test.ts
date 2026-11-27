@@ -932,7 +932,7 @@ describe("chatTurnDefinition", () => {
           }
         }
       })({ trigger: "server" }, laterAttempt("clr-1", 1, stop.signal));
-      expect(result).toMatchObject({ status: "aborted" });
+      expect(result).toMatchObject({ status: "skipped" });
       expect(await instance.sessions.session("s1").getHistory()).toEqual([]);
     });
   });

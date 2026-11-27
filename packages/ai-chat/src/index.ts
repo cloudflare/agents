@@ -151,6 +151,7 @@ import { nanoid } from "nanoid";
 import {
   cancelTurn,
   chatDispatch,
+  submitTurn,
   chatTurnDefinition,
   clearChat,
   parseProtocolMessage,
@@ -158,7 +159,8 @@ import {
   type ChatDeps,
   type ChatHost,
   type ChatLane,
-  type ChatTurnInput
+  type ChatTurnInput,
+  type ChatTurnResult
 } from "agents/chat";
 
 // Re-export lifecycle types from the shared chat toolkit so existing
@@ -870,6 +872,52 @@ export class AIChatAgent<
   /** Whether each running call continues a reply, for `onChatResponse`. */
   private readonly _callContinues = new Map<string, boolean>();
 
+  /** Callers waiting for the end of a turn they started, by request id. */
+  private readonly _turnWaiters = new Map<
+    string,
+    (result: ChatTurnResult) => void
+  >();
+
+  /**
+   * Start a server turn on the chat's lane and wait for its end: the turns
+   * behind `saveMessages` and `continueLastTurn`.
+   */
+  private async _serverTurn(
+    input: ChatTurnInput,
+    options: { signal?: AbortSignal; storeContext?: boolean } = {}
+  ): Promise<SaveMessagesResult> {
+    const requestId = nanoid();
+    if (options.signal?.aborted) return { requestId, status: "aborted" };
+    const ended = new Promise<ChatTurnResult>((resolve) =>
+      this._turnWaiters.set(requestId, resolve)
+    );
+    await submitTurn(this._chatDeps(), this._chatLane(), input, {
+      requestId,
+      ...(options.signal && { signal: options.signal }),
+      ...(options.storeContext && { storeContext: true })
+    });
+    // A turn the lane ends without running it (a clear, a skip) never
+    // reaches `onResponse`: its run's end answers instead.
+    const settled = this.tasks.wait(requestId).then((record) =>
+      record && record.status !== "completed"
+        ? ({
+            requestId,
+            status: record.status === "aborted" ? "aborted" : "skipped"
+          } as ChatTurnResult)
+        : ended
+    );
+    const result = await Promise.race([ended, settled]);
+    this._turnWaiters.delete(requestId);
+    return {
+      requestId,
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error }),
+      ...(result.reason !== undefined && {
+        reason: result.reason as SaveMessagesResult["reason"]
+      })
+    };
+  }
+
   /** What the chat module is given: the agent's capabilities and its tabs. */
   private _chatDeps(): ChatDeps {
     return {
@@ -916,18 +964,27 @@ export class AIChatAgent<
       },
       hooks: {
         onResponse: async (result) => {
+          const waiter = this._turnWaiters.get(result.requestId);
+          this._turnWaiters.delete(result.requestId);
           const continuation =
             this._callContinues.get(result.requestId) ?? false;
           this._callContinues.delete(result.requestId);
           this.messages = (await this.#session.getHistory()) as UIMessage[];
-          if (result.status === "skipped") return;
+          if (result.status === "skipped") {
+            waiter?.(result);
+            return;
+          }
           const message =
             result.messageId !== undefined
               ? ((await this.#session.getMessage(
                   result.messageId
                 )) as UIMessage | null)
               : null;
-          if (!message) return;
+          if (!message) {
+            waiter?.(result);
+            return;
+          }
+          waiter?.(result);
           await this.onChatResponse({
             message,
             requestId: result.requestId,
@@ -3298,7 +3355,20 @@ export class AIChatAgent<
         ) => UIMessage[] | Promise<UIMessage[]>),
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
-    return this._runProgrammaticMessagesTurn(nanoid(), messages, options);
+    // The messages are worked out once the turns ahead have run, against
+    // the transcript as they left it.
+    // Queued at once. A function is worked out against the transcript now;
+    // the turn carries only the messages the transcript does not hold, and
+    // stores them when it starts, after the replies ahead of it.
+    if (options?.signal?.aborted) {
+      return { requestId: nanoid(), status: "aborted" };
+    }
+    const resolved =
+      typeof messages === "function" ? await messages(this.messages) : messages;
+    return this._serverTurn(
+      { trigger: "server", messages: resolved },
+      { ...(options?.signal && { signal: options.signal }) }
+    );
   }
 
   /**
@@ -3357,53 +3427,22 @@ export class AIChatAgent<
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
-    const pinned: ProgrammaticTurnOptions | undefined = options;
-    if (!this._findLastAssistantMessage()) {
-      return {
-        requestId: "",
-        status: "skipped",
-        reason: "nothing-to-continue"
-      };
-    }
-
-    const requestId = nanoid();
-    let emptyReplyRemoved = false;
-    const result = await this._runServerTurn(requestId, {
-      signal: options?.signal,
-      body: body ?? pinned?.body,
-      clientTools: pinned?.clientTools,
-      // A body the app passes becomes the chat's stored body, as it always
-      // has. A context framework code pins is this turn's only.
-      storeContext: body !== undefined,
-      continuation: true,
-      // Decided first, at the front of the queue, before the turn stores
-      // anything: while the reply still waits on a client there is nothing
-      // to continue, and a skipped call leaves the chat as it found it. The
-      // client's answer starts the continuation.
-      // A reply that holds nothing once its trailing reasoning is gone has
-      // nothing to continue either. It is removed, and the question it
-      // answered is answered again below, as recovery does for a lost reply.
-      prepare: async () => {
-        if (this._turns.continuationWaitsOnClient()) {
-          return { declined: "skipped", reason: "awaiting-client" };
-        }
-        emptyReplyRemoved = await this._turns.removeEmptyReplyToContinue(
-          this.messages,
-          this._repairedTranscriptSink()
-        );
-        return emptyReplyRemoved
-          ? { declined: "skipped", reason: "nothing-to-continue" }
-          : { input: [] };
+    // The chat module decides: no reply to continue, a reply waiting on a
+    // client, or a reply that holds nothing (removed, its question
+    // answered again).
+    const pinned = options as ProgrammaticTurnOptions | undefined;
+    const turnBody = body ?? pinned?.body ?? undefined;
+    return this._serverTurn(
+      {
+        trigger: "server",
+        mode: "continue",
+        ...(turnBody && { body: turnBody })
+      },
+      {
+        ...(options?.signal && { signal: options.signal }),
+        storeContext: body !== undefined
       }
-    });
-    if (!emptyReplyRemoved) return result;
-    const retried = await this._retryLastUserTurn(
-      { ...pinned, body: body ?? pinned?.body },
-      body !== undefined
     );
-    return retried.status === "skipped" && retried.reason === undefined
-      ? { ...retried, reason: "nothing-to-continue" }
-      : retried;
   }
 
   private async _retryLastUserTurn(
