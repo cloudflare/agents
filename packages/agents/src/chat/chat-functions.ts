@@ -22,6 +22,12 @@ import {
   type ChatTurnInput
 } from "./chat-host";
 import { frameText } from "./chat-frames";
+import {
+  clearRecentChatTerminals,
+  recentChatTerminal,
+  recordRecentChatTerminal,
+  type ChatRecentTerminal
+} from "./recent-terminals";
 import { mergeUserMessages } from "./merge-user-messages";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
@@ -204,6 +210,12 @@ export async function submitTurn(
       done: true,
       outcome: "skipped"
     } as { type: string });
+    recordRecentChatTerminal(deps.kv, {
+      id,
+      body: "",
+      done: true,
+      outcome: "skipped"
+    });
     if (text === undefined || !deps.webSockets) continue;
     for (const connection of deps.webSockets.getConnections()) {
       sendIfOpen(connection, text);
@@ -246,6 +258,7 @@ export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
   for (const turn of retrying) await turn.settle(false);
   await deps.sessions.session(deps.session ?? "").clearMessages();
   continueRequestsOf(deps.streams).clear();
+  clearRecentChatTerminals(deps.kv);
 }
 
 /** A client's answer to a tool call. */
@@ -464,10 +477,24 @@ export async function resumeChat(
   deps: ChatDeps,
   lane: ChatLane,
   connection: Connection,
-  probeId?: string
+  probeId?: string,
+  /** The request ids the tab still waits on, newest last. */
+  requestIds: readonly string[] = []
 ): Promise<void> {
   const requestId = await streamingTurn(deps, lane);
+  // Requests the tab waits on that ended while it was away are ended first,
+  // except the one announced below, whose end follows the ack.
+  const endOthers = (except?: string) => {
+    for (const id of requestIds) {
+      if (id === except || id === requestId) continue;
+      const ended = recentChatTerminal(deps.kv, [id]);
+      if (ended && ended.outcome !== "recovering") {
+        sendIfOpen(connection, endedFrame(ended));
+      }
+    }
+  };
   if (requestId) {
+    endOthers();
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -489,6 +516,7 @@ export async function resumeChat(
     order: "oldest"
   });
   if (waiting || (answeringIn(deps).get(deps.session ?? "") ?? 0) > 0) {
+    endOthers();
     const parked = parkedIn(deps.streams, deps.session ?? "");
     // A tab whose socket closed while it waited is dropped here; the rest
     // are answered when the turn streams or ends, or the answer is applied.
@@ -508,6 +536,22 @@ export async function resumeChat(
     );
     return;
   }
+  // The newest request the tab waits on that ended while it was away is
+  // offered as a stream: its end follows the ack, the only frame a tab
+  // surfaces as the request's outcome.
+  const ended = recentChatTerminal(deps.kv, requestIds);
+  if (ended && ended.outcome !== "recovering") {
+    endOthers(ended.requestId);
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
+        id: ended.requestId,
+        ...(probeId && { probeId })
+      })
+    );
+    return;
+  }
   sendIfOpen(
     connection,
     JSON.stringify({
@@ -515,6 +559,21 @@ export async function resumeChat(
       ...(probeId && { probeId })
     })
   );
+}
+
+/** The frame that tells a tab how a request that ended while it was away ended. */
+function endedFrame(ended: ChatRecentTerminal): string {
+  return JSON.stringify({
+    type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+    id: ended.requestId,
+    body: ended.body,
+    done: true,
+    replay: true,
+    ...(ended.error && { error: true }),
+    ...(ended.outcome !== undefined && { outcome: ended.outcome }),
+    ...(ended.continuation && { continuation: true }),
+    ...(ended.messageIds && { messageIds: ended.messageIds })
+  });
 }
 
 /**
@@ -527,7 +586,12 @@ export async function replayTurn(
   requestId: string
 ): Promise<void> {
   const streamId = chatTurnStreamId(requestId);
-  if ((await deps.streams.status(streamId))?.state !== "streaming") return;
+  if ((await deps.streams.status(streamId))?.state !== "streaming") {
+    // It ended while the tab was away: its recorded end.
+    const ended = recentChatTerminal(deps.kv, [requestId]);
+    if (ended) sendIfOpen(connection, endedFrame(ended));
+    return;
+  }
   // What this isolate buffered is written first.
   deps.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
   const stop = new AbortController();
@@ -662,7 +726,7 @@ export async function chatDispatch(
       );
       return true;
     case "stream-resume-request":
-      await resumeChat(deps, lane, connection, event.probeId);
+      await resumeChat(deps, lane, connection, event.probeId, event.requestIds);
       return true;
     case "stream-resume-ack":
       await replayTurn(deps, connection, event.id);

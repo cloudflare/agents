@@ -63,11 +63,16 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
   }
   readonly lane = { definition: "__cf_chat_turn", lane: "chat:s1" };
   readonly tasks: Tasks = new Tasks();
+  /** The object's synchronous key-value storage. */
+  get kv() {
+    return this.ctx.storage.kv;
+  }
   get deps() {
     return {
       tasks: this.tasks,
       streams: this.streams,
       sessions: this.sessions,
+      kv: this.ctx.storage.kv,
       session: "s1"
     };
   }
