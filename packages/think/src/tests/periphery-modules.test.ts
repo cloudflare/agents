@@ -5,7 +5,7 @@ import { ThinkTestAgent } from "./agents/think-session";
 import type { LanguageModel, ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
 import { ThinkModelResolver, isWorkersAIModelId } from "../model";
-import { tableExists } from "../config-store";
+import { ThinkConfigStore, tableExists } from "../config-store";
 import { migrateWorkflowNotificationTable } from "../workflow-notifications";
 import { capabilityBlock, systemPromptForTurn } from "../system-prompt";
 
@@ -114,6 +114,86 @@ describe("ThinkConfigStore", () => {
       );
       config._migrateLegacyConfigToThinkTable();
       expect(config._cfConfig.get("lastBody")).toBe("current");
+    });
+  });
+});
+
+/** A started config store on its own Durable Object, and its SQLite. */
+async function withStore<T>(
+  fn: (store: ThinkConfigStore, sql: SqlStorage) => T | Promise<T>
+) {
+  const stub = env.ThinkConfigStoreProbe.get(
+    env.ThinkConfigStoreProbe.idFromName(`store-${crypto.randomUUID()}`)
+  );
+  await stub.start();
+  return runInDurableObject(stub, (instance, state) =>
+    fn(
+      (instance as unknown as { config: ThinkConfigStore }).config,
+      state.storage.sql
+    )
+  );
+}
+
+// Successors of the "ThinkConfigStore" tests above, which reach the store
+// through Think's private `_cfConfig` field and its
+// `_migrateLegacyConfigToThinkTable` seam: the same store, on a minimal
+// Durable Object, through its own methods.
+describe("ThinkConfigStore on its own Durable Object", () => {
+  it("stores, reads and deletes keys", async () => {
+    await withStore((store, sql) => {
+      expect(store.get("a")).toBeUndefined();
+      store.set("a", "1");
+      expect(store.get("a")).toBe("1");
+      expect(thinkConfigValue(sql, "a")).toBe("1");
+      store.delete("a");
+      expect(store.get("a")).toBeUndefined();
+    });
+  });
+
+  it("skips a write whose value matches the last value it saw", async () => {
+    await withStore((store, sql) => {
+      store.set("a", "1");
+      sql.exec("UPDATE think_config SET value = 'other' WHERE key = 'a'");
+      store.set("a", "1");
+      expect(thinkConfigValue(sql, "a")).toBe("other");
+      store.set("a", "2");
+      expect(thinkConfigValue(sql, "a")).toBe("2");
+    });
+  });
+
+  it("lifts Think's keys out of assistant_config and drops it", async () => {
+    await withStore((store, sql) => {
+      sql.exec(`CREATE TABLE assistant_config (
+        session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+        PRIMARY KEY (session_id, key))`);
+      sql.exec(
+        "INSERT INTO assistant_config VALUES ('', 'lastBody', '{\"x\":1}'), ('', 'unrelated', 'y'), ('s1', 'skillsFingerprint', 'other-session')"
+      );
+      store.migrateLegacy();
+      expect(store.get("lastBody")).toBe('{"x":1}');
+      expect(store.get("unrelated")).toBeUndefined();
+      expect(store.get("skillsFingerprint")).toBeUndefined();
+      const tables = sql
+        .exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE name = 'assistant_config'"
+        )
+        .toArray();
+      expect(tables).toEqual([]);
+    });
+  });
+
+  it("keeps a think_config value over the legacy one", async () => {
+    await withStore((store, sql) => {
+      store.set("lastBody", "current");
+      sql.exec(`CREATE TABLE assistant_config__lifted_v1 (
+        session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL)`);
+      sql.exec(
+        "INSERT INTO assistant_config__lifted_v1 VALUES ('', 'lastBody', 'legacy'), ('', 'skillsFingerprint', 'lifted')"
+      );
+      store.migrateLegacy();
+      expect(store.get("lastBody")).toBe("current");
+      // The lift did read the table: a key only it holds is lifted.
+      expect(store.get("skillsFingerprint")).toBe("lifted");
     });
   });
 });
