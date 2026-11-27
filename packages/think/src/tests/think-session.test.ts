@@ -2229,6 +2229,22 @@ describe("Think — dynamic configuration", () => {
     expect(config!.maxTokens).toBe(4000);
   });
 
+  it("keeps newer config when a restart lifts the legacy row again", async () => {
+    const name = `config-legacy-restart-${crypto.randomUUID()}`;
+    const agent = await freshLegacyConfigMigrationAgent(name);
+    await agent.setTestConfig({ theme: "light", maxTokens: 2000 });
+    // A real restart: the new isolate seeds the legacy row again and its
+    // start lifts it again.
+    await agent.resetIsolateForTest().catch(() => {});
+    const restarted = await freshLegacyConfigMigrationAgent(name);
+    // The restart's lift ran: it drops the table it lifted from.
+    expect(await restarted.legacyConfigTableExistsForTest()).toBe(false);
+    const config = await restarted.getTestConfig();
+    expect(config).not.toBeNull();
+    expect(config!.theme).toBe("light");
+    expect(config!.maxTokens).toBe(2000);
+  });
+
   it("should not let legacy config overwrite newer think_config values on rerun", async () => {
     const agent = await freshLegacyConfigMigrationAgent(
       "config-legacy-rerun-preserves-newer"
