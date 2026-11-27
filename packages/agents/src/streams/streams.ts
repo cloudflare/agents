@@ -93,6 +93,8 @@ export interface StreamsOptions {
  * `lifecycle.ready()`, so the caller owns startup ordering.
  */
 export interface StreamsSyncInternal {
+  /** The largest chunk, serialized, this capability stores (`maxChunkBytes`). */
+  readonly maxChunkBytes: number;
   /** Idempotent DDL — safe to call before the Lifecycle starts. */
   ensureTables(): void;
   getStream(streamId: string): StreamRow | undefined;
@@ -404,6 +406,9 @@ export class Streams extends LifecycleCapability {
       VALUES
         (${streamId}, 'streaming', ${options.tag ?? null}, ${metadataJson}, 0, ${now}, ${now})
     `;
+    // Born in this isolate: no earlier isolate buffered into it, so a
+    // buffered append starts at seq 0.
+    this.#bufferedHere.add(streamId);
     this.#emit("stream:opened", { streamId });
     return this.#writer(streamId);
   }
@@ -594,6 +599,7 @@ export class Streams extends LifecycleCapability {
 
   #buildSyncAperture(): StreamsSyncInternal {
     return {
+      maxChunkBytes: this.#maxChunkBytes,
       ensureTables: () => this.#ensureTables(),
       counter: (name) => {
         if (this.#countersTable === false) return 0;

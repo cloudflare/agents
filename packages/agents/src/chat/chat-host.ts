@@ -25,6 +25,7 @@ import { frameText } from "./chat-frames";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { responseSource } from "./reply-source";
+import { ROW_VALUE_BYTES, utf8Length } from "../internal/platform-limits";
 
 /** The capabilities the chat functions are given. They own every row and job. */
 export interface ChatDeps {
@@ -143,6 +144,31 @@ export interface ChatHost {
 /** The reason a chat clear cancels its turns with. */
 export const CHAT_CLEARED = "chat cleared";
 
+/**
+ * When a turn's chunks are written: every 10 chunks or 512 KB, in one row
+ * write, into the stream's newest block while it stays under 256 KB, as the
+ * hosts' reply streams do.
+ */
+const CHUNK_BATCH = {
+  maxChunks: 10,
+  maxBytes: 512_000,
+  fillBlocks: true
+} as const;
+
+/**
+ * Chunks after which the turn waits on work a replay must not repeat,
+ * written at once rather than batched: a tool's call and outcome, and the
+ * end of a step (the model is called again after it).
+ */
+const TOOL_EVENTS: ReadonlySet<string> = new Set([
+  "tool-input-available",
+  "tool-approval-request",
+  "tool-output-available",
+  "tool-output-error",
+  "tool-output-denied",
+  "finish-step"
+]);
+
 /** The run's checkpoint key holding the reply a continuation extends. */
 const BASE_CHECKPOINT = "chat:base";
 /** The run's checkpoint key counting the stream chunks recovery discarded. */
@@ -250,6 +276,8 @@ async function storedChunks(
   streamId: string
 ): Promise<UIMessageChunk[]> {
   const chunks: UIMessageChunk[] = [];
+  // What this isolate buffered is written first.
+  streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
   const stop = new AbortController();
   try {
     for await (const batch of streams.readBatches(streamId, {
@@ -311,6 +339,9 @@ function isCutOffTool(part: UIMessage["parts"][number]): boolean {
     (type.startsWith("tool-") || type === "dynamic-tool") &&
     (state === "input-streaming" ||
       state === "input-available" ||
+      // Only progress, no result: the tool had not finished.
+      (state === "output-available" &&
+        (part as { preliminary?: unknown }).preliminary === true) ||
       // Approved: it ran, or was about to, in the turn that was cut off.
       (state === "approval-responded" &&
         (part as { approval?: { approved?: unknown } }).approval?.approved ===
@@ -688,6 +719,59 @@ export function chatTurnDefinition(
       }));
       const continuing = partial;
       let started = false;
+      // Chunks are written in batches (`CHUNK_BATCH`); a reader flushes
+      // first. A batch is written at once at a tool event, a part's first
+      // delta, and when the model pauses (the end of a burst), so a reset
+      // keeps a tool call while its tool runs and what a quiet model sent.
+      const sync = deps.streams.__DO_NOT_USE_WILL_BREAK__sync();
+      const deltaParts = new Set<string>();
+      let flushQueued = false;
+      const flushWhenQuiet = () => {
+        if (flushQueued) return;
+        flushQueued = true;
+        setTimeout(() => {
+          flushQueued = false;
+          try {
+            sync.flush(streamId);
+          } catch {
+            // The stream settled meanwhile: nothing is left to write.
+          }
+        }, 0);
+      };
+      const record = (chunk: UIMessageChunk) => {
+        const json = JSON.stringify(chunk);
+        const bytes = utf8Length(json);
+        // One past the capability's chunk limit goes through the writer,
+        // which refuses it as it always has.
+        if (bytes > Math.min(sync.maxChunkBytes, ROW_VALUE_BYTES)) {
+          out.append(chunk as never);
+          return;
+        }
+        sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
+        flushWhenQuiet();
+        const partId = (chunk as { id?: unknown }).id;
+        const firstDelta =
+          (chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
+          typeof partId === "string" &&
+          !deltaParts.has(partId);
+        if (firstDelta) deltaParts.add(partId);
+        // A part's id may come back in a later step: its next first delta
+        // is written at once too.
+        if (
+          (chunk.type === "text-end" || chunk.type === "reasoning-end") &&
+          typeof partId === "string"
+        ) {
+          deltaParts.delete(partId);
+        }
+        // A preliminary output (progress) waits for the batch.
+        if (
+          firstDelta ||
+          (TOOL_EVENTS.has(chunk.type) &&
+            (chunk as { preliminary?: unknown }).preliminary !== true)
+        ) {
+          sync.flush(streamId);
+        }
+      };
       const recorded = watchStall(
         chunksOf(source, requestId),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
@@ -715,7 +799,7 @@ export function chatTurnDefinition(
                 type: "start",
                 messageId: continuing?.id ?? fallbackId
               } as UIMessageChunk;
-              out.append(start as never);
+              record(start);
               seen.push(start);
               send({
                 body: JSON.stringify(start),
@@ -735,7 +819,7 @@ export function chatTurnDefinition(
             const next = host.hooks?.transformChunk?.(own, parts) ?? own;
             // An in-band error is stored only if it ends the turn.
             if (next.type !== "error") {
-              out.append(next as never);
+              record(next);
               seen.push(next);
             }
             send({
