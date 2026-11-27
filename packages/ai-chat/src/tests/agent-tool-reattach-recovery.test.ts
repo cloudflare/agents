@@ -2,42 +2,9 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 
-/**
- * Parity with `@cloudflare/think`'s
- * `agent-tool-reattach-recovery.test.ts`: when an AIChatAgent facet running as
- * an agent-tool child is interrupted mid-run and recovers, its recovery turn
- * mints a NEW request id. If `cf_ai_chat_agent_tool_runs.request_id` is not
- * re-bound, the parent's re-attach tail can no longer attribute the recovered
- * turn's frames, so a healthy long-running child is abandoned as `interrupted`
- * once the no-progress budget elapses. The fix re-binds on both recovery paths.
- */
-interface ReattachStub {
-  seedAgentToolChildRunForTest(runId: string, requestId: string): Promise<void>;
-  getAgentToolChildRunRequestIdForTest(runId: string): Promise<string | null>;
-  resolveAgentToolRunForRequestForTest(
-    requestId: string
-  ): Promise<string | null>;
-  persistMessages(messages: unknown[]): Promise<void>;
-  insertInterruptedStream(
-    streamId: string,
-    requestId: string,
-    chunks: Array<{ body: string; index: number }>
-  ): Promise<void>;
-  insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
-  triggerFiberRecovery(): Promise<void>;
-  runScheduledRecoveryContinueForTest(): Promise<void>;
-  runScheduledRecoveryRetryForTest(): Promise<void>;
-  agentToolRunWithFailingReaderForTest(): Promise<{
-    afterCutOff: string | undefined;
-    final: string | undefined;
-    summary: string | undefined;
-    readerCalls: number;
-  }>;
-}
-
-async function getStub(room: string): Promise<ReattachStub> {
-  const stub = await getAgentByName(env.ChatRecoveryTestAgent, room);
-  return stub as unknown as ReattachStub;
+/** An AIChatAgent agent-tool child whose run's reply is cut off and recovered. */
+async function getStub(room: string) {
+  return getAgentByName(env.ChatRecoveryTestAgent, room);
 }
 
 describe("an agent-tool run whose reply is cut off in the isolate", () => {
