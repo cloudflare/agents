@@ -49,6 +49,10 @@ import {
   type InterruptedToolPart
 } from "../../chat/chat-host";
 import { TaskSettlement } from "../../tasks/settlement";
+import {
+  ChatStreamStalledError,
+  iterateWithStallWatchdog
+} from "../../chat/stall-watchdog";
 import { StreamAccumulator } from "../../chat/stream-accumulator";
 import type {
   AgentHarness,
@@ -185,6 +189,13 @@ const DEFAULT_STALL_TIMEOUT_MS = 120_000;
 /** Stream chunks read at a time when rebuilding what a turn streamed. */
 const READ_PAGE = 50;
 
+/**
+ * A server tool call's step: never retried by Tasks (an interrupted call is
+ * reported unless its tool is safe to run again), and never timed out (the
+ * longest timer the runtime takes).
+ */
+const TOOL_STEP = { retries: { limit: 1 }, timeout: 2 ** 31 - 1 } as const;
+
 const INTERRUPTED_TOOL_ERROR =
   "The tool call was interrupted before it finished, because the agent restarted. It may or may not have taken effect.";
 
@@ -211,8 +222,6 @@ type LiveRun = {
    * uses rather than building again.
    */
   built?: SessionBuild;
-  /** The reply's id, once the loop has one. */
-  replyId?: string;
   /** The reply as the loop holds it: everything streamed so far. */
   reply?: UIMessage;
   /** Settles when the attempt has returned. */
@@ -239,6 +248,8 @@ type Placed = PlacedTurn | { readonly ended: OperationOutcome };
 
 /** What one attempt's loop runs with. */
 type TurnContext = {
+  /** The operation's run: its tool calls are its steps. */
+  readonly run: TaskStep;
   readonly session: ThinkSessionId;
   readonly operationId: string;
   readonly built: SessionBuild;
@@ -549,6 +560,12 @@ async function continued(
     last = snapshot;
   }
   return last;
+}
+
+/** The reply id a turn's stream starts with, if it has started. */
+function replyIdOf(chunks: readonly UIMessageChunk[]): string | undefined {
+  const start = chunks.find((chunk) => chunk.type === "start");
+  return start?.type === "start" ? start.messageId : undefined;
 }
 
 /** A value as JSON round-trips it; `undefined` stays itself. */
@@ -1403,7 +1420,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             sessions: this.#sessions,
             session
           },
-          this.#chatHost(session, operationId, built, placed, live)
+          this.#chatHost(run, session, operationId, built, placed, live)
         );
         const input: ChatTurnInput = {
           session,
@@ -1477,6 +1494,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * `respond`, and the harness's hooks and recovery policy.
    */
   #chatHost(
+    run: TaskStep,
     session: ThinkSessionId,
     operationId: string,
     built: SessionBuild,
@@ -1488,12 +1506,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const hooks = this.#options.hooks;
     return {
       respond: async (call) =>
-        this.#respond(call, { session, operationId, built, placed, live }),
+        this.#respond(call, {
+          run,
+          session,
+          operationId,
+          built,
+          placed,
+          live
+        }),
       options: {
         recovery: {
           // The first attempt, then one per interruption it survives.
           maxAttempts: (recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS) + 1,
-          stallTimeoutMs: recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS
+          // The loop watches each model call itself: a tool may take longer
+          // than the model may stay silent.
+          stallTimeoutMs: 0
         }
       },
       hooks: {
@@ -1526,10 +1553,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           return true;
         },
         onRecovery: async (context) => {
+          const replyId = replyIdOf(live.partial);
           const partial =
-            context.partialParts.length > 0 && live.replyId !== undefined
+            context.partialParts.length > 0 && replyId !== undefined
               ? ({
-                  id: live.replyId,
+                  id: replyId,
                   role: "assistant",
                   parts: context.partialParts
                 } as UIMessage)
@@ -1863,10 +1891,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       call.mode === "continue" ? call.messages.at(-1) : undefined;
     const before = continuing ? call.messages.slice(0, -1) : [...call.messages];
     const messageId = continuing?.id ?? crypto.randomUUID();
-    live.replyId = messageId;
     let reply = continuing;
     live.reply = reply;
     let steps = 0;
+    /** Whether this attempt made progress the transcript does not hold. */
+    let progressed = false;
     let pendingModel = true;
     let started = false;
     let finish: UIMessageChunk = { type: "finish" };
@@ -1886,6 +1915,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         );
         if (action._tag === "call-model") {
           const chunks: UIMessageChunk[] = [];
+          const stall = new AbortController();
           const model = await this.#modelCall(
             call,
             turn,
@@ -1893,9 +1923,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             reply,
             messageId,
             steps,
-            signal
+            AbortSignal.any([signal, stall.signal])
           );
-          for await (const chunk of untilAborted(model.stream, signal)) {
+          const stallTimeoutMs =
+            this.#options.recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+          for await (const chunk of untilAborted(
+            iterateWithStallWatchdog(model.stream, stallTimeoutMs, () =>
+              stall.abort(new ChatStreamStalledError("Model stream stalled"))
+            ),
+            signal
+          )) {
             if (chunk.type === "start") {
               if (started) continue;
               started = true;
@@ -1910,8 +1947,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             yield chunk;
           }
           if (signal.aborted) return;
-          const failure = model.error();
+          const stalled = stall.signal.aborted;
+          const failure = stalled ? stall.signal.reason : model.error();
           if (failure !== undefined) {
+            // What the failed call streamed is part of the reply kept.
+            const streamed = await continued(reply, chunks);
+            if (streamed) live.reply = settledPartial(streamed);
+            // A stall is an interruption: the next attempt continues.
+            if (stalled) throw new ModelCallError("retry", failure);
             try {
               await this.#extensions.hook("onError", {
                 error: failure,
@@ -1925,11 +1968,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               (await this.#extensions.hook("classifyError", {
                 error: failure
               })) ?? "fail";
+            if (kind === "context-overflow" && progressed) {
+              // This attempt ran model calls or tools the transcript does
+              // not hold yet: make room, then continue from what it
+              // streamed, as after an interruption, so nothing runs twice.
+              try {
+                await this.#handle(turn.session).compact();
+              } catch (error) {
+                console.warn(
+                  "ThinkHarness could not compact the session",
+                  error
+                );
+              }
+              throw new ModelCallError("retry", failure);
+            }
             throw new ModelCallError(kind, failure);
           }
           reply = await continued(reply, chunks);
           if (!reply) throw new Error("The model call produced no message");
           live.reply = reply;
+          progressed = true;
           steps += 1;
           pendingModel = lastStep(reply).some(
             (part) => isToolCallPart(part) && !part.providerExecuted
@@ -1961,6 +2019,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             yield next.value;
           }
           live.reply = reply;
+          progressed = true;
           continue;
         }
         yield finish;
@@ -2199,28 +2258,46 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         });
       }
     });
-    const settled = await Promise.race([
-      aborted,
-      Promise.all(
-        toRun.map(async (part) => {
-          const toolName = toolNameOf(part);
-          const tool = Object.hasOwn(tools, toolName)
-            ? tools[toolName]
-            : undefined;
-          const { toolCallId } = part;
-          const recorded = await call.step(
+    const maxAttempts =
+      this.#options.recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    // Each call's result is streamed as it finishes, so a reset after one
+    // of several leaves the finished ones in the reply.
+    const finished: { toolCallId: string; outcome: ToolOutcome }[] = [];
+    let wake = () => {};
+    let left = toRun.length;
+    const all = Promise.all(
+      toRun.map(async (part) => {
+        const toolName = toolNameOf(part);
+        const tool = Object.hasOwn(tools, toolName)
+          ? tools[toolName]
+          : undefined;
+        const { toolCallId } = part;
+        try {
+          // SAFETY: the step returns what the function below returns.
+          const recorded = (await turn.run.do(
             `tool:${stepIndex}:${toolCallId}`,
-            async (): Promise<{ outcome: ToolOutcome; input: unknown }> => {
+            TOOL_STEP,
+            async ({ attempt }) => {
               let input: unknown = part.input;
               // Removed since the model was offered it, or never offered.
               if (!tool) {
                 return {
-                  input,
+                  input: asJson(input),
                   outcome: {
                     ok: false,
                     errorText: `Tool "${toolName}" is no longer available.`
                   }
-                };
+                } as TaskJson;
+              }
+              // Started before with no result recorded: a reset cut it off.
+              if (
+                attempt > 1 &&
+                (toolRecovery(tool) === "report" || attempt - 1 >= maxAttempts)
+              ) {
+                return {
+                  input: asJson(input),
+                  outcome: { ok: false, errorText: INTERRUPTED_TOOL_ERROR }
+                } as TaskJson;
               }
               const decision = await this.#extensions.hook("beforeToolCall", {
                 session,
@@ -2228,19 +2305,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 toolCallId,
                 toolName,
                 input,
-                attempt: call.attempt
+                attempt
               });
               if (decision?.action === "block") {
                 return {
-                  input,
+                  input: asJson(input),
                   outcome: { ok: false, errorText: decision.reason }
-                };
+                } as TaskJson;
               }
               if (decision?.action === "substitute") {
                 return {
-                  input,
-                  outcome: { ok: true, output: decision.output }
-                };
+                  input: asJson(input),
+                  outcome: { ok: true, output: asJson(decision.output) }
+                } as TaskJson;
               }
               if (decision?.action === "run" && decision.input !== undefined) {
                 input = decision.input;
@@ -2267,10 +2344,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 outcome: outcome.ok
                   ? { ok: true, output: asJson(outcome.output) }
                   : outcome
-              };
+              } as TaskJson;
             }
-          );
-          if (signal.aborted) return undefined;
+          )) as unknown as { outcome: ToolOutcome; input: unknown };
+          if (signal.aborted) return;
           await this.#extensions.hook("afterToolCall", {
             session,
             operationId,
@@ -2280,26 +2357,44 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             attempt: call.attempt,
             ...recorded.outcome
           });
-          return { toolCallId, outcome: recorded.outcome };
-        })
-      )
-    ]);
-    // Aborted while they ran: the stop settles the calls.
-    if (settled === "aborted" || signal.aborted) return current;
-    for (const result of settled) {
-      if (!result) continue;
-      const { toolCallId, outcome } = result;
-      current = withToolPart(current, toolCallId, (part) =>
-        withOutcome(part, outcome)
-      );
-      yield outcome.ok
-        ? { type: "tool-output-available", toolCallId, output: outcome.output }
-        : {
-            type: "tool-output-error",
-            toolCallId,
-            errorText: outcome.errorText
-          };
+          finished.push({ toolCallId, outcome: recorded.outcome });
+        } finally {
+          left -= 1;
+          wake();
+        }
+      })
+    );
+    while (left > 0 || finished.length > 0) {
+      if (finished.length === 0) {
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            wake = resolve;
+          }),
+          aborted,
+          all
+        ]);
+      }
+      // Aborted while they ran: the stop settles the calls.
+      if (signal.aborted) return current;
+      for (const { toolCallId, outcome } of finished.splice(0)) {
+        current = withToolPart(current, toolCallId, (part) =>
+          withOutcome(part, outcome)
+        );
+        yield outcome.ok
+          ? {
+              type: "tool-output-available",
+              toolCallId,
+              output: outcome.output
+            }
+          : {
+              type: "tool-output-error",
+              toolCallId,
+              errorText: outcome.errorText
+            };
+      }
     }
+    // A step that ended the attempt (a reset, a suspension) ends it here.
+    await all;
     return current;
   }
 
@@ -2325,10 +2420,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     };
     // A run carried forward from a released version and not placed yet
     // has that version's stream and progress.
+    const placed = this.#tasks.checkpointOf<Placed>(runId, PLACED_KEY);
     const legacy =
-      live === undefined &&
-      this.#tasks.checkpointOf<Placed>(runId, PLACED_KEY) === undefined
+      live === undefined && placed === undefined
         ? this.#tasks.checkpointOf<TurnState>(runId, TURN_KEY)
+        : undefined;
+    // A new reply goes under the question it answers (a regenerated one is
+    // a branch there); a continued one is already in place.
+    const parentId = legacy
+      ? (legacy.parentId ?? undefined)
+      : placed && "continues" in placed && !placed.continues
+        ? placed.questionId
         : undefined;
     const streamId = legacy
       ? (legacy.streamId ?? undefined)
@@ -2387,7 +2489,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       return undefined;
     }
     await this.#commit(run, session, open ? streamId : undefined, (put) =>
-      put(keep, legacy?.parentId ? { parentId: legacy.parentId } : {})
+      put(keep, parentId !== undefined ? { parentId } : {})
     );
     // A stream the turn errored is not settled again by the commit.
     drop();

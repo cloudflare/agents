@@ -610,6 +610,8 @@ describe("ThinkHarness durability", () => {
     // The partial text survived, and the continuation wrote into the same
     // message.
     expect(messages[1]).toMatch(/^assistant: x+ continued$/);
+    // `onRecovery` was shown the partial reply.
+    expect(await stub.recoveryPartial()).toEqual(expect.any(String));
     expect(await stub.streamRows()).toBe(0);
   });
 
@@ -971,6 +973,89 @@ describe("ThinkHarness durability", () => {
     await stub.release();
   });
 
+  it("reports an approved tool call a reset cut off, instead of running it again", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await stub.prompt("approve gate");
+    const [call] = await stub.lastToolCalls();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    await stub.gateStarted(1);
+
+    stub = await crash(name);
+    await stub.release();
+    await runDurableObjectAlarm(stub);
+    expect(text(await stub.wait(receipt.operationId))).toMatch(
+      /^tool said: error: The tool call was interrupted/
+    );
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
+  it("keeps a finished tool's result when a reset cuts off the other call of its step", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("multiply and gate");
+    await stub.gateStarted(1);
+    await stub.streamed("tool-output-available");
+
+    stub = await crash(name);
+    await stub.release();
+    await runDurableObjectAlarm(stub);
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect(await stub.multiplyRuns()).toBe(1);
+    expect(await stub.gateRuns()).toBe(1);
+    expect((await stub.messages())[1]).toMatch(
+      /^assistant: \[multiply output-available\] \[gate output-error\]/
+    );
+  });
+
+  it("does not hold a slow tool to the model's stall timeout", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    const receipt = await stub.submit("gate");
+    await stub.gateStarted(1);
+    // Silent for several stall timeouts while the tool runs.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await stub.release();
+    expect(text(await stub.wait(receipt.operationId))).toBe(
+      "tool said: released after 1 runs"
+    );
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
+  it("does not run a tool again when the call after it overflows the context", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("multiply then overflow");
+    await runDurableObjectAlarm(stub);
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("done");
+    expect(await stub.multiplyRuns()).toBe(1);
+  });
+
+  it("keeps the text a failed call after a tool streamed", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("multiply then fail");
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "model exploded"
+    });
+    expect((await stub.messages())[1]).toMatch(
+      /^assistant: \[multiply output-available\] partial$/
+    );
+  });
+
+  it("keeps a failed regeneration's partial as a branch under its question", async () => {
+    const stub = fresh();
+    await stub.prompt("flaky");
+    const [question] = await stub.messageIds();
+    const receipt = await stub.regenerate();
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    expect(await stub.branches(question ?? "")).toBe(2);
+  });
+
   it("does not run a finished tool again after a reset in the model call that follows it", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
@@ -1093,10 +1178,12 @@ describe("ThinkHarness's own Tasks", () => {
     let root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
     const operationId = await root.childSubmit("gate");
     await root.childGateStarted();
-
-    await abortAllDurableObjects();
-    root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    // While the tool runs, the open run becomes the released store's
+    // operation, as that version left it; then the object is reset.
     await root.childDowngradeToStore();
+    expect(await root.childStoreTables()).toMatchObject({
+      cf_think_harness_store_operations: 1
+    });
     await abortAllDurableObjects();
     root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
     const result = root.childWait(operationId);

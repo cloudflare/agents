@@ -33,6 +33,8 @@ import type {
 const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
+const MULTIPLY_RUNS_KEY = "test:multiply:runs";
+const RECOVERY_PARTIAL_KEY = "test:recovery:partial";
 const SYSTEM_KEY = "test:system";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
@@ -165,6 +167,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     this.#releaseSlow = resolve;
   });
   #overflowed = false;
+  #toolOverflowed = false;
+  #flakyCalls = 0;
+  /** The recovery options, which a test may change while the object runs. */
+  readonly #recovery: { stallTimeoutMs?: number } = {};
   /** Sessions that have context: the context session and its forks. */
   readonly #contextSessions = new Set<string>([CONTEXT_SESSION]);
   /** Sessions handles, as configureSession hands them over. */
@@ -175,6 +181,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new ThinkHarness({
     tasks: this.tasks,
     system: "You are a test.",
+    recovery: this.#recovery,
     model: new MockLanguageModelV4({
       doStream: async ({ prompt, tools }) => {
         // SAFETY: the mock's prompt is the provider's message list.
@@ -190,7 +197,20 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         multiply: tool({
           description: "Multiply by three",
           inputSchema: z.object({ value: z.number() }),
-          execute: async ({ value }) => value * 3
+          execute: async ({ value }) => {
+            const kv = this.ctx.storage.kv;
+            kv.put(
+              MULTIPLY_RUNS_KEY,
+              (kv.get<number>(MULTIPLY_RUNS_KEY) ?? 0) + 1
+            );
+            return value * 3;
+          }
+        }),
+        approve_gate: tool({
+          description: "Needs approval, then waits until released",
+          inputSchema: z.object({}),
+          needsApproval: true,
+          execute: () => this.#gate()
         }),
         gate: tool({
           description: "Wait until released",
@@ -269,6 +289,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     },
     hooks: {
       classifyError: classifyContextOverflow,
+      onRecovery: ({ partial }) => {
+        this.ctx.storage.kv.put(RECOVERY_PARTIAL_KEY, partial?.id ?? null);
+        return "continue";
+      },
       beforeTurn: async ({ toolSet, session, system: built }) => {
         // As an extension's `sendMessage` from this hook does.
         if (this.ctx.storage.kv.get<boolean>(NOTE_IN_BEFORE_TURN_KEY)) {
@@ -393,7 +417,25 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       // The model call after the tool's step streams, then holds.
       return this.#slow(12);
     }
-    if (last?.role === "tool") {
+    const firstText = contentText(first?.content);
+    if (
+      last?.role === "tool" &&
+      firstText === "multiply then overflow" &&
+      !this.#toolOverflowed
+    ) {
+      this.#toolOverflowed = true;
+      parts = [
+        { type: "stream-start", warnings: [] },
+        { type: "error", error: new Error("context_length_exceeded") }
+      ];
+    } else if (last?.role === "tool" && firstText === "multiply then fail") {
+      parts = [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "t" },
+        { type: "text-delta", id: "t", delta: "partial" },
+        { type: "error", error: new Error("model exploded") }
+      ];
+    } else if (last?.role === "tool") {
       parts = textReply(`tool said: ${toolResultText(last.content)}`);
     } else if (last?.role === "assistant") {
       parts = textReply("continued");
@@ -426,6 +468,28 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([{ name: "gate" }]);
       } else if (text === "gate" || text === "gate-safe") {
         parts = callReply([{ name: text === "gate" ? "gate" : "gate_safe" }]);
+      } else if (text === "approve gate") {
+        parts = callReply([{ name: "approve_gate" }]);
+      } else if (
+        text === "multiply and gate" ||
+        text === "multiply then overflow" ||
+        text === "multiply then fail"
+      ) {
+        parts = callReply([
+          { name: "multiply", input: { value: 2 } },
+          ...(text === "multiply and gate" ? [{ name: "gate" }] : [])
+        ]);
+      } else if (text === "flaky") {
+        this.#flakyCalls++;
+        parts =
+          this.#flakyCalls === 1
+            ? textReply("echo: flaky")
+            : [
+                { type: "stream-start", warnings: [] },
+                { type: "text-start", id: "t" },
+                { type: "text-delta", id: "t", delta: "partial" },
+                { type: "error", error: new Error("model exploded") }
+              ];
       } else if (text === "approve") {
         parts = callReply([{ name: "dangerous" }]);
       } else if (text === "client") {
@@ -977,6 +1041,20 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   gateRuns(): number {
     return this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0;
+  }
+
+  multiplyRuns(): number {
+    return this.ctx.storage.kv.get<number>(MULTIPLY_RUNS_KEY) ?? 0;
+  }
+
+  /** The partial reply's id `onRecovery` last saw, or null for none. */
+  recoveryPartial(): string | null | undefined {
+    return this.ctx.storage.kv.get<string | null>(RECOVERY_PARTIAL_KEY);
+  }
+
+  /** Treat a model stream silent this long as stalled. */
+  setStallTimeout(ms: number): void {
+    this.#recovery.stallTimeoutMs = ms;
   }
 
   dangerousRuns(): number {
@@ -1603,7 +1681,33 @@ export class ThinkHarnessFacetChild extends Agent<Cloudflare.Env> {
 
   /** Rewrite the open runs as the released version's store had them. */
   downgradeToStore(): void {
-    downgradeToStore(this.ctx, this.lifecycle, this.harness, null);
+    // The sub-agent's harness keeps its runs on a Tasks of its own: the
+    // runs table that holds them names it.
+    const sql = this.ctx.storage.sql;
+    const table = sql
+      .exec<{ name: string }>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name LIKE 'cf_agents_task_runs%'`
+      )
+      .toArray()
+      .map((row) => row.name)
+      .find(
+        (name) =>
+          sql
+            .exec<{ n: number }>(
+              `SELECT COUNT(*) AS n FROM ${name}
+               WHERE definition = '__cf_think_harness_operation'`
+            )
+            .one().n > 0
+      );
+    if (!table) throw new Error("The harness has no open run");
+    downgradeToStore(
+      this.ctx,
+      this.lifecycle,
+      this.harness,
+      null,
+      table.slice("cf_agents_task_runs".length)
+    );
   }
 
   /** The harness store's tables left here, with their row counts. */
@@ -1682,7 +1786,9 @@ function downgradeToStore(
   ctx: DurableObjectState,
   lifecycle: Parameters<typeof forgetSchemaVersion>[0],
   harness: ThinkHarness,
-  abandonReason: string | null
+  abandonReason: string | null,
+  /** The suffix of the Tasks tables the harness's runs are in. */
+  tasks = ""
 ): void {
   // The released version kept no schema version for the harness.
   forgetSchemaVersion(lifecycle, harness.capabilityId);
@@ -1697,7 +1803,7 @@ function downgradeToStore(
       status: string;
       checkpoint: string | null;
     }>(
-      `SELECT run_id, input, status, checkpoint FROM cf_agents_task_runs
+      `SELECT run_id, input, status, checkpoint FROM cf_agents_task_runs${tasks}
        WHERE definition = '__cf_think_harness_operation'
          AND status IN ('pending', 'running')
        ORDER BY seq`
@@ -1740,7 +1846,7 @@ function downgradeToStore(
     if (run.status === "running") store.start(session, id);
     const started = sql
       .exec<{ step_name: string }>(
-        `SELECT step_name FROM cf_agents_task_steps
+        `SELECT step_name FROM cf_agents_task_steps${tasks}
          WHERE run_id = ? AND state = 'running'`,
         run.run_id
       )
@@ -1755,8 +1861,14 @@ function downgradeToStore(
         ])
       )
     });
-    sql.exec("DELETE FROM cf_agents_task_steps WHERE run_id = ?", run.run_id);
-    sql.exec("DELETE FROM cf_agents_task_runs WHERE run_id = ?", run.run_id);
+    sql.exec(
+      `DELETE FROM cf_agents_task_steps${tasks} WHERE run_id = ?`,
+      run.run_id
+    );
+    sql.exec(
+      `DELETE FROM cf_agents_task_runs${tasks} WHERE run_id = ?`,
+      run.run_id
+    );
   }
 }
 /** The table suffix of the instances the harness composes. */
