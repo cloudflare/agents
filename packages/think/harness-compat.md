@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**533 of 1333 (17 class-only, each with a successor) tests that construct Think pass (39%).** Across the whole suite, 832 of 1649.
+**535 of 1335 (17 class-only, each with a successor) tests that construct Think pass (40%).** Across the whole suite, 834 of 1651.
 
 A class-only test reaches its behaviour through something private to the
 Think class. It is left out of the headline, it has a successor that
@@ -42,7 +42,7 @@ end. The per-file counts below include it.
 | `cold-rpc-initialization.test.ts`      | 4 / 4     | 100% |
 | `connection-state.test.ts`             | 2 / 2     | 100% |
 | `context-upgrade.test.ts`              | 11 / 12   | 91%  |
-| `deliver-notice.test.ts`               | 7 / 7     | 100% |
+| `deliver-notice.test.ts`               | 9 / 9     | 100% |
 | `detached-reconcile-lane.test.ts`      | 0 / 1     | 0%   |
 | `durable-admission.test.ts`            | 4 / 9     | 44%  |
 | `empty-reply.test.ts`                  | 0 / 10    | 0%   |

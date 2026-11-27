@@ -1,8 +1,8 @@
 {
-  "total": 1649,
-  "passed": 832,
-  "needThink": 1333,
-  "needThinkPassed": 533,
+  "total": 1651,
+  "passed": 834,
+  "needThink": 1335,
+  "needThinkPassed": 535,
   "classOnly": 17,
   "mechanicsOnly": 0,
   "files": {
@@ -87,8 +87,8 @@
       "passed": 11
     },
     "deliver-notice.test.ts": {
-      "total": 7,
-      "passed": 7
+      "total": 9,
+      "passed": 9
     },
     "detached-reconcile-lane.test.ts": {
       "total": 1,
@@ -403,8 +403,10 @@
     "deliver-notice.test.ts > deliverNotice > accepts a markdown payload",
     "deliver-notice.test.ts > deliverNotice > annotates the web notice when informModel is true",
     "deliver-notice.test.ts > deliverNotice > appends a plain web notice to the transcript when informModel is false",
+    "deliver-notice.test.ts > deliverNotice > asks for a thread for a messenger notice out of a turn",
     "deliver-notice.test.ts > deliverNotice > defaults the delivery kind to notice",
     "deliver-notice.test.ts > deliverNotice > does not start a model turn (notices are assistant-only, no user turn)",
+    "deliver-notice.test.ts > deliverNotice > posts a messenger notice to its thread as given, and records it only with informModel",
     "deliver-notice.test.ts > deliverNotice > records the delivery kind on the notice message metadata",
     "deliver-notice.test.ts > deliverNotice > throws when a named channel cannot be resolved (fail fast)",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a clear before the replay drops it",

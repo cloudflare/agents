@@ -1087,7 +1087,11 @@ export class Think<
     const channelId = options?.channel ?? "web";
     await deliverChannelNotice(text, options, {
       channelId,
-      registry: undefined,
+      // Only the messengers so far (configureChannels() comes with C6): it
+      // names what a notice to one of them lacks.
+      registry: new Map(
+        (this.#messengers?.ids ?? []).map((id) => [id, { kind: "messenger" }])
+      ) as never,
       surface: async () =>
         this.#messengers?.noticeSurface(channelId, options?.thread) as never,
       addMessages: (messages) => this.addMessages(messages),

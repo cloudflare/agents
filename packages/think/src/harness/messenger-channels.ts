@@ -43,6 +43,8 @@ export type ThinkMessengerChannels = {
   readonly channels: Channels;
   /** Take a webhook for a messenger; `undefined` when none owns its path. */
   receive(request: Request): Promise<Response | undefined>;
+  /** The messengers' ids. */
+  readonly ids: readonly string[];
   /** Where a notice to messenger `id`'s `thread` is posted, if anywhere. */
   noticeSurface(
     id: string,
@@ -250,16 +252,15 @@ export function messengerChannels(options: {
 
   return {
     channels,
+    ids: definitions.map((definition) => definition.id),
     noticeSurface(id, thread) {
       const definition = definitions.find((d) => d.id === id);
       if (!definition || thread === undefined) return undefined;
       return {
         async post(text) {
           await chat().initialize();
-          return definition.adapter.postMessage(
-            thread,
-            typeof text === "string" ? { markdown: text } : text
-          );
+          // A string goes as plain text, as Think posts it.
+          return definition.adapter.postMessage(thread, text);
         }
       };
     },
