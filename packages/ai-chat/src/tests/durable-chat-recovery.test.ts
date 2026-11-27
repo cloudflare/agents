@@ -6,35 +6,6 @@ import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS, socketBarrier } from "./test-utils";
 import { MessageType } from "../types";
 
-/**
- * Wait until the recovery is over: its incident has a final status, no
- * chat-turn run (the attempt's own included) is open or waiting out a
- * backoff, and the chat is idle. A stop writes the final status while the
- * attempt still runs, so the status alone ends too early.
- */
-async function recoveryEnded(agentStub: {
-  getChatRecoveryIncidentsForTest(): Promise<unknown>;
-  chatTurnRunsInFlightForTest(): Promise<number>;
-  waitForIdleForTest(): Promise<unknown>;
-}): Promise<void> {
-  await expect
-    .poll(
-      async () =>
-        (
-          (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-            status?: string;
-          }>
-        )[0]?.status,
-      { timeout: 10_000 }
-    )
-    .toMatch(/^(skipped|exhausted|completed|failed)$/);
-  // Pending includes a run waiting out a backoff.
-  await expect
-    .poll(() => agentStub.chatTurnRunsInFlightForTest(), { timeout: 10_000 })
-    .toBe(0);
-  await agentStub.waitForIdleForTest();
-}
-
 /** Every frame `ws` receives from now on, parsed. */
 function seenFrames(ws: WebSocket): unknown[] {
   const frames: unknown[] = [];
