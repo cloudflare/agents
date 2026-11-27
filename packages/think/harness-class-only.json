@@ -499,5 +499,14 @@
       "file": "submissions.test.ts",
       "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays running when a reset also cuts its recovery, then completes once"
     }
+  },
+  {
+    "file": "turn-metadata.test.ts",
+    "test": "turn metadata > strips reserved metadata keys from client-supplied messages at intake",
+    "reason": "Writes through Think's private intake seam `_persistIncomingMessage`, without a request.",
+    "successor": {
+      "file": "turn-metadata.test.ts",
+      "test": "turn metadata > strips reserved metadata keys a client's chat request sends"
+    }
   }
 ]
