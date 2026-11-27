@@ -2117,6 +2117,56 @@ describe("Think — host bridge methods", () => {
     expect(inside).toBe(false);
   });
 
+  it("sends a client the transcript addMessages changes outside a turn, before and after one", async () => {
+    // What the class's `_insideInferenceLoop` flag decides, through public
+    // behaviour: outside a turn, `addMessages` broadcasts the transcript.
+    const room = `host-loop-broadcast-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    const ws = await connectWS("ThinkTestAgent", room);
+    try {
+      const transcript = (id: string) =>
+        new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error(`no transcript with ${id}`)),
+            5000
+          );
+          const handler = (e: MessageEvent) => {
+            const msg = JSON.parse(e.data as string) as {
+              type?: string;
+              messages?: Array<{ id: string }>;
+            };
+            if (
+              msg.type === "cf_agent_chat_messages" &&
+              msg.messages?.some((message) => message.id === id)
+            ) {
+              clearTimeout(timer);
+              ws.removeEventListener("message", handler);
+              resolve();
+            }
+          };
+          ws.addEventListener("message", handler);
+        });
+      const note = (id: string): UIMessage => ({
+        id,
+        role: "user",
+        parts: [{ type: "text", text: id }]
+      });
+      const before = transcript("before-a-turn");
+      expect(
+        await agent.addMessagesExpectingError([note("before-a-turn")])
+      ).toBeNull();
+      await before;
+      await agent.testChat("Hello");
+      const after = transcript("after-a-turn");
+      expect(
+        await agent.addMessagesExpectingError([note("after-a-turn")])
+      ).toBeNull();
+      await after;
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
   it("_hostSetContext writes to a context block", async () => {
     const agent = await freshSessionAgent("host-set-ctx");
     await agent.hostSetContext("memory", "Set via host bridge");
