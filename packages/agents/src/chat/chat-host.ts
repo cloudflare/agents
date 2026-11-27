@@ -1080,6 +1080,8 @@ export function chatTurnDefinition(
     };
     // The reply this turn stored, when it stored one.
     let finalReply: UIMessage | undefined;
+    // The transcript the turn read (repaired), once it read it.
+    let turnTranscript: UIMessage[] | undefined;
     const report = async (
       result: ChatTurnResult,
       /** The model's own error chunk ended it: sent as an error frame. */
@@ -1118,7 +1120,16 @@ export function chatTurnDefinition(
       const sendTranscript = async (exceptOrigin: boolean) => {
         const sockets = deps.webSockets;
         if (!sockets) return;
-        const history = (await session.getHistory()) as UIMessage[];
+        // The transcript the turn read, with its stored reply: read again
+        // only when the turn ended before it read one.
+        const history = turnTranscript
+          ? finalReply
+            ? [
+                ...turnTranscript.filter((m) => m.id !== finalReply?.id),
+                finalReply
+              ]
+            : turnTranscript
+          : ((await session.getHistory()) as UIMessage[]);
         // With the messages the waiting requests hold, named as queued.
         const text = frameText({
           type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
@@ -1524,6 +1535,7 @@ export function chatTurnDefinition(
       return (await session.getHistory(leaf)) as unknown as UIMessage[];
     };
     const messages = await history();
+    turnTranscript = messages;
     // "Continue the last turn", decided before anything is stored: with no
     // reply, or a reply still waiting on the client, there is nothing to
     // continue; a reply that holds nothing is removed and its question is
