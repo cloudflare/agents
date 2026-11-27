@@ -416,6 +416,14 @@ const DISCARDED_CHECKPOINT = "chat:discarded";
  * counted so far (attempts, progress, interrupted attempts), read by the
  * next attempt that finds this one cut off.
  */
+/**
+ * The run's checkpoint key for what the host's turn stashed for its own
+ * recovery (`ChatModelCall.checkpoint`): handed back to `onRecovery` as
+ * `recoveryData`.
+ *
+ * @internal
+ */
+export const CHAT_STASH_CHECKPOINT = "chat:stash";
 const INCIDENT_CHECKPOINT = "chat:incident";
 
 /**
@@ -1501,7 +1509,13 @@ export function chatTurnDefinition(
           requestId,
           partialText,
           partialParts,
-          recoveryData: null,
+          // What the turn stashed, and the request it was sent with.
+          recoveryData: step.checkpoint.get(CHAT_STASH_CHECKPOINT) ?? null,
+          ...(run.body !== undefined && { lastBody: { ...run.body } }),
+          ...(run.clientTools !== undefined &&
+            run.clientTools.length > 0 && {
+              lastClientTools: [...run.clientTools]
+            }),
           messages: (await session.getHistory()) as unknown as UIMessage[],
           createdAt: step.createdAt
         });

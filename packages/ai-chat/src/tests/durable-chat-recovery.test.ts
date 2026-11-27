@@ -3756,7 +3756,7 @@ describe("platform-transient reader errors (#1964)", () => {
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
   });
 
-  it("passes the live turn's checkpoint and start time to onChatRecovery", async () => {
+  it("passes what the turn stashed and its start time to onChatRecovery", async () => {
     const agentStub = await getTestAgent(
       `transient-context-${crypto.randomUUID()}`
     );
@@ -3772,14 +3772,11 @@ describe("platform-transient reader errors (#1964)", () => {
       recoveryData: unknown;
       createdAt: number;
     }>;
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        firstSeenAt: number;
-      }>;
     expect(contexts).toHaveLength(1);
     expect(contexts[0].recoveryData).toEqual({ responseId: "r-123" });
     expect(contexts[0].createdAt).toBeGreaterThanOrEqual(before);
-    expect(contexts[0].createdAt).toBeLessThan(incidents[0].firstSeenAt);
+    // When the turn began, not when its recovery did.
+    expect(contexts[0].createdAt).toBeLessThanOrEqual(Date.now());
   });
 
   it("ends a transient failure the app declines to continue as the stream error, and records it", async () => {

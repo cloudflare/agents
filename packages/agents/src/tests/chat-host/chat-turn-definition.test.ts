@@ -311,6 +311,44 @@ describe("chatTurnDefinition", () => {
     });
   });
 
+  it("hands onRecovery what the turn stashed and the request it was sent with", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const seen: Array<Record<string, unknown>> = [];
+      const kept = new Map<string, unknown>([
+        ["chat:stash", { responseId: "r-123" }]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          ...instance.host.hooks,
+          onRecovery: (context) =>
+            void seen.push({
+              recoveryData: context.recoveryData,
+              lastBody: context.lastBody,
+              lastClientTools: context.lastClientTools
+            })
+        }
+      })(
+        {
+          trigger: "submit-message",
+          body: { model: "m" },
+          clientTools: [{ name: "pick", description: "Pick one" }]
+        },
+        laterAttempt("run-1", 2, undefined, kept)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
+      expect(seen).toEqual([
+        {
+          recoveryData: { responseId: "r-123" },
+          lastBody: { model: "m" },
+          lastClientTools: [{ name: "pick", description: "Pick one" }]
+        }
+      ]);
+    });
+  });
+
   it("continues a turn cut off for the fourth time: the budget is ten attempts without progress", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
