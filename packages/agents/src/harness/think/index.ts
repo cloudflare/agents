@@ -44,6 +44,7 @@ export type {
   ThinkSessionContext,
   ThinkSessionId,
   ThinkSessionInfo,
+  ThinkShippedExtension,
   ThinkStepFinishContext,
   ThinkStreamCallback,
   ThinkSubmitOptions,

@@ -19,7 +19,7 @@ import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
 import type { ToolInvoke } from "../extensions/types";
-import { codemodeExtension, sandboxExecutor } from "../extensions/codemode";
+import { codemode, sandboxExecutor } from "../extensions/index";
 export { CodemodeSandbox } from "../extensions/codemode";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import {
@@ -2444,28 +2444,25 @@ export class ThinkCodemodeObject extends DurableObject<Cloudflare.Env> {
         execute: async ({ question }) => question
       })
     }),
+    // Installed as an app installs it, from the public entry.
     extensions: [
-      {
-        name: "codemode",
-        extension: codemodeExtension({
-          // In this isolate, or in the sandbox object once a test says so.
-          executor: {
-            execute: (code, providers) =>
-              (this.ctx.storage.kv.get<boolean>(SANDBOXED_KEY)
-                ? sandboxExecutor(
-                    this.env.CODEMODE_SANDBOX,
-                    this.ctx.id.toString()
-                  )
-                : new DynamicWorkerExecutor({
-                    loader: (this.env as unknown as { LOADER: WorkerLoader })
-                      .LOADER
-                  })
-              ).execute(code, providers)
-          },
-          direct: ["ask"]
-        }),
-        after: true
-      }
+      codemode({
+        // In this isolate, or in the sandbox object once a test says so.
+        executor: {
+          execute: (code, providers) =>
+            (this.ctx.storage.kv.get<boolean>(SANDBOXED_KEY)
+              ? sandboxExecutor(
+                  this.env.CODEMODE_SANDBOX,
+                  this.ctx.id.toString()
+                )
+              : new DynamicWorkerExecutor({
+                  loader: (this.env as unknown as { LOADER: WorkerLoader })
+                    .LOADER
+                })
+            ).execute(code, providers)
+        },
+        direct: ["ask"]
+      })
     ]
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);

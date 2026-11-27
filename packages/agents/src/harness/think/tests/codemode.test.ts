@@ -3,7 +3,7 @@ import { abortAllDurableObjects, runDurableObjectAlarm } from "cloudflare:test";
 import { tool } from "ai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { codemodeExtension } from "../extensions/codemode";
+import { codemode } from "../extensions/index";
 import { harnessHookRules } from "../extensions/hooks";
 import { loadInProcess } from "../extensions/in-process";
 import { ExtensionManager } from "../extensions/manager";
@@ -160,10 +160,10 @@ describe("codemode as an extension", () => {
       "codemode",
       loadInProcess(
         "codemode",
-        codemodeExtension({
+        codemode({
           executor: { execute: async () => ({ result: null }) },
           maxCatalogTokens: 80
-        })
+        }).extension
       )
     );
     const built = await manager.build("s");

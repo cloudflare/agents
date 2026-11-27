@@ -16,6 +16,7 @@ const entries = [
   "src/harness/opencode/index.ts",
   "src/harness/pi/index.ts",
   "src/harness/think/index.ts",
+  "src/harness/think/extensions/index.ts",
   "src/harness/container/index.ts",
   "src/harness/container/daemon/index.ts",
   "src/harness/container/runtime/index.ts",

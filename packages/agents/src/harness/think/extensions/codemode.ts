@@ -32,8 +32,14 @@ import {
 } from "@cloudflare/codemode";
 import { jsonSchema, type JSONSchema7 } from "ai";
 import type { ThinkExtension, ToolInvoke } from "./types";
+import type { ThinkShippedExtension } from "../types";
 
 /** @internal */
+/**
+ * Options for {@link codemode}.
+ *
+ * @experimental
+ */
 export type CodemodeOptions = {
   /** Runs the scripts. */
   readonly executor: Executor;
@@ -197,7 +203,7 @@ function report(
  * not the agent. The app exports the class from its Worker entry and
  * declares it (a binding and a migration); it keeps nothing.
  *
- * @internal
+ * @experimental
  */
 export class CodemodeSandbox extends DurableObject<{ LOADER: WorkerLoader }> {
   /** Run a script; its functions are stubs back to the caller. */
@@ -217,7 +223,7 @@ export class CodemodeSandbox extends DurableObject<{ LOADER: WorkerLoader }> {
  * An executor that runs each script in the agent's sandbox object, one
  * per agent (by `name`), instead of in this isolate.
  *
- * @internal
+ * @experimental
  */
 export function sandboxExecutor(
   sandbox: DurableObjectNamespace<CodemodeSandbox>,
@@ -241,8 +247,25 @@ export function sandboxExecutor(
   };
 }
 
-/** @internal */
-export function codemodeExtension(options: CodemodeOptions): ThinkExtension {
+/**
+ * Code Mode for ThinkHarness: the model gets one `code` tool, and the other
+ * tools become functions its script calls, each a recorded step with the
+ * tool hooks and approvals. Install it with
+ * `extensions: [codemode({ executor })]`.
+ *
+ * @experimental The API may change between releases.
+ */
+export function codemode(options: CodemodeOptions): ThinkShippedExtension {
+  // After the harness's own, so it sees every tool the session has.
+  return {
+    name: "codemode",
+    extension: codemodeTransforms(options),
+    after: true
+  };
+}
+
+/** Codemode's tool and prompt transforms. @internal */
+export function codemodeTransforms(options: CodemodeOptions): ThinkExtension {
   const direct = new Set(options.direct ?? []);
   const budget = options.maxCatalogTokens ?? DEFAULT_CATALOG_TOKENS;
   // Between one build's tools and prompt transforms, by session. Each

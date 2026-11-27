@@ -3178,6 +3178,7 @@
     "ThinkSessions.fork",
     "ThinkSessions.get",
     "ThinkSessions.list",
+    "ThinkShippedExtension",
     "ThinkStepFinishContext",
     "ThinkStreamCallback",
     "ThinkSubmitOptions",
@@ -3189,6 +3190,13 @@
     "ThinkTurnEndContext",
     "ThinkWhenBusy",
     "ToolRecovery"
+  ],
+  "agents/harness/think/extensions": [
+    "codemode",
+    "CodemodeOptions",
+    "CodemodeSandbox",
+    "CodemodeSandbox.run",
+    "sandboxExecutor"
   ],
   "agents/internal": "internal",
   "agents/lifecycle": [
