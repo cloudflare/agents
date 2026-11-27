@@ -21,6 +21,7 @@ import {
   type ChatTurnInput
 } from "./chat-host";
 import { frameText } from "./chat-frames";
+import { mergeUserMessages } from "./merge-user-messages";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { parseChatRequest } from "./protocol-dispatch";
@@ -78,6 +79,7 @@ export async function submitTurn(
   // already hold as they are, since a tab sends its whole list.
   const fresh: UIMessage[] = [];
   const arrival = options.arrival ?? "queue";
+  const replaced: string[] = [];
   // A turn that replaces the waiting ones answers their questions too: it
   // carries their messages, which they would have stored when they started.
   if (arrival !== "queue" && arrival !== "drop") {
@@ -94,6 +96,7 @@ export async function submitTurn(
       ) {
         continue;
       }
+      replaced.push(waiting.runId);
       for (const message of deps.tasks.inputOf<ChatTurnInput>(waiting.runId)
         ?.messages ?? []) {
         if (!(input.messages ?? []).some((m) => m.id === message.id)) {
@@ -107,6 +110,21 @@ export async function submitTurn(
     if (!stored || JSON.stringify(stored) !== JSON.stringify(message)) {
       fresh.push(message);
     }
+  }
+  // `merge` joins the queued questions into one message, which keeps the
+  // newest one's id (as the hosts' merge does).
+  if (
+    arrival === "merge" &&
+    fresh.filter((m) => m.role === "user").length > 1
+  ) {
+    const users = fresh.filter((m) => m.role === "user");
+    const merged = mergeUserMessages(users);
+    fresh.splice(
+      0,
+      fresh.length,
+      ...fresh.filter((m) => m.role !== "user"),
+      merged
+    );
   }
   const { messages: _messages, ...rest } = input;
   const given: ChatTurnInput = fresh.length
@@ -154,10 +172,23 @@ export async function submitTurn(
       idempotencyKey: options.idempotencyKey
     })
   });
-  return {
-    requestId: receipt.runId,
-    ...((receipt as { dropped?: boolean }).dropped && { dropped: true })
-  };
+  const dropped = (receipt as { dropped?: boolean }).dropped === true;
+  // The tabs learn that a replaced or dropped request ended without a
+  // reply (its turn never runs to say so).
+  for (const id of dropped ? [receipt.runId] : replaced) {
+    const text = frameText({
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      id,
+      body: "",
+      done: true,
+      outcome: "skipped"
+    } as { type: string });
+    if (text === undefined || !deps.webSockets) continue;
+    for (const connection of deps.webSockets.getConnections()) {
+      sendIfOpen(connection, text);
+    }
+  }
+  return { requestId: receipt.runId, ...(dropped && { dropped: true }) };
 }
 
 /** Stop the turn `requestId`, waiting or running. */
