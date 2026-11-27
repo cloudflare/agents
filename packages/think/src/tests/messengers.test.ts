@@ -1514,6 +1514,16 @@ describe("think messengers core", () => {
       expect(await agent.getRecorded("post")).toHaveLength(prompts.length);
     });
 
+    it("answers a messenger declared in configureChannels()", async () => {
+      const agent = await sendBurst(`configured-${crypto.randomUUID()}`, [
+        { id: "c1", text: "hello", threadId: "fake:dm" }
+      ]);
+      expect(await agent.getRecorded("prompt")).toEqual(["hello"]);
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content).at(-1)
+      ).toBe("Got it");
+    });
+
     it("labels a group speaker with the messenger's channelSpeakerLabel", async () => {
       const agent = await sendBurst("label-group", [
         {

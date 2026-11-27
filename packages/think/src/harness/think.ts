@@ -952,8 +952,27 @@ export class Think<
     // channels, and their deliveries register on Tasks, at construction. A
     // sub-agent mounts them too (its path is not known yet) but takes no
     // webhook.
+    // A messenger declared in `configureChannels()` mounts too, when it
+    // returns its channels at once; one it returns later cannot mount
+    // (checked at start).
+    // One that reads what its subclass sets up later is read at start.
+    let configured: ThinkChannels | Promise<ThinkChannels> | undefined;
+    try {
+      configured = this.configureChannels();
+    } catch {
+      configured = undefined;
+    }
+    if (configured instanceof Promise) {
+      // Read again at start; this one is not awaited.
+      configured.catch(() => {});
+      configured = undefined;
+    }
+    this.#configuredAtConstruction = configured;
     this.#messengers = messengerChannels({
-      messengers: this.getMessengers() as ThinkMessengers,
+      messengers: resolveChannels(
+        this.#configuredAtConstruction ?? {},
+        this.getMessengers() as ThinkMessengers
+      ).messengers as ThinkMessengers,
       harness: this.harness,
       tasks: this.tasks,
       root: () => this.parentPath.length === 0,
@@ -996,10 +1015,19 @@ export class Think<
       await this.#context.load();
       // As in Think: the channel registry, read at start on the root.
       if (this.parentPath.length === 0) {
-        this.#channels = resolveChannels(
-          await this.configureChannels(),
+        const resolved = resolveChannels(
+          this.#configuredAtConstruction ?? (await this.configureChannels()),
           this.getMessengers() as ThinkMessengers
-        ).channels;
+        );
+        this.#channels = resolved.channels;
+        const unmounted = Object.keys(resolved.messengers).filter(
+          (id) => !this.#messengers?.ids.includes(id)
+        );
+        if (unmounted.length > 0) {
+          throw new Error(
+            `Messenger channels ${unmounted.map((id) => `"${id}"`).join(", ")} come from an async configureChannels(): the harness-backed Think mounts messengers at construction, so declare them in getMessengers() or return them from configureChannels() synchronously`
+          );
+        }
       }
       if (this.extensionLoader) {
         this.extensionManager = createThinkExtensionManager({
@@ -1677,6 +1705,8 @@ export class Think<
       : undefined;
   }
 
+  /** What `configureChannels()` returned at construction, when not a promise. */
+  #configuredAtConstruction: ThinkChannels | undefined;
   /** The channel registry, read at start (none on a sub-agent). */
   #channels: Map<string, NormalizedChannelDefinition> | undefined;
   /** The running operation's channel, resolved at its first model call. */

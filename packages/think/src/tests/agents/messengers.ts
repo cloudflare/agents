@@ -10,6 +10,8 @@ import {
   sendMessengerReply
 } from "../../messengers/reply-task";
 import { telegramMessenger } from "../../messengers/telegram";
+import { messengerChannel } from "../../channels";
+import type { ThinkChannels } from "../../channels";
 import {
   chatSdkMessenger,
   type MessengerEvent,
@@ -282,7 +284,20 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     } as LanguageModel;
   }
 
+  /**
+   * An agent named `configured-…` declares its messenger in
+   * `configureChannels()` instead of `getMessengers()`.
+   */
+  override configureChannels(): ThinkChannels {
+    if (!this.name.startsWith("configured-")) return {};
+    return { fake: messengerChannel(this._messengers().fake) };
+  }
+
   override getMessengers(): ThinkMessengers {
+    return this.name.startsWith("configured-") ? {} : this._messengers();
+  }
+
+  private _messengers(): ThinkMessengers {
     // #2313: an agent named `queue-…` answers each message as it arrives.
     if (this.name.startsWith("queue-")) this.messengerConcurrency = "queue";
     // An agent named `tg-…` talks to the fake Telegram Bot API (the test
