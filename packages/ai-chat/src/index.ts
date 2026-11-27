@@ -2483,8 +2483,8 @@ export class AIChatAgent<
     kind: "continue" | "retry",
     data: ChatRecoveryContinueData & ChatRecoveryRetryData
   ): Promise<void> {
-    const requestId = data.originalRequestId;
-    if (requestId === undefined) return;
+    // An old payload may not name its request: the turn still runs.
+    const requestId = data.originalRequestId ?? nanoid();
     await this._forgetReleasedIncidents(requestId);
     if (await this.tasks.get(requestId)) return;
     const leaf = await this.#session.getLatestLeaf();

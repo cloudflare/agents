@@ -497,6 +497,118 @@ describe("chatTurnDefinition", () => {
     });
   });
 
+  it.each([
+    {
+      name: "past the work budget, however much it streams",
+      // 3 chunks are stored; 2000 chunks of work were counted before.
+      counted: { progress: 2_000, workBaseline: 0, lastProgressAt: Date.now() },
+      recovery: { maxRecoveryWork: 100 },
+      reason: "work_budget_exceeded"
+    },
+    {
+      name: "after the no-progress window, below the attempt limit",
+      counted: {
+        progress: 1_000,
+        workBaseline: 1_000,
+        lastProgressAt: Date.now() - 10 * 60_000
+      },
+      recovery: {},
+      reason: "no_progress_timeout"
+    },
+    {
+      name: "after a custom no-progress window",
+      counted: {
+        progress: 1_000,
+        workBaseline: 1_000,
+        lastProgressAt: Date.now() - 5_000
+      },
+      recovery: { noProgressTimeoutMs: 1_000 },
+      reason: "no_progress_timeout"
+    },
+    {
+      name: "when shouldKeepRecovering says no",
+      counted: {
+        progress: 1_000,
+        workBaseline: 1_000,
+        lastProgressAt: Date.now()
+      },
+      recovery: { shouldKeepRecovering: () => false },
+      reason: "recovery_aborted"
+    }
+  ])("gives up a cut-off turn $name", async ({ counted, recovery, reason }) => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const reasons: string[] = [];
+      const kept = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 1,
+            maxAttempts: 10,
+            status: "attempting",
+            firstSeenAt: Date.now() - 20 * 60_000,
+            lastAttemptAt: Date.now() - 60_000,
+            ...counted
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: {
+          recovery: {
+            ...recovery,
+            onExhausted: (context) => void reasons.push(context.reason)
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, kept)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "error" });
+      expect(reasons).toEqual([reason]);
+      expect(instance.calls).toEqual([]);
+    });
+  });
+
+  it("counts attempts that come within half a minute without progress as one: a reconnect storm does not spend the budget", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      // The attempt limit was reached a second ago, with nothing streamed
+      // since: this is the same burst.
+      const kept = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 2,
+            maxAttempts: 2,
+            status: "attempting",
+            firstSeenAt: Date.now() - 5_000,
+            lastAttemptAt: Date.now() - 1_000,
+            progress: 1_000,
+            workBaseline: 1_000
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: { recovery: { maxAttempts: 2 } }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, kept)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
+      expect(kept.get("chat:incident")).toMatchObject({ attempt: 2 });
+    });
+  });
+
   it("hands onRecovery what the turn stashed and the request it was sent with", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
