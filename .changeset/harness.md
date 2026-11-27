@@ -18,4 +18,4 @@ Experimental harnesses and Channels.
 - ThinkHarness now answers turns on AI SDK 6. It streamed a reply through `toUIMessageStream`, which only AI SDK 7 exports, so every turn failed on 6.
 - Channels: after a reset cut a run, a surface gets the rerun's answer once. A cut response that finished nothing is no longer posted beside the rerun's; one that finished a step is still posted. A Chat SDK Channel starts a native stream only with the first text, so an empty response posts nothing.
 - ThinkHarness ends a model call at an in-band stream error, so a provider that reports an error and leaves its stream open no longer hangs the turn.
-- ThinkHarness: `onChunk` and session watchers also get a reply's `start` chunk when the model sent none of its own (the harness made one), so what they see matches what the stream stores.
+- ThinkHarness's `onChunk` also gets a reply's `start` chunk when the model sent none (the harness makes one), so it sees what the reply's stream stores.
