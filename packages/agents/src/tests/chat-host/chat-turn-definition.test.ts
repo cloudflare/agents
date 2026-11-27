@@ -1055,4 +1055,30 @@ describe("chatTurnDefinition", () => {
       expect(ids).not.toContain("u1");
     });
   });
+
+  it("reads the whole path when the hydration budget is zero or not finite", async () => {
+    for (const budget of [0, -1, Number.POSITIVE_INFINITY]) {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        await instance.lifecycle.start();
+        const session = instance.sessions.session("s1");
+        for (const id of ["u1", "u2", "u3"]) {
+          await session.appendMessage({
+            id,
+            role: "user",
+            parts: [{ type: "text", text: "x".repeat(2000) }]
+          } as never);
+        }
+        await definitionOf(instance, {
+          ...instance.host,
+          options: { hydrationByteBudget: budget }
+        })({ trigger: "server" }, laterAttempt("h-2", 1));
+        expect(instance.calls[0].messages.map((m) => m.id)).toEqual([
+          "u1",
+          "u2",
+          "u3"
+        ]);
+      });
+    }
+  });
 });
