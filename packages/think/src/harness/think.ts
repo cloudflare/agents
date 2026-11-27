@@ -130,6 +130,8 @@ import {
 } from "../extensions/wiring";
 import { stampTurnContext, turnMetadataFromMessages } from "../turn-metadata";
 import type {
+  ChatErrorContext,
+  ContextOverflowConfig,
   ExtensionConfig,
   MessageMetadataCallback,
   OnStartDegradation
@@ -431,6 +433,12 @@ export class Think<
    * `beforeTurn` may return its own `messageMetadata` instead.
    */
   messageMetadata?: MessageMetadataCallback;
+
+  /**
+   * Opt-in handling for a turn that overflows the context window, as on
+   * Think. Unset leaves an overflow terminal.
+   */
+  contextOverflow?: ContextOverflowConfig;
 
   readonly harness: ThinkHarness;
   readonly #chat: ThinkChat;
@@ -803,6 +811,8 @@ export class Think<
             : { ...kept, parts: [] };
         },
         onRecovery: (context) => this.#onRecovery(context),
+        onContextOverflow: ({ operationId }) =>
+          this.#onContextOverflow(operationId),
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
           // As in Think, the final-answer tool is plumbing: no hook sees it.
@@ -2128,7 +2138,7 @@ export class Think<
 
   onChatResponse(_result: ChatResponseResult): void | Promise<void> {}
 
-  onChatError(error: unknown): unknown {
+  onChatError(error: unknown, _ctx?: ChatErrorContext): unknown {
     return error;
   }
 
@@ -3280,7 +3290,14 @@ export class Think<
           // "aborted" is the harness's reason for a stop, and "withdrawn" for
           // a stop that reached the turn while it waited (see `saveResult`).
           if (error === "aborted" || error === "withdrawn") return;
-          const wrapped = this.onChatError(new Error(error));
+          const wrapped = this.#overflowErrors.delete(error)
+            ? this.onChatError(new Error(error), {
+                requestId: operationId,
+                stage: "stream",
+                messagesPersisted: true,
+                classification: "context_overflow"
+              })
+            : this.onChatError(new Error(error));
           return callback.onError(errorText(wrapped));
         }
       });
@@ -4080,9 +4097,45 @@ export class Think<
     }
   }
 
+  /**
+   * As in Think: with `contextOverflow.reactive`, an overflowing call
+   * compacts the session and the turn runs again, `beforeTurn` included.
+   * Without it, or when compaction can't shorten the history, the
+   * overflow ends the turn.
+   */
+  async #onContextOverflow(operationId: string): Promise<boolean> {
+    if (!this.contextOverflow?.reactive) return false;
+    let shortened = false;
+    try {
+      shortened = Boolean(await this.session.compact());
+    } catch (error) {
+      console.warn(
+        `[Think] context-overflow compaction failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    this._emit("chat:context:compacted", {
+      reason: "reactive",
+      shortened,
+      requestId: operationId,
+      attempt: 1
+    });
+    if (shortened && this.#ownTurn?.operationId === operationId) {
+      // The retry is the same turn run again: its hooks run again.
+      this.#ownTurn = undefined;
+      this.#extensionTurn = undefined;
+    }
+    return shortened;
+  }
+
   #classify(error: unknown): ThinkErrorClass {
     const classification = this.classifyChatError(error);
-    if (classification === "context_overflow") return "context-overflow";
+    if (classification === "context_overflow") {
+      // The turn's caller hears it as an overflow, as on Think.
+      this.#overflowErrors.add(
+        error instanceof Error ? error.message : String(error)
+      );
+      return "context-overflow";
+    }
     // As on Think: a transient or rate-limited error is tried again within
     // chatRecovery's budget. An app's own classification wins; without one,
     // a platform transient (a lost connection) is tried again too.
@@ -4094,6 +4147,9 @@ export class Think<
     }
     return "fail";
   }
+
+  /** Error texts classified as a context overflow, until reported. */
+  readonly #overflowErrors = new Set<string>();
 
   /** The root session's Sessions handle, which the harness hands over on first use. */
   async #rootHandle(): Promise<Session> {
