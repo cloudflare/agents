@@ -2379,6 +2379,9 @@ export class ThinkTestAgent extends Think {
   private _capturedTurnChannels: string[] = [];
   private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
   private _beforeTurnThrowChannel: string | null = null;
+  // Read by configureChannels(): a field is set only after the base
+  // constructor, so the registry must be read at start.
+  private readonly _voiceInstructions = "VOICE MODE";
 
   override configureChannels() {
     return {
@@ -2390,7 +2393,7 @@ export class ThinkTestAgent extends Think {
       voice: {
         kind: "voice" as const,
         ingress: { transport: "voice" as const },
-        instructions: "VOICE MODE",
+        instructions: this._voiceInstructions,
         tools: () => ({}),
         maxTurns: 3
       }

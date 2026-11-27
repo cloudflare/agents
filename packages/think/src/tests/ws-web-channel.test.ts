@@ -177,6 +177,26 @@ describe("Think — WebSocket chat runs on the web channel (#2255)", () => {
     ws.close();
   });
 
+  it("continues a voice reply on voice after its web regeneration fails in beforeTurn", async () => {
+    const { agent, ws } = await freshAgent();
+    await agent.runChannelTurnForTest({ input: "hello", channel: "voice" });
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const voiceUser = stored.find((m) => m.role === "user");
+    await agent.setBeforeTurnThrowChannelForTest("web");
+
+    await sendChat(
+      ws,
+      [{ ...voiceUser!, metadata: undefined }],
+      "regenerate-message"
+    );
+    await agent.setBeforeTurnThrowChannelForTest(null);
+    await agent.resetCapturedTurnChannelsForTest();
+
+    await agent.runChannelTurnForTest({ continuation: true });
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual(["voice"]);
+    ws.close();
+  });
+
   it("extends the channel an explicit-channel continuation ran on", async () => {
     const { agent, ws } = await freshAgent();
     await sendChat(ws, [userMessage("hello")]);

@@ -71,6 +71,7 @@ import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
 import {
   CONTEXT_RECORD_KIND,
+  CONTEXT_REMINDER_MESSAGE_ID,
   type Context,
   type PreparedTurn
 } from "../../context/context";
@@ -3779,6 +3780,6 @@ function withReminder(
   }
   return [
     ...messages,
-    { id: "cf_agents_context_reminder", role: "user", parts: [part] }
+    { id: CONTEXT_REMINDER_MESSAGE_ID, role: "user", parts: [part] }
   ];
 }

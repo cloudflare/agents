@@ -53,7 +53,21 @@ import {
   type MessengerConcurrency,
   type ThinkMessengers
 } from "../messengers";
-import { deliverChannelNotice } from "../channels/runtime";
+import { resolveChannels } from "../channels";
+import type {
+  ChannelContext,
+  NormalizedChannelDefinition,
+  ThinkChannels
+} from "../channels";
+import {
+  deliverChannelNotice,
+  resolveChannelContext
+} from "../channels/runtime";
+import {
+  channelFromMessages,
+  stampTurnContext,
+  turnMetadataFromMessages
+} from "../turn-metadata";
 import type { DeliverNoticeOptions } from "../turn-types";
 import {
   messengerChannels,
@@ -111,6 +125,7 @@ import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import {
+  CONTEXT_REMINDER_MESSAGE_ID,
   mcpConnectionsExtension,
   mcpExtension,
   registerDeliverySink
@@ -926,6 +941,7 @@ export class Think<
         (event.status.status === "done" || event.status.status === "unanswered")
       ) {
         this.#turns.delete(event.status.operationId);
+        this.#webRequests.delete(event.status.operationId);
         // A call the operation left without an afterToolCall is forgotten.
         for (const [toolCallId, kept] of this.#modelInputs) {
           if (kept.operationId === event.status.operationId) {
@@ -941,8 +957,27 @@ export class Think<
     // channels, and their deliveries register on Tasks, at construction. A
     // sub-agent mounts them too (its path is not known yet) but takes no
     // webhook.
+    // A messenger declared in `configureChannels()` mounts too, when it
+    // returns its channels at once; one it returns later cannot mount
+    // (checked at start).
+    // One that reads what its subclass sets up later is read at start.
+    let configured: ThinkChannels | Promise<ThinkChannels> | undefined;
+    try {
+      configured = this.configureChannels();
+    } catch {
+      configured = undefined;
+    }
+    if (configured instanceof Promise) {
+      // Not used: it may have read a field its subclass had not set yet.
+      configured.catch(() => {});
+      configured = undefined;
+    }
+    this.#configuredAtConstruction = configured;
     this.#messengers = messengerChannels({
-      messengers: this.getMessengers() as ThinkMessengers,
+      messengers: resolveChannels(
+        this.#configuredAtConstruction ?? {},
+        this.getMessengers() as ThinkMessengers
+      ).messengers as ThinkMessengers,
       harness: this.harness,
       tasks: this.tasks,
       root: () => this.parentPath.length === 0,
@@ -983,6 +1018,24 @@ export class Think<
           )
       });
       await this.#context.load();
+      // As in Think: the channel registry, read at start on the root.
+      if (this.parentPath.length === 0) {
+        // Read again at start, once its subclass is set up: the registry
+        // is what it answers now.
+        const resolved = resolveChannels(
+          await this.configureChannels(),
+          this.getMessengers() as ThinkMessengers
+        );
+        this.#channels = resolved.channels;
+        const unmounted = Object.keys(resolved.messengers).filter(
+          (id) => !this.#messengers?.ids.includes(id)
+        );
+        if (unmounted.length > 0) {
+          throw new Error(
+            `Messenger channels ${unmounted.map((id) => `"${id}"`).join(", ")} come from an async configureChannels(): the harness-backed Think mounts messengers at construction, so declare them in getMessengers() or return them from configureChannels() synchronously`
+          );
+        }
+      }
       if (this.extensionLoader) {
         this.extensionManager = createThinkExtensionManager({
           loader: this.extensionLoader,
@@ -1004,7 +1057,10 @@ export class Think<
       await this.#skills.start(() => this.getSkills());
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
-        if (event.type === "reset") this.#transcript.replace([]);
+        if (event.type === "reset") {
+          this.#transcript.replace([]);
+          this.#lastTurnChannel = undefined;
+        }
         if (event.type === "message") {
           // Apply it now, so a synchronous read right after a turn sees it;
           // the re-read that follows picks up compaction and branching.
@@ -1522,11 +1578,7 @@ export class Think<
     const channelId = options?.channel ?? "web";
     await deliverChannelNotice(text, options, {
       channelId,
-      // Only the messengers so far (configureChannels() comes with C6): it
-      // names what a notice to one of them lacks.
-      registry: new Map(
-        (this.#messengers?.ids ?? []).map((id) => [id, { kind: "messenger" }])
-      ) as never,
+      registry: this.#channels,
       surface: async () =>
         this.#messengers?.noticeSurface(channelId, options?.thread) as never,
       addMessages: (messages) => this.addMessages(messages),
@@ -1539,9 +1591,12 @@ export class Think<
       }
     });
   }
-  configureChannels():
-    | Record<string, unknown>
-    | Promise<Record<string, unknown>> {
+  /**
+   * Return the channels for this agent, as on Think: the implicit `web`
+   * channel and each messenger are always present; these add surfaces and
+   * per-channel policy (instructions, a narrower tool set, `maxTurns`).
+   */
+  configureChannels(): ThinkChannels | Promise<ThinkChannels> {
     return {};
   }
   getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
@@ -1652,14 +1707,40 @@ export class Think<
     return this.#transcript.messages;
   }
 
-  /** The channel of the running turn. Channels are not supported. */
-  get activeChannel(): undefined {
-    return undefined;
+  /** The channel of the running turn, if it resolved to one. */
+  get activeChannel(): ChannelContext | undefined {
+    const turn = this.#turnChannel;
+    return turn && turn.operationId === this.#running?.requestId
+      ? turn.context
+      : undefined;
   }
 
-  /** Metadata of the running turn. Not supported. */
-  get activeTurnMetadata(): undefined {
-    return undefined;
+  /** What `configureChannels()` returned at construction, when not a promise. */
+  #configuredAtConstruction: ThinkChannels | undefined;
+  /** The channel the last turn ran on, for a continuation, as on Think. */
+  #lastTurnChannel: string | undefined;
+  /** Operations a browser's chat request started: they run on `web`. */
+  #webRequests = new Set<string>();
+  /** The channel registry, read at start (none on a sub-agent). */
+  #channels: Map<string, NormalizedChannelDefinition> | undefined;
+  /** The running operation's channel, resolved at its first model call. */
+  #turnChannel:
+    | {
+        operationId: string;
+        /** The channel asked for, registered or not. */
+        channelId: string | undefined;
+        context: ChannelContext | undefined;
+        definition: NormalizedChannelDefinition | undefined;
+      }
+    | undefined;
+
+  /**
+   * The server-supplied metadata stamped on the turn's user message, as on
+   * Think: read from the latest user message, so a recovered or continued
+   * turn reads the same value.
+   */
+  get activeTurnMetadata(): Record<string, unknown> | undefined {
+    return turnMetadataFromMessages(this.messages);
   }
 
   /** The turn running now, if any. */
@@ -1979,7 +2060,8 @@ export class Think<
       if (!stream.input)
         throw new TypeError('runTurn: mode "stream" requires input');
       return this.chat(stream.input, stream.callback, {
-        ...(stream.signal && { signal: stream.signal })
+        ...(stream.signal && { signal: stream.signal }),
+        ...(stream.channel !== undefined && { channel: stream.channel })
       });
     }
     if (mode === "submit") {
@@ -1997,7 +2079,8 @@ export class Think<
         ...(submit.idempotencyKey !== undefined && {
           idempotencyKey: submit.idempotencyKey
         }),
-        ...(submit.metadata !== undefined && { metadata: submit.metadata })
+        ...(submit.metadata !== undefined && { metadata: submit.metadata }),
+        ...(submit.channel !== undefined && { channel: submit.channel })
       });
     }
     const wait = options as RunTurnWait;
@@ -2023,7 +2106,11 @@ export class Think<
                 (current: UIMessage[]) => unknown
               >
             );
-      receipt = await session.submit(messages);
+      receipt = await session.submit(
+        // As in Think: the channel is stamped on the durable user message,
+        // so a continuation or a recovered turn resolves it again.
+        wait.channel ? stampTurnContext(messages, wait.channel) : messages
+      );
     }
     wait.signal?.addEventListener(
       "abort",
@@ -2070,17 +2157,21 @@ export class Think<
         );
       }
     }
-    const receipt = await this.harness.session().submit(messages, {
-      ...(options?.submissionId !== undefined && {
-        operationId: options.submissionId
-      }),
-      submission: true,
-      // An empty key is no key, as on Think.
-      ...(options?.idempotencyKey && {
-        idempotencyKey: options.idempotencyKey
-      }),
-      ...(metadata !== undefined && { metadata })
-    });
+    // As in Think: the channel is stamped on the user messages, so the
+    // turn that runs them resolves it.
+    const receipt = await this.harness
+      .session()
+      .submit(stampTurnContext(messages, options?.channel), {
+        ...(options?.submissionId !== undefined && {
+          operationId: options.submissionId
+        }),
+        submission: true,
+        // An empty key is no key, as on Think.
+        ...(options?.idempotencyKey && {
+          idempotencyKey: options.idempotencyKey
+        }),
+        ...(metadata !== undefined && { metadata })
+      });
     const inspection = await this.inspectSubmission(receipt.operationId);
     return {
       ...(inspection ?? {
@@ -2324,10 +2415,15 @@ export class Think<
       }
       return;
     }
-    const messages =
+    // As in Think: the channel and the caller's turn metadata are stamped
+    // on the durable user message.
+    const messages = stampTurnContext(
       typeof userMessage === "function"
         ? await userMessage(this.messages)
-        : toInput(userMessage);
+        : toInput(userMessage),
+      options?.channel,
+      options?.metadata
+    );
     this.#turns.set(operationId, { trigger: "rpc" });
     options?.signal?.addEventListener(
       "abort",
@@ -2604,8 +2700,57 @@ export class Think<
   // ── Harness wiring ────────────────────────────────────────────────
 
   async #beforeTurn(turn: ThinkTurnContext): Promise<ThinkTurnConfig | void> {
-    // Every tool on offer, as Think's `beforeTurn` sees them.
-    const tools = turn.toolSet;
+    // The turn's channel, from the stamp on its latest user message, as
+    // Think resolves it for a new, continued or recovered turn.
+    if (this.#turnChannel?.operationId !== turn.operationId) {
+      // A context reminder the harness adds as a message of its own is not
+      // the turn's user message.
+      const history = turn.messages.filter(
+        (message) => message.id !== CONTEXT_REMINDER_MESSAGE_ID
+      );
+      const web = this.#webRequests.delete(turn.operationId);
+      const user = [...history].reverse().find((m) => m.role === "user");
+      // As in Think: a browser's request runs on `web`; a continuation on
+      // the channel the last turn ran on; anything else on its stamp. A
+      // messenger's message is stamped once its turn starts.
+      let channel = web
+        ? "web"
+        : ((turn.continuation ? this.#lastTurnChannel : undefined) ??
+          channelFromMessages(history));
+      // A browser's new user message is stamped `web` here, as Think stamps
+      // it at intake: the client's own write cannot carry the key, and the
+      // harness writes the message when its turn starts.
+      if (web && user) await this.#stamp(user.id, "web");
+      const messenger =
+        channel === undefined && user
+          ? this.#messengers?.channelOf(user.id)
+          : undefined;
+      if (messenger !== undefined && user) {
+        channel = messenger;
+        await this.#stamp(user.id, messenger);
+      }
+      const emit = this._emit as unknown as (
+        type: string,
+        payload: Record<string, unknown>
+      ) => void;
+      this.#turnChannel = {
+        operationId: turn.operationId,
+        channelId: channel,
+        context: resolveChannelContext(channel, {
+          registry: this.#channels,
+          requestId: turn.operationId,
+          messengerContext: () => undefined,
+          emit: (event) => emit.call(this, event.type, event.payload)
+        }),
+        definition: channel ? this.#channels?.get(channel) : undefined
+      };
+    }
+    const channel = this.#turnChannel.context
+      ? this.#turnChannel.definition
+      : undefined;
+    // Every tool on offer, as Think's `beforeTurn` sees them, narrowed by
+    // the channel's policy.
+    const tools = channel?.tools ? channel.tools(turn.toolSet) : turn.toolSet;
     // Resolved only when read, as in Think: a `beforeTurn` that sets its
     // own model never needs the default's binding.
     // The step before this call ran its tools: it ends now, before this
@@ -2643,7 +2788,15 @@ export class Think<
     }
     // As in Think: the capability block for the turn's tools follows the
     // prompt, unless a `beforeTurn` gives its own.
-    const base = turn.system ?? this.getSystemPrompt();
+    const prompt = turn.system ?? this.getSystemPrompt();
+    // As in Think: the channel's instructions come before the prompt.
+    const instructions =
+      channel?.instructions && this.#turnChannel.context
+        ? typeof channel.instructions === "function"
+          ? await channel.instructions(this.#turnChannel.context)
+          : channel.instructions
+        : undefined;
+    const base = instructions ? `${instructions}\n\n${prompt}` : prompt;
     const context = {
       system: systemPromptForTurn(base, tools),
       messages: await convertToModelMessages([...turn.messages], {
@@ -2696,7 +2849,8 @@ export class Think<
       const { messages: _messages, ...kept } = changesOf(own ?? {}, config);
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
-    this.#turnMaxSteps = config.maxSteps;
+    // A channel's `maxTurns` is a default a `beforeTurn` may override.
+    this.#turnMaxSteps = config.maxSteps ?? channel?.maxTurns;
     // The model stays lazy, as in Think: spreading `context` would read
     // its `model` getter and resolve the default.
     const turnModel = config.model;
@@ -2789,7 +2943,13 @@ export class Think<
     const sent =
       model !== undefined ? this.resolveModel(model) : resolveDefault();
     const messages = step.messages ?? turnMessages;
-    const activeTools = step.activeTools ?? config.activeTools;
+    // A narrowing channel limits the tools the model is offered.
+    // A narrowing channel limits the tools the model is offered, and a
+    // selection cannot bring back a tool it removed.
+    const selected = step.activeTools ?? config.activeTools;
+    const activeTools = channel?.tools
+      ? (selected ?? Object.keys(tools)).filter((name) => name in tools)
+      : selected;
     const toolChoice = step.toolChoice ?? config.toolChoice;
     const callSettings = defined({
       topP: config.topP,
@@ -2803,6 +2963,9 @@ export class Think<
       experimental_transform: config.experimental_transform,
       experimental_repairToolCall: config.repairToolCall
     });
+    // As in Think: recorded once the turn is prepared, so a continuation
+    // never extends a turn whose preparation threw.
+    if (first) this.#lastTurnChannel = this.#turnChannel.channelId;
     return {
       model: sent,
       ...(typeof system === "string" && { system }),
@@ -2828,6 +2991,16 @@ export class Think<
       ...(Object.keys(callSettings).length > 0 && { callSettings }),
       sendReasoning: config.sendReasoning ?? this.sendReasoning
     } as ThinkTurnConfig;
+  }
+
+  /** Stamp `channel` on stored user message `id`, unless it has one. */
+  async #stamp(id: string, channel: string): Promise<void> {
+    const handle = await this.#rootHandle();
+    const stored = await handle.getMessage(id);
+    if (!stored || stored.role !== "user") return;
+    if (channelFromMessages([stored as UIMessage]) !== undefined) return;
+    const [stamped] = stampTurnContext([stored as UIMessage], channel);
+    await handle.updateMessage(stamped as SessionMessage);
   }
 
   /** The input a human approved for a call, from the latest reply. */
@@ -2939,8 +3112,21 @@ export class Think<
     };
     const onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      // As in Think: a browser's chat request runs on the `web` channel.
+      const request = chatRequestId(message);
+      if (request !== undefined) this.#webRequests.add(request);
       for (const handlers of this.#handlers) {
-        if ((await handlers.onMessage?.(connection, message)) === true) return;
+        if ((await handlers.onMessage?.(connection, message)) === true) {
+          // A request that started nothing (refused, or a resend of one
+          // that ended) is forgotten now; one that runs, when it settles.
+          if (
+            request !== undefined &&
+            !(await this.harness.inspection(this.harness.session().id, request))
+          ) {
+            this.#webRequests.delete(request);
+          }
+          return;
+        }
       }
       return onMessage(connection, message);
     };
@@ -3529,4 +3715,18 @@ for (const method of [
   Think.prototype.rejectExecution
 ]) {
   callable()(method, undefined as unknown as ClassMethodDecoratorContext);
+}
+
+/** The id of a browser's chat request, if `message` is one. */
+function chatRequestId(message: WSMessage): string | undefined {
+  if (typeof message !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(message) as { type?: unknown; id?: unknown };
+    return parsed.type === "cf_agent_use_chat_request" &&
+      typeof parsed.id === "string"
+      ? parsed.id
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }

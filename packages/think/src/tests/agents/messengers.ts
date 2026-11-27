@@ -10,6 +10,8 @@ import {
   sendMessengerReply
 } from "../../messengers/reply-task";
 import { telegramMessenger } from "../../messengers/telegram";
+import { messengerChannel } from "../../channels";
+import type { ThinkChannels } from "../../channels";
 import {
   chatSdkMessenger,
   type MessengerEvent,
@@ -282,7 +284,38 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     } as LanguageModel;
   }
 
+  /**
+   * An agent named `configured-…` declares its messenger in
+   * `configureChannels()` instead of `getMessengers()`.
+   */
+  /** Read by an `async-config-…` agent's `configureChannels()`. */
+  readonly #asyncVoice = "ASYNC VOICE";
+
+  override configureChannels(): ThinkChannels | Promise<ThinkChannels> {
+    // An agent named `async-config-…` configures its channels
+    // asynchronously, reading a private field before its first await.
+    if (this.name.startsWith("async-config-")) {
+      return (async () => {
+        const instructions = this.#asyncVoice;
+        await Promise.resolve();
+        return {
+          voice: {
+            kind: "voice" as const,
+            ingress: { transport: "voice" as const },
+            instructions
+          }
+        };
+      })();
+    }
+    if (!this.name.startsWith("configured-")) return {};
+    return { fake: messengerChannel(this._messengers().fake) };
+  }
+
   override getMessengers(): ThinkMessengers {
+    return this.name.startsWith("configured-") ? {} : this._messengers();
+  }
+
+  private _messengers(): ThinkMessengers {
     // #2313: an agent named `queue-…` answers each message as it arrives.
     if (this.name.startsWith("queue-")) this.messengerConcurrency = "queue";
     // An agent named `tg-…` talks to the fake Telegram Bot API (the test
@@ -759,6 +792,18 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
           AND status IN ('pending', 'running')
       `[0]?.n ?? 0
     );
+  }
+
+  /** The channel each turn ran on, as `beforeTurn` saw it. */
+  override beforeTurn(): void {
+    this.ctx.storage.kv.put("turn-channels", [
+      ...this.getTurnChannelsForTest(),
+      this.activeChannel?.channelId ?? ""
+    ]);
+  }
+
+  getTurnChannelsForTest(): string[] {
+    return this.ctx.storage.kv.get<string[]>("turn-channels") ?? [];
   }
 
   async getAdapterCalls(): Promise<Array<{ kind: string; content: string }>> {
