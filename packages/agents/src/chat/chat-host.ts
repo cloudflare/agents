@@ -862,7 +862,9 @@ export function chatTurnDefinition(
             : {};
       // A byte budget reads only the newest messages that fit it.
       const budget = host.options?.hydrationByteBudget;
-      if (budget !== undefined && Number.isFinite(budget)) {
+      // Zero, a negative or no finite budget reads the whole path, as the
+      // hosts' hydration does.
+      if (budget !== undefined && Number.isFinite(budget) && budget > 0) {
         return (await session.getRecentHistory(budget, leaf))
           .messages as unknown as UIMessage[];
       }
