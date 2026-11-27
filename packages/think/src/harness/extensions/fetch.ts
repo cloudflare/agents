@@ -10,7 +10,10 @@ import {
   type FetchToolEvent
 } from "../../tools/fetch";
 import type { ThinkWorkspace } from "../../workspace-files";
-import type { ThinkExtension } from "./workspace";
+import { setTool, type ThinkExtension } from "./workspace";
+
+/** The fetch tools that only read. */
+const FETCH_READS = new Set(["fetch_url"]);
 
 /**
  * Offer the fetch tools for `options()`, or none while it is `false`. The
@@ -30,7 +33,7 @@ export function fetchExtension(
       for (const [name, tool] of Object.entries(
         createFetchTools({ ...configured, workspace: workspace(), onEvent })
       )) {
-        tools.set(name, tool);
+        setTool(tools, name, tool, FETCH_READS);
       }
     });
 }

@@ -14,6 +14,25 @@ export type ThinkExtension = NonNullable<
 >[number]["extension"];
 
 /**
+ * Set a tool, marked safe to run again after an interruption when its name
+ * is in `rerun`: a read that changes nothing. Other tools cut off by a
+ * reset are reported to the model as interrupted.
+ *
+ * @internal
+ */
+export function setTool<T extends object>(
+  tools: { set(name: string, tool: T): unknown },
+  name: string,
+  tool: T,
+  rerun: ReadonlySet<string>
+): void {
+  tools.set(name, rerun.has(name) ? { ...tool, recovery: "rerun" } : tool);
+}
+
+/** The workspace tools that only read. */
+const WORKSPACE_READS = new Set(["read", "ls", "grep", "find"]);
+
+/**
  * Offer the workspace's tools: file reads and writes, search and, when the
  * workspace has execution backends, `exec`. The workspace is read when the
  * tools are built, so a host may assign it after construction.
@@ -28,7 +47,7 @@ export function workspaceExtension(
       for (const [name, tool] of Object.entries(
         createAITools({ workspace: workspace() })
       )) {
-        tools.set(name, tool);
+        setTool(tools, name, tool, WORKSPACE_READS);
       }
     });
 }
