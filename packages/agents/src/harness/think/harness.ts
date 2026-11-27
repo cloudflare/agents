@@ -2055,6 +2055,23 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         );
         break;
       }
+      case "reply": {
+        // A new reply after the latest message, whoever wrote it: Think's
+        // continueLastTurn() writes a new assistant message, not an append.
+        const latest = await handle.getLatestLeaf();
+        if (!latest) {
+          unanswered = "not_found";
+          break;
+        }
+        this.lifecycle.storage.transactionSync(() =>
+          progress({
+            trigger: "submit-message",
+            questionId: latest.id,
+            continues: false
+          })
+        );
+        break;
+      }
       case "continue": {
         const latest = await handle.getLatestLeaf();
         if (!latest) {
