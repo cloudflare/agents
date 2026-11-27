@@ -1475,7 +1475,8 @@ describe("Think durable submissions", () => {
     });
     const settled = await agent.waitForSubmissionForTest(accepted.submissionId);
     expect(settled).toMatchObject({ status: "aborted", error: "stop" });
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Once the turn queue is idle, a late status would have been reported.
+    await agent.waitForIdleForTest();
 
     const statuses = (await agent.getSubmissionLog())
       .filter((entry) => entry.submissionId === accepted.submissionId)

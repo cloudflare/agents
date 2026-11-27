@@ -295,6 +295,37 @@ async function waitForAgentToolRun(
   );
 }
 
+/**
+ * A socket delivers in order: once the answer to a resume request arrives,
+ * every frame the agent sent the socket before it has arrived too.
+ */
+async function socketBarrier(ws: WebSocket): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("no answer to the resume request")),
+      5000
+    );
+    const onMessage = (e: MessageEvent) => {
+      let type: string | undefined;
+      try {
+        type = (JSON.parse(e.data as string) as { type?: string }).type;
+      } catch {
+        return; // Not JSON: not the answer.
+      }
+      if (
+        type === "cf_agent_stream_resume_none" ||
+        type === "cf_agent_stream_resuming"
+      ) {
+        clearTimeout(timer);
+        ws.removeEventListener("message", onMessage);
+        resolve();
+      }
+    };
+    ws.addEventListener("message", onMessage);
+    ws.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+  });
+}
+
 describe("Think agent tools", () => {
   it("uses assistant text as the default agent-tool summary", async () => {
     const agent = await freshAgent();
@@ -886,7 +917,7 @@ describe("Think agent tools", () => {
         const runId = crypto.randomUUID();
         await agent.startAgentToolRun("child probe", { runId, eventDelivery });
         await waitForAgentToolRun(agent, runId);
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await socketBarrier(ws);
         ws.close();
         return chunks;
       }
@@ -913,7 +944,7 @@ describe("Think agent tools", () => {
         });
         const agent = await freshAgent(room);
         await agent.broadcastRecoveredAgentToolChunkForTest(eventDelivery);
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await socketBarrier(ws);
         ws.close();
         return chunks;
       }
