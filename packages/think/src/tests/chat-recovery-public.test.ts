@@ -19,7 +19,13 @@ async function resetDuringTurn(
   name: string,
   chunksBeforeReset: number,
   answer?: { continue?: boolean; persist?: boolean },
-  options?: { holdRecovery?: boolean; openedStream?: boolean; stash?: string }
+  options?: {
+    holdRecovery?: boolean;
+    openedStream?: boolean;
+    stash?: string;
+    /** More of the request body, beside its messages. */
+    body?: Record<string, unknown>;
+  }
 ) {
   const room = `${name}-${crypto.randomUUID()}`;
   const agent = () => getAgentByName(env.ThinkTestAgent, room);
@@ -71,6 +77,7 @@ async function resetDuringTurn(
       init: {
         method: "POST",
         body: JSON.stringify({
+          ...options?.body,
           messages: [
             {
               id: userId,
@@ -282,6 +289,30 @@ describe("chat recovery, through public behaviour", () => {
       expect(first?.streamId).not.toBe("");
       expect(first?.createdAt).toEqual(expect.any(Number));
       expect(first?.recoveryRootRequestId).toBe(requestId);
+    }, 30_000);
+
+    // Successor of think-session's "continues a partial stream with request
+    // context from the recovered snapshot".
+    it("continues a reset-cut reply with the request's body and client tools", async () => {
+      const { agent } = await resetDuringTurn("reset-context", 2, undefined, {
+        body: {
+          mode: "snapshot",
+          clientTools: [{ name: "snapshotTool", description: "A client tool" }]
+        }
+      });
+      await vi.waitFor(
+        async () => {
+          expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+
+      // The new isolate's only turn is the recovery's continuation.
+      const turns = await (await agent()).getBeforeTurnLog();
+      expect(turns).toHaveLength(1);
+      expect(turns[0]?.continuation).toBe(true);
+      expect(turns[0]?.body).toMatchObject({ mode: "snapshot" });
+      expect(turns[0]?.toolNames).toContain("snapshotTool");
     }, 30_000);
 
     // Successor of think-session's "stashed data round-trips through fiber
