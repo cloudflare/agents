@@ -1350,13 +1350,36 @@ export class Think<
   ): Promise<ThinkSubmissionInspection[]> {
     const wanted = submissionStatuses(options?.status);
     if (wanted?.length === 0) return [];
-    const listed = await this.harness.submissions(this.harness.session().id, {
-      ...(wanted && { status: taskStatusesFor(wanted) }),
-      limit: Math.min(Math.max(options?.limit ?? 50, 1), 100)
-    });
-    return listed
-      .map(submissionInspection)
-      .filter((submission) => !wanted || wanted.includes(submission.status));
+    const session = this.harness.session().id;
+    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 100);
+    if (!wanted) {
+      return (await this.harness.submissions(session, { limit })).map(
+        submissionInspection
+      );
+    }
+    // Several submission statuses share a run status (a queued and a
+    // started operation are both open runs; an aborted one is a completed
+    // run), so a page can hold submissions that were not asked for: read on
+    // until `limit` of the wanted ones are found, or there are no more.
+    const status = taskStatusesFor(wanted);
+    const found: ThinkSubmissionInspection[] = [];
+    let after: { operationId: string; createdAt: number } | undefined;
+    for (let size = limit; ; size = DELETE_PAGE) {
+      const page = await this.harness.submissions(session, {
+        status,
+        ...(after && { after }),
+        limit: size
+      });
+      for (const item of page) {
+        const submission = submissionInspection(item);
+        if (!wanted.includes(submission.status)) continue;
+        found.push(submission);
+        if (found.length === limit) return found;
+      }
+      const last = page.at(-1);
+      if (page.length < size || !last) return found;
+      after = { operationId: last.operationId, createdAt: last.createdAt };
+    }
   }
 
   async deleteSubmission(submissionId: string): Promise<boolean> {

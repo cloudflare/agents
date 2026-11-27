@@ -7,5 +7,23 @@
       "file": "submissions.test.ts",
       "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays aborted when it is cancelled while its reply is being recovered"
     }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > lists the running submission when newer ones wait behind it",
+    "reason": "a submission run imported as `running` in the class's shape (`insertSubmissionForTest`); nothing runs it",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > while a submission runs > lists it as running, and the one that waits behind it as pending"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > bulk delete skips active submissions even when explicitly requested",
+    "reason": "a submission run imported as `running` in the class's shape (`insertSubmissionForTest`); nothing runs it, beside a seeded `completed` one",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > while a submission runs > a bulk delete that asks for every status deletes only the finished one"
+    }
   }
 ]
