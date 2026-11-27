@@ -587,3 +587,29 @@ export { backoffDelay } from "../retries";
  * starting sub-agent). Sibling-package support, not a public API.
  */
 export { broadcastReachesUnlistedSockets } from "../dynamic-agents/unlisted-sockets";
+
+/**
+ * @internal The chat module (CHAT-MODULE.md): the turn definition and the
+ * functions a host calls. Sibling-package support for `@cloudflare/ai-chat`,
+ * not a public API.
+ */
+export {
+  chatTurnDefinition,
+  chatTurnStreamId,
+  type ChatDeps,
+  type ChatHost,
+  type ChatHooks,
+  type ChatModelCall,
+  type ChatTurnInput,
+  type ChatTurnResult
+} from "./chat-host";
+export {
+  answerTool,
+  cancelTurn,
+  chatDispatch,
+  clearChat,
+  resumeChat,
+  submitTurn,
+  type ChatArrival,
+  type ChatLane
+} from "./chat-functions";

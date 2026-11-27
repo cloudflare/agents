@@ -39,8 +39,11 @@ export interface ChatDeps {
   readonly tasks: Tasks;
   readonly streams: Streams;
   readonly sessions: Sessions;
-  /** Absent for a host that owns no sockets (a harness inside an agent). */
-  readonly webSockets?: WebSockets;
+  /**
+   * The tabs the chat's frames go to. Absent for a host that owns no
+   * sockets (a harness inside an agent).
+   */
+  readonly webSockets?: Pick<WebSockets, "getConnections">;
   /** The Sessions session the chat's transcript is in. */
   readonly session?: string;
   /**
