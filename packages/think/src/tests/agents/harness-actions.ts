@@ -46,6 +46,10 @@ function actionModel(): LanguageModel {
     doStream(options: { prompt: { role: string; content: unknown }[] }) {
       const last = options.prompt[options.prompt.length - 1];
       const prompt = JSON.stringify(options.prompt);
+      // The reply after the tool result fails when the question asks so.
+      if (last.role === "tool" && prompt.includes("then fail")) {
+        return Promise.reject(new Error("the follow-up reply failed"));
+      }
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });

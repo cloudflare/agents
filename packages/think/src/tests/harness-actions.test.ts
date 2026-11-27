@@ -93,6 +93,17 @@ describe("harness-backed Think: actions that need a human", () => {
     expect(await think.pendingApprovals()).toEqual([]);
   });
 
+  it("answers an approved action's output even when the reply after it fails", async () => {
+    const think = await agent();
+    await think.say("charge 5 then fail");
+    const [pending] = await think.pendingApprovals();
+
+    expect(await think.approveExecution(pending.executionId)).toEqual({
+      charged: 5
+    });
+    expect(await think.charged()).toBe(1);
+  });
+
   it("lists the same descriptor after a restart, from the action and its input", async () => {
     const name = crypto.randomUUID();
     const think = await agent(name);

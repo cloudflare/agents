@@ -657,7 +657,6 @@ export class Think<
           // A call approved after a restart runs before any model call of
           // its turn: the turn's grant is asked for here.
           await this.#authorizeTurn(call.operationId, async () => {
-            const chosen = await this.getModel();
             let model: LanguageModel | undefined;
             const self = this;
             return {
@@ -667,8 +666,11 @@ export class Think<
               }),
               tools: {},
               // Resolved only when read, as in Think.
+              // As in Think, `getModel()` is called only here.
               get model() {
-                return (model ??= self.resolveModel(chosen));
+                return (model ??= self.resolveModel(
+                  self.getModel() as ThinkModel
+                ));
               },
               continuation: true,
               requestId: call.operationId
@@ -1425,13 +1427,17 @@ export class Think<
     this.#actionDescriptors.delete(pending.descriptor.toolCallId);
     const result = await session.wait(receipt.operationId);
     await this.#sync();
-    // What the harness said: a decision it did not apply is not reported
-    // as one.
-    if (result.status !== "done") {
+    // A decision the harness did not apply leaves the call waiting: that
+    // alone is an error. A follow-up reply that failed after the action
+    // ran is not.
+    if ((await this.pendingApprovals(executionId)).length > 0) {
       return {
         status: "error",
         executionId,
-        error: result.reason ?? result.status
+        error:
+          result.status === "done"
+            ? "not applied"
+            : (result.reason ?? result.status)
       };
     }
     // As on Think: the action's outcome, or the rejection.
