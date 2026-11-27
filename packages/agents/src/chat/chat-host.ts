@@ -355,6 +355,19 @@ export function continueRequestsOf(streams: Streams): Set<string> {
  */
 const liveTurns = new WeakMap<Streams, Map<string, LiveTurn>>();
 
+/**
+ * The attempt of each session still running in this isolate, as a promise
+ * that settles when it has returned. At most one entry per lane.
+ */
+type Unwinding = { signal: AbortSignal; ended: Promise<void> };
+const unwindingAttempts = new WeakMap<Streams, Map<string, Unwinding>>();
+
+function unwindingOf(streams: Streams): Map<string, Unwinding> {
+  let attempts = unwindingAttempts.get(streams);
+  if (!attempts) unwindingAttempts.set(streams, (attempts = new Map()));
+  return attempts;
+}
+
 /** @internal The live turns of the chat whose stream log is `streams`. */
 export function liveTurnsOf(streams: Streams): Map<string, LiveTurn> {
   let turns = liveTurns.get(streams);
@@ -947,7 +960,10 @@ export function chatTurnDefinition(
   input: unknown,
   step: TaskStep
 ) => Promise<ChatTurnResult | TaskSettlement> {
-  return async (input, step) => {
+  const attempt = async (
+    input: unknown,
+    step: TaskStep
+  ): Promise<ChatTurnResult | TaskSettlement> => {
     const given = (input ?? {}) as ChatTurnInput;
     const requestId = step.id;
     const sessionId = given.session ?? deps.session ?? "";
@@ -2275,5 +2291,30 @@ export function chatTurnDefinition(
       status: "completed",
       ...(storedId && { messageId: storedId })
     });
+  };
+  return (input, step) => {
+    const sessionId =
+      ((input ?? {}) as ChatTurnInput).session ?? deps.session ?? "";
+    // A stop ends a run at once, while its attempt is still storing what it
+    // streamed: the next turn's attempt starts after that, so its question
+    // follows that reply. Only a stopped attempt is waited for: it ends as
+    // soon as it has stored its reply.
+    const unwinding = unwindingOf(deps.streams);
+    const earlier = unwinding.get(sessionId);
+    const mine = earlier?.signal.aborted
+      ? earlier.ended.then(() => attempt(input, step))
+      : attempt(input, step);
+    const entry: Unwinding = {
+      signal: step.signal,
+      ended: mine.then(
+        () => {},
+        () => {}
+      )
+    };
+    unwinding.set(sessionId, entry);
+    void entry.ended.then(() => {
+      if (unwinding.get(sessionId) === entry) unwinding.delete(sessionId);
+    });
+    return mine;
   };
 }
