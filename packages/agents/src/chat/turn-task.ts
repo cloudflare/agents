@@ -40,12 +40,13 @@ export type ChatTurnClosureEntry = {
     reject(error: unknown): void;
   };
   /**
-   * For the turn of a recovery attempt, called once its caller is settled:
-   * the returned promise settles once the attempt has recorded the turn's
-   * outcome. The run stays open until then, so a reset before that write
-   * replays the run, which settles the recovery. Never rejects.
+   * For the turn of a recovery attempt, called once its caller is settled.
+   * `until` settles once the attempt has recorded the turn's outcome: the
+   * run stays open until then, so a reset before that write replays the
+   * run, which settles the recovery. It never rejects. `ended` is whether
+   * the turn returned, as opposed to throwing an error the attempt handles.
    */
-  hold?(): Promise<void>;
+  hold?(): { ended: boolean; until: Promise<void> };
 };
 
 /**
@@ -135,6 +136,11 @@ export type ChatTurnTaskHooks = {
     requestId: string;
     persisted: unknown;
     createdAt: number;
+    /**
+     * The turn, a recovery attempt's, had ended: only the attempt's record
+     * of the outcome is missing (`InterruptedChatTurn.ended`).
+     */
+    ended?: boolean;
     attempt: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void>;
   /** The host's recovery callbacks, bounded to their model handoff. */
@@ -208,6 +214,11 @@ const STASH = "stash";
  * runs it.
  */
 const ATTEMPT = "attempt";
+/**
+ * The run's checkpoint key that says its turn, a recovery attempt's, ended,
+ * and the run stayed open for the attempt to record the outcome.
+ */
+const ENDED = "ended";
 /**
  * The checkpoint entry holding a lane turn's envelope, written when its
  * model call begins (`null` when it could not be kept). A turn accepted
@@ -352,6 +363,7 @@ export function createChatTurnTaskDefinition(
               requestId,
               persisted,
               createdAt: typeof beganAt === "number" ? beganAt : step.createdAt,
+              ...(step.checkpoint.get(ENDED) === true && { ended: true }),
               attempt: (next) => {
                 if (!journalableAttempt(next)) return false;
                 scheduled = next;
@@ -407,7 +419,13 @@ export function createChatTurnTaskDefinition(
           // now, in memory. Were the run to end first, a reset in between
           // would leave a recovery nothing runs again. A turn cut off
           // again kept its next attempt in this run: that is its outcome.
-          if (!scheduled) await entry.hold?.();
+          const held = scheduled ? undefined : entry.hold?.();
+          if (held) {
+            // Kept with the run: its replay must not ask the model to
+            // continue a reply that is finished.
+            if (held.ended) step.checkpoint.set(ENDED, true);
+            await held.until;
+          }
         } catch (error) {
           entry.settle.reject(error);
           throw error;

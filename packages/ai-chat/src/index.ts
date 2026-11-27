@@ -3553,6 +3553,7 @@ export class AIChatAgent<
     requestId: string;
     persisted: unknown;
     createdAt: number;
+    ended?: boolean;
     attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
     const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
@@ -3565,7 +3566,8 @@ export class AIChatAgent<
       snapshot,
       recoveryData: user,
       createdAt: turn.createdAt,
-      attempt: turn.attempt
+      attempt: turn.attempt,
+      ...(turn.ended && { ended: true })
     };
     await this._chatRecoveryEngine().recoverInterruptedTurn(recovered, {
       // Read from storage, not `this.messages`: a chat fiber row an older

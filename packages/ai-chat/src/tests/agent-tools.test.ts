@@ -538,6 +538,7 @@ describe("AIChatAgent as an agent-tool child", () => {
           child: { status: string; error?: string } | null;
           incidents: string[];
           assistantMessages: number;
+          modelCalls: number;
           resetAtOutcome: boolean;
         }>;
       }
@@ -548,7 +549,9 @@ describe("AIChatAgent as an agent-tool child", () => {
     // recovery. Nothing is left scheduled with nothing to run it.
     expect(outcome.incidents).not.toContain("scheduled");
     expect(outcome.child).toEqual({ status: "completed", error: undefined });
-    // The reply was not asked for again.
+    // The reply was finished: the isolate after the reset does not ask the
+    // model to continue it.
+    expect(outcome.modelCalls).toBe(0);
     expect(outcome.assistantMessages).toBe(1);
   }, 40_000);
 

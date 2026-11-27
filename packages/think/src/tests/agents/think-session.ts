@@ -3343,16 +3343,6 @@ export class ThinkTestAgent extends Think {
     };
   }
 
-  /** Each recovery incident's status and reason. */
-  async recoveryOutcomesForTest(): Promise<
-    Array<{ status: string; reason?: string }>
-  > {
-    return (await this._recoveryIncidentsForTest()).map((incident) => ({
-      status: incident.status,
-      reason: incident.reason
-    }));
-  }
-
   /**
    * Reset this agent's isolate at the moment a recovery attempt is about to
    * record that its turn completed: the recovered turn has ended, and its
@@ -3365,8 +3355,11 @@ export class ThinkTestAgent extends Think {
       updateIncident(id: unknown, status: string, ...rest: unknown[]): unknown;
     };
     const update = engine.updateIncident.bind(engine);
-    engine.updateIncident = (id, status, ...rest) => {
+    engine.updateIncident = async (id, status, ...rest) => {
       if (status !== "completed") return update(id, status, ...rest);
+      // What was written so far is on disk, as it is a moment later in a
+      // real reset: the abort alone would drop it.
+      await this.ctx.storage.sync();
       this.ctx.abort("test: forced reset");
       throw new Error("test: forced reset");
     };
@@ -6556,6 +6549,7 @@ export class ThinkAgentToolParent extends Agent {
     incidents: Array<{ status: string; reason?: string }>;
     assistantMessages: number;
     resetAtOutcome: boolean;
+    modelCallsAfterReset: number;
   }> {
     const runId = crypto.randomUUID();
     const child = await this.subAgent(ThinkTestAgent, runId);
@@ -6579,12 +6573,15 @@ export class ThinkAgentToolParent extends Agent {
     const armed = await (
       await this.subAgent(ThinkTestAgent, runId)
     ).resetBeforeRecoveryOutcomeForTest();
+    // What the parent hands back after two resets of its child is its own
+    // re-attach policy: the child is what recovery owns.
     await running;
     const deadline = Date.now() + 15_000;
     let inspection: { status: string; error?: string } | null = null;
     let incidents: Array<{ status: string; reason?: string }> = [];
     let assistantMessages = 0;
     let resetAtOutcome = false;
+    let modelCallsAfterReset = 0;
     while (Date.now() < deadline) {
       try {
         const fresh = await this.subAgent(ThinkTestAgent, runId);
@@ -6595,6 +6592,8 @@ export class ThinkAgentToolParent extends Agent {
         ).length;
         // The armed isolate is gone: the second reset happened.
         resetAtOutcome = (await fresh.isolateForTest()) !== armed;
+        // What the isolate after that reset asked the model.
+        modelCallsAfterReset = (await fresh.getBeforeStepLog()).length;
         if (
           resetAtOutcome &&
           inspection &&
@@ -6614,7 +6613,8 @@ export class ThinkAgentToolParent extends Agent {
         : null,
       incidents,
       assistantMessages,
-      resetAtOutcome
+      resetAtOutcome,
+      modelCallsAfterReset
     };
   }
 

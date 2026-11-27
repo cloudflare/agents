@@ -385,9 +385,12 @@ describe("ChatTurnFibers", () => {
     host.recoveryAttemptEnded = () => attemptEnded;
     // The run, as the turn's Task: it settles the caller, then holds.
     let runEnded = false;
+    let ended: boolean | undefined;
     host.runTask = async (_input, closure) => {
       closure.settle.resolve(await closure.run((fn) => fn()));
-      await closure.hold?.();
+      const held = closure.hold?.();
+      ended = held?.ended;
+      await held?.until;
       runEnded = true;
     };
 
@@ -400,9 +403,31 @@ describe("ChatTurnFibers", () => {
       )
     ).resolves.toBe("reply");
     expect(runEnded).toBe(false);
+    // The turn returned: the run may record that it ended.
+    expect(ended).toBe(true);
 
     attemptEnds();
     await vi.waitFor(() => expect(runEnded).toBe(true));
+  });
+
+  it("does not call a recovery attempt's turn ended when it threw", async () => {
+    host.inRecoveryAttempt = () => true;
+    host.recoveryAttemptEnded = () => Promise.resolve();
+    let ended: boolean | undefined;
+    host.runTask = async (_input, closure) => {
+      closure.settle.resolve(await closure.run((fn) => fn()));
+      ended = closure.hold?.().ended;
+    };
+    await expect(
+      fibers.run(
+        { requestId: "r1", continuation: true, snapshot: snapshot("r1") },
+        async () => {
+          throw new Error("Network connection lost.");
+        }
+      )
+    ).rejects.toThrow("Network connection lost.");
+    // The attempt handles the error: the turn is not a finished reply.
+    expect(ended).toBe(false);
   });
 
   it("asks no run to hold for a turn outside a recovery attempt", async () => {

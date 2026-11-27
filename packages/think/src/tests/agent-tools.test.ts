@@ -449,6 +449,7 @@ describe("Think agent tools", () => {
           incidents: Array<{ status: string; reason?: string }>;
           assistantMessages: number;
           resetAtOutcome: boolean;
+          modelCallsAfterReset: number;
         }>;
       }
     ).runThinkChildThroughResetAtOutcomeForTest();
@@ -458,7 +459,9 @@ describe("Think agent tools", () => {
     expect(outcome.resetAtOutcome).toBe(true);
     expect(outcome.incidents).toEqual([]);
     expect(outcome.child).toEqual({ status: "completed", error: undefined });
-    // The reply was not asked for again.
+    // The reply was finished: the isolate after the reset does not ask the
+    // model to continue it.
+    expect(outcome.modelCallsAfterReset).toBe(0);
     expect(outcome.assistantMessages).toBe(1);
   }, 40_000);
 

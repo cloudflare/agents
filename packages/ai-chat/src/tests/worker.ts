@@ -6698,18 +6698,25 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       updateIncident(id: unknown, status: string, ...rest: unknown[]): unknown;
     };
     const update = engine.updateIncident.bind(engine);
-    engine.updateIncident = (id, status, ...rest) => {
+    engine.updateIncident = async (id, status, ...rest) => {
       if (status !== "completed") return update(id, status, ...rest);
+      // What was written so far is on disk, as it is a moment later in a
+      // real reset: the abort alone would drop it.
+      await this.ctx.storage.sync();
       this.ctx.abort("test: forced reset");
       throw new Error("test: forced reset");
     };
     return this._isolateForTest;
   }
 
-  /** Each recovery incident's status, and how many replies are stored. */
+  /**
+   * Each recovery incident's status, how many replies are stored, and how
+   * many times this isolate asked the model.
+   */
   async recoveryStateForTest(): Promise<{
     incidents: string[];
     assistantMessages: number;
+    modelCalls: number;
   }> {
     const incidents = await this.ctx.storage.list<{ status: string }>({
       prefix: "cf:chat-recovery:incident:"
@@ -6718,7 +6725,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       incidents: [...incidents.values()].map((incident) => incident.status),
       assistantMessages: this.messages.filter(
         (message) => message.role === "assistant"
-      ).length
+      ).length,
+      modelCalls: this._chatCallsForTest.length
     };
   }
 
@@ -9018,6 +9026,8 @@ export class AIChatAgentToolParent extends Agent<Env> {
     child: { status: string; error?: string } | null;
     incidents: string[];
     assistantMessages: number;
+    /** By the isolate after the second reset. */
+    modelCalls: number;
     resetAtOutcome: boolean;
   }> {
     const runId = crypto.randomUUID();
@@ -9041,10 +9051,16 @@ export class AIChatAgentToolParent extends Agent<Env> {
     const armed = await (
       await this.subAgent(AIChatAgentToolChild, runId)
     ).resetBeforeRecoveryOutcomeForTest();
+    // What the parent hands back after two resets of its child is its own
+    // re-attach policy: the child is what recovery owns.
     await running;
     const deadline = Date.now() + 15_000;
     let inspection: { status: string; error?: string } | null = null;
-    let state = { incidents: [] as string[], assistantMessages: 0 };
+    let state = {
+      incidents: [] as string[],
+      assistantMessages: 0,
+      modelCalls: 0
+    };
     let resetAtOutcome = false;
     while (Date.now() < deadline) {
       try {

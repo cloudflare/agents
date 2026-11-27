@@ -221,12 +221,15 @@ describe("createChatTurnTaskDefinition", () => {
       hold: () => {
         // Asked only once the caller has the turn's result.
         holds.push(resolve.mock.calls.length);
-        return new Promise<void>((done) => {
-          recorded = done;
-        });
+        return {
+          ended: true,
+          until: new Promise<void>((done) => {
+            recorded = done;
+          })
+        };
       }
     };
-    const { step } = fakeStep(entry);
+    const { step, checkpoint } = fakeStep(entry);
     let ended = false;
     const run = createChatTurnTaskDefinition(hooks)(
       { requestId: "r1", continuation: true, nonce: "n1" },
@@ -240,10 +243,37 @@ describe("createChatTurnTaskDefinition", () => {
     expect(ended).toBe(false);
 
     expect(holds).toEqual([1]);
+    // Kept with the run, for its replay after a reset.
+    expect(checkpoint.get("ended")).toBe("true");
 
     recorded();
     await run;
     expect(ended).toBe(true);
+  });
+
+  it("tells recovery that a replayed run's turn had ended", async () => {
+    for (const ended of [true, false]) {
+      const recovered: unknown[] = [];
+      const { step, checkpoint } = fakeStep(undefined);
+      if (ended) checkpoint.set("ended", "true");
+      await createChatTurnTaskDefinition({
+        ...hooks,
+        storage: {
+          get: async () => undefined,
+          delete: async () => true
+        } as unknown as DurableObjectStorage,
+        recover: async (turn) => void recovered.push(turn.ended)
+      })(
+        {
+          requestId: "r1",
+          continuation: true,
+          nonce: "n1",
+          envelope: { __snapshot: { s: 1 }, user: null }
+        },
+        step
+      );
+      expect(recovered).toEqual([ended ? true : undefined]);
+    }
   });
 
   it("keeps only the app's stash data in the checkpoint", async () => {

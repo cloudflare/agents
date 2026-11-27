@@ -9825,6 +9825,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string;
     persisted: unknown;
     createdAt: number;
+    ended?: boolean;
     attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
     if (await this._settlePersistedChatTurn(turn.requestId)) return;
@@ -9839,7 +9840,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         snapshot,
         recoveryData: user,
         createdAt: turn.createdAt,
-        attempt: turn.attempt
+        attempt: turn.attempt,
+        ...(turn.ended && { ended: true })
       },
       this._chatRecoveryWakeHooks()
     );

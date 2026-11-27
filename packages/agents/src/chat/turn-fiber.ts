@@ -194,7 +194,9 @@ export class ChatTurnFibers {
 
     this.liveTurns.set(requestId, liveTurn);
     try {
-      return settled(await this.#runAsTask(turn, onStash, body));
+      return settled(
+        await this.#runAsTask(turn, onStash, body, () => stopped === undefined)
+      );
     } finally {
       if (this.liveTurns.get(requestId) === liveTurn) {
         this.liveTurns.delete(requestId);
@@ -205,7 +207,9 @@ export class ChatTurnFibers {
   async #runAsTask<T>(
     turn: ChatTurnFiber,
     onStash: (data: unknown) => void,
-    body: () => Promise<T>
+    body: () => Promise<T>,
+    /** Whether the body returned, once it has: it did not throw. */
+    turnEnded: () => boolean
   ): Promise<T> {
     const { requestId, continuation, snapshot } = turn;
     // The snapshot is a hint for recovery; stream cursors are the evidence.
@@ -263,7 +267,7 @@ export class ChatTurnFibers {
         ...(attemptEnded && {
           hold: () => {
             held();
-            return attemptEnded;
+            return { ended: turnEnded(), until: attemptEnded };
           }
         })
       }

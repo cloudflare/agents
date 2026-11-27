@@ -441,6 +441,12 @@ export interface InterruptedChatTurn {
    * run of its own (`ChatRecoveryTurnBindings.startAttemptRun`).
    */
   attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
+  /**
+   * The turn was a recovery attempt's and had returned: its reply is
+   * stored, and only the attempt's record of the outcome is missing (the
+   * isolate went away before it was written). Nothing is continued.
+   */
+  ended?: boolean;
 }
 
 /**
@@ -759,6 +765,44 @@ export class ChatRecoveryEngine {
       await wake.latestMessage()
     );
     const recoveryRootRequestId = snapshot?.recoveryRootRequestId ?? requestId;
+
+    if (turn.ended) {
+      // The turn finished: it is not an interrupted attempt, so nothing is
+      // counted against the budget and the model is not asked again. The
+      // recovery it belonged to gets the outcome its attempt did not write.
+      const ended = streamStatus === "error" ? "error" : "completed";
+      try {
+        if (streamStillActive) await wake.completeRecoveredStream(streamId);
+        await wake.onStreamEnded?.({
+          requestId,
+          recoveryRootRequestId,
+          streamStatus: ended
+        });
+        const incidentId = chatRecoveryIncidentId({
+          requestId,
+          recoveryRootRequestId,
+          latestUserMessageId: snapshot?.latestUserMessageId,
+          recoveryKind
+        });
+        const incident = await this.readIncident(incidentId);
+        if (
+          incident?.status === "scheduled" ||
+          incident?.status === "attempting" ||
+          incident?.status === "detected"
+        ) {
+          await this.updateIncident(
+            incidentId,
+            ended === "error" ? "failed" : "completed",
+            ended === "error" ? "Recovered chat stream had errored." : undefined
+          );
+        }
+        // The turn's run is still open while it is replayed here.
+        await adapter.turns?.reconcileAgentToolChildRuns(requestId);
+      } finally {
+        this.#settled();
+      }
+      return;
+    }
 
     // An interrupted turn is a run whose isolate died before it finished. The
     // replay is itself an attempt: it counts the death and records itself so

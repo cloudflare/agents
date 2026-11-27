@@ -2189,6 +2189,40 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     expect(reconciled).toBe(0);
   });
 
+  it("settles the recovery of a turn that had ended, without the budget, the app or the model", async () => {
+    // A recovery attempt's turn returned, and the isolate went away before
+    // the attempt recorded the outcome. Its run is replayed with `ended`.
+    // The budget is spent as well: a finished reply is not given up on.
+    const h = makeHarness({
+      seedExhausted: true,
+      stream: { streamId: "s1", streamStillActive: false }
+    });
+    const reconciled: Array<string | undefined> = [];
+    const streamsEnded: string[] = [];
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      reconcileAgentToolChildRuns: async (endedRequestId?: string) =>
+        void reconciled.push(endedRequestId)
+    } as unknown as ChatRecoveryTurnBindings;
+    h.wake.onStreamEnded = async ({ requestId, streamStatus }) =>
+      void streamsEnded.push(`${requestId}:${streamStatus}`);
+
+    await h.engine.recoverInterruptedTurn({ ...h.turn, ended: true }, h.wake);
+
+    expect(h.calls).not.toContain("exhaust");
+    expect(h.calls).not.toContain("invokeOnChatRecovery");
+    expect(h.calls).not.toContain("schedule");
+    expect(h.calls).not.toContain("persist");
+    // The outcome the attempt did not write, once.
+    expect(h.events.map((event) => event.type)).toEqual([
+      "chat:recovery:completed"
+    ]);
+    expect(streamsEnded).toEqual(["req-1:completed"]);
+    // The turn's run is still open while it is replayed: the reconcile is
+    // told so.
+    expect(reconciled).toEqual(["req-1"]);
+  });
+
   it("flips the incident to failed and rethrows when scheduling throws", async () => {
     const h = makeHarness({ scheduleThrows: true });
 
