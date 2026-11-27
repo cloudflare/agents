@@ -579,6 +579,17 @@ describe("Think durable submissions", () => {
           error: "Submission was skipped by turn reset."
         });
       }
+      // A filter for skipped finds them, to list and to delete.
+      const listed = await agent.listSubmissionsForTest({ status: "skipped" });
+      expect(
+        listed.map((submission) => submission.submissionId).sort()
+      ).toEqual(["sub-reset-queued", "sub-reset-running"]);
+      await expect(
+        agent.deleteSubmissionsForTest({ status: "skipped" })
+      ).resolves.toBe(2);
+      await expect(
+        agent.listSubmissionsForTest({ status: "skipped" })
+      ).resolves.toEqual([]);
     });
 
     it("a cancel says its messages were applied", async () => {

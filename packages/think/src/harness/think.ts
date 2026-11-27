@@ -243,6 +243,8 @@ function taskStatusesFor(
     } else {
       out.add("completed");
       if (status !== "completed") out.add(status);
+      // A submission a turn reset ended is an aborted run.
+      if (status === "skipped") out.add("aborted");
     }
   }
   return [...out];
