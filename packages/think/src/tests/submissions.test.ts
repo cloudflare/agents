@@ -86,6 +86,7 @@ type ThinkSubmissionTestStub = {
   getMessagesForTest(): Promise<UIMessage[]>;
   setFinalAnswerResponseForTest(args: unknown): Promise<void>;
   getFinalAnswerCallsForTest(): Promise<string>;
+  getAfterToolNamesForTest(): Promise<string[]>;
   setTurnConfigOverride(config: Record<string, unknown> | null): Promise<void>;
   persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
@@ -2205,6 +2206,14 @@ describe("Think durable submissions", () => {
       }
     });
   });
+
+  it("keeps the final-answer call from the tool hooks", async () => {
+    const agent = await freshAgent();
+    await finalAnswerCalls(agent, "hidden-hooks");
+    expect(await agent.getAfterToolNamesForTest()).not.toContain(
+      "think_final_answer"
+    );
+  }, 30_000);
 
   it("keeps the final-answer tool on when a turn names its active tools", async () => {
     const agent = await freshAgent();
