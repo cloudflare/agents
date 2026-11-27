@@ -323,6 +323,19 @@ describe("an upgrade from the latest release, mid-turn", () => {
       turns.filter((r) => isContinue(r.id)).length,
       breakdown
     ).toBeLessThanOrEqual(1);
+    // The continuation carries the last submission the release started, so
+    // the new build must not run that submission again as well.
+    if (turns.some((r) => isContinue(r.id))) {
+      const cut = Math.max(
+        ...turns
+          .filter((r) => r.id.startsWith("release|submission "))
+          .map((r) => Number(r.id.slice(-1)))
+      );
+      expect(
+        turns.some((r) => r.id === `main|submission ${cut}`),
+        breakdown
+      ).toBe(false);
+    }
     for (const n of [1, 2, 3]) {
       expect(
         turns.some((r) => r.id.endsWith(`|submission ${n}`)),
