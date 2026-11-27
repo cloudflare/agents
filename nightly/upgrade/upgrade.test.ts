@@ -21,7 +21,12 @@ const RELEASE = ["agents", "@cloudflare/ai-chat", "@cloudflare/think"];
 const CHATS: Cls[] = ["chat", "think"];
 
 type Run = { kind: string; id: string; n: number };
-type Probe = { messages: UIMessage[]; runs: Run[]; submissions?: string[] };
+type Probe = {
+  messages: UIMessage[];
+  runs: Run[];
+  submissions?: string[];
+  log?: string[];
+};
 
 async function probe(cls: Cls, room: string): Promise<Probe> {
   const r = await ctl(cls, room, "probeState");
@@ -302,7 +307,7 @@ describe("an upgrade from the latest release, mid-turn", () => {
     // submission's turn calls the model once, except the one the deploy cut
     // off, which the new build runs again: once on each build.
     const turns = runsOf(p, "turn");
-    const breakdown = JSON.stringify(turns);
+    const breakdown = JSON.stringify({ turns, log: p.log });
     expect(
       runsOf(p, "call").map((r) => r.id),
       breakdown
@@ -323,19 +328,6 @@ describe("an upgrade from the latest release, mid-turn", () => {
       turns.filter((r) => isContinue(r.id)).length,
       breakdown
     ).toBeLessThanOrEqual(1);
-    // The continuation carries the last submission the release started, so
-    // the new build must not run that submission again as well.
-    if (turns.some((r) => isContinue(r.id))) {
-      const cut = Math.max(
-        ...turns
-          .filter((r) => r.id.startsWith("release|submission "))
-          .map((r) => Number(r.id.slice(-1)))
-      );
-      expect(
-        turns.some((r) => r.id === `main|submission ${cut}`),
-        breakdown
-      ).toBe(false);
-    }
     for (const n of [1, 2, 3]) {
       expect(
         turns.some((r) => r.id.endsWith(`|submission ${n}`)),

@@ -39,6 +39,7 @@ type Sql = (
 function tables(sql: Sql) {
   sql`CREATE TABLE IF NOT EXISTS probe_kv (k TEXT PRIMARY KEY, v TEXT)`;
   sql`CREATE TABLE IF NOT EXISTS probe_runs (kind TEXT, id TEXT, n INTEGER, PRIMARY KEY (kind, id))`;
+  sql`CREATE TABLE IF NOT EXISTS probe_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, line TEXT)`;
 }
 function getPace(sql: Sql): Pace {
   tables(sql);
@@ -55,6 +56,22 @@ function countRun(sql: Sql, kind: string, id: string) {
   sql`INSERT INTO probe_runs (kind, id, n) VALUES (${kind}, ${id}, 1)
       ON CONFLICT (kind, id) DO UPDATE SET n = n + 1`;
 }
+/** One line in the room's log: what happened, on which build, when. */
+function log(sql: Sql, line: string) {
+  try {
+    tables(sql);
+    sql`INSERT INTO probe_log (at, line) VALUES (${Date.now()}, ${line.slice(0, 300)})`;
+  } catch {
+    // storage may be gone during a reset
+  }
+}
+function readLog(sql: Sql) {
+  tables(sql);
+  return sql`SELECT at, line FROM probe_log ORDER BY seq`.map(
+    (r) => `${r.at} ${r.line}`
+  );
+}
+
 function runs(sql: Sql) {
   tables(sql);
   return sql`SELECT kind, id, n FROM probe_runs ORDER BY kind, id`;
@@ -97,6 +114,10 @@ function fakeModel(sql: Sql, build: string): LanguageModel {
       countRun(sql, "call", build);
       // And for which user message, so a turn that ran twice shows.
       countRun(sql, "turn", `${build}|${lastUserText(prompt)}`);
+      log(
+        sql,
+        `${build} model call: ${prompt.length} messages, last ${prompt.at(-1)?.role}: ${lastUserText(prompt).slice(0, 40)}`
+      );
       const callTool =
         prompt.at(-1)?.role === "user" &&
         lastUserText(prompt).includes("[approve]");
@@ -183,6 +204,25 @@ export class ProbeThink extends Think<Env> {
   private get s(): Sql {
     return this.sql.bind(this) as Sql;
   }
+  // Chat events, to read what recovery did when a check fails.
+  override observability = {
+    emit: (event: { type: string; payload?: Record<string, unknown> }) => {
+      if (
+        !event.type.startsWith("chat:") &&
+        !event.type.startsWith("submission")
+      )
+        return;
+      const p = event.payload ?? {};
+      log(
+        this.sql.bind(this) as Sql,
+        `${this.env.BUILD} ${event.type} ${JSON.stringify({ requestId: p.requestId, attempt: p.attempt, reason: p.reason, status: p.status, kind: p.recoveryKind })}`
+      );
+    }
+  } as unknown as Think<Env>["observability"];
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    log(this.sql.bind(this) as Sql, `${env.BUILD} start`);
+  }
   override getModel() {
     return fakeModel(this.s, this.env.BUILD);
   }
@@ -210,6 +250,7 @@ export class ProbeThink extends Think<Env> {
     return {
       messages: await this.getMessages(),
       runs: runs(this.s),
+      log: readLog(this.s),
       submissions: submissions.map((s) => s.status)
     };
   }
