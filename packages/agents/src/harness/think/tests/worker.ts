@@ -299,7 +299,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       this.ctx.storage.kv.put(SUBMISSION_STATUS_KEY, seen);
     },
     hooks: {
-      classifyError: classifyContextOverflow,
+      // An app's own classifier that ends a lost connection, when asked.
+      classifyError: (error) =>
+        this.ctx.storage.kv.get<boolean>(FATAL_CLASSIFIER_KEY)
+          ? "fail"
+          : classifyContextOverflow(error),
       onRecovery: ({ partial }) => {
         this.ctx.storage.kv.put(RECOVERY_PARTIAL_KEY, partial?.id ?? null);
         return this.ctx.storage.kv.get<boolean>(ABANDON_KEY)
@@ -1217,6 +1221,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.kv.get<string | null>(RECOVERY_PARTIAL_KEY);
   }
 
+  /** From now on, the app's classifier calls every model error `fail`. */
+  classifyEveryErrorAsFail(): void {
+    this.ctx.storage.kv.put(FATAL_CLASSIFIER_KEY, true);
+  }
+
   /** The next model call's preparation hits a platform transient once. */
   blipNextPreparation(): void {
     this.ctx.storage.kv.put(PREPARE_BLIP_KEY, true);
@@ -2068,6 +2077,7 @@ function downgradeToStore(
 /** The table suffix of the instances the harness composes. */
 const ABANDON_KEY = "test:abandon-recovery";
 const PREPARE_BLIP_KEY = "test:prepare-blip";
+const FATAL_CLASSIFIER_KEY = "test:fatal-classifier";
 const HARNESS_SUFFIX = "__c_think_2dharness";
 
 /** The table prefix ThinkHarness keeps its records under in the shared store. */

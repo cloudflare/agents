@@ -464,6 +464,15 @@ describe("ThinkHarness turns", () => {
     expect(text(result)).toBe("echo: transient once");
   });
 
+  it("ends a turn on a platform transient when the app's classifier says fail", async () => {
+    const stub = fresh();
+    await stub.classifyEveryErrorAsFail();
+    const result = await stub.prompt("transient once");
+    expect(result.status).toBe("unanswered");
+    expect(reason(result)).toMatch(/Network connection lost/);
+    expect(await stub.modelCalls()).toBe(1);
+  });
+
   it("tries a turn again after a platform transient while its model call is prepared", async () => {
     const stub = fresh();
     await stub.blipNextPreparation();

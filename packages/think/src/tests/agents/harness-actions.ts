@@ -37,6 +37,10 @@ function finish(controller: ReadableStreamDefaultController, reason: string) {
 }
 
 /** Calls the action the prompt names; after a tool result, says what it got. */
+/** Model calls to fail with a lost connection, and the calls made. */
+let lostConnections = 0;
+let modelCalls = 0;
+
 function actionModel(): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -47,6 +51,11 @@ function actionModel(): LanguageModel {
       throw new Error("doGenerate not implemented in mock");
     },
     doStream(options: { prompt: { role: string; content: unknown }[] }) {
+      modelCalls++;
+      if (lostConnections > 0) {
+        lostConnections--;
+        return Promise.reject(new Error("Network connection lost."));
+      }
       const last = options.prompt[options.prompt.length - 1];
       const prompt = JSON.stringify(options.prompt);
       // The reply after the tool result fails when the question asks so.
@@ -237,6 +246,20 @@ export class ThinkHarnessActionsAgent extends Think {
 
   async say(text: string): Promise<void> {
     await this.chat(text, quiet);
+  }
+
+  /** The next `count` model calls lose their connection. */
+  loseConnectionsForTest(count: number): void {
+    lostConnections = count;
+  }
+
+  modelCallsForTest(): number {
+    return modelCalls;
+  }
+
+  /** From now on, the app's classifyChatError names every error `fatal`. */
+  classifyErrorsAsFatalForTest(): void {
+    this.classifyChatError = () => "fatal";
   }
 
   /** Ends this object, so the next call meets a fresh isolate. */

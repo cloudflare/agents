@@ -2248,11 +2248,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             } catch (error) {
               console.error("ThinkHarness onError hook failed", error);
             }
-            const kind = isPlatformTransientError(failure)
-              ? "retry"
-              : ((await this.#extensions.hook("classifyError", {
-                  error: failure
-                })) ?? "fail");
+            // The app's classifier decides first; without one, a platform
+            // transient (a lost connection) is tried again.
+            const kind =
+              (await this.#extensions.hook("classifyError", {
+                error: failure
+              })) ?? (isPlatformTransientError(failure) ? "retry" : "fail");
             if (kind === "context-overflow" && progressed) {
               // This attempt ran model calls or tools the transcript does
               // not hold yet: make room, then continue from what it
@@ -3504,11 +3505,13 @@ async function* untilAborted<T>(
 /**
  * Classify the context-window overflow errors of common providers
  * (Anthropic, OpenAI, Google, Bedrock, Mistral and others) as
- * `"context-overflow"`, and everything else as `"fail"`. Pass it as
+ * `"context-overflow"`, a platform transient error (a lost connection, a
+ * storage reset, an error marked retryable) as `"retry"`, and everything
+ * else as `"fail"`. Pass it as
  * `hooks.classifyError`, or call it from your own classifier.
  *
  * @param error - The model call's error.
- * @returns `"context-overflow"` or `"fail"`.
+ * @returns `"context-overflow"`, `"retry"` or `"fail"`.
  * @experimental
  */
 export function classifyContextOverflow(error: unknown): ThinkErrorClass {
@@ -3522,7 +3525,8 @@ export function classifyContextOverflow(error: unknown): ThinkErrorClass {
       text = String(error);
     }
   }
-  return CONTEXT_OVERFLOW_PATTERN.test(text) ? "context-overflow" : "fail";
+  if (CONTEXT_OVERFLOW_PATTERN.test(text)) return "context-overflow";
+  return isPlatformTransientError(error) ? "retry" : "fail";
 }
 
 const CONTEXT_OVERFLOW_PATTERN =

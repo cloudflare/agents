@@ -680,6 +680,17 @@ describe("Think — error handling", () => {
     );
   });
 
+  it("ends a turn on a lost connection when classifyChatError says fatal", async () => {
+    const agent = await freshAgent(`lost-fatal-${crypto.randomUUID()}`);
+    await agent.classifyChatErrorsAsFatal();
+    await agent.setInBandErrorResponse("Network connection lost.");
+    const before = await agent.mockModelCallsForTest();
+    const result = await agent.testChat("a provider connection drops");
+    expect(result.error).toContain("Network connection lost.");
+    // The app's classification wins: the model is not asked again.
+    expect((await agent.mockModelCallsForTest()) - before).toBe(1);
+  });
+
   it("does not fire the watchdog for a slow-but-steady stream (timer resets per chunk)", async () => {
     const agent = await freshAgent(`slow-${crypto.randomUUID()}`);
     const stalled: Array<unknown> = [];

@@ -6431,6 +6431,16 @@ export class ThinkTestAgent extends Think {
     this._inBandErrorResponse = { errorText, textChunks };
   }
 
+  /** From now on, the app's classifyChatError names every error `fatal`. */
+  async classifyChatErrorsAsFatal(): Promise<void> {
+    this.classifyChatError = () => "fatal";
+  }
+
+  /** The mock models' calls so far, in this isolate. */
+  async mockModelCallsForTest(): Promise<number> {
+    return _mockCallCount;
+  }
+
   async clearInBandErrorResponse(): Promise<void> {
     this._inBandErrorResponse = null;
   }

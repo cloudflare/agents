@@ -12,7 +12,8 @@ import {
   type Connection,
   type ConnectionContext,
   type WSMessage,
-  callable
+  callable,
+  isPlatformTransientError
 } from "agents";
 import {
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
@@ -3533,11 +3534,13 @@ export class Think<
 
   #classify(error: unknown): ThinkErrorClass {
     const classification = this.classifyChatError(error);
-    return classification === "context_overflow"
-      ? "context-overflow"
-      : classification === "transient"
-        ? "retry"
-        : "fail";
+    if (classification === "context_overflow") return "context-overflow";
+    // An app's own classification wins; without one, a platform transient
+    // (a lost connection) is tried again within chatRecovery's budget.
+    if (classification === undefined && isPlatformTransientError(error)) {
+      return "retry";
+    }
+    return "fail";
   }
 
   /** The root session's Sessions handle, which the harness hands over on first use. */

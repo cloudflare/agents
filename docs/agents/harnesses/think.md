@@ -148,17 +148,17 @@ Every step of a turn reads only durable state, so a restarted object continues w
 
 ## Hooks
 
-| Hook             | When                                                                                                                                               |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `beforeTurn`     | Before every model call. Return `model`, `system`, `messages`, `activeTools`, `toolChoice`, `providerOptions`, `maxOutputTokens` or `temperature`. |
-| `beforeToolCall` | Before each server tool call. Return `{ action: "block", reason }`, `{ action: "substitute", output }`, or `{ action: "run", input }`.             |
-| `afterToolCall`  | After each server tool call, with its result.                                                                                                      |
-| `onStepFinish`   | After each model call's message is persisted.                                                                                                      |
-| `onChunk`        | For each UI chunk the model streams.                                                                                                               |
-| `onTurnEnd`      | After an operation settles.                                                                                                                        |
-| `onError`        | Observe a model call's error.                                                                                                                      |
-| `classifyError`  | Return `fail`, `retry`, or `context-overflow`. `classifyContextOverflow` matches the common providers' overflow errors.                            |
-| `onRecovery`     | Return `continue` or `abandon` for an interrupted model call.                                                                                      |
+| Hook             | When                                                                                                                                                    |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `beforeTurn`     | Before every model call. Return `model`, `system`, `messages`, `activeTools`, `toolChoice`, `providerOptions`, `maxOutputTokens` or `temperature`.      |
+| `beforeToolCall` | Before each server tool call. Return `{ action: "block", reason }`, `{ action: "substitute", output }`, or `{ action: "run", input }`.                  |
+| `afterToolCall`  | After each server tool call, with its result.                                                                                                           |
+| `onStepFinish`   | After each model call's message is persisted.                                                                                                           |
+| `onChunk`        | For each UI chunk the model streams.                                                                                                                    |
+| `onTurnEnd`      | After an operation settles.                                                                                                                             |
+| `onError`        | Observe a model call's error.                                                                                                                           |
+| `classifyError`  | Return `fail`, `retry`, or `context-overflow`. `classifyContextOverflow` matches the common providers' overflow errors and retries platform transients. |
+| `onRecovery`     | Return `continue` or `abandon` for an interrupted model call.                                                                                           |
 
 `beforeTurn` runs before every model call because a turn makes several, and after an eviction the harness has no memory of what an earlier call returned. On `context-overflow` the harness compacts the session with its compaction function and calls the model again, once.
 
