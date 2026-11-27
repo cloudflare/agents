@@ -236,6 +236,17 @@ function toInput(
   return Array.isArray(input) ? input : [input];
 }
 
+/** Where think@0.24.0 kept a response hook a reset left owed. */
+const RELEASED_RESPONSE_HOOK_PREFIX = "cf_think_pending_response_hook:";
+
+type ReleasedResponseHook = {
+  requestId: string;
+  messageId: string;
+  continuation?: boolean;
+  status: "completed" | "error" | "aborted";
+  error?: string;
+};
+
 /** Marks an operation that answers the history with a new reply. */
 const NEW_REPLY_KEY = "cf_think_new_reply";
 
@@ -1301,7 +1312,49 @@ export class Think<
         "Declared scheduled tasks were not reconciled on this wake; the " +
           "next successful wake will reconcile them."
       );
+      // Best-effort: a hook that throws must not stop the agent starting;
+      // the next row waits for the next wake.
+      try {
+        await this.#replayReleasedResponseHooks();
+      } catch (error) {
+        console.error(
+          "[Think] A response hook a released version left owed failed",
+          error
+        );
+      }
     };
+  }
+
+  /**
+   * TEMPORARY: remove in the next minor. The response hooks a reset left
+   * owed in think@0.24.0, kept in KV: each runs once, marked recovered, for
+   * a reply that was stored, and goes.
+   */
+  async #replayReleasedResponseHooks(): Promise<void> {
+    const owed = await this.ctx.storage.list<ReleasedResponseHook>({
+      prefix: RELEASED_RESPONSE_HOOK_PREFIX
+    });
+    if (owed.size === 0) return;
+    const handle = await this.#rootHandle();
+    for (const [key, hook] of owed) {
+      const message = hook?.messageId
+        ? await handle.getMessage(hook.messageId)
+        : null;
+      if (message && hook) {
+        // Deleted first: a hook that fails is not run again on every wake.
+        await this.ctx.storage.delete(key);
+        await this.onChatResponse({
+          message: message as UIMessage,
+          requestId: hook.requestId,
+          continuation: hook.continuation === true,
+          status: hook.status,
+          ...(hook.error !== undefined && { error: hook.error }),
+          recovered: true
+        });
+      } else {
+        await this.ctx.storage.delete(key);
+      }
+    }
   }
 
   #onStartDegradations: OnStartDegradation[] = [];

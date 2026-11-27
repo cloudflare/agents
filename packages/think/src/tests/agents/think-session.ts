@@ -14137,6 +14137,46 @@ export class ThinkRecoveryTestAgent extends Think {
     this.ctx.abort("test: forced reset");
   }
 
+  /**
+   * Leave a conversation with a reply and the response hook think@0.24.0
+   * would have kept owed for it in KV, then reset the isolate.
+   */
+  async leaveReleasedOwedHookThenResetForTest(): Promise<string> {
+    const assistantId = crypto.randomUUID();
+    await this.addMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      },
+      {
+        id: assistantId,
+        role: "assistant",
+        parts: [{ type: "text", text: "Answered before the reset" }]
+      }
+    ]);
+    await this.ctx.storage.put("cf_think_pending_response_hook:req-released", {
+      requestId: "req-released",
+      messageId: assistantId,
+      continuation: false,
+      status: "completed"
+    });
+    await this.ctx.storage.sync();
+    this.ctx.abort("test: forced reset");
+    return assistantId;
+  }
+
+  /** The KV keys a released version's owed hooks are kept under. */
+  async releasedOwedHooksForTest(): Promise<string[]> {
+    return [
+      ...(
+        await this.ctx.storage.list({
+          prefix: "cf_think_pending_response_hook:"
+        })
+      ).keys()
+    ];
+  }
+
   /** Every response hook call, kept across resets. */
   async hookCallsForTest(): Promise<HookCallForTest[]> {
     return this.ctx.storage.kv.get<HookCallForTest[]>(HOOK_CALLS_KEY) ?? [];

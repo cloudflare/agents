@@ -739,5 +739,14 @@
     "test": "recovery \u00d7 onChatResponse after a reset (#2266) > keeps the hook a turn owes on the turn's run, not in KV",
     "reason": "where the class keeps an owed hook (its turn run's checkpoint, not a KV key): nothing an app sees",
     "mechanicsOnly": true
+  },
+  {
+    "file": "run-turn-recovery.test.ts",
+    "test": "recovery \u00d7 onChatResponse after a reset (#2266) > replays on startup an owed response hook a released version kept, without a chat fiber",
+    "reason": "the owed hook captured through the class's private hook (`_fireResponseHook`, `leaveOwedHookAsReleasedForTest`) and its private startup replay (`_replayPendingResponseHooks`) called by hand",
+    "successor": {
+      "file": "run-turn-recovery.test.ts",
+      "test": "recovery \u00d7 onChatResponse after a reset (#2266) > runs once, as recovered, the response hook think@0.24.0 left owed"
+    }
   }
 ]

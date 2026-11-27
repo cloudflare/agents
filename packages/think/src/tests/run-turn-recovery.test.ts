@@ -270,6 +270,28 @@ describe("recovery × failed final persist (#1997)", () => {
 });
 
 describe("recovery × onChatResponse after a reset (#2266)", () => {
+  it("runs once, as recovered, the response hook think@0.24.0 left owed", async () => {
+    const name = `hook-released-${crypto.randomUUID()}`;
+    let agent = await freshRecoveryAgent(name);
+    const assistantId = await agent
+      .leaveReleasedOwedHookThenResetForTest()
+      .catch(() => undefined);
+    void assistantId;
+
+    agent = await freshRecoveryAgent(name);
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(await agent.hookCallsForTest()).toEqual([
+      expect.objectContaining({
+        requestId: "req-released",
+        status: "completed",
+        messageId: messages[1].id,
+        recovered: true
+      })
+    ]);
+    expect(await agent.releasedOwedHooksForTest()).toEqual([]);
+  }, 30_000);
+
   it("does not run the response hook again after a reset that follows a completed turn", async () => {
     const name = `hook-no-replay-${crypto.randomUUID()}`;
     let agent = await freshRecoveryAgent(name);
