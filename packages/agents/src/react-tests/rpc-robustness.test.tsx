@@ -473,17 +473,23 @@ describe("useAgent RPC robustness", () => {
         latestAgent!.call("closeConnectionsForTest", [1011, "nonterminal"])
       ).resolves.toBeGreaterThan(0);
 
+      // The close reaches the client first, then the socket reconnects:
+      // waiting for `identified` before the close arrives would pass on the
+      // old socket.
+      await vi.waitFor(
+        () => {
+          expect(shouldReconnectOnClose).toHaveBeenCalledWith(
+            expect.objectContaining({ code: 1011, reason: "nonterminal" })
+          );
+        },
+        { timeout: 10000 }
+      );
       await vi.waitFor(
         () => {
           expect(latestAgent?.identified).toBe(true);
         },
         { timeout: 10000 }
       );
-      await vi.waitFor(() => {
-        expect(shouldReconnectOnClose).toHaveBeenCalledWith(
-          expect.objectContaining({ code: 1011, reason: "nonterminal" })
-        );
-      });
       const reconnectedAgent = latestAgent as unknown as TestAgent;
       expect(reconnectedAgent.connectionError).toBeNull();
 
@@ -491,12 +497,15 @@ describe("useAgent RPC robustness", () => {
         latestAgent!.call("closeConnectionsForTest", [4001, "user-stop"])
       ).resolves.toBeGreaterThan(0);
 
-      await vi.waitFor(() => {
-        expect(latestAgent?.connectionError).toMatchObject({
-          code: 4001,
-          reason: "user-stop"
-        });
-      });
+      await vi.waitFor(
+        () => {
+          expect(latestAgent?.connectionError).toMatchObject({
+            code: 4001,
+            reason: "user-stop"
+          });
+        },
+        { timeout: 10000 }
+      );
       const terminalAgent = latestAgent as unknown as TestAgent;
       expect(terminalAgent.shouldReconnect).toBe(false);
     });
