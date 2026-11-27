@@ -9893,7 +9893,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     return {
       requestId: result.requestId,
       status: result.status,
-      ...(result.error !== undefined && { error: result.error })
+      ...(result.error !== undefined && { error: result.error }),
+      ...(result.reason !== undefined && { reason: result.reason })
     };
   }
 
