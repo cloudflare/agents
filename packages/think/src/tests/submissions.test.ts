@@ -65,6 +65,7 @@ type ThinkSubmissionTestStub = {
   waitFromHeldHookForTest(submissionId: string): Promise<string>;
   cancelInSubmissionStatusHookForTest(): Promise<void>;
   waitForIdleForTest(): Promise<void>;
+  isTasksIdleForTest(): Promise<boolean>;
   isSubmissionStatusHookHeldForTest(): Promise<boolean>;
   statusReportsQueuedForTest(submissionId: string): Promise<number>;
   releaseSubmissionStatusHookForTest(): Promise<void>;
@@ -1475,7 +1476,14 @@ describe("Think durable submissions", () => {
     });
     const settled = await agent.waitForSubmissionForTest(accepted.submissionId);
     expect(settled).toMatchObject({ status: "aborted", error: "stop" });
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Once the turn queue is idle and no Tasks run is open (the claim and
+    // its status reports run as a task, not a turn), a late status would
+    // have been reported.
+    await agent.waitForIdleForTest();
+    await vi.waitFor(
+      async () => expect(await agent.isTasksIdleForTest()).toBe(true),
+      { timeout: 5000, interval: 10 }
+    );
 
     const statuses = (await agent.getSubmissionLog())
       .filter((entry) => entry.submissionId === accepted.submissionId)

@@ -10253,6 +10253,15 @@ export class ThinkProgrammaticTestAgent extends Think {
     await waitForThinkIdleForTest(this);
   }
 
+  /**
+   * Whether no Tasks run is pending or running: a submission's claim, its
+   * status reports and its handler are all done.
+   */
+  async isTasksIdleForTest(): Promise<boolean> {
+    const open = await this.tasks.list({ status: ["pending", "running"] });
+    return open.length === 0;
+  }
+
   /** Whether a held stream has sent its chunks and is waiting. */
   async isChunkStreamHeldForTest(): Promise<boolean> {
     return this._chunkHold?.reached ?? false;
