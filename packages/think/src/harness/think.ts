@@ -899,6 +899,14 @@ export class Think<
           await this.#chunkHooks;
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
+          this.#turnFinished(
+            end.operationId,
+            end.status === "done"
+              ? "completed"
+              : end.reason === "aborted" || end.reason === "withdrawn"
+                ? "aborted"
+                : "error"
+          );
           const streamed = this.#streamed.delete(end.operationId);
           this.#liveCalls.delete(end.operationId);
           this.#toolCalls.delete(end.operationId);
@@ -1785,6 +1793,68 @@ export class Think<
   afterToolCall(_ctx: ToolCallResultContext): void | Promise<void> {}
 
   /** An operation's trigger and signal: a submission unless set first. */
+  /** The turns that reached a model call, with what `chat:turn:finish` repeats. */
+  readonly #turnEvents = new Map<
+    string,
+    {
+      trigger: TurnTrigger;
+      continuation: boolean;
+      generation: number;
+      startedAt: number;
+    }
+  >();
+
+  /**
+   * As on Think: `chat:turn:start` when a turn starts its work (here its
+   * first model call), with the clear count it started under.
+   */
+  #turnStarted(
+    operationId: string,
+    trigger: TurnTrigger,
+    continuation: boolean
+  ): void {
+    const meta = {
+      trigger,
+      continuation,
+      generation: this.#clears,
+      startedAt: Date.now()
+    };
+    this.#turnEvents.set(operationId, meta);
+    this._emit("chat:turn:start", {
+      requestId: operationId,
+      trigger,
+      admission: "queue",
+      continuation,
+      generation: meta.generation
+    });
+  }
+
+  /** As on Think: `chat:turn:finish` for a turn that started. */
+  #turnFinished(
+    operationId: string,
+    status: "completed" | "aborted" | "error"
+  ): void {
+    const meta = this.#turnEvents.get(operationId);
+    if (!meta) return;
+    this.#turnEvents.delete(operationId);
+    this._emit("chat:turn:finish", {
+      requestId: operationId,
+      trigger: meta.trigger,
+      admission: "queue",
+      continuation: meta.continuation,
+      generation: meta.generation,
+      status,
+      durationMs: Date.now() - meta.startedAt
+    });
+  }
+
+  /** A new operation id for a turn a method call asks for (`programmatic`). */
+  #programmaticTurn(): string {
+    const operationId = crypto.randomUUID();
+    this.#turns.set(operationId, { trigger: "programmatic" });
+    return operationId;
+  }
+
   #turnOf(operationId: string) {
     let turn = this.#turns.get(operationId);
     if (!turn) {
@@ -1878,7 +1948,7 @@ export class Think<
    * otherwise on the channel the last turn ran on.
    */
   async #continue(channel: string | undefined) {
-    const operationId = crypto.randomUUID();
+    const operationId = this.#programmaticTurn();
     if (channel !== undefined) this.#explicitChannels.set(operationId, channel);
     try {
       return await this.harness.session().continue({ operationId });
@@ -1985,7 +2055,8 @@ export class Think<
     const known = new Set(this.messages.map((message) => message.id));
     const session = this.harness.session();
     const receipt = await session.submit(
-      resolved.filter((message) => !known.has(message.id))
+      resolved.filter((message) => !known.has(message.id)),
+      { operationId: this.#programmaticTurn() }
     );
     return this.#waitForTurn(receipt.operationId, options?.signal);
   }
@@ -2460,7 +2531,8 @@ export class Think<
       receipt = await session.submit(
         // As in Think: the channel is stamped on the durable user message,
         // so a continuation or a recovered turn resolves it again.
-        wait.channel ? stampTurnContext(messages, wait.channel) : messages
+        wait.channel ? stampTurnContext(messages, wait.channel) : messages,
+        { operationId: this.#programmaticTurn() }
       );
     }
     wait.signal?.addEventListener(
@@ -3223,6 +3295,7 @@ export class Think<
       this.#recordUnexecutedTools(tools);
       this.#continued.set(turn.operationId, turn.continuation);
       this.#clearsAtStart.set(turn.operationId, this.#clears);
+      this.#turnStarted(turn.operationId, identity.trigger, turn.continuation);
     }
     // As in Think: the capability block for the turn's tools follows the
     // prompt, unless a `beforeTurn` gives its own.
