@@ -769,6 +769,17 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     `;
   }
 
+  /** Deliver a notice out of a turn; returns the transcript's texts. */
+  async deliverNoticeForTest(
+    text: string,
+    options: { channel: string; thread: string; informModel?: boolean }
+  ): Promise<string[]> {
+    await this.deliverNotice(text, options);
+    return (await this.getMessages()).flatMap((message) =>
+      message.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))
+    );
+  }
+
   private _ensureTable(): void {
     this.sql`CREATE TABLE IF NOT EXISTS messenger_delivery_log (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, content TEXT
@@ -785,32 +796,6 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return [
       ...this.ctx.storage.kv.list({ prefix: "cf_think_messenger_asker:" })
     ].length;
-  }
-
-  /** Deliver a notice out of a turn; returns the transcript's texts. */
-  async deliverNoticeForTest(
-    text: string,
-    options: { channel: string; thread: string; informModel?: boolean }
-  ): Promise<string[]> {
-    await this.deliverNotice(text, options);
-    return (await this.getMessages()).flatMap((message) =>
-      message.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))
-    );
-  }
-
-  /** A notice to a messenger with no thread; returns the error's text. */
-  async deliverNoticeWithoutThreadForTest(): Promise<string> {
-    try {
-      await this.deliverNotice("hi", { channel: "fake" });
-      return "delivered";
-    } catch (error) {
-      return String(error);
-    }
-  }
-
-  /** Whether each post was plain text or Markdown, in order. */
-  getPostShapesForTest(): string[] {
-    return this.ctx.storage.kv.get<string[]>("post-shapes") ?? [];
   }
 
   /** The thread of every post, in order. */
@@ -928,10 +913,6 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         this.ctx.storage.kv.put("post-threads", [
           ...this.getPostThreadsForTest(),
           threadId
-        ]);
-        this.ctx.storage.kv.put("post-shapes", [
-          ...(this.ctx.storage.kv.get<string[]>("post-shapes") ?? []),
-          typeof message === "string" ? "text" : "markdown"
         ]);
         return { id: "reply", raw: {}, threadId };
       },
