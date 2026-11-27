@@ -1229,6 +1229,13 @@ export function chatTurnDefinition(
         });
       }
       if (result.status === "aborted") await sendTranscript(false);
+      // A turn that was recovered: the tabs stop showing it as recovering.
+      if (
+        step.attempt > 1 ||
+        step.checkpoint.get(FAILED_CHECKPOINT) !== undefined
+      ) {
+        sendRecovering(false);
+      }
       await host.hooks?.onResponse?.(result);
       return result;
     };
@@ -1305,7 +1312,24 @@ export function chatTurnDefinition(
     // A failure worth another attempt: the stream stays open, and the next
     // attempt continues it after a backoff, asking the app and the budget. A recovery attempt that fails this way counts against
     // `maxAttempts`, however little time passed.
+    // Every tab is told while the turn is being recovered, as the hosts'
+    // `cf_agent_chat_recovering` frames did (a client shows "recovering…").
+    const sendRecovering = (recovering: boolean) => {
+      const text = frameText({
+        type: CHAT_MESSAGE_TYPES.CHAT_RECOVERING,
+        recovering,
+        id: requestId
+      } as { type: string });
+      const sockets = deps.webSockets;
+      if (!sockets || text === undefined) return;
+      if (sockets.broadcast) sockets.broadcast(text, []);
+      else
+        for (const connection of sockets.getConnections()) {
+          sendIfOpen(connection, text);
+        }
+    };
     const tryAgainAfter = (error: unknown) => {
+      sendRecovering(true);
       const before = step.checkpoint.get<{ failures: number; retries: number }>(
         FAILED_CHECKPOINT
       );
@@ -1446,6 +1470,7 @@ export function chatTurnDefinition(
         isolate: (isolateId ??= crypto.randomUUID()),
         token: crypto.randomUUID()
       };
+      sendRecovering(true);
       // A reply that waits on the client (a client tool's result, an
       // approval) is not stuck: the budget cannot give it up while it
       // waits. The app is still asked, since it may choose to drop it.
