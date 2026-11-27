@@ -20,7 +20,11 @@ import type { ClientToolSchema } from "./client-tools";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
 import { chatRecoveryBackoffSeconds } from "./recovery-engine";
 import { TaskSettlement } from "../tasks/settlement";
-import { continuationWaitsOnClient } from "./before-turn";
+import {
+  continuationWaitsOnClient,
+  interruptedToolPartAsError,
+  repairTranscriptBeforeTurn
+} from "./before-turn";
 import { replyIsRemovedAsEmpty } from "./repair-transcript";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
@@ -1034,6 +1038,48 @@ export function chatTurnDefinition(
           });
         }
       }
+    }
+    // Before the model is asked: a call the transcript leaves unanswered
+    // that nothing will answer in time is settled (a provider rejects a
+    // request holding a call with no result), trailing reasoning is dropped,
+    // and a reply left holding nothing is removed. The repaired transcript
+    // is stored, and the call sees it.
+    const clientToolNames = new Set(
+      (run.clientTools ?? []).map((tool) => tool.name)
+    );
+    const repaired = repairTranscriptBeforeTurn([...messages], {
+      continuation: partial !== undefined,
+      clientToolNames,
+      repairPart: (part) =>
+        (host.hooks?.repairInterruptedToolPart?.(
+          part as never
+        ) as UIMessage["parts"][number]) ??
+        interruptedToolPartAsError(part, { clientToolNames })
+    });
+    if (partial !== undefined && repaired.keptToolCallIds.length > 0) {
+      // A continuation whose reply still waits on a client: its answer
+      // starts the continuation.
+      return report({
+        requestId,
+        status: "skipped",
+        reason: "awaiting-client"
+      });
+    }
+    const emptied = new Set(repaired.emptyReplyIds);
+    for (let i = 0; i < repaired.messages.length; i++) {
+      const next = repaired.messages[i];
+      if (emptied.has(next.id)) continue;
+      if (next !== messages[i]) await session.upsertMessage(next as never);
+    }
+    if (emptied.size > 0) await session.deleteMessages([...emptied]);
+    messages.splice(
+      0,
+      messages.length,
+      ...repaired.messages.filter((message) => !emptied.has(message.id))
+    );
+    if (partial !== undefined) {
+      partial =
+        messages.find((message) => message.id === partial?.id) ?? partial;
     }
     let call: ChatModelCall = {
       session: sessionId,

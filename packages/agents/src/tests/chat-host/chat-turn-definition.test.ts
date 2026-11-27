@@ -1687,4 +1687,47 @@ describe("chatTurnDefinition", () => {
       expect(await instance.sessions.session("s1").getHistory()).toEqual([]);
     });
   });
+
+  it("a new question settles the call an earlier reply still waits on, before the model is asked", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      await session.appendMessage({
+        id: "u2",
+        role: "user",
+        parts: []
+      } as never);
+      await definitionOf(instance, instance.host)(
+        { trigger: "submit-message", questionId: "u2" },
+        laterAttempt("rp-1", 1)
+      );
+      const sent = (
+        instance.calls[0].messages.find((m) => m.id === "a1") as unknown as {
+          parts: Array<{ state?: string }>;
+        }
+      ).parts[0];
+      expect(sent.state).toBe("output-error");
+      expect(JSON.stringify(await session.getMessage("a1"))).toContain(
+        "output-error"
+      );
+    });
+  });
 });
