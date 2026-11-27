@@ -14,6 +14,7 @@ import {
   type WSMessage
 } from "agents";
 import type { ChatResponseResult, SaveMessagesResult } from "agents/chat";
+import { chatDispatch } from "agents/chat";
 import {
   ThinkChat,
   ThinkHarness,
@@ -1354,6 +1355,29 @@ export class Think<
     };
     const onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      // A tab's chat frames go through the shared chat dispatch (H2c), onto
+      // the harness's root session.
+      const session = this.harness.session().id;
+      if (
+        await chatDispatch(
+          this.harness.chatDeps(session, {
+            kv: this.ctx.storage.kv,
+            webSockets: { getConnections: () => this.getConnections() },
+            emit: (type, payload) =>
+              (
+                this._emit as unknown as (
+                  type: string,
+                  payload: Record<string, unknown>
+                ) => void
+              ).call(this, type, payload)
+          }),
+          this.harness.chatLane(session),
+          connection,
+          message
+        )
+      ) {
+        return;
+      }
       for (const handlers of this.#handlers) {
         if ((await handlers.onMessage?.(connection, message)) === true) return;
       }
