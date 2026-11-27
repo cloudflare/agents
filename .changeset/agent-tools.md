@@ -13,3 +13,4 @@ Agent tools and sub-agents.
 - Runs wait for their child's recovery and start in order, and aged-media eviction runs for every sub-agent (#3024, #3144, #2974).
 - Many sub-agents started at once no longer stall, and their work resumes when the root restarts (#3077, #3014, #3086).
 - Sub-agents work under a jurisdiction, keep socket frames in order, and no longer reset their tree's storage when upgrading old chat tables (#3085, #3181, #3215, #3192).
+- An `AIChatAgent` agent-tool run is its chat turn: one durable run, so a reset of the child resumes it and a cancel ends it at once, whatever the turn is doing. Runs a released version kept are carried forward, and a run in flight across the upgrade carries on.

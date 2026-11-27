@@ -109,12 +109,12 @@ describe("agent-tool runs as chat turns", () => {
         { type: "text-end", id: "reply-1-0" },
         { type: "finish" }
       ]);
-      // A reader that followed the live stream already has it.
+      // A reader with a position pages through the replay.
       expect(
         await agentToolTurnChunks(instance.deps, "run-done", {
           afterSequence: 3
         })
-      ).toEqual([]);
+      ).toEqual([{ sequence: 4, body: JSON.stringify({ type: "finish" }) }]);
     });
   });
 

@@ -10,7 +10,7 @@ import type { ChatRecoveryTestAgent } from "./worker";
  * drops the tables, turns it into `it`.
  */
 describe("agent-tool child rows a released version left", () => {
-  it.fails("inspect as they did, and the released tables are gone", async () => {
+  it("inspect as they did, and the released tables are gone", async () => {
     const agent = await getAgentByName(
       env.ChatRecoveryTestAgent as unknown as DurableObjectNamespace<ChatRecoveryTestAgent>,
       `child-upgrade-${crypto.randomUUID()}`

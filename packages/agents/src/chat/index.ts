@@ -247,6 +247,26 @@ export {
 } from "./server-turn";
 
 /**
+ * @internal An agent-tool run as the child's chat turn on the chat module:
+ * start, inspect, chunks, tail, progress, cancel, and the carry-forward of
+ * a released version's run tables. Sibling-package support for
+ * `@cloudflare/ai-chat`, not a public API. See `agent-tool-turns.ts`.
+ */
+export {
+  agentToolTurnChunks,
+  agentToolTurnId,
+  agentToolTurnOf,
+  cancelAgentToolTurn,
+  carryForwardAgentToolRuns,
+  inspectAgentToolTurn,
+  recordAgentToolProgress,
+  startAgentToolTurn,
+  tailAgentToolTurn
+} from "./agent-tool-turns";
+/** @internal The turn streaming in this isolate per session, to inject a chunk into. */
+export { liveTurnsOf } from "./chat-host";
+
+/**
  * @internal The life of an agent-tool run on the child agent, shared by
  * `@cloudflare/ai-chat` and `@cloudflare/think`: start, the bound request
  * id, cancel, the terminal status, and the reconcile of a run an earlier

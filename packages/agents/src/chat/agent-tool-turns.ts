@@ -48,7 +48,12 @@ export async function startAgentToolTurn(
   lane: ChatLane,
   runId: string,
   message: UIMessage,
-  options: { terminalOnly?: boolean; startMessageId: string | null }
+  options: {
+    terminalOnly?: boolean;
+    startMessageId: string | null;
+    /** The turn's request body (the run's input, for the host's hooks). */
+    body?: Record<string, unknown>;
+  }
 ): Promise<void> {
   const agentTool: AgentToolTurnMeta = {
     runId,
@@ -58,7 +63,13 @@ export async function startAgentToolTurn(
   await submitTurn(
     deps,
     lane,
-    { trigger: "server", messages: [message] },
+    {
+      trigger: "server",
+      messages: [message],
+      // No client's tools: the run has no tab.
+      clientTools: [],
+      ...(options.body && { body: options.body })
+    },
     {
       requestId: agentToolTurnId(runId),
       retain: true,
@@ -82,7 +93,7 @@ export function agentToolTurnOf(
  * Record progress or a milestone on the agent-tool turn `requestId` (the
  * tool's `ChatModelCall.requestId`): one field of the run's metadata each,
  * one statement, kept after the run settles. Progress replaces the last;
- * each milestone is its own field. `false` when the turn is not one.
+ * each milestone is its own field, by its sequence. `false` when the turn is not one.
  */
 export function recordAgentToolProgress(
   deps: ChatDeps,
@@ -98,7 +109,7 @@ export function recordAgentToolProgress(
     report.kind === "progress"
       ? { progress: report.snapshot as unknown as TaskJson }
       : {
-          [`milestone:${report.milestone.name}`]:
+          [`milestone:${report.milestone.sequence}`]:
             report.milestone as unknown as TaskJson
         }
   );
@@ -130,21 +141,36 @@ export function inspectAgentToolTurn(
   const base = {
     runId,
     requestId: id,
+    streamId: chatTurnStreamId(id),
     startedAt: record.createdAt,
     ...(progress ? { progress } : {}),
     ...(milestones.length ? { milestones } : {})
   };
+  // A cancel is the run's end as soon as it is asked, with its reason; its
+  // turn leaves the lane when it comes up.
+  const cancelled = fields.cancelled as string | undefined;
   if (record.status === "pending" || record.status === "running") {
-    return { ...base, status: "running" };
+    return cancelled === undefined
+      ? { ...base, status: "running" }
+      : { ...base, status: "aborted", error: cancelled };
   }
   if (record.status === "aborted" || record.status === "skipped") {
-    return {
-      ...base,
-      status: "aborted",
-      ...(record.reason ? { error: record.reason } : {})
-    };
+    const error = cancelled ?? record.reason;
+    return { ...base, status: "aborted", ...(error ? { error } : {}) };
   }
   const result = record.result as ChatTurnResult | undefined;
+  // A run carried forward from a released version keeps its result here.
+  const kept = fields.result as
+    | { output?: unknown; summary?: string }
+    | undefined;
+  if (record.status === "completed" && kept) {
+    return {
+      ...base,
+      status: "completed",
+      ...(kept.output !== undefined && { output: kept.output }),
+      ...(kept.summary !== undefined && { summary: kept.summary })
+    };
+  }
   if (record.status === "error" || result?.status === "error") {
     return {
       ...base,
@@ -239,9 +265,7 @@ export function chunksOfMessage(message: UIMessage): UIMessageChunk[] {
 /**
  * Run `runId`'s chunks after `afterSequence`. While the run is live they
  * are its stream's, numbered by their place in it. Once it settled the
- * cutover dropped the stream: a replay from the start gets the stored
- * reply's chunks, numbered from 0, and a reader that already had a position
- * in the stream gets none.
+ * cutover dropped the stream: the stored reply's chunks, numbered from 0.
  */
 export async function agentToolTurnChunks(
   deps: ChatDeps,
@@ -258,12 +282,11 @@ export async function agentToolTurnChunks(
       .session(input?.session ?? deps.session ?? "")
       .getMessage(result.messageId);
     if (!message) return [];
-    // A reader with a position read the live stream, whose numbering this
-    // is not: it saw the reply already. A replay from the start gets it.
-    if ((options?.afterSequence ?? -1) >= 0) return [];
-    return chunksOfMessage(message as unknown as UIMessage).map(
-      (chunk, sequence) => ({ sequence, body: JSON.stringify(chunk) })
-    );
+    // Numbered from 0 as the replay's own: a reader pages through it.
+    const after = options?.afterSequence ?? -1;
+    return chunksOfMessage(message as unknown as UIMessage)
+      .map((chunk, sequence) => ({ sequence, body: JSON.stringify(chunk) }))
+      .filter((chunk) => chunk.sequence > after);
   }
   // What this isolate buffered is written first.
   deps.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
@@ -287,11 +310,191 @@ export async function agentToolTurnChunks(
   return chunks;
 }
 
+/**
+ * Follow run `runId`'s live stream from after `afterSequence`: newline-
+ * delimited `{ sequence, body }` lines, each chunk as the stream is woken
+ * with it, until the run's turn settles. `null` when the turn has no stream
+ * open (not started yet, or settled): the parent reads chunks then.
+ */
+export async function tailAgentToolTurn(
+  deps: ChatDeps,
+  runId: string,
+  options: { afterSequence?: number; signal?: AbortSignal } = {}
+): Promise<ReadableStream<Uint8Array> | null> {
+  const streamId = chatTurnStreamId(agentToolTurnId(runId));
+  if ((await deps.streams.status(streamId))?.state !== "streaming") {
+    return null;
+  }
+  const stop = new AbortController();
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, stop.signal])
+    : stop.signal;
+  const encoder = new TextEncoder();
+  let reader: AsyncGenerator<{ seq: number; chunk: unknown }[]> | undefined;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      reader ??= deps.streams.readBatches(streamId, {
+        from: (options.afterSequence ?? -1) + 1,
+        signal
+      }) as AsyncGenerator<{ seq: number; chunk: unknown }[]>;
+      try {
+        const next = await reader.next();
+        if (next.done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(
+          encoder.encode(
+            next.value
+              .map(
+                (item) =>
+                  `${JSON.stringify({ sequence: item.seq, body: JSON.stringify(item.chunk) })}\n`
+              )
+              .join("")
+          )
+        );
+      } catch (error) {
+        // A stop of the read, or a stream deleted as the turn settled, ends
+        // the tail: the parent inspects the run then.
+        if (signal.aborted) controller.close();
+        else controller.error(error);
+      }
+    },
+    cancel() {
+      stop.abort();
+    }
+  });
+}
+
+/**
+ * Carry the agent-tool runs a released version kept in its own tables onto
+ * the chat turn runs this version reads, once, then drop the tables. A run
+ * that was still running is carried as an error: nothing of this version
+ * owns its turn.
+ */
+export async function carryForwardAgentToolRuns(
+  deps: ChatDeps,
+  sql: SqlStorage,
+  tables: { runs: string; milestones: string },
+  definition: string
+): Promise<void> {
+  const exists = (name: string) =>
+    sql
+      .exec(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        name
+      )
+      .toArray().length > 0;
+  if (!exists(tables.runs)) return;
+  type ReleasedRun = {
+    run_id: string;
+    status: string;
+    output_json: string | null;
+    summary: string | null;
+    error_message: string | null;
+    started_at: number;
+    completed_at: number | null;
+    progress_json: string | null;
+    event_delivery: string | null;
+  };
+  const parse = (json: string | null): unknown => {
+    if (json === null) return undefined;
+    try {
+      return JSON.parse(json);
+    } catch {
+      return undefined;
+    }
+  };
+  const milestones = new Map<string, AgentToolMilestone[]>();
+  if (exists(tables.milestones)) {
+    for (const row of sql
+      .exec(
+        `SELECT run_id, sequence, name, data_json, at FROM ${tables.milestones} ORDER BY sequence`
+      )
+      .toArray() as {
+      run_id: string;
+      sequence: number;
+      name: string;
+      data_json: string | null;
+      at: number;
+    }[]) {
+      const list = milestones.get(row.run_id) ?? [];
+      list.push({
+        name: row.name,
+        sequence: row.sequence,
+        at: row.at,
+        ...(row.data_json !== null && { data: parse(row.data_json) })
+      } as AgentToolMilestone);
+      milestones.set(row.run_id, list);
+    }
+  }
+  for (const row of sql
+    .exec(
+      `SELECT run_id, status, output_json, summary, error_message, started_at, completed_at, progress_json, event_delivery FROM ${tables.runs}`
+    )
+    .toArray() as ReleasedRun[]) {
+    const fields: Record<string, unknown> = {
+      runId: row.run_id,
+      startMessageId: null,
+      ...(row.event_delivery === "terminal" && { terminalOnly: true }),
+      ...(row.progress_json !== null && {
+        progress: parse(row.progress_json)
+      })
+    };
+    for (const milestone of milestones.get(row.run_id) ?? []) {
+      fields[`milestone:${milestone.sequence}`] = milestone;
+    }
+    const status =
+      row.status === "completed"
+        ? "completed"
+        : row.status === "aborted"
+          ? "aborted"
+          : "error";
+    if (status === "completed") {
+      const output = parse(row.output_json);
+      fields.result = {
+        ...(output !== undefined && { output }),
+        ...(row.summary !== null && { summary: row.summary })
+      };
+    }
+    await deps.tasks.importRun({
+      runId: agentToolTurnId(row.run_id),
+      definition,
+      status,
+      attempt: 1,
+      retain: true,
+      metadata: { agentTool: fields as TaskJson },
+      ...(status === "error" && {
+        error:
+          row.error_message ??
+          (row.status === "running" || row.status === "starting"
+            ? "Agent tool run was interrupted by an upgrade."
+            : "Agent tool run failed")
+      }),
+      ...(status === "aborted" &&
+        row.error_message !== null && { error: row.error_message }),
+      ...(status === "completed" && {
+        result: { requestId: agentToolTurnId(row.run_id), status: "completed" }
+      }),
+      createdAt: row.started_at,
+      settledAt: row.completed_at ?? Date.now()
+    });
+  }
+  sql.exec(`DROP TABLE IF EXISTS ${tables.milestones}`);
+  sql.exec(`DROP TABLE ${tables.runs}`);
+}
+
 /** Cancel run `runId`: it ends `aborted` with `reason`, from any state. */
 export function cancelAgentToolTurn(
   deps: ChatDeps,
   runId: string,
   reason: string
 ): Promise<boolean> {
-  return cancelTurn(deps, agentToolTurnId(runId), reason);
+  const id = agentToolTurnId(runId);
+  const status = deps.tasks.peek(id)?.status;
+  // Marked at once, before the lane acts on the stop.
+  if (status === "pending" || status === "running") {
+    deps.tasks.patchMetadata(id, "agentTool", { cancelled: reason });
+  }
+  return cancelTurn(deps, id, reason);
 }
