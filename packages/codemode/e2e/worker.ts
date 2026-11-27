@@ -289,7 +289,11 @@ async function handleMcpExecute(
       };
       return {
         content: [
-          { type: "text" as const, text: JSON.stringify(structuredContent) }
+          {
+            type: "text" as const,
+            // Not JSON, so the test fails if structuredContent is ignored
+            text: `count=${structuredContent.count} total=${structuredContent.total}`
+          }
         ],
         structuredContent
       };
