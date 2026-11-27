@@ -168,13 +168,15 @@ class StreamStalledError extends Error {
 /** `chunks`, erroring with a stall when nothing arrives for `ms`. */
 function watchStall(
   chunks: ReadableStream<UIMessageChunk>,
-  ms: number | undefined
+  ms: number | undefined,
+  /** Calls already running when the stream starts (approved, continued). */
+  alreadyRunning: Iterable<string> = []
 ): ReadableStream<UIMessageChunk> {
   if (!ms || ms <= 0) return chunks;
   const reader = chunks.getReader();
   // Tool calls asked and not answered yet: while one runs, the model is
   // silent by design, and only the model's silence is a stall.
-  const running = new Set<string>();
+  const running = new Set<string>(alreadyRunning);
   return new ReadableStream<UIMessageChunk>({
     async pull(controller) {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -193,7 +195,11 @@ function watchStall(
         if (typeof id === "string") {
           if (next.value.type === "tool-input-available") running.add(id);
           else if (
-            next.value.type === "tool-output-available" ||
+            // Waiting for an approval is not running; a preliminary output
+            // (a tool's progress) is not its end.
+            next.value.type === "tool-approval-request" ||
+            (next.value.type === "tool-output-available" &&
+              (next.value as { preliminary?: unknown }).preliminary !== true) ||
             next.value.type === "tool-output-error" ||
             next.value.type === "tool-output-denied"
           ) {
@@ -343,7 +349,9 @@ function repairCutOffTools(
       if (
         typeof name === "string" &&
         answeredByClient.has(name) &&
-        (part as { state?: unknown }).state === "input-available"
+        // An approved client tool waits for the tab's result too.
+        ((part as { state?: unknown }).state === "input-available" ||
+          (part as { state?: unknown }).state === "approval-responded")
       ) {
         return part;
       }
@@ -682,7 +690,20 @@ export function chatTurnDefinition(
       let started = false;
       const recorded = watchStall(
         chunksOf(source, requestId),
-        recovery === false ? undefined : recovery?.stallTimeoutMs
+        recovery === false ? undefined : recovery?.stallTimeoutMs,
+        // An approved call of the reply continued runs with no new input.
+        (continuing?.parts ?? []).flatMap((part) => {
+          const record = part as {
+            toolCallId?: unknown;
+            state?: unknown;
+            approval?: { approved?: unknown };
+          };
+          return typeof record.toolCallId === "string" &&
+            record.state === "approval-responded" &&
+            record.approval?.approved === true
+            ? [record.toolCallId]
+            : [];
+        })
       ).pipeThrough(
         new TransformStream<UIMessageChunk, UIMessageChunk>({
           transform(chunk, controller) {

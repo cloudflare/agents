@@ -1116,4 +1116,138 @@ describe("chatTurnDefinition", () => {
       expect(part?.state).toBe("output-error");
     });
   });
+
+  async function approvedReply(instance: ChatTurnHostObject, tool: string) {
+    const session = instance.sessions.session("s1");
+    await session.appendMessage({ id: "u1", role: "user", parts: [] } as never);
+    await session.appendMessage({
+      id: "a1",
+      role: "assistant",
+      parts: [
+        {
+          type: `tool-${tool}`,
+          toolCallId: "c1",
+          state: "approval-responded",
+          input: {},
+          approval: { id: "ap1", approved: true }
+        }
+      ]
+    } as never);
+  }
+
+  it("an approved tool that runs longer than the stall timeout in its continuation is not a stall", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await approvedReply(instance, "gate");
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            async start(controller) {
+              // The approved tool runs for five stall timeouts, announcing
+              // nothing before its output.
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              controller.enqueue({
+                type: "tool-output-available",
+                toolCallId: "c1",
+                output: "ran"
+              });
+              controller.close();
+            }
+          }),
+        options: { recovery: { stallTimeoutMs: 20 } }
+      })({ trigger: "tool-answer" }, laterAttempt("ap-2", 1));
+      expect(result).toMatchObject({ status: "completed" });
+    });
+  });
+
+  it("a call waiting for approval does not hold the stall watchdog off", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "gate",
+                input: {}
+              });
+              controller.enqueue({
+                type: "tool-approval-request",
+                toolCallId: "c1",
+                approvalId: "ap1"
+              });
+              // Then the model goes silent without closing.
+            }
+          }),
+        options: { recovery: { stallTimeoutMs: 20 } }
+      })({ trigger: "server" }, laterAttempt("ap-3", 1));
+      expect(result).toBeInstanceOf(TaskSettlement);
+    });
+  });
+
+  it("a tool's progress output does not end its run for the stall watchdog", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            async start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "slow",
+                input: {}
+              });
+              controller.enqueue({
+                type: "tool-output-available",
+                toolCallId: "c1",
+                output: "half",
+                preliminary: true
+              });
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              controller.enqueue({
+                type: "tool-output-available",
+                toolCallId: "c1",
+                output: "done"
+              });
+              controller.close();
+            }
+          }),
+        options: { recovery: { stallTimeoutMs: 20 } }
+      })({ trigger: "server" }, laterAttempt("pr-1", 1));
+      expect(result).toMatchObject({ status: "completed" });
+    });
+  });
+
+  it("an approved client tool cut off by a reset still waits for the tab's result", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await approvedReply(instance, "ask");
+      const checkpoint = new Map<string, unknown>([
+        ["chat:base", { id: "a1", parts: 1 }]
+      ]);
+      const cut = await instance.streams.open(chatTurnStreamId("ap-4"), {
+        tag: "ap-4"
+      });
+      cut.append({ type: "start", messageId: "a1" } as never);
+      await definitionOf(instance, instance.host)(
+        { trigger: "tool-answer", clientTools: [{ name: "ask" }] },
+        laterAttempt("ap-4", 2, new AbortController().signal, checkpoint)
+      );
+      const part = (
+        instance.calls[0].messages.find((m) => m.id === "a1") as unknown as {
+          parts: Array<{ toolCallId?: string; state?: string }>;
+        }
+      ).parts.find((p) => p.toolCallId === "c1");
+      expect(part?.state).toBe("approval-responded");
+    });
+  });
 });
