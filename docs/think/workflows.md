@@ -136,8 +136,9 @@ Object RPC open.
 2. Think runs the submitted turn through the normal submission queue.
 3. When the submission reaches `completed`, `error`, `aborted`, or `skipped`,
    Think records a pending workflow notification.
-4. Think drains the notification outbox with `sendWorkflowEvent()` and Durable
-   Object alarms until delivery succeeds.
+4. Think sends the notification with `sendWorkflowEvent()` at once. A failed
+   send is retried from Durable Object alarms with backoff until it succeeds,
+   for up to twelve hours.
 5. `step.waitForEvent("<name>:wait", ...)` resumes the Workflow.
 6. `step.prompt()` validates the structured output or throws a typed error.
 
