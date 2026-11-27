@@ -811,7 +811,9 @@ export class Think<
             .catch((error: unknown) =>
               console.error("[Think] An extension's onChunk failed", error)
             );
-          void this.onChunk({ chunk } as unknown as ChunkContext);
+          void this.onChunk({
+            chunk: streamPartOf(chunk, this.#callsOf(operationId))
+          } as unknown as ChunkContext);
         },
         onTurnEnd: async (end) => {
           // The extensions' chunk hooks finish inside the turn, as in Think.
@@ -819,6 +821,7 @@ export class Think<
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
           const streamed = this.#streamed.delete(end.operationId);
+          this.#toolCalls.delete(end.operationId);
           const clearsAtStart = this.#clearsAtStart.get(end.operationId);
           this.#clearsAtStart.delete(end.operationId);
           // A clear that ran, or runs, while the turn was open.
@@ -1831,6 +1834,21 @@ export class Think<
       parentId = message.id;
     }
     await this.#sync();
+  }
+
+  /**
+   * Each running turn's tool calls by id, so `onChunk` can name a call's
+   * tool and input on its result, as the AI SDK's stream parts do.
+   */
+  readonly #toolCalls = new Map<
+    string,
+    Map<string, { toolName: string; input: unknown }>
+  >();
+
+  #callsOf(operationId: string) {
+    let calls = this.#toolCalls.get(operationId);
+    if (!calls) this.#toolCalls.set(operationId, (calls = new Map()));
+    return calls;
   }
 
   /** The extensions' `onChunk` calls, chained so they run in order. */
@@ -3365,6 +3383,63 @@ function systemText(value: unknown): string | undefined {
     return typeof content === "string" ? [content] : [];
   });
   return texts.length > 0 ? texts.join("\n\n") : undefined;
+}
+
+/**
+ * A UI chunk as the AI SDK's stream has it in Think's `onChunk`: a tool's
+ * output is a `tool-result` (or `tool-error`) part, a delta carries its
+ * `text`. Other chunks pass as they are.
+ */
+function streamPartOf(
+  chunk: UIMessageChunk,
+  calls: Map<string, { toolName: string; input: unknown }>
+): unknown {
+  switch (chunk.type) {
+    case "tool-input-start":
+      return {
+        type: "tool-input-start",
+        id: chunk.toolCallId,
+        toolName: chunk.toolName
+      };
+    case "tool-input-delta":
+      return {
+        type: "tool-input-delta",
+        id: chunk.toolCallId,
+        delta: chunk.inputTextDelta
+      };
+    case "tool-input-available": {
+      // The call, as the AI SDK's stream has it; its result names it again.
+      calls.set(chunk.toolCallId, {
+        toolName: chunk.toolName,
+        input: chunk.input
+      });
+      return {
+        type: "tool-call",
+        toolCallId: chunk.toolCallId,
+        toolName: chunk.toolName,
+        input: chunk.input,
+        ...(chunk.providerExecuted && { providerExecuted: true }),
+        ...(chunk.dynamic && { dynamic: true })
+      };
+    }
+    case "tool-output-available":
+      return {
+        type: "tool-result",
+        toolCallId: chunk.toolCallId,
+        ...calls.get(chunk.toolCallId),
+        output: chunk.output,
+        ...(chunk.preliminary && { preliminary: true })
+      };
+    case "tool-output-error":
+      return {
+        type: "tool-error",
+        toolCallId: chunk.toolCallId,
+        ...calls.get(chunk.toolCallId),
+        error: chunk.errorText
+      };
+    default:
+      return "delta" in chunk ? { ...chunk, text: chunk.delta } : chunk;
+  }
 }
 
 /** `fields` without its undefined ones. */

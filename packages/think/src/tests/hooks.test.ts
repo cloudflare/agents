@@ -1997,6 +1997,30 @@ describe("Think — extension observation hooks", () => {
 // ── onChunk ─────────────────────────────────────────────────────
 
 describe("Think — onChunk hook", () => {
+  it("gets a tool's call and result as the AI SDK's stream parts, named", async () => {
+    const agent = await freshToolAgent(
+      `hook-chunk-parts-${crypto.randomUUID()}`
+    );
+    const result = await agent.testChat("Call echo");
+    expect(result.done).toBe(true);
+
+    const parts = JSON.parse(await agent.getChunkPartLog()) as Array<
+      Record<string, unknown>
+    >;
+    const types = parts.map((part) => part.type);
+    expect(types).toContain("tool-call");
+    expect(types).toContain("tool-result");
+    // The UI stream's names never reach onChunk.
+    expect(types).not.toContain("tool-input-available");
+    expect(types).not.toContain("tool-output-available");
+    const call = parts.find((part) => part.type === "tool-call");
+    const done = parts.find((part) => part.type === "tool-result");
+    expect(call).toMatchObject({ toolName: "echo" });
+    expect(call?.input).toBeDefined();
+    expect(done).toMatchObject({ toolName: "echo", input: call?.input });
+    expect(done?.output).toBeDefined();
+  });
+
   it("fires for streaming chunks", async () => {
     const agent = await freshAgent("hook-chunk-1");
     await agent.testChat("Hello");
