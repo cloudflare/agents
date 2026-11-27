@@ -1,6 +1,6 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ThinkTestAgent } from "./agents";
 
 type StopOptions = {
@@ -21,20 +21,71 @@ type StopResult = {
   responses: string[];
   chatErrors: string[];
   agentErrors: string[];
-  errorFrames: number;
   failedEvents: number;
-  terminalOutcomes: string[];
   run: { status: string | null; error: string | null } | null;
 };
 
-async function stopTurn(options: StopOptions): Promise<StopResult> {
-  const agent = (await getAgentByName(
-    env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
-    crypto.randomUUID()
-  )) as unknown as {
-    stopWithReasonForTest(o: StopOptions): Promise<StopResult>;
-  };
-  return agent.stopWithReasonForTest(options);
+type Frame = Record<string, unknown>;
+
+/**
+ * Stop a turn with a tab connected, and return what the tab saw with the
+ * fixture's result. The stream-resume request is answered after every frame
+ * sent before it, so once its answer is in, the tab has seen the turn's.
+ */
+async function stopTurn(
+  options: StopOptions
+): Promise<StopResult & { errorFrames: number; terminalOutcomes: string[] }> {
+  const name = crypto.randomUUID();
+  const res = await exports.default.fetch(
+    `http://example.com/agents/think-test-agent/${name}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  const ws = res.webSocket;
+  if (!ws) throw new Error("no socket");
+  ws.accept();
+  const frames: Frame[] = [];
+  ws.addEventListener("message", (event) => {
+    if (typeof event.data === "string") frames.push(JSON.parse(event.data));
+  });
+  try {
+    const agent = (await getAgentByName(
+      env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+      name
+    )) as unknown as {
+      stopWithReasonForTest(o: StopOptions): Promise<StopResult>;
+    };
+    const result = await agent.stopWithReasonForTest(options);
+    const seen = frames.length;
+    ws.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+    await vi.waitFor(
+      () => {
+        expect(
+          frames
+            .slice(seen)
+            .some(
+              (frame) =>
+                frame.type === "cf_agent_stream_resume_none" ||
+                frame.type === "cf_agent_stream_resuming"
+            )
+        ).toBe(true);
+      },
+      { timeout: 5000, interval: 10 }
+    );
+    const replies = frames.filter(
+      (frame) => frame.type === "cf_agent_use_chat_response"
+    );
+    return {
+      ...result,
+      errorFrames: replies.filter((frame) => frame.error === true).length,
+      terminalOutcomes: replies
+        .filter(
+          (frame) => frame.done === true && typeof frame.outcome === "string"
+        )
+        .map((frame) => String(frame.outcome))
+    };
+  } finally {
+    ws.close();
+  }
 }
 
 // A turn whose own signal aborted ends aborted, whatever the abort's reason
@@ -76,6 +127,11 @@ describe("a stopped turn ends aborted, whatever reason the stop carried", () => 
           expect(result.terminalOutcomes.filter((o) => o === "error")).toEqual(
             []
           );
+          // Once the reply has begun, the tab is told it ended aborted. A
+          // turn stopped in `beforeTurn` sent the tab nothing to end.
+          if (phase !== "hook") {
+            expect(result.terminalOutcomes).toContain("aborted");
+          }
         });
       }
     }

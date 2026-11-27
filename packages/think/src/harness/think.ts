@@ -13,7 +13,11 @@ import {
   type ConnectionContext,
   type WSMessage
 } from "agents";
-import type { ChatResponseResult, SaveMessagesResult } from "agents/chat";
+import type {
+  ChatResponseResult,
+  SaveMessagesOptions,
+  SaveMessagesResult
+} from "agents/chat";
 import {
   ThinkChat,
   ThinkHarness,
@@ -212,6 +216,15 @@ function taskStatusesFor(
     }
   }
   return [...out];
+}
+
+/** A programmatic turn whose caller's signal had aborted before it began. */
+function stoppedBeforeStart(): SaveMessagesResult {
+  return {
+    requestId: crypto.randomUUID(),
+    status: "aborted",
+    reason: "stopped"
+  };
 }
 
 function saveResult(result: ThinkOperationResult): SaveMessagesResult {
@@ -829,8 +842,11 @@ export class Think<
   async saveMessages(
     messages:
       | UIMessage[]
-      | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>)
+      | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
+    // As on Think: a turn stopped before it starts builds and stores nothing.
+    if (options?.signal?.aborted) return stoppedBeforeStart();
     await this.#sync();
     const resolved =
       typeof messages === "function" ? await messages(this.messages) : messages;
@@ -839,9 +855,7 @@ export class Think<
     const receipt = await session.submit(
       resolved.filter((message) => !known.has(message.id))
     );
-    const result = await session.wait(receipt.operationId);
-    await this.#sync();
-    return saveResult(result);
+    return this.#waitForTurn(receipt.operationId, options?.signal);
   }
 
   async clearMessages(): Promise<void> {
@@ -849,7 +863,15 @@ export class Think<
     await this.#sync();
   }
 
-  async continueLastTurn(): Promise<SaveMessagesResult> {
+  async continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
+  ): Promise<SaveMessagesResult> {
+    if (body !== undefined) {
+      throw new Error(
+        "Think.continueLastTurn with a body is not supported by the harness-backed Think yet"
+      );
+    }
     // As on Think: with no assistant message to continue, nothing runs.
     await this.#sync();
     if (this.#messages.at(-1)?.role !== "assistant") {
@@ -859,11 +881,30 @@ export class Think<
         reason: "nothing-to-continue"
       };
     }
+    if (options?.signal?.aborted) return stoppedBeforeStart();
+    const receipt = await this.harness.session().continue();
+    return this.#waitForTurn(receipt.operationId, options?.signal);
+  }
+
+  /**
+   * Wait for a programmatic turn to end. The caller's signal stops it as a
+   * stop from a tab would, so the turn ends `aborted`.
+   */
+  async #waitForTurn(
+    operationId: string,
+    signal: AbortSignal | undefined
+  ): Promise<SaveMessagesResult> {
     const session = this.harness.session();
-    const receipt = await session.continue();
-    const result = await session.wait(receipt.operationId);
-    await this.#sync();
-    return saveResult(result);
+    const stop = () => void session.abort(operationId);
+    signal?.addEventListener("abort", stop, { once: true });
+    try {
+      if (signal?.aborted) stop();
+      const result = await session.wait(operationId);
+      await this.#sync();
+      return saveResult(result);
+    } finally {
+      signal?.removeEventListener("abort", stop);
+    }
   }
 
   /** Add messages to the conversation without running a turn. */
@@ -1329,6 +1370,11 @@ export class Think<
         onEvent: (json) => callback.onEvent(json),
         onDone: () => callback.onDone(),
         onError: (error) => {
+          // A stopped turn is not an error: as on Think, its caller hears
+          // neither `onDone` nor `onError`, and `onChatError` does not run.
+          // "aborted" is the harness's reason for a stop, and "withdrawn" for
+          // a stop that reached the turn while it waited (see `saveResult`).
+          if (error === "aborted" || error === "withdrawn") return;
           const wrapped = this.onChatError(new Error(error));
           return callback.onError(errorText(wrapped));
         }
@@ -1366,6 +1412,11 @@ export class Think<
       messagesApplied,
       submission: after
     };
+  }
+
+  /** Stop one turn by its request id; it ends `aborted`. */
+  protected abortRequest(requestId: string, _reason?: unknown): void {
+    void this.keepAliveWhile(() => this.harness.session().abort(requestId));
   }
 
   async cancelChat(requestId: string): Promise<void> {
@@ -1411,7 +1462,8 @@ export class Think<
         return resolveDefault();
       },
       continuation: turn.continuation,
-      requestId: turn.operationId
+      requestId: turn.operationId,
+      abortSignal: turn.signal
     };
     const own = await this.beforeTurn(context);
     // The sandboxed extensions see the subclass's config, as in Think,
