@@ -1417,6 +1417,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /** @internal Abort everything in a session and clear its transcript. */
   async reset(session: ThinkSessionId, handoff?: string): Promise<void> {
     await this.abort(session);
+    // A reset session's outputs are nobody's now.
+    for (const runId of this.#outputValues.keys()) {
+      if (operationOf(runId)[0] === session) this.#outputValues.delete(runId);
+    }
     const handle = this.#handle(session);
     this.#ownClears.set(session, (this.#ownClears.get(session) ?? 0) + 1);
     try {

@@ -749,7 +749,10 @@ export class Think<
         const frozen = (await this.#context?.freezeSystemPrompt()) ?? "";
         return frozen ? undefined : this.getSystemPrompt();
       },
-      tools: async () => this.#withFinalAnswer(await this.getTools()),
+      tools: async () => {
+        this.#lastTools = await this.getTools();
+        return this.#withFinalAnswer(this.#lastTools);
+      },
       // The harness cuts older messages as Think does, by its step.
       truncationStep: () => this.truncationStep,
       // A turn's `beforeTurn` may set its own, as in Think.
@@ -954,6 +957,15 @@ export class Think<
             .catch((error: unknown) =>
               console.error("[Think] An extension's onChunk failed", error)
             );
+          // As in the AI SDK, only an async generator's own iterable
+          // streams: a promise of one has no progress to report.
+          if (
+            chunk.type === "tool-output-available" &&
+            chunk.preliminary &&
+            !this.#streamsProgress(chunk.toolCallId, operationId)
+          ) {
+            return;
+          }
           void this.onChunk({ chunk: part } as unknown as ChunkContext);
         },
         onTurnEnd: async (end) => {
@@ -2183,6 +2195,21 @@ export class Think<
     }
     return undefined;
   }
+
+  /** Whether a call's tool is an async generator, whose progress streams. */
+  #streamsProgress(toolCallId: string, operationId: string): boolean {
+    const name = this.#toolCalls.get(operationId)?.get(toolCallId)?.toolName;
+    const execute = name
+      ? (this.#lastTools?.[name] as { execute?: unknown } | undefined)?.execute
+      : undefined;
+    return (
+      typeof execute !== "function" ||
+      execute.constructor.name === "AsyncGeneratorFunction"
+    );
+  }
+
+  /** The tools the latest build offered, for `#streamsProgress`. */
+  #lastTools: ToolSet | undefined;
 
   #callsOf(operationId: string) {
     let calls = this.#toolCalls.get(operationId);

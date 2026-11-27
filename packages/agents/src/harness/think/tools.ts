@@ -91,21 +91,17 @@ export async function executeTool(
     return { ok: false, errorText: "The tool has no execute function" };
   }
   try {
-    const returned: unknown = execute(input, {
+    const result: unknown = await execute(input, {
       toolCallId: options.toolCallId,
       messages: options.messages,
       abortSignal: options.abortSignal,
       context: undefined
     });
-    // As in the AI SDK: only an async generator's own iterable streams. A
-    // promise of one collapses to its last value, with no progress.
-    const streams = isAsyncIterable(returned);
-    const result: unknown = streams ? returned : await returned;
     if (!isAsyncIterable(result)) return { ok: true, output: result };
     let last: unknown;
     let seen = false;
     for await (const output of result) {
-      if (seen && streams) options.onPreliminary(last);
+      if (seen) options.onPreliminary(last);
       last = output;
       seen = true;
     }
