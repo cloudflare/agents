@@ -2536,6 +2536,25 @@ describe("Think — dynamic configuration", () => {
     expect(config!.maxTokens).toBe(2000);
   });
 
+  it("lifts the config from assistant_config__lifted_v1 too, and a restart keeps the newer value", async () => {
+    const name = `lifted-${crypto.randomUUID()}`;
+    const agent = await freshLegacyConfigMigrationAgent(name);
+    // The release's value is lifted on the first start.
+    expect(await agent.getTestConfig()).toEqual({
+      theme: "dark",
+      maxTokens: 4000
+    });
+    await agent.setTestConfig({ theme: "light", maxTokens: 2000 });
+    // A real restart: the new isolate's constructor seeds the lifted table
+    // again, and its start lifts from it again.
+    await agent.resetIsolateForTest().catch(() => {});
+    const restarted = await freshLegacyConfigMigrationAgent(name);
+    expect(await restarted.getTestConfig()).toEqual({
+      theme: "light",
+      maxTokens: 2000
+    });
+  });
+
   it("should not let legacy config overwrite newer think_config values on rerun", async () => {
     const agent = await freshLegacyConfigMigrationAgent(
       "config-legacy-rerun-preserves-newer"

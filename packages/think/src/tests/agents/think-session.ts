@@ -9102,8 +9102,14 @@ export class ThinkConfigTestAgent extends Think<Cloudflare.Env> {
 export class ThinkLegacyConfigMigrationAgent extends Think<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    // As a release left it: Sessions' `assistant_config`, or, named
+    // `lifted-…`, the `assistant_config__lifted_v1` an earlier Sessions
+    // migration renamed it to. Seeded again by every isolate's constructor.
+    const table = ctx.id.name?.startsWith("lifted-")
+      ? "assistant_config__lifted_v1"
+      : "assistant_config";
     ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS assistant_config (
+      CREATE TABLE IF NOT EXISTS ${table} (
         session_id TEXT NOT NULL,
         key TEXT NOT NULL,
         value TEXT NOT NULL,
@@ -9111,7 +9117,7 @@ export class ThinkLegacyConfigMigrationAgent extends Think<Cloudflare.Env> {
       )
     `);
     ctx.storage.sql.exec(`
-      INSERT OR REPLACE INTO assistant_config (session_id, key, value)
+      INSERT OR REPLACE INTO ${table} (session_id, key, value)
       VALUES ('', '_think_config', '{"theme":"dark","maxTokens":4000}')
     `);
   }
