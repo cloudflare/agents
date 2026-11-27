@@ -149,6 +149,7 @@ import type {
 import { nanoid } from "nanoid";
 import {
   cancelTurn,
+  CHAT_CLEARED,
   chatTurnStreamId,
   type AgentToolStreams,
   forgetTab,
@@ -2603,6 +2604,12 @@ export class AIChatAgent<
     // Queue generation, abort controllers, submit concurrency, the tool-result
     // apply chain, the continuation slots and barrier, and parked connections.
     this._turns.reset();
+    // The chat module's turns end as a clear ends them (nothing they stream
+    // is kept), and agent-tool runs see a reset (SEAM: the clear count).
+    this._chatClears++;
+    this._holdForStop(
+      stopAllTurns(this._chatDeps(), this._chatLane(), CHAT_CLEARED)
+    );
     this._agentToolRuns.chatReset();
     this._pendingChatResponseResults.length = 0;
   }
