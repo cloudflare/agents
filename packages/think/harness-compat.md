@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**290 of the 1290 tests that construct Think pass (22%).** Across the whole suite, 583 of 1583.
+**294 of the 1296 tests that construct Think pass (22%).** Across the whole suite, 589 of 1591.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -22,8 +22,8 @@ supported by the harness-backed Think yet".
 | `actions-durable-pause.test.ts`        | 2 / 56   | 3%   |
 | `agent-tool-reattach-recovery.test.ts` | 0 / 2    | 0%   |
 | `agent-tool-rebind-noop.test.ts`       | 0 / 6    | 0%   |
-| `agent-tools.test.ts`                  | 12 / 64  | 18%  |
-| `assistant-agent-loop.test.ts`         | 9 / 33   | 27%  |
+| `agent-tools.test.ts`                  | 12 / 67  | 17%  |
+| `assistant-agent-loop.test.ts`         | 10 / 33  | 30%  |
 | `assistant-agent.test.ts`              | 5 / 5    | 100% |
 | `assistant-message-metadata.test.ts`   | 1 / 9    | 11%  |
 | `attachment-consumption.test.ts`       | 0 / 4    | 0%   |
@@ -32,12 +32,13 @@ supported by the harness-backed Think yet".
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 1 / 4    | 25%  |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 34 / 138 | 24%  |
+| `client-tools.test.ts`                 | 33 / 139 | 23%  |
 | `cold-rpc-initialization.test.ts`      | 4 / 4    | 100% |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `context-upgrade.test.ts`              | 4 / 11   | 36%  |
 | `deliver-notice.test.ts`               | 0 / 7    | 0%   |
-| `durable-admission.test.ts`            | 2 / 9    | 22%  |
+| `detached-reconcile-lane.test.ts`      | 0 / 1    | 0%   |
+| `durable-admission.test.ts`            | 4 / 9    | 44%  |
 | `empty-reply.test.ts`                  | 0 / 10   | 0%   |
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
@@ -47,6 +48,7 @@ supported by the harness-backed Think yet".
 | `facet-request-order.test.ts`          | 0 / 1    | 0%   |
 | `fetch-tools.test.ts`                  | 52 / 53  | 98%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
+| `harness-tool-recovery.test.ts`        | 2 / 2    | 100% |
 | `hooks.test.ts`                        | 55 / 149 | 36%  |
 | `hydration-budget.test.ts`             | 1 / 19   | 5%   |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
@@ -76,11 +78,11 @@ supported by the harness-backed Think yet".
 | `stop-reason.test.ts`                  | 0 / 46   | 0%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1    | 100% |
-| `submissions.test.ts`                  | 28 / 123 | 22%  |
+| `submissions.test.ts`                  | 29 / 123 | 23%  |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
 | `think-eviction.test.ts`               | 2 / 3    | 66%  |
-| `think-session.test.ts`                | 59 / 307 | 19%  |
+| `think-session.test.ts`                | 60 / 308 | 19%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
 | `workspace-tools.test.ts`              | 8 / 10   | 80%  |
