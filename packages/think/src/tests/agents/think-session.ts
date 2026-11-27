@@ -4083,7 +4083,7 @@ export class ThinkTestAgent extends Think {
   async cancelQueuedRunThroughPublicApiForTest(
     by: "cancel" | "signal"
   ): Promise<{
-    atCancel: string | undefined;
+    atCancel: { status: string | undefined; error: string | undefined };
     status: string | undefined;
     error: string | undefined;
     userTexts: string[];
@@ -4100,14 +4100,19 @@ export class ThinkTestAgent extends Think {
     else parent.abort(new Error("parent stopped"));
     // Settled while the turn ahead is still held: the cancel does not wait
     // for the queue.
-    let atCancel = (await this.inspectAgentToolRun(runId))?.status;
+    let atCancel = await this.inspectAgentToolRun(runId);
     const settleBy = Date.now() + 2000;
-    while (atCancel === "running" && Date.now() < settleBy) {
+    while (atCancel?.status === "running" && Date.now() < settleBy) {
       await new Promise((resolve) => setTimeout(resolve, 5));
-      atCancel = (await this.inspectAgentToolRun(runId))?.status;
+      atCancel = await this.inspectAgentToolRun(runId);
     }
     await this.releaseBeforeStepForTest();
     await active.turn;
+    // Settled: a cancelled turn that wrongly started after the one ahead
+    // would show in the transcript and the step count read below.
+    if (!(await this.waitUntilStable({ timeout: 5000 }))) {
+      throw new Error("the agent never became stable");
+    }
     let inspection = await this.inspectAgentToolRun(runId);
     const deadline = Date.now() + 5000;
     while (inspection?.status === "running" && Date.now() < deadline) {
@@ -4115,7 +4120,7 @@ export class ThinkTestAgent extends Think {
       inspection = await this.inspectAgentToolRun(runId);
     }
     return {
-      atCancel,
+      atCancel: { status: atCancel?.status, error: atCancel?.error },
       status: inspection?.status,
       error: inspection?.error,
       userTexts: this._userTextsForTest(),

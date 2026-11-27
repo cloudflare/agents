@@ -36,7 +36,7 @@ type ThinkAgentToolTestStub = {
     stored: string | null;
   }>;
   cancelQueuedRunThroughPublicApiForTest(by: "cancel" | "signal"): Promise<{
-    atCancel: string | undefined;
+    atCancel: { status: string | undefined; error: string | undefined };
     status: string | undefined;
     error: string | undefined;
     userTexts: string[];
@@ -536,7 +536,7 @@ describe("Think agent tools", () => {
       const agent = await freshAgent();
       const result = await agent.cancelQueuedRunThroughPublicApiForTest(by);
       expect(result).toMatchObject({
-        atCancel: "aborted",
+        atCancel: { status: "aborted", error },
         status: "aborted",
         error
       });
