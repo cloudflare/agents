@@ -415,6 +415,12 @@ export type ThinkRecoveryContext = ThinkHookContext & {
   readonly attempt: number;
   /** The partial assistant message rebuilt from the interrupted stream. */
   readonly partial: UIMessage | undefined;
+  /**
+   * The turn's latest `stash()` data, or `null`.
+   *
+   * @internal For Think's `onChatRecovery`.
+   */
+  readonly recoveryData?: unknown;
 };
 
 /**

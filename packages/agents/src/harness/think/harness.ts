@@ -1832,7 +1832,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             session,
             operationId,
             attempt: context.attempt,
-            partial
+            partial,
+            recoveryData: context.recoveryData
           });
           // What was streamed is dropped: the reply is not rebuilt from it.
           if (typeof decision === "object" && decision.persist === false) {

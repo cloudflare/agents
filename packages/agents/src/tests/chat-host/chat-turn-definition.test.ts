@@ -9,6 +9,7 @@ import {
   runningChatTurn
 } from "../../chat/chat-host";
 import type { TaskStep } from "../../tasks/types";
+import { stashCurrentFiber } from "../../fiber-runs";
 import { TaskSettlement } from "../../tasks/settlement";
 import { TaskCancellation } from "../../tasks/replay";
 import type { ChatHost } from "../../chat/chat-host";
@@ -1183,6 +1184,78 @@ describe("chatTurnDefinition", () => {
         laterAttempt("g-1", 1)
       );
       expect(instance.calls[0].messages.map((m) => m.id)).toEqual(["u1"]);
+    });
+  });
+
+  it("keeps what the turn stashed in its run and hands it to the recovery of a later attempt", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      expect(() => stashCurrentFiber("outside")).toThrow(/outside a fiber/);
+      // The first attempt stashes from respond, as a hook in it would.
+      const checkpoint = new Map<string, unknown>();
+      await definitionOf(instance, {
+        ...instance.host,
+        respond: async (call) => {
+          stashCurrentFiber({ notes: "the turn's own notes" });
+          return instance.host.respond(call);
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-s", 1, undefined, checkpoint)
+      );
+      // It is kept in the run's checkpoint: a later attempt, cut off, of a
+      // turn with that checkpoint finds it.
+      const kept = new Map([["chat:stash", checkpoint.get("chat:stash")]]);
+      expect(kept.get("chat:stash")).toEqual({ notes: "the turn's own notes" });
+      await cutOff(instance, "run-s2");
+      const seen: unknown[] = [];
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          onRecovery: (context) => void seen.push(context.recoveryData)
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-s2", 2, undefined, kept)
+      );
+      expect(seen).toEqual([{ notes: "the turn's own notes" }]);
+    });
+  });
+
+  it("keeps what the chunk hook stashes, as the reply streams", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const checkpoint = new Map<string, unknown>();
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          transformChunk: (chunk) => {
+            if (chunk.type === "text-delta") stashCurrentFiber(chunk.delta);
+            return chunk;
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-c", 1, undefined, checkpoint)
+      );
+      expect(checkpoint.get("chat:stash")).toEqual(expect.any(String));
+    });
+  });
+
+  it("hands a recovery null for a turn that stashed nothing", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-n");
+      const seen: unknown[] = [];
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          onRecovery: (context) => void seen.push(context.recoveryData)
+        }
+      })({ trigger: "submit-message" }, laterAttempt("run-n", 2));
+      expect(seen).toEqual([null]);
     });
   });
 

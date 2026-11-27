@@ -3014,6 +3014,7 @@ export class Think<
     readonly operationId: string;
     readonly attempt: number;
     readonly partial: UIMessage | undefined;
+    readonly recoveryData?: unknown;
   }): Promise<"continue" | "abandon" | ChatRecoveryOptions> {
     // As on Think: a submission cut off by a reset whose turn started
     // longer ago than the stale window is not recovered. It ends `error`.
@@ -3051,7 +3052,7 @@ export class Think<
         .flatMap((part) => (part.type === "text" ? [part.text] : []))
         .join(""),
       partialParts: parts,
-      recoveryData: null,
+      recoveryData: context.recoveryData ?? null,
       messages: [...this.messages],
       // When the turn started, as Think gives it (not its time in the
       // queue), so an app can refuse stale work.
