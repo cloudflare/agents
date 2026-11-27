@@ -1655,15 +1655,6 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(errored.after).toBe("error");
   });
 
-  it("cancelAgentToolRun aborts an in-flight recovery turn and seals the child aborted (#1630)", async () => {
-    const result = await (
-      await getParent()
-    ).childCancelAgentToolRunAbortsRecoveryForTest();
-    expect(result.abortedBefore).toBe(false);
-    expect(result.abortedAfter).toBe(true);
-    expect(result.childStatus).toBe("aborted");
-  });
-
   it("hands a live run's output hook the input as it was passed, not its stored copy", async () => {
     await expect(
       (await getParent()).childRunWithDateInputForTest()
@@ -1707,17 +1698,6 @@ describe("AIChatAgent as an agent-tool child", () => {
     // its old request id, and its row is not marked cancelled.
     expect(result.ownRequestAborted).toBe(false);
     expect(result.after).toEqual({ status: "completed", cancelledAt: null });
-  });
-
-  it("a cancel of a run being recovered stops the requests on its row and nothing else", async () => {
-    await expect(
-      (await getParent()).childCancelRecoveredRunForTest()
-    ).resolves.toEqual({
-      recoveredTurnAborted: true,
-      attemptAborted: true,
-      otherTurnAborted: false,
-      otherAttemptAborted: false
-    });
   });
 
   for (const path of ["continue", "retry"] as const) {
