@@ -526,6 +526,10 @@ export class Think<
         ? AbortSignal.abort()
         : new AbortController().signal;
     }
+    // A grant prepared beside this one while it waited keeps its signal:
+    // one signal per operation, so a stop reaches both.
+    const raced = this.#grantSignals.get(operationId);
+    if (raced) return raced.signal;
     const controller = new AbortController();
     this.#grantSignals.set(operationId, controller);
     return controller.signal;

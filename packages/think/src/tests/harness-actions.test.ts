@@ -24,6 +24,7 @@ type ActionsStub = {
   holdModelForTest(): Promise<void>;
   modelEnteredForTest(): Promise<boolean>;
   releaseModelForTest(): Promise<void>;
+  idleForTest(): Promise<boolean>;
   abortAllRequests(): Promise<void>;
   rejectExecution(
     executionId: string,
@@ -259,6 +260,8 @@ describe("harness-backed Think: actions that need a human", () => {
       expect(await fresh.modelEnteredForTest()).toBe(true)
     );
     await fresh.abortAllRequests();
+    // The stop has settled the operation before the grant is prepared.
+    await vi.waitFor(async () => expect(await fresh.idleForTest()).toBe(true));
     await fresh.releaseModelForTest();
     await approved;
     expect(await fresh.grantContext()).toMatchObject({

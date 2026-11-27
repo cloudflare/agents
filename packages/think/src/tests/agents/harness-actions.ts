@@ -124,6 +124,11 @@ export class ThinkHarnessActionsAgent extends Think {
     this.#releaseModel?.();
   }
 
+  /** Whether no operation is in flight (the last one has settled). */
+  async idleForTest(): Promise<boolean> {
+    return (await this.harness.session().inFlight()) === undefined;
+  }
+
   /** From now on, `getModel()` throws. */
   failModelForTest(): void {
     this.ctx.storage.kv.put(MODEL_FAILS_KEY, true);
