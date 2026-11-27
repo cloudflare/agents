@@ -1104,7 +1104,10 @@ function createMultiChunkMockModel(chunks: string[]): LanguageModel {
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
-          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          // No chunks: no text part at all, not an empty one.
+          if (chunks.length > 0) {
+            controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          }
           for (const chunk of chunks) {
             controller.enqueue({
               type: "text-delta",
@@ -1112,7 +1115,9 @@ function createMultiChunkMockModel(chunks: string[]): LanguageModel {
               delta: chunk
             });
           }
-          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          if (chunks.length > 0) {
+            controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          }
           controller.enqueue({
             type: "finish",
             finishReason: v3FinishReason("stop"),
@@ -6327,6 +6332,11 @@ export class ThinkTestAgent extends Think {
     }
     if (this._multiChunks) {
       return createMultiChunkMockModel(this._multiChunks);
+    }
+    // The harness-backed Think has no `_transformInferenceResult`: a reply
+    // stripped of its text is the model's own answer with no text part.
+    if (this._stripTextResponseForTest && isHarnessBackedForTest(this)) {
+      return createMultiChunkMockModel([]);
     }
     return createMockModel(
       (callOptions) => {
