@@ -170,16 +170,20 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        # Only names a nightly job made (nightly-<suite>-<run>-<attempt>-<job>),
+        # never a probe someone deployed by hand. Another job may delete the
+        # same Worker first, so a failed delete is only logged.
         run: |
+          set -o pipefail
           cutoff=$(date -u -d '1 day ago' +%s)
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts" |
             jq -r --argjson cutoff "$cutoff" \
-              '.result[] | select(.id | startswith("nightly-")) | select((.modified_on | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < $cutoff) | .id' |
+              '.result[] | select(.id | test("^nightly-[a-z-]+-[0-9]+-[0-9]+-[a-z]+$")) | select((.modified_on | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < $cutoff) | .id' |
             while read -r name; do
               echo "deleting $name"
-              curl -fsS -X DELETE -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$name?force=true" > /dev/null
+              curl -sS -X DELETE -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$name?force=true" > /dev/null || echo "could not delete $name"
             done
       - name: Run
         working-directory: ${{ matrix.dir }}
@@ -196,6 +200,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
+          set -o pipefail
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts" |
             jq -r --arg suffix "-$NIGHTLY_RUN" '.result[] | select(.id | startswith("nightly-")) | select(.id | endswith($suffix)) | .id' |
@@ -214,17 +219,23 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       issues: write
+      actions: read
     steps:
       - name: Open, update or close the nightly issue
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RESULTS: ${{ toJSON(needs) }}
+          RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="Nightly E2E failing"
           gh label create nightly --color B60205 --description "The nightly E2E workflow" --force
-          failed=$(echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key): \(.value.result)"')
+          # Each failed job by name (a matrix group reports only its overall result).
+          failed=$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled") | "\(.name): \(.conclusion)"')
+          if [ -z "$failed" ]; then
+            failed=$(echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key): \(.value.result)"')
+          fi
           issue=$(gh issue list --state open --label nightly --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
           if [ -n "$failed" ]; then
             body=$(printf 'Run: %s\n\n%s\n' "$RUN_URL" "$failed")
