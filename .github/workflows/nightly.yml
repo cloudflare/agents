@@ -114,7 +114,7 @@ jobs:
 
   # Suites that deploy their own uniquely named Workers to the CI account,
   # drive them, and delete them. On the schedule, or by hand with
-  # `run_deployed`. Two at a time; the ones on Workers AI are spread out.
+  # `run_deployed`. Two at a time, so the Workers AI ones are spread out.
   deployed:
     name: "Deployed: ${{ matrix.name }}"
     if: ${{ github.event_name == 'schedule' || inputs.run_deployed }}
@@ -134,6 +134,9 @@ jobs:
           - name: Pi and OpenCode harnesses
             dir: nightly
             run: pnpm run harnesses
+          - name: Think soak on a real model
+            dir: nightly
+            run: pnpm run soak
           - name: ai-chat recovery after a redeploy
             dir: packages/ai-chat
             run: pnpm run test:e2e:deployed
