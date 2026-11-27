@@ -18,6 +18,7 @@ import type {
   streamText
 } from "ai";
 import type { ClientToolSchema } from "../../chat/client-tools";
+import type { ChatRecoveryConfig } from "../../chat/lifecycle";
 import type {
   HarnessInput,
   HarnessInputFrom,
@@ -252,6 +253,12 @@ export type ThinkRecoveryOptions = {
    * interrupted and recovered. `0` turns the watchdog off. Default 120000.
    */
   readonly stallTimeoutMs?: number;
+  /**
+   * @internal The rest of a host's released `ChatRecoveryConfig` (the
+   * harness-backed Think's `chatRecovery`), handed to the turn definition's
+   * recovery budget as it is.
+   */
+  readonly chatRecovery?: Exclude<ChatRecoveryConfig, true>;
 };
 
 /** Context for every hook. @experimental */

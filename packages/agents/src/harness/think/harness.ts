@@ -1695,6 +1695,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         }),
       options: {
         recovery: {
+          ...recovery?.chatRecovery,
           // Recoveries without progress, as the turn definition counts
           // them.
           maxAttempts: recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,

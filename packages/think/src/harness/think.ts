@@ -2524,14 +2524,24 @@ export class Think<
   /** The running model call's own stall timeout, from `beforeTurn`. */
   #turnStallTimeoutMs: number | undefined;
 
-  #recoveryOptions(): { maxAttempts?: number; stallTimeoutMs: number } {
+  #recoveryOptions(): {
+    maxAttempts?: number;
+    stallTimeoutMs: number;
+    chatRecovery?: Exclude<ChatRecoveryConfig, true>;
+  } {
     const config = this.chatRecovery;
     const stallTimeoutMs =
       this.#turnStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
-    if (config === true || config.maxAttempts === undefined) {
-      return { stallTimeoutMs };
-    }
-    return { maxAttempts: config.maxAttempts, stallTimeoutMs };
+    // Think's released config, as it is: the turn definition's recovery
+    // budget honours its fields.
+    if (config === true) return { stallTimeoutMs };
+    return {
+      ...(config.maxAttempts !== undefined && {
+        maxAttempts: config.maxAttempts
+      }),
+      stallTimeoutMs,
+      chatRecovery: config
+    };
   }
 
   async #onRecovery(context: {
