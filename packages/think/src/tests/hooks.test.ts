@@ -1997,6 +1997,25 @@ describe("Think — extension observation hooks", () => {
 // ── onChunk ─────────────────────────────────────────────────────
 
 describe("Think — onChunk hook", () => {
+  it("gets a call whose input doesn't parse as the AI SDK's invalid tool-call", async () => {
+    const agent = await freshToolAgent(
+      `hook-chunk-invalid-${crypto.randomUUID()}`
+    );
+    await agent.useInvalidToolInputForTest();
+    await agent.testChat("Call echo");
+    const parts = JSON.parse(await agent.getChunkPartLog()) as Array<
+      Record<string, unknown>
+    >;
+    expect(parts.map((part) => part.type)).not.toContain("tool-input-error");
+    expect(parts).toContainEqual(
+      expect.objectContaining({
+        type: "tool-call",
+        toolName: "echo",
+        invalid: true
+      })
+    );
+  });
+
   it("gets a tool's call and result as the AI SDK's stream parts, named", async () => {
     const agent = await freshToolAgent(
       `hook-chunk-parts-${crypto.randomUUID()}`
