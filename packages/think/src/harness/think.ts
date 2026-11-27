@@ -224,6 +224,22 @@ function saveResult(result: ThinkOperationResult): SaveMessagesResult {
   };
 }
 
+/** The request a tab's stop frame names, if `message` is one. */
+function cancelledRequestOf(message: WSMessage): string | undefined {
+  if (typeof message !== "string" || !message.includes("_cancel")) {
+    return undefined;
+  }
+  try {
+    const frame = JSON.parse(message) as { type?: unknown; id?: unknown };
+    return frame.type === "cf_agent_chat_request_cancel" &&
+      typeof frame.id === "string"
+      ? frame.id
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Frames a turn and the shared chat dispatch send themselves (H2c). */
 const TURN_FRAMES = new Set<string>([
   "cf_agent_use_chat_response",
@@ -1441,6 +1457,17 @@ export class Think<
       // A tab's chat frames go through the shared chat dispatch (H2c), onto
       // the harness's root session.
       const session = this.harness.session().id;
+      // A stop of a turn that has started goes to the harness, the one
+      // keeper of what it streamed (its reply's branch, client tools and
+      // events); a request still waiting keeps its place on the dispatch.
+      const stopped = cancelledRequestOf(message);
+      if (stopped !== undefined) {
+        const status = await this.harness.session().inspect(stopped);
+        if (status?.status === "running") {
+          await this.harness.session().abort(stopped);
+          return;
+        }
+      }
       if (
         await chatDispatch(
           this.harness.chatDeps(session, this.#chatHostDeps()),
