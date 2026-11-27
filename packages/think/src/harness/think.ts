@@ -924,17 +924,7 @@ export class Think<
           const part = streamPartOf(chunk, this.#callsOf(operationId), (id) =>
             this.#storedCall(id)
           );
-          // In order, one after another, as Think awaits each chunk's hooks.
-          this.#chunkHooks = this.#chunkHooks
-            .then(() =>
-              this.#extensionHooks.chunk({
-                chunk: part
-              } as unknown as ChunkContext)
-            )
-            .catch((error: unknown) =>
-              console.error("[Think] An extension's onChunk failed", error)
-            );
-          void this.onChunk({ chunk: part } as unknown as ChunkContext);
+          this.#dispatchChunk(part);
         },
         onTurnEnd: async (end) => {
           // A turn no `chat()` caller waits on has nobody to tell.
@@ -1037,13 +1027,11 @@ export class Think<
         event.chunk.type === "tool-output-available" &&
         event.chunk.preliminary
       ) {
-        void this.onChunk({
-          chunk: streamPartOf(
-            event.chunk,
-            this.#callsOf(event.operationId),
-            (id) => this.#storedCall(id)
+        this.#dispatchChunk(
+          streamPartOf(event.chunk, this.#callsOf(event.operationId), (id) =>
+            this.#storedCall(id)
           )
-        } as unknown as ChunkContext);
+        );
       }
       if (event.type === "prefix-changed") {
         this._emit("chat:prefix:changed", {
@@ -2086,6 +2074,32 @@ export class Think<
       }
     }
     return undefined;
+  }
+
+  /**
+   * A stream part to the extensions' `onChunk` and the subclass's, as
+   * Think gives both the same part.
+   */
+  #dispatchChunk(part: unknown): void {
+    const typed = part as { type?: string; id?: string };
+    // An extension's snapshot names a tool input's call by `toolCallId`.
+    const forExtensions =
+      (typed.type === "tool-input-start" ||
+        typed.type === "tool-input-delta") &&
+      typed.id !== undefined
+        ? { ...typed, toolCallId: typed.id }
+        : part;
+    // In order, one after another, as Think awaits each chunk's hooks.
+    this.#chunkHooks = this.#chunkHooks
+      .then(() =>
+        this.#extensionHooks.chunk({
+          chunk: forExtensions
+        } as unknown as ChunkContext)
+      )
+      .catch((error: unknown) =>
+        console.error("[Think] An extension's onChunk failed", error)
+      );
+    void this.onChunk({ chunk: part } as unknown as ChunkContext);
   }
 
   #callsOf(operationId: string) {

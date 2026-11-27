@@ -660,8 +660,10 @@ describe("extensions: conformance in process and across a boundary", () => {
         };
         const through = await run(tools.s as Tool);
         expect(through).toEqual(await run(original));
+        // Each yield as it comes, as the AI SDK reports them: a tool that
+        // then throws still reported what it yielded.
         expect(through.preliminary).toEqual(
-          ["one", "two"].slice(0, fail ? 1 : 2)
+          fail ? ["one", "two"] : ["one", "two", "three"]
         );
       }
     }
