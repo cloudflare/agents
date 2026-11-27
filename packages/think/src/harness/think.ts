@@ -1672,10 +1672,10 @@ export class Think<
   // turns they would have recovered are gone after the move, so each
   // completes without doing anything instead of failing on retry.
   /**
-   * As on Think: whether and how often an interrupted turn is attempted
-   * again. `true` keeps the default budget.
+   * As on Think: how often an interrupted turn is attempted again. `true`
+   * keeps the default budget.
    */
-  chatRecovery: ChatRecoveryConfig | false = true;
+  chatRecovery: ChatRecoveryConfig = true;
 
   /**
    * As on Think: decide what an interrupted turn does. Return
@@ -1697,7 +1697,6 @@ export class Think<
   #recoveryOptions(): { maxAttempts?: number; stallTimeoutMs: number } {
     const config = this.chatRecovery;
     const stallTimeoutMs = this.chatStreamStallTimeoutMs;
-    if (config === false) return { maxAttempts: 0, stallTimeoutMs };
     if (config === true || config.maxAttempts === undefined) {
       return { stallTimeoutMs };
     }
@@ -1718,11 +1717,9 @@ export class Think<
       recoveryRootRequestId: context.operationId,
       attempt: context.attempt,
       maxAttempts:
-        config === false
-          ? 0
-          : config === true
-            ? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS
-            : (config.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS),
+        config === true
+          ? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS
+          : (config.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS),
       recoveryKind: parts.length > 0 ? "continue" : "retry",
       streamId: context.operationId,
       requestId: context.operationId,

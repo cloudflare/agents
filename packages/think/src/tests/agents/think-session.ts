@@ -1490,6 +1490,9 @@ export class ThinkTestAgent extends Think {
   private _errorAttemptsRemaining: number | null = null;
   private _stripTextResponseForTest = false;
   private _stallAfterChunks: number | null = null;
+  /** A stall in the model itself, on both Thinks: parts sent, then calls left to stall. */
+  private _modelStallForTest: { afterParts: number; calls: number } | null =
+    null;
   // #1626 stall-recovery: when set, only the first N inferences stall (then the
   // continuation streams normally). `null` = every inference stalls (the
   // original terminal-watchdog behavior).
@@ -3282,6 +3285,57 @@ export class ThinkTestAgent extends Think {
       SELECT value FROM think_config WHERE key = ${key}
     `;
     return rows[0]?.value ?? null;
+  }
+
+  /**
+   * Recovery as an app sees it, on both Thinks: the model stalls on its
+   * first `stalledCalls` calls after `afterParts` parts, the turn runs, and
+   * the agent is waited on until it is stable. Only public API is read.
+   */
+  async stallRecoveryForTest(options: {
+    afterParts: number;
+    stalledCalls: number;
+    timeoutMs: number;
+    recovery?: ChatRecoveryOptions;
+    chatRecovery?: ChatRecoveryConfig;
+  }): Promise<{
+    first: TestChatResult;
+    stable: boolean;
+    recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];
+    roles: string[];
+    lastAssistantText: string;
+  }> {
+    this._modelStallForTest = {
+      afterParts: options.afterParts,
+      calls: options.stalledCalls
+    };
+    this.chatStreamStallTimeoutMs = options.timeoutMs;
+    this._recoveryHookForTest = options.recovery ?? null;
+    this._recoveryCallsForTest = [];
+    const chatRecovery = this.chatRecovery;
+    if (options.chatRecovery !== undefined) {
+      this.chatRecovery = options.chatRecovery;
+    }
+    try {
+      const first = await this.testChat("stall, then recover");
+      const stable = await this.waitUntilStable({ timeout: 8_000 });
+      const messages = await this.getMessages();
+      const last = messages.filter((m) => m.role === "assistant").at(-1);
+      return {
+        first,
+        stable,
+        recoveryCalls: this._recoveryCallsForTest,
+        roles: messages.map((m) => m.role),
+        lastAssistantText: (last?.parts ?? [])
+          .map((p) => (p.type === "text" ? p.text : ""))
+          .join("")
+      };
+    } finally {
+      this._modelStallForTest = null;
+      this.chatStreamStallTimeoutMs = 0;
+      this._recoveryHookForTest = null;
+      this.chatRecovery = chatRecovery;
+    }
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -5862,6 +5916,14 @@ export class ThinkTestAgent extends Think {
 
   override getModel(): ThinkModel {
     const model = this._baseModelForTest();
+    const modelStall = this._modelStallForTest;
+    if (modelStall && typeof model !== "string") {
+      return stallingModelForTest(model, modelStall.afterParts, () => {
+        if (modelStall.calls <= 0) return false;
+        modelStall.calls--;
+        return true;
+      });
+    }
     // The harness-backed Think has no `_transformInferenceResult`: a stall
     // armed by a test is the model's own silence there.
     if (
