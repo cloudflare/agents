@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 type PrefixStub = {
   addLateTool(): Promise<void>;
   say(text: string): Promise<void>;
+  lastText(): Promise<string>;
 };
 
 describe("harness-backed Think: chat:prefix:changed", () => {
@@ -20,6 +21,8 @@ describe("harness-backed Think: chat:prefix:changed", () => {
         crypto.randomUUID()
       )) as unknown as PrefixStub;
       await agent.say("hello");
+      // The turn answered, on AI SDK 6 as on 7.
+      expect(await agent.lastText()).toBe("ok");
       await agent.say("again");
       expect(payloads).toEqual([]);
       await agent.addLateTool();

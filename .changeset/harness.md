@@ -15,3 +15,4 @@ Experimental harnesses and Channels.
 - The harness store no longer corrupts long log entries containing emoji (#3054).
 - Channels: a message surface may carry a `key` that stays the same across messages of one place; an inbound email's surface carries its thread root, so a thread that writes twice is one surface answered at its latest message.
 - Channels `applyChunks` keeps a pending approval when the tool's input arrives late (#3145).
+- ThinkHarness now answers turns on AI SDK 6. It streamed a reply through `toUIMessageStream`, which only AI SDK 7 exports, so every turn failed on 6.
