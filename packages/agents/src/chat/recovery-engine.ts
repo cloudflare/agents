@@ -871,6 +871,21 @@ export class ChatRecoveryEngine {
       ) {
         await wake.persistOrphanedStream(streamId);
       }
+      // Nothing continues the reply: its stream ends here. Before the
+      // give-up is delivered, so a tab that was offered the stream and has
+      // not answered gets the terminal message too; left active, the stream
+      // would also read as a turn still running to the reconcile below. A
+      // write that fails must not cost the tabs that message: the give-up
+      // is delivered all the same, and the failure is thrown after it, so
+      // the run is replayed.
+      let streamFailure: { error: unknown } | undefined;
+      if (streamStillActive) {
+        try {
+          await wake.completeRecoveredStream(streamId);
+        } catch (error) {
+          streamFailure = { error };
+        }
+      }
       await adapter.exhaustChatRecovery(
         incident,
         config,
@@ -879,11 +894,7 @@ export class ChatRecoveryEngine {
         createdAt,
         snapshot?.originMessageIds
       );
-      // Nothing continues the reply: its stream ends here. Left active, it
-      // would read as a turn still running to the reconcile below. After
-      // the give-up was delivered: a write that fails must not cost the
-      // tab its terminal message.
-      if (streamStillActive) await wake.completeRecoveredStream(streamId);
+      if (streamFailure) throw streamFailure.error;
       this.#settled();
       await this.#reconcileChildRuns();
       return;
