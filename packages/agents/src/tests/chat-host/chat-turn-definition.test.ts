@@ -1250,4 +1250,31 @@ describe("chatTurnDefinition", () => {
       expect(part?.state).toBe("approval-responded");
     });
   });
+
+  it("a client tool call does not hold the stall watchdog off", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "ask",
+                input: {}
+              });
+              // Then the model goes silent.
+            }
+          }),
+        options: { recovery: { stallTimeoutMs: 20 } }
+      })(
+        { trigger: "server", clientTools: [{ name: "ask" }] },
+        laterAttempt("ct-2", 1)
+      );
+      expect(result).toBeInstanceOf(TaskSettlement);
+    });
+  });
 });

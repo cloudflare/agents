@@ -401,6 +401,8 @@ export async function replayTurn(
 ): Promise<void> {
   const streamId = chatTurnStreamId(requestId);
   if ((await deps.streams.status(streamId))?.state !== "streaming") return;
+  // What this isolate buffered is written first.
+  deps.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
   const stop = new AbortController();
   try {
     for await (const batch of deps.streams.readBatches(streamId, {
