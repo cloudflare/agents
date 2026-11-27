@@ -45,5 +45,17 @@ describe("agent-tool child rows a released version left", () => {
     expect(result.status).toBe("completed");
     expect(result.summary).toBeTruthy();
     expect(result.tablesLeft).toEqual([]);
+    // Its reply's stream is kept for the parent, as any agent-tool run's.
+    expect(result.chunks).toBeGreaterThan(0);
+  });
+
+  it("end, not stay running, when the app declines to recover its turn", async () => {
+    const agent = await getAgentByName(
+      env.ChatRecoveryTestAgent as unknown as DurableObjectNamespace<ChatRecoveryTestAgent>,
+      `child-upgrade-declined-${crypto.randomUUID()}`
+    );
+    const result = await agent.inFlightAgentToolRunAcrossUpgradeForTest(true);
+    expect(result.status).toBe("error");
+    expect(result.tablesLeft).toEqual([]);
   });
 });

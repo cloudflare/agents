@@ -259,6 +259,7 @@ export {
   cancelAgentToolTurn,
   carryForwardAgentToolRuns,
   inspectAgentToolTurn,
+  reclaimAgentToolStreams,
   recordAgentToolProgress,
   releasedAgentToolRunOfRequest,
   releasedAgentToolRunWaiting,

@@ -17,6 +17,7 @@ import type {
   AgentToolStoredChunk
 } from "../agent-tool-types";
 import { StreamNotFoundError } from "../streams/errors";
+import { REPLAY_PAGE_BYTES, utf8Length } from "../internal/platform-limits";
 import type { TaskJson } from "../tasks/types";
 import { cancelTurn, submitTurn, type ChatLane } from "./chat-functions";
 import {
@@ -24,6 +25,9 @@ import {
   type ChatDeps,
   type ChatTurnResult
 } from "./chat-host";
+
+/** The most of a released summary a run too large to carry whole keeps. */
+const OVERSIZED_SUMMARY_CHARS = 16_000;
 
 /** The chat-turn run id of agent-tool run `runId`. */
 export function agentToolTurnId(runId: string): string {
@@ -37,7 +41,33 @@ export type AgentToolTurnMeta = {
   terminalOnly?: true;
   /** The newest message when the turn was submitted: what follows is the run's. */
   startMessageId: string | null;
+  /** The run's input message: its reply follows it, also when it was queued. */
+  inputMessageId?: string;
 };
+
+/**
+ * Delete the streams settled agent-tool turns kept, except run `except`'s:
+ * at the next agent-tool turn's start, and when the chat is cleared.
+ */
+export async function reclaimAgentToolStreams(
+  deps: ChatDeps,
+  except?: string
+): Promise<void> {
+  await deps.streams.list({ limit: 1 });
+  const prefix = chatTurnStreamId(agentToolTurnId(""));
+  const keep =
+    except === undefined ? null : chatTurnStreamId(agentToolTurnId(except));
+  const kept = deps.streams
+    .__DO_NOT_USE_WILL_BREAK__sync()
+    .listRows()
+    .filter(
+      (row) =>
+        row.state !== "streaming" &&
+        row.stream_id.startsWith(prefix) &&
+        row.stream_id !== keep
+    );
+  for (const row of kept) await deps.streams.delete(row.stream_id);
+}
 
 /**
  * Start agent-tool run `runId` as one turn on `lane`: `message` is the
@@ -57,18 +87,12 @@ export async function startAgentToolTurn(
   }
 ): Promise<void> {
   // The streams earlier agent-tool turns kept are reclaimed now.
-  for (const kept of await deps.streams.list({ state: "completed" })) {
-    if (
-      kept.streamId.startsWith(chatTurnStreamId(agentToolTurnId(""))) &&
-      kept.streamId !== chatTurnStreamId(agentToolTurnId(runId))
-    ) {
-      await deps.streams.delete(kept.streamId);
-    }
-  }
+  await reclaimAgentToolStreams(deps, runId);
   const agentTool: AgentToolTurnMeta = {
     runId,
     ...(options.terminalOnly ? { terminalOnly: true as const } : {}),
-    startMessageId: options.startMessageId
+    startMessageId: options.startMessageId,
+    inputMessageId: message.id
   };
   await submitTurn(
     deps,
@@ -224,8 +248,18 @@ export async function agentToolTurnChunks(
   if ((await deps.streams.status(streamId)) === null) return [];
   // What this isolate buffered is written first.
   deps.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
-  const from = (options?.afterSequence ?? -1) + 1;
+  // What a recovery declined to keep is not replayed (the positions stay).
+  const discarded =
+    ((
+      deps.tasks.peek(id)?.metadata?.agentTool as
+        | { discarded?: unknown }
+        | undefined
+    )?.discarded as number | undefined) ??
+    deps.tasks.checkpointOf<number>(id, "chat:discarded") ??
+    0;
+  const from = Math.max((options?.afterSequence ?? -1) + 1, discarded);
   const chunks: AgentToolStoredChunk[] = [];
+  let bytes = 0;
   const stop = new AbortController();
   try {
     for await (const batch of deps.streams.readBatches(streamId, {
@@ -234,7 +268,16 @@ export async function agentToolTurnChunks(
       onUpToDate: () => stop.abort()
     })) {
       for (const item of batch) {
-        chunks.push({ sequence: item.seq, body: JSON.stringify(item.chunk) });
+        const body = JSON.stringify(item.chunk);
+        // One reply holds at most REPLAY_PAGE_BYTES of bodies (at least one
+        // chunk): the reader asks again after the last it got.
+        const size = utf8Length(body);
+        if (chunks.length > 0 && bytes + size > REPLAY_PAGE_BYTES) {
+          stop.abort();
+          break;
+        }
+        bytes += size;
+        chunks.push({ sequence: item.seq, body });
       }
       if (stop.signal.aborted) break;
     }
@@ -405,6 +448,7 @@ export async function carryForwardAgentToolRuns(
     started_at: number;
     completed_at: number | null;
     progress_json: string | null;
+    last_signal_at: number | null;
     event_delivery: string | null;
   };
   const parse = (json: string | null): unknown => {
@@ -443,7 +487,7 @@ export async function carryForwardAgentToolRuns(
   const waiting: string[] = [];
   for (const row of sql
     .exec(
-      `SELECT run_id, request_id, status, output_json, summary, error_message, started_at, completed_at, progress_json, event_delivery FROM ${tables.runs}`
+      `SELECT run_id, request_id, status, output_json, summary, error_message, started_at, completed_at, progress_json, last_signal_at, event_delivery FROM ${tables.runs}`
     )
     .toArray() as ReleasedRun[]) {
     const fields: Record<string, unknown> = {
@@ -451,7 +495,10 @@ export async function carryForwardAgentToolRuns(
       startMessageId: null,
       ...(row.event_delivery === "terminal" && { terminalOnly: true }),
       ...(row.progress_json !== null && {
-        progress: parse(row.progress_json)
+        progress: {
+          ...(parse(row.progress_json) as object),
+          at: row.last_signal_at ?? row.started_at
+        }
       })
     };
     for (const milestone of milestones.get(row.run_id) ?? []) {
@@ -491,13 +538,13 @@ export async function carryForwardAgentToolRuns(
         ...(row.summary !== null && { summary: row.summary })
       };
     }
-    await deps.tasks.importRun({
+    const record = (agentTool: Record<string, unknown>) => ({
       runId: agentToolTurnId(row.run_id),
       definition,
-      status,
+      status: status as "completed" | "aborted" | "error",
       attempt: 1,
       retain: true,
-      metadata: { agentTool: fields as TaskJson },
+      metadata: { agentTool: agentTool as TaskJson },
       ...(status === "error" && {
         error:
           row.error_message ??
@@ -513,6 +560,22 @@ export async function carryForwardAgentToolRuns(
       createdAt: row.started_at,
       settledAt: row.completed_at ?? Date.now()
     });
+    try {
+      await deps.tasks.importRun(record(fields));
+    } catch {
+      // Too large for a run's metadata (a big output, many milestones):
+      // the run is carried with its summary, capped, and the rest go on.
+      const summary = row.summary?.slice(0, OVERSIZED_SUMMARY_CHARS);
+      await deps.tasks.importRun(
+        record({
+          runId: row.run_id,
+          startMessageId: null,
+          ...(status === "completed" && {
+            result: { ...(summary !== undefined && { summary }) }
+          })
+        })
+      );
+    }
   }
   // A turn of a run carried as an error is not the run's any more: if the
   // upgrade carried it on as a chat turn, it stops, so it calls no model.

@@ -753,6 +753,67 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._modelGate = new TestGate();
   }
 
+  /** The roles of the messages the last output hook was given. */
+  private _outputHookRoles: string[] = [];
+
+  protected override getAgentToolOutput(
+    request: { runId: string; input: unknown },
+    messagesAfterStart: readonly ChatMessage[]
+  ): unknown {
+    this._outputHookRoles = messagesAfterStart.map((message) => message.role);
+    return super.getAgentToolOutput(request, messagesAfterStart);
+  }
+
+  /**
+   * An agent-tool run queued behind a chat turn: its tail is asked for
+   * while it waits, and the turn ahead answers before it runs. Returns
+   * whether the tail came back while the run waited, how the run ended,
+   * the roles its output hook got, and the chunks its tail carried.
+   */
+  async queuedAgentToolRunForTest(): Promise<{
+    tailWhileQueued: boolean;
+    status: string | undefined;
+    hookRoles: string[];
+    tailChunks: number;
+  }> {
+    await this.holdTurnQueueForTest();
+    void this.saveMessages([
+      { id: "ahead", role: "user", parts: [{ type: "text", text: "ahead" }] }
+    ]);
+    const runId = crypto.randomUUID();
+    await this.startAgentToolRun({ prompt: "queued" }, { runId });
+    const tail = await this.tailAgentToolRun(runId);
+    const tailWhileQueued =
+      this.tasks.peek(`agent-tool:${runId}`)?.status === "pending";
+    this.releaseTurnQueueForTest();
+    const text = await new Response(
+      tail as unknown as ReadableStream<Uint8Array>
+    ).text();
+    await this.tasks.wait(`agent-tool:${runId}`, { timeoutMs: 10_000 });
+    const inspection = await this.inspectAgentToolRun(runId);
+    return {
+      tailWhileQueued,
+      status: inspection?.status,
+      hookRoles: this._outputHookRoles,
+      tailChunks: text.trim() ? text.trim().split("\n").length : 0
+    };
+  }
+
+  /** A settled run's kept reply, then a clear: what a parent reads after. */
+  async clearedAgentToolRepliesForTest(): Promise<{
+    before: number;
+    after: number;
+  }> {
+    const runId = crypto.randomUUID();
+    await this.startAgentToolRun({ prompt: "kept" }, { runId });
+    await this.tasks.wait(`agent-tool:${runId}`, { timeoutMs: 10_000 });
+    const before = (await this.getAgentToolChunks(runId)).length;
+    this.resetTurnState();
+    await this.waitUntilStable({ pendingInteraction: () => false });
+    const after = (await this.getAgentToolChunks(runId)).length;
+    return { before, after };
+  }
+
   /**
    * Hold a turn's model call, let an agent-tool child it waits on stream
    * twice in quick succession, and return the credits the turn got.
@@ -3541,7 +3602,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    * left cut off (a chat-turn run of the release). Start as an upgraded
    * version does, carry the turn on as a wake does, and report the run.
    */
-  async inFlightAgentToolRunAcrossUpgradeForTest(): Promise<{
+  async inFlightAgentToolRunAcrossUpgradeForTest(declined = false): Promise<{
+    chunks: number;
     keptForItsTurn: boolean;
     beforeItsTurn: string | undefined;
     status: string | undefined;
@@ -3591,6 +3653,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM cf_ai_chat_agent_tool_runs
       `[0]?.n === 1;
+    // The app declines to recover it: the run ends, it is not left running.
+    if (declined) this.recoveryOverride = { continue: false };
     // A parent that asks before the turn is carried sees it running.
     const beforeItsTurn = (await this.inspectAgentToolRun("released-live"))
       ?.status;
@@ -3602,6 +3666,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         AND name IN ('cf_ai_chat_agent_tool_runs', 'cf_ai_chat_agent_tool_milestones')
     `.map((row) => row.name);
     return {
+      chunks: (await this.getAgentToolChunks("released-live")).length,
       keptForItsTurn,
       beforeItsTurn,
       status: inspection?.status,
@@ -6033,6 +6098,47 @@ const FACET_OOM_TEST_TASK_NAME = "__cf_test_facetRecoveryOom";
 const FACET_SLOW_OOM_TEST_TASK_NAME = "__cf_test_facetRecoverySlowOom";
 
 export class AIChatAgentToolChild extends AIChatAgent<Env> {
+  /**
+   * Released agent-tool rows this sub-agent kept on an earlier version,
+   * carried as it starts: the run as a parent reads it, and the tables.
+   */
+  async carryReleasedRowsInFacetForTest(): Promise<{
+    status: string | undefined;
+    tablesLeft: string[];
+    rowsLeft: number;
+  }> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_ai_chat_agent_tool_runs (
+        run_id TEXT PRIMARY KEY, request_id TEXT, status TEXT NOT NULL,
+        input_json TEXT, output_json TEXT, summary TEXT, error_message TEXT,
+        started_at INTEGER NOT NULL, completed_at INTEGER,
+        progress_json TEXT, last_signal_at INTEGER, event_delivery TEXT
+      )
+    `;
+    this
+      .sql`CREATE INDEX IF NOT EXISTS idx_ai_chat_agent_tool_request_id ON cf_ai_chat_agent_tool_runs(request_id)`;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, summary, started_at, completed_at)
+      VALUES ('facet-done', 'req-facet-done', 'completed', 'done', ${Date.now()}, ${Date.now()})
+    `;
+    await (
+      this as unknown as { _carryForwardAgentToolChildRuns(): Promise<void> }
+    )._carryForwardAgentToolChildRuns();
+    const tablesLeft = this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name = 'cf_ai_chat_agent_tool_runs'
+    `.map((row) => row.name);
+    const rowsLeft =
+      this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM cf_ai_chat_agent_tool_runs
+      `[0]?.n ?? 0;
+    return {
+      status: (await this.inspectAgentToolRun("facet-done"))?.status,
+      tablesLeft,
+      rowsLeft
+    };
+  }
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     // Test-only routed Task definition that deterministically reaches the
@@ -6958,6 +7064,15 @@ type AgentToolFinishForTest = {
 };
 
 export class AIChatAgentToolParent extends Agent<Env> {
+  /** A sub-agent that kept released agent-tool rows carries them. */
+  async childFacetCarryForTest() {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      `facet-carry-${crypto.randomUUID()}`
+    );
+    return child.carryReleasedRowsInFacetForTest();
+  }
+
   async seedChildLegacyRequestContextForTest(childName: string): Promise<void> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);
     await child.seedLegacyRequestContextForTest();

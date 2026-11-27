@@ -18,6 +18,11 @@ import { describe, expect, it, vi, onTestFinished } from "vitest";
 import type { Env } from "./worker";
 
 type ParentStub = DurableObjectStub & {
+  childFacetCarryForTest(): Promise<{
+    status: string | undefined;
+    tablesLeft: string[];
+    rowsLeft: number;
+  }>;
   resetChildForTest(childName: string): Promise<void>;
   seedChildLegacyRequestContextForTest(childName: string): Promise<void>;
   childLegacyRequestContextForTest(childName: string): Promise<{
@@ -706,6 +711,15 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(carried.lastText).toContain("Partial");
     expect(carried.lastText.length).toBeGreaterThan("Partial".length);
     expect(carried.releasedRuns).toBe(0);
+  });
+
+  it("in a sub-agent, carries released rows and empties their table instead of dropping it", async () => {
+    const result = await (await getParent()).childFacetCarryForTest();
+    expect(result).toEqual({
+      status: "completed",
+      tablesLeft: ["cf_ai_chat_agent_tool_runs"],
+      rowsLeft: 0
+    });
   });
 
   it("runs an AIChatAgent child and returns summary, output, events, and chunks", async () => {

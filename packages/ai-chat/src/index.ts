@@ -65,6 +65,7 @@ import {
   liveTurnsOf,
   recordAgentToolProgress,
   progressCreditOf,
+  reclaimAgentToolStreams,
   releasedAgentToolRunOfRequest,
   releasedAgentToolRunWaiting,
   startAgentToolTurn,
@@ -629,6 +630,30 @@ export class AIChatAgent<
   }
 
   /**
+   * A released turn that is not carried on (the app declined it, or the
+   * conversation moved on): its request ends, and an agent-tool run it
+   * belonged to ends as an error, so its parent stops waiting.
+   */
+  private async _endUncarriedTurn(
+    requestId: string,
+    key: { requestId: string; metadata?: Record<string, TaskJson> }
+  ): Promise<void> {
+    this._frames.endUnstarted(null, requestId, "aborted");
+    if (!key.metadata) return;
+    await this.tasks.importRun({
+      runId: key.requestId,
+      definition: CHAT_TURN_DEFINITION,
+      status: "error",
+      attempt: 1,
+      retain: true,
+      metadata: key.metadata,
+      error: "Agent tool run was not recovered after the upgrade.",
+      createdAt: Date.now()
+    });
+    await this._carryForwardAgentToolChildRuns();
+  }
+
+  /**
    * The run id and metadata a released turn of `requestId` is carried
    * under: its open agent-tool run's, so that run carries on, or its own.
    */
@@ -649,7 +674,10 @@ export class AIChatAgent<
           runId: run.runId,
           startMessageId: null,
           ...(run.terminalOnly && { terminalOnly: true })
-        }
+        },
+        // Its reply's stream is kept for its parent, as every agent-tool
+        // turn's is.
+        chat: { keepStream: true }
       }
     };
   }
@@ -1117,8 +1145,19 @@ export class AIChatAgent<
               this.tasks.patchMetadata(result.requestId, "agentTool", {
                 result: this._agentToolResult(
                   toolRun.runId,
-                  toolRun.startMessageId
+                  toolRun
                 ) as TaskJson
+              });
+            }
+            // What a recovery declined to keep, kept with the run so a
+            // replay after it settled skips it too.
+            const discarded = this.tasks.checkpointOf<number>(
+              result.requestId,
+              "chat:discarded"
+            );
+            if (discarded) {
+              this.tasks.patchMetadata(result.requestId, "agentTool", {
+                discarded
               });
             }
             this._agentToolInputs.delete(toolRun.runId);
@@ -1753,7 +1792,10 @@ export class AIChatAgent<
     // The chat module's turns end as a clear ends them (nothing they stream
     // is kept); an agent-tool run's turn ends with them.
     this._holdForStop(
-      stopAllTurns(this._chatDeps(), this._chatLane(), CHAT_CLEARED)
+      stopAllTurns(this._chatDeps(), this._chatLane(), CHAT_CLEARED).then(
+        // The replies settled agent-tool runs kept go with the chat.
+        () => reclaimAgentToolStreams(this._chatDeps())
+      )
     );
     this._chatResponses.length = 0;
   }
@@ -2294,7 +2336,7 @@ export class AIChatAgent<
     const inspection = inspectAgentToolTurn(deps, runId, () =>
       this._agentToolResult(
         runId,
-        agentToolTurnOf(deps, agentToolTurnId(runId))?.startMessageId ?? null
+        agentToolTurnOf(deps, agentToolTurnId(runId))
       )
     );
     // A clear ends the run as the release recorded it: skipped, an error.
@@ -2307,10 +2349,14 @@ export class AIChatAgent<
       : inspection;
   }
 
-  /** Run `runId`'s output and summary, from the messages after its start. */
+  /**
+   * Run `runId`'s output and summary, from its input message on (a turn
+   * that ended while it was queued is not the run's), else from what came
+   * after the newest message when it was submitted.
+   */
   private _agentToolResult(
     runId: string,
-    startMessageId: string | null
+    meta: { startMessageId: string | null; inputMessageId?: string } | undefined
   ): { output: unknown; summary: string | null } {
     const input = this._agentToolInputs.has(runId)
       ? this._agentToolInputs.get(runId)
@@ -2319,10 +2365,16 @@ export class AIChatAgent<
             | { agentToolInput?: unknown }
             | undefined
         )?.agentToolInput;
-    const start = startMessageId
-      ? this.messages.findIndex((m) => m.id === startMessageId)
+    const inputAt = meta?.inputMessageId
+      ? this.messages.findIndex((m) => m.id === meta.inputMessageId)
       : -1;
-    const messagesAfterStart = this.messages.slice(start + 1);
+    const start = meta?.startMessageId
+      ? this.messages.findIndex((m) => m.id === meta.startMessageId)
+      : -1;
+    const messagesAfterStart =
+      inputAt >= 0
+        ? this.messages.slice(inputAt)
+        : this.messages.slice(start + 1);
     let output = this.getAgentToolOutput({ runId, input }, messagesAfterStart);
     // An output JSON cannot hold is kept as its string.
     try {
@@ -2354,15 +2406,43 @@ export class AIChatAgent<
     options?: { afterSequence?: number; signal?: AbortSignal }
   ): Promise<ReadableStream<AgentToolStoredChunk>> {
     await this._agentToolCarry();
-    let tail = await tailAgentToolTurn(this._chatDeps(), runId, options);
+    const tail = await tailAgentToolTurn(this._chatDeps(), runId, options);
+    // The stream carries newline-delimited JSON; the RPC boundary types it
+    // as the chunks it encodes.
+    if (tail) return tail as unknown as ReadableStream<AgentToolStoredChunk>;
+    // Returned at once, so the parent's deadlines apply from here: a turn
+    // that has not opened its stream is waited for in the first read.
+    let inner: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        inner ??= (
+          await this._agentToolTailOnceOpen(runId, options)
+        ).getReader();
+        const next = await inner.read();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+      cancel: async (reason) => {
+        await inner?.cancel(reason);
+      }
+    });
+    return stream as unknown as ReadableStream<AgentToolStoredChunk>;
+  }
+
+  /**
+   * Run `runId`'s tail once its turn has opened its stream (its first frame
+   * wakes the wait), or the chunks it has when it ended or was stopped.
+   */
+  private async _agentToolTailOnceOpen(
+    runId: string,
+    options?: { afterSequence?: number; signal?: AbortSignal }
+  ): Promise<ReadableStream<Uint8Array>> {
     const id = agentToolTurnId(runId);
     const open = () => {
       const status = this.tasks.peek(id)?.status;
       return status === "pending" || status === "running";
     };
-    if (!tail && open()) {
-      // Its turn has not opened its stream yet: wait for its first frame,
-      // or its end, then follow it.
+    if (open() && !options?.signal?.aborted) {
       let wake!: () => void;
       const started = new Promise<void>((resolve) => (wake = resolve));
       const waits = this._agentToolTailWaits.get(id) ?? new Set();
@@ -2386,25 +2466,21 @@ export class AIChatAgent<
         }
       }
       if (!options?.signal?.aborted) {
-        tail = await tailAgentToolTurn(this._chatDeps(), runId, options);
+        const tail = await tailAgentToolTurn(this._chatDeps(), runId, options);
+        if (tail) return tail;
       }
     }
-    // Not streaming now: the stream carries the chunks there are and ends,
-    // and the parent inspects the run.
-    const stream =
-      tail ??
-      new ReadableStream<Uint8Array>({
-        start: async (controller) => {
-          const encoder = new TextEncoder();
-          for (const chunk of await this.getAgentToolChunks(runId, options)) {
-            controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
-          }
-          controller.close();
+    // Not streaming: the chunks there are, then the end.
+    const chunks = await this.getAgentToolChunks(runId, options);
+    const encoder = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
         }
-      });
-    // The stream carries newline-delimited JSON; the RPC boundary types it
-    // as the chunks it encodes.
-    return stream as unknown as ReadableStream<AgentToolStoredChunk>;
+        controller.close();
+      }
+    });
   }
 
   private static _extractLatestAssistantText(
@@ -2669,7 +2745,7 @@ export class AIChatAgent<
       // The app's hook failed: the turn is not continued, and what was
       // streamed stays stored.
       console.error("[AIChatAgent] onChatRecovery threw", error);
-      this._frames.endUnstarted(null, requestId, "aborted");
+      await this._endUncarriedTurn(requestId, key);
       return;
     }
     // "Do not keep it" drops what this turn streamed, unless that holds a
@@ -2695,7 +2771,7 @@ export class AIChatAgent<
       droppable ? before : leaf
     );
     if (plan.action === "skip") {
-      this._frames.endUnstarted(null, requestId, "aborted");
+      await this._endUncarriedTurn(requestId, key);
       return;
     }
 
@@ -2729,7 +2805,10 @@ export class AIChatAgent<
           // The user messages the request came from, so its end names them.
           ...(snapshot?.originMessageIds &&
             snapshot.originMessageIds.length > 0 && {
-              chat: { messageIds: snapshot.originMessageIds }
+              chat: {
+                ...(key.metadata?.chat as Record<string, TaskJson> | undefined),
+                messageIds: snapshot.originMessageIds
+              }
             })
         }
       }
@@ -2758,7 +2837,7 @@ export class AIChatAgent<
     const target =
       kind === "continue" ? data.targetAssistantId : data.targetUserId;
     if (!leaf || (target !== undefined && leaf.id !== target)) {
-      this._frames.endUnstarted(null, requestId, "aborted");
+      await this._endUncarriedTurn(requestId, key);
       return;
     }
     const body = data.lastBody ?? this._requestContextNow().body;
@@ -2784,7 +2863,10 @@ export class AIChatAgent<
           ...key.metadata,
           ...(data.originMessageIds &&
             data.originMessageIds.length > 0 && {
-              chat: { messageIds: data.originMessageIds }
+              chat: {
+                ...(key.metadata?.chat as Record<string, TaskJson> | undefined),
+                messageIds: data.originMessageIds
+              }
             })
         }
       }

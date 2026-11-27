@@ -47,7 +47,8 @@ describe("agent-tool runs as chat turns", () => {
       await instance.tasks.wait(agentToolTurnId("run-1"));
       expect(agentToolTurnOf(instance.deps, agentToolTurnId("run-1"))).toEqual({
         runId: "run-1",
-        startMessageId: null
+        startMessageId: null,
+        inputMessageId: "in-1"
       });
       expect(
         inspectAgentToolTurn(instance.deps, "run-1", collect)
@@ -391,6 +392,65 @@ describe("agent-tool runs as chat turns", () => {
         await carry();
       }
     );
+  });
+
+  it("carries a released run too large for run metadata with its summary, and the others whole", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: ChatTurnHostObject, state) => {
+        await instance.lifecycle.start();
+        const sql = state.storage.sql;
+        sql.exec(
+          "CREATE TABLE released_runs (run_id TEXT PRIMARY KEY, request_id TEXT, status TEXT NOT NULL, input_json TEXT, output_json TEXT, summary TEXT, error_message TEXT, started_at INTEGER NOT NULL, completed_at INTEGER, progress_json TEXT, last_signal_at INTEGER, event_delivery TEXT)"
+        );
+        sql.exec(
+          "INSERT INTO released_runs (run_id, request_id, status, summary, output_json, started_at, completed_at) VALUES ('huge', 'r1', 'completed', 'big one', ?, 1, 2)",
+          JSON.stringify("x".repeat(2_000_000))
+        );
+        sql.exec(
+          "INSERT INTO released_runs (run_id, request_id, status, summary, progress_json, last_signal_at, started_at, completed_at) VALUES ('small', 'r2', 'completed', 'done', '{\"fraction\":0.5}', 42, 1, 2)"
+        );
+        await carryForwardAgentToolRuns(
+          instance.deps,
+          sql,
+          { runs: "released_runs", milestones: "released_milestones" },
+          "chat"
+        );
+        expect(
+          inspectAgentToolTurn(instance.deps, "huge", collect)
+        ).toMatchObject({ status: "completed", summary: "big one" });
+        // Carried after it, whole, its progress with the time it was sent.
+        expect(
+          inspectAgentToolTurn(instance.deps, "small", collect)
+        ).toMatchObject({
+          status: "completed",
+          summary: "done",
+          progress: { fraction: 0.5, at: 42 }
+        });
+      }
+    );
+  });
+
+  it("does not replay what a recovery declined to keep", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await startAgentToolTurn(instance.deps, instance.lane, "run-d", input, {
+        startMessageId: null
+      });
+      await instance.tasks.wait(agentToolTurnId("run-d"));
+      const all = await agentToolTurnChunks(instance.deps, "run-d");
+      expect(all.length).toBeGreaterThan(2);
+      // The first two were an attempt the app chose not to keep.
+      instance.tasks.patchMetadata(agentToolTurnId("run-d"), "agentTool", {
+        discarded: 2
+      });
+      const kept = await agentToolTurnChunks(instance.deps, "run-d");
+      expect(kept.map((chunk) => chunk.sequence)).toEqual(
+        all.slice(2).map((chunk) => chunk.sequence)
+      );
+    });
   });
 
   it("has nothing for a run id the child never took, and no agent-tool turn for a plain one", async () => {
