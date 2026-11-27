@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 import { getAgentByName } from "agents";
@@ -701,12 +701,14 @@ describe("Message Sanitization", () => {
         autoContinue: false
       })
     );
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The tabs are sent the answered message, redacted.
+    await vi.waitFor(() => expect(updates.length).toBeGreaterThan(0));
     const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const output = (persisted[0].parts[0] as { output?: { content?: string } })
       .output;
     expect(output?.content).toBe("[custom-redacted]");
     expect(JSON.stringify(updates)).not.toContain("sensitive data");
+    expect(JSON.stringify(updates)).toContain("[custom-redacted]");
     ws.close(1000);
   });
 
