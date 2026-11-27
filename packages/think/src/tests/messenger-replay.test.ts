@@ -82,4 +82,12 @@ describe("Telegram messenger replies (recorded webhooks)", () => {
       { method: "sendRichMessage", body: { chat_id: "42", text: "Got it" } }
     ]);
   }, 30_000);
+
+  it("answers a direct message once after a reset mid-answer", async () => {
+    expect(
+      await replay(`tg-resetmid-${crypto.randomUUID()}`, dm("hello"))
+    ).toEqual([
+      { method: "sendRichMessage", body: { chat_id: "42", text: "Got it" } }
+    ]);
+  }, 30_000);
 });

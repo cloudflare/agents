@@ -18,7 +18,12 @@ import type {
 } from "../ingress";
 import { matchesPath } from "../ingress";
 import type { ResponseChunk } from "../protocol";
-import { INTERRUPTED_NOTICE, posting, reportingPosting } from "../deliveries";
+import {
+  INTERRUPTED_NOTICE,
+  posting,
+  reportingPosting,
+  SupersededResponse
+} from "../deliveries";
 import { createTextCollector } from "../stream";
 import type { ChannelMessageSurface } from "../surface";
 
@@ -180,8 +185,14 @@ export function chatSdkChannel(
         sending = true;
         return () => (posted = true);
       };
-      async function* untilThePost(): AsyncIterable<string> {
-        yield* text.deltas;
+      const deltas = text.deltas[Symbol.asyncIterator]();
+      const rest = { [Symbol.asyncIterator]: () => deltas };
+      // Whether the adapter's stream read any of it.
+      let read = false;
+      async function* untilThePost(first: string): AsyncIterable<string> {
+        read = true;
+        yield first;
+        yield* rest;
         // The adapter read it all: what it sends next is its post. Until
         // then it showed previews (Telegram's drafts), so a stream cut
         // short before here is streamed again in full. An adapter that
@@ -192,13 +203,26 @@ export function chatSdkChannel(
         surface,
         async (threadId) => {
           if (stream) {
-            const sent = await stream.call(adapter, threadId, untilThePost());
+            // Telegram refuses a stream without text: start it with the
+            // first. A response with none posts nothing (or the notice).
+            const first = await deltas.next();
+            if (first.done) return postAndEdit(threadId, text, beforePost);
+            const sent = await stream.call(
+              adapter,
+              threadId,
+              untilThePost(first.value)
+            );
             // An adapter that will not stream to this thread (Telegram
             // groups) returns null before it reads any text.
-            if (sent !== null || text.started()) {
+            if (sent !== null || read) {
               posted = true;
               return sent;
             }
+            return postAndEdit(
+              threadId,
+              { ...text, deltas: prefixed(first.value, rest) },
+              beforePost
+            );
           }
           return postAndEdit(threadId, text, beforePost);
         },
@@ -227,18 +251,21 @@ export function chatSdkChannel(
     let sent: { id: string } | undefined;
     for await (const delta of text.deltas) {
       markdown += delta;
+      // A message shows no trailing whitespace: what is shown is trimmed, so
+      // "Got " then "Got it" is posted as "Got" and edited once.
+      const visible = markdown.trimEnd();
       if (!sent) {
         // Telegram refuses a blank message: wait for the first real text.
-        if (markdown.trim().length === 0) continue;
+        if (visible.length === 0) continue;
         const afterPost = beforePost();
-        sent = await adapter.postMessage(threadId, { markdown });
+        sent = await adapter.postMessage(threadId, { markdown: visible });
         afterPost();
-      } else if (Date.now() - shownAt < EDIT_INTERVAL_MS) {
+      } else if (visible === shown || Date.now() - shownAt < EDIT_INTERVAL_MS) {
         continue;
       } else {
-        await adapter.editMessage(threadId, sent.id, { markdown });
+        await adapter.editMessage(threadId, sent.id, { markdown: visible });
       }
-      shown = markdown;
+      shown = visible;
       shownAt = Date.now();
     }
     if (!sent) {
@@ -246,10 +273,11 @@ export function chatSdkChannel(
       beforePost();
       return adapter.postMessage(threadId, { markdown: INTERRUPTED_NOTICE });
     }
-    if (shown !== markdown) {
+    const visible = markdown.trimEnd();
+    if (shown !== visible) {
       const wait = shownAt + EDIT_INTERVAL_MS - Date.now();
       if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-      await adapter.editMessage(threadId, sent.id, { markdown });
+      await adapter.editMessage(threadId, sent.id, { markdown: visible });
     }
     return sent;
   }
@@ -274,6 +302,14 @@ function interruptedAnswer(reference: string | undefined): DeliveryResult {
  * response that breaks off ends the deltas there, without an error, so the
  * adapter still posts what it has; `interrupted()` says it broke off.
  */
+async function* prefixed(
+  first: string,
+  rest: AsyncIterable<string>
+): AsyncIterable<string> {
+  yield first;
+  yield* rest;
+}
+
 function textOf(chunks: ReadableStream<ResponseChunk>): {
   deltas: AsyncIterable<string>;
   started(): boolean;
@@ -290,7 +326,9 @@ function textOf(chunks: ReadableStream<ResponseChunk>): {
         started = true;
         yield text;
       }
-    } catch {
+    } catch (error) {
+      // A later response answers: post nothing of this one.
+      if (error instanceof SupersededResponse) throw error;
       interrupted = true;
     }
   }

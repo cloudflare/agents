@@ -150,6 +150,149 @@ describe("deliverToSurfaces", () => {
     ]);
   }, 40_000);
 
+  it("posts no notice for a run cut off before it wrote, once a later run answers its turn", async () => {
+    const stub = fresh();
+    // The notice the cut-off response would post fails once, so its delivery
+    // tries again after the turn's later run opened its response.
+    await stub.setScript(["retryable"]);
+    await stub.receive(
+      {
+        type: "message",
+        eventId: "e1",
+        message: {
+          id: "e1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      },
+      {
+        route: "default",
+        participant: { id: "alice" },
+        surface: await stub.surfaceOf("t1")
+      }
+    );
+    await stub.emit([{ type: "run-start", operations: ["e1"] }]);
+    await stub.wake();
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "a" }),
+      chunk({ type: "text-delta", id: "a", delta: "Hello" }),
+      chunk({ type: "text-end", id: "a" }),
+      { type: "run-end", operations: ["e1"] }
+    ]);
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 0
+    );
+    const posts = await stub.getPosts();
+    expect(posts.some((p) => p.text === "Hello" && p.outcome === "ok")).toBe(
+      true
+    );
+    // The fake records a stream that broke off as `uncertain`: the cut-off
+    // response's retry read it as ended empty instead.
+    expect(posts.map((p) => p.outcome)).not.toContain("uncertain");
+  });
+
+  it("posts nothing of a run cut off mid-answer, once a later run answers its turn", async () => {
+    const stub = fresh();
+    // The cut-off response's post fails once, so its delivery tries again
+    // after the turn's later run opened its response.
+    await stub.setScript(["retryable"]);
+    await stub.receive(
+      {
+        type: "message",
+        eventId: "e1",
+        message: {
+          id: "e1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      },
+      {
+        route: "default",
+        participant: { id: "alice" },
+        surface: await stub.surfaceOf("t1")
+      }
+    );
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "a" }),
+      chunk({ type: "text-delta", id: "a", delta: "Hel" })
+    ]);
+    await stub.wake();
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "b" }),
+      chunk({ type: "text-delta", id: "b", delta: "Hello" }),
+      chunk({ type: "text-end", id: "b" }),
+      { type: "run-end", operations: ["e1"] }
+    ]);
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 0
+    );
+    const posts = await stub.getPosts();
+    // Only the first, failed post had the cut-off text.
+    expect(posts.filter((p) => p.text === "Hel").map((p) => p.outcome)).toEqual(
+      ["retryable"]
+    );
+    expect(posts.some((p) => p.text === "Hello" && p.outcome === "ok")).toBe(
+      true
+    );
+  });
+
+  it("still posts a cut-off run's finished step, which a later run does not repeat", async () => {
+    const stub = fresh();
+    await stub.setScript(["retryable"]);
+    await stub.receive(
+      {
+        type: "message",
+        eventId: "e1",
+        message: {
+          id: "e1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      },
+      {
+        route: "default",
+        participant: { id: "alice" },
+        surface: await stub.surfaceOf("t1")
+      }
+    );
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "a" }),
+      chunk({ type: "text-delta", id: "a", delta: "Step one." }),
+      chunk({ type: "text-end", id: "a" }),
+      chunk({ type: "text-start", id: "b" }),
+      chunk({ type: "text-delta", id: "b", delta: "Hel" })
+    ]);
+    await stub.wake();
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "c" }),
+      chunk({ type: "text-delta", id: "c", delta: "Hello" }),
+      chunk({ type: "text-end", id: "c" }),
+      { type: "run-end", operations: ["e1"] }
+    ]);
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 0
+    );
+    const posts = await stub.getPosts();
+    // Tried again after the later run began, the cut response is still
+    // posted (as cut off), so its finished step reaches the reader.
+    expect(
+      posts.some(
+        (p) => p.text.startsWith("Step one.") && p.outcome === "uncertain"
+      )
+    ).toBe(true);
+    expect(posts.some((p) => p.text === "Hello" && p.outcome === "ok")).toBe(
+      true
+    );
+  });
+
   it("delivers the response as one email to an email surface, through the email Channel", async () => {
     const stub = fresh();
     await answer(stub, [], async () => ({
@@ -302,6 +445,11 @@ describe("deliverToSurfaces", () => {
     ]);
     // A new instance finds the response still streaming: interrupted.
     await stub.wake();
+    // The turn ends without another run: what the cut response held is all
+    // there is.
+    await stub.emit([
+      { type: "operation", status: { operationId: "e1", status: "unanswered" } }
+    ]);
     await until(
       () => stub.getEmails(),
       (e) => e.length === 1
@@ -355,6 +503,11 @@ describe("deliverToSurfaces", () => {
     );
     await stub.emit([{ type: "run-start", operations: ["e1"] }]);
     await stub.wake();
+    // The turn ends without another run: what the cut response held is all
+    // there is.
+    await stub.emit([
+      { type: "operation", status: { operationId: "e1", status: "unanswered" } }
+    ]);
     const emails = await until(
       () => stub.getEmails(),
       (e) => e.length === 1

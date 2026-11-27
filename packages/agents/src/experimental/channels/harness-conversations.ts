@@ -297,7 +297,9 @@ export class HarnessConversations {
     link: SessionLink,
     operations: readonly string[]
   ): Promise<void> {
-    link.endResponse();
+    // A response still open here is a run that never ended (a reset cut it,
+    // and this run is its rerun): what it holds is not the answer.
+    link.cutResponse();
     const queued = this.#turns(conversationId).find(
       (t) => t.status === "queued"
     );
@@ -489,6 +491,12 @@ class SessionLink {
 
   endResponse(): void {
     this.response?.end();
+    this.response = undefined;
+    this.extends = undefined;
+  }
+
+  cutResponse(): void {
+    this.response?.interrupt();
     this.response = undefined;
     this.extends = undefined;
   }

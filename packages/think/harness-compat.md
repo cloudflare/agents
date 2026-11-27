@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**321 of 1299 (0 class-only, each with a successor) tests that construct Think pass (24%).** Across the whole suite, 616 of 1594.
+**433 of 1312 (0 class-only, each with a successor) tests that construct Think pass (33%).** Across the whole suite, 728 of 1607.
 
 A class-only test reaches its behaviour through something private to the
 Think class. It is left out of the headline, it has a successor that
@@ -40,10 +40,10 @@ end. The per-file counts below include it.
 | `client-tools.test.ts`                 | 38 / 141 | 26%  |
 | `cold-rpc-initialization.test.ts`      | 4 / 4    | 100% |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
-| `context-upgrade.test.ts`              | 4 / 11   | 36%  |
+| `context-upgrade.test.ts`              | 8 / 11   | 72%  |
 | `deliver-notice.test.ts`               | 0 / 7    | 0%   |
 | `detached-reconcile-lane.test.ts`      | 0 / 1    | 0%   |
-| `durable-admission.test.ts`            | 3 / 9    | 33%  |
+| `durable-admission.test.ts`            | 4 / 9    | 44%  |
 | `empty-reply.test.ts`                  | 0 / 10   | 0%   |
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
@@ -51,16 +51,16 @@ end. The per-file counts below include it.
 | `execute-tool.test.ts`                 | 6 / 6    | 100% |
 | `extension-manager.test.ts`            | 50 / 50  | 100% |
 | `facet-request-order.test.ts`          | 0 / 1    | 0%   |
-| `fetch-tools.test.ts`                  | 52 / 53  | 98%  |
+| `fetch-tools.test.ts`                  | 53 / 53  | 100% |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
 | `harness-tool-recovery.test.ts`        | 2 / 2    | 100% |
-| `hooks.test.ts`                        | 55 / 149 | 36%  |
+| `hooks.test.ts`                        | 83 / 149 | 55%  |
 | `hydration-budget.test.ts`             | 2 / 19   | 10%  |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
 | `mcp-tool-materialization.test.ts`     | 5 / 5    | 100% |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
 | `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
-| `messengers.test.ts`                   | 79 / 111 | 71%  |
+| `messengers.test.ts`                   | 86 / 115 | 74%  |
 | `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
 | `onconnect-broadcast.test.ts`          | 4 / 17   | 23%  |
 | `onstart-degraded.test.ts`             | 3 / 5    | 60%  |
@@ -69,7 +69,7 @@ end. The per-file counts below include it.
 | `periphery-channels.test.ts`           | 12 / 12  | 100% |
 | `periphery-extensions.test.ts`         | 12 / 12  | 100% |
 | `periphery-inference.test.ts`          | 19 / 19  | 100% |
-| `periphery-modules.test.ts`            | 12 / 19  | 63%  |
+| `periphery-modules.test.ts`            | 14 / 19  | 73%  |
 | `periphery-transcript.test.ts`         | 12 / 12  | 100% |
 | `periphery-turn-policy.test.ts`        | 13 / 13  | 100% |
 | `prefix-changed.test.ts`               | 1 / 1    | 100% |
@@ -77,18 +77,18 @@ end. The per-file counts below include it.
 | `queued-order.test.ts`                 | 0 / 5    | 0%   |
 | `rpc-chat-turns.test.ts`               | 0 / 5    | 0%   |
 | `run-turn-recovery.test.ts`            | 1 / 11   | 9%   |
-| `run-turn.test.ts`                     | 13 / 35  | 37%  |
+| `run-turn.test.ts`                     | 14 / 35  | 40%  |
 | `scheduled-tasks.test.ts`              | 9 / 9    | 100% |
 | `skills-tools.test.ts`                 | 2 / 2    | 100% |
-| `stop-reason.test.ts`                  | 0 / 46   | 0%   |
+| `stop-reason.test.ts`                  | 36 / 46  | 78%  |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1    | 100% |
-| `submissions.test.ts`                  | 29 / 123 | 23%  |
+| `submissions.test.ts`                  | 40 / 123 | 32%  |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
-| `terminal-frame-order.test.ts`         | 0 / 4    | 0%   |
+| `terminal-frame-order.test.ts`         | 2 / 4    | 50%  |
 | `think-eviction.test.ts`               | 2 / 3    | 66%  |
-| `think-session.test.ts`                | 79 / 308 | 25%  |
+| `think-session.test.ts`                | 97 / 317 | 30%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
-| `workspace-tools.test.ts`              | 8 / 10   | 80%  |
+| `workspace-tools.test.ts`              | 9 / 10   | 90%  |
 | `ws-web-channel.test.ts`               | 1 / 10   | 10%  |

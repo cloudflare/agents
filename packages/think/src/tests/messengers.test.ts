@@ -1236,6 +1236,33 @@ describe("think messengers core", () => {
       expect(calls.at(-1)?.content).toBe("Got it");
     });
 
+    it("posts each reply only to the thread that asked", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "two-threads"
+      );
+      for (const threadId of ["fake:dm-a", "fake:dm-b"]) {
+        const response = await agent.fetch(
+          "https://example.com/messengers/fake/webhook",
+          {
+            body: JSON.stringify({
+              id: `m-${threadId}`,
+              text: "hello",
+              threadId
+            }),
+            method: "POST"
+          }
+        );
+        await response.text();
+      }
+      expect(await agent.getPostThreadsForTest()).toEqual([
+        "fake:dm-a",
+        "fake:dm-b"
+      ]);
+      // Nor through another messenger.
+      expect(await agent.getOtherPostsForTest()).toEqual([]);
+    });
+
     it("leaves native streaming untouched", async () => {
       const streamed: string[] = [];
       const { calls, runtime } = recordingRuntime({
@@ -1635,6 +1662,39 @@ describe("think messengers core", () => {
         { kind: "edit", content: "Got it" }
       ]);
     });
+
+    it("keeps nothing of a reply's asker once a turn a reset cut settled", async () => {
+      const name = `reset-${crypto.randomUUID()}`;
+      // A reset stub stays broken: each call takes a new one.
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      await (
+        await agent()
+      )
+        .fetch("https://example.com/messengers/fake/webhook", {
+          body: JSON.stringify({
+            id: "k1",
+            text: "hello",
+            threadId: "fake:dm"
+          }),
+          method: "POST"
+        })
+        .catch(() => undefined);
+      let kept = -1;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        kept = await (await agent()).askersKeptForTest().catch(() => -1);
+        const prompts = await (
+          await agent()
+        )
+          .getRecorded("prompt")
+          .catch(() => [] as string[]);
+        // Settled once the rerun asked the model again.
+        if (kept === 0 && prompts.length > 1) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(kept).toBe(0);
+    }, 30_000);
 
     it("answers a webhook reply once after the object reset mid-reply", async () => {
       const name = `reset-${crypto.randomUUID()}`;
@@ -2418,6 +2478,28 @@ describe("think messengers core", () => {
 
     const fallback = await agent.fetch("https://example.com/custom");
     await expect(fallback.text()).resolves.toBe("fallback");
+  });
+
+  it("leaves a webhook sent to a sub-agent to its own onRequest", async () => {
+    const agent = await getAgentByName(
+      env.ThinkMessengerRouteTestAgent,
+      "route-facet"
+    );
+    await expect(agent.webhookOnSubAgentForTest()).resolves.toBe("fallback");
+  });
+
+  it("refuses a webhook its messenger's verification rejects", async () => {
+    const agent = await getAgentByName(
+      env.ThinkMessengerRouteTestAgent,
+      "route-verify"
+    );
+
+    const response = await agent.fetch(
+      "https://example.com/messengers/guarded/webhook",
+      { method: "POST" }
+    );
+    expect(response.status).toBe(401);
+    expect(await agent.getGuardedWebhooksForTest()).toBe(0);
   });
 });
 
