@@ -391,6 +391,62 @@ describe("AIChatAgent messageConcurrency", () => {
     ws.close(1000);
   });
 
+  it.each([
+    ["merge", "merge-message-concurrency-agent"],
+    ["latest", "latest-message-concurrency-agent"],
+    ["queue", "slow-stream-agent"]
+  ])(
+    "%s: a reply stopped while it streams is stored before the question waiting behind it",
+    async (_mode, path) => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/${path}/${room}`);
+      const agentStub = await getAgentByName(
+        (path === "slow-stream-agent"
+          ? env.SlowStreamAgent
+          : path.startsWith("merge")
+            ? env.MergeMessageConcurrencyAgent
+            : env.LatestMessageConcurrencyAgent) as typeof env.MergeMessageConcurrencyAgent,
+        room
+      );
+      const body = { format: "plaintext", chunkCount: 3, chunkDelayMs: 0 };
+
+      // The first reply has streamed a chunk and is held there.
+      await agentStub.holdStreamForTest("req-stop-1");
+      onTestFinished(() => agentStub.releaseStreamForTest("req-stop-1"));
+      sendChatRequest(ws, "req-stop-1", [firstUserMessage], body);
+      await waitUntil(() => agentStub.isStreamHeldForTest("req-stop-1"));
+
+      // A second question waits behind it, and the user stops the first.
+      sendChatRequest(
+        ws,
+        "req-stop-2",
+        [firstUserMessage, secondUserMessage],
+        body
+      );
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+          id: "req-stop-1"
+        })
+      );
+      await waitUntil(
+        async () =>
+          ((await agentStub.getPersistedMessages()) as ChatMessage[]).filter(
+            (message) => message.role === "assistant"
+          ).length === 2
+      );
+
+      const persisted =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(
+        persisted.map((message) =>
+          message.role === "user" ? message.id : message.role
+        )
+      ).toEqual(["user-1", "assistant", "user-2", "assistant"]);
+      ws.close(1000);
+    }
+  );
+
   it("merge concatenates overlapping queued user messages into one follow-up turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(
