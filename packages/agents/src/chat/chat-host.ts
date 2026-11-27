@@ -995,7 +995,13 @@ export function chatTurnDefinition(
         // A tool call's input and its outcome are written at once: a tool
         // runs for as long as it takes, and a reset while it runs must find
         // the call stored (or the tool would run again).
-        if (TOOL_EVENTS.has(chunk.type)) sync.flush(streamId);
+        // A preliminary output (progress) waits for the batch.
+        if (
+          TOOL_EVENTS.has(chunk.type) &&
+          (chunk as { preliminary?: unknown }).preliminary !== true
+        ) {
+          sync.flush(streamId);
+        }
       };
       const liveKey = sessionId;
       const live = liveTurnsOf(deps.streams);
