@@ -260,6 +260,7 @@ export {
   carryForwardAgentToolRuns,
   inspectAgentToolTurn,
   recordAgentToolProgress,
+  releasedAgentToolRunOfRequest,
   startAgentToolTurn,
   tailAgentToolTurn
 } from "./agent-tool-turns";

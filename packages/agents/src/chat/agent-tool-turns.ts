@@ -552,6 +552,37 @@ export async function tailAgentToolTurn(
 }
 
 /**
+ * The open agent-tool run a released version kept for its turn
+ * `requestId`, if any: the upgrade step that carries that turn starts its
+ * run under {@link agentToolTurnId} of it, so the run carries on.
+ */
+export function releasedAgentToolRunOfRequest(
+  sql: SqlStorage,
+  table: string,
+  requestId: string
+): { runId: string; terminalOnly: boolean } | null {
+  const exists =
+    sql
+      .exec(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        table
+      )
+      .toArray().length > 0;
+  if (!exists) return null;
+  const row = sql
+    .exec(
+      `SELECT run_id, event_delivery FROM ${table} WHERE request_id = ? AND status IN ('running', 'starting') LIMIT 1`,
+      requestId
+    )
+    .toArray()[0] as
+    | { run_id: string; event_delivery: string | null }
+    | undefined;
+  return row
+    ? { runId: row.run_id, terminalOnly: row.event_delivery === "terminal" }
+    : null;
+}
+
+/**
  * Carry the agent-tool runs a released version kept in its own tables onto
  * the chat turn runs this version reads, once, then drop the tables. A run
  * that was still running is carried as an error: nothing of this version
@@ -637,11 +668,21 @@ export async function carryForwardAgentToolRuns(
         : row.status === "aborted"
           ? "aborted"
           : "error";
-    if (
-      status === "error" &&
-      row.request_id !== null &&
-      (row.status === "running" || row.status === "starting")
-    ) {
+    const open = row.status === "running" || row.status === "starting";
+    // Its turn carried on under the run's id by the upgrade step: that run
+    // is the run's now. What the row kept goes onto it.
+    if (open && deps.tasks.peek(agentToolTurnId(row.run_id))) {
+      const { runId: _runId, startMessageId: _start, ...kept } = fields;
+      if (Object.keys(kept).length > 0) {
+        deps.tasks.patchMetadata(
+          agentToolTurnId(row.run_id),
+          "agentTool",
+          kept as Record<string, TaskJson>
+        );
+      }
+      continue;
+    }
+    if (status === "error" && row.request_id !== null && open) {
       interrupted.push(row.request_id);
     }
     if (status === "completed") {

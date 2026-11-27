@@ -14,6 +14,7 @@ import {
   carryForwardAgentToolRuns,
   inspectAgentToolTurn,
   recordAgentToolProgress,
+  releasedAgentToolRunOfRequest,
   remainingChunks,
   startAgentToolTurn
 } from "../../chat/agent-tool-turns";
@@ -360,6 +361,72 @@ describe("agent-tool runs as chat turns", () => {
         });
         // Its turn stopped: no model work for a run its parent sees ended.
         expect(modelCall?.aborted).toBe(true);
+      }
+    );
+  });
+
+  it("lets a released run whose turn the upgrade carried on carry on, with what its row kept", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: ChatTurnHostObject, state) => {
+        await instance.lifecycle.start();
+        const host = instance.host as { respond: ChatHost["respond"] };
+        let started!: () => void;
+        const running = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        host.respond = async (call: ChatModelCall) =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "start", messageId: "reply-on" });
+              started();
+              call.signal.addEventListener("abort", () => controller.close());
+            }
+          });
+        const sql = state.storage.sql;
+        sql.exec(
+          "CREATE TABLE released_runs (run_id TEXT PRIMARY KEY, request_id TEXT, status TEXT NOT NULL, input_json TEXT, output_json TEXT, summary TEXT, error_message TEXT, started_at INTEGER NOT NULL, completed_at INTEGER, progress_json TEXT, last_signal_at INTEGER, event_delivery TEXT)"
+        );
+        sql.exec(
+          "CREATE TABLE released_milestones (run_id TEXT NOT NULL, sequence INTEGER NOT NULL, name TEXT NOT NULL, data_json TEXT, at INTEGER NOT NULL, PRIMARY KEY (run_id, sequence))"
+        );
+        sql.exec(
+          "INSERT INTO released_runs (run_id, request_id, status, started_at) VALUES ('released-run', 'released-req', 'running', ?)",
+          Date.now()
+        );
+        sql.exec(
+          "INSERT INTO released_milestones (run_id, sequence, name, at) VALUES ('released-run', 0, 'found', 1)"
+        );
+        // The upgrade step finds the run its released turn belongs to, and
+        // carries the turn on under the run's id.
+        expect(
+          releasedAgentToolRunOfRequest(sql, "released_runs", "released-req")
+        ).toEqual({ runId: "released-run", terminalOnly: false });
+        await startAgentToolTurn(
+          instance.deps,
+          instance.lane,
+          "released-run",
+          input,
+          { startMessageId: null }
+        );
+        await running;
+        await carryForwardAgentToolRuns(
+          instance.deps,
+          sql,
+          { runs: "released_runs", milestones: "released_milestones" },
+          "chat"
+        );
+        // It carries on, with the milestone its row kept.
+        expect(
+          inspectAgentToolTurn(instance.deps, "released-run", collect)
+        ).toMatchObject({
+          status: "running",
+          milestones: [{ name: "found", sequence: 0 }]
+        });
+        expect(
+          releasedAgentToolRunOfRequest(sql, "released_runs", "released-req")
+        ).toBeNull();
       }
     );
   });
