@@ -13066,21 +13066,22 @@ export class ThinkRecoveryTestAgent extends Think {
   /** Seed a session that ends in a PARTIAL assistant message (the state a
    * deploy-interrupted turn leaves behind, which `continueLastTurn` replays). */
   async seedPartialAssistantTurnForTest(): Promise<void> {
-    const self = this as unknown as {
-      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
-    };
-    await self._upsertMessageInHistory({
-      id: "u1",
-      role: "user",
-      parts: [{ type: "text", text: "Say hello." }]
-    });
-    await self._upsertMessageInHistory(
+    await this.addMessages([
       {
-        id: "a1",
-        role: "assistant",
-        parts: [{ type: "text", text: "Sure, here is" }]
-      },
-      "u1"
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Say hello." }]
+      }
+    ]);
+    await this.addMessages(
+      [
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [{ type: "text", text: "Sure, here is" }]
+        }
+      ],
+      { parentId: "u1" }
     );
   }
 
