@@ -471,7 +471,8 @@ export class PerfAgent extends Agent<Env> {
         const r = await this.tasks.run("five");
         const deadline = Date.now() + 10000;
         while (Date.now() < deadline) {
-          const s = await this.tasks.get(r.runId);
+          // The poll is the driver's, not the task's: keep it out of the counts.
+          const s = await this.meter.quiet(() => this.tasks.get(r.runId));
           // release: `state` (completed | failed | cancelled); after T1: `status` (completed | error | aborted | skipped)
           const st =
             (s as { status?: string; state?: string } | null)?.status ??

@@ -64,7 +64,7 @@ SOAK_LOG=/tmp/soak.log pnpm run soak   # SOAK_LOG: one line per turn, for watchi
 
 ## perf
 
-The storage cost of each scenario from the perf probe (SQL statements, rows written and read, KV writes, alarm calls, `storage.sync()` calls, rows and jobs left), at the root and in facets. It runs on local workerd, once with the latest release of the three packages and once with this repository's build, and prints one markdown table, `release / this build`, bold where this build costs more. It is a report: it fails only when a scenario breaks on this build.
+The storage cost of each scenario from the perf probe (SQL statements, rows written and read, KV writes, alarm writes, `storage.sync()` calls, rows and jobs left), at the root and in facets. It runs on local workerd, once with the latest release of the three packages and once with this repository's build, and prints one markdown table, `release / this build`, bold where this build costs more. It is a report: it fails only when a scenario breaks on this build.
 
 ```sh
 cd nightly

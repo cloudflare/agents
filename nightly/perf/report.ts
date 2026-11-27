@@ -78,6 +78,15 @@ function releaseBundle(scratch: string): Record<string, string> {
   return versions;
 }
 
+/** Stop every local runtime this report started, also when it is interrupted. */
+const running = new Set<() => void>();
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    for (const stop of running) stop();
+    process.exit(1);
+  });
+}
+
 /** A local `wrangler dev` of a bundle on fresh state, in its own process group. */
 async function startDev(out: string, port: number): Promise<() => void> {
   if (await alive(port)) throw new Error(`port ${port} is in use`);
@@ -101,6 +110,7 @@ async function startDev(out: string, port: number): Promise<() => void> {
     { cwd: DIR, stdio: "ignore", detached: true }
   );
   const stop = () => {
+    running.delete(stop);
     if (dev.pid) {
       try {
         process.kill(-dev.pid, "SIGKILL");
@@ -110,6 +120,7 @@ async function startDev(out: string, port: number): Promise<() => void> {
     }
     rmSync(state, { recursive: true, force: true });
   };
+  running.add(stop);
   for (let i = 0; !(await alive(port)); i++) {
     if (i > 90) {
       stop();
@@ -170,7 +181,7 @@ const METRICS: Record<string, (r: Result) => number | undefined> = {
   "rows R": (r) => r.counts?.rowsRead,
   "KV writes": (r) =>
     sum(r.counts, ["kvPut", "kvDelete", "asyncPut", "asyncDelete"]),
-  alarm: (r) => sum(r.counts, ["setAlarm", "deleteAlarm"]),
+  "alarm writes": (r) => sum(r.counts, ["setAlarm", "deleteAlarm"]),
   sync: (r) => r.counts?.sync,
   "rows left": (r) =>
     r.tables ? userTables(r).reduce((a, t) => a + t.rows, 0) : undefined,
@@ -208,7 +219,12 @@ try {
   bundle(DIR, path.join(scratch, "main"));
   const release = await runLocal(path.join(scratch, "out"), 8791);
   const main = await runLocal(path.join(scratch, "main"), 8793);
-  const broken = Object.entries(main).filter(([, r]) => r.ok === false);
+  // A scenario that threw or timed out measured nothing comparable.
+  const failed = (r: Result) =>
+    r.ok === false ||
+    Boolean(r.error) ||
+    Boolean((r.value as { timeout?: boolean } | undefined)?.timeout);
+  const broken = Object.entries(main).filter(([, r]) => failed(r));
   const report = [
     `## Storage cost per scenario: release (${Object.entries(versions)
       .map(([p, v]) => `${p}@${v}`)

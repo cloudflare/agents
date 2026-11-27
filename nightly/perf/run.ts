@@ -57,6 +57,15 @@ export async function runScenarios(
     let bytes = 0;
     ws.onmessage = (e: MessageEvent) => {
       frames++;
+      // Take a stream the server offers, as useAgentChat does, so a
+      // reconnect mid-stream measures the replay too.
+      if (
+        typeof e.data === "string" &&
+        e.data.includes('"cf_agent_stream_resuming"')
+      ) {
+        const { id } = JSON.parse(e.data) as { id?: string };
+        ws.send(JSON.stringify({ type: "cf_agent_stream_resume_ack", id }));
+      }
       bytes +=
         typeof e.data === "string"
           ? e.data.length

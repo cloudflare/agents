@@ -106,8 +106,11 @@ export class Meter {
     const meter = this;
     const sql = storage.sql;
     const exec = sql.exec.bind(sql);
-    // oxlint-disable-next-line typescript/no-explicit-any -- patching a runtime object
-    (sql as any).exec = (query: string, ...bindings: unknown[]) => {
+    type Exec = (
+      query: string,
+      ...bindings: unknown[]
+    ) => ReturnType<typeof exec>;
+    (sql as unknown as { exec: Exec }).exec = (query, ...bindings) => {
       const cursor = exec(query, ...bindings);
       if (!meter.paused) {
         meter.counts.sqlStatements++;
@@ -124,11 +127,12 @@ export class Meter {
     const count = (key: keyof Counts) => {
       if (!meter.paused) meter.counts[key]++;
     };
-    // oxlint-disable-next-line typescript/no-explicit-any -- patching a runtime object
-    const wrap = (obj: any, name: string, key: keyof Counts) => {
+    type Methods = Record<string, unknown>;
+    const wrap = (target: object, name: string, key: keyof Counts) => {
+      const obj = target as Methods;
       const orig = obj[name];
       if (typeof orig !== "function") return;
-      const bound = orig.bind(obj);
+      const bound = (orig as (...a: unknown[]) => unknown).bind(obj);
       obj[name] = (...args: unknown[]) => {
         count(key);
         if (!meter.paused) {
