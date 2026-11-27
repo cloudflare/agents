@@ -623,6 +623,33 @@ describe("createChatTurnTaskDefinition", () => {
     expect(marks).toEqual([["run-lane", "r-lane", true]]);
   });
 
+  it("tells the host that a lane run's backoff is over when the run wakes", async () => {
+    // The wake replays the run: its turn's closure went with the attempt
+    // that suspended. The host must still hear that the wait ended, or it
+    // would keep the run as waiting and a later stop would end it.
+    const { step, checkpoint } = fakeStep(undefined);
+    Object.assign(step, { id: "run-lane" });
+    checkpoint.set("snapshot", JSON.stringify({ __cfBeganAt: 1 }));
+    checkpoint.set(
+      "attempt",
+      JSON.stringify({
+        callback: "_chatRecoveryContinue",
+        data: { incidentId: "i-lane" },
+        delaySeconds: 30
+      })
+    );
+    const marks: Array<[string, string, boolean]> = [];
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      backingOff: (runId, requestId, waiting) =>
+        void marks.push([runId, requestId, waiting])
+    })({ requestId: "r-lane", nonce: "n-lane", lane: true }, step);
+    expect(marks).toEqual([
+      ["run-lane", "r-lane", true],
+      ["run-lane", "r-lane", false]
+    ]);
+  });
+
   it("keeps a live turn's planned attempt in the checkpoint at once", async () => {
     const { step, checkpoint } = fakeStep(undefined);
     let kept: string | undefined;

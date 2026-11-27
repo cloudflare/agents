@@ -1979,7 +1979,8 @@ export class ChatTurns<
   /**
    * The lane runs of this isolate that wait out a kept attempt's backoff,
    * by run id, with their request. Set as the wait starts, which is before
-   * Tasks records the run as sleeping.
+   * Tasks records the run as sleeping, and removed when the run wakes (its
+   * replay says the wait is over) or a stop ends it.
    */
   readonly #backingOff = new Map<string, string>();
 

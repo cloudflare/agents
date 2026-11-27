@@ -407,7 +407,18 @@ export function createChatTurnTaskDefinition(
         return (scheduled ?? null) as TaskJson;
       }
     );
-    if (attempt) return runKeptAttempt(hooks, step, attempt, lane);
+    if (attempt) {
+      // A lane run that wakes from its backoff replays through here: the
+      // host hears that its wait is over.
+      return runKeptAttempt(
+        hooks,
+        step,
+        attempt,
+        lane,
+        false,
+        lane ? requestId : undefined
+      );
+    }
   };
 }
 
