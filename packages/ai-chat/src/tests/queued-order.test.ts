@@ -67,6 +67,10 @@ type Stub = {
   holdStreamForTest(requestId: string): Promise<void>;
   isStreamHeldForTest(requestId: string): Promise<boolean>;
   releaseStreamForTest(requestId: string): Promise<void>;
+  queuedTurnCountForTest(): Promise<number>;
+  handledMessageCountForTest(type: string): Promise<number>;
+  getQueuedMessageIdsForTest(): Promise<string[]>;
+  connectionCountForTest(): Promise<number>;
 };
 
 const SLOW = { chunkCount: 20, chunkDelayMs: 50 };
@@ -172,19 +176,33 @@ describe("a message queued behind a running turn", () => {
       const { ws: tabA } = await connectChatWS(path);
       const { ws: tabB } = await connectChatWS(path);
       const seenB = record(tabB);
+      const stub = (await getAgentByName(
+        end === "stopped"
+          ? env.SlowStreamAgent
+          : env.LatestMessageConcurrencyAgent,
+        room
+      )) as unknown as Stub;
+      // r1 is held mid-stream until tab A has gone, so r2 waits behind it
+      // throughout.
+      await stub.holdStreamForTest("r1");
+      onTestFinished(() => stub.releaseStreamForTest("r1"));
       sendChatRequest(tabB, "r1", [user("u1", "one")], SLOW);
-      await waitFor(() =>
-        seenB.some((f) => isUseChatResponseMessage(f) && f.id === "r1")
-      );
+      await waitFor(() => stub.isStreamHeldForTest("r1"));
       sendChatRequest(
         tabA,
         "r2",
         [user("u1", "one"), user("u2", "two")],
         QUICK
       );
-      await delay(100);
+      // r2 waits behind r1 (the count includes the running turn).
+      await waitFor(async () => (await stub.queuedTurnCountForTest()) === 2);
+      // The tab that sent r2 goes away before r2 can end: closed, and gone
+      // from the agent, before the stop or the superseding request (from
+      // the other tab) ends r2.
+      tabA.close();
+      await waitFor(async () => (await stub.connectionCountForTest()) === 1);
       if (end === "stopped") {
-        tabA.send(
+        tabB.send(
           JSON.stringify({
             type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
             id: "r2"
@@ -198,9 +216,18 @@ describe("a message queued behind a running turn", () => {
           QUICK
         );
       }
-      await delay(50);
-      // The tab that sent r2 goes away before r2 ends.
-      tabA.close();
+      // While r1 still holds the lane (tab A is gone already, so r2's end
+      // cannot reach it): the stop is handled, or the lane has taken the
+      // superseding request in (its question is queued behind r1; its
+      // handler waits for the lane, so it ends only after r1 does).
+      await waitFor(async () =>
+        end === "stopped"
+          ? (await stub.handledMessageCountForTest(
+              MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
+            )) === 1
+          : (await stub.getQueuedMessageIdsForTest()).includes("u3")
+      );
+      await stub.releaseStreamForTest("r1");
       await waitFor(() =>
         seenB.some(
           (f) =>
@@ -319,19 +346,27 @@ describe("a message queued behind a running turn", () => {
     const room = crypto.randomUUID();
     const path = `/agents/slow-stream-agent/${room}`;
     const { ws: tabA } = await connectChatWS(path);
-    const seenA = record(tabA);
+    record(tabA);
     const stub = (await getAgentByName(
       env.SlowStreamAgent,
       room
     )) as unknown as Stub;
+    // r1 is held mid-stream until the clear is handled, so r2 is still
+    // waiting when it lands.
+    await stub.holdStreamForTest("r1");
+    onTestFinished(() => stub.releaseStreamForTest("r1"));
     sendChatRequest(tabA, "r1", [user("u1", "one")], SLOW);
-    await waitFor(() =>
-      seenA.some((f) => isUseChatResponseMessage(f) && f.id === "r1")
-    );
+    await waitFor(() => stub.isStreamHeldForTest("r1"));
     sendChatRequest(tabA, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(100);
+    await waitFor(async () => (await stub.queuedTurnCountForTest()) === 2);
     tabA.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
-    await delay(300);
+    await waitFor(
+      async () =>
+        (await stub.handledMessageCountForTest(
+          MessageType.CF_AGENT_CHAT_CLEAR
+        )) === 1
+    );
+    await stub.releaseStreamForTest("r1");
     await stub.waitForIdleForTest();
     expect(await stub.getPersistedMessages()).toEqual([]);
     tabA.close();
