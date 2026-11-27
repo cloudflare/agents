@@ -917,7 +917,9 @@ export class Think<
           const responding =
             kept ??
             (!ranHere && this.#messengers
-              ? await this.#storedMessengerContext()
+              ? await this.#storedMessengerContext(
+                  end.message?.id ?? end.messageId
+                )
               : undefined);
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
@@ -2241,9 +2243,19 @@ export class Think<
   #ranHere = new Set<string>();
 
   /** The latest user message's trusted messenger context, as stored. */
-  async #storedMessengerContext(): Promise<MessengerContext | undefined> {
+  async #storedMessengerContext(
+    replyId: string | undefined
+  ): Promise<MessengerContext | undefined> {
     await this.#sync();
-    const user = [...this.#transcript.messages]
+    const messages = this.#transcript.messages;
+    // The turn's own user message: the last one before its reply, or the
+    // latest when the reply is not stored.
+    const reply =
+      replyId !== undefined
+        ? messages.findIndex((message) => message.id === replyId)
+        : -1;
+    const before = reply >= 0 ? messages.slice(0, reply) : messages;
+    const user = [...before]
       .reverse()
       .find((message) => message.role === "user");
     return this.#trustedMessengerOf(user);
