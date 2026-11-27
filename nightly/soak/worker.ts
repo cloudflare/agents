@@ -187,8 +187,9 @@ export class ProbeThink extends Think<Env> {
       definition: r.definition,
       status: r.status,
       attempt: (r as { attempt?: number }).attempt,
+      // A settled run's snapshot keeps no attempt count; its error is an object.
       error: (r as { error?: unknown }).error
-        ? String((r as { error?: unknown }).error).slice(0, 200)
+        ? JSON.stringify((r as { error?: unknown }).error).slice(0, 300)
         : undefined
     }));
   }
