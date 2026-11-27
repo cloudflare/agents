@@ -24,6 +24,7 @@ import {
   type WSMessage
 } from "agents";
 import type { ObservabilityEvent } from "agents/observability";
+import type { TaskJson } from "agents/tasks";
 
 import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
@@ -1031,6 +1032,7 @@ export class AIChatAgent<
       signal?: AbortSignal;
       storeContext?: boolean;
       requestId?: string;
+      metadata?: Record<string, TaskJson>;
     } = {}
   ): Promise<SaveMessagesResult> {
     const requestId = options.requestId ?? nanoid();
@@ -1041,7 +1043,8 @@ export class AIChatAgent<
     await submitTurn(this._chatDeps(), this._chatLane(), input, {
       requestId,
       ...(options.signal && { signal: options.signal }),
-      ...(options.storeContext && { storeContext: true })
+      ...(options.storeContext && { storeContext: true }),
+      ...(options.metadata && { metadata: options.metadata })
     });
     // A turn the lane ends without running it (a clear, a skip) never
     // reaches `onResponse`: its run's end answers instead.
@@ -3523,7 +3526,12 @@ export class AIChatAgent<
             body: { agentToolInput: input as never },
             clientTools: []
           },
-          { requestId, ...(signal && { signal }) }
+          // Its parent reads the turn's chunks after it ended.
+          {
+            requestId,
+            ...(signal && { signal }),
+            metadata: { chat: { keepStream: true } }
+          }
         )
     );
   }

@@ -1250,9 +1250,17 @@ export function chatTurnDefinition(
       finalReply = stored;
       const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
       let after: (() => Promise<void>) | undefined;
+      // A turn whose stream a reader replays after it ended (an agent-tool
+      // run's parent, run metadata `chat.keepStream`) keeps it, completed.
+      const keepStream =
+        (
+          deps.tasks.peek(requestId)?.metadata?.chat as
+            | { keepStream?: unknown }
+            | undefined
+        )?.keepStream === true;
       try {
         out.close({
-          discard: true,
+          discard: !keepStream,
           commit: () => {
             after = sync.upsert(stored as never, placement).after;
             step.checkpoint.set(REPLY_CHECKPOINT, stored.id);
