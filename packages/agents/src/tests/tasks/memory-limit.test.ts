@@ -311,10 +311,11 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
           await state.storage.put("oomLoopRemaining", 1);
           await instance.tasks.run("lateOomStepLoop", undefined, { runId });
           backdateTaskWake(state.storage, runId);
-          // No re-arm: an alarm armed for now could fire on its own beside
-          // the direct call below, and two observers of one reset make two
-          // strikes (see "Two observers of one reset"). The direct call is
-          // the only drive.
+          // `tasks.run` armed the alarm for now. Move it a minute out first,
+          // so it cannot fire on its own beside the direct call below: two
+          // observers of one reset make two strikes (see "Two observers of
+          // one reset"). The direct call is the only drive.
+          await state.storage.setAlarm(Date.now() + 60_000);
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
           await waitForStrikes(state.storage, (strikes) => strikes === 1);
         }
