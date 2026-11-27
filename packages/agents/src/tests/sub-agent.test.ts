@@ -396,6 +396,50 @@ describe("SubAgent", () => {
       expect(b).toBe("value-b");
     });
 
+    it("empties a nested sub-agent's storage when its parent sub-agent is deleted", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+      await agent.nestedSetValue("outer-del", "inner", "key", "kept?");
+
+      await agent.nestedDeleteOuter("outer-del");
+
+      expect(await agent.nestedGetValue("outer-del", "inner", "key")).toBe(
+        null
+      );
+    });
+
+    it("empties a nested sub-agent's storage when its parent sub-agent destroys itself", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+      await agent.nestedSetValue("outer-gone", "inner", "key", "kept?");
+
+      await agent.outerSelfDestruct("outer-gone");
+
+      expect(await agent.nestedGetValue("outer-gone", "inner", "key")).toBe(
+        null
+      );
+    });
+
+    it("still deletes a sub-agent that fails to empty itself", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      expect(await agent.deleteUnemptiableForTest("stubborn")).toEqual({
+        deleted: true,
+        listed: false
+      });
+    });
+
+    it("refuses a new sub-agent in a sub-agent that is being deleted", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+      await agent.nestedSetValue("outer-busy", "inner", "key", "value");
+
+      expect(await agent.newSubAgentWhileEmptyingForTest("outer-busy")).toMatch(
+        /being deleted/
+      );
+    });
+
     it("should isolate nested sub-agents that share the same logical name", async () => {
       const name = uniqueName();
       const agent = await getAgentByName(env.TestSubAgentParent, name);

@@ -547,6 +547,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         );
       }
       await this.#closeConnectionsForDeletedPath(targetPath);
+      await this.#emptyChild(target.className, target.name);
       try {
         ctx.facets.delete(`${target.className}\0${target.name}`);
       } catch {
@@ -653,7 +654,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         `Sub-agent bootstrap requires the root agent class "${rootClassName}" to be available as a Durable Object namespace, but ctx.exports["${rootClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the root agent class is exported under that class name and registered in your wrangler.jsonc durable_objects.bindings.`
       );
     }
+    this.#refuseWhileEmptying();
     const identity = await this.registry.identity(className, name, childPath);
+    // A delete may have started while the identity was worked out.
+    this.#refuseWhileEmptying();
     const facetId = rootNs.idFromName(identity.name);
     const stub = ctx.facets.get(facetKey, () => ({
       class: Cls as DurableObjectClass,
@@ -771,6 +775,90 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   /**
+   * Empty a child facet's storage, and its own children's, before the
+   * facet is deleted. On deployed Workers, deleting a facet under its
+   * `${class}\0${name}` key leaves its storage behind, so the child
+   * empties itself from inside. The child is reached without running its
+   * start: nothing in it runs again before it is deleted.
+   */
+  async #emptyChild(className: string, name: string): Promise<void> {
+    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
+    const row = this.registry.row(className, name);
+    const Cls = ctx.exports?.[className];
+    if (!row || !Cls || !ctx.facets) return;
+    const rootClassName = this.#rootClassName();
+    const rootNs = ctx.exports?.[rootClassName] as unknown as
+      | Pick<DurableObjectNamespace, "idFromName">
+      | undefined;
+    if (!rootNs?.idFromName) return;
+    const identityName =
+      row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
+      typeof row.identity_name === "string"
+        ? row.identity_name
+        : name;
+    const stub = ctx.facets.get(`${className}\0${name}`, () => ({
+      class: Cls as DurableObjectClass,
+      id: rootNs.idFromName(identityName)
+    }));
+    try {
+      await (
+        stub as unknown as {
+          _cf_emptyFacetStorage(rootClassName: string): Promise<void>;
+        }
+      )._cf_emptyFacetStorage(rootClassName);
+    } catch (error) {
+      // The delete goes ahead, as it did before the child emptied itself.
+      console.error(
+        `[Agent] Could not empty sub-agent ${className} "${name}" before deleting it:`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Run inside a facet that is about to be deleted: empty its children,
+   * then its own storage. `rootClassName` comes from the parent, because
+   * this facet's start has not run to restore its path.
+   */
+  async emptyStorage(rootClassName: string): Promise<void> {
+    this.#rootClassNameOverride = rootClassName;
+    this.#emptying = true;
+    // No sub-agent is made from here on, so this ends; a child recorded
+    // before the refusal took hold is read on the next pass.
+    for (
+      let children = this.registry.list();
+      children.length > 0;
+      children = this.registry.list()
+    ) {
+      for (const child of children) {
+        await this.#emptyChild(child.className, child.name);
+        this.registry.forget(child.className, child.name);
+      }
+    }
+    await this.#host.ctx.storage.deleteAll();
+  }
+
+  #rootClassNameOverride: string | undefined;
+  #emptying = false;
+
+  #refuseWhileEmptying(): void {
+    if (this.#emptying) {
+      throw new Error(
+        "This sub-agent is being deleted, so it cannot make sub-agents."
+      );
+    }
+  }
+
+  #rootClassName(): string {
+    return (
+      this.#rootClassNameOverride ??
+      this.#host._parentPath[0]?.className ??
+      (this.#host as unknown as { constructor: { name: string } }).constructor
+        .name
+    );
+  }
+
+  /**
    * Forcefully abort a running facet. Transitively aborts the child's
    * own children; storage is preserved.
    */
@@ -805,6 +893,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     const root = this.#host._isFacet ? await this.rootAlarmOwner() : undefined;
 
     await this.#closeConnectionsForDeletedPath(childPath, root);
+    await this.#emptyChild(className, name);
 
     // Remove the facet and its registry row before the awaited root
     // bookkeeping below, so a concurrent resolver observes "gone" as early

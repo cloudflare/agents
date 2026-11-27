@@ -10,3 +10,4 @@ Schedules, jobs and workflows.
 - Jobs and `getSchedule()` work in sub-agents, and `destroy()` from a scheduled callback sticks (#3012, #3020, #3083).
 - A crashing fiber recovery hook no longer takes the agent down (#2970).
 - `AgentWorkflow` runs and stubs survive an Agent reset, and `approveWorkflow()` and `rejectWorkflow()` skip an overridden `sendWorkflowEvent()` (#3052, #2978).
+- `deleteSubAgent()` and a sub-agent's `destroy()` now empty the sub-agent's storage, and its own sub-agents' storage, on deployed Workers.
