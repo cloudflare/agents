@@ -13,8 +13,7 @@ import type { UIMessage } from "ai";
 import {
   chatTurnStreamId,
   continueRequestsOf,
-  dropHeldQuestions,
-  holdQuestions,
+  STOPPED_METADATA,
   liveTurnsOf,
   parkedIn,
   releaseParked,
@@ -117,35 +116,14 @@ export async function cancelTurn(
   deps: ChatDeps,
   requestId: string
 ): Promise<boolean> {
-  // A turn stopped before it started keeps its question, unanswered: it
-  // would have stored it when it started.
-  // While a turn ahead still runs, it is held until that turn's reply is
-  // stored, so the transcript stays in lane order.
+  // A turn stopped before it started keeps its place in the lane: when its
+  // turn comes it stores its question, unanswered, and ends (the mark is on
+  // its run, so a reset keeps it).
   const record = deps.tasks.peek(requestId);
   if (record?.status === "pending" && record.attempt === 0) {
-    const input = deps.tasks.inputOf<ChatTurnInput>(requestId);
-    const sessionId = input?.session ?? deps.session ?? "";
-    const questions = (input?.messages ?? []).filter((m) => m.role === "user");
-    // A turn of the same chat that runs now (it is ahead in the lane).
-    const ahead = deps.tasks
-      .peekList({
-        definition: record.definition,
-        status: ["running"],
-        results: false
-      })
-      .some(
-        (run) =>
-          (deps.tasks.inputOf<ChatTurnInput>(run.runId)?.session ??
-            deps.session ??
-            "") === sessionId
-      );
-    if (ahead) await holdQuestions(deps, sessionId, questions);
-    else {
-      const session = deps.sessions.session(sessionId);
-      for (const question of questions) {
-        await session.upsertMessage(question as never);
-      }
-    }
+    return deps.tasks.patchMetadata(requestId, STOPPED_METADATA.key, {
+      [STOPPED_METADATA.field]: true
+    });
   }
   return deps.tasks.cancel(requestId, "chat turn cancelled");
 }
@@ -154,7 +132,7 @@ export async function cancelTurn(
 export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
   await deps.tasks.clear(lane.lane, "chat cleared");
   await deps.sessions.session(deps.session ?? "").clearMessages();
-  await dropHeldQuestions(deps, deps.session ?? "");
+  continueRequestsOf(deps.streams).clear();
 }
 
 /** A client's answer to a tool call. */
@@ -510,9 +488,12 @@ export async function chatDispatch(
       return true;
     }
     case "cancel":
+      // A stop also drops what earlier answers asked to continue.
+      continueRequestsOf(deps.streams).clear();
       await cancelTurn(deps, event.id);
       return true;
     case "cancel-continuation": {
+      continueRequestsOf(deps.streams).clear();
       // A stop from a tab that waits for a tool continuation: the
       // continuation turns of the lane stop, waiting or running.
       for (const run of deps.tasks.peekList({

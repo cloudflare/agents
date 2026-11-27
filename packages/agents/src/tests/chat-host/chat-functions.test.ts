@@ -714,7 +714,8 @@ describe("chat functions over a minimal host", () => {
   async function streamThenHold(
     instance: ChatTurnHostObject,
     chunks: unknown[],
-    seen: string[] = []
+    seen: string[] = [],
+    request = chatRequest("r1", "Hi")
   ) {
     let release!: () => void;
     const released = new Promise<void>((resolve) => (release = resolve));
@@ -747,12 +748,7 @@ describe("chat functions over a minimal host", () => {
         if (++count === chunks.length) reached();
         return chunk;
       };
-    await chatDispatch(
-      instance.deps,
-      instance.lane,
-      tab,
-      chatRequest("r1", "Hi")
-    );
+    await chatDispatch(instance.deps, instance.lane, tab, request);
     await allSent;
     return release;
   }
@@ -858,7 +854,9 @@ describe("chat functions over a minimal host", () => {
       );
       await cancelTurn(instance.deps, "r2");
       release();
-      await instance.resultFor("r1");
+      expect(await instance.resultFor("r2")).toMatchObject({
+        status: "aborted"
+      });
       const ids = (await instance.sessions.session("s1").getHistory()).map(
         (m) => m.id
       );
@@ -1082,6 +1080,187 @@ describe("chat functions over a minimal host", () => {
       expect(types).toContain("tool-output-available");
       release();
       while (instance.results.length < 2) await instance.nextResult();
+    });
+  });
+
+  it("of two waiting requests, a stopped later one keeps its question after the earlier one's reply", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      instance.reply = [
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Hello" },
+        { type: "text-end", id: "t1" }
+      ];
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r2", "u2", "Two")
+      );
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r3", "u3", "Three")
+      );
+      await cancelTurn(instance.deps, "r3");
+      // The stop is kept on the run itself, which survives a reset.
+      expect(instance.tasks.peek("r3")?.metadata).toMatchObject({
+        chat: { stopped: true }
+      });
+      release();
+      expect(await instance.resultFor("r3")).toMatchObject({
+        status: "aborted"
+      });
+      const ids = (await instance.sessions.session("s1").getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toEqual(["u1", "a1", "u2", "r2-reply", "u3"]);
+      // r3 never called the model (r1's call is the held fake's).
+      expect(instance.calls.map((c) => c.requestId)).toEqual(["r2"]);
+    });
+  });
+
+  it("a denied server tool counts as answered for the batch's continuation", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let asked!: () => void;
+      const bothAsked = new Promise<void>((resolve) => (asked = resolve));
+      const respond = instance.host.respond;
+      let first = true;
+      instance.host.respond = async (call) => {
+        if (!first) return respond(call);
+        first = false;
+        return new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "start", messageId: "a1" });
+            controller.enqueue({
+              type: "tool-input-available",
+              toolCallId: "c1",
+              toolName: "ask",
+              input: {}
+            });
+            controller.enqueue({
+              type: "tool-input-available",
+              toolCallId: "s1",
+              toolName: "lookup",
+              input: {}
+            });
+            await released;
+            controller.enqueue({
+              type: "tool-output-denied",
+              toolCallId: "s1"
+            });
+            controller.close();
+          }
+        });
+      };
+      let count = 0;
+      (instance.host.hooks as { transformChunk?: unknown }).transformChunk =
+        (chunk: { type: string }) => {
+          if (chunk.type === "tool-input-available" && ++count === 2) asked();
+          return chunk;
+        };
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await bothAsked;
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        toolResult("c1", true)
+      );
+      release();
+      while (instance.results.length < 2) await instance.nextResult();
+      expect(
+        instance.calls.filter((c) => c.trigger === "tool-answer")
+      ).toHaveLength(1);
+      instance.host.respond = respond;
+    });
+  });
+
+  it("a stop drops what earlier answers asked to continue", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(
+        instance,
+        [
+          { type: "start", messageId: "a1" },
+          {
+            type: "tool-input-available",
+            toolCallId: "c1",
+            toolName: "ask",
+            input: {}
+          },
+          {
+            type: "tool-input-available",
+            toolCallId: "c2",
+            toolName: "ask",
+            input: {}
+          }
+        ],
+        [],
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: "r1",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "u1",
+                  role: "user",
+                  parts: [{ type: "text", text: "Hi" }]
+                }
+              ],
+              clientTools: [{ name: "ask" }]
+            })
+          }
+        })
+      );
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        toolResult("c1", true)
+      );
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({ type: "cf_agent_chat_request_cancel", id: "r1" })
+      );
+      release();
+      await instance.resultFor("r1");
+      // The last answer, after the stop, asks for nothing.
+      await answerTool(instance.deps, instance.lane, {
+        kind: "result",
+        toolCallId: "c2",
+        output: { ok: "c2" }
+      });
+      expect(
+        instance.calls.filter((c) => c.trigger === "tool-answer")
+      ).toHaveLength(0);
+      expect(
+        instance.tasks.peekList({
+          definition: instance.lane.definition,
+          lane: instance.lane.lane,
+          status: ["pending", "running"],
+          results: false
+        })
+      ).toHaveLength(0);
     });
   });
 });

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
   CHAT_CLEARED,
-  holdQuestions,
   chatTurnDefinition,
   chatTurnStreamId
 } from "../../chat/chat-host";
@@ -1558,29 +1557,6 @@ describe("chatTurnDefinition", () => {
           })
       })({ trigger: "server" }, laterAttempt("big-1", 1));
       expect(result).toMatchObject({ status: "error" });
-    });
-  });
-
-  it("a question held behind a turn is stored after its reply when the turn runs again after a reset", async () => {
-    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
-      await instance.lifecycle.start();
-      const session = instance.sessions.session("s1");
-      await session.appendMessage({
-        id: "u1",
-        role: "user",
-        parts: []
-      } as never);
-      // Held by an isolate that is gone: only the session's copy is left.
-      await holdQuestions({ ...instance.deps, streams: {} as never }, "s1", [
-        { id: "u2", role: "user", parts: [{ type: "text", text: "Two" }] }
-      ]);
-      await definitionOf(instance, instance.host)(
-        { trigger: "submit-message", questionId: "u1" },
-        laterAttempt("hq-1", 2)
-      );
-      const ids = (await session.getHistory()).map((m) => m.id);
-      expect(ids).toEqual(["u1", "reply-1", "u2"]);
     });
   });
 });

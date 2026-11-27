@@ -223,52 +223,12 @@ export interface LiveTurn {
   whenAnswered(fn: () => void): void;
 }
 
-/** Questions of stopped turns held until the turn ahead stores its reply. */
-const heldQuestions = new WeakMap<Streams, Map<string, UIMessage[]>>();
-
-/** The session config key the held questions are kept under, for a reset. */
-const HELD_QUESTIONS_KEY = "transcript:chat:held";
-
-function heldIn(streams: Streams, session: string): UIMessage[] {
-  let chats = heldQuestions.get(streams);
-  if (!chats) heldQuestions.set(streams, (chats = new Map()));
-  let held = chats.get(session);
-  if (!held) chats.set(session, (held = []));
-  return held;
-}
-
 /**
- * @internal Hold the questions of a turn stopped before it started until
- * the turn of chat `session` now running stores its reply, so they follow
- * it in lane order. Kept in the session's config too, for a reset before
- * then.
+ * The metadata a turn stopped before it started carries (`Tasks.patchMetadata`,
+ * under `chat`): it keeps its place in the lane, and when its turn comes it
+ * stores its question and ends without calling the model.
  */
-export async function holdQuestions(
-  deps: ChatDeps,
-  session: string,
-  questions: readonly UIMessage[]
-): Promise<void> {
-  if (questions.length === 0) return;
-  const handle = deps.sessions.session(session);
-  const stored = await handle.internal_config(HELD_QUESTIONS_KEY);
-  const held = [
-    ...(stored ? (JSON.parse(stored) as UIMessage[]) : []),
-    ...questions
-  ];
-  await handle.internal_setConfig(HELD_QUESTIONS_KEY, JSON.stringify(held));
-  heldIn(deps.streams, session).push(...questions);
-}
-
-/** @internal A chat clear: held questions are dropped with the rest. */
-export async function dropHeldQuestions(
-  deps: ChatDeps,
-  session: string
-): Promise<void> {
-  heldIn(deps.streams, session).splice(0);
-  await deps.sessions
-    .session(session)
-    .internal_setConfig(HELD_QUESTIONS_KEY, null);
-}
+export const STOPPED_METADATA = { key: "chat", field: "stopped" } as const;
 
 /** Replies whose batch an answer asked to continue, once it is answered. */
 const continueRequests = new WeakMap<Streams, Set<string>>();
@@ -314,7 +274,8 @@ function waitingCallsOf(chunks: readonly UIMessageChunk[]): string[] {
     if (chunk.type === "tool-input-available") waiting.push(id);
     if (
       chunk.type === "tool-output-available" ||
-      chunk.type === "tool-output-error"
+      chunk.type === "tool-output-error" ||
+      chunk.type === "tool-output-denied"
     ) {
       const at = waiting.indexOf(id);
       if (at >= 0) waiting.splice(at, 1);
@@ -658,24 +619,18 @@ export function chatTurnDefinition(
         id: requestId
       });
     };
+    // The reply this turn stored, when it stored one.
+    let finalReply: UIMessage | undefined;
     const report = async (result: ChatTurnResult) => {
-      // The questions of turns stopped while this one ran follow its reply.
-      // After a reset they are read back from the session's config; a first
-      // attempt holds them in memory when there are any.
-      const inMemory = heldIn(deps.streams, sessionId).splice(0);
-      const stored =
-        inMemory.length === 0 && step.attempt > 1
-          ? await session.internal_config(HELD_QUESTIONS_KEY)
-          : null;
-      const held = stored ? (JSON.parse(stored) as UIMessage[]) : inMemory;
-      if (held.length > 0) {
-        for (const question of held) {
-          await session.upsertMessage(question as never);
-        }
-        await session.internal_setConfig(HELD_QUESTIONS_KEY, null);
-      }
-      // A reply that waits on no call has no batch left to continue.
-      if (result.messageId !== undefined && waitingCallsOf(seen).length === 0) {
+      // A stored reply that waits on no call has no batch left to continue.
+      if (
+        result.messageId !== undefined &&
+        finalReply !== undefined &&
+        !finalReply.parts.some((part) => {
+          const state = (part as { state?: unknown }).state;
+          return state === "input-available" || state === "approval-requested";
+        })
+      ) {
         continueRequestsOf(deps.streams).delete(result.messageId);
       }
       // A tab still waiting learns there is no stream to resume.
@@ -710,6 +665,7 @@ export function chatTurnDefinition(
         return undefined;
       }
       const stored = host.hooks?.sanitizeForPersistence?.(message) ?? message;
+      finalReply = stored;
       const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
       let after: (() => Promise<void>) | undefined;
       try {
@@ -761,9 +717,19 @@ export function chatTurnDefinition(
       return report({ requestId, status: "completed", messageId: storedReply });
     }
     // The request's messages go in now, after every reply queued before it.
+    // Stopped before it started: it stores its question in its place in
+    // the lane, and ends without calling the model.
+    const stopped =
+      step.attempt === 1 &&
+      (
+        deps.tasks.peek(requestId)?.metadata?.[STOPPED_METADATA.key] as
+          | Record<string, unknown>
+          | undefined
+      )?.[STOPPED_METADATA.field] === true;
     // A reply a tab sent back is a snapshot from before it finished: the
     // stored one stands.
     for (const message of run.messages ?? []) {
+      if (stopped && message.role !== "user") continue;
       if (
         message.role === "assistant" &&
         (await session.getMessage(message.id)) !== null
@@ -772,6 +738,7 @@ export function chatTurnDefinition(
       }
       await session.upsertMessage(message as never);
     }
+    if (stopped) return report({ requestId, status: "aborted" });
     const earlier = await deps.streams.status(streamId);
     if (earlier && earlier.state !== "streaming") {
       return report({
