@@ -1,10 +1,10 @@
 {
-  "total": 1651,
-  "passed": 834,
-  "needThink": 1335,
-  "needThinkPassed": 535,
-  "classOnly": 17,
-  "mechanicsOnly": 0,
+  "total": 1676,
+  "passed": 902,
+  "needThink": 1329,
+  "needThinkPassed": 591,
+  "classOnly": 36,
+  "mechanicsOnly": 6,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -27,8 +27,8 @@
       "passed": 0
     },
     "agent-tools.test.ts": {
-      "total": 68,
-      "passed": 12
+      "total": 70,
+      "passed": 27
     },
     "assistant-agent-loop.test.ts": {
       "total": 33,
@@ -52,7 +52,7 @@
     },
     "channel-policy.test.ts": {
       "total": 3,
-      "passed": 1
+      "passed": 3
     },
     "channel-recovery.test.ts": {
       "total": 5,
@@ -60,15 +60,15 @@
     },
     "channel-threading.test.ts": {
       "total": 4,
-      "passed": 1
+      "passed": 4
     },
     "channels.test.ts": {
       "total": 8,
       "passed": 8
     },
     "chat-recovery-public.test.ts": {
-      "total": 4,
-      "passed": 4
+      "total": 13,
+      "passed": 12
     },
     "client-tools.test.ts": {
       "total": 141,
@@ -92,7 +92,7 @@
     },
     "detached-reconcile-lane.test.ts": {
       "total": 1,
-      "passed": 0
+      "passed": 1
     },
     "durable-admission.test.ts": {
       "total": 9,
@@ -112,7 +112,7 @@
     },
     "execute-hitl.test.ts": {
       "total": 16,
-      "passed": 0
+      "passed": 1
     },
     "execute-tool.test.ts": {
       "total": 6,
@@ -134,13 +134,17 @@
       "total": 7,
       "passed": 7
     },
+    "harness-actions.test.ts": {
+      "total": 12,
+      "passed": 12
+    },
     "harness-tool-recovery.test.ts": {
       "total": 2,
       "passed": 2
     },
     "hooks.test.ts": {
       "total": 151,
-      "passed": 92
+      "passed": 105
     },
     "hydration-budget.test.ts": {
       "total": 19,
@@ -148,7 +152,7 @@
     },
     "max-concurrent-agent-tools.test.ts": {
       "total": 5,
-      "passed": 1
+      "passed": 5
     },
     "mcp-tool-materialization.test.ts": {
       "total": 5,
@@ -168,7 +172,7 @@
     },
     "nested-agent-tools.test.ts": {
       "total": 3,
-      "passed": 1
+      "passed": 3
     },
     "onconnect-broadcast.test.ts": {
       "total": 17,
@@ -255,8 +259,8 @@
       "passed": 1
     },
     "submissions.test.ts": {
-      "total": 132,
-      "passed": 54
+      "total": 133,
+      "passed": 56
     },
     "telegram-messenger.test.ts": {
       "total": 2,
@@ -271,12 +275,12 @@
       "passed": 2
     },
     "think-session.test.ts": {
-      "total": 329,
-      "passed": 126
+      "total": 330,
+      "passed": 129
     },
     "turn-metadata.test.ts": {
       "total": 4,
-      "passed": 1
+      "passed": 3
     },
     "workflows.test.ts": {
       "total": 3,
@@ -296,16 +300,31 @@
     "actions-durable-pause.test.ts > action() durable-pause validation > rejects kind durable-pause with approval: false",
     "agent-tools.test.ts > Think agent tools > an Infinity no-progress budget never seals on silence — only the hard ceiling ends the wait (#1630/#1672)",
     "agent-tools.test.ts > Think agent tools > bounds Think recovery when child facet startup never completes",
+    "agent-tools.test.ts > Think agent tools > cancels a re-issued run and its child when the caller stops while it waits for its next check",
+    "agent-tools.test.ts > Think agent tools > cancels the child when the caller stops while the parent re-attaches",
     "agent-tools.test.ts > Think agent tools > defaults the re-attach hard ceiling to uncapped (Infinity) when unset (#1630/#1672)",
+    "agent-tools.test.ts > Think agent tools > does not contaminate a run's terminal status with an unrelated turn's error frame (#1575)",
     "agent-tools.test.ts > Think agent tools > does not re-arm after a full no-progress window even if the child progressed earlier (#1630)",
     "agent-tools.test.ts > Think agent tools > eventDelivery: \"terminal\" (#2298) > rejects terminal delivery for a detached run",
+    "agent-tools.test.ts > Think agent tools > follows a Think child that is still streaming when the parent attaches, to its result",
+    "agent-tools.test.ts > Think agent tools > follows a Think child whose reply stalls and is retried, to its result",
     "agent-tools.test.ts > Think agent tools > honors the public AgentStaticOptions re-attach budgets (#1630)",
+    "agent-tools.test.ts > Think agent tools > keeps a completed Think child's stored chunks for a parent attaching afterwards",
+    "agent-tools.test.ts > Think agent tools > keeps concurrent Think child runs' error state isolated (#1575)",
     "agent-tools.test.ts > Think agent tools > keeps scheduled Think startup recovery single-flight",
     "agent-tools.test.ts > Think agent tools > lets Think startup return before stale child recovery finalizes",
+    "agent-tools.test.ts > Think agent tools > marks an in-band stream error as error with no tailer attached (#1575)",
+    "agent-tools.test.ts > Think agent tools > marks skipped agent-tool turns as errors",
     "agent-tools.test.ts > Think agent tools > only recovers rows that were stale before Think startup began",
     "agent-tools.test.ts > Think agent tools > re-arms across a clean mid-flight stream-close and follows an advancing child to completed (#1630)",
     "agent-tools.test.ts > Think agent tools > re-attach returns not-tailable for an adapter without a live-tail (#1630)",
+    "agent-tools.test.ts > Think agent tools > re-attaches a still-running Think child and finalizes it completed (#1630)",
+    "agent-tools.test.ts > Think agent tools > recovers completed Think child runs into terminal parent rows",
+    "agent-tools.test.ts > Think agent tools > repairs an interrupted run by re-attaching on re-issue (#1630)",
+    "agent-tools.test.ts > Think agent tools > runs a Think child through the parent agent-tool API",
     "agent-tools.test.ts > Think agent tools > runs scheduled Think startup recovery and finalizes stale rows",
+    "agent-tools.test.ts > Think agent tools > uses assistant text as the default agent-tool summary",
+    "agent-tools.test.ts > Think agent tools > waits for a run whose child isolate reset, and returns the status the child's recovery reached",
     "assistant-agent-loop.test.ts > Think — agentic loop > context assembly > converts messages to model format",
     "assistant-agent-loop.test.ts > Think — agentic loop > default loop — text only > persists assistant message after streaming",
     "assistant-agent-loop.test.ts > Think — agentic loop > default loop — text only > streams a response using the mock model",
@@ -329,7 +348,12 @@
     "browser-tools.test.ts > createBrowserTools > requires a browser binding or cdpUrl",
     "browser-tools.test.ts > createBrowserTools > returns browser_execute plus the default Quick Action tools when a binding is present",
     "channel-policy.test.ts > per-channel policy (Phase 4b) > does not apply channel policy for turns on other channels",
+    "channel-policy.test.ts > per-channel policy (Phase 4b) > narrows the tool set via the channel policy (removes, not just adds)",
+    "channel-policy.test.ts > per-channel policy (Phase 4b) > prepends channel instructions to the system prompt before beforeTurn",
     "channel-threading.test.ts > channel threading (Phase 4a) > has no channel context when none is supplied",
+    "channel-threading.test.ts > channel threading (Phase 4a) > re-resolves the channel on continuation from persisted metadata",
+    "channel-threading.test.ts > channel threading (Phase 4a) > resolves an explicitly named channel",
+    "channel-threading.test.ts > channel threading (Phase 4a) > resolves the channel in wait mode and stamps it on the user message",
     "channels.test.ts > resolveChannels > absorbs getMessengers() entries as messenger channels and feeds the runtime",
     "channels.test.ts > resolveChannels > allows overriding the web channel's policy with a kind: web entry",
     "channels.test.ts > resolveChannels > always includes an implicit web channel",
@@ -340,7 +364,15 @@
     "channels.test.ts > resolveChannels > throws when getMessengers() declares a messenger named web",
     "chat-recovery-public.test.ts > chat recovery, through public behaviour > asks onChatRecovery no more often than chatRecovery's attempts allow",
     "chat-recovery-public.test.ts > chat recovery, through public behaviour > continues a stalled turn and calls onChatRecovery with its partial",
+    "chat-recovery-public.test.ts > chat recovery, through public behaviour > ends a stalled turn with an error when onChatRecovery throws",
+    "chat-recovery-public.test.ts > chat recovery, through public behaviour > gives onChatRecovery the time the turn was asked for, not the time of the stall",
     "chat-recovery-public.test.ts > chat recovery, through public behaviour > gives up a stalled turn when onChatRecovery declines to continue",
+    "chat-recovery-public.test.ts > chat recovery, through public behaviour > onChatRecovery's context > names the interrupted turn as the root of its recovery",
+    "chat-recovery-public.test.ts > chat recovery, through public behaviour > onChatRecovery's context > tells onChatRecovery of a turn interrupted before it streamed anything, with no partial",
+    "chat-recovery-public.test.ts > chat recovery, through public behaviour > onChatRecovery's context > tells onChatRecovery the interrupted turn's partial text and when it was interrupted",
+    "chat-recovery-public.test.ts > chat recovery, through public behaviour > onChatRecovery's context after a reset > dates a reset-interrupted turn by when it started, not by when it was recovered",
+    "chat-recovery-public.test.ts > chat recovery, through public behaviour > onChatRecovery's context after a reset > tells onChatRecovery of a turn a reset cut off before its first chunk, with no partial",
+    "chat-recovery-public.test.ts > chat recovery, through public behaviour > onChatRecovery's context after a reset > tells onChatRecovery the partial a reset cut off mid-reply",
     "chat-recovery-public.test.ts > chat recovery, through public behaviour > recovers a stall when only beforeTurn sets the stall timeout",
     "client-tools.test.ts > Think — a client copy of a reply that is behind > does not shorten the stored reply",
     "client-tools.test.ts > Think — auto-continuation > autoContinue: true triggers continuation",
@@ -409,10 +441,12 @@
     "deliver-notice.test.ts > deliverNotice > posts a messenger notice to its thread as given, and records it only with informModel",
     "deliver-notice.test.ts > deliverNotice > records the delivery kind on the notice message metadata",
     "deliver-notice.test.ts > deliverNotice > throws when a named channel cannot be resolved (fail fast)",
+    "detached-reconcile-lane.test.ts > Think detached delivery and the chat lane > does not hold the alarm on a detached delivery that waits for a busy chat lane",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a clear before the replay drops it",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a record left between the turn's fiber and the record's delete is recovery's",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > runs however long it waited: its question is never dropped",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > submissions: one running and one pending at the reset each get their own reply, in order",
+    "execute-hitl.test.ts > Think HITL — approve/reject paused executions > stores nothing for approvals of ids nothing is pending under",
     "execute-tool.test.ts > execute tool on the codemode runtime > maps needsApproval AI SDK tools to requiresApproval — the call pauses durably",
     "execute-tool.test.ts > execute tool on the codemode runtime > one-liner: createExecuteTool(agent) runs without state.* and records on this.codemode",
     "execute-tool.test.ts > execute tool on the codemode runtime > runs sandbox code against the workspace tools",
@@ -529,6 +563,18 @@
     "fiber.test.ts > Think — runFiber > should run a fiber to completion and return the result",
     "fiber.test.ts > Think — runFiber > should support checkpointing via ctx.stash()",
     "fiber.test.ts > Think — runFiber > should support fire-and-forget fibers",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > answers an approved action's output even when the reply after it fails",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > answers both racing decisions with what the harness applied",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > answers the approval methods over a tab's RPC",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > asks the turn's grant again for a call approved after a restart",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > deletes settled ledger rows past their retention at start",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > does not run an approved action whose input beforeToolCall changed",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > keeps the reply attachments an action recorded in its turn",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > lists an approval-gated call with its descriptor, and runs it once on approve",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > lists permissions computed from the input, also after a restart",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > lists the same descriptor after a restart, from the action and its input",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > parks a durable-pause call for approval, and reports a rejection without running it",
+    "harness-actions.test.ts > harness-backed Think: actions that need a human > refuses an action whose permission the turn was not granted, without asking",
     "harness-tool-recovery.test.ts > the shipped tools' recovery on the harness > runs a public fetch again, and reports a binding's",
     "harness-tool-recovery.test.ts > the shipped tools' recovery on the harness > runs the workspace's reads again after an interruption, and reports its writes",
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > 'allow' with modified input runs execute with the substituted input",
@@ -540,7 +586,20 @@
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > collapses Promise<AsyncIterable> returns to the last yielded value",
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > collapses sync AsyncIterable returns to the last yielded value",
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > void decision runs the original execute with original input",
+    "hooks.test.ts > Think — actions compile into guarded tools > allows permissioned actions by default",
+    "hooks.test.ts > Think — actions compile into guarded tools > denies approval-gated actions before prompting",
+    "hooks.test.ts > Think — actions compile into guarded tools > denies permissioned actions before execute",
+    "hooks.test.ts > Think — actions compile into guarded tools > does not execute an approved action with rewritten input",
+    "hooks.test.ts > Think — actions compile into guarded tools > does not execute when the action ledger has an unknown pending row",
+    "hooks.test.ts > Think — actions compile into guarded tools > executes an action through the tool-call hooks",
     "hooks.test.ts > Think — actions compile into guarded tools > hashes action input by value: key order is ignored, dates are told apart",
+    "hooks.test.ts > Think — actions compile into guarded tools > keeps beforeToolCall as the outer gate after approval",
+    "hooks.test.ts > Think — actions compile into guarded tools > maps thrown action errors to structured tool output",
+    "hooks.test.ts > Think — actions compile into guarded tools > normalizes non-JSON-safe action outputs before model consumption",
+    "hooks.test.ts > Think — actions compile into guarded tools > rechecks authorization after approval before execute",
+    "hooks.test.ts > Think — actions compile into guarded tools > records approval-gated actions only after approval",
+    "hooks.test.ts > Think — actions compile into guarded tools > times out actions with a structured tool output",
+    "hooks.test.ts > Think — actions compile into guarded tools > truncates oversized action outputs before model consumption",
     "hooks.test.ts > Think — beforeStep hook > awaits async beforeStep hooks before continuing the step",
     "hooks.test.ts > Think — beforeStep hook > can override the model for a step",
     "hooks.test.ts > Think — beforeStep hook > ends a step that ran a tool before the next step's beforeStep",
@@ -631,6 +690,10 @@
     "hydration-budget.test.ts > hydrationByteBudget — windowed hydration (#1710) > emits chat:hydration:windowed on change, not on every sync",
     "hydration-budget.test.ts > hydrationByteBudget — windowed hydration (#1710) > exposes degraded onStart steps via the public accessor",
     "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > DOES count an in-flight `running` run toward the cap",
+    "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > allows the rejected slot to be reused once a run settles",
+    "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > allows unlimited concurrency by default (Infinity)",
+    "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > does not count soft-terminal `interrupted` runs toward the cap",
+    "max-concurrent-agent-tools.test.ts > maxConcurrentAgentTools > rejects over-cap runs fail-fast with a clear error (no queue)",
     "mcp-tool-materialization.test.ts > Think MCP tool materialization > automatically exposes MCP tools by default for compatibility",
     "mcp-tool-materialization.test.ts > Think MCP tool materialization > hands the model an MCP tool's result when it calls one",
     "mcp-tool-materialization.test.ts > Think MCP tool materialization > sends the MCP tools as getAITools() gives them, byte for byte, after the workspace's",
@@ -753,6 +816,8 @@
     "messengers.test.ts > think messengers core > typing indicator (#2324) > still runs the turn when the typing indicator fails",
     "messengers.test.ts > think messengers core > typing indicator (#2324) > stops refreshing when the turn fails",
     "nested-agent-tools.test.ts > nested agent-tools (grandparent → middle → grandchild) > does not bridge grandchild observation up to the grandparent",
+    "nested-agent-tools.test.ts > nested agent-tools (grandparent → middle → grandchild) > enforces each nesting level's own maxConcurrentAgentTools independently",
+    "nested-agent-tools.test.ts > nested agent-tools (grandparent → middle → grandchild) > runs a 3-level chain to completion at every level",
     "onconnect-broadcast.test.ts > Think — onConnect broadcast policy > broadcasts CHAT_MESSAGES on connect when no stream is active",
     "onconnect-broadcast.test.ts > chat frames with no client (#2724) > serializes no chat frame in a sub-agent no client has open",
     "onconnect-broadcast.test.ts > chat frames with no client (#2724) > serializes no chat frame when no client is connected",
@@ -974,7 +1039,9 @@
     "submissions.test.ts > Think durable submissions > waitForSubmission resolves when a running submission completes",
     "submissions.test.ts > Think durable submissions > waitForSubmission returns the current state when it times out",
     "submissions.test.ts > Think durable submissions > waitForSubmission throws from onSubmissionStatus for its own submission",
+    "submissions.test.ts > Think durable submissions > waitForSubmission throws inside the turn that submitted it instead of deadlocking",
     "submissions.test.ts > Think durable submissions > waitForSubmission waits for onSubmissionStatus after the terminal write",
+    "submissions.test.ts > Think durable submissions > waitForSubmission waits for work a turn left running, while a later turn runs",
     "submissions.test.ts > Think durable submissions > while a submission runs > a bulk delete that asks for every status deletes only the finished one",
     "submissions.test.ts > Think durable submissions > while a submission runs > a cancel says its messages were applied",
     "submissions.test.ts > Think durable submissions > while a submission runs > a turn reset ends it skipped, and the one that waits behind it",
@@ -1044,6 +1111,7 @@
     "think-session.test.ts > Think — error handling > answers the next turn after a model failure",
     "think-session.test.ts > Think — error handling > bridges an in-band stream error to chat:request:failed on a WebSocket turn",
     "think-session.test.ts > Think — error handling > bridges an in-band stream error to chat:request:failed on the RPC path",
+    "think-session.test.ts > Think — error handling > does not call onInterrupted on a normally-completing or terminally-erroring turn (#1644)",
     "think-session.test.ts > Think — error handling > does not fire the watchdog for a slow-but-steady stream (timer resets per chunk)",
     "think-session.test.ts > Think — error handling > emits chat:request:failed when a chat stream fails",
     "think-session.test.ts > Think — error handling > keeps the partial reply of a turn whose model reports an error",
@@ -1053,6 +1121,7 @@
     "think-session.test.ts > Think — error handling > tells a chat its caller cancelled nothing more when a clear follows",
     "think-session.test.ts > Think — error handling > tells a chat the chat was cleared under it, with no response hook",
     "think-session.test.ts > Think — error handling > tells a waiting chat, and the running one, that a clear cut them off",
+    "think-session.test.ts > Think — error handling > terminates cleanly on an in-band stream error while the watchdog is armed",
     "think-session.test.ts > Think — getConfig inside configureSession > should fall back to default when no config is stored",
     "think-session.test.ts > Think — getConfig inside configureSession > should not throw when getConfig() is called in configureSession on first start",
     "think-session.test.ts > Think — getConfig inside configureSession > should read previously stored config inside configureSession",
@@ -1060,6 +1129,7 @@
     "think-session.test.ts > Think — model message conversion > replays legacy raw-string workspace read outputs as text",
     "think-session.test.ts > Think — onChatRecovery > does not continue a reply again when the recovery callback is delivered again after a reset cut its turn off",
     "think-session.test.ts > Think — onChatResponse > fires onChatResponse for a failed turn that wrote text, even when its error reads like a never-ran reason",
+    "think-session.test.ts > Think — onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability",
     "think-session.test.ts > Think — onChatResponse > should accumulate response hooks across multiple turns",
     "think-session.test.ts > Think — onChatResponse > should fire onChatResponse after successful chat turn",
     "think-session.test.ts > Think — onChatResponse > should fire onChatResponse with aborted status on abort",
@@ -1111,7 +1181,9 @@
     "think-session.test.ts > Think — waitUntilStable > returns false when no pending after tool result applied",
     "think-session.test.ts > Think — waitUntilStable > returns true immediately when no pending interactions",
     "think-session.test.ts > Think — waitUntilStable > returns true when no turns are active",
+    "turn-metadata.test.ts > turn metadata > re-resolves turn metadata from durable history (recovery read path)",
     "turn-metadata.test.ts > turn metadata > returns undefined when the latest user message carries none",
+    "turn-metadata.test.ts > turn metadata > stamps chat() metadata on the user message and exposes it during the turn",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes submitMessages and waitForEvent results after copying serializable data",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes the submitMessages result before cancelling a timed-out prompt",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > keeps the waitForEvent result alive while validating nested output",
