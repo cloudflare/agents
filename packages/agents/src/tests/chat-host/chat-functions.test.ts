@@ -4,6 +4,7 @@ import type { Connection } from "agents";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
   answerTool,
+  cancelTurn,
   chatDispatch,
   resumeChat,
   submitTurn
@@ -701,6 +702,209 @@ describe("chat functions over a minimal host", () => {
         id: result.requestId,
         probeId: "p3"
       });
+    });
+  });
+
+  /**
+   * r1's model streams `chunks`, then waits for the returned release before
+   * it ends; later calls answer with the fixture's reply. `seen` records the
+   * type of every chunk the host's chunk hook is given.
+   */
+  async function streamThenHold(
+    instance: ChatTurnHostObject,
+    chunks: unknown[],
+    seen: string[] = []
+  ) {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const allSent = new Promise<void>((resolve) => (reached = resolve));
+    const respond = instance.host.respond;
+    let first = true;
+    instance.host.respond = async (call) => {
+      if (!first) return respond(call);
+      first = false;
+      return new ReadableStream({
+        async start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk as never);
+          await released;
+          controller.enqueue({ type: "text-start", id: "tz" } as never);
+          controller.enqueue({
+            type: "text-delta",
+            id: "tz",
+            delta: " world"
+          } as never);
+          controller.enqueue({ type: "text-end", id: "tz" } as never);
+          controller.close();
+        }
+      });
+    };
+    let count = 0;
+    (instance.host.hooks as { transformChunk?: unknown }).transformChunk =
+      (chunk: { type: string }) => {
+        seen.push(chunk.type);
+        if (++count === chunks.length) reached();
+        return chunk;
+      };
+    await chatDispatch(
+      instance.deps,
+      instance.lane,
+      tab,
+      chatRequest("r1", "Hi")
+    );
+    await allSent;
+    return release;
+  }
+
+  function toolResult(toolCallId: string) {
+    return JSON.stringify({
+      type: "cf_agent_tool_result",
+      toolCallId,
+      toolName: "ask",
+      output: { ok: toolCallId },
+      autoContinue: true
+    });
+  }
+
+  it("a reply a queued request sends back does not overwrite the finished one", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Hello" },
+        { type: "text-end", id: "t1" }
+      ]);
+      // The tab's list holds the reply as it had streamed so far.
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: "r2",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "u1",
+                  role: "user",
+                  parts: [{ type: "text", text: "Hi" }]
+                },
+                {
+                  id: "a1",
+                  role: "assistant",
+                  parts: [{ type: "text", text: "Hello" }]
+                },
+                {
+                  id: "u2",
+                  role: "user",
+                  parts: [{ type: "text", text: "Two" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      release();
+      await instance.resultFor("r2");
+      const reply = await instance.sessions.session("s1").getMessage("a1");
+      expect(JSON.stringify(reply)).toContain(" world");
+    });
+  });
+
+  it("a live tool answer's continuation extends the reply that asked, not a question queued meanwhile", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "c1",
+          toolName: "ask",
+          input: {}
+        }
+      ]);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r2", "u2", "Two")
+      );
+      await chatDispatch(instance.deps, instance.lane, tab, toolResult("c1"));
+      release();
+      while (instance.results.length < 3) await instance.nextResult();
+      const continued = instance.calls.find((c) => c.trigger === "tool-answer");
+      expect(continued).toMatchObject({ mode: "continue", replyId: "a1" });
+    });
+  });
+
+  it("a stopped request that had not started keeps its question", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r2", "u2", "Two")
+      );
+      await cancelTurn(instance.deps, "r2");
+      release();
+      await instance.resultFor("r1");
+      const ids = (await instance.sessions.session("s1").getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toContain("u2");
+    });
+  });
+
+  it("answers to a live batch start one continuation, after the last, and pass the chunk hook", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const seen: string[] = [];
+      const release = await streamThenHold(
+        instance,
+        [
+          { type: "start", messageId: "a1" },
+          {
+            type: "tool-input-available",
+            toolCallId: "c1",
+            toolName: "ask",
+            input: {}
+          },
+          {
+            type: "tool-input-available",
+            toolCallId: "c2",
+            toolName: "ask",
+            input: {}
+          }
+        ],
+        seen
+      );
+      await chatDispatch(instance.deps, instance.lane, tab, toolResult("c1"));
+      expect(
+        instance.tasks.peekList({
+          definition: instance.lane.definition,
+          lane: instance.lane.lane,
+          status: ["pending"],
+          results: false
+        })
+      ).toHaveLength(0);
+      await chatDispatch(instance.deps, instance.lane, tab, toolResult("c2"));
+      release();
+      while (instance.results.length < 2) await instance.nextResult();
+      expect(
+        instance.calls.filter((c) => c.trigger === "tool-answer")
+      ).toHaveLength(1);
+      expect(seen.filter((t) => t === "tool-output-available")).toHaveLength(2);
     });
   });
 });

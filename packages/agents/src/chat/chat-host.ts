@@ -185,8 +185,10 @@ export function releaseParked(
 /** A turn streaming in this isolate, that a tool answer can join. */
 export interface LiveTurn {
   readonly requestId: string;
-  /** Whether the reply holds the call `toolCallId` and no answer to it. */
-  waitsOn(toolCallId: string): boolean;
+  /** The id of the reply that streams, once it started. */
+  replyId(): string | undefined;
+  /** The calls the reply holds with no answer yet, in the order asked. */
+  waitingCalls(): string[];
   inject(chunk: UIMessageChunk): void;
 }
 
@@ -609,7 +611,15 @@ export function chatTurnDefinition(
       return report({ requestId, status: "completed", messageId: storedReply });
     }
     // The request's messages go in now, after every reply queued before it.
+    // A reply a tab sent back is a snapshot from before it finished: the
+    // stored one stands.
     for (const message of run.messages ?? []) {
+      if (
+        message.role === "assistant" &&
+        (await session.getMessage(message.id)) !== null
+      ) {
+        continue;
+      }
       await session.upsertMessage(message as never);
     }
     const earlier = await deps.streams.status(streamId);
@@ -802,26 +812,39 @@ export function chatTurnDefinition(
             // as a chunk, stored and sent like the model's.
             live.set(liveKey, {
               requestId,
-              waitsOn: (toolCallId) => {
-                let asked = false;
+              replyId: () => {
+                const start = seen.find((chunk) => chunk.type === "start");
+                return (start as { messageId?: string } | undefined)?.messageId;
+              },
+              waitingCalls: () => {
+                const waiting: string[] = [];
                 for (const chunk of seen) {
                   const id = (chunk as { toolCallId?: unknown }).toolCallId;
-                  if (id !== toolCallId) continue;
-                  if (chunk.type === "tool-input-available") asked = true;
+                  if (typeof id !== "string") continue;
+                  if (chunk.type === "tool-input-available") waiting.push(id);
                   if (
                     chunk.type === "tool-output-available" ||
                     chunk.type === "tool-output-error"
                   ) {
-                    return false;
+                    const at = waiting.indexOf(id);
+                    if (at >= 0) waiting.splice(at, 1);
                   }
                 }
-                return asked;
+                return waiting;
               },
+              // Stored and sent like the model's chunks, through the host's
+              // chunk hook.
               inject: (chunk) => {
-                out.append(chunk as never);
-                seen.push(chunk);
-                send({ body: JSON.stringify(chunk), done: false });
-                controller.enqueue(chunk);
+                const next =
+                  host.hooks?.transformChunk?.(chunk, parts) ?? chunk;
+                out.append(next as never);
+                seen.push(next);
+                send({
+                  body: JSON.stringify(next),
+                  done: false,
+                  ...(continuing && { continuation: true })
+                });
+                controller.enqueue(next);
               }
             });
           },
