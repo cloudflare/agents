@@ -3409,6 +3409,8 @@ export class ThinkTestAgent extends Think {
     roles: string[];
     lastAssistantText: string;
     modelCalls: number;
+    /** When the turn was asked for. */
+    askedAt: number;
   }> {
     const callsBefore = this._modelPromptsForTest.length;
     this._modelStallForTest = {
@@ -3431,6 +3433,7 @@ export class ThinkTestAgent extends Think {
       this.chatRecovery = options.chatRecovery;
     }
     try {
+      const askedAt = Date.now();
       const first = await this.testChat("stall, then recover");
       const stable = await this.waitUntilStable({ timeout: 8_000 });
       const messages = await this.getMessages();
@@ -3443,7 +3446,8 @@ export class ThinkTestAgent extends Think {
         lastAssistantText: (last?.parts ?? [])
           .map((p) => (p.type === "text" ? p.text : ""))
           .join(""),
-        modelCalls: this._modelPromptsForTest.length - callsBefore
+        modelCalls: this._modelPromptsForTest.length - callsBefore,
+        askedAt
       };
     } finally {
       this._modelStallForTest = null;

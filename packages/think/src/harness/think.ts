@@ -2268,9 +2268,19 @@ export class Think<
       partialParts: parts,
       recoveryData: null,
       messages: [...this.messages],
-      createdAt: Date.now()
+      // When the turn started, as Think gives it (not its time in the
+      // queue), so an app can refuse stale work.
+      createdAt: await this.#turnStartedAt(context.operationId)
     });
     return decision?.continue === false ? "abandon" : "continue";
+  }
+
+  async #turnStartedAt(operationId: string): Promise<number> {
+    const run = await this.harness.inspection(
+      this.harness.session().id,
+      operationId
+    );
+    return run?.startedAt ?? run?.createdAt ?? Date.now();
   }
 
   async _chatRecoveryRetry(): Promise<void> {}

@@ -90,4 +90,19 @@ describe("chat recovery, through public behaviour", () => {
     expect(result.recoveryCalls[0]).toMatchObject({ attempt: 1 });
     expect(result.roles).toEqual(["user", "assistant"]);
   });
+
+  it("gives onChatRecovery the time the turn was asked for, not the time of the stall", async () => {
+    const agent = await freshAgent("recover-created-at");
+    const result = await agent.stallRecoveryForTest({
+      afterParts: 2,
+      stalledCalls: 1,
+      timeoutMs: 1500
+    });
+
+    const createdAt = result.recoveryCalls[0]?.createdAt ?? 0;
+    expect(createdAt).toBeGreaterThanOrEqual(result.askedAt - 50);
+    // The stall fires 1500 ms after the reply starts; the turn started
+    // well before that.
+    expect(createdAt).toBeLessThan(result.askedAt + 1000);
+  });
 });
