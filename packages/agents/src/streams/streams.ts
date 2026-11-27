@@ -406,6 +406,9 @@ export class Streams extends LifecycleCapability {
       VALUES
         (${streamId}, 'streaming', ${options.tag ?? null}, ${metadataJson}, 0, ${now}, ${now})
     `;
+    // Born in this isolate: no earlier isolate buffered into it, so a
+    // buffered append starts at seq 0.
+    this.#bufferedHere.add(streamId);
     this.#emit("stream:opened", { streamId });
     return this.#writer(streamId);
   }

@@ -755,6 +755,14 @@ export function chatTurnDefinition(
           typeof partId === "string" &&
           !deltaParts.has(partId);
         if (firstDelta) deltaParts.add(partId);
+        // A part's id may come back in a later step: its next first delta
+        // is written at once too.
+        if (
+          (chunk.type === "text-end" || chunk.type === "reasoning-end") &&
+          typeof partId === "string"
+        ) {
+          deltaParts.delete(partId);
+        }
         // A preliminary output (progress) waits for the batch.
         if (
           firstDelta ||

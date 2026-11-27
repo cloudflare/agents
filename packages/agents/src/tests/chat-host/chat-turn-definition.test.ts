@@ -1326,16 +1326,104 @@ describe("chatTurnDefinition", () => {
     });
   });
 
-  it("a part's first delta and a finished step are written at once", async () => {
+  it("a part's first delta is written at once", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       const turn = await heldTurn(instance, [
         { type: "start", messageId: "a1" },
-        { type: "start-step" },
         { type: "text-start", id: "t1" },
         { type: "text-delta", id: "t1", delta: "Hi" }
       ]);
       expect(await turn.stored()).toContain("text-delta");
+      await turn.finish();
+    });
+  });
+
+  it("a finished step is written at once", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      // After the first delta (written at once), the rest of the step is
+      // batched until the step ends.
+      const turn = await heldTurn(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "start-step" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "a" },
+        { type: "text-delta", id: "t1", delta: "b" },
+        { type: "text-end", id: "t1" },
+        { type: "finish-step" }
+      ]);
+      expect(await turn.stored()).toContain("finish-step");
+      await turn.finish();
+    });
+  });
+
+  it("a part id used again in a later step has its first delta written at once", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const turn = await heldTurn(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t" },
+        { type: "text-delta", id: "t", delta: "one" },
+        { type: "text-end", id: "t" },
+        {
+          type: "tool-input-available",
+          toolCallId: "s1",
+          toolName: "lookup",
+          input: {}
+        },
+        { type: "tool-output-available", toolCallId: "s1", output: 1 },
+        // The next call reuses the part id.
+        { type: "text-start", id: "t" },
+        { type: "text-delta", id: "t", delta: "two" }
+      ]);
+      const types = await turn.stored();
+      expect(types.filter((t) => t === "text-delta")).toHaveLength(2);
+      await turn.finish();
+    });
+  });
+
+  it("what the model sent is written when it pauses, while the turn is still live", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const turn = await heldTurn(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "a" },
+        { type: "text-delta", id: "t1", delta: "b" },
+        { type: "text-delta", id: "t1", delta: "c" }
+      ]);
+      // The model is quiet now: after it, everything it sent is stored.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(
+        (await turn.stored()).filter((t) => t === "text-delta")
+      ).toHaveLength(3);
+      await turn.finish();
+    });
+  });
+
+  it("a new reply's stream starts at seq 0", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const turn = await heldTurn(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "a" }
+      ]);
+      const stop = new AbortController();
+      const seqs: number[] = [];
+      try {
+        for await (const batch of instance.streams.readBatches(
+          chatTurnStreamId("held-1"),
+          { signal: stop.signal, onUpToDate: () => stop.abort() }
+        )) {
+          for (const item of batch) seqs.push((item as { seq: number }).seq);
+          if (stop.signal.aborted) break;
+        }
+      } catch (error) {
+        if (!stop.signal.aborted) throw error;
+      }
+      expect(seqs[0]).toBe(0);
       await turn.finish();
     });
   });
