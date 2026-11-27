@@ -13,6 +13,7 @@
  */
 
 export { TaskSettlement } from "../tasks/settlement";
+export { CONTEXT_REMINDER_MESSAGE_ID } from "../context/context";
 export {
   MAX_FRAMEWORK_METADATA_BYTES,
   MAX_SERIALIZED_BYTES

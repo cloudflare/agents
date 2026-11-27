@@ -1524,6 +1524,13 @@ describe("think messengers core", () => {
       ).toBe("Got it");
     });
 
+    it("runs a messenger's turn on its channel", async () => {
+      const agent = await sendBurst(`channel-${crypto.randomUUID()}`, [
+        { id: "m1", text: "hello", threadId: "fake:dm" }
+      ]);
+      expect(await agent.getTurnChannelsForTest()).toEqual(["fake"]);
+    });
+
     it("labels a group speaker with the messenger's channelSpeakerLabel", async () => {
       const agent = await sendBurst("label-group", [
         {

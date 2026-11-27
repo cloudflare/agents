@@ -776,6 +776,18 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     );
   }
 
+  /** The channel each turn ran on, as `beforeTurn` saw it. */
+  override beforeTurn(): void {
+    this.ctx.storage.kv.put("turn-channels", [
+      ...this.getTurnChannelsForTest(),
+      this.activeChannel?.channelId ?? ""
+    ]);
+  }
+
+  getTurnChannelsForTest(): string[] {
+    return this.ctx.storage.kv.get<string[]>("turn-channels") ?? [];
+  }
+
   async getAdapterCalls(): Promise<Array<{ kind: string; content: string }>> {
     this._ensureTable();
     return this.sql<{ kind: string; content: string }>`

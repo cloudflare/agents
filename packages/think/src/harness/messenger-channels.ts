@@ -45,6 +45,11 @@ export type ThinkMessengerChannels = {
   receive(request: Request): Promise<Response | undefined>;
   /** The messengers' ids. */
   readonly ids: readonly string[];
+  /**
+   * The messenger whose webhook sent user message `messageId`, while its
+   * turn runs (the message's id is its event's).
+   */
+  channelOf(messageId: string): string | undefined;
   /** Where a notice to messenger `id`'s `thread` is posted, if anywhere. */
   noticeSurface(
     id: string,
@@ -253,6 +258,10 @@ export function messengerChannels(options: {
   return {
     channels,
     ids: definitions.map((definition) => definition.id),
+    channelOf(messageId) {
+      return options.kv.get<ChannelMessageSurface>(askerKey(messageId))
+        ?.channelKey;
+    },
     noticeSurface(id, thread) {
       const definition = definitions.find((d) => d.id === id);
       if (!definition || thread === undefined) return undefined;

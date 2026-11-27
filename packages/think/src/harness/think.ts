@@ -125,6 +125,7 @@ import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import {
+  CONTEXT_REMINDER_MESSAGE_ID,
   mcpConnectionsExtension,
   mcpExtension,
   registerDeliverySink
@@ -937,6 +938,7 @@ export class Think<
         (event.status.status === "done" || event.status.status === "unanswered")
       ) {
         this.#turns.delete(event.status.operationId);
+        this.#webRequests.delete(event.status.operationId);
         // A call the operation left without an afterToolCall is forgotten.
         for (const [toolCallId, kept] of this.#modelInputs) {
           if (kept.operationId === event.status.operationId) {
@@ -963,8 +965,9 @@ export class Think<
       configured = undefined;
     }
     if (configured instanceof Promise) {
-      // Read again at start; this one is not awaited.
+      // Awaited at start on the root, not called again; unused elsewhere.
       configured.catch(() => {});
+      this.#configuredLater = configured;
       configured = undefined;
     }
     this.#configuredAtConstruction = configured;
@@ -1015,8 +1018,12 @@ export class Think<
       await this.#context.load();
       // As in Think: the channel registry, read at start on the root.
       if (this.parentPath.length === 0) {
+        // Read again at start when it answered at construction, before its
+        // subclass was set up: the registry is what it answers now.
         const resolved = resolveChannels(
-          this.#configuredAtConstruction ?? (await this.configureChannels()),
+          this.#configuredAtConstruction !== undefined
+            ? await this.configureChannels()
+            : await (this.#configuredLater ?? this.configureChannels()),
           this.getMessengers() as ThinkMessengers
         );
         this.#channels = resolved.channels;
@@ -1050,7 +1057,10 @@ export class Think<
       await this.#skills.start(() => this.getSkills());
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
-        if (event.type === "reset") this.#transcript.replace([]);
+        if (event.type === "reset") {
+          this.#transcript.replace([]);
+          this.#lastTurnChannel = undefined;
+        }
         if (event.type === "message") {
           // Apply it now, so a synchronous read right after a turn sees it;
           // the re-read that follows picks up compaction and branching.
@@ -1707,6 +1717,10 @@ export class Think<
 
   /** What `configureChannels()` returned at construction, when not a promise. */
   #configuredAtConstruction: ThinkChannels | undefined;
+  /** What it returned at construction, when a promise. */
+  #configuredLater: Promise<ThinkChannels> | undefined;
+  /** The channel the last turn ran on, for a continuation, as on Think. */
+  #lastTurnChannel: string | undefined;
   /** Operations a browser's chat request started: they run on `web`. */
   #webRequests = new Set<string>();
   /** The channel registry, read at start (none on a sub-agent). */
@@ -2655,14 +2669,30 @@ export class Think<
       // A context reminder the harness adds as a message of its own is not
       // the turn's user message.
       const history = turn.messages.filter(
-        (message) => message.id !== CONTEXT_REMINDER_ID
+        (message) => message.id !== CONTEXT_REMINDER_MESSAGE_ID
       );
       const web = this.#webRequests.delete(turn.operationId);
-      const channel = web ? "web" : channelFromMessages(history);
-      // As in Think: a browser's new user message is stamped `web`, so a
-      // continued or recovered turn resolves it again. The client's own
-      // write cannot carry the key.
-      if (web) await this.#stampWeb(history);
+      const user = [...history].reverse().find((m) => m.role === "user");
+      // As in Think: a browser's request runs on `web`; a continuation on
+      // the channel the last turn ran on; anything else on its stamp. A
+      // messenger's message is stamped once its turn starts.
+      let channel = web
+        ? "web"
+        : ((turn.continuation ? this.#lastTurnChannel : undefined) ??
+          channelFromMessages(history));
+      // A browser's new user message is stamped `web` here, as Think stamps
+      // it at intake: the client's own write cannot carry the key, and the
+      // harness writes the message when its turn starts.
+      if (web && user) await this.#stamp(user.id, "web");
+      const messenger =
+        channel === undefined && user
+          ? this.#messengers?.channelOf(user.id)
+          : undefined;
+      if (messenger !== undefined && user) {
+        channel = messenger;
+        await this.#stamp(user.id, messenger);
+      }
+      this.#lastTurnChannel = channel;
       const emit = this._emit as unknown as (
         type: string,
         payload: Record<string, unknown>
@@ -2923,12 +2953,14 @@ export class Think<
     } as ThinkTurnConfig;
   }
 
-  /** Stamp `web` on the latest user message, unless it has a channel. */
-  async #stampWeb(history: readonly UIMessage[]): Promise<void> {
-    const user = [...history].reverse().find((m) => m.role === "user");
-    if (!user || channelFromMessages([user]) !== undefined) return;
-    const [stamped] = stampTurnContext([user], "web");
-    await (await this.#rootHandle()).updateMessage(stamped as SessionMessage);
+  /** Stamp `channel` on stored user message `id`, unless it has one. */
+  async #stamp(id: string, channel: string): Promise<void> {
+    const handle = await this.#rootHandle();
+    const stored = await handle.getMessage(id);
+    if (!stored || stored.role !== "user") return;
+    if (channelFromMessages([stored as UIMessage]) !== undefined) return;
+    const [stamped] = stampTurnContext([stored as UIMessage], channel);
+    await handle.updateMessage(stamped as SessionMessage);
   }
 
   /** The input a human approved for a call, from the latest reply. */
@@ -3044,7 +3076,17 @@ export class Think<
       const request = chatRequestId(message);
       if (request !== undefined) this.#webRequests.add(request);
       for (const handlers of this.#handlers) {
-        if ((await handlers.onMessage?.(connection, message)) === true) return;
+        if ((await handlers.onMessage?.(connection, message)) === true) {
+          // A request that started nothing (refused, or a resend of one
+          // that ended) is forgotten now; one that runs, when it settles.
+          if (
+            request !== undefined &&
+            !(await this.harness.inspection(this.harness.session().id, request))
+          ) {
+            this.#webRequests.delete(request);
+          }
+          return;
+        }
       }
       return onMessage(connection, message);
     };
@@ -3536,9 +3578,6 @@ for (const method of [
 ]) {
   callable()(method, undefined as unknown as ClassMethodDecoratorContext);
 }
-
-/** The id of the message a context reminder becomes after a reply. */
-const CONTEXT_REMINDER_ID = "cf_agents_context_reminder";
 
 /** The id of a browser's chat request, if `message` is one. */
 function chatRequestId(message: WSMessage): string | undefined {

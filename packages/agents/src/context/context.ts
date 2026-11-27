@@ -40,6 +40,9 @@ import { AgentContextProvider, type SqlProvider } from "./sqlite-provider";
  * @internal Annotation kind of a context record: what a session copy
  * (a fork) carries over with its messages.
  */
+/** The id of the user message a reminder becomes after an assistant message. */
+export const CONTEXT_REMINDER_MESSAGE_ID = "cf_agents_context_reminder";
+
 export const CONTEXT_RECORD_KIND = "context";
 const RECORD = CONTEXT_RECORD_KIND;
 /** Session config key of a refresh asked for and not yet recorded. */
@@ -588,7 +591,7 @@ export class Context {
     }
     if (carried.length > 0) {
       projected.push({
-        id: "cf_agents_context_reminder",
+        id: CONTEXT_REMINDER_MESSAGE_ID,
         role: "user",
         parts: [textPart(renderReminder(carried.map(([, text]) => text)))]
       });
