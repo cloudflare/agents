@@ -83,6 +83,11 @@ import { ThinkConfigStore } from "../config-store";
 import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "../system-prompt";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
+import {
+  cachedMessageBytes,
+  ThinkTranscriptCache,
+  type HydrationResult
+} from "../transcript-cache";
 import { Context, type ContextConfig } from "agents/context";
 import type {
   AddMessagesOptions,
@@ -300,7 +305,27 @@ export class Think<
   fetchTools: false | Omit<CreateFetchToolsOptions, "workspace" | "onEvent"> =
     false;
 
-  #messages: UIMessage[] = [];
+  /**
+   * As on Think: the byte budget for the in-memory message view. A stored
+   * transcript larger than this is hydrated as its most recent messages
+   * that fit, and `chat:hydration:windowed` is emitted. Non-finite or
+   * non-positive: always the whole transcript.
+   *
+   * @default 32 * 1024 * 1024
+   */
+  hydrationByteBudget: number = 32 * 1024 * 1024;
+
+  /** The in-memory message view, bounded by `hydrationByteBudget`. */
+  readonly #transcript = new ThinkTranscriptCache({
+    budget: () => this.hydrationByteBudget,
+    readAll: () => this.harness.session().messages(),
+    readRecent: async (budget) => {
+      const recent = await (await this.#rootHandle()).getRecentHistory(budget);
+      return { ...recent, messages: recent.messages as UIMessage[] };
+    },
+    emitWindowed: (payload) => this._emit("chat:hydration:windowed", payload),
+    refreshed: () => {}
+  });
   #context: Context | undefined;
   #handle: Session | undefined;
   /** Each submission's status reports, run one at a time in order. */
@@ -636,19 +661,24 @@ export class Think<
       await this.#skills.start(() => this.getSkills());
       this.harness.observe((session, event) => {
         if (session !== this.harness.session().id) return;
-        if (event.type === "reset") this.#messages = [];
+        if (event.type === "reset") this.#transcript.replace([]);
         if (event.type === "message") {
           // Apply it now, so a synchronous read right after a turn sees it;
           // the re-read that follows picks up compaction and branching.
-          const index = this.#messages.findIndex(
+          const messages = this.#transcript.messages;
+          const index = messages.findIndex(
             (message) => message.id === event.message.id
           );
-          this.#messages =
+          if (index === -1) {
+            this.#transcript.noteGrowth(cachedMessageBytes(event.message));
+          }
+          this.#transcript.replace(
             index === -1
-              ? [...this.#messages, event.message]
-              : this.#messages.map((message, i) =>
+              ? [...messages, event.message]
+              : messages.map((message, i) =>
                   i === index ? event.message : message
-                );
+                )
+          );
         }
         if (
           event.type === "message" ||
@@ -667,7 +697,7 @@ export class Think<
         "The agent is starting with an empty in-memory message view; " +
           "persisted history is untouched."
       );
-      if (!hydrated) this.#messages = [];
+      if (!hydrated) this.#transcript.replace([]);
       this.#installProtocol();
       await onStart(props);
       // Best-effort, as in Think: a getScheduledTasks() that throws must
@@ -916,8 +946,17 @@ export class Think<
 
   // ── Messages ──────────────────────────────────────────────────────
 
+  /**
+   * Result of the most recent refresh when `hydrationByteBudget` applies.
+   * `truncated` means `this.messages` is a recent window of a larger
+   * stored transcript.
+   */
+  protected get _lastHydration(): HydrationResult | null {
+    return this.#transcript.lastHydration;
+  }
+
   get messages(): UIMessage[] {
-    return this.#messages;
+    return this.#transcript.messages;
   }
 
   /** The channel of the running turn. Channels are not supported. */
@@ -997,7 +1036,7 @@ export class Think<
     }
     // As on Think: with no assistant message to continue, nothing runs.
     await this.#sync();
-    if (this.#messages.at(-1)?.role !== "assistant") {
+    if (this.#transcript.messages.at(-1)?.role !== "assistant") {
       return {
         requestId: "",
         status: "skipped",
@@ -1070,7 +1109,7 @@ export class Think<
   readonly #hostApi = createThinkHostApi({
     workspace: () => this.workspace,
     context: () => this.context,
-    messages: () => this.#messages,
+    messages: () => this.#transcript.messages,
     // Not a submission: a tool calling this during a turn would wait on
     // its own turn. One appended from `beforeTurn` comes before the reply,
     // as in Think: the harness attaches the reply to it.
@@ -1112,7 +1151,7 @@ export class Think<
 
   /** Whether the latest message has a tool call waiting on a client. */
   protected hasPendingInteraction(): boolean {
-    const last = this.#messages.at(-1);
+    const last = this.#transcript.messages.at(-1);
     return (last?.parts ?? []).some(
       (part) =>
         "toolCallId" in part &&
@@ -1238,7 +1277,7 @@ export class Think<
     await this.#sync();
     const message =
       result.status === "done" && result.messageId !== undefined
-        ? this.#messages.find((m) => m.id === result.messageId)
+        ? this.#transcript.messages.find((m) => m.id === result.messageId)
         : undefined;
     return {
       ...saveResult(result),
@@ -1831,7 +1870,7 @@ export class Think<
   }
 
   async #sync(): Promise<void> {
-    this.#messages = await this.harness.session().messages();
+    await this.#transcript.sync();
   }
 
   /** Route this Agent's connections through ThinkChat's handlers. */
