@@ -344,7 +344,7 @@
   {
     "file": "media-eviction.test.ts",
     "test": "mediaEviction — aged media leaves the conversation (#1710) > a second pass is a cheap no-op",
-    "reason": "Pins the pass's own bookkeeping through Think's private _evictAgedMediaBestEffort seam: a second pass over unchanged rows reads and writes nothing; nothing an app can observe.",
+    "reason": "Pins the pass's own bookkeeping through Think's private _evictAgedMediaBestEffort seam: a second pass over rows the first already rewrote evicts nothing and reports no backlog; nothing an app can observe.",
     "mechanicsOnly": true
   },
   {
