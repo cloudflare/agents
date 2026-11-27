@@ -1175,15 +1175,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
     });
     // An attempt still building its session has not read its earlier
-    // attempts' chunks back yet: the stored stream has them then.
+    // attempts' chunks back yet (its partial is empty): the stored stream
+    // has them then. A live partial with chunks already holds them.
     const live = this.#live.get(session);
-    const stored = this.#streamChunks(
-      chatTurnStreamId(runIdOf(session, operationId))
-    );
     const chunks =
-      live?.operationId === operationId && live.partial.length >= stored.length
+      live?.operationId === operationId && live.partial.length > 0
         ? [...live.partial]
-        : stored;
+        : this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
     return { chunks, stop };
   }
 
