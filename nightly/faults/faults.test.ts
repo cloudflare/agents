@@ -6,14 +6,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { beforeAll, describe, expect, inject, it } from "vitest";
 import { violations } from "./invariants";
-import type { Cls } from "./lib";
+import type { Cls } from "../shared/probe";
 import { CHAT_ONLY, SCENARIOS, THINK_ONLY } from "./scenarios";
 
 const RESULTS = path.join(import.meta.dirname, "results");
 
 beforeAll(() => {
-  process.env.FAULTS_URL = inject("faultsUrl");
-  process.env.FAULTS_KEY = inject("faultsKey");
+  process.env.PROBE_URL = inject("probeUrl");
+  process.env.PROBE_KEY = inject("probeKey");
   mkdirSync(RESULTS, { recursive: true });
 });
 

@@ -1,0 +1,25 @@
+{
+  // The upgrade suite's Worker. The suite deploys it under a unique name
+  // (`nightly-upgrade-<id>`), first built on the release, then on this
+  // repository, and deletes it when it ends.
+  "name": "nightly-upgrade",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": {
+    // The second deploy resets busy objects at once, mid-turn.
+    "code_update_strategy": { "mode": "immediate" },
+    "bindings": [
+      { "class_name": "ProbeChat", "name": "ProbeChat" },
+      { "class_name": "ProbeThink", "name": "ProbeThink" },
+      { "class_name": "ProbeAgent", "name": "ProbeAgent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ProbeChat", "ProbeThink", "ProbeAgent"]
+    }
+  ]
+}

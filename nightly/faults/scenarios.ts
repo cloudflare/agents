@@ -20,7 +20,7 @@ import {
   type CtlResult,
   type Frame,
   type ProbeState
-} from "./lib";
+} from "../shared/probe";
 
 /** One scenario's outcome: the settled state and every frame each tab saw. */
 export type Run = {

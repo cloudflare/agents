@@ -16,7 +16,23 @@ An `AIChatAgent` and a `Think` agent on a scripted fake model, put through about
 cd nightly
 pnpm run faults                                   # deploy, run every scenario on both agents, delete
 FAULTS_ONLY=stall,rl429RetryAfter pnpm run faults  # a subset (an unknown name is an error)
-FAULTS_URL=https://<worker>.workers.dev FAULTS_KEY=<its PROBE_KEY> pnpm run faults   # against a Worker you deployed
+PROBE_URL=https://<worker>.workers.dev PROBE_KEY=<its PROBE_KEY> pnpm run faults   # against a Worker you deployed
 ```
 
 Each scenario's full outcome (the stored transcript, events, model calls and every frame the tabs saw) is written to `faults/results/<agent>-<scenario>.json`.
+
+## upgrade
+
+Deploys the probe Worker built on the latest release of `agents`, `@cloudflare/ai-chat` and `@cloudflare/think` (installed together from npm in a scratch directory), leaves live rows in it, then deploys this repository's build over it while a reply streams. Then it checks that:
+
+- a finished chat keeps every message and takes a new turn;
+- the reply the deploy cut off is recovered by the new build and ends once;
+- an approval asked for before the upgrade still runs its tool, once;
+- three queued Think submissions each complete once, in order;
+- a running fiber is recovered once, from its last checkpoint;
+- a schedule the release set fires once.
+
+```sh
+cd nightly
+pnpm run upgrade
+```
