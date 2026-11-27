@@ -19,14 +19,17 @@ async function resetDuringTurn(
   name: string,
   chunksBeforeReset: number,
   answer?: { continue?: boolean; persist?: boolean },
-  options?: { holdRecovery?: boolean }
+  options?: { holdRecovery?: boolean; openedStream?: boolean }
 ) {
   const room = `${name}-${crypto.randomUUID()}`;
   const agent = () => getAgentByName(env.ThinkTestAgent, room);
   if (answer) await (await agent()).answerRecoveryForTest(answer);
   if (options?.holdRecovery) await (await agent()).holdRecoveryOnceForTest();
   const startedAt = Date.now();
-  if (chunksBeforeReset === 0) {
+  if (options?.openedStream) {
+    // A stream opens, and its first chunk is slow to come.
+    await (await agent()).useSlowModelForTest(["late "], 5_000);
+  } else if (chunksBeforeReset === 0) {
     // No stream at all: the model call waits on the provider.
     await (await agent()).hangModelAtConnectForTest();
   } else {
@@ -46,6 +49,7 @@ async function resetDuringTurn(
   ws.accept();
   const requestId = crypto.randomUUID();
   let chunks = 0;
+  let opened = false;
   ws.addEventListener("message", (event) => {
     const frame = JSON.parse(String(event.data)) as {
       type?: string;
@@ -53,6 +57,7 @@ async function resetDuringTurn(
       done?: boolean;
     };
     if (frame.type !== "cf_agent_use_chat_response" || frame.done) return;
+    opened = true;
     if (frame.body?.includes("text-delta")) chunks++;
   });
   ws.send(
@@ -78,9 +83,11 @@ async function resetDuringTurn(
   await vi.waitFor(
     async () => {
       expect(
-        chunksBeforeReset === 0
-          ? await (await agent()).modelConnectingForTest()
-          : chunks >= chunksBeforeReset
+        options?.openedStream
+          ? opened && chunks === 0
+          : chunksBeforeReset === 0
+            ? await (await agent()).modelConnectingForTest()
+            : chunks >= chunksBeforeReset
       ).toBe(true);
     },
     { timeout: 10_000, interval: 10 }
@@ -487,6 +494,23 @@ describe("chat recovery, through public behaviour", () => {
 
     // Successors of the pre-stream retry tests (think-session, "Think —
     // onChatRecovery"): a turn cut off before its first chunk is asked again.
+    it("answers a turn a reset cut off after its stream opened but before any text", async () => {
+      const { agent } = await resetDuringTurn("retry-opened", 0, undefined, {
+        openedStream: true
+      });
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(
+        messages[1]?.parts.some(
+          (part) => part.type === "text" && (part.text ?? "").length > 0
+        )
+      ).toBe(true);
+    }, 30_000);
+
     it("answers a turn a reset cut off before its first chunk, with its user message once", async () => {
       const { agent } = await resetDuringTurn("retry-pre-stream", 0);
       const messages = await settle(agent);

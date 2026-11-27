@@ -463,5 +463,14 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > retries a regeneration a reset cut off before its first chunk as a new branch, keeping the earlier answer"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > retries an interrupted opened stream with no assistant content",
+    "reason": "an interrupted turn built from seeded private stream rows with no text, recovered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > answers a turn a reset cut off after its stream opened but before any text"
+    }
   }
 ]
