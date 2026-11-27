@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { LifecycleJob } from "../../lifecycle/job-queue";
 import {
   backdateTaskWake,
@@ -77,15 +77,34 @@ async function seedDoomedRun(
       status: "pending",
       nextAt: Date.now() - 1_000
     });
-    await instance.lifecycle.rearmAlarm();
+    // Armed a minute out: only `driveOomWake`'s forced run drives it.
+    await state.storage.setAlarm(Date.now() + 60_000);
   });
 }
 
-/** Fire the alarm and let the breaker's deferred isolate reset land. */
-async function driveOomWake(name: string) {
+/** The breaker's own counters, read without starting the Lifecycle. */
+async function breakerCounters(name: string) {
   const stub = env.TaskHarnessObject.getByName(name);
+  return runInDurableObject(stub, async (_instance, state) => ({
+    strikes: (await state.storage.get<number>(OOM_STRIKES_KEY)) ?? 0,
+    budget: (await state.storage.get<number>("oomLoopRemaining")) ?? 0
+  }));
+}
+
+/**
+ * Fire the alarm, then wait until the attempt it ran has left its mark: a
+ * strike or a spent budget. `{ expectChange: false }` for a run that must
+ * not run again.
+ */
+async function driveOomWake(
+  name: string,
+  { expectChange = true }: { expectChange?: boolean } = {}
+): Promise<boolean> {
+  const stub = env.TaskHarnessObject.getByName(name);
+  const before = await breakerCounters(name);
+  let ran = true;
   try {
-    await runDurableObjectAlarm(stub);
+    ran = await runDurableObjectAlarm(stub);
   } catch (error) {
     // workerd may surface the intentional breaker reset to the test caller.
     // The durable strike/backoff writes landed before this reset was armed.
@@ -96,7 +115,17 @@ async function driveOomWake(name: string) {
       throw error;
     }
   }
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (!expectChange) return ran;
+  await vi.waitFor(
+    async () => {
+      const now = await breakerCounters(name);
+      expect(
+        now.strikes !== before.strikes || now.budget !== before.budget
+      ).toBe(true);
+    },
+    { timeout: 8000, interval: 25 }
+  );
+  return ran;
 }
 
 /** Backdate the run and its mirror wake so the next alarm drives it again. */
@@ -115,7 +144,8 @@ async function makeRunDue(name: string, runId: string) {
       past,
       `task:${runId}`
     );
-    await instance.lifecycle.rearmAlarm();
+    // Armed a minute out: only `driveOomWake`'s forced run drives it.
+    await state.storage.setAlarm(Date.now() + 60_000);
   });
 }
 
@@ -447,7 +477,8 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
           status: "pending",
           nextAt: future
         });
-        await instance.lifecycle.rearmAlarm();
+        // Armed a minute out: only `driveOomWake`'s forced run drives it.
+        await state.storage.setAlarm(Date.now() + 60_000);
       }
     );
 
@@ -654,8 +685,15 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
     expect(view.strikes).toBe(0);
     expect(view.budget).toBe(7);
 
-    // A later clean alarm cycle must not revive it.
-    await driveOomWake(name);
+    // A later clean alarm cycle must not revive it. Sealing removed the last
+    // wake, and with it the alarm, so arm one for the cycle to run.
+    await runInDurableObject(
+      env.TaskHarnessObject.getByName(name),
+      async (_instance, state) => {
+        await state.storage.setAlarm(Date.now() + 60_000);
+      }
+    );
+    expect(await driveOomWake(name, { expectChange: false })).toBe(true);
     const after = await readBreakerView(name, "oom-2");
     expect(after.run?.status).toBe("error");
     expect(after.budget).toBe(7);
