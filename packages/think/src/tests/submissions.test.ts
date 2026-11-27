@@ -12,6 +12,8 @@ import type {
 } from "../think";
 
 type ThinkSubmissionTestStub = {
+  holdRecoveryOnceForTest(): Promise<void>;
+  recoveryHeldForTest(): Promise<boolean>;
   holdChunksAfterResetForTest(
     chunks: string[],
     delayMs: number,
@@ -721,6 +723,47 @@ describe("Think durable submissions", () => {
       ).toBe(true);
       expect(done?.messageId).toBe(stored[1].id);
     }, 30_000);
+
+    // Successor of think-session's "leaves the recovered submission
+    // `running` on a deferral so the re-run picks it up": the platform cuts
+    // the recovery attempt (a reset while onChatRecovery runs).
+    it("stays running when a reset also cuts its recovery, then completes once", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.holdRecoveryOnceForTest();
+      await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("interrupt me twice", {
+        submissionId: "sub-cut-twice"
+      });
+      await chunkStreamHeld(agent);
+      await agent.resetIsolateForTest().catch(() => {});
+      const recovering = await freshAgent(name);
+      await vi.waitFor(
+        async () => expect(await recovering.recoveryHeldForTest()).toBe(true),
+        { timeout: 10_000, interval: 20 }
+      );
+      await expect(
+        recovering.inspectSubmissionForTest("sub-cut-twice")
+      ).resolves.toMatchObject({ status: "running" });
+      await recovering.resetIsolateForTest().catch(() => {});
+
+      const restarted = await freshAgent(name);
+      await expect(
+        restarted.waitForSubmissionForTest("sub-cut-twice", {
+          timeoutMs: 15_000
+        })
+      ).resolves.toMatchObject({ status: "completed" });
+      await tasksIdle(restarted);
+      // Completed once: one question, one reply.
+      const stored = (await restarted.getStoredMessages()) as Array<{
+        role: string;
+      }>;
+      expect(stored.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+    }, 40_000);
 
     it("stays aborted when it is cancelled while its reply is being recovered", async () => {
       const name = crypto.randomUUID();
