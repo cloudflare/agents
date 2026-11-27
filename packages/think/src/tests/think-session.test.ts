@@ -3491,6 +3491,14 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(result.after).toMatchObject({ requestId: "earlier-failure" });
   });
 
+  it("runTurn: a turn asked for while a stop is in progress is stopped by the next stop, before it builds anything", async () => {
+    const agent = await freshAgent("run-turn-between-stops");
+    expect(await agent.runTurnBetweenStopsForTest()).toEqual({
+      status: "aborted",
+      modelCalls: 0
+    });
+  });
+
   it("a turn saved straight after a reset is not stopped by it", async () => {
     const agent = await freshProgrammaticAgent("save-after-reset");
     expect(await agent.saveRightAfterResetForTest()).toBe("completed");
