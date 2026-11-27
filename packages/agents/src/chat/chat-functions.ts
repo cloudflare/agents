@@ -351,10 +351,17 @@ export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
       id: run.runId,
       metadata: deps.tasks.peek(run.runId)?.metadata
     }));
+  // A tab waiting for a stream learns at once that none is coming (the
+  // clear waits for a running turn to stop, which can take a while).
+  const parked = parkedIn(deps.streams, deps.session ?? "");
+  if (parked.size > 0) {
+    releaseParked(parked, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
+  }
   await deps.tasks.clear(lane.lane, "chat cleared");
   for (const run of unstarted) {
     endUnstarted(deps, run.id, "skipped", run.metadata);
   }
+
   for (const turn of retrying) await turn.settle(false);
   await deps.sessions.session(deps.session ?? "").clearMessages();
   continueRequestsOf(deps.streams).clear();

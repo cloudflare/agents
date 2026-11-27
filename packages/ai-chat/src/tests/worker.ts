@@ -1563,8 +1563,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return continuationStateForTest(this);
   }
 
-  getLatestStreamStatusForTest(): string | null {
-    return this._replyStreams.getAllStreamMetadata()[0]?.status ?? null;
+  /** How turn `requestId` ended, as the chat recorded its end frame. */
+  getTurnOutcomeForTest(requestId: string): string | null {
+    return (
+      recentChatTerminal(this.ctx.storage.kv, [requestId])?.outcome ?? null
+    );
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {

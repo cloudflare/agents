@@ -1313,7 +1313,11 @@ describe("Client tools continuation", () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       await agentStub.waitForIdleForTest();
 
-      expect(await agentStub.getLatestStreamStatusForTest()).toBe("error");
+      expect(
+        await agentStub.getTurnOutcomeForTest(
+          activeContinuation!.activeRequestId!
+        )
+      ).toBe("error");
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
       expect(await agentStub.getContinuationStateForTest()).toEqual({
         hasPending: false,

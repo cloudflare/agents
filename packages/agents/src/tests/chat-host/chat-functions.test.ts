@@ -2659,4 +2659,40 @@ describe("chat functions over a minimal host", () => {
       expect(other).toEqual([{ type: "cf_agent_stream_resume_none" }]);
     });
   });
+
+  it("a clear tells a tab waiting for a stream at once that none is coming", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const respond = instance.host.respond;
+      (instance.host as { respond: typeof respond }).respond = async (call) => {
+        await gate;
+        return respond(call);
+      };
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r1", "u1", "Hi")
+      );
+      const sent: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-w", sent)
+      );
+      // The clear waits for the turn, which waits on its model.
+      const cleared = clearChat(instance.deps, instance.lane);
+      await vi.waitFor(() =>
+        expect(sent.map((frame) => frame.type)).toEqual([
+          "cf_agent_stream_pending",
+          "cf_agent_stream_resume_none"
+        ])
+      );
+      release();
+      await cleared;
+    });
+  });
 });
