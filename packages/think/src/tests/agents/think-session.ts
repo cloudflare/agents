@@ -3115,6 +3115,26 @@ export class ThinkTestAgent extends Think {
   }
 
   /** Like `setTurnConfigOutputText`, with an `Output.object` spec. */
+  /** A schema whose transform makes the answer a bigint. */
+  async setTurnConfigOutputBigInt(): Promise<void> {
+    this._turnConfigOverride = {
+      output: Output.object({
+        schema: z.object({
+          answer: z.string().transform((value) => BigInt(value))
+        }),
+        name: "Answer"
+      }),
+      activeTools: []
+    };
+  }
+
+  /** A wait-mode turn's output answer, as its type and its text. */
+  async runTurnOutputAnswerForTest(input: string): Promise<string> {
+    const result = await this.runTurn({ input });
+    const answer = (result as { output?: { answer?: unknown } }).output?.answer;
+    return `${typeof answer} ${String(answer)}`;
+  }
+
   async setTurnConfigOutputObject(): Promise<void> {
     this._turnConfigOverride = {
       output: Output.object({
