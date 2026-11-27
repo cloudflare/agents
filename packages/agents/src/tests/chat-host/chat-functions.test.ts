@@ -390,18 +390,15 @@ describe("chat functions over a minimal host", () => {
         };
         return handle;
       };
+      const sent: Array<Record<string, unknown>> = [];
+      // The tab that answers is the one that asks to resume.
+      const answering = recordingTab("tab-a", sent);
       const answered = answerTool(instance.deps, instance.lane, {
         kind: "result",
         toolCallId: "c1",
         output: { ok: true }
       });
-      const sent: Array<Record<string, unknown>> = [];
-      await resumeChat(
-        instance.deps,
-        instance.lane,
-        recordingTab("tab-a", sent),
-        "p2"
-      );
+      await resumeChat(instance.deps, instance.lane, answering, "p2");
       expect(sent).toEqual([
         { type: "cf_agent_stream_pending", probeId: "p2" }
       ]);
@@ -692,19 +689,16 @@ describe("chat functions over a minimal host", () => {
         return handle;
       };
       const done = instance.nextResult();
+      const sent: Array<Record<string, unknown>> = [];
+      // The tab that answers is the one that asks to resume.
+      const answering = recordingTab("tab-h", sent);
       const answered = answerTool(
         instance.deps,
         instance.lane,
         { kind: "result", toolCallId: "c1", output: { ok: true } },
-        { autoContinue: true }
+        { autoContinue: true, connection: answering }
       );
-      const sent: Array<Record<string, unknown>> = [];
-      await resumeChat(
-        instance.deps,
-        instance.lane,
-        recordingTab("tab-h", sent),
-        "p3"
-      );
+      await resumeChat(instance.deps, instance.lane, answering, "p3");
       release();
       await answered;
       const result = await done;
@@ -2614,6 +2608,55 @@ describe("chat functions over a minimal host", () => {
       expect(
         asked.some((frame) => frame.type === "cf_agent_chat_messages")
       ).toBe(false);
+    });
+  });
+
+  it("a tab that did not answer is told there is nothing to resume while another tab's continuation waits", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const respond = instance.host.respond;
+      (instance.host as { respond: typeof respond }).respond = async (call) => {
+        await gate;
+        return respond(call);
+      };
+      const answeredBy: Array<Record<string, unknown>> = [];
+      const other: Array<Record<string, unknown>> = [];
+      const done = instance.nextResult();
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c1", output: {} },
+        { autoContinue: true, connection: recordingTab("tab-a", answeredBy) }
+      );
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-b", other)
+      );
+      release();
+      await done;
+      expect(other).toEqual([{ type: "cf_agent_stream_resume_none" }]);
     });
   });
 });

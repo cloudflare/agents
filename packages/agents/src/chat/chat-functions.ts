@@ -670,9 +670,28 @@ export async function resumeChat(
     results: false,
     order: "oldest"
   });
+  // A continuation is the answering tab's to wait on: another tab stays on
+  // the live frames every tab gets, and is told there is nothing to resume.
+  const parkedNow = parkedIn(deps.streams, deps.session ?? "");
+  const continuationOnly =
+    waiting !== undefined &&
+    deps.tasks.inputOf<ChatTurnInput>(waiting.runId)?.trigger ===
+      "tool-answer" &&
+    !parkedNow.has(connection.id);
+  if (continuationOnly) {
+    endOthers();
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
+        ...(probeId && { probeId })
+      })
+    );
+    return;
+  }
   if (waiting || (answeringIn(deps).get(deps.session ?? "") ?? 0) > 0) {
     endOthers();
-    const parked = parkedIn(deps.streams, deps.session ?? "");
+    const parked = parkedNow;
     // A tab whose socket closed while it waited is dropped here; the rest
     // are answered when the turn streams or ends, or the answer is applied.
     for (const [id, tab] of parked) {
