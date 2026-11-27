@@ -3457,17 +3457,30 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                   toolCallId,
                   scope
                 ),
-                onPreliminary: (output) =>
+                onPreliminary: (output) => {
+                  const chunk: UIMessageChunk = {
+                    type: "tool-output-available",
+                    toolCallId,
+                    output,
+                    preliminary: true
+                  };
                   this.#events.emit(session, {
                     type: "chunk",
                     operationId,
-                    chunk: {
-                      type: "tool-output-available",
-                      toolCallId,
-                      output,
-                      preliminary: true
-                    }
-                  })
+                    chunk
+                  });
+                  // The host's `onChunk` hears a tool's progress too, as
+                  // it hears the model's chunks.
+                  try {
+                    this.#options.hooks?.onChunk?.({
+                      session,
+                      operationId,
+                      chunk
+                    });
+                  } catch (error) {
+                    console.error("ThinkHarness onChunk hook failed", error);
+                  }
+                }
               });
               // A tool that parks is aborted; what it returns is dropped.
               running.catch(() => {});

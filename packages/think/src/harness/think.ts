@@ -972,21 +972,22 @@ export class Think<
         onChunk: ({ chunk, operationId }) => {
           this.#streamed.add(operationId);
           this.#noteLiveCall(operationId, chunk);
-          // A snapshot reads a delta's text as `text`, as a stream part has it.
-          const text = "delta" in chunk ? chunk.delta : undefined;
+          // The AI SDK's stream part, which Think gives its extensions and
+          // `onChunk` alike.
+          const part = streamPartOf(chunk, this.#callsOf(operationId), (id) =>
+            this.#storedCall(id)
+          );
           // In order, one after another, as Think awaits each chunk's hooks.
           this.#chunkHooks = this.#chunkHooks
             .then(() =>
               this.#extensionHooks.chunk({
-                chunk: text === undefined ? chunk : { ...chunk, text }
+                chunk: part
               } as unknown as ChunkContext)
             )
             .catch((error: unknown) =>
               console.error("[Think] An extension's onChunk failed", error)
             );
-          void this.onChunk({
-            chunk: streamPartOf(chunk, this.#callsOf(operationId))
-          } as unknown as ChunkContext);
+          void this.onChunk({ chunk: part } as unknown as ChunkContext);
         },
         onTurnEnd: async (end) => {
           // Its messenger context, for its response hook, taken first so it
@@ -2428,6 +2429,23 @@ export class Think<
     string,
     Map<string, { toolName: string; input: unknown }>
   >();
+
+  /**
+   * A call the transcript holds already, as one approved before its turn
+   * runs it: its tool and input.
+   */
+  #storedCall(
+    toolCallId: string
+  ): { toolName: string; input: unknown } | undefined {
+    for (let i = this.#transcript.messages.length - 1; i >= 0; i--) {
+      for (const part of this.#transcript.messages[i].parts) {
+        if (isToolUIPart(part) && part.toolCallId === toolCallId) {
+          return { toolName: getToolName(part), input: part.input };
+        }
+      }
+    }
+    return undefined;
+  }
 
   #callsOf(operationId: string) {
     let calls = this.#toolCalls.get(operationId);
@@ -4879,9 +4897,30 @@ function systemText(value: unknown): string | undefined {
  */
 function streamPartOf(
   chunk: UIMessageChunk,
-  calls: Map<string, { toolName: string; input: unknown }>
+  calls: Map<string, { toolName: string; input: unknown }>,
+  stored: (
+    toolCallId: string
+  ) => { toolName: string; input: unknown } | undefined
 ): unknown {
+  const named = (toolCallId: string) =>
+    calls.get(toolCallId) ?? stored(toolCallId);
   switch (chunk.type) {
+    case "tool-input-error":
+      // The AI SDK reports a call it couldn't parse as an invalid call.
+      calls.set(chunk.toolCallId, {
+        toolName: chunk.toolName,
+        input: chunk.input
+      });
+      return {
+        type: "tool-call",
+        toolCallId: chunk.toolCallId,
+        toolName: chunk.toolName,
+        input: chunk.input,
+        invalid: true,
+        error: chunk.errorText,
+        ...(chunk.providerExecuted && { providerExecuted: true }),
+        ...(chunk.dynamic && { dynamic: true })
+      };
     case "tool-input-start":
       return {
         type: "tool-input-start",
@@ -4913,7 +4952,7 @@ function streamPartOf(
       return {
         type: "tool-result",
         toolCallId: chunk.toolCallId,
-        ...calls.get(chunk.toolCallId),
+        ...named(chunk.toolCallId),
         output: chunk.output,
         ...(chunk.preliminary && { preliminary: true })
       };
@@ -4921,7 +4960,7 @@ function streamPartOf(
       return {
         type: "tool-error",
         toolCallId: chunk.toolCallId,
-        ...calls.get(chunk.toolCallId),
+        ...named(chunk.toolCallId),
         error: chunk.errorText
       };
     default:
