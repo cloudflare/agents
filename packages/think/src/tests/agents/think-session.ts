@@ -787,6 +787,27 @@ function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
   };
 }
 
+/**
+ * A mock model that tells `record` the system prompt each call is sent:
+ * what a turn actually sends, read the same way on both test configs.
+ */
+function systemRecordingModel(
+  response: () => string,
+  record: (system: string | undefined) => void
+): LanguageModel {
+  return createMockModel((options) => {
+    const first = options.prompt?.[0];
+    record(
+      first?.role === "system"
+        ? typeof first.content === "string"
+          ? first.content
+          : (first.content ?? []).map((part) => part.text ?? "").join("")
+        : undefined
+    );
+    return response();
+  });
+}
+
 /** Typed model-call subset used by prompt-sensitive test models. */
 export type MockModelCallOptions = {
   prompt?: Array<{
@@ -7587,8 +7608,20 @@ export class ThinkSessionTestAgent extends Think {
     ];
   }
 
+  /** The system prompt the latest model call was sent. */
+  protected _lastSystemPrompt: string | undefined;
+
   override getModel(): LanguageModel {
-    return createMockModel(this._response);
+    return systemRecordingModel(
+      () => this._response,
+      (system) => {
+        this._lastSystemPrompt = system;
+      }
+    );
+  }
+
+  async getLastSystemPromptForTest(): Promise<string | undefined> {
+    return this._lastSystemPrompt;
   }
 
   async setResponse(response: string): Promise<void> {
@@ -7674,8 +7707,19 @@ export class ThinkSessionTestAgent extends Think {
 // overridden getSystemPrompt() is fallback-only and should warn.
 
 export class ThinkSystemPromptSkillsWarningAgent extends Think {
+  private _lastSystemPrompt: string | undefined;
+
   override getModel(): LanguageModel {
-    return createMockModel("Skills warning response");
+    return systemRecordingModel(
+      () => "Skills warning response",
+      (system) => {
+        this._lastSystemPrompt = system;
+      }
+    );
+  }
+
+  async getLastSystemPromptForTest(): Promise<string | undefined> {
+    return this._lastSystemPrompt;
   }
 
   override getSystemPrompt(): string {
@@ -7843,8 +7887,19 @@ export class ThinkAsyncConfigSessionAgent extends Think {
     ];
   }
 
+  private _lastSystemPrompt: string | undefined;
+
   override getModel(): LanguageModel {
-    return createMockModel("Async session agent response");
+    return systemRecordingModel(
+      () => "Async session agent response",
+      (system) => {
+        this._lastSystemPrompt = system;
+      }
+    );
+  }
+
+  async getLastSystemPromptForTest(): Promise<string | undefined> {
+    return this._lastSystemPrompt;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
