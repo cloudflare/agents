@@ -148,6 +148,15 @@ import type {
   SaveMessagesResult
 } from "agents/chat";
 import { nanoid } from "nanoid";
+import {
+  chatDispatch,
+  chatTurnDefinition,
+  parseProtocolMessage,
+  type ChatArrival,
+  type ChatDeps,
+  type ChatHost,
+  type ChatLane
+} from "agents/chat";
 
 // Re-export lifecycle types from the shared chat toolkit so existing
 // consumers (`import type { ChatResponseResult } from "@cloudflare/ai-chat"`)
@@ -852,6 +861,99 @@ export class AIChatAgent<
     inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt
   });
 
+  /** The Task definition each chat turn runs as (the chat module's). */
+  static readonly CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
+
+  /** Whether each running call continues a reply, for `onChatResponse`. */
+  private readonly _callContinues = new Map<string, boolean>();
+
+  /** What the chat module is given: the agent's capabilities and its tabs. */
+  private _chatDeps(): ChatDeps {
+    return {
+      tasks: this.tasks,
+      streams: this.streams,
+      sessions: this.sessions,
+      kv: this.ctx.storage.kv,
+      webSockets: { getConnections: () => this.getConnections() }
+    };
+  }
+
+  /** The chat's lane: one turn at a time, joined as `messageConcurrency` says. */
+  private _chatLane(): ChatLane {
+    const concurrency = this.messageConcurrency;
+    const arrival: ChatArrival =
+      typeof concurrency === "object"
+        ? {
+            debounceMs:
+              concurrency.debounceMs ?? AIChatAgent.MESSAGE_DEBOUNCE_MS
+          }
+        : concurrency;
+    return {
+      definition: AIChatAgent.CHAT_TURN_DEFINITION,
+      lane: "chat",
+      arrival
+    };
+  }
+
+  /** How the chat module asks this agent for a reply and tells it the end. */
+  private _chatHost(): ChatHost {
+    const recovery = this.chatRecovery;
+    return {
+      respond: async (call) => {
+        // Apps read the transcript the call is for from `this.messages`.
+        this.messages = [...call.messages] as UIMessage[];
+        this._callContinues.set(call.requestId, call.mode === "continue");
+        return this.onChatMessage(async () => {}, {
+          requestId: call.requestId,
+          abortSignal: call.signal,
+          clientTools: [...call.clientTools],
+          ...(call.body !== undefined && { body: { ...call.body } }),
+          continuation: call.mode === "continue"
+        });
+      },
+      hooks: {
+        onResponse: async (result) => {
+          const continuation =
+            this._callContinues.get(result.requestId) ?? false;
+          this._callContinues.delete(result.requestId);
+          this.messages = (await this.#session.getHistory()) as UIMessage[];
+          if (result.status === "skipped") return;
+          const message =
+            result.messageId !== undefined
+              ? ((await this.#session.getMessage(
+                  result.messageId
+                )) as UIMessage | null)
+              : null;
+          if (!message) return;
+          await this.onChatResponse({
+            message,
+            requestId: result.requestId,
+            continuation,
+            status: result.status,
+            ...(result.error !== undefined && { error: result.error })
+          });
+        },
+        sanitizeForPersistence: (message) =>
+          this._sanitizeMessageForPersistence(message),
+        onRecovery: (context) => this.onChatRecovery(context)
+      },
+      options: {
+        hydrationByteBudget: this.hydrationByteBudget,
+        ...(this.maxPersistedMessages !== undefined && {
+          maxPersistedMessages: this.maxPersistedMessages
+        }),
+        recovery:
+          typeof recovery === "object"
+            ? {
+                ...(recovery.maxAttempts !== undefined && {
+                  maxAttempts: recovery.maxAttempts
+                })
+              }
+            : {}
+      }
+    };
+  }
+
   /**
    * Register the shared chat-turn and chat-recovery Task definitions (see
    * `agents/chat` `createChatTurnTaskDefinition` for the turn logic): the
@@ -884,6 +986,13 @@ export class AIChatAgent<
           this._turns.backingOff(runId, requestId, waiting),
         holdParksUntil: (reply) => this._turns.holdParksUntil(reply),
         attempts
+      })
+    );
+    // The chat module's turn definition: every new turn runs here.
+    this.tasks.register(
+      AIChatAgent.CHAT_TURN_DEFINITION,
+      chatTurnDefinition(this._chatDeps(), this._chatHost(), {
+        name: AIChatAgent.CHAT_TURN_DEFINITION
       })
     );
     // The recovery Task, which only finishes runs an earlier version
@@ -1188,11 +1297,26 @@ export class AIChatAgent<
       enqueueInteraction: (run) => this._enqueueInteractionApply(run)
     };
     this.onMessage = async (connection: Connection, message: WSMessage) => {
-      if (
-        !this._cf_connectionTargetsSubAgent(connection) &&
-        (await dispatchChatProtocol(connection, message, protocol))
-      ) {
-        return;
+      if (!this._cf_connectionTargetsSubAgent(connection)) {
+        // The chat module answers the chat protocol; a clear and a tab's
+        // transcript push are this agent's.
+        const event =
+          typeof message === "string" ? parseProtocolMessage(message) : null;
+        if (
+          event &&
+          event.type !== "clear" &&
+          event.type !== "messages" &&
+          typeof message === "string" &&
+          (await chatDispatch(
+            this._chatDeps(),
+            this._chatLane(),
+            connection,
+            message
+          ))
+        ) {
+          return;
+        }
+        if (await dispatchChatProtocol(connection, message, protocol)) return;
       }
       return _onMessage(connection, message);
     };

@@ -15,7 +15,6 @@ import type { Streams } from "../streams/streams";
 import type { Tasks } from "../tasks/tasks";
 import type { TaskCheckpoint, TaskStep, TaskValue } from "../tasks/types";
 import type { StreamWriter } from "../streams/types";
-import type { WebSockets } from "../websockets/websockets";
 import type { Connection } from "agents";
 import type { ClientToolSchema } from "./client-tools";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
@@ -43,7 +42,7 @@ export interface ChatDeps {
    * The tabs the chat's frames go to. Absent for a host that owns no
    * sockets (a harness inside an agent).
    */
-  readonly webSockets?: Pick<WebSockets, "getConnections">;
+  readonly webSockets?: { getConnections(): Iterable<Connection> };
   /** The Sessions session the chat's transcript is in. */
   readonly session?: string;
   /**
