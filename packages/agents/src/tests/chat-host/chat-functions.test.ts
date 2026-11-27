@@ -1544,21 +1544,30 @@ describe("chat functions over a minimal host", () => {
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await instance.lifecycle.start();
       const sent: Array<Record<string, unknown>> = [];
+      const other: Array<Record<string, unknown>> = [];
+      const sender = recordingTab("tab-x", sent);
       const deps = {
         ...instance.deps,
         webSockets: {
-          getConnections: () => [recordingTab("tab-x", sent)]
+          getConnections: () => [sender, recordingTab("tab-y", other)]
         } as never
       };
       const lane = { ...instance.lane, arrival: "drop" as const };
       const finish = await holdFirstTurn(instance, lane);
-      await chatDispatch(deps, lane, tab, chatRequestWith("r2", "u2", "two"));
+      await chatDispatch(
+        deps,
+        lane,
+        sender,
+        chatRequestWith("r2", "u2", "two")
+      );
       await finish();
       expect(instance.calls.map((c) => c.requestId)).toEqual(["r1"]);
       expect(await instance.sessions.session("s1").getMessage("u2")).toBeNull();
+      // The tab that sent it is told; another tab never saw it.
       expect(sent).toContainEqual(
         expect.objectContaining({ id: "r2", done: true, outcome: "skipped" })
       );
+      expect(other.filter((frame) => frame.id === "r2")).toEqual([]);
     });
   });
 

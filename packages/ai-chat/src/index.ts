@@ -155,7 +155,8 @@ import {
   type ChatArrival,
   type ChatDeps,
   type ChatHost,
-  type ChatLane
+  type ChatLane,
+  type ChatTurnInput
 } from "agents/chat";
 
 // Re-export lifecycle types from the shared chat toolkit so existing
@@ -1150,7 +1151,7 @@ export class AIChatAgent<
       // sent the message list, so it knows which messages are queued.
       // The HTTP transcript has the stored messages only; this list names
       // the queued ones, which a tab keeps apart and draws last.
-      if (this._turns.queuedMessageIds().size > 0) {
+      if (this._queuedMessageIds().size > 0) {
         this._frames.send(connection, {
           type: MessageType.CF_AGENT_CHAT_MESSAGES,
           connect: true,
@@ -1280,7 +1281,7 @@ export class AIChatAgent<
       messages: async (connection, messages) => {
         // A message a waiting request holds is stored when its turn
         // starts, not because a tab sent it back.
-        const queued = this._turns.queuedMessageIds();
+        const queued = this._queuedMessageIds();
         const transformedMessages = autoTransformMessages(messages).filter(
           (message) => !queued.has(message.id)
         );
@@ -1774,7 +1775,7 @@ export class AIChatAgent<
     // starts: a turn answers its own question, and the turn running now
     // never sees it. Messages other waiting requests hold are theirs, even
     // when this tab drew them and sent them back.
-    const queued = transformedMessages ? this._turns.queuedMessageIds() : null;
+    const queued = transformedMessages ? this._queuedMessageIds() : null;
     const sent = transformedMessages?.filter((m) => !queued?.has(m.id)) ?? [];
     const heldIds = new Set(
       newUserMessageIds(
@@ -2193,6 +2194,20 @@ export class AIChatAgent<
         return state === "input-available" || state === "approval-requested";
       })
     );
+  }
+
+  /**
+   * The ids of the messages the chat's waiting turns hold: questions not
+   * stored yet, which a turn stores when it starts.
+   */
+  protected _queuedMessageIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const run of this._openChatTurns()) {
+      if (run.status !== "pending") continue;
+      const input = this.tasks.inputOf<ChatTurnInput>(run.runId);
+      for (const message of input?.messages ?? []) ids.add(message.id);
+    }
+    return ids;
   }
 
   /** The chat's turns that wait or run in its lane. */

@@ -845,8 +845,9 @@ export function chatTurnDefinition(
       await session.upsertMessage(message as never);
     }
     // The run ends aborted, as a stop of a running turn does.
+    // Its tab was told it ended when it was stopped.
     if (stopped) {
-      await report({ requestId, status: "aborted" });
+      await host.hooks?.onResponse?.({ requestId, status: "aborted" });
       return TaskSettlement.aborted("chat turn cancelled");
     }
     const earlier = await deps.streams.status(streamId);

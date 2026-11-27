@@ -95,7 +95,7 @@ export async function submitTurn(
   // already hold as they are, since a tab sends its whole list.
   const fresh: UIMessage[] = [];
   const arrival = options.arrival ?? "queue";
-  const replaced: string[] = [];
+  const replaced: Array<{ id: string; origin: string | undefined }> = [];
   // A turn that replaces the waiting ones answers their questions too: it
   // carries their messages, which they would have stored when they started.
   if (arrival !== "queue" && arrival !== "drop") {
@@ -112,7 +112,10 @@ export async function submitTurn(
       ) {
         continue;
       }
-      replaced.push(waiting.runId);
+      replaced.push({
+        id: waiting.runId,
+        origin: originOf(deps.tasks.peek(waiting.runId)?.metadata)
+      });
       for (const message of deps.tasks.inputOf<ChatTurnInput>(waiting.runId)
         ?.messages ?? []) {
         if (!(input.messages ?? []).some((m) => m.id === message.id)) {
@@ -206,28 +209,52 @@ export async function submitTurn(
     if (options.signal.aborted) stop();
     else options.signal.addEventListener("abort", stop, { once: true });
   }
-  // The tabs learn that a replaced or dropped request ended without a
-  // reply (its turn never runs to say so).
-  for (const id of dropped ? [receipt.runId] : replaced) {
-    const text = frameText({
-      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-      id,
-      body: "",
-      done: true,
-      outcome: "skipped"
-    } as { type: string });
-    recordRecentChatTerminal(deps.kv, {
-      id,
-      body: "",
-      done: true,
-      outcome: "skipped"
-    });
-    if (text === undefined || !deps.webSockets) continue;
-    for (const connection of deps.webSockets.getConnections()) {
-      sendIfOpen(connection, text);
+  // The tab that sent a replaced or dropped request learns it ended
+  // without a reply (its turn never runs to say so).
+  if (dropped) {
+    endUnstarted(deps, receipt.runId, "skipped", originOf(options.metadata));
+  } else {
+    for (const run of replaced) {
+      endUnstarted(deps, run.id, "skipped", run.origin);
     }
   }
   return { requestId: receipt.runId, ...(dropped && { dropped: true }) };
+}
+
+/** The tab that sent a request, as its run's metadata records it. */
+function originOf(
+  metadata: Readonly<Record<string, unknown>> | undefined
+): string | undefined {
+  const origin = (metadata?.chat as { origin?: unknown } | undefined)?.origin;
+  return typeof origin === "string" ? origin : undefined;
+}
+
+/**
+ * A request that ends without its turn running (stopped, replaced or
+ * dropped before it started): its end goes to the tab that sent it (to every
+ * tab when no tab sent it), and is kept for a tab that comes back.
+ */
+function endUnstarted(
+  deps: ChatDeps,
+  requestId: string,
+  outcome: "skipped" | "aborted",
+  origin: string | undefined
+): void {
+  const frame = {
+    type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+    id: requestId,
+    body: "",
+    done: true,
+    outcome
+  };
+  recordRecentChatTerminal(deps.kv, frame);
+  const text = frameText(frame as { type: string });
+  if (text === undefined || !deps.webSockets) return;
+  for (const connection of deps.webSockets.getConnections()) {
+    if (origin === undefined || connection.id === origin) {
+      sendIfOpen(connection, text);
+    }
+  }
 }
 
 /** Stop the turn `requestId`, waiting or running. */
@@ -239,11 +266,16 @@ export async function cancelTurn(
   // A turn stopped before it started keeps its place in the lane: when its
   // turn comes it stores its question, unanswered, and ends (the mark is on
   // its run, so a reset keeps it).
+  // Its tab learns at once that it ended.
   const record = deps.tasks.peek(requestId);
   if (record?.status === "pending" && record.attempt === 0) {
-    return deps.tasks.patchMetadata(requestId, STOPPED_METADATA.key, {
+    const marked = deps.tasks.patchMetadata(requestId, STOPPED_METADATA.key, {
       [STOPPED_METADATA.field]: true
     });
+    if (marked) {
+      endUnstarted(deps, requestId, "aborted", originOf(record.metadata));
+    }
+    return marked;
   }
   const retrying = retryingTurn(deps, requestId);
   const cancelled = await deps.tasks.cancel(requestId, reason);
@@ -669,6 +701,8 @@ export async function chatDispatch(
         },
         {
           requestId: request.requestId,
+          // The tab that sent it, for an end its turn never sends.
+          metadata: { chat: { origin: connection.id } },
           ...(request.trigger === "submit-message" &&
             lane.arrival && { arrival: lane.arrival })
         }
