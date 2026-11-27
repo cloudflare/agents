@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "..";
 import type { TestRetryAgent } from "./agents/retry";
 
@@ -77,7 +77,7 @@ describe("retry integration", () => {
     it("retries queue callback and succeeds", async () => {
       const stub = await getAgentByName(
         env.TestRetryAgent,
-        "queue-retry-succeed"
+        `queue-retry-succeed-${crypto.randomUUID()}`
       );
       await stub.enqueueWithRetry(3, {
         maxAttempts: 5,
@@ -85,19 +85,18 @@ describe("retry integration", () => {
         maxDelayMs: 10
       });
 
-      // Queue flushing runs as a fire-and-forget background task (not alarm-based).
-      // Wait briefly for the retry loop to complete before reading results.
-      await new Promise((r) => setTimeout(r, 100));
-
-      const result = await runInDurableObject(
-        stub,
-        async (instance: TestRetryAgent) => {
-          return {
-            attempts: instance.queueCallbackAttempts,
-            result: instance.queueCallbackResult
-          };
-        }
+      // Queue flushing runs as a fire-and-forget background task (not
+      // alarm-based): wait for the retry loop to reach its result.
+      const read = () =>
+        runInDurableObject(stub, async (instance: TestRetryAgent) => ({
+          attempts: instance.queueCallbackAttempts,
+          result: instance.queueCallbackResult
+        }));
+      await vi.waitFor(
+        async () => expect((await read()).result).not.toBeNull(),
+        { timeout: 5000, interval: 10 }
       );
+      const result = await read();
 
       expect(result.attempts).toBe(3);
       expect(result.result).toBe("queue-ok-3");
@@ -136,7 +135,7 @@ describe("retry integration", () => {
     it("retries scheduled callback and succeeds", async () => {
       const stub = await getAgentByName(
         env.TestRetryAgent,
-        "schedule-retry-succeed"
+        `schedule-retry-succeed-${crypto.randomUUID()}`
       );
       await stub.scheduleWithRetry(3, {
         maxAttempts: 5,
@@ -153,18 +152,17 @@ describe("retry integration", () => {
       // Fire the alarm deterministically
       await runDurableObjectAlarm(stub);
 
-      // tryN uses setTimeout for retry delays; wait briefly for retries to complete
-      await new Promise((r) => setTimeout(r, 100));
-
-      const result = await runInDurableObject(
-        stub,
-        async (instance: TestRetryAgent) => {
-          return {
-            attempts: instance.scheduleCallbackAttempts,
-            result: instance.scheduleCallbackResult
-          };
-        }
+      // tryN waits between attempts on timers: wait for its result.
+      const read = () =>
+        runInDurableObject(stub, async (instance: TestRetryAgent) => ({
+          attempts: instance.scheduleCallbackAttempts,
+          result: instance.scheduleCallbackResult
+        }));
+      await vi.waitFor(
+        async () => expect((await read()).result).not.toBeNull(),
+        { timeout: 5000, interval: 10 }
       );
+      const result = await read();
 
       expect(result.attempts).toBe(3);
       expect(result.result).toBe("schedule-ok-3");
