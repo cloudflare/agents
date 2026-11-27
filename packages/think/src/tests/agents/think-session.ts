@@ -11804,6 +11804,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
   }
 
+  private _afterToolNames: string[] = [];
+
+  override afterToolCall(ctx: ToolCallResultContext): void {
+    this._afterToolNames.push(ctx.toolName);
+  }
+
+  /** The tools `afterToolCall` heard of, in order. */
+  async getAfterToolNamesForTest(): Promise<string[]> {
+    return this._afterToolNames;
+  }
+
   private _turnConfigForTest: TurnConfig | null = null;
 
   /** Every turn's `beforeTurn` returns this config. */
