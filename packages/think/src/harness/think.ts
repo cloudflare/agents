@@ -491,6 +491,8 @@ export class Think<
       })
   });
   #context: Context | undefined;
+  /** Ends the view's subscription to the root session's change feed. */
+  #unsubscribeMirror: (() => void) | undefined;
   #handle: Session | undefined;
   /** Each submission's status reports, run one at a time in order. */
   readonly #submissionStatuses = new SubmissionStatusQueue();
@@ -1109,40 +1111,79 @@ export class Think<
           this.#transcript.replace([]);
           this.#lastTurnChannel = undefined;
         }
-        if (event.type === "message") {
-          // Apply it now, so a synchronous read right after a turn sees it;
-          // the re-read that follows picks up compaction and branching.
-          const messages = this.#transcript.messages;
-          const index = messages.findIndex(
-            (message) => message.id === event.message.id
-          );
-          // Every message the harness writes that this view lacks is a new
-          // one at the leaf: an append, which ages older messages. A row
-          // that grew may now hold media the eviction cursor has passed; a
-          // pass's own rewrites shrink rows and leave it alone, as on Think.
-          if (index === -1) {
-            this.#transcript.noteGrowth(cachedMessageBytes(event.message));
-            this.#mediaEviction.noteAppend();
-          } else if (
-            cachedMessageBytes(event.message) >
-            cachedMessageBytes(messages[index]!)
-          ) {
-            this.#mediaEviction.invalidate();
-          }
-          this.#transcript.replace(
-            index === -1
-              ? [...messages, event.message]
-              : messages.map((message, i) =>
-                  i === index ? event.message : message
-                )
-          );
-        }
-        if (
-          event.type === "message" ||
-          event.type === "reset" ||
-          event.type === "transcript"
-        ) {
+        // A message is applied by the root session's change feed below,
+        // which knows an append from an update, as on Think.
+        if (event.type === "message") this.#wakeStableWaiters();
+        if (event.type === "reset" || event.type === "transcript") {
           void this.#sync().then(() => this.#wakeStableWaiters());
+        }
+      });
+      // As on Think, the view follows the root session's own change feed:
+      // every write, the harness's and one made straight to the session (an
+      // app's, or a late tool result on an older reply), reaches it and
+      // media eviction, told apart as an append or an update.
+      this.#unsubscribeMirror?.();
+      this.#unsubscribeMirror = (await this.#rootHandle()).mirror<UIMessage>({
+        get: () => this.#transcript.messages,
+        set: (messages) => this.#transcript.replace(messages),
+        transform: (message) => message as unknown as UIMessage,
+        intercept: async (event) => {
+          switch (event.type) {
+            case "append":
+              // An append under the view's tail extends it in place; a
+              // branch append moves the path, which a patch cannot express.
+              if (
+                !event.inserted ||
+                event.parentId === undefined ||
+                event.parentId ===
+                  (this.#transcript.messages.at(-1)?.id ?? null)
+              ) {
+                return false;
+              }
+              await this.#transcript.sync();
+              return true;
+            case "update":
+              // An update to a row the view does not hold (an older reply a
+              // late tool result lands on) may have put media on a row
+              // media eviction already examined.
+              if (
+                !this.#transcript.messages.some(
+                  (message) => message.id === event.message.id
+                )
+              ) {
+                this.#mediaEviction.rowChangedOutsideCache();
+              }
+              return false;
+            case "import":
+              this.#transcript.markStale();
+              return true;
+            case "clear":
+              this.#transcript.replace([]);
+              this.#transcript.coversActivePath = true;
+              return true;
+            case "delete":
+            case "compaction":
+            case "compact":
+              await this.#transcript.sync();
+              return true;
+            default:
+              return false;
+          }
+        },
+        onApplied: (event, message, previous) => {
+          if (event.type === "update") {
+            // A row that grew may now hold media the cursor has passed; a
+            // pass's own rewrites shrink rows and leave it alone.
+            if (
+              previous &&
+              cachedMessageBytes(message) > cachedMessageBytes(previous)
+            ) {
+              this.#mediaEviction.invalidate();
+            }
+            return;
+          }
+          this.#transcript.noteGrowth(cachedMessageBytes(message));
+          this.#mediaEviction.noteAppend();
         }
       });
       this.#onStartDegradations = [];
