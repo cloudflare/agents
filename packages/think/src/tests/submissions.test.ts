@@ -572,6 +572,71 @@ describe("Think durable submissions", () => {
       ).resolves.toMatchObject({ status: "pending" });
     });
 
+    /** A submission that has completed, and when. */
+    async function completed(agent: ThinkSubmissionTestStub, id: string) {
+      await agent.testSubmitMessages(`finish ${id}`, { submissionId: id });
+      await expect(
+        agent.waitForSubmissionForTest(id, { timeoutMs: 10_000 })
+      ).resolves.toMatchObject({ status: "completed" });
+      const done = await agent.inspectSubmissionForTest(id);
+      // The next one completes at a later millisecond.
+      await vi.waitFor(() =>
+        expect(Date.now()).toBeGreaterThan(done?.completedAt ?? 0)
+      );
+      return done?.completedAt ?? 0;
+    }
+
+    it("a status filter applies before the limit and the cutoff, to list and to delete", async () => {
+      const agent = await freshAgent();
+      await completed(agent, "sub-older-completed");
+      const newer = await completed(agent, "sub-newer-completed");
+      await running(agent, "sub-filter-running");
+      await agent.testSubmitMessages("wait behind it", {
+        submissionId: "sub-filter-pending"
+      });
+
+      // The newest completed one, though two newer submissions exist.
+      const listed = await agent.listSubmissionsForTest({
+        status: "completed",
+        limit: 1
+      });
+      expect(listed.map((submission) => submission.submissionId)).toEqual([
+        "sub-newer-completed"
+      ]);
+      await expect(
+        agent.deleteSubmissionsForTest({
+          status: "completed",
+          completedBefore: new Date(newer),
+          limit: 10
+        })
+      ).resolves.toBe(1);
+      await expect(
+        agent.inspectSubmissionForTest("sub-older-completed")
+      ).resolves.toBeNull();
+      await expect(
+        agent.inspectSubmissionForTest("sub-newer-completed")
+      ).resolves.toMatchObject({ status: "completed" });
+    });
+
+    it("a limit over several statuses takes the newest of them all", async () => {
+      const agent = await freshAgent();
+      await completed(agent, "sub-several-older");
+      await completed(agent, "sub-several-newer");
+      await running(agent, "sub-several-running");
+      await agent.testSubmitMessages("wait behind it", {
+        submissionId: "sub-several-pending"
+      });
+
+      const listed = await agent.listSubmissionsForTest({
+        status: ["pending", "completed"],
+        limit: 2
+      });
+      expect(listed.map((submission) => submission.submissionId)).toEqual([
+        "sub-several-pending",
+        "sub-several-newer"
+      ]);
+    });
+
     it("a turn reset ends it skipped, and the one that waits behind it", async () => {
       const agent = await freshAgent();
       await running(agent, "sub-reset-running");
