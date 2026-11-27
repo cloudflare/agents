@@ -20,7 +20,7 @@ import type {
   TaskStep,
   TaskValue
 } from "../tasks/types";
-import { withFiberStash } from "../fiber-runs";
+import { withFiberStash } from "../fiber-stash";
 import type { StreamWriter } from "../streams/types";
 import type { Connection } from "agents";
 import type { ClientToolSchema } from "./client-tools";
