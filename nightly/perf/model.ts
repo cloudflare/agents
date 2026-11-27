@@ -40,6 +40,9 @@ const usage = {
 let calls = 0;
 const failed = new Set<string>();
 
+/** Text deltas the fake model has streamed in this isolate, for scenarios that act mid-reply. */
+export const streamed = { deltas: 0 };
+
 export function fakeModel(): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -116,6 +119,7 @@ export function fakeModel(): LanguageModel {
               id,
               delta: m ? `w${i} ` : "ok"
             });
+            streamed.deltas++;
           }
           controller.enqueue({ type: "text-end", id });
           controller.enqueue({

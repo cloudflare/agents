@@ -122,7 +122,8 @@ export async function runScenarios(
   for (const cls of chatHosts) {
     add("startup-empty", cls, async (room) => since(cls, room));
     add("startup-500", cls, async (room) => {
-      await run(cls, room, "seed", 500);
+      const seeded = await run(cls, room, "seed", 500);
+      if (seeded.ok === false) return seeded;
       await abort(cls, room);
       return since(cls, room);
     });

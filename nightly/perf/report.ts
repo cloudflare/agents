@@ -78,11 +78,17 @@ function releaseBundle(scratch: string): Record<string, string> {
   return versions;
 }
 
-/** Stop every local runtime this report started, also when it is interrupted. */
+/**
+ * Stop every local runtime this report started and remove its scratch
+ * directory, also when it is interrupted.
+ */
 const running = new Set<() => void>();
+const scratchDirs = new Set<string>();
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     for (const stop of running) stop();
+    for (const dir of scratchDirs)
+      rmSync(dir, { recursive: true, force: true });
     process.exit(1);
   });
 }
@@ -210,7 +216,7 @@ function table(
     `|---|${names.map(() => "---").join("|")}|`
   ];
   const get = (m: string, r: Result | undefined) =>
-    r && !failed(r) ? METRICS[m](r) : undefined;
+    r && r.ok !== false ? METRICS[m](r) : undefined;
   // A facet scenario's levels (the leaf, @mid, @root) are one tree: its
   // cost is their sum, so only the sum row is bolded.
   const levelsOf = (results: Record<string, Result>, key: string) =>
@@ -263,11 +269,15 @@ function table(
 }
 
 const scratch = mkdtempSync(path.join(tmpdir(), "nightly-perf-release-"));
+scratchDirs.add(scratch);
 try {
   const versions = releaseBundle(scratch);
   bundle(DIR, path.join(scratch, "main"));
-  const release = await runLocal(path.join(scratch, "out"), 8791);
-  const main = await runLocal(path.join(scratch, "main"), 8793);
+  // PERF_PORT moves both runtimes (it and the port two above), so two
+  // reports can run on one machine.
+  const port = Number(process.env.PERF_PORT ?? 8791);
+  const release = await runLocal(path.join(scratch, "out"), port);
+  const main = await runLocal(path.join(scratch, "main"), port + 2);
   const why = (r: Result) =>
     r.error ??
     ((r.value as { timeout?: boolean } | undefined)?.timeout
@@ -278,6 +288,9 @@ try {
   // fails on both is listed, but it is not this build's regression.
   const broken = bad.filter(([k]) => !release[k] || !failed(release[k]));
   const both = bad.filter(([k]) => release[k] && failed(release[k]));
+  const releaseOnly = Object.entries(release).filter(
+    ([k, r]) => failed(r) && main[k] && !failed(main[k])
+  );
   const report = [
     `## Storage cost per scenario: release (${Object.entries(versions)
       .map(([p, v]) => `${p}@${v}`)
@@ -295,7 +308,13 @@ try {
     ...(both.length
       ? [
           "",
-          `Failing on the release and on this build (no numbers): ${both.map(([k, r]) => `${k} (${why(r)})`).join("; ")}`
+          `Failing on the release and on this build: ${both.map(([k, r]) => `${k} (${why(r)})`).join("; ")}`
+        ]
+      : []),
+    ...(releaseOnly.length
+      ? [
+          "",
+          `Failing on the release only (fixed on this build): ${releaseOnly.map(([k, r]) => `${k} (${why(r)})`).join("; ")}`
         ]
       : [])
   ].join("\n");

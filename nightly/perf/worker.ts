@@ -13,7 +13,7 @@ import { convertToModelMessages, isStepCount, streamText, tool } from "ai";
 import type { ToolSet, UIMessage } from "ai";
 import { z } from "zod";
 import { Meter, tableStats } from "./meter";
-import { fakeModel } from "./model";
+import { fakeModel, streamed } from "./model";
 
 type Env = {
   PerfThink: DurableObjectNamespace<PerfThink>;
@@ -65,6 +65,15 @@ async function untilStreaming(h: { meter: Meter }) {
   const deadline = Date.now() + 10_000;
   while (!(await h.meter.quiet(() => replyStreaming(h)))) {
     if (Date.now() > deadline) throw new Error("no reply started streaming");
+    await sleep(5);
+  }
+}
+
+/** Until the fake model has streamed up to `n` deltas in total (bounded at 30 s). */
+async function untilDeltas(n: number) {
+  const deadline = Date.now() + 30_000;
+  while (streamed.deltas < n) {
+    if (Date.now() > deadline) throw new Error("the reply did not stream");
     await sleep(5);
   }
 }
@@ -288,8 +297,11 @@ export class PerfThink extends Think<Env> {
         return s;
       },
       abortMidStream: async () => {
+        const from = streamed.deltas;
         void this.saveMessages([user("long 400 delay 10")]);
-        await untilStreaming(this);
+        // A quarter of the reply has streamed (100 of 400 deltas) when the
+        // object resets, so recovery has a partial reply to take up.
+        await untilDeltas(from + 100);
         await this.ctx.storage.sync();
         this.ctx.abort("perf: reset");
       },
@@ -409,8 +421,11 @@ export class PerfChat extends AIChatAgent<Env> {
         };
       },
       abortMidStream: async () => {
+        const from = streamed.deltas;
         void this.saveMessages([user("long 400 delay 10")]);
-        await untilStreaming(this);
+        // A quarter of the reply has streamed (100 of 400 deltas) when the
+        // object resets, so recovery has a partial reply to take up.
+        await untilDeltas(from + 100);
         await this.ctx.storage.sync();
         this.ctx.abort("perf: reset");
       },
@@ -510,6 +525,7 @@ export class PerfAgent extends Agent<Env> {
         // The 1 s schedule's tick, bounded at 10 s.
         const deadline = Date.now() + 10_000;
         while (this.ticks === 0 && Date.now() < deadline) await sleep(20);
+        if (this.ticks === 0) throw new Error("the schedule never ticked");
         return this.ticks;
       }
     };
