@@ -2990,8 +2990,46 @@ export class Think<
     return run?.startedAt ?? run?.createdAt ?? Date.now();
   }
 
-  async _chatRecoveryRetry(): Promise<void> {}
-  async _chatRecoveryContinue(): Promise<void> {}
+  // A job think@0.24.0 queued to recover an incident: that recovery does
+  // not run after the move, so the messenger reply held for it is
+  // released as interrupted (the apology). TEMPORARY: remove in the next
+  // minor.
+  async _chatRecoveryRetry(data?: { incidentId?: string }): Promise<void> {
+    await this.#releaseHeldReply(data);
+  }
+  async _chatRecoveryContinue(data?: { incidentId?: string }): Promise<void> {
+    await this.#releaseHeldReply(data);
+  }
+
+  async #releaseHeldReply(data?: { incidentId?: string }): Promise<void> {
+    if (typeof data?.incidentId !== "string") return;
+    await this.#messengers?.releaseReleasedReply(
+      data.incidentId,
+      "interrupted"
+    );
+  }
+
+  /**
+   * TEMPORARY: remove in the next minor. Think's start step for the
+   * recovered replies think@0.24.0 kept; the shell runs it at start.
+   * @internal
+   */
+  async _replayMessengerRecoveryDeliveries(): Promise<void> {
+    await this.#messengers?.importReleasedReplies();
+  }
+
+  /**
+   * TEMPORARY: remove in the next minor. Release the reply held for a
+   * think@0.24.0 recovery incident, as Think does.
+   * @internal
+   */
+  async _releaseMessengerRecovery(
+    incidentId: string,
+    outcome: "completed" | "interrupted",
+    text?: string
+  ): Promise<void> {
+    await this.#messengers?.releaseReleasedReply(incidentId, outcome, text);
+  }
   async _cfRetryMessengerRecoveryDelivery(): Promise<void> {}
 
   // ── Harness wiring ────────────────────────────────────────────────
