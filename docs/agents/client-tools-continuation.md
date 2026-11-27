@@ -202,7 +202,7 @@ The tools a turn offers the model are the `clientTools` of the request that star
 
 ## Reasoning at the end of a reply
 
-A reply that is cut off right after the model's reasoning ends in a reasoning part. Anthropic rejects a request in which an assistant message's final block is a thinking block, whether a user message follows it or not, so one such reply would fail every later turn. The reasoning a reply ends in is removed when a cut-off reply is stored and before every turn. Reasoning that text or a tool call follows is kept. A text part with no text goes with the reasoning: it is the start of an answer the model never wrote.
+A reply that is cut off right after the model's reasoning ends in a reasoning part. Anthropic rejects a request in which an assistant message's final block is a thinking block, whether a user message follows it or not, so one such reply would fail every later turn. The reasoning a cut-off reply ends in is removed when it is stored. A reply that completed is stored as it finished: in `Think`, the reasoning it ends in is left out of the model request only. In `AIChatAgent`, whose app builds the request from the stored messages, that reasoning is removed before every turn. Reasoning that text or a tool call follows is kept. A text part with no text goes with the reasoning: it is the start of an answer the model never wrote.
 
 ### A reply that holds nothing
 
@@ -210,13 +210,12 @@ A reply has nothing left once its trailing reasoning is gone when it holds no te
 
 Such a reply is not stored, in `AIChatAgent` and in `Think`. The question stays the latest message, and recovery answers it again as it does for a turn that was cut off before it produced anything. Tabs that drew the reasoning while it streamed receive the message list after the turn's terminal frame, so they drop it too.
 
-A stored reply that is only reasoning is removed the same way. This includes a reply that finished as reasoning alone, which a model produces when it runs out of output tokens while it is thinking, and a reply an earlier version stored with its reasoning. It is removed:
+A reply that finished as reasoning alone (a model can end a turn that way, or run out of output tokens while it is thinking) is kept in `Think`'s transcript: the user saw it, and the next turn does not remove it. The model request leaves it out. It is removed only when there is nothing else to do with it:
 
-- by the next turn that starts a new reply,
 - by `continueLastTurn()`, which then answers the question again, and
 - by a recovery that was scheduled to continue it, which also answers the question again.
 
-Every connected client receives the message list without it. The user saw that reasoning, and after the next turn it is gone from the transcript. The reason is that an app builds its model request from the stored messages, and Anthropic rejects a request in which that message appears. To keep a copy, read it from the `chat:transcript:repaired` event: `removedMessages` holds each removed message as it was stored.
+In `AIChatAgent`, an app builds its model request from the stored messages, and Anthropic rejects a request in which such a message appears. So there the next turn that starts a new reply removes it too, and every connected client receives the message list without it. To keep a copy, read it from the `chat:transcript:repaired` event: `removedMessages` holds each removed message as it was stored.
 
 ### A reply cut off while a tool runs
 
