@@ -42,7 +42,8 @@ import {
   type LanguageModel,
   type ToolSet,
   type TypedToolCall,
-  type UIMessage
+  type UIMessage,
+  type UIMessageChunk
 } from "ai";
 import { ThinkModelResolver } from "../model";
 import {
@@ -2604,9 +2605,10 @@ export class Think<
   }
 
   /**
-   * Follow the run: its chunks after `afterSequence`, then the ones its
+   * Follow the run: its chunks after `afterSequence`, then each chunk its
    * reply streams, as newline-delimited JSON, until the run ends or
-   * `signal` aborts. Cancelling the stream only detaches.
+   * `signal` aborts. It waits on the harness's events for the operation,
+   * never in a loop. Cancelling the stream only detaches.
    */
   async tailAgentToolRun(
     runId: string,
@@ -2614,49 +2616,67 @@ export class Think<
   ): Promise<ReadableStream<Uint8Array>> {
     const session = this.harness.session().id;
     const operationId = agentToolOperationId(runId);
-    const stop = new AbortController();
-    const signal = options?.signal
-      ? AbortSignal.any([options.signal, stop.signal])
-      : stop.signal;
+    const after = options?.afterSequence ?? -1;
     const encoder = new TextEncoder();
-    let last = options?.afterSequence ?? -1;
-    return new ReadableStream<Uint8Array>({
-      pull: async (controller) => {
-        for (;;) {
-          if (signal.aborted) {
-            controller.close();
-            return;
-          }
-          const fresh = await this.#agentToolChunks(runId, last);
-          if (fresh.length > 0) {
-            for (const chunk of fresh) {
-              controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
-              last = chunk.sequence;
-            }
-            return;
-          }
-          const status = await this.harness.inspection(session, operationId);
-          if (
-            !status ||
-            (status.status !== "queued" && status.status !== "running")
-          ) {
-            controller.close();
-            return;
-          }
-          if (status.status === "queued") {
-            // Not started: nothing streams yet.
-            await new Promise((resolve) => setTimeout(resolve, 25));
-          } else {
-            await this.harness.operationChanged(
-              session,
-              operationId,
-              last + 1,
-              signal
-            );
-          }
+    const line = (chunk: AgentToolStoredChunk) =>
+      encoder.encode(`${JSON.stringify(chunk)}\n`);
+    const open = (status: { status: string } | undefined) =>
+      status?.status === "queued" || status?.status === "running";
+    const status = await this.harness.inspection(session, operationId);
+    if (!open(status)) {
+      // Settled: what a read returns, then the end.
+      const chunks = await this.#agentToolChunks(runId, after);
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(line(chunk));
+          controller.close();
         }
+      });
+    }
+    let follow: { stop(): void } | undefined;
+    let ended = false;
+    const signal = options?.signal;
+    let onAbort: (() => void) | undefined;
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      follow?.stop();
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    };
+    return new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        let next = 0;
+        const close = () => {
+          if (ended) return;
+          end();
+          controller.close();
+        };
+        const emit = (chunk: UIMessageChunk) => {
+          const sequence = next++;
+          if (sequence > after) {
+            controller.enqueue(line({ sequence, body: JSON.stringify(chunk) }));
+          }
+        };
+        const followed = this.harness.followOperation(
+          session,
+          operationId,
+          (event) => {
+            if (ended) return;
+            if (event.type === "chunk") emit(event.chunk);
+            else close();
+          }
+        );
+        follow = followed;
+        for (const chunk of followed.chunks) emit(chunk);
+        onAbort = close;
+        if (signal?.aborted) return close();
+        signal?.addEventListener("abort", onAbort, { once: true });
+        // It may have ended between the read above and the subscription.
+        void this.harness.inspection(session, operationId).then((now) => {
+          if (!open(now)) close();
+        });
       },
-      cancel: () => stop.abort()
+      cancel: () => end()
     });
   }
 }

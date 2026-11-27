@@ -1149,36 +1149,41 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
-   * @internal Wait until an operation's reply stream has more than `seen`
-   * chunks, or settles, or `signal` aborts. Resolves at once for an
-   * operation with no stream (not started yet, or its reply stored).
+   * @internal Follow an operation: the chunks its reply holds now (as this
+   * isolate streams it, earlier attempts' included, or as its stream stores
+   * them), then each chunk it streams after that, then its end, to
+   * `listener`. Snapshot and subscription are one synchronous step, so no
+   * chunk is missed or seen twice. Call after `lifecycle.ready()`.
    */
-  async operationChanged(
+  followOperation(
     session: ThinkSessionId,
     operationId: string,
-    seen: number,
-    signal?: AbortSignal
-  ): Promise<void> {
-    await this.lifecycle.ready();
-    const streamId = chatTurnStreamId(runIdOf(session, operationId));
-    if ((await this.#streams.status(streamId)) === null) return;
-    const stop = new AbortController();
-    const abort = () => stop.abort();
-    signal?.addEventListener("abort", abort, { once: true });
-    let read = 0;
-    try {
-      for await (const batch of this.#streams.readBatches(streamId, {
-        signal: stop.signal
-      })) {
-        read += batch.length;
-        if (read > seen) return;
+    listener: (
+      event: { type: "chunk"; chunk: UIMessageChunk } | { type: "end" }
+    ) => void
+  ): { chunks: UIMessageChunk[]; stop(): void } {
+    const stop = this.#events.subscribe(session, (event) => {
+      if (event.type === "chunk" && event.operationId === operationId) {
+        listener({ type: "chunk", chunk: event.chunk });
+      } else if (
+        event.type === "run-end" &&
+        event.operationId === operationId
+      ) {
+        listener({ type: "end" });
+      } else if (
+        event.type === "operation" &&
+        event.status.operationId === operationId &&
+        (event.status.status === "done" || event.status.status === "unanswered")
+      ) {
+        listener({ type: "end" });
       }
-    } catch {
-      // Stopped, or the stream went away: either way, look again.
-    } finally {
-      signal?.removeEventListener("abort", abort);
-      stop.abort();
-    }
+    });
+    const live = this.#live.get(session);
+    const chunks =
+      live?.operationId === operationId
+        ? [...live.partial]
+        : this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+    return { chunks, stop };
   }
 
   /**

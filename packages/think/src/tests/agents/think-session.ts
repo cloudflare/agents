@@ -3687,6 +3687,25 @@ export class ThinkTestAgent extends Think {
   }
 
   /** Stream the next turns slowly, one chunk every `delayMs`. */
+  #runReads = 0;
+  /**
+   * Count the reads of an operation's state on the harness, if this agent
+   * has one (the harness-backed Think): a tail that spins reads it in a loop.
+   */
+  async countRunReadsForTest(): Promise<void> {
+    const harness = (this as unknown as { harness?: Record<string, unknown> })
+      .harness;
+    if (!harness) return;
+    const inspection = harness.inspection as (...args: unknown[]) => unknown;
+    harness.inspection = (...args: unknown[]) => {
+      this.#runReads++;
+      return inspection.apply(harness, args);
+    };
+  }
+  async runReadsForTest(): Promise<number> {
+    return this.#runReads;
+  }
+
   async useSlowModelForTest(chunks: string[], delayMs: number): Promise<void> {
     this._turnConfigOverride = {
       model: createDelayedMultiChunkMockModel(chunks, delayMs)
@@ -6825,6 +6844,7 @@ export class ThinkAgentToolParent extends Agent {
    * child's run while it is still running, and return what the call gives.
    */
   async runSlowThinkChildForTest(): Promise<{
+    reads: number;
     status: string;
     summary?: string;
     error?: string;
@@ -6832,6 +6852,7 @@ export class ThinkAgentToolParent extends Agent {
     const runId = `slow-${crypto.randomUUID()}`;
     const child = await this.subAgent(ThinkTestAgent, runId);
     await child.useSlowModelForTest(["one ", "two ", "three "], 150);
+    await child.countRunReadsForTest();
     const r = await this.runAgentTool(ThinkTestAgent, {
       runId,
       parentToolCallId: "slow-call",
@@ -6839,6 +6860,7 @@ export class ThinkAgentToolParent extends Agent {
       inputPreview: "slow child"
     });
     return {
+      reads: await child.runReadsForTest(),
       status: r.status,
       ...(r.summary !== undefined && { summary: r.summary }),
       ...(r.error !== undefined && { error: r.error })
