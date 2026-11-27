@@ -1479,8 +1479,14 @@ export function chatTurnDefinition(
     let overflowTried = false;
     for (;;) {
       let source: ChatModelStream | undefined;
+      let modelChunks: ReadableStream<UIMessageChunk> | undefined;
       try {
         source = await host.respond(call);
+        // A reply that cannot be read (a body already taken) fails here,
+        // before anything streamed, as a `respond` that throws does.
+        if (source && !(step.signal.aborted && !writer)) {
+          modelChunks = chunksOf(source, requestId);
+        }
       } catch (error) {
         // `respond` failed before anything streamed: a stop ends the turn
         // stopped, a transient failure retries, anything else ends it as
@@ -1601,7 +1607,7 @@ export function chatTurnDefinition(
       );
       const recorded = watchStall(
         untilStopped(
-          withPartStarts(chunksOf(source, requestId), requestId),
+          withPartStarts(modelChunks ?? chunksOf(source, requestId), requestId),
           step.signal
         ),
         recovery === false ? undefined : recovery?.stallTimeoutMs,

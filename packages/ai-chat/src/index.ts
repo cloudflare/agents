@@ -610,8 +610,35 @@ export class AIChatAgent<
     storedOriginIds: (requestId) =>
       this._replyStreams.getOriginMessageIds(requestId),
     recoveryOriginIds: () => this._chatRecoveryEngine().activeOriginMessageIds,
-    clientView: (messages) => this._turns.clientView(messages)
+    clientView: (messages) => this._clientView(messages)
   });
+
+  /**
+   * The list a tab is sent: the stored messages, then those the waiting
+   * requests hold, in lane order, named in `queuedMessageIds` (a tab keeps
+   * them apart and draws them last).
+   */
+  private _clientView<TMessage extends { id: string }>(
+    messages: readonly TMessage[]
+  ): { messages: TMessage[]; queuedMessageIds?: string[] } {
+    const known = new Set(messages.map((message) => message.id));
+    const queued: TMessage[] = [];
+    for (const run of this._openChatTurns()) {
+      if (run.status !== "pending") continue;
+      for (const message of this.tasks.inputOf<ChatTurnInput>(run.runId)
+        ?.messages ?? []) {
+        if (known.has(message.id)) continue;
+        known.add(message.id);
+        queued.push(message as unknown as TMessage);
+      }
+    }
+    return queued.length > 0
+      ? {
+          messages: [...messages, ...queued],
+          queuedMessageIds: queued.map((message) => message.id)
+        }
+      : { messages: [...messages] };
+  }
 
   /** Lazily-built shared resume-handshake driver (Tier-2). */
   private _resumeHandshakeInstance: ResumeHandshake | null = null;
@@ -1338,7 +1365,7 @@ export class AIChatAgent<
         this._frames.send(connection, {
           type: MessageType.CF_AGENT_CHAT_MESSAGES,
           connect: true,
-          ...this._turns.connectView(this.messages)
+          ...this._clientView(this.messages)
         });
       }
 
@@ -1500,6 +1527,14 @@ export class AIChatAgent<
             message
           ))
         ) {
+          // A request that waits behind another: the other tabs are shown
+          // its messages at once, after the transcript, named as queued.
+          if (
+            event.type === "chat-request" &&
+            this.tasks.peek(event.id)?.status === "pending"
+          ) {
+            this._frames.broadcastMessages(this.messages, [connection.id]);
+          }
           return;
         }
         if (await dispatchChatProtocol(connection, message, protocol)) return;

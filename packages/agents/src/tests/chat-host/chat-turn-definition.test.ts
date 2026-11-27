@@ -2051,4 +2051,25 @@ describe("chatTurnDefinition", () => {
       expect(sent.at(-1)?.error).toBe(false);
     });
   });
+
+  it("a reply whose body cannot be read ends the turn as an error, before anything streamed", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      // Its body is already taken by a reader.
+      const taken = new Response("hello");
+      taken.body!.getReader();
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1"
+        },
+        { respond: async () => taken }
+      )({ trigger: "server" }, laterAttempt("lk-1", 1));
+      expect(result).toMatchObject({ status: "error" });
+    });
+  });
 });
