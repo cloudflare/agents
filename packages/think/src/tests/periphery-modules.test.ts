@@ -188,10 +188,12 @@ describe("ThinkConfigStore on its own Durable Object", () => {
       sql.exec(`CREATE TABLE assistant_config__lifted_v1 (
         session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL)`);
       sql.exec(
-        "INSERT INTO assistant_config__lifted_v1 VALUES ('', 'lastBody', 'legacy')"
+        "INSERT INTO assistant_config__lifted_v1 VALUES ('', 'lastBody', 'legacy'), ('', 'skillsFingerprint', 'lifted')"
       );
       store.migrateLegacy();
       expect(store.get("lastBody")).toBe("current");
+      // The lift did read the table: a key only it holds is lifted.
+      expect(store.get("skillsFingerprint")).toBe("lifted");
     });
   });
 });
