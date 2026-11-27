@@ -283,10 +283,6 @@ export function chatSdkMessenger(
 
 export class ThinkMessengerRuntime {
   private chat?: Chat<Record<string, Adapter>>;
-  private readonly definitionsByAdapterName = new Map<
-    string,
-    NormalizedMessengerDefinition
-  >();
   private readonly definitionsById = new Map<
     string,
     NormalizedMessengerDefinition
@@ -305,7 +301,6 @@ export class ThinkMessengerRuntime {
     );
     this.definitions = normalizeMessengers(definitions);
     for (const definition of this.definitions) {
-      this.definitionsByAdapterName.set(definition.adapterName, definition);
       this.definitionsById.set(definition.id, definition);
     }
   }
@@ -465,132 +460,13 @@ export class ThinkMessengerRuntime {
   }
 
   private createChat(): Chat<Record<string, Adapter>> {
-    const adapters = Object.fromEntries(
-      this.definitions.map((definition) => [
-        definition.adapterName,
-        definition.adapter
-      ])
-    ) as Record<string, Adapter>;
-    const chat = new Chat({
-      adapters,
+    return createMessengerChat({
+      definitions: this.definitions,
       concurrency: this.concurrency,
-      fallbackStreamingPlaceholderText: FALLBACK_STREAMING_PLACEHOLDER_TEXT,
-      state: createChatSdkState({
-        agent: ThinkMessengerStateAgent,
-        keyShard: (key) => this.shardStateKey(key),
-        // The Chat SDK never extends its 30 second thread lock while a
-        // handler runs; a Think turn often takes longer.
-        lockHeartbeat: true,
-        parent: this.host as unknown as ChatSdkStateAdapterOptions["parent"],
-        shardKey: (threadId) => this.shardThread(threadId)
-      }),
-      userName: this.definitions[0]?.userName ?? "think"
-    } satisfies ChatConfig<Record<string, Adapter>>);
-
-    chat.onDirectMessage(async (thread, message, _channel, context) => {
-      const definition = this.definitionForThread(thread);
-      if (!definition) return;
-      if (definition.respondTo.includes("direct-message")) {
-        await this.enqueueReply(
-          definition,
-          await this.toEvent(definition, {
-            eventKind: "direct-message",
-            message,
-            skipped: context?.skipped,
-            thread
-          }),
-          thread
-        );
-      }
+      parent: this.host,
+      onEvent: (definition, event, thread) =>
+        this.enqueueReply(definition, event, thread)
     });
-
-    chat.onNewMention(async (thread, message, context) => {
-      const definition = this.definitionForThread(thread);
-      if (!definition) return;
-      if (definition.subscribeOnMention) {
-        await thread.subscribe();
-      }
-      if (definition.respondTo.includes("mention")) {
-        await this.enqueueReply(
-          definition,
-          await this.toEvent(definition, {
-            eventKind: "mention",
-            message,
-            skipped: context?.skipped,
-            thread
-          }),
-          thread
-        );
-      }
-    });
-
-    // A burst is routed on its newest message only. When an earlier message
-    // in an unsubscribed thread mentioned the bot, answer the burst as that
-    // mention instead of letting it fall through unanswered.
-    chat.onNewMessage(/[\s\S]*/, async (thread, message, context) => {
-      const definition = this.definitionForThread(thread);
-      if (!definition || !definition.respondTo.includes("mention")) return;
-      if (!context?.skipped.some((skipped) => mentionsBot(definition, skipped)))
-        return;
-      if (definition.subscribeOnMention) {
-        await thread.subscribe();
-      }
-      await this.enqueueReply(
-        definition,
-        await this.toEvent(definition, {
-          eventKind: "mention",
-          message,
-          skipped: context.skipped,
-          thread
-        }),
-        thread
-      );
-    });
-
-    chat.onSubscribedMessage(async (thread, message, context) => {
-      const definition = this.definitionForThread(thread);
-      if (!definition) return;
-      const mentioned =
-        message.isMention ||
-        (context?.skipped.some((skipped) => mentionsBot(definition, skipped)) ??
-          false);
-      if (
-        definition.respondTo.includes("subscribed-thread") ||
-        (mentioned && definition.respondTo.includes("mention"))
-      ) {
-        await this.enqueueReply(
-          definition,
-          await this.toEvent(definition, {
-            eventKind: mentioned ? "mention" : "subscribed-message",
-            message,
-            skipped: context?.skipped,
-            thread
-          }),
-          thread
-        );
-      }
-    });
-
-    chat.onAction(async (event) => {
-      if (!event.thread) return;
-      const thread = event.thread as ChatThread;
-      const definition = this.definitionForThread(thread);
-      if (!definition) return;
-      if (definition.respondTo.includes("action")) {
-        await this.enqueueReply(
-          definition,
-          await this.toEvent(definition, {
-            action: event,
-            eventKind: "action",
-            raw: event.raw,
-            thread
-          }),
-          thread
-        );
-      }
-    });
-
-    return chat.registerSingleton();
   }
 
   private async enqueueReply(
@@ -718,66 +594,6 @@ export class ThinkMessengerRuntime {
     };
   }
 
-  private definitionForThread(
-    thread: ChatThread
-  ): NormalizedMessengerDefinition | undefined {
-    return (
-      this.definitionsByAdapterName.get(thread.toJSON().adapterName) ??
-      this.definitionForThreadId(thread.id) ??
-      this.definitionForThreadId(thread.channelId)
-    );
-  }
-
-  private definitionForThreadId(
-    threadId: string | undefined
-  ): NormalizedMessengerDefinition | undefined {
-    if (!threadId) {
-      return undefined;
-    }
-
-    if (this.definitions.length === 1) {
-      return this.definitions[0];
-    }
-
-    return this.definitions.find(
-      (definition) =>
-        threadId === definition.id ||
-        threadId.startsWith(`${definition.id}:`) ||
-        (this.hasUniqueProvider(definition.provider) &&
-          (threadId === definition.provider ||
-            threadId.startsWith(`${definition.provider}:`))) ||
-        threadId === definition.adapterName ||
-        threadId.startsWith(`${definition.adapterName}:`)
-    );
-  }
-
-  private hasUniqueProvider(provider: string): boolean {
-    return (
-      this.definitions.filter((definition) => definition.provider === provider)
-        .length === 1
-    );
-  }
-
-  private shardThread(threadId: string): string {
-    const definition = this.definitionForThreadId(threadId);
-    return (
-      definition?.shardKey?.(threadId) ||
-      threadId.split(":").slice(0, 2).join(":") ||
-      "default"
-    );
-  }
-
-  private shardStateKey(key: string): string | undefined {
-    for (const definition of this.definitions) {
-      const shard = definition.keyShard?.(key);
-      if (shard) {
-        return shard;
-      }
-    }
-
-    return defaultKeyShard(key, (threadId) => this.shardThread(threadId));
-  }
-
   /**
    * `ThreadImpl.fromJSON` (what `chat.reviver()` calls) builds the thread
    * without the Chat's streaming config, so a recovered reply would fall back to
@@ -810,16 +626,209 @@ export class ThinkMessengerRuntime {
       isDM: json.isDM
     });
   }
+}
 
-  private async toEvent(
+/**
+ * The Chat SDK `Chat` a Think's messengers take their webhooks through: its
+ * state on Think's state sub-agents (subscriptions, thread locks, queued
+ * messages), its concurrency, and the handlers that turn what each
+ * messenger answers (`respondTo`) into a {@link MessengerEvent} for
+ * `onEvent`. A handler holds the thread's lock until `onEvent` resolves.
+ *
+ * @internal
+ */
+export function createMessengerChat(options: {
+  definitions: NormalizedMessengerDefinition[];
+  concurrency: MessengerConcurrency;
+  parent: unknown;
+  onEvent(
     definition: NormalizedMessengerDefinition,
-    input: ChatSdkMessengerEventInput
-  ): Promise<MessengerEvent> {
-    return (
-      (await definition.toEvent?.(input)) ??
-      defaultChatSdkEvent(definition, input)
+    event: MessengerEvent,
+    thread: ChatThread
+  ): Promise<void>;
+}): Chat<Record<string, Adapter>> {
+  const { definitions } = options;
+  const lookup = messengerLookup(definitions);
+  const adapters = Object.fromEntries(
+    definitions.map((definition) => [
+      definition.adapterName,
+      definition.adapter
+    ])
+  ) as Record<string, Adapter>;
+  const chat = new Chat({
+    adapters,
+    concurrency: options.concurrency,
+    fallbackStreamingPlaceholderText: FALLBACK_STREAMING_PLACEHOLDER_TEXT,
+    state: createChatSdkState({
+      agent: ThinkMessengerStateAgent,
+      keyShard: (key) => lookup.shardStateKey(key),
+      // The Chat SDK never extends its 30 second thread lock while a
+      // handler runs; a Think turn often takes longer.
+      lockHeartbeat: true,
+      parent: options.parent as ChatSdkStateAdapterOptions["parent"],
+      shardKey: (threadId) => lookup.shardThread(threadId)
+    }),
+    userName: definitions[0]?.userName ?? "think"
+  } satisfies ChatConfig<Record<string, Adapter>>);
+
+  chat.onDirectMessage(async (thread, message, _channel, context) => {
+    const definition = lookup.forThread(thread);
+    if (!definition) return;
+    if (definition.respondTo.includes("direct-message")) {
+      await options.onEvent(
+        definition,
+        await messengerEvent(definition, {
+          eventKind: "direct-message",
+          message,
+          skipped: context?.skipped,
+          thread
+        }),
+        thread
+      );
+    }
+  });
+
+  chat.onNewMention(async (thread, message, context) => {
+    const definition = lookup.forThread(thread);
+    if (!definition) return;
+    if (definition.subscribeOnMention) {
+      await thread.subscribe();
+    }
+    if (definition.respondTo.includes("mention")) {
+      await options.onEvent(
+        definition,
+        await messengerEvent(definition, {
+          eventKind: "mention",
+          message,
+          skipped: context?.skipped,
+          thread
+        }),
+        thread
+      );
+    }
+  });
+
+  // A burst is routed on its newest message only. When an earlier message
+  // in an unsubscribed thread mentioned the bot, answer the burst as that
+  // mention instead of letting it fall through unanswered.
+  chat.onNewMessage(/[\s\S]*/, async (thread, message, context) => {
+    const definition = lookup.forThread(thread);
+    if (!definition || !definition.respondTo.includes("mention")) return;
+    if (!context?.skipped.some((skipped) => mentionsBot(definition, skipped)))
+      return;
+    if (definition.subscribeOnMention) {
+      await thread.subscribe();
+    }
+    await options.onEvent(
+      definition,
+      await messengerEvent(definition, {
+        eventKind: "mention",
+        message,
+        skipped: context.skipped,
+        thread
+      }),
+      thread
     );
-  }
+  });
+
+  chat.onSubscribedMessage(async (thread, message, context) => {
+    const definition = lookup.forThread(thread);
+    if (!definition) return;
+    const mentioned =
+      message.isMention ||
+      (context?.skipped.some((skipped) => mentionsBot(definition, skipped)) ??
+        false);
+    if (
+      definition.respondTo.includes("subscribed-thread") ||
+      (mentioned && definition.respondTo.includes("mention"))
+    ) {
+      await options.onEvent(
+        definition,
+        await messengerEvent(definition, {
+          eventKind: mentioned ? "mention" : "subscribed-message",
+          message,
+          skipped: context?.skipped,
+          thread
+        }),
+        thread
+      );
+    }
+  });
+
+  chat.onAction(async (event) => {
+    if (!event.thread) return;
+    const thread = event.thread as ChatThread;
+    const definition = lookup.forThread(thread);
+    if (!definition) return;
+    if (definition.respondTo.includes("action")) {
+      await options.onEvent(
+        definition,
+        await messengerEvent(definition, {
+          action: event,
+          eventKind: "action",
+          raw: event.raw,
+          thread
+        }),
+        thread
+      );
+    }
+  });
+
+  return chat.registerSingleton();
+}
+
+/** Which messenger a thread or a state key belongs to. */
+function messengerLookup(definitions: NormalizedMessengerDefinition[]) {
+  const byAdapterName = new Map(
+    definitions.map((definition) => [definition.adapterName, definition])
+  );
+  const hasUniqueProvider = (provider: string): boolean =>
+    definitions.filter((definition) => definition.provider === provider)
+      .length === 1;
+  const forThreadId = (
+    threadId: string | undefined
+  ): NormalizedMessengerDefinition | undefined => {
+    if (!threadId) return undefined;
+    if (definitions.length === 1) return definitions[0];
+    return definitions.find(
+      (definition) =>
+        threadId === definition.id ||
+        threadId.startsWith(`${definition.id}:`) ||
+        (hasUniqueProvider(definition.provider) &&
+          (threadId === definition.provider ||
+            threadId.startsWith(`${definition.provider}:`))) ||
+        threadId === definition.adapterName ||
+        threadId.startsWith(`${definition.adapterName}:`)
+    );
+  };
+  const shardThread = (threadId: string): string =>
+    forThreadId(threadId)?.shardKey?.(threadId) ||
+    threadId.split(":").slice(0, 2).join(":") ||
+    "default";
+  return {
+    forThread: (thread: ChatThread) =>
+      byAdapterName.get(thread.toJSON().adapterName) ??
+      forThreadId(thread.id) ??
+      forThreadId(thread.channelId),
+    shardThread,
+    shardStateKey(key: string): string | undefined {
+      for (const definition of definitions) {
+        const shard = definition.keyShard?.(key);
+        if (shard) return shard;
+      }
+      return defaultKeyShard(key, shardThread);
+    }
+  };
+}
+
+async function messengerEvent(
+  definition: NormalizedMessengerDefinition,
+  input: ChatSdkMessengerEventInput
+): Promise<MessengerEvent> {
+  return (
+    (await definition.toEvent?.(input)) ??
+    defaultChatSdkEvent(definition, input)
+  );
 }
 
 export function normalizeMessengers(

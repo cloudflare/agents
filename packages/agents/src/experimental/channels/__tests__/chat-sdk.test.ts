@@ -257,4 +257,22 @@ describe("Chat SDK Channel", () => {
       ["telegram:42", "sent-1", { markdown: "Got it" }]
     ]);
   });
+
+  it("sends only, through the owner's initialize, for an adapter a Chat owns", async () => {
+    const adapter = fakeAdapter();
+    const initialize = vi.fn(async () => {});
+    const channel = chatSdkChannel({
+      adapter,
+      name: "telegram",
+      path: "/webhooks/telegram",
+      participant: (event) => event.actor?.id ?? null,
+      initialize
+    });
+    expect(channel.ingress).toBeUndefined();
+    await expect(
+      channel.deliver!(SURFACE, { markdown: "Hi" })
+    ).resolves.toEqual({ status: "delivered", reference: "sent-1" });
+    expect(initialize).toHaveBeenCalledOnce();
+    expect(adapter.initialize).not.toHaveBeenCalled();
+  });
 });

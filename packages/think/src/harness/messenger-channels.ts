@@ -1,18 +1,22 @@
 /**
- * The harness-backed Think's messengers, on Channels: each messenger from
- * `getMessengers()` is a Chat SDK Channel (its adapter verifies and parses
- * the platform's webhooks), mounted with `Channels.forHarness` on the
- * class's `ThinkHarness`, its replies sent as delivery runs. A message joins
- * the harness's default session (`conversation: "self"`).
+ * The harness-backed Think's messengers, on Channels. Each messenger from
+ * `getMessengers()` takes its webhooks through Think's Chat SDK `Chat` (the
+ * release's state rows: subscriptions, thread locks, queued messages),
+ * which decides what is answered. Each answered event joins the harness's
+ * default session through `Channels.forHarness`, as `conversation: "self"`
+ * does in Think, and its reply goes out through the messenger's Chat SDK
+ * Channel as a delivery run, to the asking thread only.
  *
- * Durable: nothing of its own (Channels' Streams and KV, the deliveries'
- * runs). In memory: the definitions.
+ * Durable: each turn's asker in KV until the turn settles (with Chat SDK
+ * state, Channels' Streams and KV, and the deliveries' runs). In memory:
+ * the definitions, the `Chat`, and the turns webhooks wait on.
  */
 
+import type { UIMessage } from "ai";
+import type { Adapter, Chat } from "chat";
 import type { ThinkHarness } from "agents/harness/think";
 import { chatSdkChannel, deliverToSurfaces } from "agents/internal";
 import {
-  ChannelGateway,
   Channels,
   type ChannelMessageSurface,
   type ChannelsHost,
@@ -20,14 +24,32 @@ import {
 } from "agents/experimental/channels";
 import { Streams } from "agents/streams";
 import type { Tasks } from "agents/tasks";
-import { normalizeMessengers, type ThinkMessengers } from "../messengers";
+import {
+  createMessengerChat,
+  idempotencyKeyForEvent,
+  normalizeMessengers,
+  withMessengerQueueTtl,
+  type MessengerConcurrency,
+  type NormalizedMessengerDefinition,
+  type ThinkMessengers
+} from "../messengers/chat-sdk";
+import {
+  toMessengerUserMessage,
+  type MessengerEvent
+} from "../messengers/events";
 
 /** @internal */
 export type ThinkMessengerChannels = {
   readonly channels: Channels;
-  /** Route a webhook to its messenger; `undefined` when none owns it. */
+  /** Take a webhook for a messenger; `undefined` when none owns its path. */
   receive(request: Request): Promise<Response | undefined>;
 };
+
+type ChannelEvent = Parameters<Channels["receive"]>[0];
+type MessagePart = Extract<
+  ChannelEvent,
+  { type: "message" }
+>["message"]["parts"][number];
 
 /**
  * The messengers as Channels, or `undefined` when there are none. Only the
@@ -45,40 +67,31 @@ export function messengerChannels(options: {
   root(): boolean;
   /** Where each turn's asker is kept, so a reply after a reset finds it. */
   kv: SyncKvStorage;
+  /** The Think object: Chat SDK state lives on its sub-agents. */
+  parent: unknown;
+  /** Read when the first webhook arrives, as Think reads it at start. */
+  concurrency(): MessengerConcurrency;
 }): ThinkMessengerChannels | undefined {
   const definitions = normalizeMessengers(options.messengers);
   if (definitions.length === 0) return undefined;
   if (definitions.some((definition) => definition.id === TURNS_KEY)) {
     throw new Error(`"${TURNS_KEY}" is reserved and is not a messenger id`);
   }
-  const ingress = definitions.map((definition) => {
-    const channel = chatSdkChannel({
-      adapter: definition.adapter,
-      name: definition.adapterName,
-      path: definition.path,
-      participant: (event) => event.actor?.id ?? null,
-      ...(definition.userName && { userName: definition.userName })
-    });
-    return { definition, channel };
-  });
   /**
-   * The deliveries' first attempts of each operation some webhook waits on,
-   * shared by every webhook for it (a retried webhook waits for what the
-   * first one started), with the count of those webhooks.
+   * The deliveries' first attempts of each operation, collected for every
+   * answer waiting on it.
    */
-  const attempts = new Map<
-    string,
-    { started: Promise<void>[]; waiting: number }
-  >();
-  /** Each waiting webhook's operations, told when Channels settles the turn. */
+  const attempts = new Map<string, Set<Promise<void>[]>>();
+  /** Each waiting answer's operation, told when Channels settles the turn. */
   const settled = new Map<string, Set<() => void>>();
   let turnsHost: ChannelsHost | undefined;
+
   /**
    * Watch `operation`'s turn from before Channels takes it. `settled()`
    * resolves once Channels settled the turn, after every update before it
    * was published (so the turn's deliveries started). It waits for the
-   * harness first; a turn Channels settled already (a repeated webhook) is
-   * no longer in its snapshot.
+   * harness first; a turn Channels settled already (a repeated event) is no
+   * longer in its snapshot.
    */
   function watchTurn(operation: string): TurnWatch {
     let resolve!: () => void;
@@ -109,11 +122,12 @@ export function messengerChannels(options: {
       }
     };
   }
+
   const channels = Channels.forHarness(options.harness, {
     streams: new Streams({ name: "think-messengers" }),
     channels: Object.fromEntries([
       // Sees each turn settle after every update before it was published
-      // (so its deliveries started), for the webhook that waits on it.
+      // (so its deliveries started), for the answer that waits on it.
       [
         TURNS_KEY,
         {
@@ -131,35 +145,112 @@ export function messengerChannels(options: {
           }
         }
       ],
-      ...ingress.map(({ definition, channel }) => [
+      ...definitions.map((definition) => [
         definition.id,
-        deliverToSurfaces(channel, {
-          tasks: options.tasks,
-          // Every thread shares the default session, as in Think: a reply
-          // goes to the thread whose message started its turn, only.
-          asker: (startedBy) =>
-            options.kv.get<ChannelMessageSurface>(askerKey(startedBy)),
-          sending: (startedBy, attempt) =>
-            attempts.get(startedBy)?.started.push(attempt)
-        })
+        deliverToSurfaces(
+          chatSdkChannel({
+            adapter: definition.adapter,
+            name: definition.adapterName,
+            path: definition.path,
+            // The Chat below owns the adapter's webhooks and its chat
+            // instance; this Channel only sends.
+            initialize: () => chat().initialize(),
+            ...(definition.userName && { userName: definition.userName })
+          }),
+          {
+            tasks: options.tasks,
+            // Every thread shares the default session, as in Think: a reply
+            // goes to the thread whose message started its turn, only.
+            asker: (startedBy) =>
+              options.kv.get<ChannelMessageSurface>(askerKey(startedBy)),
+            sending: (startedBy, attempt) =>
+              attempts.get(startedBy)?.forEach((mine) => mine.push(attempt))
+          }
+        )
       ])
     ])
   });
-  const gatewayChannels = Object.fromEntries(
-    ingress.map(({ definition, channel }) => [definition.id, channel])
-  );
+
+  /**
+   * Answer one event the Chat routed here: it joins the default session,
+   * and the handler (holding the thread's lock, as in Think) returns once
+   * Channels settled the turn and its deliveries' first attempts ended (one
+   * that failed and waits to retry is not waited for).
+   */
+  async function answer(
+    definition: NormalizedMessengerDefinition,
+    event: MessengerEvent
+  ): Promise<void> {
+    const eventId = idempotencyKeyForEvent(event);
+    const author = event.message?.author ?? event.action?.user;
+    const threadId = event.thread.id;
+    const surface: ChannelMessageSurface = {
+      channelKey: definition.id,
+      version: 1,
+      address: { threadId },
+      label: `${definition.adapterName} · ${threadId}`,
+      key: threadId
+    };
+    const mine: Promise<void>[] = [];
+    const waiting = attempts.get(eventId) ?? new Set();
+    attempts.set(eventId, waiting.add(mine));
+    // Watched before Channels takes it, so its settling is seen.
+    const turn = watchTurn(eventId);
+    try {
+      options.kv.put(askerKey(eventId), surface);
+      await channels.receive(
+        {
+          type: "message",
+          eventId,
+          message: {
+            id: eventId,
+            role: "user",
+            parts: messageParts(toMessengerUserMessage(event))
+          }
+        },
+        {
+          route: definition.id,
+          participant: {
+            id: `${definition.adapterName}:${author?.userId ?? "unknown"}`
+          },
+          surface
+        }
+      );
+      await turn.settled();
+      await Promise.all(mine);
+      // Also here: a repeated event's turn settled before it came, and will
+      // not settle again.
+      options.kv.delete(askerKey(eventId));
+    } finally {
+      turn.release();
+      waiting.delete(mine);
+      if (waiting.size === 0 && attempts.get(eventId) === waiting) {
+        attempts.delete(eventId);
+      }
+    }
+  }
+
+  let made: Chat<Record<string, Adapter>> | undefined;
+  const chat = () =>
+    (made ??= createMessengerChat({
+      definitions,
+      concurrency: withMessengerQueueTtl(options.concurrency()),
+      parent: options.parent,
+      onEvent: (definition, event) => answer(definition, event)
+    }));
+
   return {
     channels,
     async receive(request) {
       if (!options.root()) return undefined;
-      // Think's webhook check comes first, as in Think: a request it refuses
-      // never reaches the adapter.
       const pathname = new URL(request.url).pathname;
       const definition = definitions.find((d) => d.path === pathname);
       if (!definition) return undefined;
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });
       }
+      // Think's webhook check comes first: a request it refuses never
+      // reaches the adapter.
       if (definition.verifyWebhook !== false) {
         const verdict = await definition.verifyWebhook(
           request.clone() as Request
@@ -169,51 +260,7 @@ export function messengerChannels(options: {
           return new Response("Unauthorized", { status: 401 });
         }
       }
-      // The gateway's own code authenticates and normalizes the webhook and
-      // hands its events to this object's Channels, every sender to this
-      // agent, as Think's messengers answer here.
-      const operations: string[] = [];
-      const turns = new Map<string, TurnWatch>();
-      const gateway = new ChannelGateway({
-        channels: gatewayChannels,
-        agent: () => ({
-          receive: async (event, origin) => {
-            operations.push(event.eventId);
-            const shared = attempts.get(event.eventId) ?? {
-              started: [],
-              waiting: 0
-            };
-            shared.waiting += 1;
-            attempts.set(event.eventId, shared);
-            // Watched before Channels takes it, so its settling is seen.
-            turns.set(event.eventId, watchTurn(event.eventId));
-            options.kv.put(askerKey(event.eventId), origin.surface);
-            await channels.receive(event, origin);
-          },
-          fetch: () =>
-            Promise.resolve(new Response("Not found", { status: 404 }))
-        })
-      });
-      try {
-        const response = await gateway.fetch(request);
-        // As in Think, the webhook answers once its replies are sent: each
-        // turn it started ends, then its deliveries' first attempts do (one
-        // that failed and waits to retry is not waited for).
-        for (const operation of operations) {
-          await turns.get(operation)?.settled();
-          await Promise.all(attempts.get(operation)?.started ?? []);
-          // Also here: a retried webhook's turn settled before it came, and
-          // will not settle again.
-          options.kv.delete(askerKey(operation));
-        }
-        return response;
-      } finally {
-        for (const operation of operations) {
-          const shared = attempts.get(operation);
-          if (shared && --shared.waiting === 0) attempts.delete(operation);
-        }
-        for (const turn of turns.values()) turn.release();
-      }
+      return chat().webhooks[definition.adapterName](request);
     }
   };
 }
@@ -225,4 +272,21 @@ const TURNS_KEY = "think:turns";
 
 function askerKey(eventId: string): string {
   return `cf_think_messenger_asker:${eventId}`;
+}
+
+/** The user message Think builds for an event, as Channels message parts. */
+function messageParts(message: UIMessage): MessagePart[] {
+  const parts: MessagePart[] = [];
+  for (const part of message.parts) {
+    if (part.type === "text") parts.push({ type: "text", text: part.text });
+    else if (part.type === "file") {
+      parts.push({
+        type: "file",
+        url: part.url,
+        mediaType: part.mediaType,
+        ...(part.filename !== undefined && { filename: part.filename })
+      });
+    }
+  }
+  return parts;
 }
