@@ -151,5 +151,14 @@
       "file": "think-session.test.ts",
       "test": "Think — error handling > bridges an in-band stream error to chat:request:failed on the RPC path"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > marks the incident failed when onChatRecovery throws",
+    "reason": "seeds a fiber row and reads the class's recovery incident records (cf:chat-recovery:incident:*)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > ends a stalled turn with an error when onChatRecovery throws"
+    }
   }
 ]
