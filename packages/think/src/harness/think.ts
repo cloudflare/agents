@@ -95,6 +95,8 @@ import type {
   TurnResult,
   ChatOptions,
   ChunkContext,
+  PrepareStepContext,
+  StepConfig,
   StepContext,
   StreamCallback,
   SubmitMessagesOptions,
@@ -298,6 +300,10 @@ export class Think<
   /** Think's `think_config` rows, the table and migration Think has. */
   readonly #config = new ThinkConfigStore();
   #configCache: unknown = null;
+  /** What `beforeTurn` returned for the running operation's turn. */
+  #ownTurn:
+    | { readonly operationId: string; readonly own: TurnConfig | void }
+    | undefined;
   /**
    * What started each operation (Think's `TurnTrigger`) and its turn's
    * abort signal, by operation id, until it settles.
@@ -318,7 +324,12 @@ export class Think<
    */
   readonly #modelInputs = new Map<
     string,
-    { readonly operationId: string; readonly input: unknown }
+    {
+      readonly operationId: string;
+      readonly input: unknown;
+      /** When `beforeToolCall` was asked, for the call's duration. */
+      readonly started: number;
+    }
   >();
   /** Builds string models through one cached default provider, as Think. */
   readonly #models = new ThinkModelResolver({
@@ -449,6 +460,7 @@ export class Think<
           });
           const kept = this.#modelInputs.get(result.toolCallId);
           const modelInput = kept ? kept.input : result.input;
+          const toolExecutionMs = kept ? Date.now() - kept.started : 0;
           this.#modelInputs.delete(result.toolCallId);
           return this.afterToolCall({
             toolName: result.toolName,
@@ -457,9 +469,19 @@ export class Think<
             stepNumber: 0,
             messages: [],
             requestId: result.operationId,
+            toolExecutionMs,
+            durationMs: toolExecutionMs,
             ...(result.ok
-              ? { success: true, output: result.output }
-              : { success: false, error: result.errorText })
+              ? {
+                  toolOutput: { type: "tool-result", output: result.output },
+                  success: true,
+                  output: result.output
+                }
+              : {
+                  toolOutput: { type: "tool-error", error: result.errorText },
+                  success: false,
+                  error: result.errorText
+                })
           } as unknown as ToolCallResultContext);
         },
         onStepFinish: async ({ message, finishReason, operationId, step }) => {
@@ -535,6 +557,7 @@ export class Think<
       if (event.type === "run-end") {
         this.#wakeStableWaiters();
         this.#running = undefined;
+        this.#ownTurn = undefined;
         this.#extensionTurn = undefined;
         this.#turnMaxSteps = undefined;
       }
@@ -861,6 +884,11 @@ export class Think<
       requestId: step.operationId
     } as unknown as StepContext);
   }
+
+  /** Before each model call, as the AI SDK's `prepareStep` in Think. */
+  beforeStep(
+    _ctx: PrepareStepContext
+  ): StepConfig | void | Promise<StepConfig | void> {}
 
   /** After each step, as in Think. */
   onStepEnd(ctx: StepContext): void | Promise<void> {
@@ -1562,7 +1590,13 @@ export class Think<
       trigger: identity.trigger,
       abortSignal: turn.signal
     };
-    const own = await this.beforeTurn(context);
+    // As in Think, `beforeTurn` runs once per turn; the harness asks
+    // before every model call, and later calls reuse what it returned.
+    const first = this.#ownTurn?.operationId !== turn.operationId;
+    const own = first
+      ? await this.beforeTurn(context)
+      : (this.#ownTurn?.own ?? undefined);
+    if (first) this.#ownTurn = { operationId: turn.operationId, own };
     // The sandboxed extensions see the subclass's config, as in Think,
     // once per operation: Think prepares a turn once for its whole tool
     // loop, and the harness asks before every model call.
@@ -1585,22 +1619,45 @@ export class Think<
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
     this.#turnMaxSteps = config.maxSteps;
+    // Then `beforeStep`, before each model call, as the AI SDK's
+    // `prepareStep` runs in Think. Its fields win for this call.
+    const self = this;
+    const step: StepFields = isMethodOverridden(this, "beforeStep")
+      ? (((await this.beforeStep({
+          stepNumber: turn.step,
+          steps: previousSteps(turn),
+          get model() {
+            return config.model !== undefined
+              ? self.resolveModel(config.model)
+              : resolveDefault();
+          },
+          messages: context.messages,
+          experimental_context: undefined
+        } as unknown as PrepareStepContext)) ?? {}) as StepFields)
+      : {};
+    const stepSystem = step.instructions ?? step.system;
     const system =
+      (typeof stepSystem === "string" ? stepSystem : undefined) ??
       config.instructions ??
       config.system ??
       systemPromptForTurn(
         base,
         config.tools ? { ...tools, ...config.tools } : tools
       );
+    const model = step.model ?? config.model;
+    const messages = step.messages ?? (first ? config.messages : undefined);
+    const activeTools = step.activeTools ?? config.activeTools;
+    const toolChoice = step.toolChoice ?? config.toolChoice;
     return {
-      ...(config.model !== undefined && {
-        model: this.resolveModel(config.model)
+      ...(model !== undefined && {
+        model: this.resolveModel(model)
       }),
       ...(typeof system === "string" && { system }),
-      ...(config.messages && { messages: config.messages }),
-      ...(config.activeTools && { activeTools: config.activeTools }),
-      ...(config.toolChoice !== undefined && {
-        toolChoice: config.toolChoice
+      ...(messages && { messages }),
+      ...(activeTools && { activeTools: [...activeTools] }),
+      ...(toolChoice !== undefined && {
+        // SAFETY: Think's and the harness's tool choice are the AI SDK's.
+        toolChoice: toolChoice as ThinkTurnConfig["toolChoice"]
       }),
       ...(config.providerOptions !== undefined && {
         // SAFETY: provider options are JSON by the AI SDK's contract.
@@ -1627,7 +1684,8 @@ export class Think<
     // the call runs with one `beforeToolCall` substituted.
     this.#modelInputs.set(call.toolCallId, {
       operationId: call.operationId,
-      input: call.input
+      input: call.input,
+      started: Date.now()
     });
     let decision: ToolCallDecision | void;
     try {
@@ -1747,6 +1805,32 @@ type OpenStep = {
   /** Which of the reply's steps it is, counted by `step-start` parts. */
   readonly segment: number;
 };
+
+/** The fields of a `StepConfig` the harness-backed Think applies. */
+type StepFields = {
+  readonly model?: ThinkModel;
+  readonly instructions?: unknown;
+  readonly system?: unknown;
+  readonly messages?: TurnConfig["messages"];
+  readonly activeTools?: readonly string[];
+  readonly toolChoice?: unknown;
+};
+
+/**
+ * The steps an operation's model calls made before this one, in the AI
+ * SDK's step terms, from the reply they are on: the last message, when
+ * this is not the first call.
+ */
+function previousSteps(turn: ThinkTurnContext) {
+  const reply = turn.messages.at(-1);
+  if (turn.step === 0 || reply?.role !== "assistant") return [];
+  const segments = stepSegments(reply);
+  const steps = [];
+  for (let segment = segments - turn.step + 1; segment <= segments; segment++) {
+    steps.push(stepResultOf(reply, segment));
+  }
+  return steps;
+}
 
 /** How many steps a reply has, by its `step-start` parts. */
 function stepSegments(message: UIMessage): number {
