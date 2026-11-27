@@ -128,7 +128,6 @@ import {
   loadThinkExtensions,
   ThinkExtensionHooks
 } from "../extensions/wiring";
-import { stampTurnContext, turnMetadataFromMessages } from "../turn-metadata";
 import type {
   ChatErrorContext,
   ContextOverflowConfig,
