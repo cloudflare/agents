@@ -220,6 +220,95 @@ describe("ThinkHarness turns", () => {
     ]);
   });
 
+  it("accepts a submission first and runs it from the alarm", async () => {
+    const stub = fresh();
+    // Accepted, not started: its caller gets it back queued, as Think's
+    // `submitMessages` returns `pending`. Read in the call that submitted
+    // it: the alarm has no chance to start it in between.
+    expect(await stub.submittedAs("one", "sub-pending")).toBe("queued");
+    expect(await stub.wait("sub-pending")).toMatchObject({ status: "done" });
+  });
+
+  it("keeps a caller's reason on an aborted operation, and still says whether it had started", async () => {
+    const stub = fresh();
+    // Running: held at the gate.
+    await stub.submit("gate", { operationId: "running" });
+    await stub.gateStarted(1);
+    // Queued behind it.
+    await stub.submit("later", { operationId: "queued" });
+    expect(await stub.abortWithReason("queued", "stop")).toBe(true);
+    expect(await stub.abortWithReason("running", "x".repeat(5000))).toBe(true);
+    await stub.release();
+
+    // The public result tells withdrawn from aborted by whether the run
+    // had started, whatever the caller's text.
+    expect(await stub.wait("queued")).toMatchObject({
+      status: "unanswered",
+      reason: "withdrawn"
+    });
+    expect(await stub.wait("running")).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    // The caller's text is on the inspection, capped.
+    expect(JSON.parse(await stub.inspectRecord("queued"))).toMatchObject({
+      reason: "withdrawn",
+      abortReason: "stop"
+    });
+    expect(
+      JSON.parse(await stub.inspectRecord("running")).abortReason
+    ).toHaveLength(1024);
+  });
+
+  it("tells withdrawn from aborted by the run, also when the caller's reason is one of those words", async () => {
+    const stub = fresh();
+    await stub.submit("gate", { operationId: "running" });
+    await stub.gateStarted(1);
+    await stub.submit("later", { operationId: "queued" });
+    // The words the harness uses itself, each on the other kind.
+    await stub.abortWithReason("queued", "aborted");
+    await stub.abortWithReason("running", "withdrawn");
+    await stub.release();
+    expect(JSON.parse(await stub.inspectRecord("queued"))).toMatchObject({
+      reason: "withdrawn",
+      abortReason: "aborted"
+    });
+    expect(JSON.parse(await stub.inspectRecord("running"))).toMatchObject({
+      reason: "aborted",
+      abortReason: "withdrawn"
+    });
+  });
+
+  it("gives a waiter the operation as it settled, with the caller's reason", async () => {
+    const stub = fresh();
+    await stub.submit("gate", { operationId: "running" });
+    await stub.gateStarted(1);
+    const settled = stub.settledRecord("running");
+    await stub.abortWithReason("running", "superseded by a newer request");
+    await stub.release();
+    expect(JSON.parse(await settled)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted",
+      abortReason: "superseded by a newer request"
+    });
+  });
+
+  it("reports no caller's reason for an abort that gave none", async () => {
+    const stub = fresh();
+    await stub.submit("gate", { operationId: "running" });
+    await stub.gateStarted(1);
+    await stub.submit("later", { operationId: "queued" });
+    await stub.abort("queued");
+    await stub.abort("running");
+    await stub.release();
+    const queued = JSON.parse(await stub.inspectRecord("queued"));
+    const running = JSON.parse(await stub.inspectRecord("running"));
+    expect(queued).toMatchObject({ reason: "withdrawn" });
+    expect(running).toMatchObject({ reason: "aborted" });
+    expect(queued.abortReason).toBeUndefined();
+    expect(running.abortReason).toBeUndefined();
+  });
+
   it("treats an empty idempotency key as none, as Think does", async () => {
     const stub = fresh();
     const first = await stub.submit("one", { idempotencyKey: "" });
