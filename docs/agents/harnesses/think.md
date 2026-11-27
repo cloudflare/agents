@@ -142,19 +142,33 @@ Input submitted with `source: "client"` is untrusted:
 `codemode()` from `agents/harness/think/extensions` gives the model one `code` tool. The model writes a JavaScript async arrow function, and the other server tools become functions the script calls. Each call is a recorded step of the turn, with the tool hooks and approvals: a call that needs approval parks the script, and once it is approved the script runs again from the top with the calls it already made answered from their records. Install it through the `extensions` option, with `@cloudflare/codemode` installed:
 
 ```ts
+import { DurableObject } from "cloudflare:workers";
+import { tool } from "ai";
+import { z } from "zod";
 import { ThinkHarness } from "agents/harness/think";
 import {
   CodemodeSandbox,
   codemode,
   sandboxExecutor
 } from "agents/harness/think/extensions";
+import { Lifecycle } from "agents/lifecycle";
+import { createAI } from "agents/models/ai-sdk";
 
+// The sandbox class, exported from the Worker entry.
 export { CodemodeSandbox };
 
 export class Assistant extends DurableObject<Env> {
+  ai = createAI({ binding: this.env.AI });
+
   harness = new ThinkHarness({
     model: this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
-    tools: { weather },
+    tools: {
+      weather: tool({
+        description: "Get the weather for a city",
+        inputSchema: z.object({ city: z.string() }),
+        execute: async ({ city }) => `Sunny in ${city}`
+      })
+    },
     extensions: [
       codemode({
         executor: sandboxExecutor(
@@ -166,7 +180,8 @@ export class Assistant extends DurableObject<Env> {
       })
     ]
   });
-  // ...
+
+  lifecycle = Lifecycle.install(this).use(this.harness);
 }
 ```
 

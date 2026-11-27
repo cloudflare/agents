@@ -282,7 +282,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               rounds: z.boolean().optional(),
               pending: z.boolean().optional(),
               order: z.boolean().optional(),
-              orderGate: z.boolean().optional()
+              orderGate: z.boolean().optional(),
+              orderGateApprove: z.boolean().optional(),
+              keyOrder: z.boolean().optional()
             }),
             execute: async (
               {
@@ -296,7 +298,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                 rounds,
                 pending,
                 order,
-                orderGate
+                orderGate,
+                orderGateApprove,
+                keyOrder
               },
               options
             ) => {
@@ -316,17 +320,36 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               }
               // Two calls whose order flips on the rerun, then an approval
               // (or, with `orderGate`, the gate an eviction cuts short).
-              if (order || orderGate) {
+              // The same input, its keys in another order on the rerun.
+              if (keyOrder) {
+                const kv = this.ctx.storage.kv;
+                const runs = (kv.get<number>(ORDER_RUNS_KEY) ?? 0) + 1;
+                kv.put(ORDER_RUNS_KEY, runs);
+                const paired = await invoke(
+                  "pair",
+                  runs === 1 ? { x: "1", y: "2" } : { y: "2", x: "1" }
+                );
+                const done = await invoke("dangerous", {});
+                if (!done.ok) return done.errorText;
+                return paired.ok ? `pair ${paired.output}` : paired.errorText;
+              }
+              if (order || orderGate || orderGateApprove) {
                 const kv = this.ctx.storage.kv;
                 const runs = (kv.get<number>(ORDER_RUNS_KEY) ?? 0) + 1;
                 kv.put(ORDER_RUNS_KEY, runs);
                 const [first, second] = runs === 1 ? ["a", "b"] : ["b", "a"];
                 const one = await invoke("label", { label: first });
                 const two = await invoke("label", { label: second });
-                const last = orderGate
-                  ? await invoke("gate_safe", {})
-                  : await invoke("dangerous", {});
+                const last =
+                  orderGate || orderGateApprove
+                    ? await invoke("gate_safe", {})
+                    : await invoke("dangerous", {});
                 if (!last.ok) return last.errorText;
+                // Then an approval, after the eviction.
+                if (orderGateApprove) {
+                  const done = await invoke("dangerous", {});
+                  if (!done.ok) return done.errorText;
+                }
                 const said = (o: typeof one) => (o.ok ? o.output : o.errorText);
                 return `${first}: ${said(one)}; ${second}: ${said(two)}`;
               }
@@ -503,6 +526,19 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                   : new Promise((resolve) => setTimeout(resolve, 0)));
               }
               return "receipt";
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only: joins its two fields, counted with the labels.
+        pair: {
+          ...tool({
+            description: "Join two strings",
+            inputSchema: z.object({ x: z.string(), y: z.string() }),
+            execute: async ({ x, y }) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(LABEL_RUNS_KEY, (kv.get<number>(LABEL_RUNS_KEY) ?? 0) + 1);
+              return `${x}${y}`;
             }
           }),
           callers: ["code"] as const
@@ -932,7 +968,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               rounds: text === "compose rounds",
               pending: text === "compose pending",
               order: text === "compose order",
-              orderGate: text === "compose order gate"
+              orderGate: text === "compose order gate",
+              orderGateApprove: text === "compose order gate approve",
+              keyOrder: text === "compose key order"
             }
           }
         ]);

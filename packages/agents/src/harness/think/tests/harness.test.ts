@@ -892,6 +892,44 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     expect(await stub.labelRuns()).toBe(2);
   });
 
+  it("answers a call after an approval whose input has its keys in another order", async () => {
+    const stub = fresh();
+    await stub.prompt("compose key order");
+    const [call] = await stub.lastToolCalls();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(approved.operationId))).toBe(
+      "tool said: pair 12"
+    );
+    expect(await stub.labelRuns()).toBe(1);
+  });
+
+  it("doesn't run again after an approval a call whose step an eviction kept for another order", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("compose order gate approve");
+    await stub.gateStarted(1);
+    stub = await crash(name);
+    await stub.release();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await stub.wait(receipt.operationId);
+    const [call] = await stub.lastToolCalls();
+    expect(call?.approvalId).toBeDefined();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    const said = text(await stub.wait(approved.operationId)) ?? "";
+    // Neither label ran again: their steps' results were kept for the park.
+    expect(await stub.labelRuns()).toBe(2);
+    expect(said).toContain("different order");
+    expect(await stub.dangerousCount()).toBe(1);
+  });
+
   it("doesn't give a call made in another order after an eviction the result another call's step kept", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);

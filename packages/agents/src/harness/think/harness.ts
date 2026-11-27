@@ -727,15 +727,39 @@ function isAncestorOf(call: string, of: string | undefined): boolean {
   return of !== undefined && of.startsWith(`${call}/`);
 }
 
-/** Which call an outcome was for: its tool and the digest of its input. */
-function callKey(toolName: string, input: unknown): string {
-  let digest: string;
+/**
+ * Which call an outcome was for: its tool and the SHA-256 of its input as
+ * canonical JSON (keys sorted), so the same input in another key order is
+ * the same call, and two inputs never share one by chance.
+ */
+async function callKey(toolName: string, input: unknown): Promise<string> {
+  let text: string;
   try {
-    digest = digestOf(asJson(input));
+    text = canonicalJson(asJson(input));
   } catch {
-    digest = "unserializable";
+    text = "unserializable";
   }
-  return `${toolName}#${digest}`;
+  const bytes = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))
+  );
+  let hex = "";
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+  return `${toolName}#${hex}`;
+}
+
+/** JSON with every object's keys in order. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.keys(value)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`
+      );
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 /** A call made where the run before made another: not run, not answered. */
@@ -2809,7 +2833,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return async (toolName, input) => {
       const toolCallId = `${parent}/${++invoked}`;
       scope.signal.throwIfAborted();
-      const key = callKey(toolName, input);
+      const key = await callKey(toolName, input);
       const kept: KeptOutcome | undefined = Object.hasOwn(
         scope.seed,
         toolCallId
@@ -3004,6 +3028,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       try {
         const recorded = (await step) as unknown as KeptOutcome;
         if (recorded.call !== undefined && recorded.call !== key) {
+          // The step's call ran: what it did is kept for its position, so
+          // a park after this carries it, and it never runs again.
+          scope.made[toolCallId] = recorded;
           return { ok: false, errorText: DIVERGED_CALL_ERROR };
         }
         const outcome = givenOutcome(recorded);
