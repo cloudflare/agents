@@ -36,9 +36,9 @@ async function waitFor(
  * the turn: the stored chunks become the partial reply, then recovery runs.
  */
 async function recoverAfterEviction(
-  chunks: Array<Record<string, unknown>>
+  chunks: Array<Record<string, unknown>>,
+  name = `empty-reply-${crypto.randomUUID()}`
 ): Promise<UIMessage[]> {
-  const name = `empty-reply-${crypto.randomUUID()}`;
   let agent = await recoveryAgent(name);
   await seedInterruptedTurn(agent, chunks);
   await evictDurableObject(agent as unknown as DurableObjectStub);
@@ -61,6 +61,16 @@ const reasoningOnly = {
   parts: [
     { type: "step-start" },
     { type: "reasoning", text: "Let me think", state: "streaming" }
+  ]
+} as UIMessage;
+
+/** A reply the model finished with reasoning only (finish "stop"). */
+const completedReasoningOnly = {
+  id: "assistant-reasoning",
+  role: "assistant",
+  parts: [
+    { type: "step-start" },
+    { type: "reasoning", text: "Let me think", state: "done" }
   ]
 } as UIMessage;
 
@@ -252,17 +262,22 @@ describe("Think: a reply that holds nothing", () => {
   // A reply a model completed with reasoning only (finish "stop") is the
   // user's answer: the next question does not delete it from the
   // transcript. Its reasoning is left out of what the model is sent.
-  it("keeps a completed reply that holds only reasoning when a new question comes", async () => {
+  async function keptAfterNewQuestion(reply: UIMessage) {
     const agent = await recoveryAgent();
     await agent.persistTestMessage(question);
-    await agent.persistTestMessage(reasoningOnly);
+    await agent.persistTestMessage(reply);
 
     expect((await agent.testSaveMessages("Something else")).status).toBe(
       "completed"
     );
 
     const stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(ids(stored)).toContain("assistant-reasoning");
+    expect(stored.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
     expect(
       stored
         .find((message) => message.id === "assistant-reasoning")
@@ -273,6 +288,36 @@ describe("Think: a reply that holds nothing", () => {
     const [prompt] = await agent.getModelPromptsForTest();
     expect(prompt?.some((line) => line.startsWith("assistant"))).toBe(false);
     expect(prompt?.filter((line) => line.startsWith("user"))).toHaveLength(2);
+  }
+
+  it("keeps a completed reply that holds only reasoning when a new question comes", async () => {
+    await keptAfterNewQuestion(completedReasoningOnly);
+  });
+
+  // The repair cannot tell a reply an older version stored cut off from one
+  // that completed: both are kept, and both are left out of the request.
+  it("keeps a reasoning-only reply an older version stored cut off when a new question comes", async () => {
+    await keptAfterNewQuestion(reasoningOnly);
+  });
+
+  // The other half of the rule: a reply cut off in its reasoning is not
+  // stored. Recovery answers the question again, and the next question
+  // follows that answer, with no reasoning-only reply anywhere.
+  it("leaves no reasoning-only reply of a turn cut off in its reasoning before the next question", async () => {
+    const name = `empty-reply-${crypto.randomUUID()}`;
+    const stored = await recoverAfterEviction(reasoningChunks, name);
+    const agent = await recoveryAgent(name);
+    expect((await agent.testSaveMessages("Something else")).status).toBe(
+      "completed"
+    );
+    const after = (await agent.getStoredMessages()) as UIMessage[];
+    expect(ids(after)).not.toContain("assistant-partial");
+    expect(after.slice(0, stored.length).map((m) => m.id)).toEqual(ids(stored));
+    expect(
+      after.every((message) =>
+        message.parts.some((part) => part.type !== "step-start")
+      )
+    ).toBe(true);
   });
 
   it("a recovery that would continue it removes it and answers the question again", async () => {

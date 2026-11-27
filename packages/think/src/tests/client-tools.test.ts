@@ -3231,6 +3231,10 @@ describe("Think — before-turn repair", () => {
       "step-start",
       "reasoning"
     ]);
+    // The continuation's answer follows it (as before this rule, in a
+    // message of its own here).
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.at(-1)?.parts.at(-1)).toMatchObject({ type: "text" });
     // And no assistant message of the model request ends in reasoning.
     const prompt = (
       (await agent.getTextOnlyPromptsForTest()) as Array<
