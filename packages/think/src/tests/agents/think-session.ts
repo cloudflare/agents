@@ -2376,6 +2376,13 @@ export class ThinkTestAgent extends Think {
     });
   }
 
+  /** The next reply stalls once after two chunks, and recovery retries it. */
+  async stallNextReplyOnceForTest(): Promise<void> {
+    this._stallAfterChunks = 2;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = 50;
+  }
+
   /**
    * An agent-tool run on an agent whose `onChatResponse` starts a turn of
    * its own once the run's reply completes. With `recovered`, the run's
@@ -6863,6 +6870,29 @@ export class ThinkAgentToolParent extends Agent {
       reads: await child.runReadsForTest(),
       status: r.status,
       ...(r.summary !== undefined && { summary: r.summary }),
+      ...(r.error !== undefined && { error: r.error })
+    };
+  }
+
+  /**
+   * Run a Think child whose reply stalls once and is retried while the
+   * parent follows it, and return what the call gives.
+   */
+  async runThinkChildThroughStallForTest(): Promise<{
+    status: string;
+    error?: string;
+  }> {
+    const runId = `stall-${crypto.randomUUID()}`;
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.stallNextReplyOnceForTest();
+    const r = await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "stall-call",
+      input: "stall once",
+      inputPreview: "stall once"
+    });
+    return {
+      status: r.status,
       ...(r.error !== undefined && { error: r.error })
     };
   }

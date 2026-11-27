@@ -119,6 +119,10 @@ type ThinkAgentToolTestStub = {
 };
 
 type ThinkAgentToolParentStub = DurableObjectStub & {
+  runThinkChildThroughStallForTest(): Promise<{
+    status: string;
+    error?: string;
+  }>;
   runSlowThinkChildForTest(): Promise<{
     reads: number;
     status: string;
@@ -694,6 +698,13 @@ describe("Think agent tools", () => {
     // Following it reads the run's state a few times, not in a loop (a tail
     // with nothing to wait on backs off instead of spinning). 0 on the class.
     expect(result.reads).toBeLessThan(50);
+  });
+
+  it("follows a Think child whose reply stalls and is retried, to its result", async () => {
+    const parent = await freshParent();
+    expect(await parent.runThinkChildThroughStallForTest()).toEqual({
+      status: "completed"
+    });
   });
 
   it("forwards a chunk that lands in the tail attach window (#1589)", async () => {

@@ -1151,7 +1151,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /**
    * @internal Follow an operation: the chunks its reply holds now (as this
    * isolate streams it, earlier attempts' included, or as its stream stores
-   * them), then each chunk it streams after that, then its end, to
+   * them), then each chunk it streams after that, then its end (it
+   * settled: an attempt that ends for a retry is not the end), to
    * `listener`. Snapshot and subscription are one synchronous step, so no
    * chunk is missed or seen twice. Call after `lifecycle.ready()`.
    */
@@ -1166,11 +1167,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (event.type === "chunk" && event.operationId === operationId) {
         listener({ type: "chunk", chunk: event.chunk });
       } else if (
-        event.type === "run-end" &&
-        event.operationId === operationId
-      ) {
-        listener({ type: "end" });
-      } else if (
         event.type === "operation" &&
         event.status.operationId === operationId &&
         (event.status.status === "done" || event.status.status === "unanswered")
@@ -1178,11 +1174,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         listener({ type: "end" });
       }
     });
+    // An attempt still building its session has not read its earlier
+    // attempts' chunks back yet: the stored stream has them then.
     const live = this.#live.get(session);
+    const stored = this.#streamChunks(
+      chatTurnStreamId(runIdOf(session, operationId))
+    );
     const chunks =
-      live?.operationId === operationId
+      live?.operationId === operationId && live.partial.length >= stored.length
         ? [...live.partial]
-        : this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+        : stored;
     return { chunks, stop };
   }
 
