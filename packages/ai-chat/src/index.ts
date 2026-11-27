@@ -342,6 +342,9 @@ export { createToolsFromClientSchemas } from "agents/chat";
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
+/** The chat module's turn definition, as AIChatAgent registers it. */
+const CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
+
 /**
  * What `AIChatAgent` stores with a client request's admission record, to run
  * it again after an isolate reset. See `ChatTurns.resumeAdmissions`.
@@ -622,12 +625,7 @@ export class AIChatAgent<
   private _clientView<TMessage extends { id: string }>(
     messages: readonly TMessage[]
   ): { messages: TMessage[]; queuedMessageIds?: string[] } {
-    return chatClientView(
-      this.tasks,
-      AIChatAgent.CHAT_TURN_DEFINITION,
-      "",
-      messages
-    );
+    return chatClientView(this.tasks, CHAT_TURN_DEFINITION, "", messages);
   }
 
   /** Lazily-built shared resume-handshake driver (Tier-2). */
@@ -933,9 +931,6 @@ export class AIChatAgent<
     inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt
   });
 
-  /** The Task definition each chat turn runs as (the chat module's). */
-  static readonly CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
-
   /** Whether each running call continues a reply, for `onChatResponse`. */
   private readonly _callContinues = new Map<string, boolean>();
 
@@ -1062,7 +1057,7 @@ export class AIChatAgent<
           }
         : concurrency;
     return {
-      definition: AIChatAgent.CHAT_TURN_DEFINITION,
+      definition: CHAT_TURN_DEFINITION,
       lane: "chat",
       arrival
     };
@@ -1308,9 +1303,9 @@ export class AIChatAgent<
     );
     // The chat module's turn definition: every new turn runs here.
     this.tasks.register(
-      AIChatAgent.CHAT_TURN_DEFINITION,
+      CHAT_TURN_DEFINITION,
       chatTurnDefinition(this._chatDeps(), this._chatHost(), {
-        name: AIChatAgent.CHAT_TURN_DEFINITION
+        name: CHAT_TURN_DEFINITION
       })
     );
     // The recovery Task, which only finishes runs an earlier version
@@ -2435,7 +2430,7 @@ export class AIChatAgent<
   /** The chat's turns that wait or run in its lane. */
   protected _openChatTurns(): readonly { runId: string; status: string }[] {
     return this.tasks.peekList({
-      definition: AIChatAgent.CHAT_TURN_DEFINITION,
+      definition: CHAT_TURN_DEFINITION,
       lane: "chat",
       status: ["pending", "running"],
       results: false,

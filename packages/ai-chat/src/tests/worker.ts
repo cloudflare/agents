@@ -140,6 +140,9 @@ type ContinuationStateForTest = {
 };
 
 /** What `agent`'s auto-continuation holds: armed, next, running. */
+/** AIChatAgent's chat-turn definition name (internal to ai-chat). */
+const CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
+
 /** The test definition that holds a chat's lane. */
 const HELD_LANE_DEFINITION = "__cf_test_held_lane";
 const heldLaneRegistered = new WeakSet<AIChatAgent>();
@@ -183,7 +186,7 @@ function continuationStateForTest(
 function queuedTurnCountForTest(agent: AIChatAgent): number {
   // The chat's lane: its turns and a test run holding it.
   return agent.tasks.peekList({
-    definition: [AIChatAgent.CHAT_TURN_DEFINITION, HELD_LANE_DEFINITION],
+    definition: [CHAT_TURN_DEFINITION, HELD_LANE_DEFINITION],
     lane: "chat",
     status: ["pending", "running"],
     results: false
@@ -2201,7 +2204,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     };
     const run = tasks.run;
     tasks.run = (...args: unknown[]) => {
-      if (args[0] !== AIChatAgent.CHAT_TURN_DEFINITION) {
+      if (args[0] !== CHAT_TURN_DEFINITION) {
         return run.apply(this.tasks, args);
       }
       tasks.run = run;
@@ -2227,7 +2230,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
                json_extract(metadata, '$.chat.stopped') AS stopped
         FROM cf_agents_task_runs
         WHERE lane = 'chat' AND status = 'pending'
-          AND definition = ${AIChatAgent.CHAT_TURN_DEFINITION}
+          AND definition = ${CHAT_TURN_DEFINITION}
         ORDER BY seq
       `.map((row) => ({
         requestId: row.request_id,
@@ -6522,7 +6525,7 @@ export class AsyncStartAdmissionAgent extends SlowStreamAgent {
         (run_id, definition, input, status, metadata, idempotency_key, retain,
          attempt, next_at, cancel_requested, created_at, updated_at, lane, seq)
       VALUES
-        (${requestId}, ${AIChatAgent.CHAT_TURN_DEFINITION},
+        (${requestId}, ${CHAT_TURN_DEFINITION},
          ${JSON.stringify(input)}, 'pending', NULL,
          NULL, 0, 0, ${now}, 0, ${now}, ${now}, 'chat',
          (SELECT coalesce(MAX(seq), 0) + 1 FROM cf_agents_task_runs
