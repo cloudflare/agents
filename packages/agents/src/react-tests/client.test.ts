@@ -609,7 +609,7 @@ describe("AgentClient", () => {
         onConnectionError
       });
       client.addEventListener("open", onOpen);
-      // Assert now: the close rejects the call during the waitFor below, and
+      // Assert now: the close rejects the call before the error is reported, and
       // a rejection with no handler by then is reported as unhandled.
       const pending = expect(client.call("add", [1, 2])).rejects.toThrow(
         "Connection closed"
