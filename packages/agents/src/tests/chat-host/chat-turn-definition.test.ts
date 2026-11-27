@@ -660,6 +660,37 @@ describe("chatTurnDefinition", () => {
       }
     });
 
+  it("passes the reply's own start through the chunk hook when the model sends none", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const hooked: string[] = [];
+      await definitionOf(instance, {
+        respond: async () =>
+          stream([
+            { type: "text-start", id: "t1" },
+            { type: "text-delta", id: "t1", delta: "Hi" },
+            { type: "text-end", id: "t1" },
+            { type: "finish" }
+          ]),
+        hooks: {
+          transformChunk: (chunk) => {
+            hooked.push(chunk.type);
+            return chunk;
+          }
+        }
+      })({ trigger: "server" }, laterAttempt("run-start", 1));
+      // What a host mirrors through the hook is what the stream stores.
+      expect(hooked).toEqual([
+        "start",
+        "text-start",
+        "text-delta",
+        "text-end",
+        "finish"
+      ]);
+    });
+  });
+
   it("gives every plain-text reply its own message", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
