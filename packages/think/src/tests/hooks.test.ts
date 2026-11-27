@@ -377,6 +377,18 @@ describe("Think — beforeStep hook", () => {
     expect(log[0].text).toBe("Async override applied");
   });
 
+  it("ends a step that ran a tool before the next step's beforeStep", async () => {
+    const agent = await freshToolAgent("hook-bs-order");
+    await agent.testChat("Run a tool");
+    // Step 0 called a tool; it ends (with its call) before step 1 starts.
+    expect(await agent.getStepHookOrderForTest()).toEqual([
+      "before:0",
+      "end:1",
+      "before:1",
+      "end:0"
+    ]);
+  });
+
   it("fires once per step across a tool-call loop with growing previous-step state", async () => {
     // Regression: beforeStep must fire for every model step in the
     // agentic loop, and `ctx.steps` / `ctx.stepNumber` must reflect the
