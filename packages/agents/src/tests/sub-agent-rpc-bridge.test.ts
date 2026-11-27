@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
 
@@ -466,18 +466,24 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     const ws = await connectWS(parentName, uniqueName());
     try {
       const parent = await getAgentByName(env.TestSubAgentParent, parentName);
-      await parent.delayNextRootResolution(300);
+      onTestFinished(() => parent.releaseConnectionOperationForTest());
       const first = `queued-first-${crypto.randomUUID()}`;
+      await parent.holdNextConnectionOperationForTest("send", first);
       const second = `live-second-${crypto.randomUUID()}`;
-      const delivered = waitForTextMessages(ws, new Set([first, second]), 2000);
+      const delivered = waitForTextMessages(ws, new Set([first, second]), 5000);
 
       const scheduled = await callRPC(ws, "sendConnectionMessageAfterDelay", [
         first
       ]);
       expectSuccessfulResult(scheduled, "scheduled");
-      await new Promise((resolve) => setTimeout(resolve, 75));
+      // The detached send is at the root, held: queued, not delivered.
+      await vi.waitFor(async () => {
+        expect(await parent.isConnectionOperationHeldForTest()).toBe(true);
+      });
+      // The live frame's send queues behind it; the frame's reply does not.
       const sent = await callRPC(ws, "sendConnectionMessageNow", [second]);
       expectSuccessfulResult(sent, "sent");
+      await parent.releaseConnectionOperationForTest();
 
       await expect(delivered).resolves.toEqual([first, second]);
     } finally {
@@ -490,19 +496,32 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     const ws = await connectWS(parentName, uniqueName());
     try {
       const parent = await getAgentByName(env.TestSubAgentParent, parentName);
-      await parent.delayNextRootResolution(300);
+      onTestFinished(() => parent.releaseConnectionOperationForTest());
       const first = `queued-state-${crypto.randomUUID()}`;
+      await parent.holdNextConnectionOperationForTest("setState", first);
       const second = `live-state-${crypto.randomUUID()}`;
 
       const scheduled = await callRPC(ws, "setConnectionMarkerAfterDelay", [
         first
       ]);
       expectSuccessfulResult(scheduled, "scheduled");
-      await new Promise((resolve) => setTimeout(resolve, 75));
+      // The detached update is at the root, held: queued, not applied.
+      await vi.waitFor(async () => {
+        expect(await parent.isConnectionOperationHeldForTest()).toBe(true);
+      });
       const set = await callRPC(ws, "setConnectionMarkerNow", [second]);
       expectSuccessfulResult(set, "set");
+      await parent.releaseConnectionOperationForTest();
 
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      // The root applied both, the queued one first.
+      const markers = async () =>
+        JSON.stringify(await parent.appliedConnectionStatesForTest());
+      await vi.waitFor(async () => {
+        const applied = await markers();
+        expect(applied.includes(first) && applied.includes(second)).toBe(true);
+      });
+      const applied = await markers();
+      expect(applied.indexOf(first)).toBeLessThan(applied.indexOf(second));
       const read = await callRPC(ws, "getConnectionMarker");
       expectSuccessfulResult(read, second);
     } finally {
@@ -515,17 +534,26 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     const ws = await connectWS(parentName, uniqueName());
     try {
       const parent = await getAgentByName(env.TestSubAgentParent, parentName);
-      await parent.delayNextRootResolution(300);
+      onTestFinished(() => parent.releaseConnectionOperationForTest());
       const message = `queued-before-live-close-${crypto.randomUUID()}`;
-      const delivered = waitForTextMessage(ws, message, 2000);
-      const closed = waitForClose(ws, 2000);
+      await parent.holdNextConnectionOperationForTest("send", message);
+      const delivered = waitForTextMessage(ws, message, 5000);
+      const closed = waitForClose(ws, 5000);
 
       const scheduled = await callRPC(ws, "sendConnectionMessageAfterDelay", [
         message
       ]);
       expectSuccessfulResult(scheduled, "scheduled");
-      await new Promise((resolve) => setTimeout(resolve, 75));
-      ws.send("close-connection-during-live-frame");
+      // The detached send is at the root, held: queued, not delivered.
+      await vi.waitFor(async () => {
+        expect(await parent.isConnectionOperationHeldForTest()).toBe(true);
+      });
+      const closing = await callRPC(ws, "closeConnectionNow", [
+        4001,
+        "live-frame-close"
+      ]);
+      expectSuccessfulResult(closing, "closing");
+      await parent.releaseConnectionOperationForTest();
 
       await expect(delivered).resolves.toBe(message);
       await expect(closed).resolves.toEqual({

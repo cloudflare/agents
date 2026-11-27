@@ -1702,7 +1702,6 @@ export class TestSubAgentParent extends Agent {
 
   private _fiberWakeRouteFailuresRemaining = 0;
   private _rootResolutionFailuresRemaining = 0;
-  private _nextRootResolutionDelayMs = 0;
   private _subAgentBroadcastFailuresRemaining = 0;
 
   override async _cf_routeLifecycle(
@@ -1732,8 +1731,72 @@ export class TestSubAgentParent extends Agent {
     this._rootResolutionFailuresRemaining += 1;
   }
 
-  delayNextRootResolution(delayMs: number): void {
-    this._nextRootResolutionDelayMs = delayMs;
+  /** The next root-side send or state write from a facet, held. */
+  private _connectionOperationHold:
+    | {
+        kind: "send" | "setState";
+        marker: string;
+        held: boolean;
+        release: () => void;
+        released: Promise<void>;
+      }
+    | undefined;
+  /** The facet socket states the root applied, in order. */
+  private _appliedConnectionStates: unknown[] = [];
+
+  /**
+   * Hold the next facet `kind` operation that carries `marker` at the root
+   * until released. Other operations (a connect's own state write) pass.
+   */
+  holdNextConnectionOperationForTest(
+    kind: "send" | "setState",
+    marker: string
+  ): void {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this._connectionOperationHold = {
+      kind,
+      marker,
+      held: false,
+      release,
+      released
+    };
+  }
+
+  isConnectionOperationHeldForTest(): boolean {
+    return this._connectionOperationHold?.held ?? false;
+  }
+
+  releaseConnectionOperationForTest(): void {
+    this._connectionOperationHold?.release();
+    this._connectionOperationHold = undefined;
+  }
+
+  appliedConnectionStatesForTest(): unknown[] {
+    return this._appliedConnectionStates;
+  }
+
+  private async _waitForConnectionOperationHold(
+    kind: "send" | "setState",
+    payload: unknown
+  ): Promise<void> {
+    const hold = this._connectionOperationHold;
+    if (!hold || hold.kind !== kind || hold.held) return;
+    const text =
+      typeof payload === "string" ? payload : JSON.stringify(payload);
+    if (!text?.includes(hold.marker)) return;
+    hold.held = true;
+    await hold.released;
+  }
+
+  override async _cf_setSubAgentConnectionState(
+    ...args: Parameters<Agent["_cf_setSubAgentConnectionState"]>
+  ): Promise<unknown> {
+    await this._waitForConnectionOperationHold("setState", args[1]);
+    this._appliedConnectionStates.push(args[1]);
+    return super._cf_setSubAgentConnectionState(...args);
   }
 
   /** Forwards one frame through a deliberately slow live bridge. */
@@ -1823,6 +1886,7 @@ export class TestSubAgentParent extends Agent {
     ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     this._subAgentConnectionSendCalls += 1;
+    await this._waitForConnectionOperationHold("send", message);
     await super._cf_sendToSubAgentConnection(connectionId, message, ownerPath);
   }
 
@@ -1832,6 +1896,7 @@ export class TestSubAgentParent extends Agent {
     ownerPath?: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     this._subAgentConnectionSendCalls += 1;
+    await this._waitForConnectionOperationHold("send", messages);
     await super._cf_sendManyToSubAgentConnection(
       connectionId,
       messages,
@@ -1870,11 +1935,6 @@ export class TestSubAgentParent extends Agent {
     if (this._rootResolutionFailuresRemaining > 0) {
       this._rootResolutionFailuresRemaining -= 1;
       throw new Error("TestSubAgentParent root resolution failed");
-    }
-    if (this._nextRootResolutionDelayMs > 0) {
-      const delayMs = this._nextRootResolutionDelayMs;
-      this._nextRootResolutionDelayMs = 0;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
     await super.__unsafe_ensureInitialized(props);
   }
@@ -3978,6 +4038,19 @@ export class SlowReplySubAgent extends Agent {
       })
     );
     return "scheduled";
+  }
+
+  /** Closes the connection during the current frame. */
+  @callable()
+  closeConnectionNow(code: number, reason: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.closeConnectionNow requires an active connection"
+      );
+    }
+    connection.close(code, reason);
+    return "closing";
   }
 
   /** Schedules a connection close after the current frame completes. */
