@@ -88,6 +88,21 @@ export function readClassOnly(file: string): {
  * @param withoutThink - Ids of the tests that pass when Think cannot be
  *   constructed: they do not exercise it, so none can be a successor.
  */
+/** The most class-only tests one successor may stand for. */
+export const MAX_ENTRIES_PER_SUCCESSOR = 4;
+
+/** How many entries name each successor, by the successor's id. */
+export function successorCounts(
+  entries: readonly ClassOnlyEntry[]
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    const successor = testId(entry.successor.file, entry.successor.test);
+    counts.set(successor, (counts.get(successor) ?? 0) + 1);
+  }
+  return counts;
+}
+
 export function checkClassOnly(
   entries: readonly ClassOnlyEntry[],
   inventory: ReadonlySet<string>,
@@ -106,6 +121,11 @@ export function checkClassOnly(
     seen.add(own);
     if (!inventory.has(own)) {
       problems.push(`no such test (delete its row): ${own}`);
+    } else if (passed.has(own)) {
+      // It reaches nothing the harness-backed Think lacks.
+      problems.push(
+        `passes on the harness-backed Think, so it is not class-only (delete its row): ${own}`
+      );
     }
     if (listed.has(successor)) {
       problems.push(
@@ -123,6 +143,13 @@ export function checkClassOnly(
       );
     }
   }
+  for (const [successor, count] of successorCounts(entries)) {
+    if (count > MAX_ENTRIES_PER_SUCCESSOR) {
+      problems.push(
+        `${count} class-only tests name one successor, more than ${MAX_ENTRIES_PER_SUCCESSOR}: ${successor}`
+      );
+    }
+  }
   return problems;
 }
 
@@ -130,9 +157,10 @@ export function checkClassOnly(
 export function classOnlyTable(entries: readonly ClassOnlyEntry[]): string {
   if (entries.length === 0) return "";
   const cell = (text: string) => text.replaceAll("|", "\\|");
+  const counts = successorCounts(entries);
   const rows = entries.map(
     (entry) =>
-      `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | \`${entry.successor.file}\`: ${cell(entry.successor.test)} |`
+      `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | \`${entry.successor.file}\`: ${cell(entry.successor.test)} | ${counts.get(testId(entry.successor.file, entry.successor.test))} |`
   );
   return `
 ## Class-only tests
@@ -143,8 +171,11 @@ through the public API: it passes here, and on the class in the ordinary
 suite (\`pnpm test:workers\`, which CI runs). The list is
 \`harness-class-only.json\`; a class-only test is deleted with the class.
 
-| Class-only test | What it reaches | Successor |
-| --- | --- | --- |
+The last column is how many class-only tests the successor stands for, at
+most ${MAX_ENTRIES_PER_SUCCESSOR}.
+
+| Class-only test | What it reaches | Successor | Stands for |
+| --- | --- | --- | --- |
 ${rows.join("\n")}
 `;
 }
