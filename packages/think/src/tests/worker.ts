@@ -73,6 +73,8 @@ export {
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
 } from "./agents";
+export { ThinkConfigStoreProbe } from "./agents/config-store-probe";
+import type { ThinkConfigStoreProbe } from "./agents/config-store-probe";
 
 import type {
   ThinkWorkspaceToolsAgent,
@@ -298,6 +300,7 @@ export type Env = {
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   ThinkPointerHydrationAgent: DurableObjectNamespace<ThinkPointerHydrationAgent>;
   ThinkLegacySessionApiAgent: DurableObjectNamespace<ThinkLegacySessionApiAgent>;
+  ThinkConfigStoreProbe: DurableObjectNamespace<ThinkConfigStoreProbe>;
   BrowserToolsHost: DurableObjectNamespace<BrowserToolsHost>;
   LOADER: WorkerLoader;
 };

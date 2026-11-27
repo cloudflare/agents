@@ -252,6 +252,10 @@
         "name": "ThinkLegacySessionApiAgent"
       },
       {
+        "class_name": "ThinkConfigStoreProbe",
+        "name": "ThinkConfigStoreProbe"
+      },
+      {
         "class_name": "BrowserToolsHost",
         "name": "BrowserToolsHost"
       },
@@ -333,6 +337,7 @@
         "ThinkMediaEvictionAutoAgent",
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",
+        "ThinkConfigStoreProbe",
         "BrowserToolsHost"
       ],
       "tag": "v1"
