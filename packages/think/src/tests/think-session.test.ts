@@ -1403,6 +1403,26 @@ describe("Think — error handling", () => {
     const stored = (await agent.getStoredMessages()) as UIMessage[];
     expect(stored).toHaveLength(4);
   });
+
+  // The successor of the test above through public behaviour: the failure
+  // is the model's own, from the model `beforeTurn` gives.
+  it("answers the next turn after a model failure", async () => {
+    const agent = await freshAgent("err-recover-model");
+
+    const errResult = await agent.testChatWithModelError("Temporary failure");
+    expect(errResult.done).toBe(false);
+    expect(errResult.error).toContain("Temporary failure");
+
+    const okResult = await agent.testChat("After error");
+    expect(okResult.done).toBe(true);
+
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored.map((message) => message.role).slice(-2)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(stored.at(-1)?.parts.length).toBeGreaterThan(0);
+  });
 });
 
 // ── Abort/cancel ─────────────────────────────────────────────────
