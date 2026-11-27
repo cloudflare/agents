@@ -4597,10 +4597,22 @@ export class ThinkTestAgent extends Think {
     };
     const first = new TestCollectingCallback();
     const second = new TestCollectingCallback();
+    // The second request has been accepted, and waits behind the first,
+    // once its caller hears it start.
+    let markQueued = () => {};
+    const queued = new Promise<void>((resolve) => {
+      markQueued = resolve;
+    });
+    const onStart = second.onStart.bind(second);
+    second.onStart = (event) => {
+      markQueued();
+      return onStart(event);
+    };
     try {
       const running = this.chat("first", first);
       await started;
       const waiting = this.chat("second", second);
+      await queued;
       if (cancelFirst) void this.cancelChat(first.requestId ?? "");
       await this.clearMessages();
       await Promise.all([running, waiting]);
