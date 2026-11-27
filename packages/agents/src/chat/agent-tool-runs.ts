@@ -38,6 +38,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import { TaskCancellation } from "../tasks/replay";
 import type { SaveMessagesResult } from "./lifecycle";
 import { allChunks } from "../agent-tool-chunks";
 import { REPLAY_PAGE_BYTES, utf8Length } from "../internal/platform-limits";
@@ -213,6 +214,8 @@ function startAnchor(
 /** An abort reason as text, or `null` when none was given. */
 export function abortReasonText(reason: unknown): string | null {
   if (reason === undefined || reason === null) return null;
+  // The chat module stops a turn with a `TaskCancellation`.
+  if (reason instanceof TaskCancellation) return reason.reason ?? null;
   return reason instanceof Error ? reason.message : String(reason);
 }
 

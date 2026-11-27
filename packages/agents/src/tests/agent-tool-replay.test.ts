@@ -34,6 +34,22 @@ function runText(
     .join("");
 }
 
+describe("an awaited agent-tool run stopped by its caller", () => {
+  // The chat module stops a turn with a `TaskCancellation`, not an Error:
+  // the run's error is its reason, and the child's run is cancelled.
+  it("cancels the child and reports the stop's reason when the signal carries a TaskCancellation", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `stop-cancellation-${crypto.randomUUID()}`
+    );
+    expect(await agent.stopRunWithTaskCancellationForTest()).toEqual({
+      status: "aborted",
+      error: "stopped",
+      child: "aborted"
+    });
+  });
+});
+
 describe("agent-tool live/replay sequencing", () => {
   it("replay after a mid-stream milestone neither duplicates nor drops text (#2364)", async () => {
     const agent = await getAgentByName(

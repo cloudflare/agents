@@ -1,4 +1,5 @@
 import { Agent, callable, type Connection } from "../../index.ts";
+import { TaskCancellation } from "../../tasks/replay.ts";
 import { TaskSettlement } from "../../tasks/settlement.ts";
 import type { TaskJson } from "../../tasks/types.ts";
 import type {
@@ -95,6 +96,46 @@ function ensureReleasedAgentToolTable(sql: SqlStorage): void {
 }
 
 export class TestAgentToolReplayAgent extends Agent {
+  /**
+   * Stop an awaited run the way the chat module stops the turn that runs
+   * it: its signal aborts with a `TaskCancellation`. Returns what the call
+   * gave and the child's run once it settled.
+   */
+  async stopRunWithTaskCancellationForTest(): Promise<{
+    status: string;
+    error?: string;
+    child: string | undefined;
+  }> {
+    const runId = crypto.randomUUID();
+    const stop = new AbortController();
+    const running = this.runAgentTool(TestAgentToolStubChild, {
+      runId,
+      input: { staysRunning: true, tailHangs: true } as StubRunInput,
+      signal: stop.signal
+    });
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    // A bound for a slow machine: the child has the run once it started.
+    const deadline = Date.now() + 5000;
+    while (
+      (await child.inspectAgentToolRun(runId))?.status !== "running" &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    stop.abort(new TaskCancellation("stopped"));
+    const result = await running;
+    let status = (await child.inspectAgentToolRun(runId))?.status;
+    while (status === "running" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      status = (await child.inspectAgentToolRun(runId))?.status;
+    }
+    return {
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error }),
+      child: status
+    };
+  }
+
   private get _agentTool(): AgentToolInternals {
     return (this as unknown as { _agentTools: AgentToolInternals })._agentTools;
   }

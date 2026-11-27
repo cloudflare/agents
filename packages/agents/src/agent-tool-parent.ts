@@ -10,6 +10,7 @@ import {
   DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS
 } from "./agent-options";
 import { MAX_SERIALIZED_BYTES } from "./tasks/serialization";
+import { TaskCancellation } from "./tasks/replay";
 import { TaskSettlement } from "./tasks/settlement";
 import type { Tasks } from "./tasks/tasks";
 import type { TaskJson, TaskRecord, TaskStep } from "./tasks/types";
@@ -146,6 +147,20 @@ type AgentToolTaskLocal = {
 };
 
 /** The agent options agent tools read. */
+
+/**
+ * A stop's reason as text, for the run's error and the cancel sent to the
+ * child (an RPC argument). The chat module stops a turn with a
+ * `TaskCancellation`, which is neither an Error nor serializable.
+ */
+function stopText(reason: unknown): string {
+  if (reason instanceof TaskCancellation) {
+    return reason.reason ?? "The operation was aborted";
+  }
+  if (reason instanceof Error) return reason.message;
+  if (reason === undefined || reason === null) return "cancelled";
+  return String(reason);
+}
 export type AgentToolParentOptions = Pick<
   ResolvedAgentOptions,
   | "detachedMaxBudgetMs"
@@ -495,19 +510,14 @@ export class AgentToolParent {
     const signal = local.signal;
     const onAbort = () => {
       void this.host.tasks
-        .cancel(
-          runId,
-          signal?.reason instanceof Error
-            ? signal.reason.message
-            : String(signal?.reason ?? "cancelled")
-        )
+        .cancel(runId, stopText(signal?.reason))
         .catch(() => {});
       void this.host.children
         .resolve(metadata.agentType, runId)
         .then((child) =>
           this._asAgentToolChildAdapter(child).cancelAgentToolRun(
             runId,
-            signal?.reason
+            stopText(signal?.reason)
           )
         )
         .catch(() => {});
@@ -800,16 +810,15 @@ export class AgentToolParent {
       result: RunAgentToolResult;
       sequence: number;
     }> => {
-      await adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      await adapter
+        .cancelAgentToolRun(runId, stopText(signal.reason))
+        .catch(() => {});
       return {
         result: {
           runId,
           agentType,
           status: "aborted",
-          error:
-            signal.reason instanceof Error
-              ? signal.reason.message
-              : String(signal.reason ?? "cancelled")
+          error: stopText(signal.reason)
         },
         sequence
       };
@@ -833,7 +842,9 @@ export class AgentToolParent {
     }
 
     const onAbort = () => {
-      void adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      void adapter
+        .cancelAgentToolRun(runId, stopText(signal.reason))
+        .catch(() => {});
     };
     signal.addEventListener("abort", onAbort, { once: true });
     try {
@@ -963,7 +974,9 @@ export class AgentToolParent {
     }
     const { adapter, inspection } = reached;
     const onAbort = () => {
-      void adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      void adapter
+        .cancelAgentToolRun(runId, stopText(signal.reason))
+        .catch(() => {});
     };
     signal.addEventListener("abort", onAbort, { once: true });
     try {
@@ -991,13 +1004,15 @@ export class AgentToolParent {
     { result: RunAgentToolResult; sequence: number } | TaskSettlement
   > {
     if (signal.aborted) {
-      await adapter.cancelAgentToolRun(runId, signal.reason).catch(() => {});
+      await adapter
+        .cancelAgentToolRun(runId, stopText(signal.reason))
+        .catch(() => {});
       return {
         result: {
           runId,
           agentType: meta.agentType,
           status: "aborted",
-          error: String(signal.reason ?? "cancelled")
+          error: stopText(signal.reason)
         },
         sequence: 1
       };
