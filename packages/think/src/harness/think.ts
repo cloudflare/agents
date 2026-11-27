@@ -448,11 +448,14 @@ export class Think<
         onTurnEnd: async (end) => {
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
+          const continuation = this.#continuing.delete(end.operationId);
           if (!end.message) return;
           await this.onChatResponse({
             message: end.message,
             requestId: end.operationId,
-            continuation: false,
+            // A turn that continues a reply (after a tool answer) says so,
+            // as Think's does.
+            continuation,
             status:
               end.status === "done"
                 ? "completed"
@@ -486,6 +489,9 @@ export class Think<
           requestId: event.operationId,
           causes: event.causes
         });
+      }
+      if (event.type === "run-start" && event.continuation) {
+        this.#continuing.add(event.operationId);
       }
       if (event.type === "run-end") {
         this.#running = undefined;
@@ -726,6 +732,9 @@ export class Think<
   #running:
     | { requestId: string; trigger: string; continuation: boolean }
     | undefined;
+
+  /** Operations whose run continues a reply, until their turn ends. */
+  readonly #continuing = new Set<string>();
 
   async getMessages(): Promise<UIMessage[]> {
     return this.harness.session().messages();
