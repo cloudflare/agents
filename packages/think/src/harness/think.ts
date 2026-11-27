@@ -236,6 +236,9 @@ function toInput(
   return Array.isArray(input) ? input : [input];
 }
 
+/** Marks an operation that answers the history with a new reply. */
+const NEW_REPLY_KEY = "cf_think_new_reply";
+
 type StaticTurnInput = Exclude<
   TurnInputMessages,
   (current: UIMessage[]) => unknown
@@ -354,7 +357,13 @@ function taskStatusesFor(
 const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
 
 /** The reasons ThinkHarness ends an operation with when it never ran. */
-const NEVER_RAN = new Set(["withdrawn", "not_waiting", "not_found", "empty"]);
+const NEVER_RAN = new Set([
+  "withdrawn",
+  "not_waiting",
+  "not_found",
+  "empty",
+  "awaiting_client"
+]);
 
 /** A programmatic turn stopped, or cleared by a reset, before it began. */
 function cutOffBeforeStart(cut: "stopped" | "cleared"): SaveMessagesResult {
@@ -1923,8 +1932,22 @@ export class Think<
     return this.harness.enqueue(
       this.harness.session().id,
       { kind: "reply" },
-      { operationId }
+      // Kept with the operation, so a turn restored after a restart is
+      // still told it continues.
+      { operationId, metadata: { [NEW_REPLY_KEY]: true } }
     );
+  }
+
+  /** Whether `operationId` is a new reply, from its record after a restart. */
+  async #restoreNewReply(operationId: string): Promise<void> {
+    if (this.#newReplies.has(operationId)) return;
+    const inspection = await this.harness.inspection(
+      this.harness.session().id,
+      operationId
+    );
+    if (inspection?.metadata?.[NEW_REPLY_KEY] === true) {
+      this.#newReplies.add(operationId);
+    }
   }
 
   /** A new operation id for a turn a method call asks for (`programmatic`). */
@@ -2198,7 +2221,15 @@ export class Think<
     const cut = await this.#cutOffByStop(options?.signal);
     if (cut) return cutOffBeforeStart(cut);
     const receipt = await this.#continue(options?.channel);
-    return this.#waitForTurn(receipt.operationId, options?.signal);
+    const result = await this.#waitForTurn(
+      receipt.operationId,
+      options?.signal
+    );
+    // As on Think: while the reply still waits on a client there is nothing
+    // to continue; the client's answer continues it.
+    return result.status === "error" && result.error === "awaiting_client"
+      ? { requestId: "", status: "skipped", reason: "awaiting-client" }
+      : result;
   }
 
   /**
@@ -3340,6 +3371,7 @@ export class Think<
     // The turn's channel, from the stamp on its latest user message, as
     // Think resolves it for a new, continued or recovered turn.
     if (this.#turnChannel?.operationId !== turn.operationId) {
+      await this.#restoreNewReply(turn.operationId);
       // A context reminder the harness adds as a message of its own is not
       // the turn's user message.
       const history = turn.messages.filter(

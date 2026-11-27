@@ -55,6 +55,7 @@ import {
   ChatStreamStalledError,
   iterateWithStallWatchdog
 } from "../../chat/stall-watchdog";
+import { continuationWaitsOnClient } from "../../chat/before-turn";
 import { StreamAccumulator } from "../../chat/stream-accumulator";
 import {
   truncateOlderMessages,
@@ -2061,6 +2062,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         const latest = await handle.getLatestLeaf();
         if (!latest) {
           unanswered = "not_found";
+          break;
+        }
+        // While the latest reply still waits on a client (a client tool's
+        // call, an approval), there is nothing to answer yet: the client's
+        // answer continues that reply.
+        const built = await this.#build(session);
+        const clientTools = new Set(
+          Object.keys(built.tools).filter(
+            (name) => !isServerTool(built.tools, name)
+          )
+        );
+        if (continuationWaitsOnClient([latest], clientTools)) {
+          unanswered = "awaiting_client";
           break;
         }
         this.lifecycle.storage.transactionSync(() =>
