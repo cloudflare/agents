@@ -25,4 +25,4 @@
 - An `AIChatAgent` turn that a clear reaches, waiting or running, ends with `outcome: "skipped"` and keeps nothing.
 - `AIChatAgent` turns store their messages directly, so a `persistMessages` override no longer sees a turn's writes.
 - A request context over the row budget is no longer kept in memory.
-- A tab that reconnects learns how a request ended by naming it in its resume request, as the client does, and is no longer sent the last request's end.
+- A tab that reconnects learns how a request ended by naming it in its resume request, as the client does; a tab that names none is told of the newest end only when it was an error.
