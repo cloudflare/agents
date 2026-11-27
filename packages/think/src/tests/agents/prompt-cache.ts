@@ -245,23 +245,24 @@ export class ThinkPromptCacheTestAgent extends Think {
     last: string;
   }> {
     this._environment = "Monday";
-    const self = this as unknown as {
-      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
-    };
-    await self._upsertMessageInHistory({
-      id: "u1",
-      role: "user",
-      parts: [{ type: "text", text: "Say hello." }]
-    });
+    await this.addMessages([
+      {
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Say hello." }]
+      }
+    ]);
     // The turn that answered u1 recorded its prompt, with Monday, on u1.
     await this.context.prepare();
-    await self._upsertMessageInHistory(
-      {
-        id: "a1",
-        role: "assistant",
-        parts: [{ type: "text", text: "Sure, here is" }]
-      },
-      "u1"
+    await this.addMessages(
+      [
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [{ type: "text", text: "Sure, here is" }]
+        }
+      ],
+      { parentId: "u1" }
     );
     this._environment = "Tuesday";
     await this.continueLastTurn();
@@ -300,17 +301,16 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     const frozen = options.frozen ?? (await this.context.freezeSystemPrompt());
     await new AgentContextProvider(this, "_system_prompt").set(frozen);
     // The turn the release answered with that prompt.
-    const self = this as unknown as {
-      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
-    };
-    await self._upsertMessageInHistory({
-      id: "r0",
-      role: "user",
-      parts: [{ type: "text", text: "before the upgrade" }]
-    });
-    await self._upsertMessageInHistory(
-      { id: "r1", role: "assistant", parts: [{ type: "text", text: "ok" }] },
-      "r0"
+    await this.addMessages([
+      {
+        id: "r0",
+        role: "user",
+        parts: [{ type: "text", text: "before the upgrade" }]
+      }
+    ]);
+    await this.addMessages(
+      [{ id: "r1", role: "assistant", parts: [{ type: "text", text: "ok" }] }],
+      { parentId: "r0" }
     );
     this.setEnvironmentForTest(options.environment);
     const turns: UpgradeReport["turns"] = [];
