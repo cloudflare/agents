@@ -304,6 +304,8 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     );
 
     expect(result.status).toBe("aborted");
+    // Released result shape: a stop says so.
+    expect(result.reason).toBe("stopped");
 
     // Registry must be drained — the controller for this request id
     // was created (so getExistingSignal observers see consistent

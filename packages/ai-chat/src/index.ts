@@ -784,7 +784,9 @@ export class AIChatAgent<
     } = {}
   ): Promise<SaveMessagesResult> {
     const requestId = options.requestId ?? nanoid();
-    if (options.signal?.aborted) return { requestId, status: "aborted" };
+    if (options.signal?.aborted) {
+      return { requestId, status: "aborted", reason: "stopped" };
+    }
     const ended = new Promise<ChatTurnResult>((resolve) =>
       this._turnWaiters.set(requestId, resolve)
     );
@@ -2213,7 +2215,7 @@ export class AIChatAgent<
     // the turn carries only the messages the transcript does not hold, and
     // stores them when it starts, after the replies ahead of it.
     if (options?.signal?.aborted) {
-      return { requestId: nanoid(), status: "aborted" };
+      return { requestId: nanoid(), status: "aborted", reason: "stopped" };
     }
     const resolved =
       typeof messages === "function" ? await messages(this.messages) : messages;
