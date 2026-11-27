@@ -4,9 +4,9 @@
 "@cloudflare/think": patch
 ---
 
-Chat recovery after a restart or a dropped stream.
+Chat recovery.
 
-- Recovery work units (`maxRecoveryWork`, `ctx.work`) now count ten stored chunks each.
+- Recovery work units (`maxRecoveryWork`, `ctx.work`) now count ten stored chunks each. See [Recovery work units](https://developers.cloudflare.com/agents/api-reference/chat-agents/#recovery-work-units).
 - Rate-limit, transient and overflow errors are recognised without `classifyChatError`, and recovery honours `Retry-After` (up to 60 s).
 - An interrupted turn is skipped if the conversation moved on, else answered or continued once, and requests behind it run afterwards in order (#2922).
 - Long conversations are no longer sealed with `work_budget_exceeded` (#3055).
