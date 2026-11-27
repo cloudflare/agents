@@ -1323,4 +1323,41 @@ describe("chatTurnDefinition", () => {
       expect(result).toBeInstanceOf(TaskSettlement);
     });
   });
+
+  it("a tool cut off after only progress output is reported interrupted, not given the progress as its result", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const cut = await instance.streams.open(chatTurnStreamId("pg-1"), {
+        tag: "pg-1"
+      });
+      for (const chunk of [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "c1",
+          toolName: "slow",
+          input: {}
+        },
+        {
+          type: "tool-output-available",
+          toolCallId: "c1",
+          output: "half",
+          preliminary: true
+        }
+      ]) {
+        cut.append(chunk as never);
+      }
+      await definitionOf(instance, instance.host)(
+        { trigger: "server" },
+        laterAttempt("pg-1", 2)
+      );
+      const part = (
+        instance.calls[0].messages.find((m) => m.id === "a1") as unknown as {
+          parts: Array<{ toolCallId?: string; state?: string }>;
+        }
+      ).parts.find((p) => p.toolCallId === "c1");
+      expect(part?.state).toBe("output-error");
+    });
+  });
 });
