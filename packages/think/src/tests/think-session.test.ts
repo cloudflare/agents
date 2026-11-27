@@ -3937,6 +3937,18 @@ describe("Think — chat() over RPC", () => {
 // ── chatRecovery ────────────────────────────────────────
 
 describe("Think — chatRecovery", () => {
+  it("runs a recovery attempt outside the turn its run was started in", async () => {
+    const agent = await getAgentByName(
+      env.ThinkTestAgent,
+      `attempt-context-${crypto.randomUUID()}`
+    );
+    // A run started from inside a turn runs in that turn's context. A
+    // recovery attempt in it must not: it starts turns of its own.
+    await expect(agent.recoveryAttemptStartedInsideTurnForTest()).resolves.toBe(
+      false
+    );
+  });
+
   it("hands off recovery after the durable turn run exists and before turn completion", async () => {
     const agent = await freshRecoveryAgent(crypto.randomUUID());
     await expect(agent.recoveryAcceptanceForTest()).resolves.toEqual({

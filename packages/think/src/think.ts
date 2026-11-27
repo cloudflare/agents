@@ -2933,11 +2933,19 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // SAFETY: the recovery engine is the sole producer of each callback's
     // payload and Tasks persists it verbatim, so the callback name selects
     // the matching host input type.
+    // A turn's run is started from inside that turn, so whatever the run
+    // does after the turn still carries the turn's context. A recovery
+    // attempt is not part of that turn: it starts turns of its own, which
+    // a turn may not.
     const attempts: ChatRecoveryTaskHooks = {
       _chatRecoveryContinue: (data) =>
-        this._chatRecoveryContinue(data as ChatRecoveryContinueData),
+        admittedTurnContext.exit(() =>
+          this._chatRecoveryContinue(data as ChatRecoveryContinueData)
+        ),
       _chatRecoveryRetry: (data) =>
-        this._chatRecoveryRetry(data as ChatRecoveryRetryData)
+        admittedTurnContext.exit(() =>
+          this._chatRecoveryRetry(data as ChatRecoveryRetryData)
+        )
     };
     const chatFiberName = (this.constructor as typeof Think).CHAT_FIBER_NAME;
     this.tasks.register(

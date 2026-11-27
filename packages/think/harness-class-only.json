@@ -733,5 +733,11 @@
       "file": "attachment-consumption.test.ts",
       "test": "attachment consumption (Phase 5) > delivers a turn's attachments to its channel, skipping the ones it cannot render"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > runs a recovery attempt outside the turn its run was started in",
+    "reason": "a recovery Task run started from inside a turn, and the class's attempt callback probed for the class's own turn context (`_activeAdmittedTurn`). On the harness a retry is another attempt of the turn's own run: there is no attempt callback and no such context",
+    "mechanicsOnly": true
   }
 ]
