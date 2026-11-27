@@ -946,7 +946,7 @@ function stallingModelForTest(
         })
       };
     }
-  } as LanguageModel;
+  } as unknown as LanguageModel;
 }
 
 /** Create a streaming text model with static or prompt-derived output. */
