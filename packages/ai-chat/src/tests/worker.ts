@@ -1,3 +1,4 @@
+import { CHAT_REQUEST_CONTEXT_KEY } from "agents/chat";
 import {
   AIChatAgent,
   type ChatResponseResult,
@@ -1474,9 +1475,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this.waitUntilStable(options);
   }
 
-  setTestBody(body: Record<string, unknown>): void {
-    this["_turns"].lastBody = body;
-    this["_turns"].storeRequestContext();
+  async setTestBody(body: Record<string, unknown>): Promise<void> {
+    // The chat module's request context: what a server turn runs with.
+    await this.sessions
+      .session()
+      .internal_setConfig(CHAT_REQUEST_CONTEXT_KEY, JSON.stringify({ body }));
   }
 
   resetTurnStateForTest(): void {
@@ -2761,7 +2764,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     }
   ): Promise<SaveMessagesResult> {
     if (options?.body) {
-      this.setTestBody(options.body);
+      await this.setTestBody(options.body);
     }
     return this.saveMessages((messages) => [
       ...messages,
