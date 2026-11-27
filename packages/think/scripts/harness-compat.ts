@@ -18,6 +18,7 @@ import {
   checkClassOnly,
   classOnlyTable,
   isMechanicsOnly,
+  isProbeCovered,
   readClassOnly,
   testId
 } from "./harness-class-only";
@@ -38,10 +39,12 @@ type Scoreboard = {
   needThink: number;
   /** Of those, the ones that pass against the harness-backed Think. */
   needThinkPassed: number;
-  /** Tests left out of both: class-only, each with a successor. */
+  /** Tests left out of both: class-only, each with a successor, mechanics-only or probe-covered. */
   classOnly: number;
   /** Of those, the mechanics-only ones, which have no successor. */
   mechanicsOnly: number;
+  /** Of those, the probe-covered ones: a deployed scenario, no successor. */
+  probeCovered: number;
   files: Record<string, { total: number; passed: number }>;
   passing: string[];
 };
@@ -127,6 +130,7 @@ const withoutThink = passedIn(absentFile);
 // counts and in `passing` like any other, and out of the headline.
 const classOnly = readClassOnly(classOnlyJson);
 const mechanicsOnly = classOnly.entries.filter(isMechanicsOnly).length;
+const probeCovered = classOnly.entries.filter(isProbeCovered).length;
 const classOnlyIds = new Set(
   classOnly.entries.map((entry) => testId(entry.file, entry.test))
 );
@@ -164,6 +168,7 @@ const scoreboard: Scoreboard = {
   needThinkPassed,
   classOnly: classOnlyIds.size,
   mechanicsOnly,
+  probeCovered,
   files: Object.fromEntries(
     Object.entries(files).sort(([a], [b]) => a.localeCompare(b))
   ),
@@ -172,10 +177,14 @@ const scoreboard: Scoreboard = {
 
 const percent = (passed: number, total: number) =>
   total === 0 ? "0%" : `${Math.floor((passed / total) * 100)}%`;
+const apart = [
+  ...(mechanicsOnly > 0 ? [`${mechanicsOnly} of them mechanics-only`] : []),
+  ...(probeCovered > 0 ? [`${probeCovered} probe-covered`] : [])
+];
 const headline =
-  mechanicsOnly === 0
+  apart.length === 0
     ? `${needThinkPassed} of ${needThink} (${classOnlyIds.size} class-only, each with a successor)`
-    : `${needThinkPassed} of ${needThink} (${classOnlyIds.size} class-only, ${mechanicsOnly} of them mechanics-only, the rest each with a successor)`;
+    : `${needThinkPassed} of ${needThink} (${classOnlyIds.size} class-only, ${apart.join(", ")}, the rest each with a successor)`;
 console.log(
   `\nThink on ThinkHarness: ${headline} tests that construct Think pass (${percent(needThinkPassed, needThink)}); ${scoreboard.passed} of all ${scoreboard.total}.`
 );
