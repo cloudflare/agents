@@ -604,9 +604,16 @@ export class Think<
           await this.#chunkHooks;
           if (end.message) await this.#endStep(end.operationId, end.message);
           else this.#openSteps.delete(end.operationId);
-          if (!end.message) return;
+          // A turn stopped while it waited never ran: there is no response.
+          if (end.status === "unanswered" && end.reason === "withdrawn") return;
           await this.onChatResponse({
-            message: end.message,
+            // As on Think, a turn that ended before it wrote anything still
+            // reports, with an empty assistant message.
+            message: end.message ?? {
+              id: end.messageId ?? crypto.randomUUID(),
+              role: "assistant",
+              parts: []
+            },
             requestId: end.operationId,
             continuation: false,
             status:

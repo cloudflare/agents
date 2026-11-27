@@ -1338,6 +1338,43 @@ function createAbortAwareMockModel(
   } as LanguageModel;
 }
 
+/** A model that streams two chunks of `text`, then fails with `message`. */
+function createMidStreamErrorMockModel(
+  text: string,
+  message: string
+): LanguageModel {
+  const half = Math.max(1, Math.floor(text.length / 2));
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-mid-stream-error",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    async doStream() {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t-1" });
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-1",
+            delta: text.slice(0, half)
+          });
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-1",
+            delta: text.slice(half)
+          });
+          controller.error(new Error(message));
+        }
+      });
+      return { stream };
+    }
+  } as LanguageModel;
+}
+
 /** Sentinel error class to distinguish simulated errors in tests */
 class SimulatedChatError extends Error {
   constructor(message: string) {
@@ -4503,6 +4540,25 @@ export class ThinkTestAgent extends Think {
       return await this.testChat("trigger error");
     } finally {
       this._errorConfig = null;
+    }
+  }
+
+  /**
+   * A turn whose model stream fails after two text chunks. The model comes
+   * from `beforeTurn`, so the turn fails the way a provider's would, on
+   * Think and on the harness-backed Think alike.
+   */
+  async testChatWithModelError(errorMessage?: string): Promise<TestChatResult> {
+    this._turnConfigOverride = {
+      model: createMidStreamErrorMockModel(
+        this._response,
+        errorMessage ?? "Mock error"
+      )
+    };
+    try {
+      return await this.testChat("trigger error");
+    } finally {
+      this._turnConfigOverride = null;
     }
   }
 

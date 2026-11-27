@@ -434,7 +434,7 @@ describe("Think — error handling", () => {
   it("should handle errors and return error message", async () => {
     const agent = await freshAgent("err-basic");
 
-    const result = await agent.testChatWithError("LLM exploded");
+    const result = await agent.testChatWithModelError("LLM exploded");
 
     expect(result.done).toBe(false);
     expect(result.error).toContain("LLM exploded");
@@ -463,7 +463,7 @@ describe("Think — error handling", () => {
   it("should log errors via onChatError hook", async () => {
     const agent = await freshAgent("err-hook");
 
-    await agent.testChatWithError("Custom error for hook");
+    await agent.testChatWithModelError("Custom error for hook");
 
     const errorLog = await agent.getChatErrorLog();
     expect(errorLog).toHaveLength(1);
@@ -2363,7 +2363,7 @@ describe("Think — onChatResponse", () => {
   it("should fire onChatResponse with error status on failure", async () => {
     const agent = await freshAgent("hook-error");
 
-    await agent.testChatWithError("Boom");
+    await agent.testChatWithModelError("Boom");
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
     expect(log).toHaveLength(1);
