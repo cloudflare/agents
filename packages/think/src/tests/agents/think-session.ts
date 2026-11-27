@@ -16207,6 +16207,43 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
+  #storedPathRowsRead = 0;
+
+  /**
+   * Count, from now on, the stored-path rows the media-eviction passes read
+   * (through the session's public row read), on both test configs.
+   */
+  async countStoredPathRowsForTest(): Promise<void> {
+    const session = this.session as unknown as {
+      internal_storedPathRows: (
+        options: Record<string, unknown>
+      ) => Promise<unknown[]>;
+    };
+    const rows = session.internal_storedPathRows.bind(session);
+    this.#storedPathRowsRead = 0;
+    session.internal_storedPathRows = async (options) => {
+      const page = await rows(options);
+      this.#storedPathRowsRead += page.length;
+      return page;
+    };
+  }
+
+  async storedPathRowsReadForTest(): Promise<number> {
+    return this.#storedPathRowsRead;
+  }
+
+  /** `count` text messages, then the media seed, so the media is aged. */
+  async seedTextThenMediaForTest(count: number): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      await this.appendMessageToHistory({
+        id: `text-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `message ${i}` }]
+      } as UIMessage);
+    }
+    await this.seedMediaHistoryForTest();
+  }
+
   async runEvictionForTest(): Promise<{
     messages: number;
     parts: number;
