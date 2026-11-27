@@ -85,6 +85,7 @@ type ThinkSubmissionTestStub = {
   getRecoveryToolExecutionsForTest(): Promise<number>;
   getMessagesForTest(): Promise<UIMessage[]>;
   setFinalAnswerResponseForTest(args: unknown): Promise<void>;
+  getFinalAnswerCallsForTest(): Promise<string>;
   persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
@@ -2165,6 +2166,47 @@ describe("Think durable submissions", () => {
       }
     });
   });
+
+  it("requires a tool call on a structured turn with tools of its own", async () => {
+    const agent = await freshAgent();
+    await agent.setFinalAnswerResponseForTest({ title: "Pinned" });
+    const accepted = await agent.testSubmitMessages("answer", {
+      submissionId: "sub-pinned-final",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-pinned",
+            stepName: "draft-report",
+            eventType: "think-prompt-pinned"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+    await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "completed"
+    );
+    const calls = JSON.parse(
+      await agent.getFinalAnswerCallsForTest()
+    ) as Array<{
+      toolChoice: unknown;
+      tools: string[];
+    }>;
+    expect(calls[0].tools).toContain("think_final_answer");
+    // It may work with its tools first, then answer.
+    expect(calls[0].toolChoice).toEqual({ type: "required" });
+  }, 30_000);
 
   it("fails a structured workflow turn that ends without its final answer", async () => {
     const agent = await freshAgent();
