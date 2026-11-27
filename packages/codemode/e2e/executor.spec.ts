@@ -335,6 +335,19 @@ test.describe("MCP codeMcpServer e2e", () => {
     expect(result.text).toBe("caught: something went wrong");
   });
 
+  test("upstream tool with an outputSchema returns structured content", async ({
+    request,
+    baseURL
+  }) => {
+    const result = await mcpExecute(
+      request,
+      baseURL!,
+      "async () => await codemode.stats({ values: [1, 2, 3] })"
+    );
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.text)).toEqual({ count: 3, total: 6 });
+  });
+
   test("non-existent tool returns error", async ({ request, baseURL }) => {
     const result = await mcpExecute(
       request,

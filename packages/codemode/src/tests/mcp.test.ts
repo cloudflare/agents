@@ -123,6 +123,45 @@ describe("codeMcpServer", () => {
     expect(validators).toEqual(["CfWorkerJsonSchemaValidator"]);
   });
 
+  it("code tool should discover and call an upstream tool with an outputSchema", async () => {
+    const upstream = createUpstreamServer();
+    upstream.registerTool(
+      "stats",
+      {
+        description: "Return structured stats",
+        inputSchema: { values: z.array(z.number()) },
+        outputSchema: { count: z.number(), total: z.number() }
+      },
+      async ({ values }) => {
+        const structuredContent = {
+          count: values.length,
+          total: values.reduce((a, b) => a + b, 0)
+        };
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(structuredContent) }
+          ],
+          structuredContent
+        };
+      }
+    );
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: "async () => await codemode.stats({ values: [1, 2, 3] })"
+      }
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(callText(result))).toEqual({ count: 3, total: 6 });
+
+    await client.close();
+  });
+
   it("should expose a single code tool", async () => {
     const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });

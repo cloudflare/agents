@@ -275,6 +275,27 @@ async function handleMcpExecute(
     })
   );
 
+  upstream.registerTool(
+    "stats",
+    {
+      description: "Return structured stats",
+      inputSchema: { values: z.array(z.number()) },
+      outputSchema: { count: z.number(), total: z.number() }
+    },
+    async ({ values }) => {
+      const structuredContent = {
+        count: values.length,
+        total: values.reduce((a, b) => a + b, 0)
+      };
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(structuredContent) }
+        ],
+        structuredContent
+      };
+    }
+  );
+
   const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
   const wrapped = await codeMcpServer({ server: upstream, executor });
 
