@@ -16,3 +16,4 @@ Experimental harnesses and Channels.
 - Channels: a message surface may carry a `key` that stays the same across messages of one place; an inbound email's surface carries its thread root, so a thread that writes twice is one surface answered at its latest message.
 - Channels `applyChunks` keeps a pending approval when the tool's input arrives late (#3145).
 - ThinkHarness now answers turns on AI SDK 6. It streamed a reply through `toUIMessageStream`, which only AI SDK 7 exports, so every turn failed on 6.
+- Channels: after a reset cut a run, a surface gets the rerun's answer once. A cut response that finished nothing is no longer posted beside the rerun's; one that finished a step is still posted. A Chat SDK Channel starts a native stream only with the first text, so an empty response posts nothing.

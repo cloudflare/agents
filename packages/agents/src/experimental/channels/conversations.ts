@@ -479,12 +479,14 @@ export class Channels extends LifecycleCapability {
     // first case.
     if (
       status.state === "errored" &&
+      (await this.#replaceable(responseId)) &&
       (await this.#superseded(conversationId, status, options.signal))
     ) {
       return "ended";
     }
     let cursor = options.from ?? 0;
     let wrote = cursor > 0;
+    let finished = false;
     for await (const batch of streams.readBatches(responseId, {
       from: cursor,
       signal: options.signal,
@@ -495,11 +497,20 @@ export class Channels extends LifecycleCapability {
         (item) => item.chunk as unknown as ResponseChunk
       );
       wrote ||= chunks.some((chunk) => chunk.type === "text-delta");
+      finished ||= chunks.some(finishesSomething);
       options.onChunks(batch[0].seq, chunks);
       cursor = batch[batch.length - 1].seq + 1;
     }
     const ending = await streams.status(responseId);
     if (ending?.state !== "errored") return "ended";
+    // It finished a step (saved): a later run goes on from there and does
+    // not repeat it, so what this one holds is part of the answer.
+    if (
+      finished ||
+      ((options.from ?? 0) > 0 && !(await this.#replaceable(responseId)))
+    ) {
+      return "interrupted";
+    }
     // Cut off while it was read. Its turn may go on in a later response
     // (a run the object's reset cut resumes): wait to know, so the reader
     // does not finish this one first.
@@ -548,6 +559,19 @@ export class Channels extends LifecycleCapability {
         }
       }
     }
+  }
+
+  /**
+   * Whether a cut-off response may be replaced by a later one of its turn:
+   * it finished nothing (no text part or tool), so the run that
+   * replaces it, rerunning the same model call, repeats all of it.
+   */
+  async #replaceable(responseId: string): Promise<boolean> {
+    for await (const { chunk } of this.streams.read(responseId)) {
+      // SAFETY: Channels records only chunks that passed the grammar.
+      if (finishesSomething(chunk as unknown as ResponseChunk)) return false;
+    }
+    return true;
   }
 
   /** Whether a later response continues `response`'s turn. */
@@ -637,4 +661,9 @@ function statusOf(turn: TurnStatus): TurnStatus {
 
 function conversationOf(tag: string | undefined): string | undefined {
   return tag?.startsWith(TAG_PREFIX) ? tag.slice(TAG_PREFIX.length) : undefined;
+}
+
+/** Whether a chunk completes something a later run would not repeat. */
+function finishesSomething(chunk: ResponseChunk): boolean {
+  return chunk.type === "text-end" || chunk.type.startsWith("tool-");
 }

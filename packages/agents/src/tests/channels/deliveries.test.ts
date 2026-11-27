@@ -241,6 +241,58 @@ describe("deliverToSurfaces", () => {
     );
   });
 
+  it("still posts a cut-off run's finished step, which a later run does not repeat", async () => {
+    const stub = fresh();
+    await stub.setScript(["retryable"]);
+    await stub.receive(
+      {
+        type: "message",
+        eventId: "e1",
+        message: {
+          id: "e1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      },
+      {
+        route: "default",
+        participant: { id: "alice" },
+        surface: await stub.surfaceOf("t1")
+      }
+    );
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "a" }),
+      chunk({ type: "text-delta", id: "a", delta: "Step one." }),
+      chunk({ type: "text-end", id: "a" }),
+      chunk({ type: "text-start", id: "b" }),
+      chunk({ type: "text-delta", id: "b", delta: "Hel" })
+    ]);
+    await stub.wake();
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "c" }),
+      chunk({ type: "text-delta", id: "c", delta: "Hello" }),
+      chunk({ type: "text-end", id: "c" }),
+      { type: "run-end", operations: ["e1"] }
+    ]);
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 0
+    );
+    const posts = await stub.getPosts();
+    // Tried again after the later run began, the cut response is still
+    // posted (as cut off), so its finished step reaches the reader.
+    expect(
+      posts.some(
+        (p) => p.text.startsWith("Step one.") && p.outcome === "uncertain"
+      )
+    ).toBe(true);
+    expect(posts.some((p) => p.text === "Hello" && p.outcome === "ok")).toBe(
+      true
+    );
+  });
+
   it("delivers the response as one email to an email surface, through the email Channel", async () => {
     const stub = fresh();
     await answer(stub, [], async () => ({
