@@ -52,7 +52,10 @@ describe("harness-backed Think: actions that need a human", () => {
       }
     ]);
 
-    await think.approveExecution(pending[0].executionId);
+    // As on Think: approving answers the action's outcome.
+    expect(await think.approveExecution(pending[0].executionId)).toEqual({
+      charged: 5
+    });
     expect(await think.charged()).toBe(1);
     expect(await think.toolStates()).toEqual(["output-available"]);
     expect(await think.lastText()).toContain("charged");
@@ -75,7 +78,13 @@ describe("harness-backed Think: actions that need a human", () => {
       kind: "durable-pause"
     });
 
-    await think.rejectExecution(pending.executionId, "too much");
+    expect(
+      await think.rejectExecution(pending.executionId, "too much")
+    ).toEqual({
+      status: "rejected",
+      executionId: pending.executionId,
+      reason: "too much"
+    });
     expect(await think.charged()).toBe(0);
     expect(await think.toolStates()).toEqual(["output-denied"]);
     expect(await think.pendingApprovals()).toEqual([]);

@@ -1331,7 +1331,7 @@ export class Think<
       return {
         status: "error",
         executionId,
-        error: `No pending approval "${executionId}"`
+        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
       };
     }
     const session = this.harness.session();
@@ -1347,9 +1347,35 @@ export class Think<
     // Recorded, so the call is never listed again. A decision stopped
     // before this point leaves the call pending with its descriptor.
     this.#actionDescriptors.delete(pending.descriptor.toolCallId);
-    const result = await session.wait(receipt.operationId);
+    await session.wait(receipt.operationId);
     await this.#sync();
-    return saveResult(result);
+    // As on Think: the action's outcome, or the rejection.
+    if (!approved) {
+      return {
+        status: "rejected",
+        executionId,
+        reason: reason ?? "Rejected by user"
+      };
+    }
+    const toolCallId = pending.descriptor.toolCallId;
+    for (const message of this.messages) {
+      for (const part of message.parts) {
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          part.state === "output-available"
+        ) {
+          return part.output;
+        }
+      }
+    }
+    return {
+      status: "error",
+      executionId,
+      error:
+        "The decision was recorded; its outcome is written when the " +
+        "action can run."
+    };
   }
   getMessengers(): ThinkMessengers {
     return {};
