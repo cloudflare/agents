@@ -365,7 +365,8 @@ describe("chat recovery, through public behaviour", () => {
       expect(given?.recoveryRootRequestId).toBe(
         progress.recoveryCalls[0]?.recoveryRootRequestId
       );
-      expect(progress.recoveryCalls.length).toBeLessThanOrEqual(2);
+      // Both attempts were spent before the give-up.
+      expect(progress.recoveryCalls).toHaveLength(2);
     }, 30_000);
 
     it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
