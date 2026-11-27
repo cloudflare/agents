@@ -2178,6 +2178,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return messageReceivedAtForTest(this, id);
   }
 
+  /** How many sockets this agent holds open. */
+  connectionCountForTest(): number {
+    return [...this.getConnections()].length;
+  }
+
   /** Reset this agent's isolate, as an eviction or a deploy does. */
   async resetIsolateForTest(): Promise<void> {
     this.ctx.abort("test: forced reset");
