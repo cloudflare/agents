@@ -481,6 +481,8 @@ describe("chat recovery, through public behaviour", () => {
       // Only what the reset left: the reply was not continued.
       expect(text).toMatch(/^one /);
       expect(text).not.toContain("six");
+      // No model call or continuation ran after the reset.
+      expect(await (await agent()).modelCallsForTest()).toBe(0);
     }, 30_000);
 
     // Successors of the pre-stream retry tests (think-session, "Think —
@@ -595,7 +597,9 @@ describe("chat recovery, through public behaviour", () => {
 
       // Past maxAttempts (1): more than one reset was recovered. Stopped at
       // maxInterruptedAttempts (3), which progress does not reset.
-      expect(resets).toBeGreaterThan(1);
+      // maxInterruptedAttempts 3: the first two resets are recovered, past
+      // maxAttempts (1); the third ends it.
+      expect(resets).toBe(3);
       expect(exhausted.map((entry) => entry.reason)).toEqual([
         "interrupted_attempts_exceeded"
       ]);
@@ -696,6 +700,13 @@ describe("chat recovery, through public behaviour", () => {
       .map((part) => (part.type === "text" ? part.text : ""))
       .join("");
     expect(text).toMatch(/^one /);
+    // Finished after the reset: the fresh isolate's model wrote the rest.
+    expect(text).toContain("Hello from the assistant!");
+    // The regenerated branch is the one the conversation now shows.
+    const shown = (await (await agent()).getMessages()) as Array<{
+      id: string;
+    }>;
+    expect(shown.at(-1)?.id).toBe(regenerated?.id);
   }, 60_000);
 
   // Successor of the platform-reset tests (think-session, "Think —

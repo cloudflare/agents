@@ -3959,6 +3959,11 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /** Model calls this isolate made through the default model. */
+  async modelCallsForTest(): Promise<number> {
+    return this._modelPromptsForTest.length;
+  }
+
   /** Whether the agent settles within `timeout` ms. */
   async stableWithinForTest(timeout: number): Promise<boolean> {
     return this.waitUntilStable({ timeout });
