@@ -851,6 +851,10 @@ export async function replayTurn(
     if (ended) sendIfOpen(connection, endedFrame(ended));
     return;
   }
+  // A tab that was not held back (the one whose answer started the
+  // turn) has had every live frame since the offer: a replay would send
+  // them again.
+  if (offered.get(connection.id) !== requestId) return;
   // What this isolate buffered is written first.
   deps.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
   const input = deps.tasks.inputOf<ChatTurnInput>(requestId);

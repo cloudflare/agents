@@ -6,6 +6,7 @@ import {
 } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import type { Connection } from "agents";
+import type { UIMessageChunk } from "ai";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
   type ChatLane,
@@ -998,6 +999,8 @@ describe("chat functions over a minimal host", () => {
       }
       expect(written).toBeLessThan(5);
       const sent: Array<Record<string, unknown>> = [];
+      // The tab was offered the stream, as a resume request does.
+      offeredIn(instance.streams).set("tab-r", "r1");
       await replayTurn(instance.deps, recordingTab("tab-r", sent), "r1");
       // Every chunk, then the replay's end for a live stream.
       expect(
@@ -2745,6 +2748,89 @@ describe("chat functions over a minimal host", () => {
       expect(
         asked.some((frame) => frame.type === "cf_agent_chat_messages")
       ).toBe(false);
+    });
+  });
+
+  it("the tab that answered gets its continuation's chunks once, however late its ack comes", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      // The model sends one delta, then the rest once the tab has acked.
+      let acked!: () => void;
+      const ack = new Promise<void>((resolve) => (acked = resolve));
+      (instance.host as { respond: typeof instance.host.respond }).respond =
+        async () =>
+          new ReadableStream<UIMessageChunk>({
+            async start(controller) {
+              controller.enqueue({ type: "text-start", id: "t2" });
+              controller.enqueue({ type: "text-delta", id: "t2", delta: "A" });
+              await ack;
+              controller.enqueue({ type: "text-delta", id: "t2", delta: "B" });
+              controller.enqueue({ type: "text-end", id: "t2" });
+              controller.enqueue({ type: "finish" });
+              controller.close();
+            }
+          });
+      const sent: Array<Record<string, unknown>> = [];
+      const answering = recordingTab("tab-a", sent);
+      instance.tabs.push(answering);
+      // The tab's ack arrives after the first delta was streamed (a tab's
+      // round trip is longer than the model's first chunk).
+      let offered: string | undefined;
+      const send = answering.send.bind(answering);
+      (answering as { send: typeof send }).send = (text: string) => {
+        send(text);
+        const frame = JSON.parse(text) as { type?: string; id?: string };
+        if (frame.type === "cf_agent_stream_resuming") offered = frame.id;
+        if (
+          offered !== undefined &&
+          frame.type === "cf_agent_use_chat_response" &&
+          String((frame as { body?: unknown }).body).includes("text-delta")
+        ) {
+          const id = offered;
+          offered = undefined;
+          void chatDispatch(
+            instance.deps,
+            instance.lane,
+            answering,
+            JSON.stringify({ type: "cf_agent_stream_resume_ack", id })
+          ).then(acked);
+        }
+      };
+      const done = instance.nextResult();
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c1", output: {} },
+        { autoContinue: true, connection: answering }
+      );
+      // A tab that never got a live delta acks at the offer's replay.
+      setTimeout(() => acked(), 2000);
+      await done;
+      const deltas = sent.filter(
+        (frame) =>
+          frame.type === "cf_agent_use_chat_response" &&
+          String(frame.body).includes('"delta":"A"')
+      );
+      expect(deltas).toHaveLength(1);
     });
   });
 
