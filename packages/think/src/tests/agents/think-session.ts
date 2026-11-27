@@ -3769,6 +3769,8 @@ export class ThinkTestAgent extends Think {
     return this._modelConnectingForTest;
   }
 
+  private _progressingForTest = false;
+  private _progressCallsForTest = 0;
   private _exhaustedForTest: Array<{
     reason: string;
     terminalMessage: string;
@@ -3789,7 +3791,11 @@ export class ThinkTestAgent extends Think {
     timeoutMs: number;
     maxAttempts: number;
     keepRecovering?: boolean;
+    /** Each model call writes new text, so each attempt makes progress. */
+    progressing?: boolean;
   }): Promise<void> {
+    this._progressingForTest = options.progressing === true;
+    this._progressCallsForTest = 0;
     this._modelStallForTest = {
       afterParts: options.afterParts,
       calls: options.stalledCalls
@@ -6365,7 +6371,17 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): ThinkModel {
-    const model = this._baseModelForTest();
+    // A lasting stall that makes progress: each call writes new text, in
+    // enough chunks that some land in the stream log before the stall.
+    if (this._progressingForTest) this._progressCallsForTest++;
+    const model = this._progressingForTest
+      ? createMultiChunkMockModel(
+          Array.from(
+            { length: 30 },
+            (_, k) => `a${this._progressCallsForTest}-${k} `
+          )
+        )
+      : this._baseModelForTest();
     const modelStall = this._modelStallForTest;
     if (modelStall && typeof model !== "string") {
       return stallingModelForTest(model, modelStall.afterParts, () => {

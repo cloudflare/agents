@@ -298,6 +298,7 @@ describe("chat recovery, through public behaviour", () => {
         stalledCalls: number;
         maxAttempts: number;
         keepRecovering?: boolean;
+        progressing?: boolean;
       },
       done: (progress: {
         recoveryCalls: unknown[];
@@ -348,6 +349,35 @@ describe("chat recovery, through public behaviour", () => {
         progress.recoveryCalls[0]?.recoveryRootRequestId
       );
       expect(progress.recoveryCalls.length).toBeLessThanOrEqual(2);
+    }, 30_000);
+
+    // Arch's ruling: a live interruption (a stall) is one more scheduled
+    // retry, capped by maxAttempts whatever the progress. onChatRecovery's
+    // `attempt` is the count that resets when the last attempt made progress.
+    it("tells onChatRecovery attempt 1 each time a stalled turn has made progress", async () => {
+      const progress = await recoverUntil(
+        "attempt-progress",
+        { afterParts: 25, stalledCalls: 2, maxAttempts: 5, progressing: true },
+        (p) => p.lastAssistantText.includes("a3-29")
+      );
+
+      expect(progress.recoveryCalls.map((call) => call.attempt)).toEqual([
+        1, 1
+      ]);
+      expect(progress.exhausted).toEqual([]);
+    }, 30_000);
+
+    it("gives a stalled turn up at stall maxAttempts + 1 even when every attempt makes progress", async () => {
+      const progress = await recoverUntil(
+        "give-up-with-progress",
+        { afterParts: 25, stalledCalls: 10, maxAttempts: 2, progressing: true },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.recoveryCalls).toHaveLength(2);
+      expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
+        "max_attempts_exceeded"
+      ]);
     }, 30_000);
 
     it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
