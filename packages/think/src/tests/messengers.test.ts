@@ -1514,6 +1514,21 @@ describe("think messengers core", () => {
       expect(await agent.getRecorded("post")).toHaveLength(prompts.length);
     });
 
+    it("labels a group speaker with the messenger's channelSpeakerLabel", async () => {
+      const agent = await sendBurst("label-group", [
+        {
+          author: { fullName: "Ada", userId: "user-ada" },
+          id: "l1",
+          isMention: true,
+          text: "@fake_bot hi",
+          threadId: "fake:group"
+        }
+      ]);
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Speaker Ada: @fake_bot hi"
+      ]);
+    });
+
     it("keeps each sender's label when a group burst mixes senders", async () => {
       const bob = { fullName: "Bob", userId: "user-bob" };
       const ada = { fullName: "Ada", userId: "user-ada" };

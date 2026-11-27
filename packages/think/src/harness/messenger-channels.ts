@@ -205,7 +205,9 @@ export function messengerChannels(options: {
           message: {
             id: eventId,
             role: "user",
-            parts: messageParts(toMessengerUserMessage(event))
+            parts: messageParts(
+              toMessengerUserMessage(event, definition.channelSpeakerLabel)
+            )
           }
         },
         {
