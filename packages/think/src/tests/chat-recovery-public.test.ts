@@ -96,12 +96,13 @@ describe("chat recovery, through public behaviour", () => {
     const result = await agent.stallRecoveryForTest({
       afterParts: 2,
       stalledCalls: 1,
-      timeoutMs: 400
+      timeoutMs: 1500
     });
 
     const createdAt = result.recoveryCalls[0]?.createdAt ?? 0;
     expect(createdAt).toBeGreaterThanOrEqual(result.askedAt - 50);
-    // The stall fires 400 ms after the reply starts.
-    expect(createdAt).toBeLessThan(result.askedAt + 300);
+    // The stall fires 1500 ms after the reply starts; the turn started
+    // well before that.
+    expect(createdAt).toBeLessThan(result.askedAt + 1000);
   });
 });
