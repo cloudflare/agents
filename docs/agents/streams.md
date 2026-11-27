@@ -203,8 +203,8 @@ pay 42 to write and 3 to cut over.
 
 ## Chat runs on this
 
-`AIChatAgent` and `Think` store their in-flight turn output here, one
-stream per turn, and end every turn with the cutover: the assistant
+`AIChatAgent` and `Think` store their in-flight turn output here, through
+their internal chat stream log, one stream per turn, and end every turn with the cutover: the assistant
 message, the stream's settlement and the deletion of its rows commit in one
 transaction. Nothing is swept on an alarm any more. A stream a crash left
 behind is either still `streaming` (recovery rebuilds the message from it)
