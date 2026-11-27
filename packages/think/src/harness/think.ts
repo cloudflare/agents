@@ -15,6 +15,7 @@ import {
 } from "agents";
 import {
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
+  runningChatTurn,
   type ChatRecoveryConfig,
   type ChatRecoveryContext,
   type ChatRecoveryOptions
@@ -1807,6 +1808,14 @@ export class Think<
       // only after the hook returns.
       throw new Error(
         "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
+      );
+    }
+    // As on Think: from inside this agent's running turn, a submission that
+    // is still open runs only after that turn ends, so the wait could not.
+    // (The turn's context does not cross into another agent's calls.)
+    if (open && this.#running && runningChatTurn() !== undefined) {
+      throw new Error(
+        "waitForSubmission() cannot be called from inside an active turn: the submission runs only after this turn ends"
       );
     }
     // A timeout stops only the wait: the submission is returned as it is
