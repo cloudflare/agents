@@ -59,4 +59,18 @@ describe("chat recovery, through public behaviour", () => {
     // The interrupted reply's text is kept.
     expect(result.lastAssistantText).toContain("Hello from the assistant!");
   });
+
+  it("recovers a stall when only beforeTurn sets the stall timeout", async () => {
+    const agent = await freshAgent("recover-per-turn");
+    const result = await agent.stallRecoveryForTest({
+      afterParts: 2,
+      stalledCalls: 1,
+      timeoutMs: 50,
+      perTurn: true
+    });
+
+    expect(result.stable).toBe(true);
+    expect(result.recoveryCalls[0]).toMatchObject({ attempt: 1 });
+    expect(result.roles).toEqual(["user", "assistant"]);
+  });
 });
