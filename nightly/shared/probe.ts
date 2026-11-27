@@ -30,6 +30,7 @@ export const MT = {
   REQUEST: "cf_agent_use_chat_request",
   RESPONSE: "cf_agent_use_chat_response",
   CANCEL: "cf_agent_chat_request_cancel",
+  CLEAR: "cf_agent_chat_clear",
   IDENTITY: "cf_agent_identity",
   RESUMING: "cf_agent_stream_resuming",
   RESUME_ACK: "cf_agent_stream_resume_ack",
@@ -158,7 +159,10 @@ export class Tab {
   /** Ids of the requests this tab sent. */
   readonly sent: string[] = [];
   private readonly waiters: Waiter[] = [];
+  private readonly listeners: ((f: Frame) => void)[] = [];
   private ws?: WebSocket;
+  /** The socket closed, by either side (a reset closes it with 1006). */
+  closed = false;
 
   constructor(
     readonly cls: Cls,
@@ -171,6 +175,9 @@ export class Tab {
       `${baseUrl().replace(/^http/, "ws")}/agents/${isFacet(this.cls) ? `probe-hub/h-${this.room}/sub/` : ""}${AGENT_PATH[this.cls]}/${this.room}?key=${encodeURIComponent(probeKey())}`
     );
     this.ws = ws;
+    ws.addEventListener("close", () => {
+      this.closed = true;
+    });
     await new Promise<void>((resolve, reject) => {
       ws.addEventListener("open", () => resolve(), { once: true });
       ws.addEventListener("error", () => reject(new Error("ws error")), {
@@ -188,6 +195,7 @@ export class Tab {
       this.frames.push(f);
       // what useAgentChat does with a stream offer
       if (f.type === MT.RESUMING) this.send({ type: MT.RESUME_ACK, id: f.id });
+      for (const l of this.listeners) l(f);
       for (const w of [...this.waiters]) {
         if (w.pred(f)) {
           this.waiters.splice(this.waiters.indexOf(w), 1);
@@ -196,6 +204,10 @@ export class Tab {
       }
     });
     return this;
+  }
+  /** Call `fn` on every frame from now on. */
+  onFrame(fn: (f: Frame) => void) {
+    this.listeners.push(fn);
   }
   send(frame: Record<string, unknown>) {
     this.ws?.send(JSON.stringify(frame));
