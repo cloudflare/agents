@@ -559,6 +559,17 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         return this.#slow(12);
       } else if (text === "slow-short") {
         return this.#slow(2);
+      } else if (text === "fail and stay open") {
+        // A provider that reports an in-band error and never closes.
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({
+              type: "error",
+              error: new Error("in-band, left open")
+            });
+          }
+        });
       } else if (text === "fail") {
         parts = [
           { type: "stream-start", warnings: [] },
