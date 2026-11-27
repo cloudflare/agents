@@ -254,6 +254,15 @@ export function liveTurnsOf(streams: Streams): Map<string, LiveTurn> {
   return turns;
 }
 
+/** Chunks written at once rather than batched: a tool's call and outcome. */
+const TOOL_EVENTS: ReadonlySet<string> = new Set([
+  "tool-input-available",
+  "tool-approval-request",
+  "tool-output-available",
+  "tool-output-error",
+  "tool-output-denied"
+]);
+
 /**
  * When a turn's chunks are written: every 10 chunks or 512 KB, in one row
  * write, into the stream's newest block while it stays under 256 KB. A
@@ -978,6 +987,10 @@ export function chatTurnDefinition(
         if (bytes > Math.min(sync.maxChunkBytes, ROW_VALUE_BYTES)) {
           out.append(chunk as never);
         } else sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
+        // A tool call's input and its outcome are written at once: a tool
+        // runs for as long as it takes, and a reset while it runs must find
+        // the call stored (or the tool would run again).
+        if (TOOL_EVENTS.has(chunk.type)) sync.flush(streamId);
       };
       const liveKey = sessionId;
       const live = liveTurnsOf(deps.streams);
