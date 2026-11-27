@@ -179,8 +179,12 @@ async function drain(
   return settle("think", room, { quietMs: 6000, maxMs: 240_000 });
 }
 
-async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
+async function soak(
+  room: string
+): Promise<{ run: Run; sent: string[]; ids: Map<string, string> }> {
   const sent: string[] = [];
+  /** Each tab-sent turn's request id, by its text, for the failure report. */
+  const ids = new Map<string, string>();
   const handled = new Set<string>();
   let tab = await open(room);
   // Every tab's requests and frames, for the done-frame checks. A request
@@ -199,6 +203,7 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
       const id = tab.request(rid("req"), [user(text)], {
         clientTools: CLIENT_TOOLS
       });
+      ids.set(text, id);
       if (RESETS.has(turn)) {
         // Cut the reply off once it streams, then come back as a new tab.
         await tab.waitFor(
@@ -250,7 +255,52 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
   late.close();
   return {
     run: { state, tabs, lateTab: late.frames, extra: {}, checks: [] },
-    sent
+    sent,
+    ids
+  };
+}
+
+/**
+ * What happened to turns that got no answer: each tab's frames for the
+ * request (chunk types, the terminal frame, error bodies), the object's
+ * responses and events, its recent runs, and how often it started.
+ */
+async function turnRecord(
+  room: string,
+  run: Run,
+  state: Run["state"],
+  texts: string[],
+  ids: Map<string, string>
+) {
+  const runs = await ctl("think", room, "probeRuns");
+  const s = state as Run["state"] & {
+    responses?: unknown[];
+    events?: { type: string }[];
+  };
+  return {
+    starts: state.starts,
+    runs: runs.ok ? runs.value : runs.error,
+    turns: texts.map((text) => {
+      const id = ids.get(text);
+      return {
+        text,
+        id,
+        frames: run.tabs.flatMap((t, n) =>
+          t.frames
+            .filter((f) => f.id === id)
+            .map(
+              (f) =>
+                `tab${n} ${f.done ? `done:${f.outcome ?? ""}` : "chunk"}${f.error ? ` error ${String(f.body).slice(0, 300)}` : ""}${f.done ? "" : ` ${String(f.body).slice(0, 60)}`}`
+            )
+        ),
+        responses: (s.responses ?? []).filter(
+          (r) => (r as { requestId?: string }).requestId === id
+        )
+      };
+    }),
+    events: (s.events ?? [])
+      .filter((e) => !e.type.startsWith("chat:stream:chunk"))
+      .slice(-300)
   };
 }
 
@@ -262,7 +312,7 @@ describe.concurrent("Think on a real model, through resets", () => {
       process.env.PROBE_URL = inject("probeUrl");
       process.env.PROBE_KEY = inject("probeKey");
       const room = `soak-${n}-${Date.now()}`;
-      const { run, sent } = await soak(room);
+      const { run, sent, ids } = await soak(room);
       const state = run.state as Run["state"] & {
         runs: { kind: string; id: string; n: number }[];
         submissions: string[];
@@ -279,10 +329,14 @@ describe.concurrent("Think on a real model, through resets", () => {
       });
       // Every message sent is in the transcript, once, in order.
       expect(texts, report).toEqual(sent);
-      // Every one is answered with text, and no tool waits on the user.
+      // Every one is answered with text, and no tool waits on the user. A
+      // turn that is not shows what the tabs and the object saw for it.
+      const unanswered = sent.filter((text) => !answeredTurn(state, text));
       expect(
-        sent.filter((text) => !answeredTurn(state, text)),
-        report
+        unanswered,
+        unanswered.length
+          ? `${report}\n${JSON.stringify(await turnRecord(room, run, state, unanswered, ids))}`
+          : report
       ).toEqual([]);
       // The weather turns used their tool (a real model may answer one in
       // prose; it may not skip them all). The approval turns are the reset
