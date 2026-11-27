@@ -132,6 +132,23 @@ describe("harness-backed Think: actions that need a human", () => {
     expect(answers).toContain(ran ? "ran" : "rejected");
   });
 
+  it("gives two racing rejections the reason of the one that was applied", async () => {
+    const think = await agent();
+    await think.say("pause and charge 5");
+    const [pending] = await think.pendingApprovals();
+
+    const answers = (await Promise.all([
+      think.rejectExecution(pending.executionId, "first reason"),
+      think.rejectExecution(pending.executionId, "second reason")
+    ])) as Array<{ status?: string; reason?: string }>;
+
+    const rejected = answers.filter((answer) => answer.status === "rejected");
+    expect(rejected.length).toBeGreaterThanOrEqual(1);
+    const applied = rejected[0].reason;
+    expect(["first reason", "second reason"]).toContain(applied);
+    for (const answer of rejected) expect(answer.reason).toBe(applied);
+  });
+
   it("reports the reason of the rejection that was applied", async () => {
     const think = await agent();
     await think.say("pause and charge 5");
@@ -145,7 +162,7 @@ describe("harness-backed Think: actions that need a human", () => {
     const think = await agent();
     await think.say("charge 5");
     expect(await think.grantContext()).toEqual({
-      trigger: expect.any(String),
+      trigger: "rpc",
       hasSignal: true
     });
   });

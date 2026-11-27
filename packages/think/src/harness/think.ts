@@ -708,7 +708,9 @@ export class Think<
                 return (model ??= self.resolveModel(chosen as ThinkModel));
               },
               continuation: true,
-              requestId: call.operationId
+              requestId: call.operationId,
+              // What started the operation, as the turn's grant is told.
+              trigger: this.#turns.get(call.operationId)?.trigger
             } as unknown as TurnContext;
           });
           const decision = await this.#beforeToolCall(call);
@@ -2959,8 +2961,14 @@ export class Think<
       );
     const model = step.model ?? config.model;
     // Without an override, the turn's one resolution of the default.
+    // As in Think, the model the grant was given is the one the call uses,
+    // unless a step changed it: a string override is resolved once.
     const sent =
-      model !== undefined ? this.resolveModel(model) : resolveDefault();
+      model === undefined
+        ? resolveDefault()
+        : model === turnModel
+          ? (grantModel ??= this.resolveModel(model))
+          : this.resolveModel(model);
     const messages = step.messages ?? turnMessages;
     // A narrowing channel limits the tools the model is offered.
     // A narrowing channel limits the tools the model is offered, and a
