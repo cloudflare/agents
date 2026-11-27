@@ -303,6 +303,7 @@ describe("Think — agentic loop", () => {
         Array<{
           toolCalls: string[];
           toolResults: string[];
+          prompt: string;
           hasSummary: boolean;
           headHasHistory: boolean;
         }>
