@@ -614,8 +614,8 @@ describe("mediaEviction — a pass that runs on its own", () => {
 
   it("drains a backlog on its own when each pass is bounded", async () => {
     // One row per pass: each pass evicts one message, and the second media
-    // row is evicted only because a pass that made progress schedules the
-    // next.
+    // row is evicted without another request from the test: a pass that
+    // made progress schedules the next.
     const name = uniqueName("auto-backlog");
     const passes: number[] = [];
     const unsubscribe = subscribe("chat", (event) => {
@@ -625,11 +625,15 @@ describe("mediaEviction — a pass that runs on its own", () => {
     });
     try {
       const agent = await evictionAgent(name);
+      // Seeded with eviction off, so its appends schedule nothing; one
+      // refresh then asks for one pass, and only the chain asks for more.
+      await agent.setMediaEvictionForTest(false);
+      await agent.seedMediaHistoryForTest();
       await agent.setMediaEvictionForTest({
         ...AGED_POLICY,
         maxRowsPerPass: 1
       });
-      await agent.seedMediaHistoryForTest();
+      await agent.resyncForTest();
       await vi.waitFor(
         async () => {
           for (const id of ["m0", "m1"]) {
