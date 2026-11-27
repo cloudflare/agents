@@ -16,6 +16,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.9.1",
+    "agents": "workspace:*",
     "vitest": "4.1.11"
   },
   "types": "dist/index.d.ts",
