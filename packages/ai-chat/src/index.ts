@@ -2464,15 +2464,24 @@ export class AIChatAgent<
         if (tail) return tail;
       }
     }
-    // Not streaming: the chunks there are, then the end.
-    const chunks = await this.getAgentToolChunks(runId, options);
+    // Not streaming: the chunks there are, page by page, then the end.
     const encoder = new TextEncoder();
+    let after = options?.afterSequence;
     return new ReadableStream<Uint8Array>({
-      start(controller) {
-        for (const chunk of chunks) {
-          controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
+      pull: async (controller) => {
+        const page = await this.getAgentToolChunks(runId, {
+          ...(after !== undefined && { afterSequence: after })
+        });
+        if (page.length === 0) {
+          controller.close();
+          return;
         }
-        controller.close();
+        after = page[page.length - 1].sequence;
+        controller.enqueue(
+          encoder.encode(
+            page.map((chunk) => `${JSON.stringify(chunk)}\n`).join("")
+          )
+        );
       }
     });
   }

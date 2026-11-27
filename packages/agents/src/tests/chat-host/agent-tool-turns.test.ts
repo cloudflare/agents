@@ -392,7 +392,7 @@ describe("agent-tool runs as chat turns", () => {
     );
   });
 
-  it("carries a released run too large for run metadata with its summary, and the others whole", async () => {
+  it("carries a released run too large for run metadata whole, and the others after it", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(
       stub,
@@ -415,9 +415,10 @@ describe("agent-tool runs as chat turns", () => {
           { runs: "released_runs", milestones: "released_milestones" },
           "chat"
         );
-        expect(
-          inspectAgentToolTurn(instance.deps, "huge", collect)
-        ).toMatchObject({ status: "completed", summary: "big one" });
+        // Kept whole: its output too.
+        const huge = inspectAgentToolTurn(instance.deps, "huge", collect);
+        expect(huge).toMatchObject({ status: "completed", summary: "big one" });
+        expect((huge?.output as string | undefined)?.length).toBe(2_000_000);
         // Carried after it, whole, its progress with the time it was sent.
         expect(
           inspectAgentToolTurn(instance.deps, "small", collect)

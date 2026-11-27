@@ -26,9 +26,6 @@ import {
   type ChatTurnResult
 } from "./chat-host";
 
-/** The most of a released summary a run too large to carry whole keeps. */
-const OVERSIZED_SUMMARY_CHARS = 16_000;
-
 /**
  * The tables `@cloudflare/ai-chat` 0.12.x kept its agent-tool child runs
  * in, which the upgrade carries forward and empties.
@@ -181,8 +178,17 @@ export function inspectAgentToolTurn(
   const id = agentToolTurnId(runId);
   const record = deps.tasks.peek(id);
   if (!record) return null;
-  const fields = ((record.metadata as { agentTool?: Record<string, unknown> })
+  const own = ((record.metadata as { agentTool?: Record<string, unknown> })
     ?.agentTool ?? {}) as Record<string, unknown>;
+  // A carried run too large for metadata keeps its fields in its input.
+  const fields = own.carriedInInput
+    ? {
+        ...(deps.tasks.inputOf<{ agentToolCarried?: Record<string, unknown> }>(
+          id
+        )?.agentToolCarried ?? {}),
+        ...own
+      }
+    : own;
   const progress = fields.progress as AgentToolProgressSnapshot | undefined;
   const milestones = Object.entries(fields)
     .filter(([key]) => key.startsWith("milestone:"))
@@ -572,18 +578,17 @@ export async function carryForwardAgentToolRuns(
     try {
       await deps.tasks.importRun(record(fields));
     } catch {
-      // Too large for a run's metadata (a big output, many milestones):
-      // the run is carried with its summary, capped, and the rest go on.
-      const summary = row.summary?.slice(0, OVERSIZED_SUMMARY_CHARS);
-      await deps.tasks.importRun(
-        record({
+      // Too large for a run's metadata (a big output, many milestones): it
+      // is kept whole in the run's input, which holds far more and which a
+      // carried run never reads again.
+      await deps.tasks.importRun({
+        ...record({
           runId: row.run_id,
           startMessageId: null,
-          ...(status === "completed" && {
-            result: { ...(summary !== undefined && { summary }) }
-          })
-        })
-      );
+          carriedInInput: true
+        }),
+        input: { agentToolCarried: fields as TaskJson }
+      });
     }
   }
   // A turn of a run carried as an error is not the run's any more: if the
