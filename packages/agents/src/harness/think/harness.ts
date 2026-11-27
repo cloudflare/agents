@@ -1996,6 +1996,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             AbortSignal.any([signal, stall.signal]),
             call.signal
           );
+          // An error the model streamed in band, if it sent one.
+          let inBand: Error | undefined;
           const stallTimeoutMs =
             this.#options.recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
           try {
@@ -2012,8 +2014,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 finish = chunk;
                 continue;
               } else if (chunk.type === "error" || chunk.type === "abort") {
-                // The model's error is thrown below, out of band.
-                continue;
+                // The model's error is thrown below, out of band. Nothing
+                // after it is read: a provider may leave its stream open
+                // after an error, and leaving the loop cancels the read.
+                if (chunk.type === "error") inBand = new Error(chunk.errorText);
+                break;
               }
               chunks.push(chunk);
               yield chunk;
@@ -2025,7 +2030,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           }
           if (signal.aborted) return;
           const stalled = stall.signal.aborted;
-          const failure = stalled ? stall.signal.reason : model.error();
+          const failure = stalled
+            ? stall.signal.reason
+            : (model.error() ?? inBand);
           if (failure !== undefined) {
             // What the failed call streamed is part of the reply kept.
             const streamed = await continued(reply, chunks);
