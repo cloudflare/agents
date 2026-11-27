@@ -1140,6 +1140,59 @@ describe("Think — error handling", () => {
     expect(result.streamStates).toEqual(["errored"]);
   });
 
+  // Successor of the next test through a real reset: the platform cuts
+  // the hook, and the next isolate delivers it.
+  it("calls onChatResponse again after a reset cuts it, with the completed reply", async () => {
+    const room = `hook-reset-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.holdResponseHookOnceForTest();
+    const ws = await connectThinkTestAgentWS(room);
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: crypto.randomUUID(),
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: "hello" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    // The hook has been called, and holds.
+    await vi.waitFor(
+      async () =>
+        expect(await agent.responseHookCallsForTest()).toEqual(["completed"]),
+      { timeout: 5_000, interval: 20 }
+    );
+    ws.close();
+    await agent.resetIsolateForTest().catch(() => undefined);
+
+    await vi.waitFor(
+      async () =>
+        expect(
+          await (await freshAgent(room)).responseHookCallsForTest()
+        ).toEqual(["completed", "completed"]),
+      { timeout: 10_000, interval: 50 }
+    );
+    // And only once more: nothing else runs it again.
+    const restarted = await freshAgent(room);
+    await vi.waitFor(
+      async () => expect(await restarted.stableWithinForTest(2_000)).toBe(true),
+      { timeout: 10_000, interval: 50 }
+    );
+    expect(await restarted.responseHookCallsForTest()).toEqual([
+      "completed",
+      "completed"
+    ]);
+  });
+
   it("replays onChatResponse when bookkeeping before it fails", async () => {
     const agent = await freshAgent(`hook-bookkeeping-${crypto.randomUUID()}`);
     const result = await agent.testResponseHookBookkeepingFailureForTest();

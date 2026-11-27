@@ -643,5 +643,14 @@
       "file": "submissions.test.ts",
       "test": "Think durable submissions > a submission whose isolate is evicted while it runs > ends failed, not running, when a reset cuts its recovered reply and the next recovery declines"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > replays onChatResponse when bookkeeping before it fails",
+    "reason": "the class's terminal-status write (`_recordTerminalChatStatus`) made to throw once, and its hook replay (`_replayPendingResponseHooks`) run by hand",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — error handling > calls onChatResponse again after a reset cuts it, with the completed reply"
+    }
   }
 ]

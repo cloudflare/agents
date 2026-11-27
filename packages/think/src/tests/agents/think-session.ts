@@ -2553,6 +2553,17 @@ export class ThinkTestAgent extends Think {
 
   override onChatResponse(result: ChatResponseResult): void | Promise<void> {
     this._responseLog.push(result);
+    // A test can count the hook's calls across resets, and hold the first
+    // one (to reset the isolate inside it).
+    const kv = this.ctx.storage.kv;
+    const calls = kv.get<string[]>("test:response-hook-calls");
+    if (calls) {
+      kv.put("test:response-hook-calls", [...calls, result.status]);
+      if (kv.get<boolean>("test:hold-response-hook")) {
+        kv.delete("test:hold-response-hook");
+        return new Promise<never>(() => {});
+      }
+    }
     if (!this._followUpFromResponse || result.status !== "completed") return;
     this._followUpFromResponse = false;
     // `saveMessages` is refused inside a turn; a submission is the way to
@@ -2566,6 +2577,20 @@ export class ThinkTestAgent extends Think {
     ]).then((submission) => {
       this._followUpSubmissionId = submission.submissionId;
     });
+  }
+
+  /**
+   * Count onChatResponse's calls in storage from now on, across resets, and
+   * hold the first one forever.
+   */
+  async holdResponseHookOnceForTest(): Promise<void> {
+    this.ctx.storage.kv.put("test:response-hook-calls", []);
+    this.ctx.storage.kv.put("test:hold-response-hook", true);
+  }
+
+  /** onChatResponse's calls, by status, since {@link holdResponseHookOnceForTest}. */
+  async responseHookCallsForTest(): Promise<string[]> {
+    return this.ctx.storage.kv.get<string[]>("test:response-hook-calls") ?? [];
   }
 
   /** The next reply stalls once after two chunks, and recovery retries it. */
