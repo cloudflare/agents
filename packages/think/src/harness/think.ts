@@ -14,7 +14,11 @@ import {
   type WSMessage
 } from "agents";
 import type { ChatResponseResult, SaveMessagesResult } from "agents/chat";
-import { chatDispatch } from "agents/chat";
+import {
+  chatDispatch,
+  type ChatArrival,
+  type MessageConcurrency
+} from "agents/chat";
 import {
   ThinkChat,
   ThinkHarness,
@@ -760,6 +764,30 @@ export class Think<
     | { requestId: string; trigger: string; continuation: boolean }
     | undefined;
 
+  /**
+   * Controls how overlapping user submit requests behave while another
+   * chat turn is already active or queued, as on Think.
+   *
+   * @default "queue"
+   */
+  messageConcurrency: MessageConcurrency = "queue";
+
+  /** How a tab's request joins the lane, as `messageConcurrency` says. */
+  #arrival(): ChatArrival {
+    const concurrency = this.messageConcurrency;
+    if (typeof concurrency !== "object") return concurrency;
+    // A missing or invalid window falls back to Think's default.
+    const { debounceMs } = concurrency;
+    return {
+      debounceMs:
+        typeof debounceMs === "number" &&
+        Number.isFinite(debounceMs) &&
+        debounceMs >= 0
+          ? debounceMs
+          : 750
+    };
+  }
+
   /** Operations whose run continues a reply, until their turn ends. */
   readonly #continuing = new Set<string>();
 
@@ -1416,7 +1444,7 @@ export class Think<
       if (
         await chatDispatch(
           this.harness.chatDeps(session, this.#chatHostDeps()),
-          this.harness.chatLane(session),
+          { ...this.harness.chatLane(session), arrival: this.#arrival() },
           connection,
           message
         )

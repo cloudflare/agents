@@ -786,7 +786,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             return this.#operate(input, run);
           }
           const session = this.#operationOf(run.id)[0];
-          if (Array.isArray(clientTools)) {
+          // Once, when the request is placed: a later attempt has them.
+          if (
+            Array.isArray(clientTools) &&
+            run.checkpoint.get(PLACED_KEY) === undefined
+          ) {
             await this.#handle(session).internal_setConfig(
               CLIENT_TOOLS_KEY,
               JSON.stringify(clientTools)
@@ -1193,12 +1197,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   #operationOf(runId: string): [ThinkSessionId, string] {
     const input = this.#tasks.inputOf(runId);
-    if (input === undefined || isOperationRunInput(input)) {
-      // SAFETY: the harness names its own runs with runIdOf.
-      return JSON.parse(runId) as [ThinkSessionId, string];
+    if (input !== undefined && !isOperationRunInput(input)) {
+      const session = (input as { readonly session?: unknown }).session;
+      return [typeof session === "string" ? session : "", runId];
     }
-    const session = (input as { readonly session?: unknown }).session;
-    return [typeof session === "string" ? session : "", runId];
+    // The harness names its own runs with runIdOf, a JSON pair. A run whose
+    // row is gone is read by its name: a dispatch run's is its request id.
+    try {
+      const pair: unknown = JSON.parse(runId);
+      if (
+        Array.isArray(pair) &&
+        pair.length === 2 &&
+        typeof pair[0] === "string" &&
+        typeof pair[1] === "string"
+      ) {
+        return [pair[0], pair[1]];
+      }
+    } catch {
+      // Not a pair: a request id.
+    }
+    return ["", runId];
   }
 
   #status(record: TaskRecord): ThinkOperationStatus {
