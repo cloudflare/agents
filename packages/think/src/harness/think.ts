@@ -1217,6 +1217,8 @@ export class Think<
         error: `No pending approval "${executionId}"`
       };
     }
+    // A decided call is never listed again.
+    this.#actionDescriptors.delete(pending.descriptor.toolCallId);
     const session = this.harness.session();
     const receipt = await session.submit(
       {
@@ -1432,6 +1434,7 @@ export class Think<
   }
 
   async clearMessages(): Promise<void> {
+    this.#actionDescriptors.clear();
     this.#clearing++;
     this.#clears++;
     // As on Think, a turn started before the clear but not yet submitted is
