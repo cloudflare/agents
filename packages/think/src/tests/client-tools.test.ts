@@ -3010,6 +3010,42 @@ describe("Think — the client tools a turn is offered", () => {
     await closeWS(ws);
   });
 
+  // Successor of "a duplicate tool result from another tab leaves the stored
+  // tools".
+  it("offers a server turn the tools of the tab whose result settled the call, not a late duplicate's", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws: tabA } = await connectWS(room);
+    await collectMessages(tabA, 3);
+    const { ws: tabB } = await connectWS(room);
+    await collectMessages(tabB, 3);
+    await agent.setTextOnlyMode(true);
+    await agent.persistToolCallMessage([
+      makeUserMessage("hello"),
+      makeToolMessage("tc-two-tabs-offered", "client_action", "input-available")
+    ]);
+    const result = (name: string) =>
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-two-tabs-offered",
+        toolName: "client_action",
+        output: "result",
+        clientTools: [{ name, description: "A tab's tool" }]
+      });
+
+    tabA.send(result("tool_of_a"));
+    await handled(agent, MSG_TOOL_RESULT);
+    tabB.send(result("tool_of_b"));
+    await handled(agent, MSG_TOOL_RESULT, 2);
+
+    await agent.saveMessagesForTest("from the server");
+    const offered = await agent.getLastTurnToolNames();
+    expect(offered).toContain("tool_of_a");
+    expect(offered).not.toContain("tool_of_b");
+    await closeWS(tabA);
+    await closeWS(tabB);
+  });
+
   it.each([
     ["an empty clientTools", { clientTools: [] }],
     ["no clientTools key", undefined]
