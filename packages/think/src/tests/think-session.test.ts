@@ -3273,6 +3273,12 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(await agent.saveRightAfterResetForTest()).toBe("completed");
   });
 
+  it("a second reset skips a turn saved after the first", async () => {
+    const agent = await freshProgrammaticAgent("save-between-resets");
+    expect(await agent.saveBetweenResetsForTest()).toBe("skipped");
+    expect(await agent.getStoredMessages()).toEqual([]);
+  });
+
   it("abortAllRequests() stops a saveMessages turn still waiting in the queue", async () => {
     const agent = await freshProgrammaticAgent("ext-abort-queued");
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d ", "e "], 50);

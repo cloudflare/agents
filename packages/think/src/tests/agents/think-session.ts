@@ -11365,6 +11365,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     this.resetTurnState();
   }
 
+  /** A turn saved between two resets, in the same call. */
+  async saveBetweenResetsForTest(): Promise<string> {
+    this.resetTurnState();
+    const saving = this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "between the resets" }]
+      }
+    ]);
+    this.resetTurnState();
+    return (await saving).status;
+  }
+
   /** A turn saved straight after a reset, in the same call. */
   async saveRightAfterResetForTest(): Promise<string> {
     this.resetTurnState();
