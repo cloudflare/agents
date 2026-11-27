@@ -18359,6 +18359,24 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
     return super.beforeTurn(ctx);
   }
 
+  private _metadataCalls: Array<{ type: string; continuation: boolean }> = [];
+
+  /** The agent's writer records each start and finish part it's given. */
+  async logMessageMetadataForTest(): Promise<void> {
+    this.messageMetadata = ({ part, continuation }) => {
+      if (part.type === "start" || part.type === "finish") {
+        this._metadataCalls.push({ type: part.type, continuation });
+      }
+      return undefined;
+    };
+  }
+
+  async getMessageMetadataCallsForTest(): Promise<
+    Array<{ type: string; continuation: boolean }>
+  > {
+    return this._metadataCalls;
+  }
+
   private _hiddenReasoning = false;
   private _failAfterReasoning = false;
 
