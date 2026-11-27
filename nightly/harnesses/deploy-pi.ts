@@ -1,4 +1,4 @@
 import type { TestProject } from "vitest/node";
 import { setup } from "./deploy";
 
-export default (project: TestProject) => setup(project, "nightly-pi");
+export default (project: TestProject) => setup(project, "pi");

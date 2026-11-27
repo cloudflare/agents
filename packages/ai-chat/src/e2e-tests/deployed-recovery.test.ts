@@ -32,6 +32,13 @@ import { pollUntil, rpcCall, sendChatMessage } from "./harness";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG = path.join(__dirname, "wrangler.deployed.jsonc");
+/**
+ * The nightly names the Worker per job (`NIGHTLY_RUN`) and deletes every
+ * Worker of the job when it ends; elsewhere the config's name is used.
+ */
+const NAME_ARG = process.env.NIGHTLY_RUN
+  ? ` --name "nightly-ai-chat-${process.env.NIGHTLY_RUN}"`
+  : "";
 const AGENT_NAME = "chat-recovery-deployed-e2e";
 const RUN = process.env.RUN_DEPLOYED_E2E === "1";
 
@@ -53,12 +60,15 @@ type RecoveryStatus = {
  * depending on version.
  */
 function deployOnce(): string {
-  const out = execSync(`npx wrangler deploy --config "${CONFIG}" 2>&1`, {
-    cwd: __dirname,
-    encoding: "utf8",
-    timeout: 180_000,
-    env: { ...process.env, CLOUDFLARE_INCLUDE_PROCESS_ENV: "true" }
-  });
+  const out = execSync(
+    `npx wrangler deploy --config "${CONFIG}"${NAME_ARG} 2>&1`,
+    {
+      cwd: __dirname,
+      encoding: "utf8",
+      timeout: 180_000,
+      env: { ...process.env, CLOUDFLARE_INCLUDE_PROCESS_ENV: "true" }
+    }
+  );
   console.log(out);
   const match = out.match(/https?:\/\/[^\s]+\.workers\.dev/);
   if (!match) {
@@ -94,7 +104,7 @@ function deploy(attempts = 3): string {
 function destroy(): void {
   try {
     const out = execSync(
-      `npx wrangler delete --config "${CONFIG}" --force 2>&1`,
+      `npx wrangler delete --config "${CONFIG}"${NAME_ARG} --force 2>&1`,
       {
         cwd: __dirname,
         encoding: "utf8",

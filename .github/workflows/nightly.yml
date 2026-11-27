@@ -1,14 +1,14 @@
 name: Nightly E2E
 
+# Runs on the schedule (main only) and by hand. Never on pull requests.
 on:
   schedule:
     # Every day at midnight UTC
     - cron: "0 0 * * *"
-  # Allow manual trigger for debugging
   workflow_dispatch:
     inputs:
       run_deployed:
-        description: "Also run the DEPLOYED recovery suites (real, billable Workers)"
+        description: "Also run the deployed suites (real, billable Workers)"
         type: boolean
         default: false
 
@@ -17,305 +17,233 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Deterministic Playwright suite. Drives only mock agents against an AI-free
-  # worker, so it boots offline/instantly and needs no Cloudflare credentials.
-  # This is the gating, always-green ai-chat e2e signal. (The Workers-AI specs
-  # run in the separate `e2e-ai-chat-llm` job below, which is bounded by a
-  # globalTimeout so a flaky edge connection can never cancel a job at the cap.)
-  e2e-ai-chat:
-    name: "E2E: ai-chat (Playwright, deterministic)"
-    timeout-minutes: 30
+  # Suites on local workerd (`wrangler dev`, SIGKILL) and Playwright against a
+  # mock Worker: no model, no deployment.
+  local:
+    name: "Local: ${{ matrix.name }}"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ai-chat Playwright
+            dir: packages/ai-chat
+            run: pnpm run test:e2e:playwright
+            playwright: true
+          - name: codemode Playwright
+            dir: packages/codemode
+            run: pnpm run test:e2e
+            playwright: true
+          - name: agents browser connector
+            dir: packages/agents
+            # A wall-clock guard below the job's cap, so a stall fails with logs.
+            run: timeout --kill-after=30s 20m pnpm run test:browser
+            playwright: true
+            chrome: true
+          - name: agents e2e (Tasks, Streams, fibers under SIGKILL)
+            dir: packages/agents
+            run: pnpm run test:e2e
+          - name: ai-chat e2e (SIGKILL recovery)
+            dir: packages/ai-chat
+            run: pnpm run test:e2e
+            ai: true
+          - name: think e2e (SIGKILL recovery)
+            dir: packages/think
+            run: pnpm run test:e2e
+            ai: true
+          - name: think harness compat
+            dir: packages/think
+            run: pnpm run test:harness:check
+          # A report: the storage cost table goes to the job summary; it
+          # fails only when a scenario breaks on this build.
+          - name: perf report against the latest release
+            dir: nightly
+            run: pnpm run perf
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
-
       - uses: ./.github/actions/install
-
       - run: pnpm run build
-
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(node -p "require('playwright/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-
-      - name: Install Playwright browsers
+      - name: Playwright browsers
+        if: matrix.playwright
         run: pnpm exec playwright install --with-deps chromium
-
-      - name: Run ai-chat deterministic e2e tests
-        run: pnpm run test:e2e:playwright
-        working-directory: packages/ai-chat
-
-  # Workers-AI Playwright suite. Needs the remote `ai` binding and a healthy
-  # Workers AI edge connection. Real-model latency/flakiness is bounded by a
-  # hard globalTimeout in playwright.llm.config.ts so this can never silently
-  # run to the job's 30-minute cancel.
-  e2e-ai-chat-llm:
-    name: "E2E: ai-chat (Playwright, Workers AI)"
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(node -p "require('playwright/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Run ai-chat Workers AI e2e tests
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:e2e:playwright:llm
-        working-directory: packages/ai-chat
-
-  e2e-think:
-    name: "E2E: think (chat recovery)"
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      - name: Run think e2e tests
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:e2e
-        working-directory: packages/think
-
-  e2e-ai-chat-recovery:
-    name: "E2E: ai-chat (SIGKILL recovery)"
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      # Real `wrangler dev` + mid-stream SIGKILL suite that proves AIChatAgent's
-      # convergence onto the shared `agents/chat` recovery engine survives a real
-      # isolate crash. Distinct from the `e2e-ai-chat` Playwright job above, which
-      # exercises the client-side resume protocol (disconnect/reconnect), not
-      # process death. (Excludes the env-gated `deployed-recovery` suite.)
-      - name: Run ai-chat SIGKILL recovery e2e tests
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:e2e
-        working-directory: packages/ai-chat
-
-  e2e-agents:
-    name: "E2E: agents (fiber eviction)"
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      # Core `runFiber` SIGKILL recovery primitives (root/sub-agent, concurrency,
-      # scan-deadline yield, poison-row aging/backoff, facet multipass). Excluded
-      # from the default unit `test` target because it spawns real wrangler dev
-      # processes; runs here nightly instead.
-      - name: Run agents fiber-recovery e2e tests
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:e2e
-        working-directory: packages/agents
-
-  # Deterministic codemode Playwright suite (Layer 4b). Drives the dynamic
-  # Worker-loader code-generation flow (executor.spec.ts) against an AI-free
-  # worker; offline, no Cloudflare credentials. Mirrors `e2e-ai-chat`. A
-  # `globalTimeout` in its playwright.config.ts bounds it so a hang can never
-  # silently run to the cap. (The Workers-AI codemode specs run in the separate
-  # `e2e-codemode-llm` job below.)
-  e2e-codemode:
-    name: "E2E: codemode (Playwright)"
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(node -p "require('playwright/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Run codemode deterministic e2e tests
-        run: pnpm run test:e2e
-        working-directory: packages/codemode
-
-  # Workers-AI codemode Playwright suite. Needs the remote `ai` binding
-  # (wrangler.jsonc) and a healthy Workers AI edge connection, so it gets
-  # credentials. Real-model latency/flakiness is bounded by a hard globalTimeout
-  # in playwright.llm.config.ts so this can never silently run to the cap.
-  e2e-codemode-llm:
-    name: "E2E: codemode (Playwright, Workers AI)"
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(node -p "require('playwright/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Run codemode Workers AI e2e tests
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:e2e:llm
-        working-directory: packages/codemode
-
-  # Browser-connector e2e (Layer 3c). Spawns a real `wrangler dev` (local Browser
-  # Rendering simulator + worker loader) and drives `BrowserConnector` over CDP.
-  # Kept out of the default unit `test` target (it needs Chromium); runs here
-  # nightly instead.
-  e2e-agents-browser:
-    name: "E2E: agents (browser connector)"
-    timeout-minutes: 30
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: ./.github/actions/install
-
-      - run: pnpm run build
-
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(node -p "require('playwright/package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
-
-      # Persist Wrangler's auto-downloaded Chrome (separate from the Playwright
-      # cache above) so it's fetched once and reused, keeping the one-time
-      # ~hundreds-of-MB download out of the timed test window. Keyed on the
-      # lockfile so a Wrangler bump (which can change the pinned Chrome build)
-      # busts it.
+      # Wrangler's own Chrome for the local Browser Rendering simulator, kept
+      # out of the timed run. Keyed on the lockfile (a Wrangler bump can
+      # change the pinned build).
       - name: Cache Wrangler Chrome
+        if: matrix.chrome
         uses: actions/cache@v5
         with:
           path: ~/.cache/.wrangler/chrome
           key: ${{ runner.os }}-wrangler-chrome-${{ hashFiles('pnpm-lock.yaml') }}
-
-      # Wall-clock guard (20m, below the 30m job cap) mirroring the Playwright
-      # suites' globalTimeout: a future environmental stall fails WITH logs
-      # instead of being silently cancelled at the cap. The suite's own bail:1
-      # already turns a real failure into a fast, reported one.
-      - name: Run agents browser-connector e2e tests
+      - name: Run
+        working-directory: ${{ matrix.dir }}
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: timeout --kill-after=30s 20m pnpm run test:browser
-        working-directory: packages/agents
+          # Only the suites with a remote `ai` binding get the account.
+          CLOUDFLARE_ACCOUNT_ID: ${{ matrix.ai && secrets.CLOUDFLARE_ACCOUNT_ID || '' }}
+          CLOUDFLARE_API_TOKEN: ${{ matrix.ai && secrets.CLOUDFLARE_API_TOKEN || '' }}
+        run: ${{ matrix.run }}
 
-  # ── DEPLOYED (Layer-5) recovery suites ──────────────────────────────────────
-  # These deploy REAL, billable Workers and drive recovery on Cloudflare's edge
-  # (not local workerd). They run on the nightly SCHEDULE. For manual
-  # `workflow_dispatch` runs they stay opt-in (set the `run_deployed` input, or
-  # the `RUN_DEPLOYED_E2E` repo variable) so ad-hoc debugging runs don't deploy
-  # billable Workers unintentionally. Each suite uniquely names its throwaway
-  # Worker and always deletes it.
-  e2e-deployed-ai-chat:
-    name: "E2E (deployed): ai-chat recovery on real edge"
-    if: ${{ github.event_name == 'schedule' || vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
-    timeout-minutes: 30
+  # Playwright on a real Workers AI model. One at a time: run together they
+  # hit the account's Workers AI rate limit (3021).
+  models:
+    name: "Workers AI: ${{ matrix.name }}"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: ai-chat Playwright
+            dir: packages/ai-chat
+            run: pnpm run test:e2e:playwright:llm
+          - name: codemode Playwright
+            dir: packages/codemode
+            run: pnpm run test:e2e:llm
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
-
       - uses: ./.github/actions/install
-
       - run: pnpm run build
-
-      # Deploys `wrangler.deployed.jsonc`, forces a mid-turn redeploy to evict the
-      # live DO, asserts recovery fires + the no-false-incident counterpart, then
-      # deletes the Worker.
-      - name: Run ai-chat DEPLOYED recovery e2e
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: Run
+        working-directory: ${{ matrix.dir }}
         env:
-          RUN_DEPLOYED_E2E: "1"
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm run test:e2e:deployed
-        working-directory: packages/ai-chat
+        run: ${{ matrix.run }}
+
+  # Suites that deploy their own uniquely named Workers to the CI account,
+  # drive them, and delete them. On the schedule, or by hand with
+  # `run_deployed`. Two at a time, so the Workers AI ones are spread out.
+  deployed:
+    name: "Deployed: ${{ matrix.name }}"
+    if: ${{ github.event_name == 'schedule' || inputs.run_deployed }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Every Worker this job deploys is named nightly-<suite>-<NIGHTLY_RUN>,
+    # so the last step can delete exactly this job's Workers.
+    env:
+      NIGHTLY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.key }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - name: Think and AIChatAgent faults (root and facets)
+            key: faults
+            dir: nightly
+            run: pnpm run faults
+          - name: reset fuzz (seeded)
+            key: fuzz
+            dir: nightly
+            run: pnpm run fuzz
+          - name: upgrade from the latest release
+            key: upgrade
+            dir: nightly
+            run: pnpm run upgrade
+          - name: Pi and OpenCode harnesses
+            key: harnesses
+            dir: nightly
+            run: pnpm run harnesses
+          - name: Think soak on a real model
+            key: soak
+            dir: nightly
+            run: pnpm run soak
+          - name: ai-chat recovery after a redeploy
+            key: aichat
+            dir: packages/ai-chat
+            run: pnpm run test:e2e:deployed
+            env_deployed: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: ./.github/actions/install
+      - run: pnpm run build
+      # Workers a cancelled run left behind (their suites delete their own).
+      - name: Delete stale nightly Workers
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        # Only names a nightly job made (nightly-<suite>-<run>-<attempt>-<job>),
+        # never a probe someone deployed by hand. Another job may delete the
+        # same Worker first, so a failed delete is only logged.
+        run: |
+          set -o pipefail
+          cutoff=$(date -u -d '1 day ago' +%s)
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts" |
+            jq -r --argjson cutoff "$cutoff" \
+              '.result[] | select(.id | test("^nightly-[a-z-]+-[0-9]+-[0-9]+-[a-z]+$")) | select((.modified_on | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < $cutoff) | .id' |
+            while read -r name; do
+              echo "deleting $name"
+              curl -fsS -X DELETE -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$name?force=true" > /dev/null || echo "::warning::could not delete $name"
+            done
+      - name: Run
+        working-directory: ${{ matrix.dir }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RUN_DEPLOYED_E2E: ${{ matrix.env_deployed && '1' || '' }}
+        run: ${{ matrix.run }}
+      # The suites delete their Workers; this catches the ones a failed or
+      # cancelled step left behind.
+      - name: Delete this job's Workers
+        if: always()
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -o pipefail
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts" |
+            jq -r --arg suffix "-$NIGHTLY_RUN" '.result[] | select(.id | startswith("nightly-")) | select(.id | endswith($suffix)) | .id' |
+            while read -r name; do
+              echo "deleting $name"
+              curl -fsS -X DELETE -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$name?force=true" > /dev/null
+            done
+
+  # One issue tracks a failing nightly: opened (or commented on) for each red
+  # scheduled run, closed by the first green one.
+  report:
+    name: Report
+    needs: [local, models, deployed]
+    if: ${{ always() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - name: Open, update or close the nightly issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Nightly E2E failing"
+          gh label create nightly --color B60205 --description "The nightly E2E workflow" --force
+          # Each failed job by name (a matrix group reports only its overall result).
+          failed=$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled") | "\(.name): \(.conclusion)"' || true)
+          if [ -z "$failed" ]; then
+            failed=$(echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key): \(.value.result)"')
+          fi
+          issue=$(gh issue list --state open --label nightly --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$failed" ]; then
+            body=$(printf 'Run: %s\n\n%s\n' "$RUN_URL" "$failed")
+            if [ -n "$issue" ]; then
+              gh issue comment "$issue" --body "$body"
+            else
+              gh issue create --title "$title" --label nightly --body "$body"
+            fi
+          elif [ -n "$issue" ]; then
+            gh issue close "$issue" --comment "Green again: $RUN_URL"
+          fi
