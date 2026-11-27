@@ -640,8 +640,8 @@ export class Think<
             : { ...kept, parts: [] };
         },
         onRecovery: (context) => this.#onRecovery(context),
-        onContextOverflow: ({ operationId }) =>
-          this.#onContextOverflow(operationId),
+        onContextOverflow: ({ operationId, signal }) =>
+          this.#onContextOverflow(operationId, signal),
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
           // The step's chunks reach extensions before its tool calls do.
@@ -814,7 +814,8 @@ export class Think<
               end.reason !== undefined && { error: end.reason })
           });
         },
-        classifyError: (error) => this.#classify(error)
+        classifyError: (error, context) =>
+          this.#classify(error, context?.operationId)
       }
     });
     this.#chat = new ThinkChat({
@@ -1219,7 +1220,10 @@ export class Think<
     return error;
   }
 
-  classifyChatError(_error: unknown): ChatErrorClassification | void {}
+  classifyChatError(
+    _error: unknown,
+    _ctx?: ChatErrorContext
+  ): ChatErrorClassification | void {}
 
   // ── Messages ──────────────────────────────────────────────────────
 
@@ -2529,8 +2533,12 @@ export class Think<
    * Without it, or when compaction can't shorten the history, the
    * overflow ends the turn.
    */
-  async #onContextOverflow(operationId: string): Promise<boolean> {
-    if (!this.contextOverflow?.reactive) return false;
+  async #onContextOverflow(
+    operationId: string,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    // A stopped turn is not compacted, nor run again.
+    if (!this.contextOverflow?.reactive || signal.aborted) return false;
     let shortened = false;
     try {
       shortened = Boolean(await this.session.compact());
@@ -2545,6 +2553,8 @@ export class Think<
       requestId: operationId,
       attempt: 1
     });
+    // Stopped while it compacted: the turn ends.
+    if (signal.aborted) return false;
     if (shortened && this.#ownTurn?.operationId === operationId) {
       // The retry is the same turn run again: its hooks run again.
       this.#ownTurn = undefined;
@@ -2628,8 +2638,12 @@ export class Think<
     if (met.some(Boolean)) this.#turnMaxSteps = step + 1;
   }
 
-  #classify(error: unknown): ThinkErrorClass {
-    const classification = this.classifyChatError(error);
+  #classify(error: unknown, operationId?: string): ThinkErrorClass {
+    // As in Think: the classifier hears the turn it is classifying for.
+    const classification = this.classifyChatError(error, {
+      ...(operationId !== undefined && { requestId: operationId }),
+      stage: "stream"
+    });
     if (classification !== "context_overflow") return "fail";
     // The turn's caller hears it as an overflow, as on Think.
     this.#overflowErrors.add(
