@@ -171,5 +171,14 @@ describe("action-ledger rows think@0.24.0 left, after the upgrade", () => {
 
     expect((await agent.testChat("call echo action")).done).toBe(true);
     expect((await agent.getActionProbe()).count).toBe(0);
+    // Held by the lease, not failed for another reason.
+    const after = await agent.getAfterToolCallLog();
+    expect(
+      (
+        JSON.parse(after.at(-1)?.outputJson ?? "null") as {
+          error?: { name?: string };
+        } | null
+      )?.error?.name
+    ).toBe("ActionPendingError");
   });
 });
