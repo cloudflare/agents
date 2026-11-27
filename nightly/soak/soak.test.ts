@@ -131,7 +131,8 @@ function progress(line: string) {
 
 /**
  * The turn for `text` has a finished reply: the assistant messages after it
- * (a tool's continuation can add one) hold text, and no tool waits on the user.
+ * (a tool's continuation can add one) hold text or reasoning, and no tool
+ * waits on the user.
  */
 function answeredTurn(state: Run["state"], text: string): boolean {
   const i = state.messages.findIndex(
@@ -147,8 +148,14 @@ function answeredTurn(state: Run["state"], text: string): boolean {
       ...(m.parts as { type: string; text?: string; state?: string }[])
     );
   }
+  // A real model sometimes ends a step with its answer in its reasoning and
+  // no text (seen on glm-4.7-flash after a tool: finishReason "stop"), so a
+  // reasoning part counts as a reply; an empty reply does not.
   return (
-    parts.some((p) => p.type === "text" && Boolean(p.text?.trim())) &&
+    parts.some(
+      (p) =>
+        (p.type === "text" || p.type === "reasoning") && Boolean(p.text?.trim())
+    ) &&
     !parts.some(
       (p) => p.state === "approval-requested" || p.state === "input-available"
     )
