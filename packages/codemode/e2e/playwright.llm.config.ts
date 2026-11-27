@@ -24,10 +24,9 @@ export default defineConfig({
   // Real model turns are slower than the deterministic executor specs.
   timeout: 90_000,
   globalTimeout: 15 * 60_000,
-  // Real-model output is nondeterministic — the small Workers AI model
-  // occasionally varies wording and trips a strict assertion. Re-runs recover
-  // these reliably, so allow extra retries (only fire on failure).
-  retries: process.env.CI ? 3 : 0,
+  // No retries: a spec that fails because the model worded something
+  // differently asserts on the wrong thing and is fixed, not retried.
+  retries: 0,
   workers: 1,
   reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
   use: {
