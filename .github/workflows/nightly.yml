@@ -55,6 +55,11 @@ jobs:
           - name: think harness compat
             dir: packages/think
             run: pnpm run test:harness:check
+          # A report: the storage cost table goes to the job summary; it
+          # fails only when a scenario breaks on this build.
+          - name: perf report against the latest release
+            dir: nightly
+            run: pnpm run perf
     steps:
       - uses: actions/checkout@v6
         with:
