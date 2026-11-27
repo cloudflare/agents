@@ -240,6 +240,10 @@
         "name": "ThinkUpgradeTestAgent"
       },
       {
+        "class_name": "ThinkUpgradeCustomStoreTestAgent",
+        "name": "ThinkUpgradeCustomStoreTestAgent"
+      },
+      {
         "class_name": "ThinkMediaEvictionAutoAgent",
         "name": "ThinkMediaEvictionAutoAgent"
       },
@@ -334,6 +338,7 @@
         "ThinkMediaEvictionAgent",
         "ThinkPromptCacheTestAgent",
         "ThinkUpgradeTestAgent",
+        "ThinkUpgradeCustomStoreTestAgent",
         "ThinkMediaEvictionAutoAgent",
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",

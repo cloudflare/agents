@@ -69,6 +69,7 @@ export {
   ThinkMediaEvictionAgent,
   ThinkPromptCacheTestAgent,
   ThinkUpgradeTestAgent,
+  ThinkUpgradeCustomStoreTestAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
@@ -132,6 +133,7 @@ import type {
   ThinkMediaEvictionAgent,
   ThinkPromptCacheTestAgent,
   ThinkUpgradeTestAgent,
+  ThinkUpgradeCustomStoreTestAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
@@ -297,6 +299,7 @@ export type Env = {
   ThinkMediaEvictionAgent: DurableObjectNamespace<ThinkMediaEvictionAgent>;
   ThinkPromptCacheTestAgent: DurableObjectNamespace<ThinkPromptCacheTestAgent>;
   ThinkUpgradeTestAgent: DurableObjectNamespace<ThinkUpgradeTestAgent>;
+  ThinkUpgradeCustomStoreTestAgent: DurableObjectNamespace<ThinkUpgradeCustomStoreTestAgent>;
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   ThinkPointerHydrationAgent: DurableObjectNamespace<ThinkPointerHydrationAgent>;
   ThinkLegacySessionApiAgent: DurableObjectNamespace<ThinkLegacySessionApiAgent>;
