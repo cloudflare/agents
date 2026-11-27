@@ -3191,10 +3191,12 @@ export class ThinkTestAgent extends Think {
       );
   }
 
-  private _waitForTurnQueueIdleForTest(): Promise<void> {
-    return (
-      this as unknown as { _turnQueue: { waitForIdle(): Promise<void> } }
-    )._turnQueue.waitForIdle();
+  private async _waitForTurnQueueIdleForTest(): Promise<void> {
+    // The harness-backed Think (`pnpm test:harness`) has no turn queue: its
+    // programmatic turns have ended when their calls return.
+    await (
+      this as unknown as { _turnQueue?: { waitForIdle(): Promise<void> } }
+    )._turnQueue?.waitForIdle();
   }
 
   /** Start an RPC turn and park it inside `beforeStep`. */
@@ -3406,9 +3408,7 @@ export class ThinkTestAgent extends Think {
     responses: string[];
     chatErrors: string[];
     agentErrors: string[];
-    errorFrames: number;
     failedEvents: number;
-    terminalOutcomes: string[];
     /** The agent-tool run's row, for `entry: "agentTool"`. */
     run: { status: string | null; error: string | null } | null;
   }> {
@@ -3430,28 +3430,15 @@ export class ThinkTestAgent extends Think {
         model: createAbortAwareMockModel(options.phase, () => markStarted())
       };
     }
-    let errorFrames = 0;
-    const terminalOutcomes: string[] = [];
-    const self = this as unknown as {
-      _frames: {
-        broadcast(frame: Record<string, unknown>, exclude?: string[]): void;
-      };
-      _emit(type: string, payload: unknown): void;
-    };
-    const broadcastChat = self._frames.broadcast;
-    self._frames.broadcast = (frame, exclude) => {
-      if (frame.error === true) errorFrames++;
-      if (frame.done === true && typeof frame.outcome === "string") {
-        terminalOutcomes.push(frame.outcome);
-      }
-      return broadcastChat.call(self._frames, frame, exclude);
-    };
+    // The frames a tab sees are counted by the test's own socket.
     let run: { status: string | null; error: string | null } | null = null;
     let failedEvents = 0;
-    const emit = self._emit;
-    self._emit = (type, payload) => {
-      if (type === "chat:request:failed") failedEvents++;
-      return emit.call(this, type, payload);
+    const observability = this.observability;
+    this.observability = {
+      emit: (event) => {
+        if (event.type === "chat:request:failed") failedEvents++;
+        observability?.emit(event);
+      }
     };
     const caller = new AbortController();
     const stop = (requestId: string | undefined) => {
@@ -3524,14 +3511,11 @@ export class ThinkTestAgent extends Think {
         responses: this._responseLog.map((response) => response.status),
         chatErrors: [...this._chatErrorLog],
         agentErrors: [...this._agentErrorLog],
-        errorFrames,
         failedEvents,
-        terminalOutcomes,
         run
       };
     } finally {
-      self._frames.broadcast = broadcastChat;
-      self._emit = emit;
+      this.observability = observability;
       this._turnConfigOverride = null;
       this._beforeTurnAbortWait = null;
     }
