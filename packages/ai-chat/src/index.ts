@@ -3981,85 +3981,116 @@ export class AIChatAgent<
    *
    * @param turn - `persisted` is the snapshot envelope the turn stored.
    */
+  /**
+   * A turn a release before the chat module left cut off (its Tasks run or
+   * its fiber row, replayed here): carried onto the chat's lane as a turn of
+   * its own, under its request id. The app's `onChatRecovery` is asked
+   * first, as the release asked it. Replaying it again finds the turn
+   * carried and does nothing.
+   */
   private async _recoverChatTurn(turn: {
     requestId: string;
     persisted: unknown;
     createdAt: number;
     attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
+    const { requestId } = turn;
+    if (await this.tasks.get(requestId)) return;
     const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
       "__cfAIChatFiberSnapshot",
       turn.persisted,
       "ai-chat-turn"
     );
-    const recovered = {
-      requestId: turn.requestId,
-      snapshot,
+    const body = snapshot?.lastBody ?? this._turns.lastBody;
+    const clientTools =
+      snapshot?.lastClientTools ?? this._turns.lastClientTools;
+
+    // What the cut-off reply streamed is stored as the reply, as the
+    // release stored an orphaned stream.
+    const before = await this.#session.getLatestLeaf();
+    const { streamId, streamStillActive } =
+      this._resolveAIChatRecoveryStream(requestId);
+    if (streamId && streamStillActive) {
+      await this._persistOrphanedStream(streamId);
+      this._replyStreams.complete(streamId);
+    }
+    const leaf = await this.#session.getLatestLeaf();
+
+    // The conversation moved on: a newer question than the one this turn
+    // answered is the latest message. Its own turn answers it.
+    const latestUser = [...this.messages]
+      .reverse()
+      .find((message) => message.role === "user");
+    if (
+      leaf?.role === "user" &&
+      snapshot?.latestUserMessageId !== undefined &&
+      latestUser !== undefined &&
+      latestUser.id !== snapshot.latestUserMessageId
+    ) {
+      this._frames.endUnstarted(null, requestId, "aborted");
+      return;
+    }
+
+    const continues = leaf?.role === "assistant";
+    const partial = continues
+      ? this.messages.find((message) => message.id === leaf.id)
+      : undefined;
+    const decision = await this.onChatRecovery({
+      incidentId: requestId,
+      recoveryRootRequestId: snapshot?.recoveryRootRequestId ?? requestId,
+      attempt: 1,
+      maxAttempts: resolveChatRecoveryConfig(this.chatRecovery).maxAttempts,
+      recoveryKind: continues ? "continue" : "retry",
+      streamId,
+      requestId,
+      partialText: (partial?.parts ?? [])
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join(""),
+      partialParts: (partial?.parts ?? []) as MessagePart[],
       recoveryData: user,
-      createdAt: turn.createdAt,
-      attempt: turn.attempt
+      messages: [...this.messages],
+      ...(body !== undefined && { lastBody: body }),
+      ...(clientTools !== undefined && { lastClientTools: clientTools }),
+      createdAt: turn.createdAt
+    });
+    if (decision?.continue === false) {
+      // Not continued: what was streamed stays stored unless the app said
+      // not to keep it.
+      if (decision.persist === false && leaf && leaf.id !== before?.id) {
+        await this.#session.deleteMessages([leaf.id]);
+      }
+      this._frames.endUnstarted(null, requestId, "aborted");
+      return;
+    }
+    // Continue without what was streamed: the question is answered again.
+    const dropped =
+      decision?.persist === false &&
+      continues &&
+      leaf !== null &&
+      leaf.id !== before?.id;
+    if (dropped) await this.#session.deleteMessages([leaf.id]);
+
+    const context = {
+      ...(body !== undefined && { body }),
+      ...(clientTools !== undefined &&
+        clientTools.length > 0 && { clientTools })
     };
-    await this._chatRecoveryEngine().recoverInterruptedTurn(recovered, {
-      // Read from storage, not `this.messages`: a chat fiber row an older
-      // version left is recovered at startup, before `onStart` hydrates the
-      // messages.
-      latestMessage: async () => {
-        const leaf = await this.#session.getLatestLeaf();
-        return leaf ? { id: leaf.id, role: leaf.role } : null;
-      },
-      partialHoldsContent: (partial) =>
-        partial.text !== "" || partial.parts.length > 0,
-      invokeOnChatRecovery: (input) =>
-        this.onChatRecovery({
-          incidentId: input.incident.incidentId,
-          recoveryRootRequestId: input.recoveryRootRequestId,
-          attempt: input.incident.attempt,
-          maxAttempts: input.incident.maxAttempts,
-          recoveryKind: input.recoveryKind,
-          streamId: input.streamId,
-          requestId: input.requestId,
-          partialText: input.partial.text,
-          // The engine seam is vocabulary-agnostic (`unknown[]`); ai-chat owns
-          // the AI SDK parts vocabulary, so re-assert it for the user context.
-          partialParts: input.partial.parts as MessagePart[],
-          recoveryData: input.recoveryData,
-          messages: [...this.messages],
-          lastBody: input.snapshot?.lastBody ?? this._turns.lastBody,
-          lastClientTools:
-            input.snapshot?.lastClientTools ?? this._turns.lastClientTools,
-          createdAt: input.createdAt
-        }),
-      // Only persist while the stream is still active. The ACK handler (client
-      // reconnect → replayChunks) may have already persisted + completed the
-      // orphaned stream before fiber recovery runs; persisting again on the same
-      // chunks would double the assistant message's parts. (The engine ANDs this
-      // with the shared never-drop-settled-work clause.)
-      shouldPersistOrphanedPartial: (input) => input.streamStillActive,
-      persistOrphanedStream: (streamId) =>
-        this._persistOrphanedStream(streamId),
-      completeRecoveredStream: (streamId) => {
-        this._replyStreams.complete(streamId);
-      },
-      // Nothing continues the cut-off request (the app declined, or the
-      // conversation moved on): end it for the tabs, and record it for a
-      // tab that comes back later.
-      onSkipped: async ({ requestId }) => {
-        this._frames.endUnstarted(null, requestId, "aborted");
-      },
-      originMessageIds: (requestId) => this._frames.originIds(requestId)
-    } satisfies ChatFiberWakeHooks);
+    await submitTurn(
+      this._chatDeps(),
+      // A carried turn takes its place in the lane; it is not a new message
+      // that could skip the ones waiting.
+      { ...this._chatLane(), arrival: "queue" },
+      continues && !dropped
+        ? { trigger: "server", mode: "continue", ...context }
+        : {
+            trigger: "server",
+            ...(latestUser && { questionId: latestUser.id }),
+            ...context
+          },
+      { requestId }
+    );
   }
 
-  /**
-   * Resolve the orphaned stream for a recovered chat turn — drives BOTH the wake
-   * path (full result) and the give-up terminalization (which reads only
-   * `.streamId`). Prefers the newest durable stream row keyed by the recovery-
-   * root request id; falls back to the live active stream; `streamId` is `""`
-   * when neither survives. `AIChatAgent` does not model terminal stream status,
-   * so `streamStatus` is left `undefined` (keeping the engine's terminal-stream
-   * branches dead here) — see the "substrate capabilities are optional" decision
-   * in the RFC.
-   */
   private _resolveAIChatRecoveryStream(
     requestId: string
   ): ResolvedRecoveryStream {

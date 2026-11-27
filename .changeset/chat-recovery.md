@@ -20,3 +20,4 @@ Chat recovery after a restart or a dropped stream.
 - A stop that lands just as a reply is cut off no longer makes the next message wait out the cancelled recovery's backoff.
 - An agent-tool run on a sub-agent whose chat recovery gave up before running a turn now ends `error`; it stayed `running`.
 - A tool cut off by a reset after reporting only progress (an `async function*` `execute`) is reported interrupted, not given its progress as its result.
+- `chatRecovery.stableTimeoutMs` is deprecated and has no effect: a recovered turn is the next attempt of the turn's own run, so there is no wait for a stable chat before it continues.
