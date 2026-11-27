@@ -7,6 +7,7 @@ import {
   INTERRUPTED_TOOL_ERROR_TEXT,
   repairTranscriptBeforeTurn
 } from "../before-turn";
+import { requestMessages } from "../repair-transcript";
 
 type Part = UIMessage["parts"][number];
 
@@ -265,7 +266,7 @@ describe("continuationWaitsOnClient", () => {
 describe("repairTranscriptBeforeTurn and reasoning", () => {
   const reasoning = { type: "reasoning", text: "Let me think", state: "done" };
 
-  it("removes the reasoning an earlier reply and the last reply end in", () => {
+  it("keeps the reasoning stored replies end in, and leaves it out of the request", () => {
     const messages = [
       user("u1"),
       reply("a1", { type: "step-start" }, reasoning),
@@ -280,13 +281,18 @@ describe("repairTranscriptBeforeTurn and reasoning", () => {
     ];
     for (const mode of [{ continuation: false }, { continuation: true }]) {
       const result = repair(messages, mode);
-      expect(result.messages[1].parts).toEqual([]);
-      expect(result.messages[3].parts.map((part) => part.type)).toEqual([
+      // Stored as they are: a reply may complete with only reasoning.
+      expect(result.messages).toEqual(messages);
+      expect(result.removedReasoningParts).toBe(0);
+      expect(result.emptyReplyIds).toEqual([]);
+      // The request has no assistant message that ends in reasoning, and
+      // none that is left empty.
+      const request = requestMessages(result.messages, mode.continuation);
+      expect(request.map((message) => message.id)).toEqual(["u1", "u2", "a2"]);
+      expect(request[2].parts.map((part) => part.type)).toEqual([
         "step-start",
         "tool-search"
       ]);
-      expect(result.removedReasoningParts).toBe(2);
-      expect(result.removedToolCalls).toBe(0);
     }
   });
 });
@@ -367,17 +373,30 @@ describe("a reply that holds nothing", () => {
     parts: [{ type: "step-start" }, { type: "reasoning", text: "Let me think" }]
   });
 
+  const empty = (id: string): UIMessage => ({
+    id,
+    role: "assistant",
+    parts: [{ type: "step-start" }, { type: "text", text: "" }]
+  });
+
   it("is reported for removal by a turn that starts a new reply", () => {
-    const result = repair(
-      [user("u1"), reasoningOnly("a1"), user("u2")],
-      newReply
-    );
+    const result = repair([user("u1"), empty("a1"), user("u2")], newReply);
     expect(result.emptyReplyIds).toEqual(["a1"]);
   });
 
   it("is reported when it is the last message of a new reply's turn", () => {
-    const result = repair([user("u1"), reasoningOnly("a1")], newReply);
+    const result = repair([user("u1"), empty("a1")], newReply);
     expect(result.emptyReplyIds).toEqual(["a1"]);
+  });
+
+  it("is not a reply that holds only reasoning: that one is kept, and left out of the request", () => {
+    const messages = [user("u1"), reasoningOnly("a1"), user("u2")];
+    const result = repair(messages, newReply);
+    expect(result.emptyReplyIds).toEqual([]);
+    expect(result.messages).toEqual(messages);
+    expect(
+      requestMessages(result.messages).map((message) => message.id)
+    ).toEqual(["u1", "u2"]);
   });
 
   it("is kept as the last message of a continuation turn, which writes into it", () => {
@@ -389,7 +408,7 @@ describe("a reply that holds nothing", () => {
     const result = repair(
       [
         user("u1"),
-        reasoningOnly("a1"),
+        empty("a1"),
         user("u2"),
         reply("a2", { type: "text", text: "answer" })
       ],

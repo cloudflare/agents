@@ -249,30 +249,9 @@ describe("Think: a reply that holds nothing", () => {
     });
   });
 
-  it("a new question removes an earlier reply that held only reasoning", async () => {
-    const agent = await recoveryAgent();
-    await agent.persistTestMessage(question);
-    await agent.persistTestMessage(reasoningOnly);
-
-    expect((await agent.testSaveMessages("Something else")).status).toBe(
-      "completed"
-    );
-
-    const stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(ids(stored)).not.toContain("assistant-reasoning");
-    // The new question follows the first one, and its reply follows it.
-    expect(stored.map((message) => message.role)).toEqual([
-      "user",
-      "user",
-      "assistant"
-    ]);
-    expect(stored.every((message) => message.parts.length > 0)).toBe(true);
-  });
-
-  // F21 (nightly soak): a reply a model completed with reasoning only
-  // (finish "stop") is the user's answer; the next question must not delete
-  // it from the transcript. Fails on main: the before-turn repair strips the
-  // trailing reasoning in storage and removes the then-empty reply.
+  // A reply a model completed with reasoning only (finish "stop") is the
+  // user's answer: the next question does not delete it from the
+  // transcript. Its reasoning is left out of what the model is sent.
   it("keeps a completed reply that holds only reasoning when a new question comes", async () => {
     const agent = await recoveryAgent();
     await agent.persistTestMessage(question);
@@ -289,6 +268,11 @@ describe("Think: a reply that holds nothing", () => {
         .find((message) => message.id === "assistant-reasoning")
         ?.parts.some((part) => part.type === "reasoning")
     ).toBe(true);
+    // The model was not sent a message that ends in reasoning: the reply,
+    // left empty without it, is not in the request.
+    const [prompt] = await agent.getModelPromptsForTest();
+    expect(prompt?.some((line) => line.startsWith("assistant"))).toBe(false);
+    expect(prompt?.filter((line) => line.startsWith("user"))).toHaveLength(2);
   });
 
   it("a recovery that would continue it removes it and answers the question again", async () => {

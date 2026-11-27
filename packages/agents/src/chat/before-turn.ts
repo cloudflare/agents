@@ -65,10 +65,12 @@ export interface BeforeTurnRepairResult extends RepairInterruptedToolPartsResult
  *   while there are any. Any other unanswered call there is dead and is
  *   settled. An approved call is kept: the turn is about to run it.
  *
- * - An assistant message that ends in reasoning has it removed
- *   (`stripTrailingReasoning`), in every message and for every turn.
- *   Anthropic rejects a request in which an assistant message's final block
- *   is a thinking block.
+ * - An assistant message that ends in reasoning is stored as it is: a reply
+ *   may complete with only reasoning. The model request leaves that
+ *   reasoning out, and a message it leaves empty
+ *   ({@link requestMessages}): Anthropic rejects a request in which an
+ *   assistant message's final block is a thinking block. A reply cut off in
+ *   its reasoning is settled by recovery, which removes it.
  *
  * A settled call goes through `repairPart`, the host's
  * `repairInterruptedToolPart` hook, which by default turns it into an errored
@@ -99,7 +101,10 @@ export function repairTranscriptBeforeTurn(
     // The last message's approved calls are always kept.
     repairApprovalResponded: true,
     // A continuation turn writes into the last message.
-    keepEmptyLastMessage: continuation
+    keepEmptyLastMessage: continuation,
+    // A stored reply that ends in reasoning may have completed that way:
+    // it is kept, and the reasoning is left out of the request only.
+    stripReasoning: false
   });
   return { ...result, keptToolCallIds };
 }

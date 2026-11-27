@@ -46,6 +46,7 @@ import {
 } from "./before-turn";
 import {
   replyIsRemovedAsEmpty,
+  requestMessages,
   stripTrailingReasoning
 } from "./repair-transcript";
 import { isReplayChunk, settleInterruptedPart } from "./message-builder";
@@ -1965,9 +1966,10 @@ export function chatTurnDefinition(
     }
     // Before the model is asked: a call the transcript leaves unanswered
     // that nothing will answer in time is settled (a provider rejects a
-    // request holding a call with no result), trailing reasoning is dropped,
-    // and a reply left holding nothing is removed. The repaired transcript
-    // is stored, and the call sees it.
+    // request holding a call with no result), and a reply that holds
+    // nothing is removed. The repaired transcript is stored. A stored reply
+    // that ends in reasoning is kept as it is (it may have completed that
+    // way); the call's messages leave that reasoning out.
     const clientToolNames = new Set(
       (run.clientTools ?? []).map((tool) => tool.name)
     );
@@ -2038,7 +2040,7 @@ export function chatTurnDefinition(
       trigger: run.trigger ?? "submit-message",
       ...(run.questionId !== undefined && { questionId: run.questionId }),
       ...(partial && { replyId: partial.id }),
-      messages,
+      messages: requestMessages(messages, partial !== undefined),
       clientTools: run.clientTools ?? [],
       ...(run.body !== undefined && { body: run.body }),
       signal: step.signal,
@@ -2448,7 +2450,10 @@ export function chatTurnDefinition(
           // Room was made: ask the model again, once, with the transcript
           // as it is now.
           overflowTried = true;
-          call = { ...call, messages: await history() };
+          call = {
+            ...call,
+            messages: requestMessages(await history(), partial !== undefined)
+          };
           continue;
         }
         if (verdict === "transient" && recovery !== false) {

@@ -1348,14 +1348,45 @@ describe("ChatTurns", () => {
       expect(seen).not.toContain("output-error");
     });
 
-    it("removes a reply the repair left empty and returns the list without it", async () => {
-      const removed: string[][] = [];
+    it("keeps a stored reply that is only reasoning and leaves it out of the request", async () => {
       const messages: UIMessage[] = [
         { id: "u1", role: "user", parts: [{ type: "text", text: "q" }] },
         {
           id: "a1",
           role: "assistant",
           parts: [{ type: "step-start" }, { type: "reasoning", text: "hm" }]
+        },
+        { id: "u2", role: "user", parts: [{ type: "text", text: "next" }] }
+      ];
+
+      const result = await turns.settleBeforeTurn(
+        messages,
+        { continuation: false, repairPart: flip },
+        {
+          persist: async () => {
+            throw new Error("nothing to store");
+          },
+          remove: async () => {
+            throw new Error("a completed reply is not removed");
+          },
+          emitRepaired: () => {}
+        }
+      );
+
+      expect(result.messages.map((message) => message.id)).toEqual([
+        "u1",
+        "u2"
+      ]);
+    });
+
+    it("removes a reply that holds nothing and returns the list without it", async () => {
+      const removed: string[][] = [];
+      const messages: UIMessage[] = [
+        { id: "u1", role: "user", parts: [{ type: "text", text: "q" }] },
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [{ type: "step-start" }, { type: "text", text: "" }]
         },
         { id: "u2", role: "user", parts: [{ type: "text", text: "next" }] }
       ];
