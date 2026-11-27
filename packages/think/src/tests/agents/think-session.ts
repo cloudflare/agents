@@ -1,4 +1,8 @@
 import { subscribe } from "agents/observability";
+import {
+  subscribe as subscribeToChannel,
+  unsubscribe as unsubscribeFromChannel
+} from "node:diagnostics_channel";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { SubmissionStatusQueue } from "../../submissions";
 import { hasToolCall, Output, tool } from "ai";
@@ -773,19 +777,34 @@ async function waitForRunStepsForTest(agent: Think): Promise<void> {
 }
 
 /**
- * Whether a recovery attempt is there to run. While an incident is open and
- * no attempt waits yet, this waits for the agent's next recovery event (an
- * attempt being scheduled, or the incident ending) and for the work that
- * event belongs to, then looks again. No timer: a recovery that never moves
- * on is the test's own timeout.
+ * Whether a `callback` recovery attempt is there to run. While an incident
+ * is open and no attempt waits yet, this waits for the agent's next recovery
+ * or Tasks event (an attempt being scheduled, its run accepted or put to
+ * sleep, the incident ending) and for the work that event belongs to, then
+ * looks again. No timer: a recovery that never moves on is the test's own
+ * timeout. False when only the other callback has work: there is nothing
+ * for this one to run.
  */
-async function recoveryAttemptOwedForTest(agent: Think): Promise<boolean> {
+async function recoveryAttemptOwedForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<boolean> {
+  const other =
+    callback === "_chatRecoveryContinue"
+      ? "_chatRecoveryRetry"
+      : "_chatRecoveryContinue";
   let moved: () => void = () => {};
-  const unsubscribe = subscribe("chat", (event) => {
+  const unsubscribeChat = subscribe("chat", (event) => {
     if (event.name === agent.name && event.type.startsWith("chat:recovery:")) {
       moved();
     }
   });
+  // Tasks says when a run is accepted or starts waiting: the moment an
+  // attempt becomes something to run.
+  const onTask = (message: unknown) => {
+    if ((message as { name?: string }).name === agent.name) moved();
+  };
+  subscribeToChannel("agents:task", onTask);
   try {
     for (;;) {
       // Listen before looking, so an event between the two is not missed.
@@ -794,10 +813,8 @@ async function recoveryAttemptOwedForTest(agent: Think): Promise<boolean> {
       });
       await waitForThinkIdleForTest(agent);
       await waitForRunStepsForTest(agent);
-      const waiting =
-        recoveryWorkCountForTest(agent, "_chatRecoveryContinue") +
-        recoveryWorkCountForTest(agent, "_chatRecoveryRetry");
-      if (waiting > 0) return true;
+      if (recoveryWorkCountForTest(agent, callback) > 0) return true;
+      if (recoveryWorkCountForTest(agent, other) > 0) return false;
       const incidents = await (
         agent as unknown as { ctx: DurableObjectState }
       ).ctx.storage.list<{ status?: string }>({
@@ -811,7 +828,8 @@ async function recoveryAttemptOwedForTest(agent: Think): Promise<boolean> {
       await next;
     }
   } finally {
-    unsubscribe();
+    unsubscribeChat();
+    unsubscribeFromChannel("agents:task", onTask);
   }
 }
 
@@ -836,7 +854,7 @@ async function runRecoveryWorkForTest(
     // Nothing waits. An attempt that ended schedules the next one just
     // after, so an incident still open means it is about to: wait for that
     // and run it, where returning now would run nothing.
-    if (await recoveryAttemptOwedForTest(agent)) {
+    if (await recoveryAttemptOwedForTest(agent, callback)) {
       await runRecoveryWorkForTest(agent, callback);
     }
     return;
