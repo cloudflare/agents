@@ -10,4 +10,4 @@ Chat turns in `AIChatAgent` and `Think`.
 - A message sent while a turn runs is stored when its own turn starts, so the transcript reads `U1, A1, U2, A2`.
 - Waiting messages are dropped only by a clear, and a cancelled or superseded one stays so across a restart (#2928).
 - A stop also drops waiting auto-continuations, an `aborted` result carries `reason: "stopped"` or `"interrupted"`, and a tool result answered just before a restart still continues the reply (#3101, #3142).
-- New events: `chat:request:failed`, `chat:stream:stalled`, `chat:continuation:dropped`, and Think's `tool:result`, `tool:approval` and `message:cancel`.
+- New events: `chat:request:failed`, `chat:stream:stalled`, `chat:continuation:dropped`, and Think's `tool:result`, `tool:approval`, `message:cancel`.

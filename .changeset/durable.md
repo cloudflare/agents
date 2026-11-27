@@ -6,7 +6,7 @@
 Schedules, jobs and workflows.
 
 - Work cut off by a reset resumes within 5 s instead of 30, and survives a dropped alarm (#3028, #2977).
-- A failing background job reaches `onJobError` instead of retrying forever (#3022, #3023, #3032, #3025, #3007).
+- A failing job reaches `onJobError` instead of retrying forever (#3022, #3023, #3032, #3025, #3007).
 - Jobs and `getSchedule()` work in sub-agents, and `destroy()` from a scheduled callback sticks (#3012, #3020, #3083).
 - A crashing fiber recovery hook no longer takes the agent down (#2970).
-- `AgentWorkflow` runs survive an Agent reset (#3052).
+- `AgentWorkflow` runs and stubs survive an Agent reset (#3052, #2978).
