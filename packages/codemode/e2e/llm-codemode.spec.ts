@@ -29,8 +29,9 @@ async function runChat(
     },
     timeout: 45_000
   });
-  expect(res.ok()).toBe(true);
-  return res.text();
+  const text = await res.text();
+  expect(res.ok(), `${res.status()}: ${text.slice(0, 2000)}`).toBe(true);
+  return text;
 }
 
 // ── Multi-provider with LLM ───────────────────────────────────────
