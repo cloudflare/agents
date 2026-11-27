@@ -10912,12 +10912,20 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   /** Emulate a reset that cut a submission's terminal report short. */
   async repeatSubmissionReportForTest(submissionId: string): Promise<void> {
+    // The run of a submission on the harness-backed Think is named by its
+    // session too.
+    const shell = this as unknown as {
+      harness?: { session(): { id: string } };
+    };
+    const runId = shell.harness
+      ? JSON.stringify([shell.harness.session().id, submissionId])
+      : submissionId;
     this.ctx.storage.sql.exec(
       "UPDATE cf_agents_task_runs SET notified = NULL WHERE run_id = ?",
-      submissionId
+      runId
     );
     await (this.tasks as unknown as { onStart(): Promise<void> }).onStart();
-    await this.tasks.wait(submissionId);
+    await this.tasks.wait(runId);
   }
 
   async getWorkflowEventsForTest(): Promise<
