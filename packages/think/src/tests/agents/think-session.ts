@@ -3917,6 +3917,11 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /** Whether the agent settles within `timeout` ms. */
+  async stableWithinForTest(timeout: number): Promise<boolean> {
+    return this.waitUntilStable({ timeout });
+  }
+
   /** Where a lasting stall's recovery has got to. */
   async recoveryProgressForTest(): Promise<{
     recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];

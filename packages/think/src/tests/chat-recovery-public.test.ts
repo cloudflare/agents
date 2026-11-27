@@ -334,6 +334,20 @@ describe("chat recovery, through public behaviour", () => {
         },
         { timeout: 20_000, interval: 50 }
       );
+      // A give-up has ended the turn only once the agent is idle, with no
+      // turn running and no recovery left to run: count after that, not at
+      // the first onExhausted. (Think sends the terminal message to the
+      // tabs; it is not stored as the reply, so the reply can't be the
+      // barrier.)
+      if (progress.exhausted.length > 0) {
+        await vi.waitFor(
+          async () => {
+            expect(await agent.stableWithinForTest(2_000)).toBe(true);
+          },
+          { timeout: 20_000, interval: 50 }
+        );
+        progress = await agent.recoveryProgressForTest();
+      }
       return progress;
     }
 
