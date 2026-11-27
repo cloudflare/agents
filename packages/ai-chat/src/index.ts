@@ -923,6 +923,9 @@ export class AIChatAgent<
   /** Whether each running call continues a reply, for `onChatResponse`. */
   private readonly _callContinues = new Map<string, boolean>();
 
+  /** Turns whose `onChatMessage` answered with a reply, until they end. */
+  private readonly _answered = new Set<string>();
+
   /** Requests that waited behind another, so every tab was shown them queued. */
   private readonly _shownQueued = new Set<string>();
 
@@ -1069,7 +1072,7 @@ export class AIChatAgent<
         ) {
           this._emit("message:request");
         }
-        return this.onChatMessage(async () => {}, {
+        const response = await this.onChatMessage(async () => {}, {
           requestId: call.requestId,
           abortSignal: call.signal,
           // No client tools reach `onChatMessage` as none, as before.
@@ -1079,6 +1082,10 @@ export class AIChatAgent<
           ...(call.body !== undefined && { body: { ...call.body } }),
           continuation: call.mode === "continue"
         });
+        // It answered with a reply: however that reply ends, the hook
+        // hears of it.
+        if (response) this._answered.add(call.requestId);
+        return response;
       },
       hooks: {
         onResponse: async (result) => {
@@ -1088,6 +1095,7 @@ export class AIChatAgent<
           // Whether the model was asked: a turn stopped before it started
           // reports nothing to `onChatResponse`.
           const ran = this._callContinues.has(result.requestId);
+          const answered = this._answered.delete(result.requestId);
           const continuation =
             this._callContinues.get(result.requestId) ?? false;
           this._callContinues.delete(result.requestId);
@@ -1114,7 +1122,8 @@ export class AIChatAgent<
                     .find((m) => m.role === "assistant") ?? null)
                 : // A turn stopped before its reply held anything still
                   // reports how it ended, with the empty reply.
-                  result.status === "aborted" && ran
+                  (result.status === "aborted" && ran) ||
+                    (result.status === "error" && answered)
                   ? ({
                       id: result.requestId,
                       role: "assistant",
