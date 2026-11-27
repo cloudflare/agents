@@ -71,6 +71,10 @@ export async function submitTurn(
     requestId?: string;
     idempotencyKey?: string;
     arrival?: ChatArrival;
+    /** Store this turn's tools and body as the chat's request context. */
+    storeContext?: boolean;
+    /** Stops the turn, waiting or running, when it aborts. */
+    signal?: AbortSignal;
   } = {}
 ): Promise<{ requestId: string; dropped?: true }> {
   const session = deps.sessions.session(input.session ?? deps.session ?? "");
@@ -133,9 +137,13 @@ export async function submitTurn(
   // A client's request sets the tools and body later turns that no client
   // sent (a server turn, a tool answer's continuation) run with.
   let run: ChatTurnInput = given;
+  // A client's request stores its context; so does a host turn told to
+  // (`storeContext`: AIChatAgent's `continueLastTurn(body)`). A host turn
+  // that is not told so runs with what it brings, for itself only.
   if (
     given.trigger === "submit-message" ||
-    given.trigger === "regenerate-message"
+    given.trigger === "regenerate-message" ||
+    options.storeContext
   ) {
     await session.internal_setConfig(
       REQUEST_CONTEXT_KEY,
@@ -153,14 +161,21 @@ export async function submitTurn(
           : null
       )
     );
-  } else if (given.clientTools === undefined && given.body === undefined) {
+  } else if (given.clientTools === undefined || given.body === undefined) {
+    // What the turn does not bring comes from the stored context.
     const stored = await session.internal_config(REQUEST_CONTEXT_KEY);
     if (stored) {
       const context = JSON.parse(stored) as Pick<
         ChatTurnInput,
         "clientTools" | "body"
       >;
-      run = { ...given, ...context };
+      const clientTools = given.clientTools ?? context.clientTools;
+      const body = given.body ?? context.body;
+      run = {
+        ...given,
+        ...(clientTools !== undefined && { clientTools }),
+        ...(body !== undefined && { body })
+      };
     }
   }
   const receipt = await deps.tasks.run(lane.definition, run as never, {
@@ -173,6 +188,11 @@ export async function submitTurn(
     })
   });
   const dropped = (receipt as { dropped?: boolean }).dropped === true;
+  if (options.signal && !dropped) {
+    const stop = () => void cancelTurn(deps, receipt.runId);
+    if (options.signal.aborted) stop();
+    else options.signal.addEventListener("abort", stop, { once: true });
+  }
   // The tabs learn that a replaced or dropped request ended without a
   // reply (its turn never runs to say so).
   for (const id of dropped ? [receipt.runId] : replaced) {
