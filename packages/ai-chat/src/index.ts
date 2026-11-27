@@ -3313,16 +3313,16 @@ export class AIChatAgent<
           continuation: false,
           inline: true
         });
-      } else if (this._turnQueue.isActive) {
-        // Inside a FOREIGN turn (e.g. `cancelAgentTool` called mid-turn).
-        // Enqueue-and-await would deadlock; inline would interleave with that
-        // turn. Fire-and-forget a turn that runs once the slot frees — the
-        // message is already persisted, so the reaction is best-effort.
-        void this.keepAliveWhile(() =>
-          this._runServerTurn(nanoid(), { continuation: false })
-        );
+      } else if (this._openChatTurns().length > 0) {
+        // Turns wait or run (perhaps the one this is called from): the
+        // reaction is a server turn on the chat's lane, durable once
+        // submitted, and runs when its place comes. Waiting for it here
+        // could wait on the caller's own turn.
+        await submitTurn(this._chatDeps(), this._chatLane(), {
+          trigger: "server"
+        });
       } else {
-        await this._runServerTurn(nanoid(), { continuation: false });
+        await this._serverTurn({ trigger: "server" });
       }
     } finally {
       this._inFlightDetachedNotifications.delete(id);
