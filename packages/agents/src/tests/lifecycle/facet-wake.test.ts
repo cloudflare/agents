@@ -94,10 +94,11 @@ describe("facet wake", () => {
     await agent.middlePush("m", "after-failure", 0);
 
     const started = Date.now();
-    await runDurableObjectAlarm(agent);
+    // The push made the facet's wake due now, so the root's alarm drives it
+    // on its own. No forced run beside it: a second drive would find no
+    // failure left to inject and run the job (see #3305).
     // The failure stayed out of the root's driver: the wake is still there
-    // for a later try, and the job has not run. (The real alarm may be the
-    // one that drove it, so wait for its outcome.)
+    // for a later try, and the job has not run.
     await vi.waitFor(async () => {
       const [wake] = await agent.rootJobs();
       expect(wake?.time).toBeGreaterThanOrEqual(started + 25_000);
