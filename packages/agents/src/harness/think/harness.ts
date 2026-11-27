@@ -40,6 +40,7 @@ import {
 } from "../../chat/client-tools";
 import type { StreamChunkData } from "../../chat/message-builder";
 import {
+  chatRecoveryGaveUp,
   chatTurnDefinition,
   chatTurnStreamId,
   runningChatTurn,
@@ -294,7 +295,8 @@ class ModelCallError extends Error {
     readonly kind: ThinkErrorClass,
     readonly error: unknown
   ) {
-    super(errorText(error));
+    // The cause is where a provider's retry-after is looked for.
+    super(errorText(error), { cause: error });
   }
 }
 
@@ -1638,7 +1640,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
     // The definition gave up on an interrupted turn, past the budget or as
     // `onRecovery` chose: its partial is stored already.
-    if (result.error === TURN_NOT_CONTINUED) {
+    if (result.error === TURN_NOT_CONTINUED || chatRecoveryGaveUp(run)) {
       return {
         status: "unanswered",
         reason: "interrupted",
@@ -1693,8 +1695,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         }),
       options: {
         recovery: {
-          // The first attempt, then one per interruption it survives.
-          maxAttempts: (recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS) + 1,
+          // Recoveries without progress, as the turn definition counts
+          // them.
+          maxAttempts: recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
           // The loop watches each model call itself: a tool may take longer
           // than the model may stay silent.
           stallTimeoutMs: 0
@@ -1742,7 +1745,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           const decision = await this.#extensions.hook("onRecovery", {
             session,
             operationId,
-            attempt: context.attempt - 1,
+            attempt: context.attempt,
             partial
           });
           return decision === "abandon" ? { continue: false } : undefined;

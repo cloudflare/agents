@@ -21,3 +21,4 @@ Chat recovery after a restart or a dropped stream.
 - An agent-tool run on a sub-agent whose chat recovery gave up before running a turn now ends `error`; it stayed `running`.
 - A tool cut off by a reset after reporting only progress (an `async function*` `execute`) is reported interrupted, not given its progress as its result.
 - A reset that lands just after a recovered reply ends no longer leaves its recovery open with nothing to finish it; an agent-tool run on a sub-agent stayed `running` in that case.
+- `ThinkHarness` (experimental, `agents/harness/think`) recovers an interrupted operation within the same budget as `chatRecovery`: `recovery.maxAttempts` (default 10) counts recoveries without progress and starts again when an attempt streamed more, and an operation also ends after five minutes without progress, after five interrupted attempts, or past the work budget. It counted ten interruptions and nothing else.
