@@ -157,7 +157,13 @@ import { ThinkSession } from "../session";
 import { ThinkConfigStore } from "../config-store";
 import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "../system-prompt";
 import { Think as LegacyThink } from "../think";
-import type { AgentToolRunInspection, AgentToolStoredChunk } from "agents";
+import type {
+  AgentToolLifecycleResult,
+  AgentToolMilestone,
+  AgentToolRunInfo,
+  AgentToolRunInspection,
+  AgentToolStoredChunk
+} from "agents";
 import {
   chunksOfMessage,
   REPLAY_PAGE_BYTES,
@@ -3626,6 +3632,123 @@ export class Think<
       return handled ?? onRequest(request);
     };
   }
+  // ── Detached agent-tool runs this agent started ──────────────────────
+
+  /**
+   * The message put back into the chat when a `detached: { notify: true }`
+   * run ends, as Think words it. Override it (an empty string sends none).
+   */
+  protected formatDetachedCompletion(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): string {
+    const label = `Background task "${run.agentType}" (run ${run.runId})`;
+    switch (result.status) {
+      case "completed":
+        return result.summary
+          ? `${label} finished:\n\n${result.summary}`
+          : `${label} finished successfully.`;
+      case "error":
+        return `${label} failed${result.error ? `: ${result.error}` : "."}`;
+      case "aborted":
+        return `${label} was cancelled.`;
+      case "interrupted":
+        return result.reason === "budget-exceeded"
+          ? `${label} ran out of time before completing and was stopped.`
+          : `${label} was interrupted before completing${result.error ? `: ${result.error}` : "."}`;
+      default:
+        return `${label} ended (${result.status}).`;
+    }
+  }
+
+  /**
+   * The message put into the chat when a `detached: { onMilestones }`
+   * milestone is reached, as Think words it. Override it (an empty string
+   * sends none).
+   */
+  protected formatDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone
+  ): string {
+    const label = `Background task "${run.agentType}" (run ${run.runId})`;
+    const detail =
+      milestone.data !== undefined
+        ? `\n\n${JSON.stringify(milestone.data, null, 2)}`
+        : "";
+    return `${label} reached milestone "${milestone.name}".${detail}`;
+  }
+
+  /**
+   * `detached: { notify: true }`: the run's end becomes a submitted turn,
+   * once per run and status, as on Think.
+   */
+  async _cfDetachedNotifyFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    const text = this.formatDetachedCompletion(run, result);
+    if (!text) return;
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      {
+        idempotencyKey: `detached-finish:${run.runId}:${result.status}`,
+        metadata: {
+          source: run.notifySource ?? "detached-agent-tool",
+          runId: run.runId,
+          agentType: run.agentType,
+          status: result.status
+        }
+      }
+    );
+  }
+
+  /**
+   * A milestone of a detached run, as on Think: `"narrate"` adds an
+   * assistant line (no model call, once per run and name); `"react"`
+   * submits a user turn (once per run and name).
+   */
+  protected override async _deliverDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone,
+    mode: "react" | "narrate"
+  ): Promise<void> {
+    const text = this.formatDetachedMilestone(run, milestone);
+    if (!text) return;
+    const metadata = {
+      source: run.notifySource ?? "detached-agent-tool",
+      runId: run.runId,
+      agentType: run.agentType,
+      milestone: milestone.name
+    };
+    if (mode === "narrate") {
+      await this.addMessages([
+        {
+          id: `detached-ms:${run.runId}:${milestone.name}`,
+          role: "assistant",
+          parts: [{ type: "text", text }],
+          metadata
+        }
+      ]);
+      return;
+    }
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { idempotencyKey: `detached-ms:${run.runId}:${milestone.name}`, metadata }
+    );
+  }
+
   // ── As an agent tool ────────────────────────────────────────────────
   // A parent runs this agent as a tool through these methods. The run is
   // one operation of the root session, `agent-tool:<runId>`, so every
