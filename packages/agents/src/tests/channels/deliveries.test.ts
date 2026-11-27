@@ -193,6 +193,53 @@ describe("deliverToSurfaces", () => {
     expect(posts.map((p) => p.outcome)).not.toContain("uncertain");
   });
 
+  it("posts nothing of a run cut off while a tool call's input arrived, once a later run answers", async () => {
+    const stub = fresh();
+    // Its first post fails, so it is tried again after the later run began.
+    await stub.setScript(["retryable"]);
+    await stub.receive(
+      {
+        type: "message",
+        eventId: "e1",
+        message: {
+          id: "e1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      },
+      {
+        route: "default",
+        participant: { id: "alice" },
+        surface: await stub.surfaceOf("t1")
+      }
+    );
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "tool-input-start", toolCallId: "c1", toolName: "lookup" }),
+      chunk({ type: "tool-input-delta", toolCallId: "c1", delta: "{" })
+    ]);
+    await stub.wake();
+    await stub.emit([
+      { type: "run-start", operations: ["e1"] },
+      chunk({ type: "text-start", id: "b" }),
+      chunk({ type: "text-delta", id: "b", delta: "Hello" }),
+      chunk({ type: "text-end", id: "b" }),
+      { type: "run-end", operations: ["e1"] }
+    ]);
+    await until(
+      () => stub.openDeliveries(),
+      (n) => n === 0
+    );
+    // The fake records a stream that broke off as `uncertain`: the cut-off
+    // response was read as ended, with nothing of it to post.
+    const posts = await stub.getPosts();
+    expect(posts.map((p) => p.outcome)).not.toContain("uncertain");
+    // The later run's answer is posted.
+    expect(posts.some((p) => p.text === "Hello" && p.outcome === "ok")).toBe(
+      true
+    );
+  });
+
   it("posts nothing of a run cut off mid-answer, once a later run answers its turn", async () => {
     const stub = fresh();
     // The cut-off response's post fails once, so its delivery tries again

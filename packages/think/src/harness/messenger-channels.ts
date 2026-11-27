@@ -15,26 +15,69 @@
 import type { UIMessage } from "ai";
 import type { Adapter, Chat } from "chat";
 import type { ThinkHarness } from "agents/harness/think";
-import { chatSdkChannel, deliverToSurfaces } from "agents/internal";
+import {
+  chatSdkChannel,
+  deliverToSurfaces,
+  deliveryDefinition,
+  registerDeliverySink,
+  releaseDelivery,
+  sendDelivery
+} from "agents/internal";
+import {
+  CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
+  CHAT_RECOVERY_TASK_NAME,
+  type ChatRecoveryIncident
+} from "agents/chat";
+import {
+  migrateLegacyRecoveredReplies,
+  RECOVERED_REPLY_SINK,
+  recoveredReplyId,
+  recoveredReplyOutcome,
+  recoveredReplySink,
+  type RecoveredReplyClaim
+} from "../messengers/recovered-reply";
 import {
   Channels,
   type ChannelMessageSurface,
   type ChannelsHost,
   type ConversationUpdate
 } from "agents/experimental/channels";
+
+/** A Channels turn's status, from its update. */
+type TurnStatus = Extract<ConversationUpdate, { type: "turn" }>["turn"];
+
+/** A message's text, its text parts joined. */
+function messageText(message: UIMessage | undefined): string {
+  return (message?.parts ?? [])
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("");
+}
 import { Streams } from "agents/streams";
 import type { Tasks } from "agents/tasks";
 import {
   createMessengerChat,
+  drainStrandedQueue,
   idempotencyKeyForEvent,
   normalizeMessengers,
+  recoveredReplyPosts,
   withMessengerQueueTtl,
   type MessengerConcurrency,
   type NormalizedMessengerDefinition,
   type ThinkMessengers
 } from "../messengers/chat-sdk";
 import {
+  INTERRUPTED_MESSENGER_RESPONSE,
+  messengerReplyRecoveryMode,
+  reviveMessengerEvent
+} from "../messengers/delivery";
+import {
+  RELEASED_REPLY_DEFINITION,
+  releasedSnapshot
+} from "../messengers/reply-task";
+import {
+  messengerContextFromEvent,
   toMessengerUserMessage,
+  type MessengerContext,
   type MessengerEvent
 } from "../messengers/events";
 
@@ -50,6 +93,22 @@ export type ThinkMessengerChannels = {
    * turn runs (the message's id is its event's).
    */
   channelOf(messageId: string): string | undefined;
+  /** The messenger context of user message `messageId`, while its turn runs. */
+  contextOf(messageId: string): MessengerContext | undefined;
+  /**
+   * TEMPORARY: remove in the next minor. Deliver the recovered replies
+   * think@0.24.0 kept under `cf_think_messenger_recovery:`. Called at start.
+   */
+  importReleasedReplies(): Promise<void>;
+  /**
+   * TEMPORARY: remove in the next minor. Release the reply held for a
+   * think@0.24.0 recovery incident with its outcome.
+   */
+  releaseReleasedReply(
+    incidentId: string,
+    outcome: "completed" | "interrupted",
+    text?: string
+  ): Promise<void>;
   /** Where a notice to messenger `id`'s `thread` is posted, if anywhere. */
   noticeSurface(
     id: string,
@@ -81,6 +140,8 @@ export function messengerChannels(options: {
   root(): boolean;
   /** Where each turn's asker is kept, so a reply after a reset finds it. */
   kv: SyncKvStorage;
+  /** Where think@0.24.0 kept the replies it left unfinished. */
+  storage: DurableObjectStorage;
   /** The Think object: Chat SDK state lives on its sub-agents. */
   parent: unknown;
   /** Read when the first webhook arrives, as Think reads it at start. */
@@ -99,6 +160,76 @@ export function messengerChannels(options: {
   /** Each waiting answer's operation, told when Channels settles the turn. */
   const settled = new Map<string, Set<() => void>>();
   let turnsHost: ChannelsHost | undefined;
+  const streams = new Streams({ name: "think-messengers" });
+  /** Each running turn's first response in this isolate. */
+  const firstResponses = new Map<string, string>();
+  /**
+   * Turns whose model call failed and was tried again in this isolate, with
+   * what their first attempt had written: the later attempts are not
+   * delivered live, but posted once the turn settles, as Think posts a
+   * recovered reply (the rest of the answer, the apology, or the
+   * empty-response text). A reset's rerun, in a new isolate, streams.
+   */
+  const retried = new Map<string, Promise<string>>();
+
+  /** The text of saved message `id`, or "" when there is none. */
+  async function textOf(id: string | undefined): Promise<string> {
+    if (id === undefined) return "";
+    const messages = await options.harness.session().messages();
+    return messageText(messages.find((message) => message.id === id));
+  }
+
+  /** The text response `responseId` streamed (what went out live). */
+  async function partialText(responseId: string): Promise<string> {
+    let text = "";
+    for await (const { chunk } of streams.read(responseId)) {
+      const delta = chunk as { type?: unknown; delta?: unknown };
+      if (delta.type === "text-delta" && typeof delta.delta === "string") {
+        text += delta.delta;
+      }
+    }
+    return text;
+  }
+
+  /** Post a retried turn's reply to its asker, as Think posts a recovered one. */
+  async function postRetried(
+    asker: ChannelMessageSurface,
+    turn: Extract<TurnStatus, { status: "settled" }>,
+    partial: Promise<string>
+  ): Promise<void> {
+    const definition = definitions.find((d) => d.id === asker.channelKey);
+    const threadId = (asker.address as { threadId?: unknown }).threadId;
+    if (!definition || typeof threadId !== "string") return;
+    const posted = await partial;
+    const text = await textOf(turn.messageIds.at(-1));
+    // Posted as a recovered reply is: a durable delivery that keeps its
+    // cursor, so a rejected part does not hold back the parts after it.
+    const claim: RecoveredReplyClaim = {
+      messengerId: definition.id,
+      threadId,
+      partialText: posted
+    };
+    const outcome = recoveredReplyOutcome(
+      claim,
+      turn.outcome === "failed" ? "interrupted" : "completed",
+      text
+    );
+    // A new delivery: its first attempt runs now, so the webhook that
+    // waits on it holds the thread until the reply is posted.
+    await sendDelivery(
+      options.tasks,
+      RECOVERED_REPLY_SINK,
+      recoveredReplyId(`retried:${turn.startedBy}`),
+      claim,
+      undefined,
+      {
+        progress: {
+          outcome: outcome.outcome,
+          ...(outcome.text !== undefined && { text: outcome.text })
+        }
+      }
+    );
+  }
 
   /**
    * Watch `operation`'s turn from before Channels takes it. `settled()`
@@ -138,7 +269,7 @@ export function messengerChannels(options: {
   }
 
   const channels = Channels.forHarness(options.harness, {
-    streams: new Streams({ name: "think-messengers" }),
+    streams,
     channels: Object.fromEntries([
       // Sees each turn settle after every update before it was published
       // (so its deliveries started), for the answer that waits on it.
@@ -149,9 +280,57 @@ export function messengerChannels(options: {
             turnsHost = host;
           },
           publish(_conversationId: string, update: ConversationUpdate) {
+            if (update.type === "turn" && update.turn.status === "running") {
+              const { startedBy, responseId } = update.turn;
+              const first = firstResponses.get(startedBy);
+              if (first === undefined) {
+                firstResponses.set(startedBy, responseId);
+              } else if (
+                first !== responseId &&
+                !retried.has(startedBy) &&
+                // Its webhook still waits here: the model call failed and
+                // was tried again. A reset's rerun has no live webhook.
+                attempts.has(startedBy)
+              ) {
+                retried.set(startedBy, partialText(first));
+              }
+            }
             if (update.type === "turn" && update.turn.status === "settled") {
+              const startedBy = update.turn.startedBy;
+              firstResponses.delete(startedBy);
+              const partial = retried.get(startedBy);
+              retried.delete(startedBy);
+              const kept = options.kv.get<ChannelMessageSurface>(
+                askerKey(startedBy)
+              );
+              if (partial && kept) {
+                const posting = postRetried(kept, update.turn, partial);
+                // The answer that waits on the turn waits on this too.
+                const waiting = attempts.get(startedBy);
+                if (waiting) {
+                  for (const mine of waiting) mine.push(posting);
+                } else {
+                  void posting.catch((error: unknown) =>
+                    console.error(
+                      "[Think] A retried reply was not posted",
+                      error
+                    )
+                  );
+                }
+              }
+              // A turn no webhook here waits on is one a reset cut off and
+              // the harness ran again: the Chat handler that held its thread
+              // died with the reset, so what queued behind it is drained, as
+              // Think drains it after recovering a reply.
+              const asker = options.kv.get<ChannelMessageSurface>(
+                askerKey(startedBy)
+              );
+              if (asker && !attempts.has(startedBy)) {
+                drainLater(asker);
+              }
               // Its replies have started: the asker is not read again.
-              options.kv.delete(askerKey(update.turn.startedBy));
+              options.kv.delete(askerKey(startedBy));
+              options.kv.delete(contextKey(startedBy));
               for (const resolve of settled.get(update.turn.startedBy) ?? []) {
                 resolve();
               }
@@ -176,7 +355,9 @@ export function messengerChannels(options: {
             // Every thread shares the default session, as in Think: a reply
             // goes to the thread whose message started its turn, only.
             asker: (startedBy) =>
-              options.kv.get<ChannelMessageSurface>(askerKey(startedBy)),
+              retried.has(startedBy)
+                ? undefined
+                : options.kv.get<ChannelMessageSurface>(askerKey(startedBy)),
             sending: (startedBy, attempt) =>
               attempts.get(startedBy)?.forEach((mine) => mine.push(attempt))
           }
@@ -212,6 +393,8 @@ export function messengerChannels(options: {
     const turn = watchTurn(eventId);
     try {
       options.kv.put(askerKey(eventId), surface);
+      // As in Think, the turn's messenger context, from the event.
+      options.kv.put(contextKey(eventId), messengerContextFromEvent(event));
       await channels.receive(
         {
           type: "message",
@@ -237,6 +420,7 @@ export function messengerChannels(options: {
       // Also here: a repeated event's turn settled before it came, and will
       // not settle again.
       options.kv.delete(askerKey(eventId));
+      options.kv.delete(contextKey(eventId));
     } finally {
       turn.release();
       waiting.delete(mine);
@@ -244,6 +428,125 @@ export function messengerChannels(options: {
         attempts.delete(eventId);
       }
     }
+  }
+
+  // TEMPORARY: remove in the next minor after this ships. A reply
+  // think@0.24.0 left unfinished: answered again if no text of it went out,
+  // apologized for if some did, as Think does; a completed one posts
+  // nothing more.
+  options.tasks.register(RELEASED_REPLY_DEFINITION, async (_input, step) => {
+    const key = `__cf_messenger_recovery:${step.id}`;
+    const snapshot = releasedSnapshot(await options.storage.get(key));
+    const event = snapshot && reviveMessengerEvent(snapshot.event);
+    const definition =
+      event && definitions.find((d) => d.id === event.messengerId);
+    if (snapshot && event && definition) {
+      const mode = messengerReplyRecoveryMode(snapshot.stage);
+      try {
+        if (mode === "answer") await answer(definition, event);
+        if (mode === "apologize") {
+          await chat().initialize();
+          await definition.adapter.postMessage(event.thread.id, {
+            markdown:
+              definition.delivery?.interruptedResponseText ??
+              INTERRUPTED_MESSENGER_RESPONSE
+          });
+        }
+      } finally {
+        // As Think does after recovering a reply, even one that failed:
+        // what queued behind it is answered, whatever the reply's stage.
+        drainThread(definition, event.thread.id);
+      }
+    }
+    await options.storage.delete(key);
+  });
+
+  // TEMPORARY: remove in the next minor. A recovery job think@0.24.0
+  // queued: that recovery does not run after the move, so the reply held
+  // for its incident is released as interrupted (the apology).
+  options.tasks.register(CHAT_RECOVERY_TASK_NAME, async (input: unknown) => {
+    const incidentId = (input as { data?: { incidentId?: unknown } } | null)
+      ?.data?.incidentId;
+    if (typeof incidentId === "string") {
+      await release(incidentId, "interrupted");
+    }
+  });
+
+  // A recovered reply is posted as Think posts it: the rest of the answer,
+  // from its cursor, the apology, or the empty-response text. A reply whose
+  // model call was tried again posts through it (`postRetried`), and so do
+  // the replies think@0.24.0 kept (TEMPORARY: that import goes in the next
+  // minor; this sink stays).
+  registerDeliverySink(
+    options.tasks,
+    RECOVERED_REPLY_SINK,
+    recoveredReplySink(async () => async (input) => {
+      const definition = definitions.find((d) => d.id === input.messengerId);
+      if (!definition) return { chunks: 0 };
+      const posts = recoveredReplyPosts(definition, input);
+      const post = posts[input.chunk];
+      if (post !== undefined) {
+        await chat().initialize();
+        await definition.adapter.postMessage(input.threadId, post);
+      }
+      return { chunks: posts.length };
+    })
+  );
+
+  /** Whether a think@0.24.0 recovery incident is over (or never was). */
+  async function incidentGone(incidentId: string): Promise<boolean> {
+    const incident = await options.storage.get<ChatRecoveryIncident>(
+      CHAT_RECOVERY_INCIDENT_KEY_PREFIX + encodeURIComponent(incidentId)
+    );
+    return (
+      !incident ||
+      incident.status === "skipped" ||
+      incident.status === "exhausted"
+    );
+  }
+
+  /** Release the reply held for `incidentId`, as Think releases it. */
+  async function release(
+    incidentId: string,
+    outcome: "completed" | "interrupted",
+    text?: string
+  ): Promise<void> {
+    const id = recoveredReplyId(incidentId);
+    const claim = options.tasks.inputOf<RecoveredReplyClaim>(id);
+    if (!claim) return;
+    await releaseDelivery(
+      options.tasks,
+      id,
+      recoveredReplyOutcome(claim, outcome, text)
+    );
+  }
+
+  /** Drain the thread `asker` names, in the background. */
+  function drainLater(asker: ChannelMessageSurface): void {
+    const definition = definitions.find((d) => d.id === asker.channelKey);
+    const threadId = (asker.address as { threadId?: unknown }).threadId;
+    if (!definition || typeof threadId !== "string") return;
+    drainThread(definition, threadId);
+  }
+
+  /** Drain `threadId`'s stranded queue, in the background. */
+  function drainThread(
+    definition: NormalizedMessengerDefinition,
+    threadId: string
+  ): void {
+    const drain = () => drainStrandedQueue(chat(), definition, threadId);
+    const keepAlive = (
+      options.parent as {
+        keepAliveWhile?: <T>(fn: () => Promise<T>) => Promise<T>;
+      }
+    ).keepAliveWhile;
+    const running = keepAlive ? keepAlive.call(options.parent, drain) : drain();
+    void running.catch((error: unknown) => {
+      console.error(
+        `[Think] Failed to drain messages queued on ${threadId}`,
+        error
+      );
+    });
   }
 
   let made: Chat<Record<string, Adapter>> | undefined;
@@ -262,6 +565,41 @@ export function messengerChannels(options: {
       return options.kv.get<ChannelMessageSurface>(askerKey(messageId))
         ?.channelKey;
     },
+    contextOf(messageId) {
+      return options.kv.get<MessengerContext>(contextKey(messageId));
+    },
+    async importReleasedReplies() {
+      // As Think moves them: settled ones are delivered; one whose incident
+      // still recovers is held, at once, so a release finds it; the rest
+      // are apologized for.
+      await migrateLegacyRecoveredReplies(
+        options.storage,
+        incidentGone,
+        (id, claim, progress) =>
+          progress.outcome === undefined
+            ? sendDelivery(options.tasks, RECOVERED_REPLY_SINK, id, claim)
+            : sendDelivery(options.tasks, RECOVERED_REPLY_SINK, id, claim, {
+                sentAt: Date.now(),
+                attempts: 0,
+                progress
+              })
+      );
+      // A held reply whose incident is gone: nothing will release it now.
+      const prefix = recoveredReplyId("");
+      for (const held of options.tasks.peekList({
+        definition: deliveryDefinition(RECOVERED_REPLY_SINK),
+        status: ["pending"],
+        parked: true,
+        results: false
+      })) {
+        const incidentId = held.runId.slice(prefix.length);
+        if (await incidentGone(incidentId)) {
+          await release(incidentId, "interrupted");
+        }
+      }
+    },
+    releaseReleasedReply: (incidentId, outcome, text) =>
+      release(incidentId, outcome, text),
     noticeSurface(id, thread) {
       const definition = definitions.find((d) => d.id === id);
       if (!definition || thread === undefined) return undefined;
@@ -301,6 +639,10 @@ type TurnWatch = { settled(): Promise<void>; release(): void };
 
 /** The key of the Channel that watches turns settle; not a messenger id. */
 const TURNS_KEY = "think:turns";
+
+function contextKey(eventId: string): string {
+  return `cf_think_messenger_context:${eventId}`;
+}
 
 function askerKey(eventId: string): string {
   return `cf_think_messenger_asker:${eventId}`;

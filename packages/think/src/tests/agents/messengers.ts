@@ -233,7 +233,18 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         : undefined;
     // An agent named `slow-…` holds each model call until the test releases
     // it (`releaseSlowModelForTest`).
-    const slow = this.name.startsWith("slow-");
+    // An agent named `queue-slowreset-…` holds its first model call until
+    // the test releases it, then resets, mid-reply.
+    const slowReset =
+      this.name.startsWith("queue-slowreset-") &&
+      !this.ctx.storage.kv.get("reset-done")
+        ? async () => {
+            this.ctx.storage.kv.put("reset-done", true);
+            await this.ctx.storage.sync();
+            this.ctx.abort("reset mid-reply");
+          }
+        : undefined;
+    const slow = this.name.startsWith("slow-") || slowReset !== undefined;
     const held = () => this._slowModelHeld;
     return {
       specificationVersion: "v3",
@@ -250,6 +261,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         if (slow) {
           await held();
           recordEnd(prompt);
+          await slowReset?.();
         }
         const call = nextCall();
         const fails =
@@ -616,6 +628,26 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     };
   }
 
+  /**
+   * Keep a recovered reply as think@0.24.0 kept it, for the next start.
+   * `failPost` rejects that post once, across a restart.
+   */
+  async seedReleasedRecoveryForTest(
+    reply: Record<string, unknown>,
+    failPost?: string
+  ): Promise<void> {
+    await this._seedLegacyRecoveredReply(
+      `${crypto.randomUUID()}:user-1`,
+      reply
+    );
+    if (failPost !== undefined) this.ctx.storage.kv.put("fail-post", failPost);
+  }
+
+  /** Reset the object, as the platform does: the next call starts it. */
+  restartForTest(): void {
+    this.ctx.abort("restart for test");
+  }
+
   private _slowPostsForTest = false;
 
   /**
@@ -806,6 +838,14 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return JSON.stringify(rows).includes(text);
   }
 
+  /** Whether any delivery run kept (if any is) holds `text`. */
+  async deliveryRowsHoldForTest(text: string): Promise<boolean> {
+    const rows = this.sql<Record<string, unknown>>`
+      SELECT * FROM cf_agents_task_runs WHERE definition LIKE '__cf_delivery:%'
+    `;
+    return JSON.stringify(rows).includes(text);
+  }
+
   /** Messenger reply runs not yet settled. */
   async openReplyRunsForTest(): Promise<number> {
     return (
@@ -829,6 +869,64 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       ...this.getTurnChannelsForTest(),
       this.activeChannel?.channelId ?? ""
     ]);
+    this.ctx.storage.kv.put("turn-threads", [
+      ...this.getTurnThreadsForTest(),
+      this.getMessengerContext()?.thread.id ?? ""
+    ]);
+    this.ctx.storage.kv.put("channel-threads", [
+      ...(this.ctx.storage.kv.get<string[]>("channel-threads") ?? []),
+      this.activeChannel?.messenger?.thread.id ?? ""
+    ]);
+  }
+
+  /** The messenger thread each response hook saw. */
+  override onChatResponse(): void {
+    this.ctx.storage.kv.put("response-threads", [
+      ...(this.ctx.storage.kv.get<string[]>("response-threads") ?? []),
+      this.getMessengerContext()?.thread.id ?? ""
+    ]);
+  }
+
+  /** The thread each turn's channel context, and its response hook, had. */
+  getContextThreadsForTest(): { channel: string[]; response: string[] } {
+    return {
+      channel: this.ctx.storage.kv.get<string[]>("channel-threads") ?? [],
+      response: this.ctx.storage.kv.get<string[]>("response-threads") ?? []
+    };
+  }
+
+  /**
+   * A reply think@0.24.0 kept unsettled while its incident still recovered,
+   * with the recovery job it had queued, for the next start.
+   */
+  async seedReleasedRecoveryJobForTest(): Promise<void> {
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    await this.ctx.storage.put(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`,
+      { incidentId, status: "scheduled" }
+    );
+    await this._seedLegacyRecoveredReply(incidentId, {
+      threadId: "fake:dm-job"
+    });
+    const runId = `chatrec_${crypto.randomUUID()}`;
+    // The Tasks tables exist before a row is written into them.
+    await this.tasks.get(runId);
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, metadata, idempotency_key,
+         retain, attempt, next_at, cancel_requested, created_at, updated_at,
+         checkpoint)
+      VALUES
+        (${runId}, '__cf_internal_chat_recovery',
+         ${JSON.stringify({ callback: "_chatRecoveryRetry", data: { incidentId }, delaySeconds: 0 })},
+         'pending', NULL, NULL, 0, 0, ${now}, 0, ${now}, ${now}, NULL)
+    `;
+  }
+
+  /** The messenger thread each turn had, as `beforeTurn` saw it. */
+  getTurnThreadsForTest(): string[] {
+    return this.ctx.storage.kv.get<string[]>("turn-threads") ?? [];
   }
 
   getTurnChannelsForTest(): string[] {
@@ -993,6 +1091,11 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         }
         if (this._failPostForTest === text(message)) {
           this._failPostForTest = null;
+          throw new Error("simulated post failure");
+        }
+        // Kept across a restart: rejected once.
+        if (this.ctx.storage.kv.get("fail-post") === text(message)) {
+          this.ctx.storage.kv.delete("fail-post");
           throw new Error("simulated post failure");
         }
         if (this._slowPostsForTest) {

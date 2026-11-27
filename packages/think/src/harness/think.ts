@@ -52,6 +52,7 @@ import { ThinkModelResolver } from "../model";
 import {
   DEFAULT_MESSENGER_CONCURRENCY,
   type MessengerConcurrency,
+  type MessengerContext,
   type ThinkMessengers
 } from "../messengers";
 import { resolveChannels } from "../channels";
@@ -917,6 +918,10 @@ export class Think<
           // A turn that never ran has no response: one stopped while it
           // waited, or input the harness turned away before a model call (a
           // tool result no call waits for, an empty or unknown operation).
+          // Its messenger context, for its response hook; forgotten here,
+          // whichever way the hook ends.
+          const responding = this.#responseContexts.get(end.operationId);
+          this.#responseContexts.delete(end.operationId);
           const stoppedByCaller = this.#callerStops.delete(end.operationId);
           // As on Think, a turn the chat was cleared under, running or
           // waiting, gets no response hook. Its `chat()` caller is told of
@@ -954,26 +959,31 @@ export class Think<
               error
             });
           }
-          await this.onChatResponse({
-            // As on Think, a turn that ended before it wrote anything still
-            // reports, with an empty assistant message.
-            message: end.message ?? {
-              id: end.messageId ?? crypto.randomUUID(),
-              role: "assistant",
-              parts: []
-            },
-            requestId: end.operationId,
-            // As `beforeTurn` saw it, if the turn got that far.
-            continuation: continued ?? false,
-            status:
-              end.status === "done"
-                ? "completed"
-                : end.reason === "aborted"
-                  ? "aborted"
-                  : "error",
-            ...(end.status === "unanswered" &&
-              end.reason !== undefined && { error: end.reason })
-          });
+          this.#respondingContext = responding;
+          try {
+            await this.onChatResponse({
+              // As on Think, a turn that ended before it wrote anything still
+              // reports, with an empty assistant message.
+              message: end.message ?? {
+                id: end.messageId ?? crypto.randomUUID(),
+                role: "assistant",
+                parts: []
+              },
+              requestId: end.operationId,
+              // As `beforeTurn` saw it, if the turn got that far.
+              continuation: continued ?? false,
+              status:
+                end.status === "done"
+                  ? "completed"
+                  : end.reason === "aborted"
+                    ? "aborted"
+                    : "error",
+              ...(end.status === "unanswered" &&
+                end.reason !== undefined && { error: end.reason })
+            });
+          } finally {
+            this.#respondingContext = undefined;
+          }
         },
         classifyError: (error) => this.#classify(error)
       }
@@ -1017,6 +1027,8 @@ export class Think<
           if (stoppedStatus(event.status)) grant.abort();
           this.#grantSignals.delete(event.status.operationId);
         }
+        this.#messengerContexts.delete(event.status.operationId);
+        this.#explicitChannels.delete(event.status.operationId);
         // A call the operation left without an afterToolCall is forgotten.
         for (const [toolCallId, kept] of this.#modelInputs) {
           if (kept.operationId === event.status.operationId) {
@@ -1057,6 +1069,7 @@ export class Think<
       tasks: this.tasks,
       root: () => this.parentPath.length === 0,
       kv: this.ctx.storage.kv,
+      storage: this.ctx.storage,
       parent: this,
       concurrency: () => this.messengerConcurrency
     });
@@ -1095,6 +1108,9 @@ export class Think<
       await this.#context.load();
       // As in Think: the channel registry, read at start on the root.
       if (this.parentPath.length === 0) {
+        // TEMPORARY: remove in the next minor. The recovered replies
+        // think@0.24.0 kept, delivered as deliveries.
+        await this.#messengers?.importReleasedReplies();
         // Read again at start, once its subclass is set up: the registry
         // is what it answers now.
         const resolved = resolveChannels(
@@ -1855,6 +1871,23 @@ export class Think<
   #configuredAtConstruction: ThinkChannels | undefined;
   /** The channel the last turn ran on, for a continuation, as on Think. */
   #lastTurnChannel: string | undefined;
+  /**
+   * Continue the latest reply, as on Think: on `channel` when one is given,
+   * otherwise on the channel the last turn ran on.
+   */
+  async #continue(channel: string | undefined) {
+    const operationId = crypto.randomUUID();
+    if (channel !== undefined) this.#explicitChannels.set(operationId, channel);
+    try {
+      return await this.harness.session().continue({ operationId });
+    } catch (error) {
+      this.#explicitChannels.delete(operationId);
+      throw error;
+    }
+  }
+
+  /** Continuations given their own channel, until they start. */
+  #explicitChannels = new Map<string, string>();
   /** Operations a browser's chat request started: they run on `web`. */
   #webRequests = new Set<string>();
   /** The channel registry, read at start (none on a sub-agent). */
@@ -1986,7 +2019,7 @@ export class Think<
 
   async continueLastTurn(
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions
+    options?: SaveMessagesOptions & { channel?: string }
   ): Promise<SaveMessagesResult> {
     if (body !== undefined) {
       throw new Error(
@@ -2004,7 +2037,7 @@ export class Think<
     }
     const cut = await this.#cutOffByStop(options?.signal);
     if (cut) return cutOffBeforeStart(cut);
-    const receipt = await this.harness.session().continue();
+    const receipt = await this.#continue(options?.channel);
     return this.#waitForTurn(receipt.operationId, options?.signal);
   }
 
@@ -2118,10 +2151,67 @@ export class Think<
     return message;
   }
 
-  /** Messengers are not supported, so there is never a messenger turn. */
-  getMessengerContext(): undefined {
-    return undefined;
+  /**
+   * The running messenger turn's context, as on Think; outside one, the
+   * latest message's.
+   */
+  getMessengerContext(): MessengerContext | undefined {
+    const running = this.#running?.requestId;
+    const active =
+      running !== undefined ? this.#messengerContexts.get(running) : undefined;
+    if (active) return active;
+    // While `onChatResponse` runs, its turn's, from its user message.
+    if (this.#respondingContext) return this.#respondingContext;
+    return messengerOf(this.messages.at(-1));
   }
+
+  /** The messenger context of the turn whose `onChatResponse` runs. */
+  #respondingContext: MessengerContext | undefined;
+
+  /**
+   * A message's messenger context, trusted only when the server stamped its
+   * messenger's channel on it (a client's write cannot set the channel).
+   */
+  #trustedMessengerOf(
+    message: UIMessage | undefined
+  ): MessengerContext | undefined {
+    const context = messengerOf(message);
+    const channel = message ? channelFromMessages([message]) : undefined;
+    return context && channel === context.messengerId ? context : undefined;
+  }
+
+  /** Each turn's messenger context, kept for its response hook. */
+  #responseContexts = new Map<string, MessengerContext>();
+
+  /**
+   * Run a turn for a messenger event, as on Think: the context is kept on
+   * the user message, and the turn runs on the messenger's channel.
+   */
+  async chatWithMessengerContext(
+    userMessage: string | UIMessage,
+    callback: StreamCallback,
+    context: MessengerContext,
+    options?: ChatOptions
+  ): Promise<void> {
+    const messages = toInput(userMessage).map((message) =>
+      message.role === "user"
+        ? {
+            ...message,
+            metadata: {
+              ...(message.metadata as Record<string, unknown> | undefined),
+              messenger: context
+            }
+          }
+        : message
+    );
+    await this.chat(messages, callback, {
+      ...options,
+      channel: context.messengerId
+    });
+  }
+
+  /** Each running operation's messenger context; dropped at its end. */
+  #messengerContexts = new Map<string, MessengerContext>();
 
   /**
    * The tools a client answers, as on Think: those the last turn had that
@@ -2345,7 +2435,7 @@ export class Think<
     }
     const session = this.harness.session();
     let receipt;
-    if (wait.continuation) receipt = await session.continue();
+    if (wait.continuation) receipt = await this.#continue(wait.channel);
     else {
       const input = wait.input;
       const messages =
@@ -2961,8 +3051,46 @@ export class Think<
     return run?.startedAt ?? run?.createdAt ?? Date.now();
   }
 
-  async _chatRecoveryRetry(): Promise<void> {}
-  async _chatRecoveryContinue(): Promise<void> {}
+  // A job think@0.24.0 queued to recover an incident: that recovery does
+  // not run after the move, so the messenger reply held for it is
+  // released as interrupted (the apology). TEMPORARY: remove in the next
+  // minor.
+  async _chatRecoveryRetry(data?: { incidentId?: string }): Promise<void> {
+    await this.#releaseHeldReply(data);
+  }
+  async _chatRecoveryContinue(data?: { incidentId?: string }): Promise<void> {
+    await this.#releaseHeldReply(data);
+  }
+
+  async #releaseHeldReply(data?: { incidentId?: string }): Promise<void> {
+    if (typeof data?.incidentId !== "string") return;
+    await this.#messengers?.releaseReleasedReply(
+      data.incidentId,
+      "interrupted"
+    );
+  }
+
+  /**
+   * TEMPORARY: remove in the next minor. Think's start step for the
+   * recovered replies think@0.24.0 kept; the shell runs it at start.
+   * @internal
+   */
+  async _replayMessengerRecoveryDeliveries(): Promise<void> {
+    await this.#messengers?.importReleasedReplies();
+  }
+
+  /**
+   * TEMPORARY: remove in the next minor. Release the reply held for a
+   * think@0.24.0 recovery incident, as Think does.
+   * @internal
+   */
+  async _releaseMessengerRecovery(
+    incidentId: string,
+    outcome: "completed" | "interrupted",
+    text?: string
+  ): Promise<void> {
+    await this.#messengers?.releaseReleasedReply(incidentId, outcome, text);
+  }
   async _cfRetryMessengerRecoveryDelivery(): Promise<void> {}
 
   // ── Harness wiring ────────────────────────────────────────────────
@@ -2977,14 +3105,18 @@ export class Think<
         (message) => message.id !== CONTEXT_REMINDER_MESSAGE_ID
       );
       const web = this.#webRequests.delete(turn.operationId);
+      const explicit = this.#explicitChannels.get(turn.operationId);
+      this.#explicitChannels.delete(turn.operationId);
       const user = [...history].reverse().find((m) => m.role === "user");
       // As in Think: a browser's request runs on `web`; a continuation on
       // the channel the last turn ran on; anything else on its stamp. A
       // messenger's message is stamped once its turn starts.
-      let channel = web
-        ? "web"
-        : ((turn.continuation ? this.#lastTurnChannel : undefined) ??
-          channelFromMessages(history));
+      let channel =
+        explicit ??
+        (web
+          ? "web"
+          : ((turn.continuation ? this.#lastTurnChannel : undefined) ??
+            channelFromMessages(history)));
       // A browser's new user message is stamped `web` here, as Think stamps
       // it at intake: the client's own write cannot carry the key, and the
       // harness writes the message when its turn starts.
@@ -2993,9 +3125,23 @@ export class Think<
         channel === undefined && user
           ? this.#messengers?.channelOf(user.id)
           : undefined;
+      // As in Think, the turn's messenger context: kept on its user
+      // message, or the webhook's, stamped with the channel.
+      const webhook = user ? this.#messengers?.contextOf(user.id) : undefined;
+      // A message's own context is trusted only on a messenger's channel,
+      // which only the server stamps: a browser cannot claim a sender.
+      const context = this.#trustedMessengerOf(user) ?? webhook;
+      if (context) {
+        this.#messengerContexts.set(turn.operationId, context);
+        this.#responseContexts.set(turn.operationId, context);
+      }
       if (messenger !== undefined && user) {
         channel = messenger;
-        await this.#stamp(user.id, messenger);
+        await this.#stamp(
+          user.id,
+          messenger,
+          webhook && { messenger: webhook }
+        );
       }
       const emit = this._emit as unknown as (
         type: string,
@@ -3007,7 +3153,7 @@ export class Think<
         context: resolveChannelContext(channel, {
           registry: this.#channels,
           requestId: turn.operationId,
-          messengerContext: () => undefined,
+          messengerContext: () => context,
           emit: (event) => emit.call(this, event.type, event.payload)
         }),
         definition: channel ? this.#channels?.get(channel) : undefined
@@ -3079,7 +3225,10 @@ export class Think<
       continuation: turn.continuation,
       requestId: turn.operationId,
       trigger: identity.trigger,
-      abortSignal: turn.signal
+      abortSignal: turn.signal,
+      ...(this.#messengerContexts.has(turn.operationId) && {
+        messenger: this.#messengerContexts.get(turn.operationId)
+      })
     };
     // As in Think, `beforeTurn` runs once per turn; the harness asks
     // before every model call, and later calls reuse what it returned.
@@ -3276,12 +3425,29 @@ export class Think<
   }
 
   /** Stamp `channel` on stored user message `id`, unless it has one. */
-  async #stamp(id: string, channel: string): Promise<void> {
+  async #stamp(
+    id: string,
+    channel: string,
+    extra?: Record<string, unknown>
+  ): Promise<void> {
     const handle = await this.#rootHandle();
     const stored = await handle.getMessage(id);
     if (!stored || stored.role !== "user") return;
     if (channelFromMessages([stored as UIMessage]) !== undefined) return;
-    const [stamped] = stampTurnContext([stored as UIMessage], channel);
+    const [stamped] = stampTurnContext(
+      [
+        extra
+          ? {
+              ...(stored as UIMessage),
+              metadata: {
+                ...(stored.metadata as Record<string, unknown> | undefined),
+                ...extra
+              }
+            }
+          : (stored as UIMessage)
+      ],
+      channel
+    );
     await handle.updateMessage(stamped as SessionMessage);
   }
 
@@ -3359,7 +3525,11 @@ export class Think<
 
   #classify(error: unknown): ThinkErrorClass {
     const classification = this.classifyChatError(error);
-    return classification === "context_overflow" ? "context-overflow" : "fail";
+    return classification === "context_overflow"
+      ? "context-overflow"
+      : classification === "transient"
+        ? "retry"
+        : "fail";
   }
 
   /** The root session's Sessions handle, which the harness hands over on first use. */
@@ -4019,4 +4189,15 @@ function chatRequestId(message: WSMessage): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The messenger context a user message keeps, if any. */
+function messengerOf(
+  message: UIMessage | undefined
+): MessengerContext | undefined {
+  const messenger = (message?.metadata as { messenger?: unknown } | undefined)
+    ?.messenger;
+  return messenger && typeof messenger === "object"
+    ? (messenger as MessengerContext)
+    : undefined;
 }

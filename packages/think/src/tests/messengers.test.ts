@@ -1236,6 +1236,29 @@ describe("think messengers core", () => {
       expect(calls.at(-1)?.content).toBe("Got it");
     });
 
+    it("answers a webhook its platform sent twice once", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "twice-sent"
+      );
+      for (let i = 0; i < 2; i++) {
+        const response = await agent.fetch(
+          "https://example.com/messengers/fake/webhook",
+          {
+            body: JSON.stringify({
+              id: "d1",
+              text: "hello",
+              threadId: "fake:dm"
+            }),
+            method: "POST"
+          }
+        );
+        await response.text();
+      }
+      expect(await agent.getRecorded("prompt")).toEqual(["hello"]);
+      expect(await agent.getPostThreadsForTest()).toEqual(["fake:dm"]);
+    });
+
     it("posts each reply only to the thread that asked", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,
@@ -1453,6 +1476,79 @@ describe("think messengers core", () => {
       ).toEqual(["one", "three"]);
     });
 
+    /** Seed a reply think@0.24.0 kept, restart, and wait for `expected`. */
+    async function afterRestart(
+      name: string,
+      reply: Record<string, unknown>,
+      expected: string[],
+      failPost?: string
+    ): Promise<string[]> {
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      await (await agent()).seedReleasedRecoveryForTest(reply, failPost);
+      await (await agent()).restartForTest().catch(() => undefined);
+      // A reset stub stays broken: each call takes a new one.
+      const deadline = Date.now() + 20_000;
+      let posted: string[] = [];
+      while (Date.now() < deadline) {
+        posted = ((await (await agent()).getAdapterCalls()) ?? []).map(
+          (call) => call.content
+        );
+        if (posted.length >= expected.length) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return posted;
+    }
+
+    it("apologizes after a restart for a reply think@0.24.0 left unsettled", async () => {
+      expect(
+        await afterRestart(
+          `orphan-restart-${crypto.randomUUID()}`,
+          { threadId: "fake:dm-orphan" },
+          [INTERRUPTED_MESSENGER_RESPONSE]
+        )
+      ).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
+    });
+
+    it("posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart", async () => {
+      expect(
+        await afterRestart(
+          `split-restart-${crypto.randomUUID()}`,
+          { outcome: "completed", text: "one|two|three", posted: 1 },
+          ["two", "three"]
+        )
+      ).toEqual(["two", "three"]);
+    });
+
+    it("apologizes for a reply think@0.24.0 held when its recovery job runs after a restart", async () => {
+      const name = `orphan-job-${crypto.randomUUID()}`;
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      await (await agent()).seedReleasedRecoveryJobForTest();
+      await (await agent()).restartForTest().catch(() => undefined);
+      let posted: string[] = [];
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        posted = (await (await agent()).getAdapterCalls()).map(
+          (call) => call.content
+        );
+        if (posted.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(posted).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
+    }, 30_000);
+
+    it("never posts again a part of a reply think@0.24.0 settled that was rejected", async () => {
+      expect(
+        await afterRestart(
+          `split-reject-${crypto.randomUUID()}`,
+          { outcome: "completed", text: "one|two|three" },
+          ["one", "three"],
+          "two"
+        )
+      ).toEqual(["one", "three"]);
+    }, 30_000);
+
     it("posts each chunk once when overlapping deliveries share a recovered reply", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,
@@ -1530,6 +1626,23 @@ describe("think messengers core", () => {
         `async-config-${crypto.randomUUID()}`
       );
       await expect(agent.getAdapterCalls()).resolves.toEqual([]);
+    });
+
+    it("gives a messenger's turn its thread as the messenger context", async () => {
+      const agent = await sendBurst(`context-${crypto.randomUUID()}`, [
+        { id: "t1", text: "hello", threadId: "fake:dm-context" }
+      ]);
+      expect(await agent.getTurnThreadsForTest()).toEqual(["fake:dm-context"]);
+    });
+
+    it("gives a messenger turn's channel context and response hook its thread", async () => {
+      const agent = await sendBurst(`context-hooks-${crypto.randomUUID()}`, [
+        { id: "h1", text: "hello", threadId: "fake:dm-hooks" }
+      ]);
+      expect(await agent.getContextThreadsForTest()).toEqual({
+        channel: ["fake:dm-hooks"],
+        response: ["fake:dm-hooks"]
+      });
     });
 
     it("runs a messenger's turn on its channel", async () => {
@@ -1906,6 +2019,36 @@ describe("think messengers core", () => {
       expect(await agent.replyRowsHoldForTest("42 Main Street")).toBe(false);
     });
 
+    it("keeps no message text in a delivery once the reply is answered", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `private-delivery-${crypto.randomUUID()}`
+      );
+      const response = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            id: "p2",
+            text: "my address is 42 Main Street",
+            threadId: "fake:dm-private"
+          }),
+          method: "POST"
+        }
+      );
+      await response.text();
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const asked = (await agent.getRecorded("prompt")).length > 0;
+        if (asked && (await agent.openReplyRunsForTest()) === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(await agent.getAdapterCalls()).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
+      expect(await agent.deliveryRowsHoldForTest("42 Main Street")).toBe(false);
+    });
+
     it("answers a repeated reply id once, after the first was answered", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,
@@ -1985,6 +2128,40 @@ describe("think messengers core", () => {
       }
       expect(prompts).toEqual(["follow up"]);
     });
+
+    it("answers a message queued behind a reply a reset cut off", async () => {
+      const name = `queue-slowreset-${crypto.randomUUID()}`;
+      // A reset stub stays broken: each call takes a new one.
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      const send = async (id: string, text: string) =>
+        (await agent())
+          .fetch("https://example.com/messengers/fake/webhook", {
+            body: JSON.stringify({ id, text, threadId: "fake:dm" }),
+            method: "POST"
+          })
+          .catch(() => undefined);
+      const first = send("q1", "hello");
+      // The first reply holds its model call; the second message queues.
+      let prompts: string[] = [];
+      for (let i = 0; i < 100 && prompts.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        prompts = await (await agent()).getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["hello"]);
+      await send("q2", "follow up");
+      // Released, the first reply's turn resets mid-reply.
+      await (await agent()).releaseSlowModelForTest();
+      await first;
+      // Drained once the cut-off reply's thread lock expires (30 s).
+      const deadline = Date.now() + 45_000;
+      while (Date.now() < deadline) {
+        prompts = await (await agent()).getRecorded("prompt");
+        if (prompts.includes("follow up")) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(prompts).toContain("follow up");
+    }, 60_000);
   });
 
   it("separates text segments across tool-call boundaries (#1841)", async () => {
