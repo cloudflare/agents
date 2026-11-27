@@ -3654,6 +3654,24 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._saveFromNextResponse = true;
   }
 
+  /**
+   * The record ai-chat 0.12.x kept of the last turn that ended in an error
+   * (async KV key `cf:chat:last-terminal`), then a reset.
+   */
+  async leaveReleasedLastTerminalForTest(record: {
+    requestId: string;
+    body: string;
+  }): Promise<void> {
+    await this.ctx.storage.put("cf:chat:last-terminal", record);
+    await this.ctx.storage.sync();
+    this.ctx.abort("test: forced reset");
+  }
+
+  /** Whether that record is still stored. */
+  async hasReleasedLastTerminalForTest(): Promise<boolean> {
+    return (await this.ctx.storage.get("cf:chat:last-terminal")) !== undefined;
+  }
+
   private _endedRequestIds: string[] = [];
 
   /** The request ids of the turns that have ended, oldest first. */

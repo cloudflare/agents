@@ -47,6 +47,9 @@ import {
   storableRequestContext,
   interruptedToolPartAsError,
   unwrapChatFiberSnapshot,
+  CHAT_LAST_TERMINAL_KEY,
+  recordRecentChatTerminal,
+  type ChatTerminalRecord,
   type OrphanPersistStore
 } from "agents/chat";
 import {
@@ -539,10 +542,27 @@ export class AIChatAgent<
   private _upgradeReleasedRows(): void {
     // ai-chat 0.12.x: `cf_ai_chat_request_context` → the session value.
     this._restoreRequestContext();
+    // ai-chat 0.12.x: the last turn that ended in an error → the recent
+    // terminals, which a tab that loads afterwards is told from.
+    this._carryLastTerminal();
     // ai-chat 0.12.x: a turn left cut off (fiber row, incident, recovery
     // runs, stream rows) → a chat-turn run under its request id
     // (turn-task's step goes here). An open agent-tool turn → run
     // `agent-tool:<runId>` (with #3346).
+  }
+
+  private _carryLastTerminal(): void {
+    const kv = this.ctx.storage.kv;
+    const last = kv.get<ChatTerminalRecord>(CHAT_LAST_TERMINAL_KEY);
+    if (last === undefined) return;
+    recordRecentChatTerminal(kv, {
+      id: last.requestId,
+      body: last.body,
+      done: true,
+      error: true,
+      ...(last.messageIds && { messageIds: last.messageIds })
+    });
+    kv.delete(CHAT_LAST_TERMINAL_KEY);
   }
 
   private _restoreRequestContext(): void {

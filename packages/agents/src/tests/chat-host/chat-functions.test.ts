@@ -2093,6 +2093,64 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
+  it("a tab that names no request is offered the last turn when it ended in an error, until a later turn ends (#1645)", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const respond = instance.host.respond;
+      instance.host.respond = async () => {
+        throw new Error("Provider returned HTTP 500.");
+      };
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await instance.resultFor("r1");
+
+      // A page loaded afterwards waits on nothing, and still learns of it.
+      const sent: Array<Record<string, unknown>> = [];
+      const fresh = recordingTab("tab-fresh", sent);
+      await resumeChat(instance.deps, instance.lane, fresh, "p1");
+      expect(sent).toEqual([
+        { type: "cf_agent_stream_resuming", id: "r1", probeId: "p1" }
+      ]);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        fresh,
+        JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "r1" })
+      );
+      expect(sent[1]).toMatchObject({
+        type: "cf_agent_use_chat_response",
+        id: "r1",
+        error: true,
+        body: "Provider returned HTTP 500."
+      });
+
+      // A later turn that ends well supersedes it.
+      instance.host.respond = respond;
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r2", "u2", "Again")
+      );
+      await instance.resultFor("r2");
+      const later: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-later", later),
+        "p2"
+      );
+      expect(later).toEqual([
+        { type: "cf_agent_stream_resume_none", probeId: "p2" }
+      ]);
+    });
+  });
+
   it("a tab waiting on several requests that ended is told how each ended, the newest after its ack", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {

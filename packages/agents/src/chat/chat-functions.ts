@@ -26,6 +26,7 @@ import {
 import { frameText } from "./chat-frames";
 import {
   clearRecentChatTerminals,
+  lastChatTerminalError,
   recentChatTerminal,
   recordRecentChatTerminal,
   type ChatRecentTerminal
@@ -791,7 +792,11 @@ export async function resumeChat(
   // The newest request the tab waits on that ended while it was away is
   // offered as a stream: its end follows the ack, the only frame a tab
   // surfaces as the request's outcome.
-  const ended = recentChatTerminal(deps.kv, requestIds);
+  // A tab that waits on none is offered the last turn, if it failed.
+  const ended =
+    requestIds.length > 0
+      ? recentChatTerminal(deps.kv, requestIds)
+      : lastChatTerminalError(deps.kv);
   if (ended && ended.outcome !== "recovering") {
     endOthers(ended.requestId);
     sendIfOpen(

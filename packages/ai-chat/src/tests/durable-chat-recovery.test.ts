@@ -300,6 +300,11 @@ interface ChatRecoveryTestStub {
   ): Promise<string>;
   startedFailingTurnStatusForTest(): Promise<string>;
   endedRequestIdsForTest(): Promise<string[]>;
+  leaveReleasedLastTerminalForTest(record: {
+    requestId: string;
+    body: string;
+  }): Promise<void>;
+  hasReleasedLastTerminalForTest(): Promise<boolean>;
   endRetryWaitsForTest(): Promise<number>;
   openChatLaneRunsForTest(): Promise<number>;
   setStashData(data: unknown): Promise<void>;
@@ -1581,6 +1586,12 @@ describe("onChatRecovery", () => {
       error: true,
       body: STREAM_ERROR
     });
+
+    // A page loaded now waits on no request, and is told nothing: a later
+    // turn has ended since.
+    const unnamed = await endsOnReconnect(room, []);
+    expect(unnamed.end).toBeUndefined();
+    expect(unnamed.types).toContain(MessageType.CF_AGENT_STREAM_RESUME_NONE);
   });
 
   // #1645 (clear-on-abort): an ABORTED server-side turn must also supersede the
@@ -1642,10 +1653,37 @@ describe("onChatRecovery", () => {
       body: STREAM_ERROR
     });
 
-    // A tab that names no request learns nothing of ended ones.
+    // A page loaded afterwards waits on no request, and is told too: the
+    // failed turn is the last thing that happened in the chat.
     const unnamed = await endsOnReconnect(room, []);
-    expect(unnamed.end).toBeUndefined();
-    expect(unnamed.types).toContain(MessageType.CF_AGENT_STREAM_RESUME_NONE);
+    expect(unnamed.end).toMatchObject({
+      id: requestId,
+      error: true,
+      body: STREAM_ERROR
+    });
+  });
+
+  it("tells a page loaded after an upgrade of the error an earlier version's last turn ended in, once carried (#1645)", async () => {
+    const room = `terminal-released-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+    await agentStub
+      .leaveReleasedLastTerminalForTest({
+        requestId: "req-released",
+        body: TERMINAL
+      })
+      .catch(() => {});
+
+    // The page waits on no request.
+    const told = await endsOnReconnect(room, []);
+    expect(told.end).toMatchObject({
+      id: "req-released",
+      error: true,
+      body: TERMINAL
+    });
+    // Read once: the earlier version's record is gone.
+    const again = await getTestAgent(room);
+    expect(await again.hasReleasedLastTerminalForTest()).toBe(false);
   });
 
   // #1645 (clear-on-chat-clear): clearing the conversation must also drop the
