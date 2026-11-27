@@ -2670,6 +2670,8 @@ export class AgentToolParent {
     // produces output (a silent/hung child forwards nothing → no credit → the
     // parent still exhausts on its own no-progress timer).
     let forwardedSinceProgress = false;
+    // Where the child's numbering meets this run's, at its first stored chunk.
+    let childBase: number | undefined;
     const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     try {
       const forwardChunk = (chunk: AgentToolStoredChunk) => {
@@ -2680,6 +2682,18 @@ export class AgentToolParent {
         const lifecycle = isAgentToolLifecycleChunk(chunk.body);
         const unstoredId =
           typeof chunk.unstoredId === "string" ? chunk.unstoredId : undefined;
+        // A stored chunk keeps the child's own place for it, from where the
+        // first one met this run's numbering: a child whose stream stores
+        // its milestone frames (an AIChatAgent run) numbers them, and a
+        // later replay does too.
+        if (
+          !lifecycle &&
+          unstoredId === undefined &&
+          typeof chunk.sequence === "number"
+        ) {
+          childBase ??= next - chunk.sequence;
+          next = Math.max(next, chunk.sequence + childBase);
+        }
         const chunkSequence =
           lifecycle || unstoredId !== undefined ? next : next++;
         if (cursor) cursor.next = next;
