@@ -483,6 +483,7 @@ export class Think<
         });
       }
       if (event.type === "run-end") {
+        for (const ended of this.#runEndWaiters.splice(0)) ended();
         this.#running = undefined;
         this.#extensionTurn = undefined;
         this.#turnMaxSteps = undefined;
@@ -722,6 +723,9 @@ export class Think<
     | { requestId: string; trigger: string; continuation: boolean }
     | undefined;
 
+  /** Resolved at the next run's end, for {@link waitUntilStable}. */
+  readonly #runEndWaiters: Array<() => void> = [];
+
   async getMessages(): Promise<UIMessage[]> {
     return this.harness.session().messages();
   }
@@ -850,6 +854,43 @@ export class Think<
         (part.state === "input-available" ||
           part.state === "approval-requested")
     );
+  }
+
+  /**
+   * Resolve `true` once no operation is open and nothing waits on a client,
+   * or `false` when `timeout` milliseconds pass first, as on Think.
+   */
+  protected async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    const deadline =
+      options?.timeout != null ? Date.now() + options.timeout : null;
+    const session = this.harness.session();
+    for (;;) {
+      // Listen before looking, so a run that ends in between still wakes us.
+      const ended = new Promise<void>((resolve) =>
+        this.#runEndWaiters.push(resolve)
+      );
+      if ((await session.pending()).length === 0) {
+        await this.#sync();
+        if (!this.hasPendingInteraction()) return true;
+      }
+      if (deadline === null) {
+        await ended;
+        continue;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        ended.then(() => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), remaining);
+        })
+      ]);
+      clearTimeout(timer);
+      if (timedOut) return false;
+    }
   }
 
   // ── Turns ─────────────────────────────────────────────────────────
