@@ -469,6 +469,15 @@ describe("chatTurnDefinition", () => {
         options: { recovery: { stallTimeoutMs: 20 } }
       })({ trigger: "server" }, laterAttempt("run-2", 1));
       expect(result).toBeInstanceOf(TaskSettlement);
+      // The stall is published, with the timeout that caught it.
+      expect(
+        instance.events.filter((event) => event.type === "chat:stream:stalled")
+      ).toEqual([
+        {
+          type: "chat:stream:stalled",
+          payload: { requestId: "run-2", timeoutMs: 20 }
+        }
+      ]);
       // The stream stays open for the next attempt to continue.
       expect(
         await instance.streams.status(chatTurnStreamId("run-2"))

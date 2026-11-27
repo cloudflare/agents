@@ -3506,7 +3506,7 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     expect(result.streamOpen).toBe(false);
   });
 
-  it("routes a stalled live stream into bounded recovery (schedules a continuation)", async () => {
+  it("retries a stalled live stream inside the turn, which completes with the partial kept", async () => {
     const room = `stall-route-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
 
@@ -3530,22 +3530,8 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     // The stall is observable, as in `Think`.
     expect(stalled).toEqual([expect.objectContaining({ timeoutMs: 150 })]);
 
-    // This attempt did not terminalize — the scheduled continuation owns the
-    // real outcome, so the server-side turn reports "aborted".
-    expect(status).toBe("aborted");
-
-    // The stall opened a bounded-recovery incident through the shared engine —
-    // a `continue` incident, exactly like a deploy interruption (rather than
-    // leaking a terminal error). The scheduled `_chatRecoveryContinue` row is
-    // consumed by the delay-0 alarm, so the durable incident (not the transient
-    // schedule row) is the stable evidence the stall was routed.
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        recoveryKind: string;
-        status: string;
-      }>;
-    expect(incidents.length).toBeGreaterThanOrEqual(1);
-    expect(incidents[0].recoveryKind).toBe("continue");
+    // The stalled attempt is retried inside the turn, which completes.
+    expect(status).toBe("completed");
 
     // The partial generated before the stall was persisted (not lost), so the
     // continuation re-anchors onto it rather than re-running from scratch.
@@ -3575,20 +3561,12 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
         timeoutMs: 100,
         hangTurns: 20
       })
-    ).toBe("aborted");
+    ).toBe("error");
 
-    await expect
-      .poll(
-        async () =>
-          (
-            (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-              reason?: string;
-            }>
-          )[0]?.reason,
-        { timeout: 10_000, interval: 100 }
-      )
-      .toBe("max_attempts_exceeded");
-    expect(await agentStub.getOnChatMessageCallCount()).toBeLessThanOrEqual(3);
+    // The first attempt and two recoveries of it, and no more afterwards.
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(3);
+    await agentStub.waitForIdleForTest();
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(3);
   }, 15_000);
 
   it("keeps the give-up's terminal record when the stalled turn it happened in ends", async () => {
@@ -3623,34 +3601,6 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
       .poll(() => agentStub.isChatResponseDrainIdleForTest(), { timeout: 5000 })
       .toBe(true);
     expect(await agentStub.getPendingChatTerminalForTest()).not.toBeNull();
-  }, 15_000);
-
-  it("keeps an incident given up when the recovered turn that gave up returns", async () => {
-    const agentStub = await getTestAgent(`stall-sealed-${crypto.randomUUID()}`);
-    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
-
-    expect(
-      await agentStub.driveStallingTurnForTest({
-        timeoutMs: 100,
-        hangTurns: 20
-      })
-    ).toBe("aborted");
-
-    const incidents = async () =>
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        status: string;
-        reason?: string;
-      }>;
-    await expect
-      .poll(async () => (await incidents())[0]?.reason, {
-        timeout: 10_000,
-        interval: 100
-      })
-      .toBe("max_attempts_exceeded");
-    // The last recovery attempt's turn stalled with the budget spent and
-    // gave up. The attempt then returns, and must not mark it "failed".
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    expect((await incidents())[0]?.status).toBe("exhausted");
   }, 15_000);
 
   it("passes a healthy (non-stalling) stream through unchanged when the watchdog is armed", async () => {

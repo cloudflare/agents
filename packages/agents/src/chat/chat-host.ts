@@ -460,7 +460,7 @@ class InBandStreamError extends Error {}
 
 /** A stream that sent nothing for the stall timeout. */
 class StreamStalledError extends Error {
-  constructor(ms: number) {
+  constructor(readonly ms: number) {
     super(`The model stream sent nothing for ${ms} ms.`);
     this.name = "StreamStalledError";
   }
@@ -2029,6 +2029,12 @@ export function chatTurnDefinition(
             requestId,
             status: "aborted",
             ...(kept && { messageId: kept })
+          });
+        }
+        if (error instanceof StreamStalledError) {
+          deps.emit?.("chat:stream:stalled", {
+            requestId,
+            timeoutMs: error.ms
           });
         }
         const verdict =
