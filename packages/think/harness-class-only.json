@@ -847,5 +847,14 @@
     "test": "Think — onChatRecovery > ends a turn found interrupted whose conversation moved on for the tabs",
     "reason": "an interrupted stream and chat fiber row inserted in the class's shape, with a newer user message persisted by hand after it, and recovery triggered by hand",
     "ruledOut": "a later request waits behind the recovery on the chat lane, so a recovery never finds a newer user leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov). On Think: submissions.test.ts 'a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order', which passes on both configs"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > flushes a settled tool result to durable storage immediately",
+    "reason": "the class's reply stream store (`_replyStreams.store`) driven by hand, counting rows in its stream log. What an app sees, a settled tool result surviving a reset right after it so the tool is not run again, is the successor's",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > keeps a tool's result and does not run the tool again"
+    }
   }
 ]
