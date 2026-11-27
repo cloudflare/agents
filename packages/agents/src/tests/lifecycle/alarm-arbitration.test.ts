@@ -66,6 +66,20 @@ describe("Lifecycle job queue", () => {
     expect(await stub.setQueueJobs({})).toBeNull();
   });
 
+  it("reads the queue once for the next wake while an exclusive job waits", async () => {
+    const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
+    const now = Date.now();
+    await stub.setQueueJobs({
+      capabilityTimes: Array.from({ length: 20 }, (_, i) => now + 5_000 + i),
+      exclusiveTime: now + 40_000
+    });
+    const { rowsRead, jobs } = await stub.rowsReadByRearm();
+    expect(jobs).toBe(21);
+    // The exclusive job decides the wake, so the ready and hung-job scans
+    // are left out: one pass over the queue, not three.
+    expect(rowsRead).toBeLessThan(2 * jobs);
+  });
+
   it("applies job pushes made during capability startup", async () => {
     const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
     const before = Date.now();

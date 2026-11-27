@@ -738,46 +738,54 @@ export class JobQueue {
             held,
             ...(exclusiveOnly ? [ownerless] : [])
           )[0]?.time ?? null);
-    const exclusive = this.#sql<{ time: number | null }>(
-      `SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}`,
+    // One statement for the three candidates: each `nextAlarmTime` runs on
+    // every re-arm, so three reads here were most of a facet's statements.
+    const now = Math.floor(nowMs);
+    const [row] = this.#sql<{
+      exclusive: number | null;
+      ready: number | null;
+      recheck: number | null;
+    }>(
+      // An exclusive job suppresses the other two, and CASE leaves their
+      // scans out then.
+      `WITH ex AS (
+         SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}
+       )
+       SELECT
+         ex.time AS exclusive,
+         CASE WHEN ex.time IS NULL THEN (SELECT MIN(time) FROM cf_agents_jobs
+           WHERE (singleflight = 0
+              OR running = 0
+              OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?)${owners}) END AS ready,
+         CASE WHEN ex.time IS NULL THEN (SELECT MIN(coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000)
+           FROM cf_agents_jobs
+           WHERE singleflight = 1
+             AND running = 1
+             AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?${owners}) END AS recheck
+       FROM ex`,
+      ...excludeOwners,
+      DEFAULT_HUNG_TIMEOUT_SECONDS,
+      now,
+      ...excludeOwners,
+      DEFAULT_HUNG_TIMEOUT_SECONDS,
+      DEFAULT_HUNG_TIMEOUT_SECONDS,
+      now,
       ...excludeOwners
     );
     // A held owner's exclusive job is still exclusive: it wakes at the later
     // of its time and its owner's hold's end, and still suppresses ordinary
     // wakes.
-    const exclusiveTimes = [exclusive[0]?.time, heldWake(true)].filter(
+    const exclusiveTimes = [row?.exclusive, heldWake(true)].filter(
       (time): time is number => typeof time === "number"
     );
     if (exclusiveTimes.length > 0) return Math.min(...exclusiveTimes);
 
-    const now = Math.floor(nowMs);
     let candidate: number | null = null;
-
-    const ready = this.#sql<{ time: number | null }>(
-      `SELECT MIN(time) AS time FROM cf_agents_jobs
-       WHERE (singleflight = 0
-          OR running = 0
-          OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?)${owners}`,
-      DEFAULT_HUNG_TIMEOUT_SECONDS,
-      now,
-      ...excludeOwners
-    );
-    if (ready[0]?.time !== null && ready[0]?.time !== undefined) {
-      candidate = Math.max(ready[0].time, now + 1);
+    const ready = row?.ready;
+    if (ready !== null && ready !== undefined) {
+      candidate = Math.max(ready, now + 1);
     }
-
-    const inFlight = this.#sql<{ recheck: number | null }>(
-      `SELECT MIN(coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000) AS recheck
-       FROM cf_agents_jobs
-       WHERE singleflight = 1
-         AND running = 1
-         AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?${owners}`,
-      DEFAULT_HUNG_TIMEOUT_SECONDS,
-      DEFAULT_HUNG_TIMEOUT_SECONDS,
-      now,
-      ...excludeOwners
-    );
-    const recheck = inFlight[0]?.recheck;
+    const recheck = row?.recheck;
     if (recheck !== null && recheck !== undefined) {
       candidate = candidate === null ? recheck : Math.min(candidate, recheck);
     }

@@ -187,6 +187,22 @@ export class FacetWakeMiddle extends WakeAgent {
     return this.syncs;
   }
 
+  kvDeletes: string[] = [];
+
+  /** Record this facet's KV deletes from now on. */
+  countKvDeletes(): void {
+    const kv = this.ctx.storage.kv;
+    const remove = kv.delete.bind(kv);
+    kv.delete = (key: string) => {
+      this.kvDeletes.push(key);
+      return remove(key);
+    };
+  }
+
+  kvDeleteKeys(): string[] {
+    return this.kvDeletes;
+  }
+
   override async _cf_routeLifecycle(
     target: Parameters<Agent["_cf_routeLifecycle"]>[0],
     envelope: Parameters<Agent["_cf_routeLifecycle"]>[1]
@@ -324,6 +340,14 @@ export class FacetWakeRoot extends WakeAgent {
 
   async middleSyncCount(name: string): Promise<number> {
     return (await this.subAgent(FacetWakeMiddle, name)).syncCount();
+  }
+
+  async middleCountKvDeletes(name: string): Promise<void> {
+    await (await this.subAgent(FacetWakeMiddle, name)).countKvDeletes();
+  }
+
+  async middleKvDeletes(name: string): Promise<string[]> {
+    return (await this.subAgent(FacetWakeMiddle, name)).kvDeleteKeys();
   }
 
   failNextFacetDrives(count: number): void {

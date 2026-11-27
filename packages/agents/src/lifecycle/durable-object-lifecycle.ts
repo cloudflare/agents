@@ -526,11 +526,7 @@ export class Lifecycle<
         await this.#ctx.storage.sync();
         return false;
       },
-      attemptSettled: (jobId) => {
-        if (this.#facetAddress()) {
-          this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + jobId);
-        }
-      },
+      attemptSettled: (jobId) => this.#clearFacetUnsettled(jobId),
       armFallback: async (time) => {
         if (this.#facetAddress()) return;
         await this.#ctx.storage.setAlarm(time);
@@ -1414,6 +1410,18 @@ export class Lifecycle<
 
   #hostSchema: LifecycleSchema | undefined;
 
+  /**
+   * Forget a facet job's attempt count. Only attempts the root drives are
+   * counted, so most jobs have none: a read first saves the delete, which
+   * is billed as a write.
+   */
+  #clearFacetUnsettled(jobId: string): void {
+    if (!this.#facetAddress()) return;
+    const kv = this.#ctx.storage.kv;
+    const key = FACET_UNSETTLED_PREFIX + jobId;
+    if (kv.get(key) !== undefined) kv.delete(key);
+  }
+
   #jobsForOwner(owner: string): LifecycleJobs {
     const rearmAfter = async <T>(mutate: () => T): Promise<T> => {
       const result = mutate();
@@ -1428,9 +1436,7 @@ export class Lifecycle<
         const cancelled = this.#jobQueue.cancel(owner, id);
         if (!cancelled) return false;
         // A job pushed again under this id starts with no crashes.
-        if (this.#facetAddress()) {
-          this.#ctx.storage.kv.delete(FACET_UNSETTLED_PREFIX + id);
-        }
+        this.#clearFacetUnsettled(id);
         await this.rearmAlarm();
         return true;
       },
