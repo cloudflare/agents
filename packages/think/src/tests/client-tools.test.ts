@@ -886,6 +886,36 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it.each([true, false])(
+    "is stable once a client's answer (approved: %s) is applied with no continuation",
+    async (approved) => {
+      const room = crypto.randomUUID();
+      const agent = await freshAgent(room);
+      await agent.setServerApprovalToolMode(true);
+      const { ws } = await connectWS(room);
+      await collectMessages(ws, 3);
+
+      const initialDone = waitForDone(ws, 15000);
+      sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+      await initialDone;
+
+      // The chat waits on the approval; the answer changes the transcript
+      // and runs nothing, and that alone must settle the wait.
+      const stable = agent.waitUntilStableForTest({ timeout: 5000 });
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_APPROVAL,
+          toolCallId: "tc-server-approval-1",
+          approved,
+          autoContinue: false
+        })
+      );
+      expect(await stable).toBe(true);
+      await agent.setServerApprovalToolMode(false);
+      await closeWS(ws);
+    }
+  );
+
   it("settles an approved tool that never ran once a new user turn moves past it (#2382)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

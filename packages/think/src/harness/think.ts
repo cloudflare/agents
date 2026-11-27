@@ -483,7 +483,7 @@ export class Think<
         });
       }
       if (event.type === "run-end") {
-        for (const ended of this.#runEndWaiters.splice(0)) ended();
+        this.#wakeStableWaiters();
         this.#running = undefined;
         this.#extensionTurn = undefined;
         this.#turnMaxSteps = undefined;
@@ -548,7 +548,7 @@ export class Think<
           event.type === "reset" ||
           event.type === "transcript"
         ) {
-          void this.#sync();
+          void this.#sync().then(() => this.#wakeStableWaiters());
         }
       });
       await this.#sync();
@@ -723,8 +723,16 @@ export class Think<
     | { requestId: string; trigger: string; continuation: boolean }
     | undefined;
 
-  /** Resolved at the next run's end, for {@link waitUntilStable}. */
-  readonly #runEndWaiters: Array<() => void> = [];
+  /**
+   * Resolved at the next run's end or transcript change, for
+   * {@link waitUntilStable}: a client's answer applied with no continuation
+   * changes the transcript and ends no run.
+   */
+  readonly #stableWaiters: Array<() => void> = [];
+
+  #wakeStableWaiters(): void {
+    for (const wake of this.#stableWaiters.splice(0)) wake();
+  }
 
   async getMessages(): Promise<UIMessage[]> {
     return this.harness.session().messages();
@@ -867,10 +875,12 @@ export class Think<
       options?.timeout != null ? Date.now() + options.timeout : null;
     const session = this.harness.session();
     for (;;) {
-      // Listen before looking, so a run that ends in between still wakes us.
-      const ended = new Promise<void>((resolve) =>
-        this.#runEndWaiters.push(resolve)
-      );
+      // Listen before looking, so a change in between still wakes us.
+      let wake!: () => void;
+      const ended = new Promise<void>((resolve) => {
+        wake = resolve;
+        this.#stableWaiters.push(resolve);
+      });
       if ((await session.pending()).length === 0) {
         await this.#sync();
         if (!this.hasPendingInteraction()) return true;
@@ -889,7 +899,11 @@ export class Think<
         })
       ]);
       clearTimeout(timer);
-      if (timedOut) return false;
+      if (timedOut) {
+        const index = this.#stableWaiters.indexOf(wake);
+        if (index !== -1) this.#stableWaiters.splice(index, 1);
+        return false;
+      }
     }
   }
 
