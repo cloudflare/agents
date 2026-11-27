@@ -576,6 +576,76 @@ describe("mediaEviction — a pass that runs on its own", () => {
     expect(await agent.storedPathRowsReadForTest()).toBeLessThan(1000);
   }, 30_000);
 
+  it("evicts a payload larger than one row and leaves the bytes in one place", async () => {
+    const agent = await evictionAgent(uniqueName("auto-split"));
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    await agent.seedMediaHistoryForTest("m", SPLIT_MEDIA_CHARS);
+    await vi.waitFor(
+      async () => {
+        const m0 = await agent.getStoredMessageForTest("m0");
+        expect(m0?.parts[1]).toEqual({
+          type: "text",
+          text: `[evicted image/png, ${SPLIT_PAYLOAD_BYTES} bytes; preserved at /workspace/attachments/evicted/m0-0.png]`
+        });
+        expect(
+          JSON.stringify(await agent.getStoredMessageForTest("m1"))
+        ).toContain("[evicted image/png,");
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    // Both rewritten rows are small again: the Workspace file is the only
+    // copy of the bytes.
+    expect(await agent.getContinuationRowCountForTest()).toBe(0);
+    expect(
+      (
+        await agent.readEvictedFileForTest(
+          "/workspace/attachments/evicted/m0-0.png"
+        )
+      )?.byteLength
+    ).toBe(SPLIT_PAYLOAD_BYTES);
+  }, 30_000);
+
+  it("drains a backlog on its own when each pass is bounded", async () => {
+    // One row per pass: the second media row is evicted only because a
+    // pass that made progress schedules the next.
+    await evictedOnItsOwn("auto-backlog", {
+      ...AGED_POLICY,
+      maxRowsPerPass: 1
+    });
+  });
+
+  it("reaches older media past large text rows that fill a pass", async () => {
+    const agent = await evictionAgent(uniqueName("auto-large-text"));
+    await agent.setMediaEvictionForTest({ ...AGED_POLICY, maxRowsPerPass: 2 });
+    await agent.seedLargeTextAboveMediaForTest(3);
+    await vi.waitFor(
+      async () => {
+        expect(
+          JSON.stringify(await agent.getStoredMessageForTest("media"))
+        ).toContain("[evicted image/png,");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("keeps the image with mediaEviction false: no pass is scheduled", async () => {
+    const agent = await evictionAgent(uniqueName("auto-disabled"));
+    await agent.setMediaEvictionForTest(false);
+    await agent.seedMediaHistoryForTest();
+    // A pass is scheduled, if at all, by the appends just made; with
+    // eviction off none is, and a refresh asks for none either.
+    await agent.resyncForTest();
+    const m0 = await agent.getStoredMessageForTest("m0");
+    expect((m0?.parts[1] as { url: string } | undefined)?.url).toBe(
+      `data:image/png;base64,${"A".repeat(16_000)}`
+    );
+    expect(
+      await agent.readEvictedFileForTest(
+        "/workspace/attachments/evicted/m0-0.png"
+      )
+    ).toBeNull();
+  });
+
   it("leaves the recent messages alone, even with keepRecentMessages 0", async () => {
     const agent = await evictedOnItsOwn("auto-recent", {
       keepRecentMessages: 0,
