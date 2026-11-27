@@ -131,8 +131,6 @@ describe("Resumable Streaming", () => {
     });
   });
 
-  describe("Stream resumption", () => {});
-
   describe("Stale stream handling", () => {
     it("restores stale streams instead of deleting them (lifecycle managed by fibers)", async () => {
       const room = crypto.randomUUID();
@@ -458,12 +456,6 @@ describe("Resumable Streaming", () => {
       ws2.close(1000);
     });
   });
-
-  describe("Client-initiated resume (issue #896)", () => {});
-
-  describe("Replay complete signal for active streams (issue #896 follow-up)", () => {});
-
-  describe("Orphaned stream edge cases", () => {});
 
   describe("clearAll clears chunk buffer", () => {
     it("buffered chunks are not flushed to SQLite after clearAll", async () => {
