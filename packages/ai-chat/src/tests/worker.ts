@@ -3135,6 +3135,14 @@ export class ResponseAgent extends AIChatAgent<Env> {
  * Used to verify onChatResponse fires with continuation=true after auto-continue.
  */
 export class ResponseContinuationAgent extends AIChatAgent<Env> {
+  isChatResponseDrainIdleForTest(): boolean {
+    return chatResponseDrainIdleForTest(this);
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await this["_turns"].waitForIdle();
+  }
+
   private _responseResults: ChatResponseResult[] = [];
   private _failContinuation: false | "throw" | "locked-body" = false;
 
@@ -3225,6 +3233,10 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
  * drain loop to fire onChatResponse again for the inner turn's result.
  */
 export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
+  isChatResponseDrainIdleForTest(): boolean {
+    return chatResponseDrainIdleForTest(this);
+  }
+
   private _responseResults: ChatResponseResult[] = [];
   private _messageQueue: string[] = [];
 
