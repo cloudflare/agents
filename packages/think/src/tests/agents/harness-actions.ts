@@ -105,6 +105,8 @@ export class ThinkHarnessActionsAgent extends Think {
       pauseCharge: action({
         description: "Charge the card after a human approves",
         kind: "durable-pause",
+        // Computed from the input.
+        permissions: ({ input }) => [`billing:charge:${input.amount}`],
         inputSchema: z.object({ amount: z.number() }),
         execute: run
       })

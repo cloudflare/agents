@@ -150,4 +150,15 @@ describe("harness-backed Think: actions that need a human", () => {
       })
     ]);
   });
+
+  it("lists permissions computed from the input, also after a restart", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("pause and charge 5");
+    const [before] = await think.pendingApprovals();
+    expect(before.descriptor.permissions).toEqual(["billing:charge:5"]);
+    await think.resetForTest().catch(() => {});
+    const [after] = await (await agent(name)).pendingApprovals();
+    expect(after.descriptor.permissions).toEqual(["billing:charge:5"]);
+  });
 });

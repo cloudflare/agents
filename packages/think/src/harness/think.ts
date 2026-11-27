@@ -70,6 +70,7 @@ import {
   actionApprovalInputErrorEnvelope,
   compileActionTools,
   normalizeActionAuthorization,
+  resolveActionPermissions,
   type ActionToolHost
 } from "../action-tools";
 import {
@@ -83,6 +84,7 @@ import type {
   ActionApprovalDescriptor,
   ActionAuthorizationContext,
   ActionAuthorizationDecision,
+  ActionPermissionSpec,
   CompiledActionMetadata,
   NormalizedActionAuthorization
 } from "../actions";
@@ -1248,13 +1250,10 @@ export class Think<
    * `approveExecution` or `rejectExecution`, by its `executionId`.
    */
   async pendingApprovals(executionId?: string): Promise<PendingApproval[]> {
+    const actions = await this.getActions();
     if (this.#actionMetadata.size === 0) {
       // A fresh isolate: compile the actions once for their metadata.
-      compileActionTools(
-        await this.getActions(),
-        this.#actionToolHost,
-        this.#actionMetadata
-      );
+      compileActionTools(actions, this.#actionToolHost, this.#actionMetadata);
     }
     const out: PendingApproval[] = [];
     for (const call of await this.harness.pendingApprovals(
@@ -1274,7 +1273,28 @@ export class Think<
           action: metadata.actionName,
           summary: metadata.summary,
           input: call.input,
-          permissions: [...(metadata.permissions ?? [])],
+          // Computed again from the input, as when the call was asked.
+          permissions:
+            metadata.permissions !== undefined
+              ? [...metadata.permissions]
+              : await resolveActionPermissions(
+                  Object.entries(actions).find(
+                    ([key, action]) =>
+                      (action.config.name ?? key) === call.toolName
+                  )?.[1].config.permissions as
+                    | ActionPermissionSpec<unknown>
+                    | undefined,
+                  call.input,
+                  {
+                    agent: this as unknown as LegacyThink,
+                    env: this.env as Cloudflare.Env,
+                    requestId: "",
+                    toolCallId: call.toolCallId,
+                    messages: [],
+                    signal: new AbortController().signal,
+                    attachReply: () => {}
+                  }
+                ),
           ...(metadata.risk !== undefined && { risk: metadata.risk }),
           kind: metadata.kind
         }

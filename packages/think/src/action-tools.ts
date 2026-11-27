@@ -249,7 +249,8 @@ export function approvedActionInputs(
   return approved;
 }
 
-async function resolveActionPermissions(
+/** @internal */
+export async function resolveActionPermissions(
   spec: ActionPermissionSpec<unknown> | undefined,
   input: unknown,
   ctx: ActionContext
