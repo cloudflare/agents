@@ -102,7 +102,18 @@ import { ThinkSession } from "../session";
 import { ThinkConfigStore } from "../config-store";
 import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "../system-prompt";
 import { Think as LegacyThink } from "../think";
-import type { Session, SessionMessage } from "agents/sessions";
+import {
+  isCompactionMessage,
+  type Session,
+  type SessionMessage
+} from "agents/sessions";
+import {
+  MediaEvictionPasses,
+  resolveMediaEvictionConfig,
+  type MediaEvictionConfig
+} from "../media-eviction";
+import { MODEL_TRUNCATION_STEP } from "../inference/model-messages";
+import { WorkspaceFiles } from "../workspace-files";
 import {
   cachedMessageBytes,
   ThinkTranscriptCache,
@@ -350,7 +361,56 @@ export class Think<
       return { ...recent, messages: recent.messages as UIMessage[] };
     },
     emitWindowed: (payload) => this._emit("chat:hydration:windowed", payload),
-    refreshed: () => {}
+    // A refresh is where an eviction pass may become worth scheduling, as
+    // on Think.
+    refreshed: () => this.#mediaEviction.request()
+  });
+
+  /**
+   * Evict aged media from the conversation, as on Think: the bytes go to
+   * the Workspace and a marker stays in the message.
+   */
+  mediaEviction: MediaEvictionConfig | boolean = true;
+
+  /** How many messages the media-eviction cutoff moves by at a time. */
+  truncationStep = MODEL_TRUNCATION_STEP;
+
+  /** Aged-media eviction passes: Think's capability, on this shell's view. */
+  readonly #mediaEviction = new MediaEvictionPasses({
+    config: () => resolveMediaEvictionConfig(this.mediaEviction),
+    truncationStep: () => this.truncationStep,
+    cachedMessages: () => this.#transcript.messages,
+    agedRowsHiddenFromCache: () =>
+      this.#transcript.lastHydration?.truncated === true ||
+      this.#transcript.messages.some((message) =>
+        isCompactionMessage(message as unknown as SessionMessage)
+      ),
+    storedBytes: () =>
+      this.#transcript.lastHydration?.totalContentBytes ?? null,
+    storedPathRows: (options) => this.session.internal_storedPathRows(options),
+    readMessage: async (id) =>
+      (await this.session.getMessage(id)) as unknown as UIMessage | null,
+    openFiles: () => new WorkspaceFiles(this.workspace),
+    // An update, never an insert, as on Think: a row a clear removed
+    // during the pass stays removed.
+    updateMessage: (message) =>
+      this.session.updateMessage(message as unknown as SessionMessage),
+    emitEvicted: (totals) =>
+      (
+        this._emit as unknown as (
+          type: string,
+          payload: Record<string, unknown>
+        ) => void
+      ).call(this, "chat:media:evicted", {
+        ...totals,
+        externalizedBytes: totals.bytes
+      }),
+    // A facet has no alarm of its own: its pass goes through the root's
+    // queue, named by its path, as on Think.
+    queueRouted: () =>
+      this.queue("_cfEvictAgedMedia", undefined, {
+        id: `media-eviction:${JSON.stringify(this.selfPath)}`
+      })
   });
   #context: Context | undefined;
   #handle: Session | undefined;
@@ -677,6 +737,7 @@ export class Think<
     });
     this.lifecycle.use(this.harness);
     this.lifecycle.use(this.#config);
+    this.lifecycle.use(this.#mediaEviction);
     // Read here, not at start as Think reads them: Channels mounts its
     // channels, and their deliveries register on Tasks, at construction. A
     // sub-agent mounts them too (its path is not known yet) but takes no
@@ -750,8 +811,18 @@ export class Think<
           const index = messages.findIndex(
             (message) => message.id === event.message.id
           );
+          // Every message the harness writes that this view lacks is a new
+          // one at the leaf: an append, which ages older messages. A row
+          // that grew may now hold media the eviction cursor has passed; a
+          // pass's own rewrites shrink rows and leave it alone, as on Think.
           if (index === -1) {
             this.#transcript.noteGrowth(cachedMessageBytes(event.message));
+            this.#mediaEviction.noteAppend();
+          } else if (
+            cachedMessageBytes(event.message) >
+            cachedMessageBytes(messages[index]!)
+          ) {
+            this.#mediaEviction.invalidate();
           }
           this.#transcript.replace(
             index === -1
@@ -1076,8 +1147,10 @@ export class Think<
     return this.harness.session().messages();
   }
 
-  async syncMessagesFromStorage(): Promise<void> {
+  /** Re-read the transcript and return it, as on Think. */
+  async syncMessagesFromStorage(): Promise<UIMessage[]> {
     await this.#sync();
+    return this.#transcript.messages.slice();
   }
 
   /** Add messages to the conversation and run a turn over it. */
@@ -2046,6 +2119,15 @@ export class Think<
     if (!this.#handle)
       throw new Error("The harness did not configure the root session");
     return this.#handle;
+  }
+
+  /**
+   * Run one media-eviction pass queued on the Agent queue, by a sub-agent
+   * facet, as on Think.
+   * @internal Queue callback.
+   */
+  async _cfEvictAgedMedia(): Promise<void> {
+    await this.#mediaEviction.run();
   }
 
   async #sync(): Promise<void> {

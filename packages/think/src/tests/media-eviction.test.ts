@@ -474,6 +474,120 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
   });
 });
 
+// Successors of the tests above that drive a pass through the class's
+// `_evictAgedMediaBestEffort` seam: these let the pass run on its own, as
+// it does for an app, and read what it left. They run on both configs.
+describe("mediaEviction — a pass that runs on its own", () => {
+  /** Seed with eviction on, then wait for the pass the appends schedule. */
+  async function evictedOnItsOwn(
+    name: string,
+    policy: MediaEvictionConfig = AGED_POLICY
+  ): Promise<MediaEvictionStub> {
+    const agent = await evictionAgent(uniqueName(name));
+    await agent.setMediaEvictionForTest(policy);
+    await agent.seedMediaHistoryForTest();
+    await vi.waitFor(
+      async () => {
+        for (const id of ["m0", "m1"]) {
+          const message = await agent.getStoredMessageForTest(id);
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    return agent;
+  }
+
+  it("leaves the exact marker in an aged file part and keeps its prose", async () => {
+    const agent = await evictedOnItsOwn("auto-marker");
+    const m0 = await agent.getStoredMessageForTest("m0");
+    expect(m0?.parts[0]).toEqual({
+      type: "text",
+      text: "look at this screenshot"
+    });
+    expect(m0?.parts[1]).toEqual({
+      type: "text",
+      text: `[evicted image/png, ${PAYLOAD_BYTES} bytes; preserved at /workspace/attachments/evicted/m0-0.png]`
+    });
+    expect(JSON.stringify(m0)).not.toContain("data:image/png");
+  });
+
+  it("writes the raw decoded bytes to the Workspace", async () => {
+    const agent = await evictedOnItsOwn("auto-workspace");
+    const file = await agent.readEvictedFileForTest(
+      "/workspace/attachments/evicted/m0-0.png"
+    );
+    expect(file?.byteLength).toBe(PAYLOAD_BYTES);
+    expect(file?.allSame).toBe(true);
+    expect(file?.firstBytes).toEqual([0, 0, 0, 0]);
+  });
+
+  it("evicts a data URL nested in a tool output and keeps the output's shape", async () => {
+    const agent = await evictedOnItsOwn("auto-tool-output");
+    const m1 = await agent.getStoredMessageForTest("m1");
+    const part = m1?.parts[0] as {
+      type: string;
+      state: string;
+      output: { mediaType: string; data: string; note: string };
+    };
+    expect(part.type).toBe("tool-screenshot");
+    expect(part.state).toBe("output-available");
+    expect(part.output.mediaType).toBe("image/png");
+    expect(part.output.note).toBe("small structured field");
+    expect(part.output.data).toBe(
+      `[evicted image/png, ${PAYLOAD_BYTES} bytes; preserved at /workspace/attachments/evicted/m1-0.png]`
+    );
+    const file = await agent.readEvictedFileForTest(
+      "/workspace/attachments/evicted/m1-0.png"
+    );
+    expect(file?.byteLength).toBe(PAYLOAD_BYTES);
+  });
+
+  it("a backlog pass reads only what is new since the cursor, not the whole path again", async () => {
+    const agent = (await evictionAgent(uniqueName("auto-cursor"))) as Awaited<
+      ReturnType<typeof evictionAgent>
+    > & {
+      countStoredPathRowsForTest(): Promise<void>;
+      storedPathRowsReadForTest(): Promise<number>;
+      seedTextThenMediaForTest(count: number): Promise<void>;
+    };
+    // One row per pass, so evicting m0 and m1 takes two passes, the second
+    // a backlog pass after the first pass's own rewrite.
+    // Seeded with eviction off, so the passes counted are the ones a
+    // refresh starts once it is on.
+    await agent.setMediaEvictionForTest(false);
+    await agent.seedTextThenMediaForTest(300);
+    await agent.setMediaEvictionForTest({ ...AGED_POLICY, maxRowsPerPass: 1 });
+    await agent.countStoredPathRowsForTest();
+    await agent.resyncForTest();
+    await vi.waitFor(
+      async () => {
+        for (const id of ["m0", "m1"]) {
+          const message = await agent.getStoredMessageForTest(id);
+          expect(JSON.stringify(message)).toContain("[evicted image/png,");
+        }
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    // Both passes together read 896 rows of the 306-row path (the first
+    // counts it and examines it; the backlog pass reads down to the first
+    // one's cursor). A pass's own rewrite shrinks its row; if that marked the
+    // cursor stale, the backlog pass would read the whole path again (1,216).
+    expect(await agent.storedPathRowsReadForTest()).toBeLessThan(1000);
+  }, 30_000);
+
+  it("leaves the recent messages alone, even with keepRecentMessages 0", async () => {
+    const agent = await evictedOnItsOwn("auto-recent", {
+      keepRecentMessages: 0,
+      minPartBytes: 10_000
+    });
+    for (const id of ["m2", "m3", "m4", "m5"]) {
+      const message = await agent.getStoredMessageForTest(id);
+      expect(textOf(message?.parts[0])).toMatch(/^recent (question|answer)$/);
+    }
+  });
+});
+
 describe("hasEvictableMedia — the in-memory gate for scheduling a pass", () => {
   const png = (bytes: number) => `data:image/png;base64,${"A".repeat(bytes)}`;
 
