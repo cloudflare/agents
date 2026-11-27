@@ -5844,26 +5844,24 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   /** Start a turn whose caller pins its own body, as an agent-tool run does. */
   startPinnedTurnForTest(body: Record<string, unknown>): void {
+    // A server turn that brings its own body and no client tools (as an
+    // agent-tool run's turn does): the chat module's turn on the lane.
     this._pinnedTurnForTest = (
       this as unknown as {
-        _runProgrammaticMessagesTurn(
-          requestId: string,
-          messages: (current: ChatMessage[]) => ChatMessage[],
-          options: { body: Record<string, unknown>; clientTools: null }
-        ): Promise<SaveMessagesResult>;
+        _serverTurn(input: ChatTurnInput): Promise<SaveMessagesResult>;
       }
-    )._runProgrammaticMessagesTurn(
-      crypto.randomUUID(),
-      (current) => [
-        ...current,
+    )._serverTurn({
+      trigger: "server",
+      messages: [
         {
           id: `pinned-${crypto.randomUUID()}`,
           role: "user",
           parts: [{ type: "text", text: "pinned turn" }]
         }
       ],
-      { body, clientTools: null }
-    );
+      body,
+      clientTools: []
+    });
   }
 
   async awaitPinnedTurnForTest(): Promise<string> {
