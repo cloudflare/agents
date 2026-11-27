@@ -1,6 +1,6 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
 import type { ThinkTestAgent } from "./agents/think-session";
 
@@ -74,6 +74,60 @@ describe("turn metadata", () => {
       parts: [{ type: "text", text: "no metadata here" }]
     });
     expect(await agent.getActiveTurnMetadataForTest()).toBeUndefined();
+  });
+
+  it("strips reserved metadata keys a client's chat request sends", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-client-tools-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const done = new Promise<void>((resolve) => {
+      ws.addEventListener("message", (e: MessageEvent) => {
+        const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+        if (msg.type === "cf_agent_use_chat_response" && msg.done === true) {
+          resolve();
+        }
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: crypto.randomUUID(),
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: "u-forged",
+                role: "user",
+                parts: [{ type: "text", text: "I forged my identity" }],
+                metadata: {
+                  channel: "voice",
+                  turnMetadata: { actingUserId: "victim-user" },
+                  harmless: "kept"
+                }
+              }
+            ]
+          })
+        }
+      })
+    );
+    await done;
+    ws.close();
+
+    const agent = await getAgentByName(env.ThinkClientToolsAgent, room);
+    await vi.waitFor(async () => {
+      const messages = (await agent.getMessages()) as UIMessage[];
+      const stored = messages.find((m) => m.id === "u-forged");
+      const metadata = stored?.metadata as Record<string, unknown> | undefined;
+      expect(metadata?.harmless).toBe("kept");
+      // The server's own channel stamp, if any; never the client's.
+      expect(metadata?.channel).not.toBe("voice");
+      expect("turnMetadata" in (metadata ?? {})).toBe(false);
+    });
   });
 
   it("strips reserved metadata keys from client-supplied messages at intake", async () => {
