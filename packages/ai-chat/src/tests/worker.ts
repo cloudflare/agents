@@ -4577,6 +4577,24 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     };
   }
 
+  /**
+   * Chat-turn Task runs not yet settled, a recovery attempt's own run
+   * included.
+   */
+  chatTurnRunsInFlightForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = '__cf_internal_chat_turn'
+          AND status IN ('pending', 'running')
+      `[0]?.count ?? 0
+    );
+  }
+
+  isChatResponseDrainIdleForTest(): boolean {
+    return chatResponseDrainIdleForTest(this);
+  }
+
   /** How many chat-turn runs are waiting out a recovery's backoff. */
   backingOffChatTurnRunsForTest(): number {
     return (
