@@ -705,7 +705,9 @@ export class Think<
             end.reason === "aborted" &&
             this.#clearing > 0
           ) {
-            this.#cleared.add(end.operationId);
+            if (this.#chatClears.has(end.operationId)) {
+              this.#chatClears.set(end.operationId, true);
+            }
             return;
           }
           await this.onChatResponse({
@@ -1249,8 +1251,11 @@ export class Think<
 
   /** Clears in progress: a turn they stop ends cleared, not stopped. */
   #clearing = 0;
-  /** The turns a clear stopped, for the `chat()` callers to be told. */
-  #cleared = new Set<string>();
+  /**
+   * The operations a `chat()` call waits on, and whether a clear stopped
+   * each. Only those are tracked; each entry goes when its call returns.
+   */
+  #chatClears = new Map<string, boolean>();
 
   async continueLastTurn(
     body?: Record<string, unknown>,
@@ -1796,26 +1801,34 @@ export class Think<
       () => void this.harness.session().abort(operationId),
       { once: true }
     );
-    await this.harness.session().chat(
-      messages,
-      {
-        onStart: () => callback.onStart({ requestId: operationId }),
-        onEvent: (json) => callback.onEvent(json),
-        onDone: () => callback.onDone(),
-        onError: (error) => {
-          // A stopped turn is not an error: as on Think, its caller hears
-          // neither `onDone` nor `onError`, and `onChatError` does not run.
-          // "aborted" is the harness's reason for a stop, and "withdrawn" for
-          // a stop that reached the turn while it waited (see `saveResult`).
-          if (error === "aborted" || error === "withdrawn") return;
-          const wrapped = this.onChatError(new Error(error));
-          return callback.onError(errorText(wrapped));
-        }
-      },
-      { operationId }
-    );
-    if (this.#cleared.delete(operationId) && !options?.signal?.aborted) {
-      await callback.onError(CHAT_CLEARED_ERROR);
+    this.#chatClears.set(operationId, false);
+    try {
+      await this.harness.session().chat(
+        messages,
+        {
+          onStart: () => callback.onStart({ requestId: operationId }),
+          onEvent: (json) => callback.onEvent(json),
+          onDone: () => callback.onDone(),
+          onError: (error) => {
+            // A stopped turn is not an error: as on Think, its caller hears
+            // neither `onDone` nor `onError`, and `onChatError` does not run.
+            // "aborted" is the harness's reason for a stop, and "withdrawn" for
+            // a stop that reached the turn while it waited (see `saveResult`).
+            if (error === "aborted" || error === "withdrawn") return;
+            const wrapped = this.onChatError(new Error(error));
+            return callback.onError(errorText(wrapped));
+          }
+        },
+        { operationId }
+      );
+      if (
+        this.#chatClears.get(operationId) === true &&
+        !options?.signal?.aborted
+      ) {
+        await callback.onError(CHAT_CLEARED_ERROR);
+      }
+    } finally {
+      this.#chatClears.delete(operationId);
     }
     await this.#sync();
   }
