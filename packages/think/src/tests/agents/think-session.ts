@@ -9504,7 +9504,10 @@ function createDurablePauseMockModel(
 // arguments. Mirrors how a real model terminates a structured workflow turn by
 // calling the synthetic final-answer tool — exercises the #1685 capture path
 // without a network round-trip.
-function createFinalAnswerMockModel(args: unknown): LanguageModel {
+function createFinalAnswerMockModel(
+  args: unknown,
+  onCall?: (call: { toolChoice: unknown; tools: string[] }) => void
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -9518,6 +9521,10 @@ function createFinalAnswerMockModel(args: unknown): LanguageModel {
         toolChoice?: { type?: string; toolName?: string };
         tools?: Array<{ name?: string }>;
       };
+      onCall?.({
+        toolChoice: opts.toolChoice,
+        tools: (opts.tools ?? []).map((t) => String(t.name))
+      });
       const toolName =
         opts.toolChoice?.type === "tool" && opts.toolChoice.toolName
           ? opts.toolChoice.toolName
@@ -11411,7 +11418,9 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     if (this._finalAnswerResponse !== undefined) {
-      return createFinalAnswerMockModel(this._finalAnswerResponse);
+      return createFinalAnswerMockModel(this._finalAnswerResponse, (call) =>
+        this._finalAnswerCalls.push(call)
+      );
     }
     // A hold kept for the isolate after a reset: taken once, by the first
     // model call of that isolate.
@@ -12126,6 +12135,14 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   // Make the next turn(s) terminate by calling the structured-output
   // `think_final_answer` tool with `args` as its arguments (issue #1685).
+  private _finalAnswerCalls: Array<{ toolChoice: unknown; tools: string[] }> =
+    [];
+
+  /** The tool choice and tool names each final-answer model call got. */
+  async getFinalAnswerCallsForTest(): Promise<string> {
+    return JSON.stringify(this._finalAnswerCalls);
+  }
+
   async setFinalAnswerResponseForTest(args: unknown): Promise<void> {
     this._finalAnswerResponse = args;
   }
