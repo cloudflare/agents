@@ -182,8 +182,8 @@ jobs:
               '.result[] | select(.id | test("^nightly-[a-z-]+-[0-9]+-[0-9]+-[a-z]+$")) | select((.modified_on | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < $cutoff) | .id' |
             while read -r name; do
               echo "deleting $name"
-              curl -sS -X DELETE -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$name?force=true" > /dev/null || echo "could not delete $name"
+              curl -fsS -X DELETE -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$name?force=true" > /dev/null || echo "::warning::could not delete $name"
             done
       - name: Run
         working-directory: ${{ matrix.dir }}
@@ -232,7 +232,7 @@ jobs:
           title="Nightly E2E failing"
           gh label create nightly --color B60205 --description "The nightly E2E workflow" --force
           # Each failed job by name (a matrix group reports only its overall result).
-          failed=$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled") | "\(.name): \(.conclusion)"')
+          failed=$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled") | "\(.name): \(.conclusion)"' || true)
           if [ -z "$failed" ]; then
             failed=$(echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key): \(.value.result)"')
           fi
