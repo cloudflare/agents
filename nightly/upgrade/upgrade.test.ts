@@ -307,13 +307,17 @@ describe("an upgrade from the latest release, mid-turn", () => {
       runsOf(p, "call").map((r) => r.id),
       breakdown
     ).toContain("main");
+    // Every call answered one of the submissions, and no turn ran twice on
+    // one build.
+    expect(
+      turns.every((r) => r.n === 1 && /\|submission [123]$/.test(r.id)),
+      breakdown
+    ).toBe(true);
     for (const n of [1, 2, 3]) {
-      const runs = turns.filter((r) => r.id.endsWith(`|submission ${n}`));
       expect(
-        runs.every((r) => r.n === 1),
+        turns.some((r) => r.id.endsWith(`|submission ${n}`)),
         breakdown
       ).toBe(true);
-      expect(runs.length, breakdown).toBeGreaterThanOrEqual(1);
     }
     expect(
       turns.filter((r) => r.id.startsWith("release|")).length,
