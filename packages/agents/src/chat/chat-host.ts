@@ -1181,6 +1181,19 @@ export function chatTurnDefinition(
           ...(messageIds && { messageIds })
         });
       }
+      // A tab away when the model's own error ended it learns that error:
+      // the end is kept with it (the live end frame does not repeat it).
+      if (inBand && result.error !== undefined) {
+        recordRecentChatTerminal(deps.kv, {
+          id: requestId,
+          done: true,
+          error: true,
+          body: result.error,
+          outcome: result.status,
+          ...(continuation && { continuation: true }),
+          ...(messageIds && { messageIds })
+        });
+      }
       if (result.status === "aborted") await sendTranscript(false);
       await host.hooks?.onResponse?.(result);
       return result;

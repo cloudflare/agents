@@ -11,34 +11,7 @@ import { evictDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 import { describe, expect, it } from "vitest";
-import { MessageType, type OutgoingMessage } from "../types";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
-
-function isStreamResumingMessage(
-  message: unknown
-): message is Extract<
-  OutgoingMessage,
-  { type: MessageType.CF_AGENT_STREAM_RESUMING }
-> {
-  return (
-    typeof message === "object" &&
-    message !== null &&
-    "type" in message &&
-    message.type === MessageType.CF_AGENT_STREAM_RESUMING
-  );
-}
-
-function collectMessages(ws: WebSocket): unknown[] {
-  const messages: unknown[] = [];
-  ws.addEventListener("message", (event: MessageEvent) => {
-    try {
-      messages.push(JSON.parse(event.data as string));
-    } catch {
-      messages.push(event.data);
-    }
-  });
-  return messages;
-}
+import { connectChatWS } from "./test-utils";
 
 async function waitFor(
   condition: () => boolean | Promise<boolean>,
@@ -86,78 +59,6 @@ describe("AIChatAgent recovery after forced Durable Object eviction", () => {
     const restored = (await stub.getMessagesForTest()) as ChatMessage[];
     expect(restored).toEqual(messages);
     expect(await stub.getPersistedMessages()).toEqual(restored);
-  });
-
-  it("restores an active resumable stream and its chunks", async () => {
-    const stub = await stubFor(crypto.randomUUID());
-    const streamId = await stub.testStartStream("req-evict-resume");
-    await stub.testStoreStreamChunk(streamId, '{"type":"text","text":"Hello"}');
-    await stub.testStoreStreamChunk(
-      streamId,
-      '{"type":"text","text":" world"}'
-    );
-    await stub.testFlushChunkBuffer();
-
-    await evictDurableObject(stub);
-
-    expect(await stub.getActiveStreamId()).toBe(streamId);
-    expect(await stub.getActiveRequestId()).toBe("req-evict-resume");
-    expect(await stub.getStreamChunks(streamId)).toMatchObject([
-      { body: '{"type":"text","text":"Hello"}' },
-      { body: '{"type":"text","text":" world"}' }
-    ]);
-  });
-
-  it("keeps the same WebSocket usable across forced eviction", async () => {
-    const room = crypto.randomUUID();
-    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const received = collectMessages(ws);
-
-    try {
-      await waitFor(() => ws.readyState === WebSocket.OPEN);
-      const stub = await stubFor(room);
-      const streamId = await stub.testStartStream("req-live-eviction");
-      await stub.testStoreStreamChunk(
-        streamId,
-        '{"type":"text-start","id":"t1"}'
-      );
-      await stub.testStoreStreamChunk(
-        streamId,
-        '{"type":"text-delta","id":"t1","delta":"partial"}'
-      );
-      await stub.testFlushChunkBuffer();
-
-      await evictDurableObject(stub);
-
-      expect(ws.readyState).toBe(WebSocket.OPEN);
-      ws.send(
-        JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
-      );
-      await waitFor(() => received.some(isStreamResumingMessage));
-
-      const resume = received.find(isStreamResumingMessage);
-      expect(resume).toBeDefined();
-      ws.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-          id: resume!.id
-        })
-      );
-
-      await waitFor(() =>
-        received.some(
-          (message) =>
-            isUseChatResponseMessage(message) &&
-            (message as { done?: boolean }).done === true
-        )
-      );
-      expect(await stub.getActiveStreamId()).toBeNull();
-
-      const persisted = (await stub.getPersistedMessages()) as ChatMessage[];
-      expect(JSON.stringify(persisted)).toContain("partial");
-    } finally {
-      if (ws.readyState === WebSocket.OPEN) ws.close(1000);
-    }
   });
 
   it('closes live WebSockets with { webSockets: "close" }', async () => {

@@ -1,3 +1,4 @@
+import { recentChatTerminal } from "../../chat/recent-terminals";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
@@ -2277,6 +2278,11 @@ describe("chatTurnDefinition", () => {
       // One error frame for the failure: the end does not repeat it.
       expect(sent.at(-1)).toMatchObject({ done: true, outcome: "error" });
       expect(sent.at(-1)?.error).toBe(false);
+      // A tab away meanwhile learns the error from the kept end.
+      expect(recentChatTerminal(instance.kv, ["ib-1"])).toMatchObject({
+        error: true,
+        body: "quota exceeded"
+      });
     });
   });
 
