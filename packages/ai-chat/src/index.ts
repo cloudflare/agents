@@ -1411,17 +1411,22 @@ export class AIChatAgent<
       // sent the message list, so it knows which messages are queued.
       // The HTTP transcript has the stored messages only; this list names
       // the queued ones, which a tab keeps apart and draws last.
-      if (this._queuedMessageIds().size > 0) {
-        this._frames.send(connection, {
-          type: MessageType.CF_AGENT_CHAT_MESSAGES,
-          connect: true,
-          ...this._clientView(this.messages)
-        });
+      // One read of the lane answers both questions below.
+      const open = this._openChatTurns();
+      if (open.some((run) => run.status === "pending")) {
+        const view = this._clientView(this.messages);
+        if (view.queuedMessageIds) {
+          this._frames.send(connection, {
+            type: MessageType.CF_AGENT_CHAT_MESSAGES,
+            connect: true,
+            ...view
+          });
+        }
       }
 
       // A turn streams or waits to: the tab is offered its stream, or told
       // to wait for it (#1784) and offered it when it starts.
-      if (this._openChatTurns().length > 0) {
+      if (open.length > 0) {
         await resumeChat(this._chatDeps(), this._chatLane(), connection);
       } else {
         // No active stream to resume: if a recovery is in progress (between
