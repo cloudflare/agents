@@ -1,7 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
-import type { ChatHost, ChatModelCall } from "../../chat/chat-host";
+import {
+  chatTurnStreamId,
+  type ChatHost,
+  type ChatModelCall
+} from "../../chat/chat-host";
 import { submitTurn } from "../../chat/chat-functions";
 import { applyChunkToParts } from "../../chat/message-builder";
 import type { UIMessage } from "ai";
@@ -88,7 +92,7 @@ describe("agent-tool runs as chat turns", () => {
     });
   });
 
-  it("replays a settled turn from its stored reply", async () => {
+  it("replays a settled turn from its kept stream, else from its stored reply", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await instance.lifecycle.start();
@@ -102,6 +106,19 @@ describe("agent-tool runs as chat turns", () => {
         }
       );
       await instance.tasks.wait(agentToolTurnId("run-done"));
+      // The turn kept its stream: a later reader gets what a live one got.
+      const streamId = chatTurnStreamId(agentToolTurnId("run-done"));
+      expect(await instance.streams.status(streamId)).toMatchObject({
+        state: "completed"
+      });
+      const kept = await agentToolTurnChunks(instance.deps, "run-done");
+      expect(kept.map((chunk) => chunk.sequence)).toEqual(
+        kept.map((_, index) => index)
+      );
+      expect(kept.length).toBeGreaterThan(0);
+      // Without it (a run carried from a released version), the stored
+      // reply is replayed.
+      await instance.streams.delete(streamId);
       const chunks = await agentToolTurnChunks(instance.deps, "run-done");
       expect(chunks.map((chunk) => JSON.parse(chunk.body))).toEqual([
         { type: "start", messageId: "reply-1" },
