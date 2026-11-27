@@ -1,8 +1,8 @@
 {
-  "total": 1583,
-  "passed": 583,
-  "needThink": 1290,
-  "needThinkPassed": 290,
+  "total": 1591,
+  "passed": 589,
+  "needThink": 1296,
+  "needThinkPassed": 294,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -25,12 +25,12 @@
       "passed": 0
     },
     "agent-tools.test.ts": {
-      "total": 64,
+      "total": 67,
       "passed": 12
     },
     "assistant-agent-loop.test.ts": {
       "total": 33,
-      "passed": 9
+      "passed": 10
     },
     "assistant-agent.test.ts": {
       "total": 5,
@@ -65,8 +65,8 @@
       "passed": 8
     },
     "client-tools.test.ts": {
-      "total": 138,
-      "passed": 34
+      "total": 139,
+      "passed": 33
     },
     "cold-rpc-initialization.test.ts": {
       "total": 4,
@@ -84,9 +84,13 @@
       "total": 7,
       "passed": 0
     },
+    "detached-reconcile-lane.test.ts": {
+      "total": 1,
+      "passed": 0
+    },
     "durable-admission.test.ts": {
       "total": 9,
-      "passed": 2
+      "passed": 4
     },
     "empty-reply.test.ts": {
       "total": 10,
@@ -123,6 +127,10 @@
     "fiber.test.ts": {
       "total": 7,
       "passed": 7
+    },
+    "harness-tool-recovery.test.ts": {
+      "total": 2,
+      "passed": 2
     },
     "hooks.test.ts": {
       "total": 149,
@@ -242,7 +250,7 @@
     },
     "submissions.test.ts": {
       "total": 123,
-      "passed": 28
+      "passed": 29
     },
     "telegram-messenger.test.ts": {
       "total": 2,
@@ -257,8 +265,8 @@
       "passed": 2
     },
     "think-session.test.ts": {
-      "total": 307,
-      "passed": 59
+      "total": 308,
+      "passed": 60
     },
     "turn-metadata.test.ts": {
       "total": 4,
@@ -300,6 +308,7 @@
     "assistant-agent-loop.test.ts > Think — agentic loop > defaultContextOverflowClassifier > classifies common provider context-overflow errors",
     "assistant-agent-loop.test.ts > Think — agentic loop > defaultContextOverflowClassifier > returns undefined for unrelated errors",
     "assistant-agent-loop.test.ts > Think — agentic loop > getModel() error > returns an error when getModel is not overridden",
+    "assistant-agent-loop.test.ts > Think — agentic loop > mid-turn context-overflow recovery (opt-in) > does not leave an orphan truncated assistant message after a reactive retry",
     "assistant-agent-loop.test.ts > Think — agentic loop > mid-turn context-overflow recovery (opt-in) > recovers a context overflow during continueLastTurn",
     "assistant-agent.test.ts > Think — cancel > cancel message does not crash the agent",
     "assistant-agent.test.ts > Think — clear > clears all messages",
@@ -336,7 +345,6 @@
     "client-tools.test.ts > Think — custom body via WebSocket > body is cleared when request has no custom fields",
     "client-tools.test.ts > Think — messageConcurrency > only applies to submit-message, not regenerate-message",
     "client-tools.test.ts > Think — messageConcurrency > post-clear submits are not treated as overlapping",
-    "client-tools.test.ts > Think — messageConcurrency > queue: processes all overlapping submits in order",
     "client-tools.test.ts > Think — onChatResponse via WebSocket > fires onChatResponse after WebSocket chat request",
     "client-tools.test.ts > Think — regeneration > multiple regenerations create multiple branches",
     "client-tools.test.ts > Think — regeneration > regenerate-message creates a sibling branch, not a replacement",
@@ -367,7 +375,9 @@
     "context-upgrade.test.ts > Think context upgrade > ignores a context record a client sends in message metadata",
     "context-upgrade.test.ts > Think context upgrade > rebuilds the prompt from the blocks at the turn after a compaction",
     "context-upgrade.test.ts > Think context upgrade > stores the prompt only on the session, never in a _system_prompt row",
+    "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a clear before the replay drops it",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a record left between the turn's fiber and the record's delete is recovery's",
+    "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > runs however long it waited: its question is never dropped",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > submissions: one running and one pending at the reset each get their own reply, in order",
     "execute-tool.test.ts > execute tool on the codemode runtime > maps needsApproval AI SDK tools to requiresApproval — the call pauses durably",
     "execute-tool.test.ts > execute tool on the codemode runtime > one-liner: createExecuteTool(agent) runs without state.* and records on this.codemode",
@@ -484,6 +494,8 @@
     "fiber.test.ts > Think — runFiber > should run a fiber to completion and return the result",
     "fiber.test.ts > Think — runFiber > should support checkpointing via ctx.stash()",
     "fiber.test.ts > Think — runFiber > should support fire-and-forget fibers",
+    "harness-tool-recovery.test.ts > the shipped tools' recovery on the harness > runs a public fetch again, and reports a binding's",
+    "harness-tool-recovery.test.ts > the shipped tools' recovery on the harness > runs the workspace's reads again after an interruption, and reports its writes",
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > 'substitute' short-circuits execute and returns the substituted output",
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > async beforeToolCall (Promise<ToolCallDecision>) is awaited correctly",
     "hooks.test.ts > Think — ToolCallDecision honored by wrapped execute > collapses Promise<AsyncIterable> returns to the last yielded value",
@@ -767,6 +779,7 @@
     "submissions.test.ts > Think durable submissions > does not delete pending or missing submissions",
     "submissions.test.ts > Think durable submissions > does not link a cancelled turn's partial to a reused submission id",
     "submissions.test.ts > Think durable submissions > does not treat public workflow-shaped metadata as workflow configuration",
+    "submissions.test.ts > Think durable submissions > emits a cancelled running submission's terminal status once",
     "submissions.test.ts > Think durable submissions > hands a waiter the result when the terminal hook deletes the submission",
     "submissions.test.ts > Think durable submissions > ignores an app's own __cf_progress field and still records the turn's progress",
     "submissions.test.ts > Think durable submissions > lets a status hook cancel its own submission",
@@ -795,6 +808,7 @@
     "think-session.test.ts > Think — Session integration > returns a copy from getMessages",
     "think-session.test.ts > Think — Session integration > should use tree-structured messages via Session",
     "think-session.test.ts > Think — abort > should expose chat request ids for cross-RPC cancellation",
+    "think-session.test.ts > Think — abort > should persist partial message on abort",
     "think-session.test.ts > Think — abort > should stop streaming on abort and not call onDone",
     "think-session.test.ts > Think — abort > stores no reply for a turn stopped before it has any content",
     "think-session.test.ts > Think — addMessages > appends without starting a model turn",
