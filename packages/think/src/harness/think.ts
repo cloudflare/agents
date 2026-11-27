@@ -3563,11 +3563,12 @@ export class Think<
       this.#ownTurn.messages = config.messages;
       // A continued reply's parts so far are in the rewritten prompt's
       // source already: a later call adds only what this turn adds.
-      const continued = turn.messages.at(-1);
+      // The reply it continues, though a context reminder may follow it.
+      const continued = [...turn.messages]
+        .reverse()
+        .find((m) => m.role === "assistant");
       this.#ownTurn.replyParts =
-        turn.continuation && continued?.role === "assistant"
-          ? continued.parts.length
-          : 0;
+        turn.continuation && continued ? continued.parts.length : 0;
     }
     const compacted = await this.#compactBeforeStep(turn, lastUsage, tools);
     const rewritten = this.#ownTurn?.messages;
