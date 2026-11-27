@@ -656,20 +656,24 @@ export class Think<
           await this.#chunkHooks;
           // A call approved after a restart runs before any model call of
           // its turn: the turn's grant is asked for here.
-          await this.#authorizeTurn(
-            call.operationId,
-            async () =>
-              ({
-                system: this.getSystemPrompt(),
-                messages: await convertToModelMessages(this.messages, {
-                  ignoreIncompleteToolCalls: true
-                }),
-                tools: {},
-                model: this.resolveModel(await this.getModel()),
-                continuation: true,
-                requestId: call.operationId
-              }) as unknown as TurnContext
-          );
+          await this.#authorizeTurn(call.operationId, async () => {
+            const chosen = await this.getModel();
+            let model: LanguageModel | undefined;
+            const self = this;
+            return {
+              system: this.getSystemPrompt(),
+              messages: await convertToModelMessages(this.messages, {
+                ignoreIncompleteToolCalls: true
+              }),
+              tools: {},
+              // Resolved only when read, as in Think.
+              get model() {
+                return (model ??= self.resolveModel(chosen));
+              },
+              continuation: true,
+              requestId: call.operationId
+            } as unknown as TurnContext;
+          });
           const decision = await this.#beforeToolCall(call);
           // As in Think: an approved action runs with the input a human
           // approved, or not at all.
@@ -1419,8 +1423,17 @@ export class Think<
     // Recorded, so the call is never listed again. A decision stopped
     // before this point leaves the call pending with its descriptor.
     this.#actionDescriptors.delete(pending.descriptor.toolCallId);
-    await session.wait(receipt.operationId);
+    const result = await session.wait(receipt.operationId);
     await this.#sync();
+    // What the harness said: a decision it did not apply is not reported
+    // as one.
+    if (result.status !== "done") {
+      return {
+        status: "error",
+        executionId,
+        error: result.reason ?? result.status
+      };
+    }
     // As on Think: the action's outcome, or the rejection.
     if (!approved) {
       return {
@@ -2583,22 +2596,28 @@ export class Think<
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
     this.#turnMaxSteps = config.maxSteps;
+    // The model stays lazy, as in Think: spreading `context` would read
+    // its `model` getter and resolve the default.
+    const turnModel = config.model;
+    const self = this;
     await this.#authorizeTurn(
       turn.operationId,
       async () =>
         ({
-          ...context,
-          ...(config.system !== undefined && { system: config.system }),
-          ...(config.messages !== undefined && { messages: config.messages }),
-          model:
-            config.model !== undefined
-              ? this.resolveModel(config.model)
-              : resolveDefault()
+          system: config.system ?? context.system,
+          messages: config.messages ?? context.messages,
+          tools: context.tools,
+          get model() {
+            return turnModel !== undefined
+              ? self.resolveModel(turnModel)
+              : resolveDefault();
+          },
+          continuation: context.continuation,
+          requestId: context.requestId
         }) as unknown as TurnContext
     );
     // Then `beforeStep`, before each model call, as the AI SDK's
     // `prepareStep` runs in Think. Its fields win for this call.
-    const self = this;
     const step: StepFields = isMethodOverridden(this, "beforeStep")
       ? (((await this.beforeStep({
           stepNumber: turn.step,
