@@ -1,4 +1,8 @@
+import { sendDelivery } from "agents/internal";
 import type { DeliverySink } from "agents/internal";
+import type { Tasks } from "agents/tasks";
+import type { ThinkSubmissionInspection } from "./submissions";
+import type { ThinkWorkflowPromptContext } from "./turn-types";
 import { tableExists } from "./config-store";
 
 /**
@@ -179,4 +183,107 @@ export async function migrateWorkflowNotificationTable(
     .toArray();
   if (left) return;
   sql.exec("DROP TABLE cf_think_workflow_notifications");
+}
+
+/** The submission metadata key a workflow's prompt is kept under. */
+const WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
+
+/**
+ * The workflow prompt a submission's metadata carries, if it is one a
+ * workflow step submitted.
+ *
+ * @internal
+ */
+export function workflowPromptContext(
+  metadata: Record<string, unknown> | null | undefined
+): ThinkWorkflowPromptContext | null {
+  const workflowPromptValue = metadata?.[WORKFLOW_PROMPT_METADATA_KEY];
+  if (
+    workflowPromptValue === null ||
+    typeof workflowPromptValue !== "object" ||
+    Array.isArray(workflowPromptValue)
+  ) {
+    return null;
+  }
+  const workflowPrompt = workflowPromptValue as Record<string, unknown>;
+  const workflowValue = workflowPrompt.workflow;
+  if (
+    workflowValue === null ||
+    typeof workflowValue !== "object" ||
+    Array.isArray(workflowValue)
+  ) {
+    return null;
+  }
+  const workflowRecord = workflowValue as Record<string, unknown>;
+  if (
+    typeof workflowRecord.name !== "string" ||
+    typeof workflowRecord.id !== "string" ||
+    typeof workflowRecord.stepName !== "string" ||
+    typeof workflowRecord.eventType !== "string"
+  ) {
+    return null;
+  }
+  const output = workflowPrompt.output;
+  const outputRecord =
+    output !== null && typeof output === "object" && !Array.isArray(output)
+      ? (output as Record<string, unknown>)
+      : null;
+  return {
+    workflow: {
+      name: workflowRecord.name,
+      id: workflowRecord.id,
+      stepName: workflowRecord.stepName,
+      eventType: workflowRecord.eventType
+    },
+    ...(outputRecord
+      ? {
+          output: {
+            schema: outputRecord.schema
+          }
+        }
+      : {}),
+    ...(typeof workflowPrompt.fingerprint === "string" && {
+      fingerprint: workflowPrompt.fingerprint
+    })
+  };
+}
+
+/**
+ * Send the workflow event a terminal submission owes. False when the
+ * submission is not a workflow's. A repeat while the delivery is open joins
+ * it (the id is stable).
+ *
+ * @internal
+ */
+export function sendWorkflowNotification(
+  tasks: Tasks,
+  submission: ThinkSubmissionInspection,
+  output?: unknown
+): boolean {
+  const workflowPrompt = workflowPromptContext(submission.metadata ?? null);
+  if (!workflowPrompt) return false;
+
+  const { status, error } = submission;
+  const payload = {
+    submissionId: submission.submissionId,
+    status,
+    ...(status === "completed" && { output }),
+    ...(error && { error })
+  };
+  void sendDelivery(
+    tasks,
+    WORKFLOW_NOTIFICATION_SINK,
+    workflowNotificationId(
+      submission.submissionId,
+      workflowPrompt.workflow.eventType
+    ),
+    {
+      workflowName: workflowPrompt.workflow.name,
+      workflowId: workflowPrompt.workflow.id,
+      event: { type: workflowPrompt.workflow.eventType, payload }
+    } satisfies WorkflowNotification
+  ).catch((error) => {
+    console.error("[Think] Failed to send workflow notification", error);
+  });
+  return true;
 }

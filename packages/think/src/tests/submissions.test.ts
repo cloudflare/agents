@@ -1981,6 +1981,44 @@ describe("Think durable submissions", () => {
     ]);
   });
 
+  it("tells the workflow once when its submission completes", async () => {
+    const agent = await freshAgent();
+    await agent.testSubmitMessages("draft the report", {
+      submissionId: "sub-workflow-completed",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-completed",
+            stepName: "draft-report",
+            eventType: "think-prompt-completed"
+          }
+        }
+      }
+    });
+    await expect(
+      agent.waitForSubmissionForTest("sub-workflow-completed", {
+        timeoutMs: 10_000
+      })
+    ).resolves.toMatchObject({ status: "completed" });
+    await agent.drainWorkflowNotificationsForTest();
+
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
+      {
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-completed",
+        event: {
+          type: "think-prompt-completed",
+          payload: {
+            submissionId: "sub-workflow-completed",
+            status: "completed"
+          }
+        }
+      }
+    ]);
+    await expect(agent.listWorkflowNotificationsForTest()).resolves.toEqual([]);
+  });
+
   it("captures workflow structured output in terminal notifications", async () => {
     const agent = await freshAgent();
     // The structured workflow turn now terminates by calling the synthetic
