@@ -251,8 +251,10 @@ type LiveRun = {
   built?: SessionBuild;
   /** The reply as the loop holds it: everything streamed so far. */
   reply?: UIMessage;
-  /** Whether the reply's reasoning is kept from the client and storage. */
+  /** Whether this run's reasoning is kept from the client and storage. */
   hideReasoning?: boolean;
+  /** How many of the reply's parts were stored before this run began. */
+  storedParts?: number;
   /** Settles when the attempt has returned. */
   readonly done: Promise<void>;
 };
@@ -2074,6 +2076,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const messageId = continuing?.id ?? crypto.randomUUID();
     let reply = continuing;
     live.reply = reply;
+    live.storedParts = continuing?.parts.length ?? 0;
     let steps = 0;
     /** Whether this attempt made progress the transcript does not hold. */
     let progressed = false;
@@ -2683,7 +2686,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       live?.reply && live.hideReasoning
         ? {
             ...live.reply,
-            parts: live.reply.parts.filter((part) => part.type !== "reasoning")
+            // Only this run's: reasoning stored before it stays.
+            parts: live.reply.parts.filter(
+              (part, at) =>
+                part.type !== "reasoning" || at < (live.storedParts ?? 0)
+            )
           }
         : live?.reply;
     if (!message && legacy) {

@@ -17576,6 +17576,16 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
   private _hiddenReasoning = false;
   private _failAfterReasoning = false;
 
+  /** The reasoning model, with reasoning sent (the default). */
+  async useReasoningModelForTest(): Promise<void> {
+    this._hiddenReasoning = true;
+  }
+
+  /** Reasoning not sent from now on. */
+  async stopSendingReasoningForTest(): Promise<void> {
+    this.sendReasoning = false;
+  }
+
   /** The call after the tool fails, ending the turn with an error. */
   async failAfterReasoningForTest(): Promise<void> {
     this._failAfterReasoning = true;

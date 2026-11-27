@@ -399,6 +399,24 @@ describe("Think — beforeStep hook", () => {
     expect(prompts[1]).toContain("echo-written:");
   });
 
+  it("keeps reasoning stored earlier when a continuation that hides reasoning fails", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-hidden-reasoning-cont-${crypto.randomUUID()}`
+    );
+    await agent.useReasoningModelForTest();
+    await agent.testChat("think, then echo");
+    expect(JSON.stringify(await agent.getMessages())).toContain(
+      "signed-thought"
+    );
+    await agent.stopSendingReasoningForTest();
+    await agent.failAfterReasoningForTest();
+    await agent.continueForTest();
+    expect(JSON.stringify(await agent.getMessages())).toContain(
+      "signed-thought"
+    );
+  });
+
   it("stores no unsent reasoning for a turn that fails after it", async () => {
     const agent = await getAgentByName(
       env.ThinkRewriteContextTestAgent,
@@ -408,6 +426,10 @@ describe("Think — beforeStep hook", () => {
     await agent.failAfterReasoningForTest();
     await agent.testChat("think, then echo, then fail");
     const messages = (await agent.getMessages()) as UIMessage[];
+    // The reply up to the failure is kept, the tool's result in it...
+    const reply = messages.find((m) => m.role === "assistant");
+    expect(JSON.stringify(reply?.parts)).toContain("echo-written:");
+    // ...without the reasoning the turn never sent.
     expect(JSON.stringify(messages)).not.toContain("signed-thought");
   });
 
