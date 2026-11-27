@@ -4504,12 +4504,12 @@ export class Think<
     // As on Think: a transient or rate-limited error is tried again within
     // chatRecovery's budget. An app's own classification wins; without one,
     // a platform transient (a lost connection) is tried again too.
-    if (appSaid) {
-      return classification === "transient" || classification === "rate_limit"
-        ? "retry"
-        : "fail";
+    // The app's verdict or, without one, the provider's: a 429 or a 503 is
+    // tried again too.
+    if (classification === "transient" || classification === "rate_limit") {
+      return "retry";
     }
-    return isPlatformTransientError(error) ? "retry" : "fail";
+    return !appSaid && isPlatformTransientError(error) ? "retry" : "fail";
   }
 
   /**

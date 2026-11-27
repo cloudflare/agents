@@ -2666,24 +2666,37 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             throw new ModelCallError("fail", parsed.error);
           }
           if (parsed) {
-            const json = asJson(parsed.value) as TaskJson;
-            // The output shares the run result's size bound: past its own
-            // bound the turn fails, naming the size, before it settles.
-            const bytes = JSON.stringify(json)?.length ?? 0;
-            if (bytes > MAX_OUTPUT_BYTES) {
-              throw new ModelCallError(
-                "fail",
-                new Error(
-                  `Structured output is ${bytes} bytes; an operation's output holds at most ${MAX_OUTPUT_BYTES}`
-                )
-              );
+            // The value the schema produced goes to this isolate's caller as
+            // it is. Its JSON, kept for a caller across a restart, only when
+            // it has one (a transform may make a bigint).
+            let json: TaskJson | undefined;
+            try {
+              json = asJson(parsed.value) as TaskJson;
+            } catch {
+              json = undefined;
             }
-            live.output = json;
+            if (json !== undefined) {
+              // The output shares the run result's size bound: past its own
+              // bound the turn fails, naming the size, before it settles.
+              const bytes = JSON.stringify(json)?.length ?? 0;
+              if (bytes > MAX_OUTPUT_BYTES) {
+                throw new ModelCallError(
+                  "fail",
+                  new Error(
+                    `Structured output is ${bytes} bytes; an operation's output holds at most ${MAX_OUTPUT_BYTES}`
+                  )
+                );
+              }
+              live.output = json;
+              const placed = turn.run.checkpoint.get<Placed>(PLACED_KEY);
+              if (placed && !("ended" in placed)) {
+                turn.run.checkpoint.set(PLACED_KEY, {
+                  ...placed,
+                  output: json
+                });
+              }
+            }
             live.outputValue = parsed.value;
-            const placed = turn.run.checkpoint.get<Placed>(PLACED_KEY);
-            if (placed && !("ended" in placed)) {
-              turn.run.checkpoint.set(PLACED_KEY, { ...placed, output: json });
-            }
           }
           continue;
         }
