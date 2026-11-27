@@ -43,6 +43,8 @@ describe("chat recovery, through public behaviour", () => {
     expect(result.first.error).toBeTruthy();
     expect(result.recoveryCalls).toHaveLength(1);
     expect(result.stable).toBe(true);
+    // Nothing continues it: the model is not called again.
+    expect(result.modelCalls).toBe(1);
   });
 
   it("asks onChatRecovery no more often than chatRecovery's attempts allow", async () => {
@@ -58,6 +60,21 @@ describe("chat recovery, through public behaviour", () => {
     expect(result.recoveryCalls).toHaveLength(1);
     // The interrupted reply's text is kept.
     expect(result.lastAssistantText).toContain("Hello from the assistant!");
+  });
+
+  it("ends a stalled turn with an error when onChatRecovery throws", async () => {
+    const agent = await freshAgent("recover-throw");
+    const result = await agent.stallRecoveryForTest({
+      afterParts: 2,
+      stalledCalls: 1,
+      timeoutMs: 50,
+      recovery: "throw"
+    });
+
+    expect(result.first.error).toBeTruthy();
+    expect(result.recoveryCalls).toHaveLength(1);
+    expect(result.stable).toBe(true);
+    expect(result.modelCalls).toBe(1);
   });
 
   it("recovers a stall when only beforeTurn sets the stall timeout", async () => {
