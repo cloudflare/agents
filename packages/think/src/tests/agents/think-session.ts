@@ -3365,7 +3365,7 @@ export class ThinkTestAgent extends Think {
     timeoutMs: number;
     /** Arm the watchdog through `beforeTurn` only, the instance's left off. */
     perTurn?: boolean;
-    recovery?: ChatRecoveryOptions;
+    recovery?: ChatRecoveryOptions | "throw";
     chatRecovery?: ChatRecoveryConfig;
   }): Promise<{
     first: TestChatResult;
@@ -3373,7 +3373,9 @@ export class ThinkTestAgent extends Think {
     recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];
     roles: string[];
     lastAssistantText: string;
+    modelCalls: number;
   }> {
+    const callsBefore = this._modelPromptsForTest.length;
     this._modelStallForTest = {
       afterParts: options.afterParts,
       calls: options.stalledCalls
@@ -3405,7 +3407,8 @@ export class ThinkTestAgent extends Think {
         roles: messages.map((m) => m.role),
         lastAssistantText: (last?.parts ?? [])
           .map((p) => (p.type === "text" ? p.text : ""))
-          .join("")
+          .join(""),
+        modelCalls: this._modelPromptsForTest.length - callsBefore
       };
     } finally {
       this._modelStallForTest = null;
