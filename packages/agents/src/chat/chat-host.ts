@@ -907,7 +907,11 @@ export function chatTurnDefinition(
     // A reply a tab sent back is a snapshot from before it finished: the
     // stored one stands.
     for (const message of run.messages ?? []) {
-      if (stopped && message.role !== "user") continue;
+      // A stopped client request still stores its question (the tab sent
+      // it); a stopped server turn stores nothing.
+      if (stopped && (message.role !== "user" || run.trigger === "server")) {
+        continue;
+      }
       if (
         message.role === "assistant" &&
         (await session.getMessage(message.id)) !== null

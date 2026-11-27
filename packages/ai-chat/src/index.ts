@@ -971,7 +971,9 @@ export class AIChatAgent<
       ...(result.error !== undefined && { error: result.error }),
       ...(result.reason !== undefined && {
         reason: result.reason as SaveMessagesResult["reason"]
-      })
+      }),
+      // Every stop of a server turn is a stop; an interruption is recovered.
+      ...(result.status === "aborted" && { reason: "stopped" as const })
     };
   }
 

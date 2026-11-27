@@ -205,9 +205,17 @@ export async function submitTurn(
   });
   const dropped = (receipt as { dropped?: boolean }).dropped === true;
   if (options.signal && !dropped) {
+    const signal = options.signal;
     const stop = () => void cancelTurn(deps, receipt.runId);
-    if (options.signal.aborted) stop();
-    else options.signal.addEventListener("abort", stop, { once: true });
+    if (signal.aborted) stop();
+    else {
+      signal.addEventListener("abort", stop, { once: true });
+      // A long-lived signal outlives many turns: each one's listener goes
+      // when its turn ends.
+      void deps.tasks
+        .wait(receipt.runId)
+        .finally(() => signal.removeEventListener("abort", stop));
+    }
   }
   // The tab that sent a replaced or dropped request learns it ended
   // without a reply (its turn never runs to say so).

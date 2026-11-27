@@ -880,6 +880,36 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
+  it("a stopped server turn that had not started stores nothing", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      await submitTurn(
+        instance.deps,
+        instance.lane,
+        {
+          trigger: "server",
+          messages: [
+            { id: "s2", role: "user", parts: [{ type: "text", text: "Two" }] }
+          ]
+        },
+        { requestId: "r2" }
+      );
+      await cancelTurn(instance.deps, "r2");
+      release();
+      expect(await instance.resultFor("r2")).toMatchObject({
+        status: "aborted"
+      });
+      const ids = (await instance.sessions.session("s1").getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toEqual(["u1", "a1"]);
+    });
+  });
+
   it("answers to a live batch start one continuation, after the last, and pass the chunk hook", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
@@ -2409,6 +2439,34 @@ describe("chat functions over a minimal host", () => {
         ).toHaveLength(0)
       );
       expect(instance.calls).toHaveLength(1);
+    });
+  });
+
+  it("a caller's signal loses the turn's listener when the turn ends", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const signal = new AbortController().signal;
+      let listeners = 0;
+      const add = signal.addEventListener.bind(signal);
+      const remove = signal.removeEventListener.bind(signal);
+      signal.addEventListener = ((...args: Parameters<typeof add>) => {
+        if (args[0] === "abort") listeners++;
+        add(...args);
+      }) as typeof add;
+      signal.removeEventListener = ((...args: Parameters<typeof remove>) => {
+        if (args[0] === "abort") listeners--;
+        remove(...args);
+      }) as typeof remove;
+      const done = instance.nextResult();
+      await submitTurn(
+        instance.deps,
+        instance.lane,
+        { trigger: "server" },
+        { signal }
+      );
+      await done;
+      await vi.waitFor(() => expect(listeners).toBe(0));
     });
   });
 });
