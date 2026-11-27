@@ -7,7 +7,7 @@ import type {
   ToolProviderTools,
   ResolvedProvider
 } from "./executor";
-import { runCode } from "./run-code";
+import { runCodeForModel } from "./run-code";
 import { filterTools } from "./resolve";
 import {
   DEFAULT_DESCRIPTION,
@@ -117,6 +117,6 @@ export function createCodeTool(
     description,
     inputSchema: codeSchema,
     execute: async ({ code }) =>
-      runCode({ code, executor, providers: resolvedProviders })
+      runCodeForModel({ code, executor, providers: resolvedProviders })
   });
 }

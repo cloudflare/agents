@@ -21,7 +21,7 @@ function createMockExecutor(result: ExecuteResult = { result: "ok" }) {
         code: string,
         providersOrFns:
           | ResolvedProvider[]
-          | Record<string, (...args: unknown[]) => Promise<unknown>>
+          | Record<string, (...args: unknown[]) => Promise<unknown>>,
       ) => {
         const providers = Array.isArray(providersOrFns)
           ? providersOrFns
@@ -29,8 +29,8 @@ function createMockExecutor(result: ExecuteResult = { result: "ok" }) {
         const allFnNames = providers.flatMap((p) => Object.keys(p.fns));
         calls.push({ code, fnNames: allFnNames, providers });
         return result;
-      }
-    )
+      },
+    ),
   };
   return { executor, calls };
 }
@@ -40,13 +40,13 @@ describe("createCodeTool", () => {
     getWeather: {
       description: "Get weather for a location",
       inputSchema: z.object({ location: z.string() }),
-      execute: async (_args: unknown) => ({ temp: 72 })
+      execute: async (_args: unknown) => ({ temp: 72 }),
     },
     searchWeb: {
       description: "Search the web",
       inputSchema: z.object({ query: z.string() }),
-      execute: async (_args: unknown) => ({ results: [] })
-    }
+      execute: async (_args: unknown) => ({ results: [] }),
+    },
   };
 
   it("should return a tool with correct structure", () => {
@@ -81,7 +81,7 @@ describe("createCodeTool", () => {
     const codeTool = createCodeTool({
       tools,
       executor,
-      description: "Custom prefix.\n\n{{types}}\n\nCustom suffix."
+      description: "Custom prefix.\n\n{{types}}\n\nCustom suffix.",
     });
 
     expect(codeTool.description).toContain("Custom prefix.");
@@ -95,12 +95,12 @@ describe("createCodeTool", () => {
 
     await codeTool.execute?.(
       { code: "async () => codemode.getWeather({ location: 'NYC' })" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect(calls).toHaveLength(1);
     expect(calls[0].code).toBe(
-      "async () => codemode.getWeather({ location: 'NYC' })"
+      "async () => codemode.getWeather({ location: 'NYC' })",
     );
     expect(calls[0].fnNames).toContain("getWeather");
     expect(calls[0].fnNames).toContain("searchWeb");
@@ -112,8 +112,8 @@ describe("createCodeTool", () => {
       myTool: {
         description: "Test",
         inputSchema: z.object({ x: z.number() }),
-        execute: executeSpy
-      }
+        execute: executeSpy,
+      },
     };
 
     let capturedProviders: ResolvedProvider[] = [];
@@ -123,13 +123,13 @@ describe("createCodeTool", () => {
         capturedProviders = providers;
         const result = await providers[0].fns.myTool({ x: 42 });
         return { result };
-      })
+      }),
     };
 
     const codeTool = createCodeTool({ tools: testTools, executor });
     await codeTool.execute?.(
       { code: "async () => null" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect(executeSpy).toHaveBeenCalledWith({ x: 42 });
@@ -141,12 +141,12 @@ describe("createCodeTool", () => {
       withExecute: {
         description: "Has execute",
         inputSchema: z.object({}),
-        execute: async () => ({})
+        execute: async () => ({}),
       },
       withoutExecute: {
         description: "No execute",
-        inputSchema: z.object({})
-      }
+        inputSchema: z.object({}),
+      },
     };
 
     let capturedFnNames: string[] = [];
@@ -155,13 +155,13 @@ describe("createCodeTool", () => {
         const providers = p as ResolvedProvider[];
         capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
         return { result: null };
-      })
+      }),
     };
 
     const codeTool = createCodeTool({ tools: testTools, executor });
     await codeTool.execute?.(
       { code: "async () => null" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect(capturedFnNames).toContain("withExecute");
@@ -173,14 +173,14 @@ describe("createCodeTool", () => {
       safeTool: {
         description: "Safe tool",
         inputSchema: z.object({}),
-        execute: async () => ({ ok: true })
+        execute: async () => ({ ok: true }),
       },
       dangerousTool: {
         description: "Dangerous tool",
         inputSchema: z.object({}),
         execute: async () => ({ deleted: true }),
-        needsApproval: true
-      }
+        needsApproval: true,
+      },
     };
 
     let capturedFnNames: string[] = [];
@@ -189,7 +189,7 @@ describe("createCodeTool", () => {
         const providers = p as ResolvedProvider[];
         capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
         return { result: null };
-      })
+      }),
     };
 
     const codeTool = createCodeTool({ tools: testTools, executor });
@@ -199,7 +199,7 @@ describe("createCodeTool", () => {
 
     await codeTool.execute?.(
       { code: "async () => null" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect(capturedFnNames).toContain("safeTool");
@@ -211,14 +211,14 @@ describe("createCodeTool", () => {
       normalTool: {
         description: "Normal",
         inputSchema: z.object({}),
-        execute: async () => ({})
+        execute: async () => ({}),
       },
       approvalFnTool: {
         description: "Approval fn",
         inputSchema: z.object({}),
         execute: async () => ({}),
-        needsApproval: async () => true
-      }
+        needsApproval: async () => true,
+      },
     };
 
     let capturedFnNames: string[] = [];
@@ -227,7 +227,7 @@ describe("createCodeTool", () => {
         const providers = p as ResolvedProvider[];
         capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
         return { result: null };
-      })
+      }),
     };
 
     const codeTool = createCodeTool({ tools: testTools, executor });
@@ -236,7 +236,7 @@ describe("createCodeTool", () => {
 
     await codeTool.execute?.(
       { code: "async () => null" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect(capturedFnNames).toContain("normalTool");
@@ -249,8 +249,8 @@ describe("createCodeTool", () => {
         description: "Explicitly safe",
         inputSchema: z.object({}),
         execute: async () => ({ ok: true }),
-        needsApproval: false
-      }
+        needsApproval: false,
+      },
     };
 
     let capturedFnNames: string[] = [];
@@ -259,7 +259,7 @@ describe("createCodeTool", () => {
         const providers = p as ResolvedProvider[];
         capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
         return { result: null };
-      })
+      }),
     };
 
     const codeTool = createCodeTool({ tools: testTools, executor });
@@ -268,7 +268,7 @@ describe("createCodeTool", () => {
 
     await codeTool.execute?.(
       { code: "async () => null" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect(capturedFnNames).toContain("explicitlySafeTool");
@@ -277,33 +277,33 @@ describe("createCodeTool", () => {
   it("should return { result, logs } on success", async () => {
     const { executor } = createMockExecutor({
       result: { answer: 42 },
-      logs: ["hello", "world"]
+      logs: ["hello", "world"],
     });
     const codeTool = createCodeTool({ tools, executor });
 
     const output = await codeTool.execute?.(
       { code: "async () => 42" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect(output).toEqual({
       result: { answer: 42 },
-      logs: ["hello", "world"]
+      logs: ["hello", "world"],
     });
   });
 
   it("should throw when executor returns error", async () => {
     const { executor } = createMockExecutor({
       result: undefined,
-      error: "execution failed"
+      error: "execution failed",
     });
     const codeTool = createCodeTool({ tools, executor });
 
     await expect(
       codeTool.execute?.(
         { code: "async () => null" },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
-      )
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
+      ),
     ).rejects.toThrow("Code execution failed: execution failed");
   });
 
@@ -311,33 +311,33 @@ describe("createCodeTool", () => {
     const { executor } = createMockExecutor({
       result: undefined,
       error: "runtime error",
-      logs: ["debug info", "[error] something went wrong"]
+      logs: ["debug info", "[error] something went wrong"],
     });
     const codeTool = createCodeTool({ tools, executor });
 
     await expect(
       codeTool.execute?.(
         { code: "async () => null" },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
-      )
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
+      ),
     ).rejects.toThrow("Console output:");
   });
 
   it("should include logs in successful output", async () => {
     const { executor } = createMockExecutor({
       result: "ok",
-      logs: ["log line 1", "log line 2"]
+      logs: ["log line 1", "log line 2"],
     });
     const codeTool = createCodeTool({ tools, executor });
 
     const output = await codeTool.execute?.(
       { code: "async () => 'ok'" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect((output as unknown as Record<string, unknown>)?.logs).toEqual([
       "log line 1",
-      "log line 2"
+      "log line 2",
     ]);
   });
 
@@ -348,7 +348,7 @@ describe("createCodeTool", () => {
 
       await codeTool.execute?.(
         { code: "async () => { return 42; }" },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       expect(calls[0].code).toBe("async () => { return 42; }");
@@ -361,7 +361,7 @@ describe("createCodeTool", () => {
       const code = `const fn = async () => { return 42; };\nfn().catch(console.error);`;
       await codeTool.execute?.(
         { code },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       // AST normalization wraps the last expression in return(...)
@@ -376,7 +376,7 @@ describe("createCodeTool", () => {
       const code = `const x = 1;\nconst y = 2;`;
       await codeTool.execute?.(
         { code },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       expect(calls[0].code).toContain("async () => {");
@@ -390,7 +390,7 @@ describe("createCodeTool", () => {
       const code = `const items = [];\nif (items.length === 0) { return null; }`;
       await codeTool.execute?.(
         { code },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       expect(calls[0].code).toContain("async () => {");
@@ -404,7 +404,7 @@ describe("createCodeTool", () => {
       const code = `const r = await codemode.getWeather({ location: "NYC" });\nreturn r;`;
       await codeTool.execute?.(
         { code },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       expect(calls[0].code).toContain("async () => {");
@@ -419,7 +419,7 @@ describe("createCodeTool", () => {
       const code = `(async () => { return 42; })`;
       await codeTool.execute?.(
         { code },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       // Parenthesized arrow is still an ArrowFunctionExpression in the AST
@@ -433,7 +433,7 @@ describe("createCodeTool", () => {
       const code = 'async () => { return `hello ${"world"}`; }';
       await codeTool.execute?.(
         { code },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       expect(calls[0].code).toBe(code);
@@ -446,7 +446,7 @@ describe("createCodeTool", () => {
       const code = `this is not valid javascript @#$`;
       await codeTool.execute?.(
         { code },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       // Falls back to wrapping in async arrow
@@ -460,7 +460,7 @@ describe("createCodeTool", () => {
 
       await codeTool.execute?.(
         { code: "   " },
-        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+        {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
       );
 
       expect(calls[0].code).toBe("async () => {}");
@@ -472,8 +472,8 @@ describe("createCodeTool", () => {
       writeFile: {
         description: "Write a file",
         inputSchema: z.object({ path: z.string(), content: z.string() }),
-        execute: async (_args: unknown) => ({ ok: true })
-      }
+        execute: async (_args: unknown) => ({ ok: true }),
+      },
     };
 
     let capturedProviders: ResolvedProvider[] = [];
@@ -481,22 +481,22 @@ describe("createCodeTool", () => {
       execute: vi.fn(async (_code: string, p: unknown) => {
         capturedProviders = p as ResolvedProvider[];
         return { result: null };
-      })
+      }),
     };
 
     const codeTool = createCodeTool({
       tools: [{ tools: testTools, name: "state" }],
-      executor
+      executor,
     });
 
     await codeTool.execute?.(
       { code: "async () => null" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect(capturedProviders[0]).toEqual({
       name: "state",
-      fns: { writeFile: expect.any(Function) }
+      fns: { writeFile: expect.any(Function) },
     });
   });
 
@@ -506,8 +506,8 @@ describe("createCodeTool", () => {
       increment: {
         description: "Increment counter",
         inputSchema: z.object({}),
-        execute: async () => ({ count: ++counter })
-      }
+        execute: async () => ({ count: ++counter }),
+      },
     };
 
     const executor: Executor = {
@@ -515,26 +515,75 @@ describe("createCodeTool", () => {
         const providers = p as ResolvedProvider[];
         const result = await providers[0].fns.increment({});
         return { result };
-      })
+      }),
     };
 
     const codeTool = createCodeTool({ tools: testTools, executor });
 
     const r1 = await codeTool.execute?.(
       { code: "call1" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
     const r2 = await codeTool.execute?.(
       { code: "call2" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1],
     );
 
     expect((r1 as unknown as Record<string, unknown>)?.result).toEqual({
-      count: 1
+      count: 1,
     });
     expect((r2 as unknown as Record<string, unknown>)?.result).toEqual({
-      count: 2
+      count: 2,
     });
     expect(counter).toBe(2);
+  });
+});
+
+describe("createCodeTool output cap", () => {
+  it("truncates oversized logs and keeps the result", async () => {
+    const { executor } = createMockExecutor({
+      result: "RETURNED",
+      logs: ["A".repeat(200_000)],
+    });
+    const t = createCodeTool({
+      tools: {
+        x: {
+          description: "x",
+          inputSchema: z.object({}),
+          execute: async () => 1,
+        },
+      },
+      executor,
+    });
+    const out = (await t.execute!(
+      { code: "async () => 1" },
+      { toolCallId: "1", messages: [] },
+    )) as { result: unknown; logs: string[] };
+    expect(out.result).toBe("RETURNED");
+    expect(JSON.stringify(out).length).toBeLessThan(25_000);
+    expect(JSON.stringify(out)).toContain("--- TRUNCATED ---");
+  });
+
+  it("truncates console output in the failure message", async () => {
+    const { executor } = createMockExecutor({
+      result: undefined,
+      error: "boom",
+      logs: ["A".repeat(200_000)],
+    });
+    const t = createCodeTool({
+      tools: {
+        x: {
+          description: "x",
+          inputSchema: z.object({}),
+          execute: async () => 1,
+        },
+      },
+      executor,
+    });
+    const err = await Promise.resolve(
+      t.execute!({ code: "async () => 1" }, { toolCallId: "1", messages: [] }),
+    ).catch((e: Error) => e);
+    expect((err as Error).message.length).toBeLessThan(25_000);
+    expect((err as Error).message).toContain("--- TRUNCATED ---");
   });
 });

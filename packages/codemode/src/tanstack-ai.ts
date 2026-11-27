@@ -37,7 +37,7 @@ import type {
   ResolvedProvider,
   SimpleToolRecord
 } from "./executor";
-import { runCode } from "./run-code";
+import { runCodeForModel } from "./run-code";
 import { filterTools, extractFns } from "./resolve";
 import {
   DEFAULT_DESCRIPTION,
@@ -267,7 +267,7 @@ export function createCodeTool(
   });
 
   return def.server(async ({ code }) =>
-    runCode({ code, executor, providers: resolvedProviders })
+    runCodeForModel({ code, executor, providers: resolvedProviders })
   );
 }
 

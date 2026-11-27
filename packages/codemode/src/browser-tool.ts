@@ -11,7 +11,7 @@ import {
   type JsonSchemaToolDescriptor,
   type JsonSchemaToolDescriptors
 } from "./json-schema-types";
-import { runCode } from "./run-code";
+import { runCodeForModel } from "./run-code";
 import { sanitizeToolName } from "./utils";
 import type { Executor, ResolvedProvider } from "./executor-types";
 import type { CodeInput, CodeOutput } from "./shared";
@@ -211,6 +211,6 @@ export function createBrowserCodeTool(
       required: ["result"]
     },
     execute: async ({ code }) =>
-      runCode({ code, executor, providers: resolvedProviders })
+      runCodeForModel({ code, executor, providers: resolvedProviders })
   };
 }
