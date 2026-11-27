@@ -509,6 +509,19 @@ describe("ThinkHarness approvals and client tools", () => {
 
     const [call] = await stub.lastToolCalls();
     const approvalId = call?.approvalId ?? "";
+    // The call waits for a decision, and a later read finds it.
+    await runInDurableObject(stub, async (instance: ThinkHarnessTestObject) => {
+      expect(
+        await instance.harness.pendingApprovals(instance.harness.session().id)
+      ).toEqual([
+        {
+          approvalId,
+          toolCallId: call?.toolCallId,
+          toolName: "dangerous",
+          input: {}
+        }
+      ]);
+    });
     // The lookup chat answers approvals with: newest message first.
     await runInDurableObject(stub, async (instance: ThinkHarnessTestObject) => {
       expect(
@@ -529,6 +542,11 @@ describe("ThinkHarness approvals and client tools", () => {
       text: "tool said: did the dangerous thing"
     });
     expect(await stub.dangerousRuns()).toBe(1);
+    await runInDurableObject(stub, async (instance: ThinkHarnessTestObject) => {
+      expect(
+        await instance.harness.pendingApprovals(instance.harness.session().id)
+      ).toEqual([]);
+    });
     expect(await stub.messages()).toEqual([
       "user: approve",
       "assistant: [dangerous output-available] tool said: did the dangerous thing"

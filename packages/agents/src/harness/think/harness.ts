@@ -119,6 +119,7 @@ import type {
   ThinkOperationStatus,
   ThinkStreamCallback,
   ThinkOperationResult,
+  ThinkPendingApproval,
   ThinkPendingOperation,
   ThinkPromptResponse,
   ThinkReceipt,
@@ -1209,6 +1210,30 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * @internal The approval id a tool call carries, from the newest message
    * back: a turn's approval sits near the end, so the read stops early.
    */
+  /**
+   * @internal The tool calls of a session's latest reply that wait for
+   * approval: only the latest reply can, since a turn after it settled
+   * them.
+   */
+  async pendingApprovals(
+    session: ThinkSessionId
+  ): Promise<ThinkPendingApproval[]> {
+    const leaf = await this.#handle(session).getLatestLeaf();
+    if (leaf?.role !== "assistant") return [];
+    return asUIMessage(leaf).parts.flatMap((part) =>
+      isToolCallPart(part) && part.state === "approval-requested"
+        ? [
+            {
+              approvalId: part.approval.id,
+              toolCallId: part.toolCallId,
+              toolName: toolNameOf(part),
+              input: part.input
+            }
+          ]
+        : []
+    );
+  }
+
   async approvalId(
     session: ThinkSessionId,
     toolCallId: string
