@@ -1103,30 +1103,29 @@ export class Agent<
       maxConcurrentAgentTools: () => this.maxConcurrentAgentTools,
       className: this.constructor.name,
       isFacet: () => this._isFacet,
-      method: (name) => {
-        const value = (this as unknown as Record<string, unknown>)[name];
-        return typeof value === "function"
-          ? (value as (...args: never[]) => unknown).bind(this)
-          : undefined;
+      children: {
+        resolve: (agentType, name) => this._cf_resolveSubAgent(agentType, name),
+        has: (agentType, name) => this.hasSubAgent(agentType, name),
+        delete: (agentType, name) => this._dynamicAgents.delete(agentType, name)
       },
-      resolveChild: (agentType, runId) =>
-        this._cf_resolveSubAgent(agentType, runId),
-      hasSubAgent: (agentType, name) => this.hasSubAgent(agentType, name),
+      schedules: this,
       emit: (type, payload) => this._emit(type, payload),
-      broadcast: (message, without) => this.broadcast(message, without),
-      onError: (error) => this.onError(error),
-      deleteChild: (agentType, name) =>
-        this._dynamicAgents.delete(agentType, name),
-      listSchedules: (criteria) => this.listSchedules(criteria),
-      cancelSchedule: (id) => this.cancelSchedule(id),
-      onAgentToolStart: (run) => this.onAgentToolStart(run),
-      onAgentToolFinish: (run, result) => this.onAgentToolFinish(run, result),
-      onProgress: (run, progress) => this.onProgress(run, progress),
-      runDetachedDelivery: (invoke, options) =>
-        this._runDetachedDelivery(invoke, options),
-      deliverDetachedMilestone: (run, milestone, mode) =>
-        this._deliverDetachedMilestone(run, milestone, mode),
-      onAgentToolStreamProgress: () => this._onAgentToolStreamProgress()
+      broadcast: (message) => this.broadcast(message),
+      hooks: {
+        onAgentToolStart: (run) => this.onAgentToolStart(run),
+        onAgentToolFinish: (run, result) => this.onAgentToolFinish(run, result),
+        onProgress: (run, progress) => this.onProgress(run, progress),
+        onError: (error) => this.onError(error),
+        runDetachedDelivery: (invoke, options) =>
+          this._runDetachedDelivery(invoke, options),
+        deliverDetachedMilestone: (run, milestone, mode) =>
+          this._deliverDetachedMilestone(run, milestone, mode),
+        onAgentToolStreamProgress: () => this._onAgentToolStreamProgress(),
+        method: (name) => {
+          const value: unknown = Reflect.get(this, name);
+          return typeof value === "function" ? value.bind(this) : undefined;
+        }
+      }
     });
     this._agentTools.registerTasks(claimMs);
 

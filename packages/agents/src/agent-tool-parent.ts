@@ -1,8 +1,10 @@
 import { hasTable } from "./lifecycle/schema";
 import type { DynamicAgentClass as SubAgentClass } from "./dynamic-agents/types";
 import { nanoid } from "nanoid";
-import type { Agent } from "./index";
 import type { Connection } from "./lifecycle/durable-object-lifecycle";
+import type { ResolvedAgentOptions } from "./agent-options";
+import type { ObservabilityEvent } from "./observability/emitter";
+import type { Schedule } from "./schedules/types";
 import {
   DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS,
   DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS
@@ -143,35 +145,79 @@ type AgentToolTaskLocal = {
   childStarted?: { resolve(): void; reject(error: unknown): void };
 };
 
+/** The agent options agent tools read. */
+export type AgentToolParentOptions = Pick<
+  ResolvedAgentOptions,
+  | "detachedMaxBudgetMs"
+  | "detachedNoProgressBudgetMs"
+  | "agentToolReattachMaxWindowMs"
+  | "agentToolReattachNoProgressTimeoutMs"
+>;
+
 /**
- * What the parent side of agent tools needs from the agent that owns it.
- * Hooks call back into the agent so subclasses' overrides apply.
+ * The agent's own methods an agent-tool run calls. Each calls the agent, so
+ * a subclass's override applies.
  */
-export interface AgentToolParentHost {
+export interface AgentToolParentHooks {
+  onAgentToolStart(run: AgentToolRunInfo): Promise<void>;
+  onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void>;
+  onProgress(
+    run: AgentToolRunInfo,
+    progress: AgentToolProgressSnapshot
+  ): Promise<void>;
+  onError(error: unknown): unknown;
+  /** Run a detached delivery in the agent's context (a chat host's lane). */
+  runDetachedDelivery(
+    invoke: () => Promise<void>,
+    options?: { serialize?: boolean }
+  ): Promise<void>;
+  deliverDetachedMilestone(
+    run: AgentToolRunInfo,
+    milestone: AgentToolMilestone,
+    mode: "react" | "narrate"
+  ): Promise<void>;
+  onAgentToolStreamProgress(): Promise<void>;
+  /**
+   * The method a run names to be called when it finishes (`onFinish`, kept
+   * by name so it outlives the isolate), bound to the agent; `undefined` if
+   * the agent has none.
+   */
+  method(name: string): ((...args: never[]) => unknown) | undefined;
+}
+
+/** What the parent side of agent tools is built from. */
+export interface AgentToolParentDeps {
   readonly ctx: DurableObjectState;
-  readonly tasks: Agent["tasks"];
-  options(): Agent["_resolvedOptions"];
+  readonly tasks: Tasks;
+  options(): AgentToolParentOptions;
   maxConcurrentAgentTools(): number;
+  /** The agent's class name, for error messages. */
   readonly className: string;
   /** Whether the agent runs as a facet (read once its start knows). */
   isFacet(): boolean;
-  /** A method of the agent by name, bound to it; `undefined` if none. */
-  method(name: string): ((...args: never[]) => unknown) | undefined;
-  resolveChild: Agent["_cf_resolveSubAgent"];
-  hasSubAgent(agentType: string, name: string): boolean;
-  emit: Agent["_emit"];
-  broadcast: Agent["broadcast"];
-  onError(error: unknown): unknown;
-  /** Delete a child by its class name, and its storage. */
-  deleteChild(agentType: string, name: string): Promise<void>;
-  listSchedules: Agent["listSchedules"];
-  cancelSchedule: Agent["cancelSchedule"];
-  onAgentToolStart: Agent["onAgentToolStart"];
-  onAgentToolFinish: Agent["onAgentToolFinish"];
-  onProgress: Agent["onProgress"];
-  runDetachedDelivery: Agent["_runDetachedDelivery"];
-  deliverDetachedMilestone: Agent["_deliverDetachedMilestone"];
-  onAgentToolStreamProgress: Agent["_onAgentToolStreamProgress"];
+  /** The agent's sub-agents, by class name. */
+  readonly children: {
+    resolve(agentType: string, name: string): Promise<unknown>;
+    has(agentType: string, name: string): boolean;
+    /** Delete a child and its storage. */
+    delete(agentType: string, name: string): Promise<void>;
+  };
+  /** The agent's schedules, for the released backbone's leftover rows. */
+  readonly schedules: {
+    listSchedules(): Promise<Schedule<unknown>[]>;
+    cancelSchedule(id: string): Promise<unknown>;
+  };
+  /** Emit an observability event. */
+  emit(
+    type: ObservabilityEvent["type"],
+    payload: Record<string, unknown>
+  ): void;
+  /** Send a frame to every client of the agent. */
+  broadcast(message: string): void;
+  readonly hooks: AgentToolParentHooks;
 }
 
 /**
@@ -190,9 +236,9 @@ export class AgentToolParent {
   private readonly _agentToolRunsStarting = new Set<string>();
   /** Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
-  private readonly host: AgentToolParentHost;
+  private readonly host: AgentToolParentDeps;
 
-  constructor(host: AgentToolParentHost) {
+  constructor(host: AgentToolParentDeps) {
     this.host = host;
   }
 
@@ -347,7 +393,7 @@ export class AgentToolParent {
       // all see each other against the cap.
       this._agentToolRunsStarting.add(runId);
       try {
-        await this.host.onAgentToolStart(runInfo);
+        await this.host.hooks.onAgentToolStart(runInfo);
         this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
           kind: "started",
           runId,
@@ -396,7 +442,7 @@ export class AgentToolParent {
     };
     this._agentToolRunsStarting.add(runId);
     try {
-      await this.host.onAgentToolStart(runInfo);
+      await this.host.hooks.onAgentToolStart(runInfo);
       this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
         kind: "started",
         runId,
@@ -453,8 +499,8 @@ export class AgentToolParent {
             : String(signal?.reason ?? "cancelled")
         )
         .catch(() => {});
-      void this.host
-        .resolveChild(metadata.agentType, runId)
+      void this.host.children
+        .resolve(metadata.agentType, runId)
         .then((child) =>
           this._asAgentToolChildAdapter(child).cancelAgentToolRun(
             runId,
@@ -508,7 +554,7 @@ export class AgentToolParent {
     const fromChild = await this._settleWithinRecoveryTimeout(
       (async () => {
         const adapter = this._asAgentToolChildAdapter<unknown, Output>(
-          await this.host.resolveChild(settled.agentType, settled.runId)
+          await this.host.children.resolve(settled.agentType, settled.runId)
         );
         const inspection = await adapter.inspectAgentToolRun(settled.runId);
         if (inspection?.status !== "completed") return undefined;
@@ -696,7 +742,7 @@ export class AgentToolParent {
     // Best-effort, like every recovered or detached finish: a hook that
     // throws goes to `onError` and does not hold the run's report.
     try {
-      await this.host.onAgentToolFinish(
+      await this.host.hooks.onAgentToolFinish(
         {
           ...this._agentToolRunInfoFromTask(meta, record.runId),
           status: result.status,
@@ -741,7 +787,7 @@ export class AgentToolParent {
     const { agentType, parentToolCallId } = meta;
     const resolveAdapter = async () =>
       this._asAgentToolChildAdapter(
-        await this.host.resolveChild(agentType, runId)
+        await this.host.children.resolve(agentType, runId)
       );
     // Replaced with a fresh stub when the child's isolate goes away under
     // the tail.
@@ -885,7 +931,7 @@ export class AgentToolParent {
     const reached = await this._settleWithinRecoveryTimeout(
       (async () => {
         const adapter = this._asAgentToolChildAdapter(
-          await this.host.resolveChild(meta.agentType, runId)
+          await this.host.children.resolve(meta.agentType, runId)
         );
         return {
           adapter,
@@ -1065,7 +1111,7 @@ export class AgentToolParent {
           // Forwarding a child's output is progress for the parent's own
           // turn recovery too (chat hosts credit it; best-effort).
           try {
-            await this.host.onAgentToolStreamProgress();
+            await this.host.hooks.onAgentToolStreamProgress();
           } catch {
             // The next forward tries again.
           }
@@ -1226,7 +1272,7 @@ export class AgentToolParent {
     // child's abort.
     if (row.detached === 1) await this.host.tasks.cancel(runId, message);
     try {
-      const child = await this.host.resolveChild(row.agent_type, runId);
+      const child = await this.host.children.resolve(row.agent_type, runId);
       const adapter = this._asAgentToolChildAdapter(child);
       await adapter.cancelAgentToolRun(runId, reason);
     } catch {
@@ -1254,7 +1300,7 @@ export class AgentToolParent {
     const notifySource =
       typeof detached.notify === "object" ? detached.notify.source : undefined;
     if (onFinishName !== undefined) {
-      const callback = this.host.method(onFinishName);
+      const callback = this.host.hooks.method(onFinishName);
       if (typeof callback !== "function") {
         throw new Error(
           `runAgentTool: detached.onFinish "${onFinishName}" is not a method on ${this.host.className}. ` +
@@ -1265,7 +1311,7 @@ export class AgentToolParent {
     } else if (detached.notify) {
       // `notify` sugar: auto-target the chat-agent notify hook if present.
       // A no-op on a base Agent that does not implement it.
-      const notifyHook = this.host.method(DETACHED_NOTIFY_CALLBACK);
+      const notifyHook = this.host.hooks.method(DETACHED_NOTIFY_CALLBACK);
       if (typeof notifyHook === "function") {
         onFinishName = DETACHED_NOTIFY_CALLBACK;
       }
@@ -1373,7 +1419,7 @@ export class AgentToolParent {
       // its tail beside the run (not in it, so no alarm waits on the tail).
       try {
         const adapter = this._asAgentToolChildAdapter(
-          await this.host.resolveChild(agentType, runId)
+          await this.host.children.resolve(agentType, runId)
         );
         await adapter.startAgentToolRun(local.input, { runId });
         local.childStarted?.resolve();
@@ -1403,7 +1449,7 @@ export class AgentToolParent {
         // asking would create a child that was deleted.
         const asked =
           meta.detached?.onMilestones &&
-          this.host.hasSubAgent(meta.agentType, runId)
+          this.host.children.has(meta.agentType, runId)
             ? await this._askDetachedChild(meta, runId)
             : null;
         if (asked?.inspection) {
@@ -1661,7 +1707,7 @@ export class AgentToolParent {
     return this._settleWithinRecoveryTimeout(
       (async () => {
         const adapter = this._asAgentToolChildAdapter(
-          await this.host.resolveChild(meta.agentType, runId)
+          await this.host.children.resolve(meta.agentType, runId)
         );
         return {
           adapter,
@@ -1738,12 +1784,12 @@ export class AgentToolParent {
     const invoke = async () => {
       // Global metering hook fires for detached runs too.
       try {
-        await this.host.onAgentToolFinish(runInfo, lifecycle);
+        await this.host.hooks.onAgentToolFinish(runInfo, lifecycle);
       } catch (error) {
         await this._safeRunOnError(error);
       }
       if (!callbackName) return;
-      const callback = this.host.method(callbackName);
+      const callback = this.host.hooks.method(callbackName);
       if (typeof callback !== "function") return;
       try {
         await (
@@ -1766,12 +1812,12 @@ export class AgentToolParent {
     };
     // A check delivers serialized against the host's turn queue (a state-
     // mutating `onFinish` never interleaves with a turn); a report does not.
-    await this.host.runDetachedDelivery(invoke, { serialize });
+    await this.host.hooks.runDetachedDelivery(invoke, { serialize });
   }
 
   private async _safeRunOnError(error: unknown): Promise<void> {
     try {
-      await this.host.onError(error);
+      await this.host.hooks.onError(error);
     } catch {
       // Delivery hooks are best-effort; a failing onError must not wedge the
       // ledger or other detached runs.
@@ -1811,7 +1857,7 @@ export class AgentToolParent {
         // child. A cleared detached run delivers nothing.
         await this.host.tasks.cancel(row.run_id, AGENT_TOOL_CLEARED_REASON);
         try {
-          const child = await this.host.resolveChild(
+          const child = await this.host.children.resolve(
             row.agent_type,
             row.run_id
           );
@@ -1825,7 +1871,7 @@ export class AgentToolParent {
       }
       try {
         // By name: the class an export resolves to need not carry it.
-        await this.host.deleteChild(row.agent_type, row.run_id);
+        await this.host.children.delete(row.agent_type, row.run_id);
       } catch {
         // Kept, with the child, so a later clear tries again.
         continue;
@@ -1982,9 +2028,9 @@ export class AgentToolParent {
       // carries nothing twice.
       sql.exec("DELETE FROM cf_agent_tool_runs WHERE run_id = ?", row.run_id);
     }
-    for (const schedule of await this.host.listSchedules()) {
+    for (const schedule of await this.host.schedules.listSchedules()) {
       if (schedule.callback === LEGACY_DETACHED_RECONCILE_CALLBACK) {
-        await this.host.cancelSchedule(schedule.id);
+        await this.host.schedules.cancelSchedule(schedule.id);
       }
     }
     const left = sql
@@ -2310,7 +2356,7 @@ export class AgentToolParent {
     // no task, and resolving it would create its child again.
     if (replay && !this.host.tasks.peek(row.run_id)) return sequence;
     const deadline = this._agentToolRecoveryDeadline(timeoutMs);
-    const resolving = this.host.resolveChild(row.agent_type, row.run_id);
+    const resolving = this.host.children.resolve(row.agent_type, row.run_id);
     const child =
       deadline === undefined
         ? await resolving
@@ -2584,7 +2630,7 @@ export class AgentToolParent {
           // advisory, so a bump failure must never break the child stream the
           // user is watching.
           try {
-            await this.host.onAgentToolStreamProgress();
+            await this.host.hooks.onAgentToolStreamProgress();
           } catch {
             // Ignore and keep forwarding; the next iteration tries again.
           }
@@ -2658,7 +2704,7 @@ export class AgentToolParent {
     const meta = this._agentToolTaskMeta(this.host.tasks.peek(runId));
     if (!meta) return;
     const runInfo = this._agentToolRunInfoFromTask(meta, runId);
-    void Promise.resolve(this.host.onProgress(runInfo, snapshot)).catch(
+    void Promise.resolve(this.host.hooks.onProgress(runInfo, snapshot)).catch(
       (error) => {
         console.error(
           `[agents] onProgress hook threw for run ${runId}:`,
@@ -2695,7 +2741,7 @@ export class AgentToolParent {
     if (!configured?.names.includes(milestone.name)) return;
     const mode = configured.mode;
     void Promise.resolve(
-      this.host.deliverDetachedMilestone(runInfo, milestone, mode)
+      this.host.hooks.deliverDetachedMilestone(runInfo, milestone, mode)
     ).catch((error) => {
       console.error(
         `[agents] detached milestone delivery threw for run ${runInfo.runId} (${milestone.name}):`,
