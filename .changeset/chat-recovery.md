@@ -6,19 +6,9 @@
 
 Chat recovery after a restart or a dropped stream.
 
-- A request waiting behind a turn that a reset cut off now runs after the recovered turn (#2922). See [Requests waiting behind an interrupted turn](https://developers.cloudflare.com/agents/api-reference/chat-agents/#requests-waiting-behind-an-interrupted-turn).
-- The recovery budget no longer grows by a conversation's whole history on each new isolate, which sealed long conversations with `work_budget_exceeded` (#3055).
-- Stopping a request being recovered always ends it `aborted` (#3027).
-- A turn found interrupted after a restart is skipped when the conversation moved on, its question is answered again when it is still the latest message, and the latest reply is continued.
-- Recovery no longer continues a reply twice and honours a provider's `Retry-After` (up to 60 seconds).
-- A rebuilt orphaned reply no longer repeats its parts (#2979).
-- Provider rate-limit, transient and context-overflow errors are recognised without `classifyChatError`. `AIChatAgent` recovers a rate-limited or transient error like a dropped stream when the error reaches it with its status (a `toUIMessageStreamResponse()` whose `onError` rethrows; the default masks it).
-- Recovery work units (`maxRecoveryWork`, `ctx.work`) now count ten stored chunks each. See [Recovery work units](https://developers.cloudflare.com/agents/api-reference/chat-agents/#recovery-work-units).
-- A reply cut off twice by resets a few seconds apart is recovered again before a request queued behind it runs, so that request no longer leaves it unanswered.
-- A stop issued while the stall watchdog aborts a reply (for example from an `abortRequest` override) is a stop: the stalled reply is not recovered.
-- A message sent while an interrupted reply waits to be recovered is answered after the recovered reply, not before it, so replies stay in the order their questions were sent.
-- A stop that lands just as a reply is cut off no longer makes the next message wait out the cancelled recovery's backoff.
-- An agent-tool run on a sub-agent whose chat recovery gave up before running a turn now ends `error`; it stayed `running`.
-- A tool cut off by a reset after reporting only progress (an `async function*` `execute`) is reported interrupted, not given its progress as its result.
-- A reset that lands just after a recovered reply ends no longer leaves its recovery open with nothing to finish it; an agent-tool run on a sub-agent stayed `running` in that case.
-- `ThinkHarness` (experimental, `agents/harness/think`) recovers an interrupted operation within the same budget as `chatRecovery`: `recovery.maxAttempts` (default 10) counts recoveries without progress and starts again when an attempt streamed more, and an operation also ends after five minutes without progress, after five interrupted attempts, or past the work budget. It counted ten interruptions and nothing else.
+- Recovery work units (`maxRecoveryWork`, `ctx.work`) now count ten stored chunks each.
+- Rate-limit, transient and overflow errors are recognised without `classifyChatError`, and recovery honours `Retry-After` (up to 60 s).
+- An interrupted turn is skipped if the conversation moved on, else answered or continued once, and requests behind it run afterwards in order (#2922).
+- Long conversations are no longer sealed with `work_budget_exceeded` (#3055).
+- A stop during recovery always ends the request `aborted`, and the next message no longer waits out its backoff (#3027).
+- A rebuilt reply no longer repeats parts, and a tool that only reported progress before a reset is reported interrupted (#2979).
