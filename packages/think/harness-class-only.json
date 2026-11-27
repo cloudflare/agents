@@ -676,14 +676,8 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > a superseded continuation (leaf moved to another assistant message) skips benignly without erroring the submission",
-    "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand, with a newer assistant leaf persisted by hand",
-    "ruledOut": "a later request waits behind the recovery on the chat lane (#3241), so a recovery never finds a newer leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov)"
-  },
-  {
-    "file": "think-session.test.ts",
     "test": "Think — onChatRecovery > a genuinely superseding user turn marks the submission skipped, not errored",
     "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand, with a newer user leaf persisted by hand",
-    "ruledOut": "a later request waits behind the recovery on the chat lane (#3241), so a recovery never finds a newer leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov)"
+    "ruledOut": "a later request waits behind the recovery on the chat lane, so a recovery never finds a newer user leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov). On Think: submissions.test.ts 'a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order', which passes on both configs"
   }
 ]
