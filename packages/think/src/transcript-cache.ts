@@ -21,6 +21,14 @@ const encoder = new TextEncoder();
  *
  * @internal
  */
+
+/**
+ * What a budgeted read (`getRecentHistory`) charges each message on top of
+ * its stored bytes; growth since a refresh is charged the same way.
+ *
+ * @internal
+ */
+export const HYDRATION_MESSAGE_OVERHEAD_BYTES = 1024;
 export function cachedMessageBytes(message: UIMessage): number {
   return encoder.encode(JSON.stringify(message)).byteLength;
 }

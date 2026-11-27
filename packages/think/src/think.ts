@@ -148,6 +148,7 @@ import {
 } from "./messengers/reply-task";
 import { ThinkModelResolver } from "./model";
 import {
+  HYDRATION_MESSAGE_OVERHEAD_BYTES,
   ThinkTranscriptCache,
   cachedMessageBytes,
   type HydrationResult
@@ -1140,12 +1141,6 @@ type StoredThinkClientRequest = {
   /** A regenerate: the message whose reply it replaces. */
   branchParentId: string | undefined;
 };
-
-/**
- * What a budgeted read (`getRecentHistory`) charges each message on top of
- * its stored bytes; growth since a refresh is charged the same way.
- */
-const HYDRATION_MESSAGE_OVERHEAD_BYTES = 1024;
 
 /**
  * How many messages past a windowed cache reconciliation looks for an older

@@ -173,6 +173,7 @@ import {
 import { MODEL_TRUNCATION_STEP } from "../inference/model-messages";
 import { WorkspaceFiles } from "../workspace-files";
 import {
+  HYDRATION_MESSAGE_OVERHEAD_BYTES,
   cachedMessageBytes,
   ThinkTranscriptCache,
   type HydrationResult
@@ -881,6 +882,9 @@ export class Think<
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
           const streamed = this.#streamed.delete(end.operationId);
+          // A turn's end is a safe boundary: a view grown past its budget
+          // re-windows here, as Think's does after a chat request.
+          await this.#transcript.refreshIfNeeded();
           this.#liveCalls.delete(end.operationId);
           this.#toolCalls.delete(end.operationId);
           const clearsAtStart = this.#clearsAtStart.get(end.operationId);
@@ -1116,8 +1120,10 @@ export class Think<
         // A message is applied by the root session's change feed below,
         // which knows an append from an update, as on Think.
         if (event.type === "message") this.#wakeStableWaiters();
+        // A reset, a delete or a compaction reaches the view through the
+        // change feed too (clear, delete, compaction): it re-reads there.
         if (event.type === "reset" || event.type === "transcript") {
-          void this.#sync().then(() => this.#wakeStableWaiters());
+          this.#wakeStableWaiters();
         }
       });
       // As on Think, the view follows the root session's own change feed:
@@ -1163,10 +1169,14 @@ export class Think<
               this.#transcript.replace([]);
               this.#transcript.coversActivePath = true;
               return true;
+            // Think also refreshes its context's prompt on a compaction; on
+            // the harness-backed Think the harness's step loop owns the
+            // context and records the change itself.
             case "delete":
             case "compaction":
             case "compact":
               await this.#transcript.sync();
+              this.#wakeStableWaiters();
               return true;
             default:
               return false;
@@ -1176,15 +1186,21 @@ export class Think<
           if (event.type === "update") {
             // A row that grew may now hold media the cursor has passed; a
             // pass's own rewrites shrink rows and leave it alone.
-            if (
-              previous &&
-              cachedMessageBytes(message) > cachedMessageBytes(previous)
-            ) {
+            // Charged against the budget as Think charges it.
+            const grew = previous
+              ? cachedMessageBytes(message) - cachedMessageBytes(previous)
+              : 0;
+            if (grew > 0) {
+              this.#transcript.noteGrowth(grew);
               this.#mediaEviction.invalidate();
             }
             return;
           }
-          this.#transcript.noteGrowth(cachedMessageBytes(message));
+          // A budgeted refresh charges each message an overhead on top of
+          // its bytes, so growth is charged the same way.
+          this.#transcript.noteGrowth(
+            cachedMessageBytes(message) + HYDRATION_MESSAGE_OVERHEAD_BYTES
+          );
           this.#mediaEviction.noteAppend();
         }
       });
@@ -2193,20 +2209,17 @@ export class Think<
    * reconnected, included).
    */
   protected hasPendingInteraction(): boolean {
+    const answerable = new Set(this.#unexecutedToolNames());
     // A reply still streaming: its calls with no result yet, as Think's
     // accumulator holds them.
     for (const calls of this.#liveCalls.values()) {
       for (const call of calls.values()) {
-        if (call.approval) return true;
-        if (new Set(this.#unexecutedToolNames()).has(call.toolName)) {
-          return true;
-        }
+        if (call.approval || answerable.has(call.toolName)) return true;
       }
     }
     const last = this.#transcript.messages.at(-1);
     const parts = last?.parts ?? [];
     if (!parts.some((part) => "toolCallId" in part)) return false;
-    const answerable = new Set(this.#unexecutedToolNames());
     return parts.some((part) => {
       if (!("toolCallId" in part)) return false;
       if (part.state === "approval-requested") return true;
