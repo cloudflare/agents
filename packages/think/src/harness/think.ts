@@ -16,6 +16,7 @@ import {
 import type { ChatResponseResult, SaveMessagesResult } from "agents/chat";
 import {
   chatDispatch,
+  resumeChat,
   type ChatArrival,
   type MessageConcurrency
 } from "agents/chat";
@@ -1449,6 +1450,16 @@ export class Think<
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
       for (const handlers of this.#handlers) {
         await handlers.onConnect?.(connection, ctx);
+      }
+      // A turn streams or waits to: the tab is offered its stream through
+      // the shared dispatch, the one resume path (H2c), as AIChatAgent's is.
+      const session = this.harness.session().id;
+      if ((await this.harness.session().pending()).length > 0) {
+        await resumeChat(
+          this.harness.chatDeps(session, this.#chatHostDeps()),
+          { ...this.harness.chatLane(session), arrival: this.#arrival() },
+          connection
+        );
       }
       return onConnect(connection, ctx);
     };
