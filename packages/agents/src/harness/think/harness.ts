@@ -1585,6 +1585,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** @internal Abort everything in a session and clear its transcript. */
   async reset(session: ThinkSessionId, handoff?: string): Promise<void> {
+    this.#outputValues.delete(session);
     await this.abort(session);
     const handle = this.#handle(session);
     this.#ownClears.set(session, (this.#ownClears.get(session) ?? 0) + 1);
@@ -1911,11 +1912,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       const output =
         live.output ??
         (placed && !("ended" in placed) ? placed.output : undefined);
+      // The session's latest output, as its schema produced it: one slot
+      // per session, which the next output turn replaces.
       if (live.outputValue !== undefined) {
-        this.#outputValues.set(
-          runIdOf(session, live.operationId),
-          live.outputValue
-        );
+        this.#outputValues.set(session, {
+          operationId: live.operationId,
+          value: live.outputValue
+        });
       }
       return outcome.status === "done" && output !== undefined
         ? { ...outcome, output }
@@ -3742,10 +3745,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // As in Think, this isolate's caller gets the value the schema
     // produced; across a restart, the JSON the run's result kept.
     const runId = runIdOf(session, operationId);
-    if (this.#outputValues.has(runId)) {
-      const value = this.#outputValues.get(runId);
-      this.#outputValues.delete(runId);
-      return value;
+    const latest = this.#outputValues.get(session);
+    if (latest?.operationId === operationId) {
+      this.#outputValues.delete(session);
+      return latest.value;
     }
     const record = this.#tasks.peek(runId);
     if (record?.status !== "completed") return undefined;
@@ -3754,8 +3757,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return outcome.status === "done" ? outcome.output : undefined;
   }
 
-  /** Structured outputs as their schemas produced them, until read. */
-  readonly #outputValues = new Map<string, unknown>();
+  /**
+   * Each session's latest structured output as its schema produced it,
+   * until read: at most one per session.
+   */
+  readonly #outputValues = new Map<
+    ThinkSessionId,
+    { readonly operationId: string; readonly value: unknown }
+  >();
 
   #result(record: TaskRecord): ThinkOperationResult {
     const [session, operationId] = operationOf(record.runId);
