@@ -22,6 +22,18 @@ PROBE_URL=https://<worker>.workers.dev PROBE_KEY=<its PROBE_KEY> pnpm run faults
 
 Each scenario's full outcome (the stored transcript, events, model calls and every frame the tabs saw) is written to `faults/results/<agent>-<scenario>.json`.
 
+## fuzz
+
+The reset fuzz, on the fault Worker: four rooms at once (Think and AIChatAgent, each with `queue` and `latest` message concurrency), each with four tabs. For six minutes each tab sends requests carrying a fault tag the scripted model acts on (client and server tools, approvals, a tool mid-reply, slow replies, stalls, errors, 429s, overflow), cancels its own or the streaming request, clears the chat now and then, and reconnects. The tabs answer client tools (some twice, some never) and approve or deny approvals. The object is reset every 30 to 90 seconds. Then the room settles and must pass the fault suite's invariants, plus: every request ends once on each connection that saw it and, on a connection still open at the end, ends at all (a tab that reconnected is not yet told how its earlier requests ended: #3330), no tool call is left open behind a later message, every reply follows its own user message, and no user message is stored twice.
+
+The choices come from one seed, printed at the start (`FUZZ_SEED` replays them; the server's timing still varies). A red run prints the seed, the violations and the last of the driver's trace.
+
+```sh
+cd nightly
+pnpm run fuzz                                  # six minutes
+FUZZ_MINUTES=3 FUZZ_SEED=689421826 pnpm run fuzz
+```
+
 ## upgrade
 
 Deploys the probe Worker built on the latest release of `agents`, `@cloudflare/ai-chat` and `@cloudflare/think` (installed together from npm in a scratch directory), leaves live rows in it, then deploys this repository's build over it while a reply streams. Then it checks that:

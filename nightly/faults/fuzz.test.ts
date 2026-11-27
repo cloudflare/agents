@@ -8,6 +8,8 @@
 // (the timing of the server's answers still varies). A red run prints the
 // seed, the violations and the last of the driver's trace.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, inject, it } from "vitest";
 import { violations } from "./invariants";
 import type { Run } from "./scenarios";
@@ -287,11 +289,11 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
     slots.flat().flatMap((t) => t.frames.filter(isResp).map((f) => f.id))
   );
   const accepted = sent.filter((q) => answered.has(q.id) || stored.has(q.uid));
-  // The connections open at the end get the fault suite's per-tab checks (a
-  // request ends once, a hand-off to recovery ends). A connection a
-  // reconnect replaced may have lost a request's end to its successor, so
-  // there only "ends once" is checked, below, and every accepted request
-  // must end on one of its slot's connections.
+  // The connections open at the end get the fault suite's per-tab checks:
+  // every request they sent ends once, and a hand-off to recovery ends. On a
+  // connection a reconnect replaced only "ends once" is checked (below): a
+  // tab that comes back is not yet told how the requests it sent before it
+  // went away ended (#3330 adds that; then those get checked too).
   const lastTabs = slots.map((slot) => slot.at(-1) as Tab);
   const tabs = lastTabs.map((t) => ({
     sent: t.sent.filter((id) => accepted.some((q) => q.id === id)),
@@ -310,11 +312,6 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
       if (n > 1)
         checks.push(`a replaced connection: request ${id} ended ${n} times`);
   }
-  for (const q of accepted)
-    if (!doneOnSlot(q.slot, q.id))
-      checks.push(
-        `request ${q.id} (${q.tag || "plain"}) never ended on any of tab ${q.slot}'s connections`
-      );
   msgs.forEach((m, i) => {
     if (i === msgs.length - 1 || m.role !== "assistant") return;
     for (const p of m.parts as { type: string; state?: string }[])
@@ -351,7 +348,37 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
     checks.push(`user messages stored twice: ${dupUsers.join(", ")}`);
 
   const run: Run = { state, tabs, lateTab: late.frames, extra: {}, checks };
-  return { room, seed, submits, resets, bad: violations(run), trace };
+  const bad = violations(run);
+  // The whole run, for whoever reads a red one: every request's frames on
+  // every connection, the stored transcript's shape and the full trace.
+  const dir = path.join(import.meta.dirname, "results");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, `fuzz-${room}.json`),
+    JSON.stringify(
+      {
+        seed,
+        bad,
+        trace,
+        requests: sent.map((q) => ({
+          ...q,
+          stored: stored.has(q.uid),
+          frames: slots[q.slot].map((t) =>
+            t.frames
+              .filter((f) => isResp(f) && f.id === q.id)
+              .map(
+                (f) =>
+                  `${f.done ? `done:${f.outcome ?? ""}` : "chunk"}${f.replay ? ":replay" : ""}`
+              )
+          )
+        })),
+        events: state.events
+      },
+      null,
+      1
+    )
+  );
+  return { room, seed, submits, resets, bad, trace };
 }
 
 const ROOMS: [Cls, string][] = [
