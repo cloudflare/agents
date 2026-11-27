@@ -289,7 +289,7 @@ export class PerfThink extends Think<Env> {
       },
       abortMidStream: async () => {
         void this.saveMessages([user("long 400 delay 10")]);
-        await sleep(1000);
+        await untilStreaming(this);
         await this.ctx.storage.sync();
         this.ctx.abort("perf: reset");
       },
@@ -410,7 +410,7 @@ export class PerfChat extends AIChatAgent<Env> {
       },
       abortMidStream: async () => {
         void this.saveMessages([user("long 400 delay 10")]);
-        await sleep(1000);
+        await untilStreaming(this);
         await this.ctx.storage.sync();
         this.ctx.abort("perf: reset");
       },
