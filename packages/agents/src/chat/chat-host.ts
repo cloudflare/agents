@@ -13,7 +13,7 @@ import type { UIMessage, UIMessageChunk } from "ai";
 import type { Sessions } from "../sessions/sessions";
 import type { Streams } from "../streams/streams";
 import type { Tasks } from "../tasks/tasks";
-import type { TaskStep, TaskValue } from "../tasks/types";
+import type { TaskCheckpoint, TaskStep, TaskValue } from "../tasks/types";
 import type { StreamWriter } from "../streams/types";
 import type { WebSockets } from "../websockets/websockets";
 import type { Connection } from "agents";
@@ -84,6 +84,11 @@ export interface ChatModelCall {
    * call that must not repeat runs here.
    */
   step<T>(name: string, fn: () => Promise<T>): Promise<T>;
+  /**
+   * The turn's run checkpoint: state its tools keep across a reset (an
+   * agent tool's progress and milestones), one statement per `set`.
+   */
+  readonly checkpoint: TaskCheckpoint;
 }
 
 /**
@@ -1040,7 +1045,8 @@ export function chatTurnDefinition(
       ...(run.body !== undefined && { body: run.body }),
       signal: step.signal,
       step: <T>(name: string, fn: () => Promise<T>) =>
-        step.do(name, () => fn() as Promise<TaskValue>) as Promise<T>
+        step.do(name, () => fn() as Promise<TaskValue>) as Promise<T>,
+      checkpoint: step.checkpoint
     };
     const fallbackId = `${requestId}-reply`;
     let writer: StreamWriter | undefined;

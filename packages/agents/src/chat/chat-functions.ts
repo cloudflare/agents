@@ -10,6 +10,7 @@
 
 import type { Connection } from "agents";
 import type { UIMessage } from "ai";
+import type { TaskJson } from "../tasks/types";
 import {
   chatTurnStreamId,
   continueRequestsOf,
@@ -82,6 +83,10 @@ export async function submitTurn(
     storeContext?: boolean;
     /** Stops the turn, waiting or running, when it aborts. */
     signal?: AbortSignal;
+    /** Keep the run after it settles, for a caller that reads it later. */
+    retain?: boolean;
+    /** The run's metadata (the core's own is under its `chat` key). */
+    metadata?: Record<string, TaskJson>;
   } = {}
 ): Promise<{ requestId: string; dropped?: true }> {
   const session = deps.sessions.session(input.session ?? deps.session ?? "");
@@ -187,7 +192,8 @@ export async function submitTurn(
   }
   const receipt = await deps.tasks.run(lane.definition, run as never, {
     lane: lane.lane,
-    retain: false,
+    retain: options.retain ?? false,
+    ...(options.metadata !== undefined && { metadata: options.metadata }),
     policy: arrival === "merge" ? "latest" : arrival,
     ...(options.requestId !== undefined && { runId: options.requestId }),
     ...(options.idempotencyKey !== undefined && {
@@ -227,7 +233,8 @@ export async function submitTurn(
 /** Stop the turn `requestId`, waiting or running. */
 export async function cancelTurn(
   deps: ChatDeps,
-  requestId: string
+  requestId: string,
+  reason = "chat turn cancelled"
 ): Promise<boolean> {
   // A turn stopped before it started keeps its place in the lane: when its
   // turn comes it stores its question, unanswered, and ends (the mark is on
@@ -239,7 +246,7 @@ export async function cancelTurn(
     });
   }
   const retrying = retryingTurn(deps, requestId);
-  const cancelled = await deps.tasks.cancel(requestId, "chat turn cancelled");
+  const cancelled = await deps.tasks.cancel(requestId, reason);
   if (cancelled && retrying) await retrying.settle(true);
   return cancelled;
 }
