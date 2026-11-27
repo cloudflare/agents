@@ -12,3 +12,4 @@ Think: scheduled tasks, submissions and extensions.
 - A sandboxed extension's hooks and host calls work when Think is a sub-agent. Before, its host calls went to a separate Durable Object with the sub-agent's id, so its `beforeTurn` and `onChunk` did nothing.
 - An extension's `permissions.network` hosts are enforced when the Worker re-exports `HostBridgeLoopback` (#3173). A context block's `type` in an extension manifest is now ignored, with a warning.
 - `onSubmissionStatus` runs one submission's status reports in order: a report waits until the hook for the one before it returns, so a slow `running` hook can no longer finish after `aborted`.
+- A messenger `deliverNotice` sent before the agent took any webhook no longer throws "ChatSdkStateAdapter is not connected" after posting, which used to skip the `informModel` transcript message.
