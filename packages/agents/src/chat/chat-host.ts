@@ -254,13 +254,18 @@ export function liveTurnsOf(streams: Streams): Map<string, LiveTurn> {
   return turns;
 }
 
-/** Chunks written at once rather than batched: a tool's call and outcome. */
+/**
+ * Chunks after which the turn waits on work a replay must not repeat,
+ * written at once rather than batched: a tool's call and outcome, and the
+ * end of a step (the model is called again after it).
+ */
 const TOOL_EVENTS: ReadonlySet<string> = new Set([
   "tool-input-available",
   "tool-approval-request",
   "tool-output-available",
   "tool-output-error",
-  "tool-output-denied"
+  "tool-output-denied",
+  "finish-step"
 ]);
 
 /**
