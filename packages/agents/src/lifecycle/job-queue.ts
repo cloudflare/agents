@@ -746,17 +746,23 @@ export class JobQueue {
       ready: number | null;
       recheck: number | null;
     }>(
-      `SELECT
-         (SELECT MIN(time) FROM cf_agents_jobs WHERE exclusive = 1${owners}) AS exclusive,
-         (SELECT MIN(time) FROM cf_agents_jobs
-          WHERE (singleflight = 0
-             OR running = 0
-             OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?)${owners}) AS ready,
-         (SELECT MIN(coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000)
-          FROM cf_agents_jobs
-          WHERE singleflight = 1
-            AND running = 1
-            AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?${owners}) AS recheck`,
+      // An exclusive job suppresses the other two, and CASE leaves their
+      // scans out then.
+      `WITH ex AS (
+         SELECT MIN(time) AS time FROM cf_agents_jobs WHERE exclusive = 1${owners}
+       )
+       SELECT
+         ex.time AS exclusive,
+         CASE WHEN ex.time IS NULL THEN (SELECT MIN(time) FROM cf_agents_jobs
+           WHERE (singleflight = 0
+              OR running = 0
+              OR coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 <= ?)${owners}) END AS ready,
+         CASE WHEN ex.time IS NULL THEN (SELECT MIN(coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000)
+           FROM cf_agents_jobs
+           WHERE singleflight = 1
+             AND running = 1
+             AND coalesce(execution_started_at, 0) + coalesce(hung_timeout_seconds, ?) * 1000 > ?${owners}) END AS recheck
+       FROM ex`,
       ...excludeOwners,
       DEFAULT_HUNG_TIMEOUT_SECONDS,
       now,

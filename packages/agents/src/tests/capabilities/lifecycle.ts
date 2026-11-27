@@ -648,6 +648,29 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  /** The rows one re-arm reads from the job queue, and the jobs in it. */
+  async rowsReadByRearm(): Promise<{ rowsRead: number; jobs: number }> {
+    await this.lifecycle.start();
+    const sql = this.ctx.storage.sql;
+    const exec = sql.exec.bind(sql);
+    const cursors: Array<{ rowsRead: number }> = [];
+    sql.exec = ((query: string, ...params: SqlStorageValue[]) => {
+      const cursor = exec(query, ...params);
+      if (query.includes("cf_agents_jobs")) cursors.push(cursor);
+      return cursor;
+    }) as typeof sql.exec;
+    try {
+      await this.lifecycle.rearmAlarm();
+    } finally {
+      sql.exec = exec;
+    }
+    return {
+      rowsRead: cursors.reduce((sum, cursor) => sum + cursor.rowsRead, 0),
+      jobs: [...this.ctx.storage.sql.exec("SELECT id FROM cf_agents_jobs")]
+        .length
+    };
+  }
+
   async routeCapability(payload: unknown): Promise<unknown> {
     return this.#routedCapability.send(payload);
   }
