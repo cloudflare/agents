@@ -142,5 +142,14 @@
       "file": "think-session.test.ts",
       "test": "Think — error handling > keeps the partial reply of a turn whose model reports an error"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > bridges an in-band stream error to chat:request:failed",
+    "reason": "the in-band error is fed through the class's private `_pumpReply` (`runInBandStreamErrorForTest`)",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — error handling > bridges an in-band stream error to chat:request:failed on the RPC path"
+    }
   }
 ]

@@ -722,6 +722,16 @@ export class Think<
           ) {
             return;
           }
+          if (end.status === "unanswered" && end.reason !== "aborted") {
+            // As on Think, a failed turn is reported to observability. A
+            // turn that ran had its messages placed before the model call.
+            this._emit("chat:request:failed", {
+              requestId: end.operationId,
+              stage: "stream",
+              messagesPersisted: true,
+              error: end.reason ?? "unanswered"
+            });
+          }
           await this.onChatResponse({
             // As on Think, a turn that ended before it wrote anything still
             // reports, with an empty assistant message.

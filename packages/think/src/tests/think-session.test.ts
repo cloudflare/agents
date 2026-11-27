@@ -551,7 +551,7 @@ describe("Think — error handling", () => {
     });
 
     try {
-      await agent.testChatWithError("Custom event error");
+      await agent.testChatWithModelError("Custom event error");
     } finally {
       unsubscribe();
     }
