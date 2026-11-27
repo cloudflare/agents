@@ -122,8 +122,19 @@ describe("harness-backed Think: actions that need a human", () => {
           ? "ran"
           : "other"
     );
-    // Neither answer contradicts what happened to the call.
+    // Neither answer contradicts what happened to the call, and at least
+    // one states it.
     expect(answers).not.toContain(ran ? "rejected" : "ran");
+    expect(answers).toContain(ran ? "ran" : "rejected");
+  });
+
+  it("reports the reason of the rejection that was applied", async () => {
+    const think = await agent();
+    await think.say("pause and charge 5");
+    const [pending] = await think.pendingApprovals();
+
+    const answer = await think.rejectExecution(pending.executionId, "too much");
+    expect(answer).toMatchObject({ status: "rejected", reason: "too much" });
   });
 
   it("lists the same descriptor after a restart, from the action and its input", async () => {
