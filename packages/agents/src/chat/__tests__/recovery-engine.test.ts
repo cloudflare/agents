@@ -351,7 +351,14 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
     // The fifth death is found by the next admission, which seals instead of
     // running the callback again.
     fake.restart();
-    await new ChatRecoveryEngine(fake.adapter).runRecoveryAttempt({
+    let reconciled = 0;
+    await new ChatRecoveryEngine({
+      ...fake.adapter,
+      turns: {
+        attemptScope: new AsyncLocalStorage(),
+        reconcileAgentToolChildRuns: async () => void reconciled++
+      } as unknown as ChatRecoveryTurnBindings
+    }).runRecoveryAttempt({
       callback: "_chatRecoveryContinue",
       data,
       run: async () => {
@@ -365,6 +372,9 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       status: "exhausted",
       reason: "interrupted_attempts_exceeded"
     });
+    // The give-up ran no turn: the agent-tool child run it held open is
+    // closed, or a parent would wait on it.
+    expect(reconciled).toBe(1);
   });
 
   it("clears its record when the attempt finishes, so a later attempt counts nothing", async () => {
@@ -2127,8 +2137,17 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
 
   it("terminalizes the exhausted budget BEFORE onChatRecovery and schedules nothing", async () => {
     const h = makeHarness({ seedExhausted: true });
+    let reconciled = 0;
+    h.adapter.turns = {
+      attemptScope: new AsyncLocalStorage(),
+      reconcileAgentToolChildRuns: async () => void reconciled++
+    } as unknown as ChatRecoveryTurnBindings;
 
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
+
+    // The give-up continues nothing: the agent-tool child run the turn
+    // held open is closed.
+    expect(reconciled).toBe(1);
 
     // Exhausted path: persist gate (no options) + exhaustChatRecovery, with the
     // turn's createdAt; never consults onChatRecovery or schedules.

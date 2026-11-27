@@ -880,6 +880,7 @@ export class ChatRecoveryEngine {
         snapshot?.originMessageIds
       );
       this.#settled();
+      await this.#reconcileChildRuns();
       return;
     }
 
@@ -2055,6 +2056,7 @@ export class ChatRecoveryEngine {
         adapter.onGiveUpBookkeepingError("seal", writeError);
       }
     }
+    await this.#reconcileChildRuns();
   }
 
   /**
@@ -2124,26 +2126,29 @@ export class ChatRecoveryEngine {
     ) {
       await adapter.setRecovering(false);
     }
-    // A recovery that ends without a turn (skipped, failed) settles nothing
-    // itself. If this agent is an agent-tool child, close the runs it held
-    // open, so a parent that follows one is not left waiting. An attempt
-    // does this as it ends.
-    const turns = adapter.turns;
-    if (
-      (status === "skipped" || status === "failed") &&
-      turns &&
-      !turns.attemptScope.getStore()
-    ) {
-      try {
-        await turns.reconcileAgentToolChildRuns();
-      } catch (error) {
-        console.error(
-          `${turns.label} failed to reconcile agent-tool child runs after recovery ended`,
-          error
-        );
-      }
+    if (status === "skipped" || status === "failed") {
+      await this.#reconcileChildRuns();
     }
     return true;
+  }
+
+  /**
+   * A recovery that ends without a turn (skipped, failed, given up) settles
+   * nothing itself. If this agent is an agent-tool child, close the runs it
+   * held open, so a parent that follows one is not left waiting. An attempt
+   * does this as it ends.
+   */
+  async #reconcileChildRuns(): Promise<void> {
+    const turns = this.adapter.turns;
+    if (!turns || turns.attemptScope.getStore()) return;
+    try {
+      await turns.reconcileAgentToolChildRuns();
+    } catch (error) {
+      console.error(
+        `${turns.label} failed to reconcile agent-tool child runs after recovery ended`,
+        error
+      );
+    }
   }
 }
 
