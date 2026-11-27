@@ -626,7 +626,9 @@ describe("mediaEviction — a pass that runs on its own", () => {
     try {
       const agent = await evictionAgent(name);
       // Seeded with eviction off, so its appends schedule nothing; one
-      // refresh then asks for one pass, and only the chain asks for more.
+      // refresh then asks for one pass. On Think only the chain asks for
+      // more; the harness-backed Think's view also re-reads after the
+      // pass's own rewrite, and that refresh asks too.
       await agent.setMediaEvictionForTest(false);
       await agent.seedMediaHistoryForTest();
       await agent.setMediaEvictionForTest({
