@@ -11228,6 +11228,7 @@ const STALE_WINDOW_KEY = "test:submission-stale-ms";
 
 /** Where {@link ThinkProgrammaticTestAgent} keeps a hold across a reset. */
 const HOLD_AFTER_RESET_KEY = "test:hold-chunks-after-reset";
+const FAIL_AFTER_RESET_KEY = "test:fail-in-band-after-reset";
 
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
@@ -11410,6 +11411,12 @@ export class ThinkProgrammaticTestAgent extends Think {
           return streams.doStream(options);
         }
       } as unknown as LanguageModel;
+    }
+    // An in-band failure kept for the isolate after a reset.
+    const failing = this.ctx.storage.kv.get<string>(FAIL_AFTER_RESET_KEY);
+    if (failing !== undefined && !this._inBandErrorResponse) {
+      this.ctx.storage.kv.delete(FAIL_AFTER_RESET_KEY);
+      this._inBandErrorResponse = { errorText: failing, textChunks: [] };
     }
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
@@ -11901,6 +11908,14 @@ export class ThinkProgrammaticTestAgent extends Think {
     after: number
   ): Promise<void> {
     this.ctx.storage.kv.put(HOLD_AFTER_RESET_KEY, { chunks, delayMs, after });
+  }
+
+  /**
+   * The model's stream fails in-band with `errorText` in the isolate after
+   * a reset. Kept in storage: the reset drops what this object holds.
+   */
+  async failInBandAfterResetForTest(errorText: string): Promise<void> {
+    this.ctx.storage.kv.put(FAIL_AFTER_RESET_KEY, errorText);
   }
 
   async holdChunksAfterForTest(after: number): Promise<void> {
