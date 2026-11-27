@@ -97,12 +97,13 @@ import {
   resolveChannelContext,
   type ChannelEvent
 } from "./channels/runtime";
+import { extensionTools } from "./extension-tools";
+import { actionsExtension } from "./harness/extensions/actions";
 import {
   DEFAULT_ACTION_TIMEOUT_MS,
   actionApprovalInputErrorEnvelope,
   actionErrorEnvelope,
   approvedActionInputs,
-  compileActionTools,
   createActionAbortSignal,
   normalizeActionAuthorization,
   prepareActionOutputForModel,
@@ -4001,14 +4002,16 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   };
 
   private async _compileActionTools(): Promise<ToolSet> {
-    const actions = await this.getActions();
     this._activeTurnActionMetadata = new Map();
     this._activeTurnActionApprovalDescriptors = new Map();
-    return compileActionTools(
-      actions,
-      this.#actionToolHost,
-      this._activeTurnActionMetadata
-    );
+    // The same extension the harness-backed Think loads for its actions.
+    return extensionTools([
+      actionsExtension(
+        () => this.getActions(),
+        this.#actionToolHost,
+        this._activeTurnActionMetadata
+      )
+    ]);
   }
 
   private _emitActionLedgerEvent(event: ActionLedgerEvent): void {
