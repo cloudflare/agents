@@ -1250,4 +1250,172 @@ describe("chatTurnDefinition", () => {
       expect(part?.state).toBe("approval-responded");
     });
   });
+
+  /**
+   * Run a turn whose model streams `chunks`, then waits until the returned
+   * `release` is called. `stored()` reads the turn's stream as a reset would
+   * find it: the rows, without flushing what is buffered.
+   */
+  async function heldTurn(instance: ChatTurnHostObject, chunks: unknown[]) {
+    await instance.lifecycle.start();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const allSent = new Promise<void>((resolve) => (reached = resolve));
+    let count = 0;
+    const done = definitionOf(instance, {
+      respond: async () =>
+        new ReadableStream({
+          async start(controller) {
+            for (const chunk of chunks) controller.enqueue(chunk as never);
+            await released;
+            controller.close();
+          }
+        }),
+      hooks: {
+        transformChunk: (chunk) => {
+          if (++count === chunks.length) reached();
+          return chunk;
+        }
+      }
+    })({ trigger: "server" }, laterAttempt("held-1", 1));
+    await allSent;
+    const stored = async () => {
+      const stop = new AbortController();
+      const types: string[] = [];
+      try {
+        for await (const batch of instance.streams.readBatches(
+          chatTurnStreamId("held-1"),
+          { signal: stop.signal, onUpToDate: () => stop.abort() }
+        )) {
+          for (const item of batch) {
+            types.push((item.chunk as { type: string }).type);
+          }
+          if (stop.signal.aborted) break;
+        }
+      } catch (error) {
+        if (!stop.signal.aborted) throw error;
+      }
+      return types;
+    };
+    return {
+      stored,
+      finish: async () => {
+        release();
+        await done;
+      }
+    };
+  }
+
+  it("a server tool's call is written before the tool runs, so a reset while it runs keeps it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const turn = await heldTurn(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "start-step" },
+        { type: "tool-input-start", toolCallId: "s1", toolName: "lookup" },
+        {
+          type: "tool-input-available",
+          toolCallId: "s1",
+          toolName: "lookup",
+          input: {}
+        }
+      ]);
+      expect(await turn.stored()).toContain("tool-input-available");
+      await turn.finish();
+    });
+  });
+
+  it("a part's first delta and a finished step are written at once", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const turn = await heldTurn(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "start-step" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Hi" }
+      ]);
+      expect(await turn.stored()).toContain("text-delta");
+      await turn.finish();
+    });
+  });
+
+  it("a reply's other chunks are written in batches, not one row write each", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      // After the first delta (written at once), four more in one burst.
+      const turn = await heldTurn(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "a" },
+        { type: "text-delta", id: "t1", delta: "b" },
+        { type: "text-delta", id: "t1", delta: "c" },
+        { type: "text-delta", id: "t1", delta: "d" },
+        { type: "text-delta", id: "t1", delta: "e" }
+      ]);
+      expect((await turn.stored()).length).toBeLessThan(7);
+      await turn.finish();
+    });
+  });
+
+  it("a chunk over the capability's chunk limit is refused, not buffered", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({ type: "text-start", id: "t1" });
+              // Over the default 1 MiB chunk limit, under the row budget.
+              controller.enqueue({
+                type: "text-delta",
+                id: "t1",
+                delta: "x".repeat(1_100_000)
+              });
+              controller.close();
+            }
+          })
+      })({ trigger: "server" }, laterAttempt("big-1", 1));
+      expect(result).toMatchObject({ status: "error" });
+    });
+  });
+
+  it("a tool cut off after only progress output is reported interrupted, not given the progress as its result", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const cut = await instance.streams.open(chatTurnStreamId("pg-1"), {
+        tag: "pg-1"
+      });
+      for (const chunk of [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "c1",
+          toolName: "slow",
+          input: {}
+        },
+        {
+          type: "tool-output-available",
+          toolCallId: "c1",
+          output: "half",
+          preliminary: true
+        }
+      ]) {
+        cut.append(chunk as never);
+      }
+      await definitionOf(instance, instance.host)(
+        { trigger: "server" },
+        laterAttempt("pg-1", 2)
+      );
+      const part = (
+        instance.calls[0].messages.find((m) => m.id === "a1") as unknown as {
+          parts: Array<{ toolCallId?: string; state?: string }>;
+        }
+      ).parts.find((p) => p.toolCallId === "c1");
+      expect(part?.state).toBe("output-error");
+    });
+  });
 });
