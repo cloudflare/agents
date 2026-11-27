@@ -10441,7 +10441,27 @@ export class ThinkToolsTestAgent extends Think {
     preliminary: boolean;
   }> = [];
 
+  // Every stream part's type, and a tool part's name, input and output.
+  private _chunkPartLog: Array<Record<string, unknown>> = [];
+
+  /** As JSON: the parts' inputs and outputs are any JSON. */
+  async getChunkPartLog(): Promise<string> {
+    return JSON.stringify(this._chunkPartLog);
+  }
+
   override onChunk(ctx: ChunkContext): void {
+    const part = ctx.chunk as Record<string, unknown>;
+    this._chunkPartLog.push(
+      String(part.type).startsWith("tool-")
+        ? {
+            type: part.type,
+            ...("toolName" in part && { toolName: part.toolName }),
+            ...("input" in part && { input: part.input }),
+            ...("output" in part && { output: part.output }),
+            ...("delta" in part && { delta: true })
+          }
+        : { type: part.type }
+    );
     if (ctx.chunk.type === "tool-result") {
       const chunk = ctx.chunk as { output: unknown; preliminary?: boolean };
       this._toolResultChunkLog.push({
