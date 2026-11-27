@@ -197,6 +197,19 @@ const DISCARDED_CHECKPOINT = "chat:discarded";
  * next attempt that finds this one cut off.
  */
 const INCIDENT_CHECKPOINT = "chat:incident";
+
+/**
+ * Whether the turn of `step` ended because its recovery gave up: the budget
+ * was spent, or the app chose not to continue. A host that reports such an
+ * end differently from a failed reply asks here.
+ *
+ * @internal
+ */
+export function chatRecoveryGaveUp(step: TaskStep): boolean {
+  const status =
+    step.checkpoint.get<ChatRecoveryIncident>(INCIDENT_CHECKPOINT)?.status;
+  return status === "exhausted" || status === "skipped";
+}
 /**
  * The run's checkpoint key for the failure that sent it to be tried again
  * (a provider's transient error, a stalled stream): its text, and how many
@@ -619,6 +632,8 @@ export function chatTurnDefinition(
       const failures = (before?.failures ?? 0) + 1;
       step.checkpoint.set(FAILED_CHECKPOINT, {
         text: error instanceof Error ? error.message : String(error),
+        // Until the next attempt has looked: this one ended itself.
+        live: true,
         failures,
         retries:
           (before?.retries ?? 0) +
@@ -708,7 +723,12 @@ export function chatTurnDefinition(
         text: string;
         failures: number;
         retries: number;
+        live?: boolean;
       }>(FAILED_CHECKPOINT);
+      const thisAttempt = {
+        isolate: (isolateId ??= crypto.randomUUID()),
+        token: crypto.randomUUID()
+      };
       const evaluated =
         recovery === false
           ? undefined
@@ -717,13 +737,12 @@ export function chatTurnDefinition(
                 requestId,
                 recoveryKind: partial ? "continue" : "retry"
               },
-              trigger: {
-                kind: "interrupted",
-                attempt: {
-                  isolate: (isolateId ??= crypto.randomUUID()),
-                  token: crypto.randomUUID()
-                }
-              },
+              // An attempt that ended itself to be tried again (a stall, a
+              // transient failure) did not die: it is not an interrupted
+              // attempt.
+              trigger: failed?.live
+                ? { kind: "stalled" }
+                : { kind: "interrupted", attempt: thisAttempt },
               config: budget,
               existing: counted
                 ? {
@@ -734,7 +753,8 @@ export function chatTurnDefinition(
                       })
                   }
                 : null,
-              currentProgress: streamedCount,
+              // Work is counted as released: one unit per ten chunks.
+              currentProgress: Math.ceil(streamedCount / CHUNK_BATCH.maxChunks),
               awaitingClientInteraction: false,
               now: Date.now(),
               onShouldKeepRecoveringError: (error) =>
@@ -744,7 +764,24 @@ export function chatTurnDefinition(
                 )
             });
       if (evaluated) {
-        step.checkpoint.set(INCIDENT_CHECKPOINT, evaluated.incident as never);
+        // This attempt is in flight either way: if its isolate dies, the
+        // next one counts it.
+        const inFlight = failed?.live
+          ? [
+              ...(evaluated.incident.attemptsInFlight ?? []).filter(
+                (attempt) => attempt.isolate === thisAttempt.isolate
+              ),
+              thisAttempt
+            ]
+          : evaluated.incident.attemptsInFlight;
+        step.checkpoint.set(INCIDENT_CHECKPOINT, {
+          ...evaluated.incident,
+          ...(inFlight &&
+            !evaluated.exhausted && { attemptsInFlight: inFlight })
+        } as never);
+        if (failed?.live) {
+          step.checkpoint.set(FAILED_CHECKPOINT, { ...failed, live: false });
+        }
       }
       const exhausted = recovery === false || evaluated?.exhausted === true;
       const attempt = evaluated?.incident.attempt ?? step.attempt;
@@ -780,6 +817,12 @@ export function chatTurnDefinition(
         const writer = await deps.streams.open(streamId, { tag: requestId });
         writer.error("interrupted");
         if (!evaluated?.exhausted) {
+          if (evaluated) {
+            step.checkpoint.set(INCIDENT_CHECKPOINT, {
+              ...evaluated.incident,
+              status: "skipped"
+            } as never);
+          }
           return report({
             requestId,
             status: "error",
