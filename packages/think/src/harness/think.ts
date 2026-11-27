@@ -75,6 +75,7 @@ import type { TaskStatus } from "agents/tasks";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
+import { ThinkConfigStore } from "../config-store";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
 import { Context, type ContextConfig } from "agents/context";
@@ -276,6 +277,9 @@ export class Think<
   /** Skills from `getSkills()`, loaded in onStart as Think loads them. */
   readonly #skills = new ThinkSkills();
   #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
+  /** Think's `think_config` rows, the table and migration Think has. */
+  readonly #config = new ThinkConfigStore();
+  #configCache: unknown = null;
 
   constructor(ctx: AgentContext, env: Env) {
     snapshotDeclaredMembers(new.target.prototype);
@@ -489,6 +493,7 @@ export class Think<
       }
     });
     this.lifecycle.use(this.harness);
+    this.lifecycle.use(this.#config);
 
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
@@ -605,6 +610,33 @@ export class Think<
     session: ThinkSession
   ): ThinkSession | Promise<ThinkSession> {
     return session;
+  }
+
+  /**
+   * Persist a JSON-serializable configuration for this agent, as on Think:
+   * private to the server, kept across restarts.
+   */
+  configure<T = Record<string, unknown>>(config: T): void {
+    this.#config.set("_think_config", JSON.stringify(config));
+    this.#configCache = config;
+  }
+
+  /** The configuration stored by {@link configure}, or null, as on Think. */
+  getConfig<T = Record<string, unknown>>(): T | null {
+    if (this.#configCache !== null) return this.#configCache as T;
+    const raw = this.#config.get("_think_config");
+    if (raw === undefined) return null;
+    this.#configCache = JSON.parse(raw);
+    return this.#configCache as T;
+  }
+
+  /**
+   * Run the legacy `assistant_config` lift again, as on Think. The config
+   * capability runs it on start; this is a test seam.
+   * @internal
+   */
+  protected _migrateLegacyConfigToThinkTable(): void {
+    this.#config.migrateLegacy();
   }
 
   /** The skill sources, as in Think: none unless overridden. */
