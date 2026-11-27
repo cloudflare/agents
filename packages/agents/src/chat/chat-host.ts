@@ -694,8 +694,16 @@ export function chatTurnDefinition(
           ? { ...baseMessage, parts: baseMessage.parts.slice(0, base.parts) }
           : undefined
       );
-      if (built && built.parts.length > 0) {
-        partial = repairCutOffTools(built, host.hooks, run.clientTools ?? []);
+      // The partial is stored as a reply is: what the host keeps out of
+      // the transcript stays out after a recovery too.
+      const sanitized =
+        built && (host.hooks?.sanitizeForPersistence?.(built) ?? built);
+      if (sanitized && sanitized.parts.length > 0) {
+        partial = repairCutOffTools(
+          sanitized,
+          host.hooks,
+          run.clientTools ?? []
+        );
         await session.upsertMessage(partial as never, placement);
       }
       // Drop what this run streamed: a reply it continues goes back to how
