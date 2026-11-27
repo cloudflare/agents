@@ -342,6 +342,12 @@ messages against the latest persisted transcript when the turn actually starts.
 This avoids stale baselines when multiple `saveMessages()` calls queue up
 behind active work.
 
+`persistMessages()` is the method your own code calls. A turn stores its
+messages directly, so an override of `persistMessages()` does not see a turn's
+writes. To change what a turn stores, override
+[`sanitizeMessageForPersistence()`](#sanitizemessageforpersistence); to act
+after a reply is stored, use [`onChatResponse`](#onchatresponse).
+
 `saveMessages()` returns `{ requestId, status, error? }`. The `status` is
 `"completed"` when the turn ran, `"error"` when the stream reported an error,
 `"skipped"` when it was invalidated (chat cleared mid-flight), or `"aborted"`
@@ -647,7 +653,9 @@ A `saveMessages()` or `continueLastTurn()` call that is waiting in the queue sto
 
 #### `onChatRecovery`
 
-Override to implement provider-specific recovery. The default behavior persists the partial response and schedules a continuation via `continueLastTurn()`.
+Override to implement provider-specific recovery. The default behavior persists the partial response and continues the reply.
+
+A recovery is another attempt of the same turn. It keeps the turn's request id, and the request ends once: a tab gets one final `done` frame for it, when the recovered reply is complete or recovery has given up. Recovery does not call `continueLastTurn()` or `waitUntilStable()`, so overriding those does not change or observe a recovery. `onChatRecovery` is the place to do that: return `{ continue: false }` to stop, or `{ persist: false }` to drop the partial response and answer again.
 
 ```typescript
 export class ChatAgent extends AIChatAgent {
