@@ -1940,7 +1940,10 @@ export class ThinkClientToolsAgent extends Think {
   isChatTurnActiveForTest(): boolean {
     const queue = (this as unknown as { _turnQueue?: { isActive: boolean } })
       ._turnQueue;
-    return queue?.isActive ?? false;
+    // The harness-backed Think (`pnpm test:harness`) has no turn queue; its
+    // running turn is the public `activeTurn`.
+    if (!queue) return this.activeTurn !== undefined;
+    return queue.isActive;
   }
 
   getOverlappingSubmitCountForTest(): number {
