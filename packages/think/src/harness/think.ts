@@ -57,7 +57,7 @@ import {
   loadThinkExtensions,
   ThinkExtensionHooks
 } from "../extensions/wiring";
-import type { ExtensionConfig } from "../turn-types";
+import type { ExtensionConfig, OnStartDegradation } from "../turn-types";
 import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
@@ -555,17 +555,63 @@ export class Think<
           void this.#sync();
         }
       });
-      await this.#sync();
+      this.#onStartDegradations = [];
+      // As in Think: a transcript that cannot be read must not stop the
+      // agent from starting; it starts with an empty view.
+      const hydrated = await this.#bestEffortStartStep(
+        "transcript-hydration",
+        () => this.#sync(),
+        "The agent is starting with an empty in-memory message view; " +
+          "persisted history is untouched."
+      );
+      if (!hydrated) this.#messages = [];
       this.#installProtocol();
       await onStart(props);
       // Best-effort, as in Think: a getScheduledTasks() that throws must
       // not stop the agent from starting.
-      try {
-        await this.internal_reconcileScheduledTasks();
-      } catch (error) {
-        console.error("[Think] Scheduled tasks were not reconciled", error);
-      }
+      await this.#bestEffortStartStep(
+        "scheduled-task-reconcile",
+        () => this.internal_reconcileScheduledTasks(),
+        "Declared scheduled tasks were not reconciled on this wake; the " +
+          "next successful wake will reconcile them."
+      );
     };
+  }
+
+  #onStartDegradations: OnStartDegradation[] = [];
+
+  /**
+   * The onStart steps that failed on this wake and were skipped so the
+   * agent could still come up, as on Think. Empty when the start was clean.
+   */
+  getOnStartDegradations(): ReadonlyArray<OnStartDegradation> {
+    return [...this.#onStartDegradations];
+  }
+
+  /**
+   * Run an onStart step whose failure must not stop the agent starting:
+   * record it, report it, and go on, as Think does. `true` when it ran.
+   */
+  async #bestEffortStartStep(
+    step: OnStartDegradation["step"],
+    fn: () => unknown,
+    hint: string
+  ): Promise<boolean> {
+    try {
+      await fn();
+      return true;
+    } catch (error) {
+      this.#onStartDegradations.push({ step, error });
+      console.error(
+        `[Think] onStart step "${step}" failed; continuing with degraded state. ${hint}`,
+        error
+      );
+      this._emit("chat:onstart:degraded", {
+        step,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
   }
 
   // ── Overridable configuration ─────────────────────────────────────

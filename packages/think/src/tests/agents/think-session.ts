@@ -15014,7 +15014,7 @@ export class ThinkOnStartReconcileFailureAgent extends Think {
   }
 
   async getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
-    return this._onStartDegradations.map((d) => ({
+    return this.getOnStartDegradations().map((d) => ({
       step: d.step,
       error: String(d.error)
     }));
@@ -15076,7 +15076,7 @@ export class ThinkOnStartHydrationFailureAgent extends Think {
   }
 
   async getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
-    return this._onStartDegradations.map((d) => ({
+    return this.getOnStartDegradations().map((d) => ({
       step: d.step,
       error: String(d.error)
     }));
@@ -15549,7 +15549,7 @@ export class ThinkWindowedHydrationAgent extends Think {
   }
 
   async getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
-    return this._onStartDegradations.map((d) => ({
+    return this.getOnStartDegradations().map((d) => ({
       step: d.step,
       error: String(d.error)
     }));
