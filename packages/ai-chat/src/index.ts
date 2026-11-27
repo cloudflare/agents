@@ -1193,14 +1193,8 @@ export class AIChatAgent<
         ...(this.maxPersistedMessages !== undefined && {
           maxPersistedMessages: this.maxPersistedMessages
         }),
-        recovery:
-          typeof recovery === "object"
-            ? {
-                ...(recovery.maxAttempts !== undefined && {
-                  maxAttempts: recovery.maxAttempts
-                })
-              }
-            : {}
+        // The app's whole budget: the turn definition applies it.
+        recovery: typeof recovery === "object" ? recovery : {}
       }
     };
   }

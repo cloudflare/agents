@@ -446,7 +446,6 @@ const CONTEXT_CHECKPOINT = "chat:context";
 /** The run's checkpoint key holding the id of the reply it stored. */
 const REPLY_CHECKPOINT = "chat:reply";
 
-
 /** The model's own error, sent as an `error` chunk in the stream. */
 class InBandStreamError extends Error {}
 
@@ -1426,7 +1425,8 @@ export function chatTurnDefinition(
             createdAt: step.createdAt,
             partialText,
             partialParts,
-            reason: evaluated.incident.reason ?? "max_attempts_exceeded"
+            reason: evaluated.incident.reason ?? "max_attempts_exceeded",
+            terminalMessage: budget.terminalMessage
           });
         } catch (error) {
           console.error(
