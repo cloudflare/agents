@@ -352,15 +352,6 @@
   },
   {
     "file": "messengers.test.ts",
-    "test": "think messengers core > recovered replies reach the thread (#2106) > retries a recovered reply whose live delivery fails, never re-sending a rejected post",
-    "reason": "sends and releases the class's `think-messenger-recovery` delivery directly (`sendDelivery`/`releaseDelivery`, a class-private payload) and reads its checkpoint; the successor rejects a post of a released reply across a restart",
-    "successor": {
-      "file": "messengers.test.ts",
-      "test": "think messengers core > recovered replies reach the thread (#2106) > never posts again a part of a reply think@0.24.0 settled that was rejected"
-    }
-  },
-  {
-    "file": "messengers.test.ts",
     "test": "think messengers core > recovered replies reach the thread (#2106) > posts each chunk once when overlapping deliveries share a recovered reply",
     "reason": "releases the class's held delivery twice at once beside its private start step (`releaseDelivery`, `_replayMessengerRecoveryDeliveries`); the successor delivers a released reply's posts each once, from its cursor",
     "successor": {
