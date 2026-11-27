@@ -814,5 +814,23 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > onChatRecovery's context after a reset > hands onChatRecovery the data the turn stashed before a reset"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > does not continue a recovered chat fiber whose stream already completed",
+    "reason": "a completed stream and an interrupted chat fiber row inserted in the class's shape (`insertInterruptedStream`, `insertInterruptedFiber`), with recovery triggered by hand",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — error handling > neither continues nor stores again a reply a reset cut after it was stored"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > does not duplicate an already-persisted completed stream on recovery",
+    "reason": "a completed stream and an interrupted chat fiber row inserted in the class's shape (`insertInterruptedStream`, `insertInterruptedFiber`), with recovery triggered by hand",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — error handling > neither continues nor stores again a reply a reset cut after it was stored"
+    }
   }
 ]
