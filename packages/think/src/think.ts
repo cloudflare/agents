@@ -356,6 +356,7 @@ import {
   submissionOutputFits,
   submissionOutputTooLarge,
   admittedSubmissionMetadata,
+  SKIPPED_BY_RESET,
   progressOutputFits,
   type SubmissionResult,
   TERMINAL_SUBMISSION_STATUSES,
@@ -7322,10 +7323,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._submissionAbortControllers.clear();
     // Every open submission ends skipped. The writes land before this
     // returns; the status reports follow.
-    const skipping = this.tasks.clear(
-      SUBMISSION_LANE,
-      "Submission was skipped by turn reset."
-    );
+    const skipping = this.tasks.clear(SUBMISSION_LANE, SKIPPED_BY_RESET);
     void this.keepAliveWhile(() => skipping).catch((error) => {
       console.error("[Think] Failed to skip pending submissions", error);
     });

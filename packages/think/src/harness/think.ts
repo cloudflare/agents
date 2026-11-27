@@ -87,6 +87,7 @@ import {
 } from "../workflow-notifications";
 import {
   admittedSubmissionMetadata,
+  SKIPPED_BY_RESET,
   cancelReason,
   isTerminalSubmissionStatus,
   SubmissionStatusQueue,
@@ -162,7 +163,7 @@ function errorText(error: unknown): string {
 
 /** Think's submission status for a harness operation status. */
 function submissionStatus(
-  status: ThinkOperationStatus
+  status: ThinkOperationStatus & { readonly abortReason?: string }
 ): ThinkSubmissionInspection["status"] {
   switch (status.status) {
     case "queued":
@@ -172,11 +173,12 @@ function submissionStatus(
     case "done":
       return "completed";
     case "unanswered":
-      return status.reason === "aborted"
+      // A turn reset stops its submissions with this reason; as on Think,
+      // they end skipped.
+      if (status.abortReason === SKIPPED_BY_RESET) return "skipped";
+      return status.reason === "aborted" || status.reason === "withdrawn"
         ? "aborted"
-        : status.reason === "withdrawn"
-          ? "aborted"
-          : "error";
+        : "error";
   }
 }
 
@@ -1716,7 +1718,14 @@ export class Think<
   #stopEveryTurn(kind: "stopped" | "cleared"): void {
     this.#stops++;
     this.#lastStop = kind;
-    const stopping = this.harness.session().abort();
+    const stopping =
+      kind === "cleared"
+        ? this.harness.abort(
+            this.harness.session().id,
+            undefined,
+            SKIPPED_BY_RESET
+          )
+        : this.harness.session().abort();
     // A failed stop is reported, and does not fail the turns after it.
     this.#stopping = stopping.catch(() => {});
     void this.keepAliveWhile(() => stopping).catch((error: unknown) =>
