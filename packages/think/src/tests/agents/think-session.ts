@@ -1661,6 +1661,8 @@ const RECOVERY_HELD_KEY = "test:recovery-held";
 const RECOVERY_CALLS_KEY = "test:recovery-calls";
 /** Where a test keeps `chatRecovery` across resets. */
 const RECOVERY_CONFIG_KEY = "test:recovery-config";
+/** Where a test keeps a model that never answers, across resets. */
+const HANG_MODEL_KEY = "test:hang-model";
 /** Where a test keeps a slow model across resets: chunks and delay. */
 const SLOW_MODEL_KEY = "test:slow-model";
 
@@ -3948,6 +3950,8 @@ export class ThinkTestAgent extends Think {
     progressing?: boolean;
     /** `chatRecovery.maxRecoveryWork`: the work budget across attempts. */
     maxRecoveryWork?: number;
+    /** `chatRecovery.noProgressTimeoutMs`: how long recovery may go without progress. */
+    noProgressTimeoutMs?: number;
   }): Promise<void> {
     this._progressingForTest = options.progressing === true;
     this._progressCallsForTest = 0;
@@ -3962,6 +3966,9 @@ export class ThinkTestAgent extends Think {
       maxAttempts: options.maxAttempts,
       ...(options.maxRecoveryWork !== undefined && {
         maxRecoveryWork: options.maxRecoveryWork
+      }),
+      ...(options.noProgressTimeoutMs !== undefined && {
+        noProgressTimeoutMs: options.noProgressTimeoutMs
       }),
       onExhausted: (ctx: ChatRecoveryExhaustedContext) => {
         this._exhaustedForTest.push({
@@ -4013,7 +4020,11 @@ export class ThinkTestAgent extends Think {
   async keepAcrossResetsForTest(options: {
     chunks: string[];
     delayMs: number;
-    config: { maxAttempts?: number; maxInterruptedAttempts?: number };
+    config: {
+      maxAttempts?: number;
+      maxInterruptedAttempts?: number;
+      noProgressTimeoutMs?: number;
+    };
   }): Promise<void> {
     this.ctx.storage.kv.put(SLOW_MODEL_KEY, {
       chunks: options.chunks,
@@ -4021,6 +4032,17 @@ export class ThinkTestAgent extends Think {
     });
     this.ctx.storage.kv.put(RECOVERY_CONFIG_KEY, options.config);
     this.chatRecovery = options.config;
+  }
+
+  /** From now on, across resets: no model call answers, and `config`. */
+  async hangAcrossResetsForTest(config: {
+    maxAttempts?: number;
+    maxInterruptedAttempts?: number;
+    noProgressTimeoutMs?: number;
+  }): Promise<void> {
+    this.ctx.storage.kv.put(HANG_MODEL_KEY, true);
+    this.ctx.storage.kv.put(RECOVERY_CONFIG_KEY, config);
+    this.chatRecovery = config;
   }
 
   /** The last assistant message's text. */
@@ -6639,6 +6661,13 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): ThinkModel {
+    // A test can leave every model call hanging on the provider, across
+    // resets: no turn ever makes progress.
+    if (this.ctx.storage.kv.get<boolean>(HANG_MODEL_KEY)) {
+      return createAbortAwareMockModel("connect", () => {
+        this._modelConnectingForTest = true;
+      });
+    }
     const slow = this.ctx.storage.kv.get<{ chunks: string[]; delayMs: number }>(
       SLOW_MODEL_KEY
     );

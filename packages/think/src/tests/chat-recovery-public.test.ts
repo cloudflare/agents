@@ -336,6 +336,7 @@ describe("chat recovery, through public behaviour", () => {
         keepRecovering?: boolean;
         progressing?: boolean;
         maxRecoveryWork?: number;
+        noProgressTimeoutMs?: number;
       },
       done: (progress: {
         recoveryCalls: unknown[];
@@ -434,6 +435,26 @@ describe("chat recovery, through public behaviour", () => {
       expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
         "work_budget_exceeded"
       ]);
+    }, 30_000);
+
+    // The no-progress window (#1637), with a short `noProgressTimeoutMs` in
+    // place of the 5-minute default: elapsed time ends recovery only when
+    // nothing moved.
+    it("keeps recovering a turn that makes progress past the no-progress window, then answers", async () => {
+      const progress = await recoverUntil(
+        "progress-survives",
+        {
+          afterParts: 25,
+          stalledCalls: 6,
+          maxAttempts: 50,
+          progressing: true,
+          noProgressTimeoutMs: 300
+        },
+        (p) => p.exhausted.length > 0 || p.lastAssistantText.includes("a7-29")
+      );
+
+      expect(progress.exhausted).toEqual([]);
+      expect(progress.recoveryCalls.length).toBeGreaterThanOrEqual(6);
     }, 30_000);
 
     it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
@@ -911,4 +932,82 @@ describe("chat recovery, through public behaviour", () => {
       unsubscribe();
     }
   }, 60_000);
+
+  // The no-progress window (#1637, 4704's promise for a parent whose child
+  // is silent): interruptions found after resets, with nothing written in
+  // between, end once the window has passed, with a short
+  // `noProgressTimeoutMs` in place of the 5-minute default.
+  it("seals a turn whose resets bring no progress once the no-progress window passes", async () => {
+    const room = `no-progress-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    const exhausted: Array<{ reason?: string }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:recovery:exhausted" && event.name === room) {
+        exhausted.push(event.payload as { reason?: string });
+      }
+    });
+    async function tab() {
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      return ws;
+    }
+    try {
+      await (
+        await agent()
+      ).hangAcrossResetsForTest({
+        maxAttempts: 50,
+        maxInterruptedAttempts: 50,
+        noProgressTimeoutMs: 300
+      });
+      let ws = await tab();
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "never answered" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      let resets = 0;
+      for (;;) {
+        // The attempt waits on the provider: no progress.
+        await vi.waitFor(
+          async () => {
+            expect(
+              exhausted.length > 0 ||
+                (await (await agent()).modelConnectingForTest())
+            ).toBe(true);
+          },
+          { timeout: 15_000, interval: 20 }
+        );
+        if (exhausted.length > 0 || resets >= 20) break;
+        await (await agent()).resetIsolateForTest().catch(() => undefined);
+        resets++;
+        ws.close();
+        ws = await tab();
+      }
+      ws.close();
+
+      expect(exhausted.map((entry) => entry.reason)).toEqual([
+        "no_progress_timeout"
+      ]);
+    } finally {
+      unsubscribe();
+    }
+  }, 90_000);
 });
