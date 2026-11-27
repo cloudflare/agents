@@ -154,42 +154,6 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — error handling > ends a stalled turn as its stream error when onChatRecovery declines to continue",
-    "reason": "reads the class's terminal record (storage key cf:chat:last-terminal) and counts the class's recovery Task callbacks (_chatRecoveryContinue/_chatRecoveryRetry)",
-    "successor": {
-      "file": "chat-recovery-public.test.ts",
-      "test": "chat recovery, through public behaviour > gives up a stalled turn when onChatRecovery declines to continue"
-    }
-  },
-  {
-    "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > fires onChatRecovery for an interrupted fiber",
-    "reason": "seeds cf_agents_streams rows and a __cf_internal_chat_turn fiber row in the class's private shapes, and triggers the class's fiber recovery",
-    "successor": {
-      "file": "chat-recovery-public.test.ts",
-      "test": "chat recovery, through public behaviour > continues a stalled turn and calls onChatRecovery with its partial"
-    }
-  },
-  {
-    "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > exhausts chat recovery after the configured max attempts",
-    "reason": "seeds fiber rows, ages and reads the class's recovery incident records (cf:chat-recovery:incident:*)",
-    "successor": {
-      "file": "chat-recovery-public.test.ts",
-      "test": "chat recovery, through public behaviour > asks onChatRecovery no more often than chatRecovery's attempts allow"
-    }
-  },
-  {
-    "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > { continue: false } persists but does not schedule continuation",
-    "reason": "seeds cf_agents_streams and a __cf_internal_chat_turn fiber row in the class's private shapes, and triggers the class's fiber recovery",
-    "successor": {
-      "file": "chat-recovery-public.test.ts",
-      "test": "chat recovery, through public behaviour > gives up a stalled turn when onChatRecovery declines to continue"
-    }
-  },
-  {
-    "file": "think-session.test.ts",
     "test": "Think — onChatRecovery > marks the incident failed when onChatRecovery throws",
     "reason": "seeds a fiber row and reads the class's recovery incident records (cf:chat-recovery:incident:*)",
     "successor": {
