@@ -450,7 +450,7 @@ export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
    */
   @callable()
   forceSweep(nowMs: number): number {
-    return this._replyStreams.reclaim(nowMs);
+    return this["_releasedStreams"].reclaim(nowMs);
   }
 }
 

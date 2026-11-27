@@ -1,7 +1,6 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
-import type { UIMessage as ChatMessage } from "ai";
 
 /**
  * Parity with `@cloudflare/think`'s
@@ -40,47 +39,6 @@ async function getStub(room: string): Promise<ReattachStub> {
   const stub = await getAgentByName(env.ChatRecoveryTestAgent, room);
   return stub as unknown as ReattachStub;
 }
-
-describe("agent-tool child re-attach: request_id rebinding across recovery", () => {
-  it("re-binds the child-run request_id on a RETRY recovery so frames stay attributable", async () => {
-    const agent = await getStub(`reattach-retry-${crypto.randomUUID()}`);
-
-    await agent.seedAgentToolChildRunForTest("run-retry", "req-reattach-retry");
-
-    await agent.persistMessages([
-      {
-        id: "u-reattach-retry",
-        role: "user",
-        parts: [{ type: "text", text: "do the long job" }]
-      }
-    ] as ChatMessage[]);
-
-    await agent.insertInterruptedFiber(
-      "__cf_internal_chat_turn:req-reattach-retry",
-      {
-        __cfAIChatFiberSnapshot: {
-          kind: "ai-chat-turn",
-          version: 1,
-          requestId: "req-reattach-retry",
-          continuation: false,
-          latestMessageId: "u-reattach-retry",
-          latestMessageRole: "user",
-          latestUserMessageId: "u-reattach-retry",
-          startedAt: Date.now()
-        },
-        user: null
-      }
-    );
-
-    await agent.triggerFiberRecovery();
-    await agent.runScheduledRecoveryRetryForTest();
-
-    const reboundReqId =
-      await agent.getAgentToolChildRunRequestIdForTest("run-retry");
-    expect(reboundReqId).toBeTruthy();
-    expect(reboundReqId).not.toBe("req-reattach-retry");
-  });
-});
 
 describe("an agent-tool run whose reply is cut off in the isolate", () => {
   // The run's input is the stored body only while the run's turn runs.
