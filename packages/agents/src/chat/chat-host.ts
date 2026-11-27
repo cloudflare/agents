@@ -232,6 +232,17 @@ export function liveTurnsOf(streams: Streams): Map<string, LiveTurn> {
   return turns;
 }
 
+/**
+ * When a turn's chunks are written: every 10 chunks or 512 KB, in one row
+ * write, into the stream's newest block while it stays under 256 KB. A
+ * crash loses at most the 9 chunks still buffered, as the hosts do today.
+ */
+export const CHUNK_BATCH = {
+  maxChunks: 10,
+  maxBytes: 512_000,
+  fillBlocks: true
+} as const;
+
 /** The run's checkpoint key holding the reply a continuation extends. */
 const BASE_CHECKPOINT = "chat:base";
 /** The run's checkpoint key counting the stream chunks recovery discarded. */
@@ -259,7 +270,8 @@ function watchStall(
   chunks: ReadableStream<UIMessageChunk>,
   ms: number | undefined,
   /** Calls already running when the stream starts (approved, continued). */
-  alreadyRunning: Iterable<string> = []
+  alreadyRunning: Iterable<string> = [],
+  clientTools: ReadonlySet<string> = new Set()
 ): ReadableStream<UIMessageChunk> {
   if (!ms || ms <= 0) return chunks;
   const reader = chunks.getReader();
@@ -282,8 +294,16 @@ function watchStall(
         }
         const id = (next.value as { toolCallId?: unknown }).toolCallId;
         if (typeof id === "string") {
-          if (next.value.type === "tool-input-available") running.add(id);
-          else if (
+          // A client tool runs in the tab, after this stream: it holds
+          // nothing off.
+          if (
+            next.value.type === "tool-input-available" &&
+            !clientTools.has(
+              String((next.value as { toolName?: unknown }).toolName)
+            )
+          ) {
+            running.add(id);
+          } else if (
             // Waiting for an approval is not running; a preliminary output
             // (a tool's progress) is not its end.
             next.value.type === "tool-approval-request" ||
@@ -872,6 +892,17 @@ export function chatTurnDefinition(
         }
       };
 
+      // Chunks are written in batches (`CHUNK_BATCH`), as the hosts' reply
+      // streams do; a reader flushes first.
+      const record = (chunk: UIMessageChunk) => {
+        const json = JSON.stringify(chunk);
+        const bytes = utf8Length(json);
+        if (bytes > ROW_VALUE_BYTES) out.append(chunk as never);
+        else
+          deps.streams
+            .__DO_NOT_USE_WILL_BREAK__sync()
+            .appendJson(streamId, json, bytes, CHUNK_BATCH);
+      };
       const liveKey = sessionId;
       const live = liveTurnsOf(deps.streams);
       const recorded = watchStall(
@@ -889,7 +920,8 @@ export function chatTurnDefinition(
             record.approval?.approved === true
             ? [record.toolCallId]
             : [];
-        })
+        }),
+        new Set((run.clientTools ?? []).map((tool) => tool.name))
       ).pipeThrough(
         new TransformStream<UIMessageChunk, UIMessageChunk>({
           start(controller) {
@@ -922,7 +954,7 @@ export function chatTurnDefinition(
               inject: (chunk) => {
                 const next =
                   host.hooks?.transformChunk?.(chunk, parts) ?? chunk;
-                out.append(next as never);
+                record(next);
                 seen.push(next);
                 send({
                   body: JSON.stringify(next),

@@ -1256,6 +1256,7 @@ describe("chatTurnDefinition", () => {
    * `release` is called. `stored()` reads the turn's stream as a reset would
    * find it: the rows, without flushing what is buffered.
    */
+
   async function heldTurn(instance: ChatTurnHostObject, chunks: unknown[]) {
     await instance.lifecycle.start();
     let release!: () => void;
@@ -1504,6 +1505,33 @@ describe("chatTurnDefinition", () => {
         }
       ).parts.find((p) => p.toolCallId === "c1");
       expect(part?.state).toBe("output-error");
+    });
+  });
+
+  it("a client tool call does not hold the stall watchdog off", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "start", messageId: "a1" });
+              controller.enqueue({
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "ask",
+                input: {}
+              });
+              // Then the model goes silent.
+            }
+          }),
+        options: { recovery: { stallTimeoutMs: 20 } }
+      })(
+        { trigger: "server", clientTools: [{ name: "ask" }] },
+        laterAttempt("ct-2", 1)
+      );
+      expect(result).toBeInstanceOf(TaskSettlement);
     });
   });
 });

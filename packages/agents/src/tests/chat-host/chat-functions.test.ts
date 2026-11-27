@@ -6,10 +6,11 @@ import {
   answerTool,
   cancelTurn,
   chatDispatch,
+  replayTurn,
   resumeChat,
   submitTurn
 } from "../../chat/chat-functions";
-import { parkedIn } from "../../chat/chat-host";
+import { chatTurnStreamId, parkedIn } from "../../chat/chat-host";
 
 const tab = { id: "tab-1", send: () => {} } as unknown as Connection;
 
@@ -905,6 +906,40 @@ describe("chat functions over a minimal host", () => {
         instance.calls.filter((c) => c.trigger === "tool-answer")
       ).toHaveLength(1);
       expect(seen.filter((t) => t === "tool-output-available")).toHaveLength(2);
+    });
+  });
+
+  it("a turn's chunks are written in batches, and a replay flushes them first", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "a" },
+        { type: "text-delta", id: "t1", delta: "b" },
+        { type: "text-delta", id: "t1", delta: "c" }
+      ]);
+      // Five chunks streamed: they wait in the batch, not one row each.
+      const stop = new AbortController();
+      let written = 0;
+      try {
+        for await (const batch of instance.streams.readBatches(
+          chatTurnStreamId("r1"),
+          { signal: stop.signal, onUpToDate: () => stop.abort() }
+        )) {
+          written += batch.length;
+          if (stop.signal.aborted) break;
+        }
+      } catch (error) {
+        if (!stop.signal.aborted) throw error;
+      }
+      expect(written).toBeLessThan(5);
+      const sent: Array<Record<string, unknown>> = [];
+      await replayTurn(instance.deps, recordingTab("tab-r", sent), "r1");
+      expect(sent).toHaveLength(5);
+      release();
+      await instance.resultFor("r1");
     });
   });
 });
