@@ -1047,7 +1047,7 @@ export class AIChatAgent<
 
   /** How the chat module asks this agent for a reply and tells it the end. */
   private _chatHost(): ChatHost {
-    const recovery = this.chatRecovery;
+    const agent = this;
     return {
       respond: async (call) => {
         // Apps read the transcript the call is for from `this.messages`.
@@ -1203,11 +1203,15 @@ export class AIChatAgent<
         }),
         // The app's whole budget: the turn definition applies it. A stream
         // that sends nothing for the app's stall timeout is interrupted.
-        recovery: {
-          ...(typeof recovery === "object" && recovery),
-          ...(this.chatStreamStallTimeoutMs > 0 && {
-            stallTimeoutMs: this.chatStreamStallTimeoutMs
-          })
+        // Read when a turn runs, so a value set after construction holds.
+        get recovery() {
+          const recovery = agent.chatRecovery;
+          return {
+            ...(typeof recovery === "object" && recovery),
+            ...(agent.chatStreamStallTimeoutMs > 0 && {
+              stallTimeoutMs: agent.chatStreamStallTimeoutMs
+            })
+          };
         }
       }
     };

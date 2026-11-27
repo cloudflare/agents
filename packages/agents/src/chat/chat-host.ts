@@ -22,7 +22,10 @@ import type {
   ChatRecoveryContext,
   ChatRecoveryOptions
 } from "./lifecycle";
-import { chatRecoveryBackoffSeconds } from "./recovery-engine";
+import {
+  chatRecoveryBackoffSeconds,
+  retryAfterSeconds
+} from "./recovery-engine";
 import {
   evaluateChatRecoveryIncident,
   resolveChatRecoveryConfig
@@ -414,6 +417,12 @@ const DISCARDED_CHECKPOINT = "chat:discarded";
  * next attempt that finds this one cut off.
  */
 const INCIDENT_CHECKPOINT = "chat:incident";
+/**
+ * The run's checkpoint key for the failure that sent it to be tried again
+ * (a provider's transient error, a stalled stream): its text, and how many
+ * recovery attempts have ended that way.
+ */
+const FAILED_CHECKPOINT = "chat:failed";
 /** Names this isolate among a turn's attempts; made on first use. */
 let isolateId: string | undefined;
 
@@ -1230,6 +1239,27 @@ export function chatTurnDefinition(
       TaskSettlement.retry(
         Date.now() + chatRecoveryBackoffSeconds(step.attempt) * 1000
       );
+    // A failure worth another attempt: the next attempt asks the app and
+    // the budget. A recovery attempt that fails this way counts against
+    // `maxAttempts`, however little time passed.
+    const tryAgainAfter = (error: unknown) => {
+      const before = step.checkpoint.get<{ failures: number; retries: number }>(
+        FAILED_CHECKPOINT
+      );
+      const failures = (before?.failures ?? 0) + 1;
+      step.checkpoint.set(FAILED_CHECKPOINT, {
+        text: error instanceof Error ? error.message : String(error),
+        failures,
+        retries:
+          (before?.retries ?? 0) +
+          (step.checkpoint.get(INCIDENT_CHECKPOINT) === undefined ? 0 : 1)
+      });
+      // A provider that says how long to wait is believed, up to the cap.
+      return TaskSettlement.retry(
+        Date.now() +
+          chatRecoveryBackoffSeconds(failures, retryAfterSeconds(error)) * 1000
+      );
+    };
 
     // An earlier attempt of this run was cut off: what it streamed is the
     // reply this attempt continues.
@@ -1339,6 +1369,13 @@ export function chatTurnDefinition(
         .join("");
       // The budget over this turn's attempts, as the host's `chatRecovery`
       // sets it. What it counted is kept with the run.
+      const counted =
+        step.checkpoint.get<ChatRecoveryIncident>(INCIDENT_CHECKPOINT);
+      const failed = step.checkpoint.get<{
+        text: string;
+        failures: number;
+        retries: number;
+      }>(FAILED_CHECKPOINT);
       const evaluated =
         recovery === false
           ? undefined
@@ -1355,10 +1392,15 @@ export function chatTurnDefinition(
                 }
               },
               config: budget,
-              existing:
-                step.checkpoint.get<ChatRecoveryIncident>(
-                  INCIDENT_CHECKPOINT
-                ) ?? null,
+              existing: counted
+                ? {
+                    ...counted,
+                    ...(failed &&
+                      failed.retries > 0 && {
+                        transientRetries: failed.retries
+                      })
+                  }
+                : null,
               currentProgress: streamedCount,
               awaitingClientInteraction: false,
               now: Date.now(),
@@ -1408,7 +1450,9 @@ export function chatTurnDefinition(
           return report({
             requestId,
             status: "error",
-            error: "The turn was interrupted and not continued."
+            // The failure the app chose not to recover from, when there
+            // was one.
+            error: failed?.text ?? "The turn was interrupted and not continued."
           });
         }
         // The budget is spent: the app is told why, and the client gets the
@@ -1665,12 +1709,8 @@ export function chatTurnDefinition(
           return report({ requestId, status: "aborted" });
         }
         const verdict = host.hooks?.classifyError?.(error, false) ?? "terminal";
-        if (
-          verdict === "transient" &&
-          recovery !== false &&
-          step.attempt < maxAttempts
-        ) {
-          return interrupted();
+        if (verdict === "transient" && recovery !== false) {
+          return tryAgainAfter(error);
         }
         const text = error instanceof Error ? error.message : String(error);
         if (writer) writer.error(text);
@@ -1998,7 +2038,7 @@ export function chatTurnDefinition(
           continue;
         }
         if (verdict === "transient" && recovery !== false) {
-          if (step.attempt < maxAttempts) return interrupted();
+          return tryAgainAfter(error);
         }
         const text = error instanceof Error ? error.message : String(error);
         // A failed reply keeps what it streamed too, and the tabs see it

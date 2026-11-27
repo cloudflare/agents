@@ -3874,31 +3874,6 @@ describe("platform-transient reader errors (#1964)", () => {
     expect(contexts[0].createdAt).toBeLessThan(incidents[0].firstSeenAt);
   });
 
-  it.each<{ name: string; headers: Record<string, string>; delay: number }>([
-    { name: "retry-after", headers: { "retry-after": "7" }, delay: 7 },
-    { name: "retry-after-ms", headers: { "retry-after-ms": "4200" }, delay: 5 },
-    {
-      name: "a wait past the cap",
-      headers: { "retry-after": "600" },
-      delay: 60
-    }
-  ])(
-    "waits as long as the provider asked before recovering: $name",
-    async ({ headers, delay }) => {
-      const agentStub = await getTestAgent(
-        `transient-retry-after-${crypto.randomUUID()}`
-      );
-      expect(
-        await agentStub.driveFailingReaderTurnForTest(
-          "Network connection lost.",
-          1,
-          { responseHeaders: headers }
-        )
-      ).toBe("aborted");
-      expect(await agentStub.getScheduledRecoveryDelayForTest()).toBe(delay);
-    }
-  );
-
   it("ends a transient failure the app declines to continue as the stream error, and records it", async () => {
     const agentStub = await getTestAgent(
       `transient-declined-${crypto.randomUUID()}`
@@ -3926,19 +3901,9 @@ describe("platform-transient reader errors (#1964)", () => {
         "Network connection lost.",
         10
       )
-    ).toBe("aborted");
+    ).toBe("error");
 
-    await expect
-      .poll(
-        async () =>
-          (
-            (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-              reason?: string;
-            }>
-          )[0]?.reason,
-        { timeout: 15_000, interval: 200 }
-      )
-      .toBe("max_attempts_exceeded");
+    // The first attempt and two recoveries of it: the budget.
     expect(await agentStub.getFailingReaderCallsForTest()).toBe(3);
   }, 20_000);
 
