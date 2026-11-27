@@ -1004,7 +1004,15 @@ describe("chatTurnDefinition", () => {
       await session.appendMessage({
         id: "a1",
         role: "assistant",
-        parts: [{ type: "text", text: "Asked" }]
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: {}
+          }
+        ]
       } as never);
       const sent: Array<Record<string, unknown>> = [];
       const tab = {

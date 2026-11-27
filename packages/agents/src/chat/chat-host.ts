@@ -26,6 +26,7 @@ import {
   repairTranscriptBeforeTurn
 } from "./before-turn";
 import { replyIsRemovedAsEmpty } from "./repair-transcript";
+import { transcriptEndsInAnswer } from "./continuation-turn";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
 import { sendIfOpen } from "./connection";
@@ -55,6 +56,14 @@ export interface ChatDeps {
    * its request ended learns how it ended.
    */
   readonly kv: RecentTerminalsKv;
+  /**
+   * Publish a `chat:*` observability event where the hosts published it
+   * (`chat:transcript:repaired`, `chat:continuation:dropped`). Absent: none.
+   */
+  readonly emit?: (
+    type: `chat:${string}`,
+    payload: Record<string, unknown>
+  ) => void;
 }
 
 /**
@@ -1080,6 +1089,41 @@ export function chatTurnDefinition(
         answerAgain = true;
       }
     }
+    // A tool answer's continuation has nothing to answer when the chat
+    // moved on past its reply, when its reply already went on to the
+    // model's answer, or when the reply still waits on a client. The answer
+    // is stored either way, and the next turn's call reads it.
+    if (
+      !partial &&
+      run.trigger === "tool-answer" &&
+      step.checkpoint.get(BASE_CHECKPOINT) === undefined
+    ) {
+      const last = messages.at(-1);
+      const dropped =
+        run.replyId !== undefined && last?.id !== run.replyId
+          ? "moved_on"
+          : transcriptEndsInAnswer(messages)
+            ? "answered"
+            : continuationWaitsOnClient(
+                  messages,
+                  new Set((run.clientTools ?? []).map((tool) => tool.name))
+                )
+              ? "awaiting_client"
+              : undefined;
+      if (dropped !== undefined) {
+        deps.emit?.("chat:continuation:dropped", {
+          requestId,
+          reason: dropped
+        });
+        return report({
+          requestId,
+          status: "skipped",
+          ...(dropped === "awaiting_client" && {
+            reason: "awaiting-client" as const
+          })
+        });
+      }
+    }
     // A tool answer continues the reply that asked for it (named, or the
     // latest); a host's "continue the last turn" does the same.
     if (
@@ -1106,7 +1150,8 @@ export function chatTurnDefinition(
     const clientToolNames = new Set(
       (run.clientTools ?? []).map((tool) => tool.name)
     );
-    const repaired = repairTranscriptBeforeTurn([...messages], {
+    const before = [...messages];
+    const repaired = repairTranscriptBeforeTurn(before, {
       continuation: partial !== undefined,
       clientToolNames,
       repairPart: (part) =>
@@ -1125,6 +1170,26 @@ export function chatTurnDefinition(
       });
     }
     const emptied = new Set(repaired.emptyReplyIds);
+    if (
+      repaired.removedToolCalls > 0 ||
+      repaired.normalizedInputs > 0 ||
+      repaired.removedReasoningParts > 0 ||
+      emptied.size > 0
+    ) {
+      deps.emit?.("chat:transcript:repaired", {
+        requestId,
+        removedToolCalls: repaired.removedToolCalls,
+        normalizedInputs: repaired.normalizedInputs,
+        toolCallIds: repaired.toolCallIds,
+        ...(repaired.removedReasoningParts > 0 && {
+          removedReasoningParts: repaired.removedReasoningParts
+        }),
+        // As stored, reasoning included, so an app can keep its own copy.
+        ...(emptied.size > 0 && {
+          removedMessages: messages.filter((message) => emptied.has(message.id))
+        })
+      });
+    }
     for (let i = 0; i < repaired.messages.length; i++) {
       const next = repaired.messages[i];
       if (emptied.has(next.id)) continue;
@@ -1136,9 +1201,13 @@ export function chatTurnDefinition(
       messages.length,
       ...repaired.messages.filter((message) => !emptied.has(message.id))
     );
+    // The reply a continuation extends, as the repair left it (only when
+    // the repair changed it).
     if (partial !== undefined) {
-      partial =
-        messages.find((message) => message.id === partial?.id) ?? partial;
+      const index = repaired.messages.findIndex((m) => m.id === partial?.id);
+      if (index !== -1 && repaired.messages[index] !== before[index]) {
+        partial = repaired.messages[index];
+      }
     }
     let call: ChatModelCall = {
       session: sessionId,

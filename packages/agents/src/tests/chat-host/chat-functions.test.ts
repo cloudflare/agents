@@ -2075,4 +2075,86 @@ describe("chat functions over a minimal host", () => {
       ).toEqual({ clientTools: [{ name: "newer" }], body: { keep: true } });
     });
   });
+
+  it("an answer for a reply the chat moved past, asked to continue, is reported dropped as moved on", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      await session.appendMessage({
+        id: "note",
+        role: "assistant",
+        parts: [{ type: "text", text: "Background job finished." }]
+      } as never);
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c1", output: {} },
+        { autoContinue: true }
+      );
+      expect(instance.events).toEqual([
+        {
+          type: "chat:continuation:dropped",
+          payload: { requestId: null, reason: "moved_on" }
+        }
+      ]);
+      expect(instance.calls).toHaveLength(0);
+    });
+  });
+
+  it("a continuation whose reply already went on to the model's answer is skipped and reported as answered", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: {}
+          },
+          { type: "step-start" },
+          { type: "text", text: "You are in Lisbon." }
+        ]
+      } as never);
+      const done = instance.nextResult();
+      await submitTurn(instance.deps, instance.lane, {
+        trigger: "tool-answer",
+        replyId: "a1"
+      });
+      expect(await done).toMatchObject({ status: "skipped" });
+      expect(instance.calls).toHaveLength(0);
+      expect(instance.events.map((event) => event.payload.reason)).toEqual([
+        "answered"
+      ]);
+    });
+  });
 });

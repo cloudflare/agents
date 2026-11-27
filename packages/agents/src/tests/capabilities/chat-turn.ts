@@ -67,13 +67,19 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
   get kv() {
     return this.ctx.storage.kv;
   }
+  /** The `chat:*` events the chat functions published, in order. */
+  readonly events: Array<{ type: string; payload: Record<string, unknown> }> =
+    [];
   get deps() {
     return {
       tasks: this.tasks,
       streams: this.streams,
       sessions: this.sessions,
       kv: this.ctx.storage.kv,
-      session: "s1"
+      session: "s1",
+      emit: (type: string, payload: Record<string, unknown>) => {
+        this.events.push({ type, payload });
+      }
     };
   }
   readonly lifecycle = Lifecycle.install(this)

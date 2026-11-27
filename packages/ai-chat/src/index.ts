@@ -23,6 +23,7 @@ import {
   type FiberRecoveryContext,
   type WSMessage
 } from "agents";
+import type { ObservabilityEvent } from "agents/observability";
 
 import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
@@ -957,7 +958,9 @@ export class AIChatAgent<
       streams: this.streams,
       sessions: this.sessions,
       kv: this.ctx.storage.kv,
-      webSockets: { getConnections: () => this.getConnections() }
+      webSockets: { getConnections: () => this.getConnections() },
+      emit: (type, payload) =>
+        this._emit(type as ObservabilityEvent["type"], payload)
     };
   }
 
@@ -986,6 +989,12 @@ export class AIChatAgent<
         // Apps read the transcript the call is for from `this.messages`.
         this.messages = [...call.messages] as UIMessage[];
         this._callContinues.set(call.requestId, call.mode === "continue");
+        if (
+          call.trigger === "submit-message" ||
+          call.trigger === "regenerate-message"
+        ) {
+          this._emit("message:request");
+        }
         return this.onChatMessage(async () => {}, {
           requestId: call.requestId,
           abortSignal: call.signal,
@@ -1002,6 +1011,11 @@ export class AIChatAgent<
             this._callContinues.get(result.requestId) ?? false;
           this._callContinues.delete(result.requestId);
           this.messages = (await this.#session.getHistory()) as UIMessage[];
+          if (result.status === "error") {
+            this._emit("message:error", { error: result.error ?? "" });
+          } else if (result.messageId !== undefined) {
+            this._emit("message:response");
+          }
           if (result.status === "skipped") {
             waiter?.(result);
             return;

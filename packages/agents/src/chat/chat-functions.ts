@@ -481,7 +481,15 @@ async function applyAnswer(
     await storeTools();
     // Only the latest reply continues: once a later message moved the chat
     // on, an answer for an older call is stored and nothing more.
-    if (i !== history.length - 1) return true;
+    if (i !== history.length - 1) {
+      if (options.autoContinue || continueWanted(deps).delete(next.id)) {
+        deps.emit?.("chat:continuation:dropped", {
+          requestId: null,
+          reason: "moved_on"
+        });
+      }
+      return true;
+    }
     // One continuation per answered batch, however many answers race to
     // complete it; an earlier answer of the batch may have asked for it.
     const wanted = continueWanted(deps);
