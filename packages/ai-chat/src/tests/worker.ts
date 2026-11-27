@@ -2245,9 +2245,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
   /** The messages waiting requests hold, not stored yet. */
   getQueuedMessageIdsForTest(): string[] {
-    return [
-      ...(this as unknown as { _turns: ChatTurns })._turns.queuedMessageIds()
-    ];
+    return [...this._queuedMessageIds()];
   }
 
   /** The transcript each `onChatMessage` call in this isolate saw. */
