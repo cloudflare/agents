@@ -2968,4 +2968,33 @@ describe("chat functions over a minimal host", () => {
       );
     });
   });
+
+  it("a tab offered a stream gets none of its live frames until it acks, then the replay and the rest", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "one" }
+      ]);
+      const sent: Array<Record<string, unknown>> = [];
+      const back = recordingTab("tab-back", sent);
+      instance.tabs.push(back);
+      await resumeChat(instance.deps, instance.lane, back);
+      expect(sent[0]).toMatchObject({
+        type: "cf_agent_stream_resuming",
+        id: "r1"
+      });
+      release();
+      await instance.resultFor("r1");
+      // Nothing of r1 reached it live: it had not acked.
+      expect(
+        sent.filter(
+          (frame) =>
+            frame.id === "r1" && frame.type === "cf_agent_use_chat_response"
+        )
+      ).toEqual([]);
+    });
+  });
 });

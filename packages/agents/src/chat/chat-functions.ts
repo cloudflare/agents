@@ -16,6 +16,7 @@ import {
   continueRequestsOf,
   STOPPED_METADATA,
   liveTurnsOf,
+  offeredIn,
   parkedIn,
   releaseParked,
   retryingTurn,
@@ -683,6 +684,7 @@ export async function resumeChat(
   };
   if (requestId) {
     endOthers();
+    offeredIn(deps.streams).set(connection.id, requestId);
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -793,8 +795,15 @@ export async function replayTurn(
   requestId: string
 ): Promise<void> {
   const streamId = chatTurnStreamId(requestId);
+  const offered = offeredIn(deps.streams);
+  // Its live frames reach the tab again from here (or, if it acked another
+  // stream, it waits on nothing).
+  const release = () => {
+    if (offered.get(connection.id) === requestId) offered.delete(connection.id);
+  };
   if ((await deps.streams.status(streamId))?.state !== "streaming") {
     // It ended while the tab was away: its recorded end.
+    release();
     const ended = recentChatTerminal(deps.kv, [requestId]);
     if (ended) sendIfOpen(connection, endedFrame(ended));
     return;
@@ -821,6 +830,8 @@ export async function replayTurn(
     }
   } catch (error) {
     if (!stop.signal.aborted) throw error;
+  } finally {
+    release();
   }
 }
 

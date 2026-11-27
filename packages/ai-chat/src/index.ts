@@ -151,6 +151,7 @@ import type {
 import { nanoid } from "nanoid";
 import {
   cancelTurn,
+  resumeChat,
   chatClientView,
   hasPendingToolInteraction,
   chatDispatch,
@@ -1408,14 +1409,10 @@ export class AIChatAgent<
         });
       }
 
-      // Notify client about active streams that can be resumed
-      if (this._replyStreams.hasActiveStream()) {
-        this._resumeHandshake().notifyStreamResuming(connection);
-      } else if (this._preStream.park(connection)) {
-        // A turn is accepted but its stream hasn't started yet (#1784): park
-        // this connection and tell it to keep waiting. `park` sent the
-        // keep-waiting frame; the turn flushes it into STREAM_RESUMING on
-        // _startStream or releases it with STREAM_RESUME_NONE on settle.
+      // A turn streams or waits to: the tab is offered its stream, or told
+      // to wait for it (#1784) and offered it when it starts.
+      if (this._openChatTurns().length > 0) {
+        await resumeChat(this._chatDeps(), this._chatLane(), connection);
       } else {
         // No active stream to resume: if a recovery is in progress (between
         // attempts — the interrupted stream ended and the continuation hasn't

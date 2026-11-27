@@ -239,6 +239,21 @@ export interface ParkedTab {
   readonly probeId?: string;
 }
 
+/**
+ * Tabs offered a turn's stream (`STREAM_RESUMING`) that have not acked it
+ * yet, by connection id, with the turn's request id. They get none of its
+ * live frames until the ack's replay: a tab would show them without the
+ * chunks streamed before it.
+ */
+const offeredTabs = new WeakMap<Streams, Map<string, string>>();
+
+/** @internal The tabs offered a stream and not acked yet, in this isolate. */
+export function offeredIn(streams: Streams): Map<string, string> {
+  let tabs = offeredTabs.get(streams);
+  if (!tabs) offeredTabs.set(streams, (tabs = new Map()));
+  return tabs;
+}
+
 /** Tabs waiting for a turn's stream to start, by chat, in this isolate. */
 const parkedTabs = new WeakMap<Streams, Map<string, Map<string, ParkedTab>>>();
 
@@ -989,7 +1004,10 @@ export function chatTurnDefinition(
       const sockets = deps.webSockets;
       const text = sockets ? frameText(frame) : undefined;
       if (sockets && text !== undefined) {
+        const offered = offeredIn(deps.streams);
         for (const connection of sockets.getConnections()) {
+          // A tab offered this stream gets it from the ack's replay.
+          if (offered.get(connection.id) === requestId) continue;
           sendIfOpen(connection, text);
         }
       }
@@ -1016,6 +1034,8 @@ export function chatTurnDefinition(
     const parked = parkedIn(deps.streams, sessionId);
     const offerStream = () => {
       if (parked.size === 0) return;
+      for (const id of parked.keys())
+        offeredIn(deps.streams).set(id, requestId);
       releaseParked(parked, {
         type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
         id: requestId
