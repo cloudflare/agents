@@ -1186,15 +1186,29 @@ export class AIChatAgent<
         },
         sanitizeForPersistence: (message) =>
           this._sanitizeMessageForPersistence(message),
-        onRecovery: (context) => this.onChatRecovery(context)
+        onRecovery: (context) => this.onChatRecovery(context),
+        // What the provider's error says: a rate limit or a transient
+        // failure goes into bounded chat recovery, like a dropped stream
+        // (#1964). An in-band error is the provider's answer.
+        classifyError: (error, inBand) =>
+          (!inBand && isRecoverableStreamReadError(error)) ||
+          isTransientProviderError(error)
+            ? "transient"
+            : "terminal"
       },
       options: {
         hydrationByteBudget: this.hydrationByteBudget,
         ...(this.maxPersistedMessages !== undefined && {
           maxPersistedMessages: this.maxPersistedMessages
         }),
-        // The app's whole budget: the turn definition applies it.
-        recovery: typeof recovery === "object" ? recovery : {}
+        // The app's whole budget: the turn definition applies it. A stream
+        // that sends nothing for the app's stall timeout is interrupted.
+        recovery: {
+          ...(typeof recovery === "object" && recovery),
+          ...(this.chatStreamStallTimeoutMs > 0 && {
+            stallTimeoutMs: this.chatStreamStallTimeoutMs
+          })
+        }
       }
     };
   }
