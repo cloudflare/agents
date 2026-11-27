@@ -300,24 +300,9 @@ async function settled(agent: {
  * no turn active. Nothing can continue from there without a new result.
  */
 async function batchParked(agent: {
-  isChatTurnActiveForTest(): Promise<boolean>;
-  hasPendingInteractionForTest(): Promise<boolean>;
-  getContinuationBarrierState(): Promise<{
-    hasPending: boolean;
-    barrierActive: boolean;
-    timerArmed: boolean;
-  }>;
+  batchParkedForTest(): Promise<boolean>;
 }): Promise<void> {
-  await waitUntil(async () => {
-    const barrier = await agent.getContinuationBarrierState();
-    return (
-      barrier.hasPending &&
-      !barrier.barrierActive &&
-      !barrier.timerArmed &&
-      !(await agent.hasPendingInteractionForTest()) &&
-      !(await agent.isChatTurnActiveForTest())
-    );
-  }, 8000);
+  await waitUntil(() => agent.batchParkedForTest(), 8000);
 }
 
 /** Wait until `count` chat turns wait in the agent's queue. */

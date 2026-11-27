@@ -2152,6 +2152,27 @@ export class ThinkClientToolsAgent extends Think {
    * armed coalesce timer (`timerArmed` false). The pending stays so the next
    * result — if it ever comes — can complete the batch.
    */
+  /**
+   * Whether an incomplete parallel batch is parked: on the class, its
+   * continuation waits for the missing results with no coalesce timer armed,
+   * no drain running, no interaction applying and no turn active. The
+   * harness-backed Think (`pnpm test:harness`) has no `_turns`: there, only
+   * that no turn runs. Either way the tests then assert what the app sees
+   * (no continuation, the unanswered call untouched) once the batch
+   * completes.
+   */
+  async batchParkedForTest(): Promise<boolean> {
+    if (this["_turns"] === undefined) return this.activeTurn === undefined;
+    const barrier = await this.getContinuationBarrierState();
+    return (
+      barrier.hasPending &&
+      !barrier.barrierActive &&
+      !barrier.timerArmed &&
+      !this.hasPendingInteractionForTest() &&
+      !this.isChatTurnActiveForTest()
+    );
+  }
+
   async getContinuationBarrierState(): Promise<{
     hasPending: boolean;
     barrierActive: boolean;
