@@ -1233,14 +1233,8 @@ export function chatTurnDefinition(
       recovery === false ? undefined : recovery
     );
     const maxAttempts = recovery === false ? 1 : budget.maxAttempts;
-    // An interruption this attempt can't finish: the stream stays open and
-    // the next attempt continues it after a backoff, within the budget.
-    const interrupted = () =>
-      TaskSettlement.retry(
-        Date.now() + chatRecoveryBackoffSeconds(step.attempt) * 1000
-      );
-    // A failure worth another attempt: the next attempt asks the app and
-    // the budget. A recovery attempt that fails this way counts against
+    // A failure worth another attempt: the stream stays open, and the next
+    // attempt continues it after a backoff, asking the app and the budget. A recovery attempt that fails this way counts against
     // `maxAttempts`, however little time passed.
     const tryAgainAfter = (error: unknown) => {
       const before = step.checkpoint.get<{ failures: number; retries: number }>(
