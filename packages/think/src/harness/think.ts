@@ -726,13 +726,16 @@ export class Think<
           }
           if (end.status === "unanswered" && end.reason !== "aborted") {
             // As on Think, a failed turn is reported to observability: in its
-            // stream once the model streamed, in the turn before that. Its
-            // messages were placed once it reached `beforeTurn`.
+            // stream once the model streamed (a message error too, as the
+            // reply pump reports one), in the turn before that. Its messages
+            // were placed once it reached `beforeTurn`.
+            const error = end.reason ?? "unanswered";
+            if (streamed) this._emit("message:error", { error });
             this._emit("chat:request:failed", {
               requestId: end.operationId,
               stage: streamed ? "stream" : "turn",
               messagesPersisted: continued !== undefined,
-              error: end.reason ?? "unanswered"
+              error
             });
           }
           await this.onChatResponse({
