@@ -906,6 +906,21 @@ export function chatTurnDefinition(
       // streams do; a reader flushes first.
       const sync = deps.streams.__DO_NOT_USE_WILL_BREAK__sync();
       const deltaParts = new Set<string>();
+      // The batch is also written when the model pauses (at the end of a
+      // burst of chunks), so a reset while it is quiet keeps what it sent.
+      let flushQueued = false;
+      const flushWhenQuiet = () => {
+        if (flushQueued) return;
+        flushQueued = true;
+        setTimeout(() => {
+          flushQueued = false;
+          try {
+            sync.flush(streamId);
+          } catch {
+            // The stream settled meanwhile: nothing is left to write.
+          }
+        }, 0);
+      };
       const record = (chunk: UIMessageChunk) => {
         const json = JSON.stringify(chunk);
         const bytes = utf8Length(json);
@@ -913,7 +928,10 @@ export function chatTurnDefinition(
         // which refuses it as it always has.
         if (bytes > Math.min(sync.maxChunkBytes, ROW_VALUE_BYTES)) {
           out.append(chunk as never);
-        } else sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
+        } else {
+          sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
+          flushWhenQuiet();
+        }
         // A tool call's input and its outcome are written at once: a tool
         // runs for as long as it takes, and a reset while it runs must find
         // the call stored (or the tool would run again).
