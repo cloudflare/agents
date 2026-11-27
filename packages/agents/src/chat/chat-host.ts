@@ -14,10 +14,14 @@ import type { UIMessage, UIMessageChunk } from "ai";
 import type { Sessions } from "../sessions/sessions";
 import type { Streams } from "../streams/streams";
 import type { Tasks } from "../tasks/tasks";
-import type { TaskJson, TaskStep, TaskValue } from "../tasks/types";
+import type {
+  TaskCheckpoint,
+  TaskJson,
+  TaskStep,
+  TaskValue
+} from "../tasks/types";
 import { withFiberStash } from "../fiber-runs";
 import type { StreamWriter } from "../streams/types";
-import type { WebSockets } from "../websockets/websockets";
 import type { Connection } from "agents";
 import type { ClientToolSchema } from "./client-tools";
 import type {
@@ -35,23 +39,79 @@ import {
 } from "./recovery-incident";
 import type { ChatRecoveryIncident } from "./recovery-incident";
 import { TaskSettlement } from "../tasks/settlement";
+import {
+  continuationWaitsOnClient,
+  interruptedToolPartAsError,
+  repairTranscriptBeforeTurn
+} from "./before-turn";
+import {
+  replyIsRemovedAsEmpty,
+  stripTrailingReasoning
+} from "./repair-transcript";
+import { isReplayChunk, settleInterruptedPart } from "./message-builder";
+import { transcriptEndsInAnswer } from "./continuation-turn";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
-import { partialHasSettledToolResults } from "./recovery-codec";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { responseSource } from "./reply-source";
 import { ROW_VALUE_BYTES, utf8Length } from "../internal/platform-limits";
+import {
+  CHAT_REQUEST_CONTEXT_KEY,
+  storableRequestContext
+} from "./request-context";
+export { CHAT_REQUEST_CONTEXT_KEY, storableRequestContext };
+import {
+  recordRecentChatTerminal,
+  type RecentTerminalsKv
+} from "./recent-terminals";
 
 /** The capabilities the chat functions are given. They own every row and job. */
 export interface ChatDeps {
   readonly tasks: Tasks;
   readonly streams: Streams;
   readonly sessions: Sessions;
-  /** Absent for a host that owns no sockets (a harness inside an agent). */
-  readonly webSockets?: WebSockets;
+  /**
+   * The tabs the chat's frames go to. Absent for a host that owns no
+   * sockets (a harness inside an agent).
+   */
+  readonly webSockets?: {
+    getConnections(): Iterable<Connection>;
+    /**
+     * Send a turn's frame to every tab but `without`, when the host sends
+     * its frames itself (AIChatAgent's `broadcast`, which agent-tool runs
+     * observe). Absent: each tab is sent the frame.
+     */
+    broadcast?(text: string, without: string[]): void;
+  };
   /** The Sessions session the chat's transcript is in. */
   readonly session?: string;
+  /**
+   * The object's synchronous key-value storage (`ctx.storage.kv`). The chat
+   * keeps the ends of its last requests there, so a tab that was away when
+   * its request ended learns how it ended.
+   */
+  readonly kv: RecentTerminalsKv;
+  /**
+   * Publish a `chat:*` observability event where the hosts published it
+   * (`chat:transcript:repaired`, `chat:continuation:dropped`). Absent: none.
+   */
+  readonly emit?: (
+    type: `chat:${string}`,
+    payload: Record<string, unknown>
+  ) => void;
+  /**
+   * What a host does to a message before it is stored (the hosts'
+   * `sanitizeMessageForPersistence`), for a message the chat functions
+   * write outside a turn: a tab's tool answer. Absent: stored as it is.
+   */
+  readonly sanitizeForPersistence?: (message: UIMessage) => UIMessage;
+  /**
+   * How a turn ended that ended without its handler running again (stopped
+   * while it waited to be retried), as `hooks.onResponse` hears of every
+   * other end: a turn ends once, and its host is told once.
+   */
+  readonly turnEnded?: (result: ChatTurnResult) => void | Promise<void>;
 }
 
 /**
@@ -87,6 +147,11 @@ export interface ChatModelCall {
    * call that must not repeat runs here.
    */
   step<T>(name: string, fn: () => Promise<T>): Promise<T>;
+  /**
+   * The turn's run checkpoint: state its tools keep across a reset (an
+   * agent tool's progress and milestones), one statement per `set`.
+   */
+  readonly checkpoint: TaskCheckpoint;
 }
 
 /**
@@ -153,6 +218,13 @@ export interface ChatOptions {
     | (Exclude<ChatRecoveryConfig, true> & {
         readonly stallTimeoutMs?: number;
       });
+  /**
+   * The most bytes of transcript a model call reads: the newest messages
+   * that fit (always at least the latest). Unset reads the whole path.
+   */
+  readonly hydrationByteBudget?: number;
+  /** Keep at most this many messages: the oldest go after each reply. */
+  readonly maxPersistedMessages?: number;
 }
 
 /** What a host supplies. */
@@ -162,6 +234,51 @@ export interface ChatHost {
   readonly options?: ChatOptions;
 }
 
+/**
+ * @internal The list a tab is sent: `messages` (the stored transcript),
+ * then the messages the waiting turns of chat `session` hold, in lane order,
+ * named in `queuedMessageIds` (a tab keeps them apart and draws them last).
+ */
+export function chatClientView<TMessage extends { id: string }>(
+  tasks: Tasks,
+  definition: string,
+  session: string,
+  messages: readonly TMessage[],
+  defaultSession = ""
+): { messages: TMessage[]; queuedMessageIds?: string[] } {
+  const known = new Set(messages.map((message) => message.id));
+  const queued: TMessage[] = [];
+  for (const run of tasks.peekList({
+    definition,
+    status: ["pending"],
+    results: false,
+    order: "oldest"
+  })) {
+    const input = tasks.inputOf<ChatTurnInput>(run.runId);
+    if ((input?.session ?? defaultSession) !== session) continue;
+    for (const message of input?.messages ?? []) {
+      if (known.has(message.id)) continue;
+      known.add(message.id);
+      queued.push(message as unknown as TMessage);
+    }
+  }
+  return queued.length > 0
+    ? {
+        messages: [...messages, ...queued],
+        queuedMessageIds: queued.map((message) => message.id)
+      }
+    : { messages: [...messages] };
+}
+
+/** @internal The user messages a client request came from, as its run notes them. */
+export function messageIdsOf(
+  metadata: Readonly<Record<string, unknown>> | undefined
+): string[] | undefined {
+  const ids = (metadata?.chat as { messageIds?: unknown } | undefined)
+    ?.messageIds;
+  return Array.isArray(ids) && ids.length > 0 ? (ids as string[]) : undefined;
+}
+
 /** The reason a chat clear cancels its turns with. */
 export const CHAT_CLEARED = "chat cleared";
 
@@ -169,6 +286,26 @@ export const CHAT_CLEARED = "chat cleared";
 export interface ParkedTab {
   readonly connection: Connection;
   readonly probeId?: string;
+  /**
+   * It asked to resume (it acks the offer and gets the replay), rather than
+   * waiting on a continuation its answer started (it gets the live frames).
+   */
+  readonly asked?: true;
+}
+
+/**
+ * Tabs offered a turn's stream (`STREAM_RESUMING`) that have not acked it
+ * yet, by connection id, with the turn's request id. They get none of its
+ * live frames until the ack's replay: a tab would show them without the
+ * chunks streamed before it.
+ */
+const offeredTabs = new WeakMap<Streams, Map<string, string>>();
+
+/** @internal The tabs offered a stream and not acked yet, in this isolate. */
+export function offeredIn(streams: Streams): Map<string, string> {
+  let tabs = offeredTabs.get(streams);
+  if (!tabs) offeredTabs.set(streams, (tabs = new Map()));
+  return tabs;
 }
 
 /** Tabs waiting for a turn's stream to start, by chat, in this isolate. */
@@ -241,6 +378,19 @@ export function continueRequestsOf(streams: Streams): Set<string> {
  * that a reset cut off is continued from its stream, not from here.
  */
 const liveTurns = new WeakMap<Streams, Map<string, LiveTurn>>();
+
+/**
+ * The attempt of each session still running in this isolate, as a promise
+ * that settles when it has returned. At most one entry per lane.
+ */
+type Unwinding = { signal: AbortSignal; ended: Promise<void> };
+const unwindingAttempts = new WeakMap<Streams, Map<string, Unwinding>>();
+
+function unwindingOf(streams: Streams): Map<string, Unwinding> {
+  let attempts = unwindingAttempts.get(streams);
+  if (!attempts) unwindingAttempts.set(streams, (attempts = new Map()));
+  return attempts;
+}
 
 /** @internal The live turns of the chat whose stream log is `streams`. */
 export function liveTurnsOf(streams: Streams): Map<string, LiveTurn> {
@@ -349,6 +499,12 @@ function instanceId(tasks: Tasks): string {
   return id;
 }
 
+/** The least time between two writes of a turn's buffer when its model pauses. */
+const PAUSE_FLUSH_MS = 50;
+
+/** The run's checkpoint key: its request context was stored. */
+const CONTEXT_CHECKPOINT = "chat:context";
+
 /** The run's checkpoint key holding the id of the reply it stored. */
 const REPLY_CHECKPOINT = "chat:reply";
 
@@ -357,10 +513,58 @@ class InBandStreamError extends Error {}
 
 /** A stream that sent nothing for the stall timeout. */
 class StreamStalledError extends Error {
-  constructor(ms: number) {
-    super(`The model stream sent nothing for ${ms} ms.`);
+  constructor(readonly ms: number) {
+    // The released text, which apps show and match on.
+    super(
+      `Chat stream stalled: no activity for ${ms}ms; the turn was aborted by the stall watchdog.`
+    );
     this.name = "StreamStalledError";
   }
+}
+
+/**
+ * `chunks` until `signal` aborts: then the model's stream is cancelled and
+ * this one closes, so a model that ignores its signal cannot hold a stopped
+ * turn open.
+ */
+function untilStopped(
+  chunks: ReadableStream<UIMessageChunk>,
+  signal: AbortSignal
+): ReadableStream<UIMessageChunk> {
+  const reader = chunks.getReader();
+  let onAbort: (() => void) | undefined;
+  return new ReadableStream<UIMessageChunk>({
+    start(controller) {
+      onAbort = () => {
+        void reader.cancel(signal.reason).catch(() => {});
+        try {
+          controller.close();
+        } catch {
+          // Already closed or errored.
+        }
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    },
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (signal.aborted) return;
+        if (next.done) {
+          signal.removeEventListener("abort", onAbort!);
+          controller.close();
+        } else controller.enqueue(next.value);
+      } catch (error) {
+        if (signal.aborted) return;
+        signal.removeEventListener("abort", onAbort!);
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      signal.removeEventListener("abort", onAbort!);
+      return reader.cancel(reason);
+    }
+  });
 }
 
 /** `chunks`, erroring with a stall when nothing arrives for `ms`. */
@@ -434,10 +638,14 @@ export type ChatTurnResult = {
   /** The stored reply's id, when one was stored. */
   readonly messageId?: string;
   readonly error?: string;
+  /** Why a "continue the last turn" was skipped. */
+  readonly reason?: "nothing-to-continue" | "awaiting-client";
 };
 
 /** The input of a chat-turn run. */
 export interface ChatTurnInput {
+  /** `"continue"`: extend the last assistant message instead of answering. */
+  readonly mode?: "continue";
   /** The session the turn is in, when one definition serves many. */
   readonly session?: string;
   readonly trigger: ChatModelCall["trigger"];
@@ -452,6 +660,8 @@ export interface ChatTurnInput {
   readonly messages?: readonly UIMessage[];
   /** For a tool answer: the reply holding the answered call, to continue. */
   readonly replyId?: string;
+  /** A host turn that stores its tools and body as the request context. */
+  readonly storeContext?: true;
 }
 
 /** The stream id a turn's reply is written under. */
@@ -504,16 +714,22 @@ async function messageOf(
       }
     })
   );
-  for await (const snapshot of readUIMessageStream({
-    stream,
-    ...(message && { message }),
-    terminateOnError: true,
-    onError: (error) => {
-      failure ??= { error };
+  try {
+    for await (const snapshot of readUIMessageStream({
+      stream,
+      ...(message && { message }),
+      terminateOnError: true,
+      onError: (error) => {
+        failure ??= { error };
+      }
+    })) {
+      last = snapshot;
+      each?.(snapshot);
     }
-  })) {
-    last = snapshot;
-    each?.(snapshot);
+  } catch (error) {
+    // The reader throws the error chunk's text as its own error: the
+    // model's error is the one kept.
+    throw failure?.error ?? error;
   }
   if (failure) throw failure.error;
   return last;
@@ -591,6 +807,125 @@ function cancelReason(reason: unknown): string {
   return String(reason);
 }
 
+/**
+ * @internal A turn waiting out its retry backoff, read before a cancel or a
+ * clear: its handler does not run again, so whoever ends it settles its
+ * stream. A stop keeps what it streamed as a stored reply, as a stop while
+ * streaming does (`keep`, before the run ends, so the reply is stored in
+ * its place before the next turn stores its question); a clear keeps
+ * nothing. `undefined` for any other turn.
+ */
+export function retryingTurn(
+  deps: ChatDeps,
+  requestId: string
+):
+  | {
+      keep(): Promise<string | undefined>;
+      settle(keep: boolean): Promise<void>;
+    }
+  | undefined {
+  const record = deps.tasks.peek(requestId);
+  if (record?.status !== "pending" || record.waitReason !== "retry") {
+    return undefined;
+  }
+  const base = deps.tasks.checkpointOf<{ id: string; parts: number }>(
+    requestId,
+    BASE_CHECKPOINT
+  );
+  const discarded =
+    deps.tasks.checkpointOf<number>(requestId, DISCARDED_CHECKPOINT) ?? 0;
+  const input = deps.tasks.inputOf<ChatTurnInput>(requestId);
+  const streamId = chatTurnStreamId(requestId);
+  const session = deps.sessions.session(input?.session ?? deps.session ?? "");
+  // What the turn streamed, as its stored reply.
+  // The id of the reply it stored, if it stored one.
+  const keep = async (): Promise<string | undefined> => {
+    if ((await deps.streams.status(streamId))?.state !== "streaming") {
+      return undefined;
+    }
+    const stored = (await storedChunks(deps.streams, streamId))
+      .slice(discarded)
+      .filter((chunk) => chunk.type !== "error");
+    const baseMessage = base
+      ? ((await session.getMessage(base.id)) as unknown as UIMessage | null)
+      : null;
+    const built = await messageOf(
+      new ReadableStream({
+        start(controller) {
+          for (const chunk of stored) controller.enqueue(chunk);
+          controller.close();
+        }
+      }),
+      baseMessage && base
+        ? { ...baseMessage, parts: baseMessage.parts.slice(0, base.parts) }
+        : undefined
+    ).catch(() => undefined);
+    if (!built || built.parts.length === 0) return undefined;
+    await session.upsertMessage(
+      repairCutOffTools(built, undefined, input?.clientTools ?? []) as never,
+      input?.trigger === "regenerate-message" && input.questionId !== undefined
+        ? { parentId: input.questionId }
+        : {}
+    );
+    return built.id;
+  };
+  return {
+    keep,
+    async settle(kept) {
+      if ((await deps.streams.status(streamId))?.state !== "streaming") return;
+      if (kept) await keep();
+      const out = await deps.streams.open(streamId, { tag: requestId });
+      out.close({ discard: true });
+    }
+  };
+}
+
+/**
+ * `chunks`, with the start of a text or reasoning part a model's deltas came
+ * without (some send `text-delta` alone, or with no id) put in front of its
+ * first delta, as the hosts' message builder accepted them.
+ */
+function withPartStarts(
+  chunks: ReadableStream<UIMessageChunk>,
+  requestId: string
+): ReadableStream<UIMessageChunk> {
+  const open = new Set<string>();
+  return chunks.pipeThrough(
+    new TransformStream<UIMessageChunk, UIMessageChunk>({
+      transform(chunk, controller) {
+        const kind =
+          chunk.type === "text-start" ||
+          chunk.type === "text-delta" ||
+          chunk.type === "text-end"
+            ? "text"
+            : chunk.type === "reasoning-start" ||
+                chunk.type === "reasoning-delta" ||
+                chunk.type === "reasoning-end"
+              ? "reasoning"
+              : undefined;
+        if (kind === undefined) {
+          controller.enqueue(chunk);
+          return;
+        }
+        const given = (chunk as { id?: unknown }).id;
+        const id = typeof given === "string" ? given : `${requestId}-${kind}`;
+        const key = `${kind}:${id}`;
+        const next = (
+          given === id ? chunk : { ...chunk, id }
+        ) as UIMessageChunk;
+        if (chunk.type === `${kind}-start`) open.add(key);
+        else if (!open.has(key)) {
+          if (chunk.type === `${kind}-end`) return;
+          open.add(key);
+          controller.enqueue({ type: `${kind}-start`, id } as UIMessageChunk);
+        }
+        if (chunk.type === `${kind}-end`) open.delete(key);
+        controller.enqueue(next);
+      }
+    })
+  );
+}
+
 /** Read what `respond` returned as UI message chunks. */
 function chunksOf(
   source: ChatModelStream,
@@ -600,12 +935,14 @@ function chunksOf(
   if ("toUIMessageStream" in source) return source.toUIMessageStream();
   // A `text/event-stream` body is a UI message stream; any other body is
   // plain text, one text part.
-  const iterable: AsyncIterable<UIMessageChunk> =
-    source instanceof Response
-      ? source.body
-        ? (responseSource(source, source.body, requestId)
-            .chunks as AsyncIterable<UIMessageChunk>)
-        : (async function* () {})()
+  const response =
+    source instanceof Response && source.body
+      ? responseSource(source, source.body, requestId)
+      : undefined;
+  const iterable: AsyncIterable<UIMessageChunk> = response
+    ? (response.chunks as AsyncIterable<UIMessageChunk>)
+    : source instanceof Response
+      ? (async function* () {})()
       : source;
   const iterator = iterable[Symbol.asyncIterator]();
   return new ReadableStream<UIMessageChunk>({
@@ -615,6 +952,9 @@ function chunksOf(
       else controller.enqueue(next.value);
     },
     async cancel() {
+      // A body read that is waiting holds the generator: the body itself is
+      // cancelled, which ends that read.
+      response?.cancel?.();
       await iterator.return?.();
     }
   });
@@ -701,36 +1041,166 @@ export function chatTurnDefinition(
   input: unknown,
   step: TaskStep
 ) => Promise<ChatTurnResult | TaskSettlement> {
-  void options;
-  return async (input, step) => {
-    const run = (input ?? {}) as ChatTurnInput;
+  const attempt = async (
+    input: unknown,
+    step: TaskStep
+  ): Promise<ChatTurnResult | TaskSettlement> => {
+    const given = (input ?? {}) as ChatTurnInput;
     const requestId = step.id;
-    const sessionId = run.session ?? deps.session ?? "";
+    const sessionId = given.session ?? deps.session ?? "";
     const session = deps.sessions.session(sessionId);
+    const client =
+      given.trigger === "submit-message" ||
+      given.trigger === "regenerate-message";
+    // A regenerate a question sent after it overtook has nothing to answer:
+    // it never runs, and leaves the stored tools and body alone.
+    if (
+      given.trigger === "regenerate-message" &&
+      step.checkpoint.get(CONTEXT_CHECKPOINT) === undefined
+    ) {
+      const noted = (
+        deps.tasks.peek(requestId)?.metadata?.chat as
+          | { questions?: unknown }
+          | undefined
+      )?.questions;
+      if (Array.isArray(noted)) {
+        const known = new Set([
+          ...(noted as string[]),
+          ...(given.messages ?? []).map((message) => message.id)
+        ]);
+        const overtaken = ((await session.getHistory()) as UIMessage[]).some(
+          (message) => message.role === "user" && !known.has(message.id)
+        );
+        if (overtaken) {
+          const frame = {
+            type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+            id: requestId,
+            body: "",
+            done: true,
+            outcome: "skipped",
+            ...(messageIdsOf(deps.tasks.peek(requestId)?.metadata) && {
+              messageIds: messageIdsOf(deps.tasks.peek(requestId)?.metadata)
+            })
+          };
+          const text = frameText(frame);
+          if (deps.webSockets && text !== undefined) {
+            for (const connection of deps.webSockets.getConnections()) {
+              sendIfOpen(connection, text);
+            }
+          }
+          recordRecentChatTerminal(deps.kv, frame);
+          const skipped = { requestId, status: "skipped" } as const;
+          await host.hooks?.onResponse?.(skipped);
+          return skipped;
+        }
+      }
+    }
+    // The request context, once per turn: a client's request (or a host
+    // turn told to) stores its tools and body; a turn that brings none
+    // runs with the stored ones, read now.
+    // A turn stopped before it started never ran: it leaves the context.
+    const stoppedEarly =
+      (
+        deps.tasks.peek(requestId)?.metadata?.[STOPPED_METADATA.key] as
+          | Record<string, unknown>
+          | undefined
+      )?.[STOPPED_METADATA.field] === true;
+    // A host turn fills what it does not bring from the stored context
+    // first (it stores the result when told to); a client's request runs
+    // with exactly what it sent.
+    let run = given;
+    if (
+      !client &&
+      (given.clientTools === undefined || given.body === undefined)
+    ) {
+      const stored = await session.internal_config(CHAT_REQUEST_CONTEXT_KEY);
+      if (stored) {
+        const context = JSON.parse(stored) as Pick<
+          ChatTurnInput,
+          "clientTools" | "body"
+        >;
+        const clientTools = given.clientTools ?? context.clientTools;
+        const body = given.body ?? context.body;
+        run = {
+          ...given,
+          ...(clientTools !== undefined && { clientTools }),
+          ...(body !== undefined && { body })
+        };
+      }
+    }
+    const storeContext = async () => {
+      if (stoppedEarly || step.checkpoint.get(CONTEXT_CHECKPOINT) !== undefined)
+        return;
+      await session.internal_setConfig(
+        CHAT_REQUEST_CONTEXT_KEY,
+        // One past the row budget is not kept (a later server turn runs
+        // without it), as the hosts do today.
+        storableRequestContext(
+          run.clientTools?.length || (run.body && Object.keys(run.body).length)
+            ? JSON.stringify({
+                ...(run.clientTools?.length && {
+                  clientTools: run.clientTools
+                }),
+                ...(run.body && { body: run.body })
+              })
+            : null
+        )
+      );
+      step.checkpoint.set(CONTEXT_CHECKPOINT, true);
+    };
+    // A client's request stores its context when it starts; a host turn
+    // told to stores it once it is sure to run (a "continue" with nothing
+    // to continue leaves it alone).
+    if (client) await storeContext();
     const streamId = chatTurnStreamId(requestId);
     // Every tab sees the reply as it streams, and how it ended.
     const send = (fields: Record<string, unknown>) => {
-      if (!deps.webSockets) return;
       const frame = {
         type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
         id: requestId,
         ...fields
       };
-      const text = frameText(frame);
-      if (text === undefined) return;
-      for (const connection of deps.webSockets.getConnections()) {
-        sendIfOpen(connection, text);
+      const sockets = deps.webSockets;
+      const text = sockets ? frameText(frame) : undefined;
+      if (sockets && text !== undefined) {
+        const offered = offeredIn(deps.streams);
+        // A tab offered this stream gets it from the ack's replay.
+        const without = [...offered]
+          .filter(([, id]) => id === requestId)
+          .map(([tab]) => tab);
+        if (sockets.broadcast) sockets.broadcast(text, without);
+        else {
+          for (const connection of sockets.getConnections()) {
+            if (!without.includes(connection.id)) sendIfOpen(connection, text);
+          }
+        }
       }
+      // An end is kept, after it is sent, for a tab that is away now.
+      if (fields.done === true) recordRecentChatTerminal(deps.kv, frame);
     };
     // A regenerated reply is a new branch under its question.
+    // So is the reply to a question a tab sent again with the replies after
+    // it taken off (a truncated list): the stored replies stay on the
+    // branch the transcript leaves.
+    const resent =
+      run.trigger === "submit-message" &&
+      run.questionId !== undefined &&
+      !(run.messages ?? []).some((m) => m.id === run.questionId) &&
+      ((await session.getLatestLeaf()) as { id?: string } | null)?.id !==
+        run.questionId &&
+      (await session.getMessage(run.questionId)) !== null;
     const placement =
-      run.trigger === "regenerate-message" && run.questionId !== undefined
+      (run.trigger === "regenerate-message" || resent) &&
+      run.questionId !== undefined
         ? { parentId: run.questionId }
         : {};
     // Tabs that asked to resume before this turn streamed.
     const parked = parkedIn(deps.streams, sessionId);
     const offerStream = () => {
       if (parked.size === 0) return;
+      for (const [id, tab] of parked) {
+        if (tab.asked) offeredIn(deps.streams).set(id, requestId);
+      }
       releaseParked(parked, {
         type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
         id: requestId
@@ -738,7 +1208,13 @@ export function chatTurnDefinition(
     };
     // The reply this turn stored, when it stored one.
     let finalReply: UIMessage | undefined;
-    const report = async (result: ChatTurnResult) => {
+    // The transcript the turn read (repaired), once it read it.
+    let turnTranscript: UIMessage[] | undefined;
+    const report = async (
+      result: ChatTurnResult,
+      /** The model's own error chunk ended it: sent as an error frame. */
+      inBand = false
+    ) => {
       // A settled turn is not recovered: what it stashed for that goes.
       if (step.checkpoint.get(STASH_CHECKPOINT) != null) {
         step.checkpoint.set(STASH_CHECKPOINT, null);
@@ -758,16 +1234,105 @@ export function chatTurnDefinition(
       if (parked.size > 0) {
         releaseParked(parked, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
       }
-      if (result.status !== "completed" && result.status !== "skipped") {
+      // A continuation's end says so, as its other frames do; a client
+      // request's end names the messages it came from.
+      const continuation =
+        run.trigger === "tool-answer" || run.mode === "continue";
+      const messageIds = messageIdsOf(deps.tasks.peek(requestId)?.metadata);
+      // The tabs get the stored transcript with the reply: before the end
+      // frame for a reply that finished (the other tabs; the one that asked
+      // read it from the stream), after it for a stop, so what the stream
+      // showed and the transcript did not keep is dropped, not merged with
+      // the stream a tab still reads.
+      const origin = (
+        deps.tasks.peek(requestId)?.metadata?.chat as
+          | { origin?: unknown }
+          | undefined
+      )?.origin;
+      const sendTranscript = async (exceptOrigin: boolean) => {
+        const sockets = deps.webSockets;
+        if (!sockets) return;
+        // The transcript the turn read, with its stored reply: read again
+        // only when the turn ended before it read one.
+        const history = turnTranscript
+          ? finalReply
+            ? [
+                ...turnTranscript.filter((m) => m.id !== finalReply?.id),
+                finalReply
+              ]
+            : turnTranscript
+          : ((await session.getHistory()) as UIMessage[]);
+        // With the messages the waiting requests hold, named as queued.
+        const text = frameText({
+          type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
+          ...(options.name
+            ? chatClientView(
+                deps.tasks,
+                options.name,
+                sessionId,
+                history,
+                deps.session ?? ""
+              )
+            : { messages: history })
+        } as { type: string });
+        if (text === undefined) return;
+        for (const connection of sockets.getConnections()) {
+          if (exceptOrigin && connection.id === origin) continue;
+          sendIfOpen(connection, text);
+        }
+      };
+      // A recovered reply is sent to the tab that asked too: what the chat
+      // stored (repaired parts, sanitised, or not kept) need not be what the
+      // tab put together from the attempts' streams.
+      const recovered =
+        step.attempt > 1 ||
+        step.checkpoint.get(FAILED_CHECKPOINT) !== undefined;
+      if (result.messageId !== undefined && result.status !== "aborted") {
+        // A continuation's tab gets it too: it answered, it did not send
+        // the reply's question.
+        await sendTranscript(client && !recovered);
+      }
+      if (inBand && result.error !== undefined) {
         send({
-          body: result.error ?? "",
+          body: result.error,
+          done: false,
+          error: true,
+          ...(continuation && { continuation: true })
+        });
+      }
+      if (result.status !== "completed" && result.status !== "skipped") {
+        // One error frame per failed reply: the model's own error was it.
+        send({
+          body: inBand ? "" : (result.error ?? ""),
           done: true,
-          error: result.status === "error",
-          outcome: result.status
+          error: result.status === "error" && !inBand,
+          outcome: result.status,
+          ...(continuation && { continuation: true }),
+          ...(messageIds && { messageIds })
         });
       } else {
-        send({ body: "", done: true, outcome: result.status });
+        send({
+          body: "",
+          done: true,
+          outcome: result.status,
+          ...(continuation && { continuation: true }),
+          ...(messageIds && { messageIds })
+        });
       }
+      // A tab away when the model's own error ended it learns that error:
+      // the end is kept with it (the live end frame does not repeat it).
+      if (inBand && result.error !== undefined) {
+        recordRecentChatTerminal(deps.kv, {
+          id: requestId,
+          done: true,
+          error: true,
+          body: result.error,
+          outcome: result.status,
+          ...(continuation && { continuation: true }),
+          ...(messageIds && { messageIds })
+        });
+      }
+      if (result.status === "aborted") await sendTranscript(false);
       await host.hooks?.onResponse?.(result);
       return result;
     };
@@ -789,9 +1354,17 @@ export function chatTurnDefinition(
       finalReply = stored;
       const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
       let after: (() => Promise<void>) | undefined;
+      // A turn whose stream a reader replays after it ended (an agent-tool
+      // run's parent, run metadata `chat.keepStream`) keeps it, completed.
+      const keepStream =
+        (
+          deps.tasks.peek(requestId)?.metadata?.chat as
+            | { keepStream?: unknown }
+            | undefined
+        )?.keepStream === true;
       try {
         out.close({
-          discard: true,
+          discard: !keepStream,
           commit: () => {
             after = sync.upsert(stored as never, placement).after;
             step.checkpoint.set(REPLY_CHECKPOINT, stored.id);
@@ -806,6 +1379,15 @@ export function chatTurnDefinition(
       else {
         await session.upsertMessage(stored as never, placement);
         step.checkpoint.set(REPLY_CHECKPOINT, stored.id);
+      }
+      const max = host.options?.maxPersistedMessages;
+      if (max !== undefined && max > 0) {
+        const kept = await session.getHistory();
+        if (kept.length > max) {
+          await session.deleteMessages(
+            kept.slice(0, kept.length - max).map((m) => m.id)
+          );
+        }
       }
       return stored.id;
     };
@@ -827,11 +1409,47 @@ export function chatTurnDefinition(
     // A failure worth another attempt: the stream stays open, and the next
     // attempt continues it after a backoff, asking the app and the budget. A recovery attempt that fails this way counts against
     // `maxAttempts`, however little time passed.
-    const tryAgainAfter = (error: unknown) => {
+    const tryAgainAfter = async (error: unknown) => {
       const before = step.checkpoint.get<{ failures: number; retries: number }>(
         FAILED_CHECKPOINT
       );
       const failures = (before?.failures ?? 0) + 1;
+      // A turn that has streamed nothing is not seen by the next attempt's
+      // budget (it reads the stream): it is given up here once it has
+      // failed `maxAttempts` times, so it cannot hold the lane for good.
+      if (failures >= maxAttempts && !(await deps.streams.status(streamId))) {
+        const reason = "max_attempts_exceeded";
+        const ended = {
+          incidentId: requestId,
+          requestId,
+          attempt: failures,
+          maxAttempts,
+          recoveryKind: "retry" as const
+        };
+        deps.emit?.("chat:recovery:failed", { ...ended, reason });
+        try {
+          await budget.onExhausted?.({
+            ...ended,
+            recoveryRootRequestId: requestId,
+            streamId,
+            createdAt: step.createdAt,
+            partialText: "",
+            partialParts: [],
+            reason,
+            terminalMessage: budget.terminalMessage
+          });
+        } catch (failure) {
+          console.error(
+            "[agents/chat] chatRecovery onExhausted hook threw",
+            failure
+          );
+        }
+        return report({
+          requestId,
+          status: "error",
+          error: budget.terminalMessage
+        });
+      }
       step.checkpoint.set(FAILED_CHECKPOINT, {
         text: error instanceof Error ? error.message : String(error),
         // Until the next attempt has looked: this one ended itself.
@@ -840,6 +1458,15 @@ export function chatTurnDefinition(
         retries:
           (before?.retries ?? 0) +
           (step.checkpoint.get(INCIDENT_CHECKPOINT) === undefined ? 0 : 1)
+      });
+      // The turn is being recovered from here on: its next attempt is
+      // scheduled.
+      deps.emit?.("chat:recovery:scheduled", {
+        incidentId: requestId,
+        requestId,
+        attempt: failures,
+        maxAttempts,
+        recoveryKind: "continue"
       });
       // A provider that says how long to wait is believed, up to the cap.
       return TaskSettlement.retry(
@@ -869,7 +1496,11 @@ export function chatTurnDefinition(
     // A reply a tab sent back is a snapshot from before it finished: the
     // stored one stands.
     for (const message of run.messages ?? []) {
-      if (stopped && message.role !== "user") continue;
+      // A stopped client request still stores its question (the tab sent
+      // it); a stopped server turn stores nothing.
+      if (stopped && (message.role !== "user" || run.trigger === "server")) {
+        continue;
+      }
       if (
         message.role === "assistant" &&
         (await session.getMessage(message.id)) !== null
@@ -879,8 +1510,14 @@ export function chatTurnDefinition(
       await session.upsertMessage(message as never);
     }
     // The run ends aborted, as a stop of a running turn does.
+    // Its tab was told it ended when it was stopped.
     if (stopped) {
-      await report({ requestId, status: "aborted" });
+      // A tab waiting for its stream learns there is none.
+      const waiting = parkedIn(deps.streams, sessionId);
+      if (waiting.size > 0) {
+        releaseParked(waiting, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
+      }
+      await host.hooks?.onResponse?.({ requestId, status: "aborted" });
       return TaskSettlement.aborted("chat turn cancelled");
     }
     const earlier = await deps.streams.status(streamId);
@@ -891,6 +1528,9 @@ export function chatTurnDefinition(
       });
     }
     let partial: UIMessage | undefined;
+    // The cut-off reply holds a tool's result: the tool ran, so the reply
+    // is kept even when the app says not to keep it (#1631).
+    let settledWork = false;
     if (earlier) {
       // Chunks an earlier attempt streamed and recovery discarded are not
       // part of the reply.
@@ -900,6 +1540,13 @@ export function chatTurnDefinition(
       const streamedCount =
         (step.checkpoint.get<number>(DISCARDED_CHECKPOINT) ?? 0) +
         stored.length;
+      // What this run streamed, not the reply it extends: a tool's result.
+      settledWork = stored.some(
+        (chunk) =>
+          chunk.type === "tool-output-available" ||
+          chunk.type === "tool-output-error" ||
+          chunk.type === "tool-output-denied"
+      );
       // A reply this run continues (a tool answer's) is the base the stream
       // extends: its first `parts` parts as they were when the run began.
       const base = step.checkpoint.get<{ id: string; parts: number }>(
@@ -958,6 +1605,15 @@ export function chatTurnDefinition(
         isolate: instanceId(deps.tasks),
         token: crypto.randomUUID()
       };
+      // A reply that waits on the client (a client tool's result, an
+      // approval) is not stuck: the budget cannot give it up while it
+      // waits. The app is still asked, since it may choose to drop it.
+      const awaitsClient =
+        partial !== undefined &&
+        continuationWaitsOnClient(
+          [partial],
+          new Set((run.clientTools ?? []).map((tool) => tool.name))
+        );
       const evaluated =
         recovery === false
           ? undefined
@@ -997,7 +1653,7 @@ export function chatTurnDefinition(
                 : null,
               // Progress is every chunk streamed, so a little more counts.
               currentProgress: streamedCount,
-              awaitingClientInteraction: false,
+              awaitingClientInteraction: awaitsClient,
               now: Date.now(),
               onShouldKeepRecoveringError: (error) =>
                 console.error(
@@ -1024,39 +1680,82 @@ export function chatTurnDefinition(
         if (failed?.live) {
           step.checkpoint.set(FAILED_CHECKPOINT, { ...failed, live: false });
         }
+        for (const { type, ...event } of evaluated.events) {
+          deps.emit?.(type, event);
+        }
       }
       const exhausted = recovery === false || evaluated?.exhausted === true;
       const attempt = evaluated?.incident.attempt ?? step.attempt;
       let decision: ChatRecoveryOptions | void = undefined;
       if (!exhausted) {
-        decision = await host.hooks?.onRecovery?.({
-          incidentId: requestId,
-          recoveryRootRequestId: requestId,
-          attempt,
-          maxAttempts,
-          recoveryKind: partial ? "continue" : "retry",
-          streamId,
-          requestId,
-          partialText,
-          partialParts,
-          recoveryData: step.checkpoint.get(STASH_CHECKPOINT) ?? null,
-          messages: (await session.getHistory()) as unknown as UIMessage[],
-          createdAt: step.createdAt
-        });
+        try {
+          decision = await host.hooks?.onRecovery?.({
+            incidentId: requestId,
+            recoveryRootRequestId: requestId,
+            attempt,
+            maxAttempts,
+            recoveryKind: partial ? "continue" : "retry",
+            streamId,
+            requestId,
+            partialText,
+            partialParts,
+            // What the turn stashed, and the request it was sent with.
+            recoveryData: step.checkpoint.get(STASH_CHECKPOINT) ?? null,
+            ...(run.body !== undefined && { lastBody: { ...run.body } }),
+            ...(run.clientTools !== undefined &&
+              run.clientTools.length > 0 && {
+                lastClientTools: [...run.clientTools]
+              }),
+            messages: (await session.getHistory()) as unknown as UIMessage[],
+            createdAt: step.createdAt
+          });
+        } catch (error) {
+          // The app's hook failed: the turn is given up, as released
+          // (`recovery_error`): nothing continues past a hook that did not
+          // say to, and the tab gets the app's terminal message. What was
+          // streamed stays stored.
+          const text = error instanceof Error ? error.message : String(error);
+          console.error("[agents/chat] onRecovery hook threw", error);
+          const writer = await deps.streams.open(streamId, { tag: requestId });
+          writer.error(text);
+          const ended = {
+            incidentId: requestId,
+            requestId,
+            attempt,
+            maxAttempts,
+            recoveryKind: partial ? ("continue" as const) : ("retry" as const)
+          };
+          deps.emit?.("chat:recovery:failed", {
+            ...ended,
+            reason: "recovery_error"
+          });
+          try {
+            await budget.onExhausted?.({
+              ...ended,
+              recoveryRootRequestId: requestId,
+              streamId,
+              createdAt: step.createdAt,
+              partialText,
+              partialParts,
+              reason: "recovery_error",
+              terminalMessage: budget.terminalMessage
+            });
+          } catch (failure) {
+            console.error(
+              "[agents/chat] chatRecovery onExhausted hook threw",
+              failure
+            );
+          }
+          return report({
+            requestId,
+            status: "error",
+            error: budget.terminalMessage
+          });
+        }
       }
-      // `persist: false` drops what this run streamed unless it holds
-      // settled tool results: work that is not idempotent and must not run
-      // again. A reply it continues keeps its base either way.
-      const drop =
-        decision?.persist === false &&
-        !partialHasSettledToolResults(
-          (partial?.parts ?? []).slice(
-            baseMessage && base ? base.parts : 0
-          ) as never
-        );
       if (exhausted || decision?.continue === false) {
         // falls through below
-      } else if (drop) {
+      } else if (decision?.persist === false && !settledWork) {
         // Continue without what was streamed: the question is answered
         // again.
         await dropPartial();
@@ -1065,10 +1764,21 @@ export function chatTurnDefinition(
       if (exhausted || decision?.continue === false) {
         // Given up: what was streamed stays stored (unless the app said
         // not to keep it), and the turn ends as an error.
-        if (drop) await dropPartial();
+        if (decision?.persist === false && !settledWork) await dropPartial();
         const writer = await deps.streams.open(streamId, { tag: requestId });
         writer.error("interrupted");
+        const ended = {
+          incidentId: requestId,
+          requestId,
+          attempt,
+          maxAttempts,
+          recoveryKind: partial ? "continue" : "retry"
+        };
         if (!evaluated?.exhausted) {
+          deps.emit?.("chat:recovery:skipped", {
+            ...ended,
+            reason: "continue_disabled"
+          });
           if (evaluated) {
             step.checkpoint.set(INCIDENT_CHECKPOINT, {
               ...evaluated.incident,
@@ -1085,6 +1795,10 @@ export function chatTurnDefinition(
         }
         // The budget is spent: the app is told why, and the client gets the
         // message the app chose for it.
+        deps.emit?.("chat:recovery:failed", {
+          ...ended,
+          reason: evaluated.incident.reason ?? "max_attempts_exceeded"
+        });
         try {
           await budget.onExhausted?.({
             incidentId: requestId,
@@ -1116,20 +1830,110 @@ export function chatTurnDefinition(
 
     // The transcript up to this turn's question (a regenerate of an older
     // question sees nothing after it), or to the reply it continues.
-    const history = async () =>
-      (await session.getHistory(
+    const history = async (): Promise<UIMessage[]> => {
+      const leaf =
         run.trigger === "tool-answer" && run.replyId !== undefined
           ? { leafId: run.replyId }
           : run.questionId !== undefined &&
               !partial &&
-              run.trigger !== "tool-answer"
+              run.trigger !== "tool-answer" &&
+              run.mode !== "continue"
             ? { leafId: run.questionId }
-            : {}
-      )) as unknown as UIMessage[];
+            : {};
+      // A byte budget reads only the newest messages that fit it.
+      const budget = host.options?.hydrationByteBudget;
+      // Zero, a negative or no finite budget reads the whole path, as the
+      // hosts' hydration does.
+      if (budget !== undefined && Number.isFinite(budget) && budget > 0) {
+        return (await session.getRecentHistory(budget, leaf))
+          .messages as unknown as UIMessage[];
+      }
+      return (await session.getHistory(leaf)) as unknown as UIMessage[];
+    };
     const messages = await history();
+    turnTranscript = messages;
+    // "Continue the last turn", decided before anything is stored: with no
+    // reply, or a reply still waiting on the client, there is nothing to
+    // continue; a reply that holds nothing is removed and its question is
+    // answered again.
+    let answerAgain = false;
+    if (
+      !partial &&
+      run.mode === "continue" &&
+      run.trigger !== "tool-answer" &&
+      step.checkpoint.get(BASE_CHECKPOINT) === undefined
+    ) {
+      const last = messages.at(-1);
+      if (last?.role !== "assistant") {
+        return report({
+          requestId,
+          status: "skipped",
+          reason: "nothing-to-continue"
+        });
+      }
+      if (
+        continuationWaitsOnClient(
+          messages,
+          new Set((run.clientTools ?? []).map((tool) => tool.name))
+        )
+      ) {
+        return report({
+          requestId,
+          status: "skipped",
+          reason: "awaiting-client"
+        });
+      }
+      if (replyIsRemovedAsEmpty(last)) {
+        await session.deleteMessages([last.id]);
+        messages.pop();
+        answerAgain = true;
+      }
+    }
+    // A tool answer's continuation has nothing to answer when the chat
+    // moved on past its reply, when its reply already went on to the
+    // model's answer, or when the reply still waits on a client. The answer
+    // is stored either way, and the next turn's call reads it.
+    if (
+      !partial &&
+      run.trigger === "tool-answer" &&
+      step.checkpoint.get(BASE_CHECKPOINT) === undefined
+    ) {
+      // The chat's latest message, not the end of the path read up to the
+      // reply.
+      const latest = (await session.getLatestLeaf()) as { id?: string } | null;
+      const dropped =
+        run.replyId !== undefined && latest?.id !== run.replyId
+          ? "moved_on"
+          : transcriptEndsInAnswer(messages)
+            ? "answered"
+            : continuationWaitsOnClient(
+                  messages,
+                  new Set((run.clientTools ?? []).map((tool) => tool.name))
+                )
+              ? "awaiting_client"
+              : undefined;
+      if (dropped !== undefined) {
+        deps.emit?.("chat:continuation:dropped", {
+          requestId,
+          reason: dropped
+        });
+        return report({
+          requestId,
+          status: "skipped",
+          ...(dropped === "awaiting_client" && {
+            reason: "awaiting-client" as const
+          })
+        });
+      }
+    }
+    if (!client && run.storeContext) await storeContext();
     // A tool answer continues the reply that asked for it (named, or the
-    // latest).
-    if (!partial && run.trigger === "tool-answer") {
+    // latest); a host's "continue the last turn" does the same.
+    if (
+      !partial &&
+      !answerAgain &&
+      (run.trigger === "tool-answer" || run.mode === "continue")
+    ) {
       const last = messages.at(-1);
       if (last?.role === "assistant") {
         partial = last;
@@ -1139,6 +1943,73 @@ export function chatTurnDefinition(
             parts: last.parts.length
           });
         }
+      }
+    }
+    // Before the model is asked: a call the transcript leaves unanswered
+    // that nothing will answer in time is settled (a provider rejects a
+    // request holding a call with no result), trailing reasoning is dropped,
+    // and a reply left holding nothing is removed. The repaired transcript
+    // is stored, and the call sees it.
+    const clientToolNames = new Set(
+      (run.clientTools ?? []).map((tool) => tool.name)
+    );
+    const before = [...messages];
+    const repaired = repairTranscriptBeforeTurn(before, {
+      continuation: partial !== undefined,
+      clientToolNames,
+      repairPart: (part) =>
+        (host.hooks?.repairInterruptedToolPart?.(
+          part as never
+        ) as UIMessage["parts"][number]) ??
+        interruptedToolPartAsError(part, { clientToolNames })
+    });
+    if (partial !== undefined && repaired.keptToolCallIds.length > 0) {
+      // A continuation whose reply still waits on a client: its answer
+      // starts the continuation.
+      return report({
+        requestId,
+        status: "skipped",
+        reason: "awaiting-client"
+      });
+    }
+    const emptied = new Set(repaired.emptyReplyIds);
+    if (
+      repaired.removedToolCalls > 0 ||
+      repaired.normalizedInputs > 0 ||
+      repaired.removedReasoningParts > 0 ||
+      emptied.size > 0
+    ) {
+      deps.emit?.("chat:transcript:repaired", {
+        requestId,
+        removedToolCalls: repaired.removedToolCalls,
+        normalizedInputs: repaired.normalizedInputs,
+        toolCallIds: repaired.toolCallIds,
+        ...(repaired.removedReasoningParts > 0 && {
+          removedReasoningParts: repaired.removedReasoningParts
+        }),
+        // As stored, reasoning included, so an app can keep its own copy.
+        ...(emptied.size > 0 && {
+          removedMessages: messages.filter((message) => emptied.has(message.id))
+        })
+      });
+    }
+    for (let i = 0; i < repaired.messages.length; i++) {
+      const next = repaired.messages[i];
+      if (emptied.has(next.id)) continue;
+      if (next !== messages[i]) await session.upsertMessage(next as never);
+    }
+    if (emptied.size > 0) await session.deleteMessages([...emptied]);
+    messages.splice(
+      0,
+      messages.length,
+      ...repaired.messages.filter((message) => !emptied.has(message.id))
+    );
+    // The reply a continuation extends, as the repair left it (only when
+    // the repair changed it).
+    if (partial !== undefined) {
+      const index = repaired.messages.findIndex((m) => m.id === partial?.id);
+      if (index !== -1 && repaired.messages[index] !== before[index]) {
+        partial = repaired.messages[index];
       }
     }
     let call: ChatModelCall = {
@@ -1154,7 +2025,8 @@ export function chatTurnDefinition(
       ...(run.body !== undefined && { body: run.body }),
       signal: step.signal,
       step: <T>(name: string, fn: () => Promise<T>) =>
-        step.do(name, () => fn() as Promise<TaskValue>) as Promise<T>
+        step.do(name, () => fn() as Promise<TaskValue>) as Promise<T>,
+      checkpoint: step.checkpoint
     };
     const fallbackId = `${requestId}-reply`;
     let writer: StreamWriter | undefined;
@@ -1162,44 +2034,101 @@ export function chatTurnDefinition(
     let reply: UIMessage | undefined;
     let overflowTried = false;
     for (;;) {
-      const source = await inTurn(requestId, step, () => host.respond(call));
+      let source: ChatModelStream | undefined;
+      let modelChunks: ReadableStream<UIMessageChunk> | undefined;
+      try {
+        source = await inTurn(requestId, step, () => host.respond(call));
+        // A reply that cannot be read (a body already taken) fails here,
+        // before anything streamed, as a `respond` that throws does.
+        if (source && !(step.signal.aborted && !writer)) {
+          modelChunks = inTurn(requestId, step, () =>
+            chunksOf(source as ChatModelStream, requestId)
+          );
+        }
+      } catch (error) {
+        // `respond` failed before anything streamed: a stop ends the turn
+        // stopped, a transient failure retries, anything else ends it as
+        // an error with the failure's message.
+        if (step.signal.aborted) {
+          writer?.close({ discard: true });
+          return report({ requestId, status: "aborted" });
+        }
+        const verdict = host.hooks?.classifyError?.(error, false) ?? "terminal";
+        if (verdict === "transient" && recovery !== false) {
+          return tryAgainAfter(error);
+        }
+        const text = error instanceof Error ? error.message : String(error);
+        if (writer) writer.error(text);
+        return report({ requestId, status: "error", error: text });
+      }
       if (!source) {
         writer?.close({ discard: true });
         return report({ requestId, status: "skipped" });
       }
+      // Stopped or cleared while the model was asked: nothing it sends is
+      // the turn's (a model that ignores its signal answers anyway).
+      if (step.signal.aborted && !writer) {
+        void Promise.resolve(source)
+          .then((value) =>
+            value instanceof Response
+              ? value.body?.cancel()
+              : (value as ReadableStream).cancel?.()
+          )
+          .catch(() => {});
+        return report({ requestId, status: "aborted" });
+      }
       const out = (writer ??= await deps.streams.open(streamId, {
         tag: requestId
       }));
-      const continuing = partial;
+      // A text or reasoning part the reply was cut off in is closed: the
+      // continuation writes a part of its own after it.
+      // The reply's parts before this stream, which the reader mutates.
+      const continuingBefore: UIMessage["parts"] = structuredClone(
+        partial?.parts ?? []
+      );
+      const continuing = partial && {
+        ...partial,
+        parts: partial.parts.map(
+          (part) => settleInterruptedPart(part as never) as typeof part
+        )
+      };
       let started = false;
       // Chunks are written in batches (`CHUNK_BATCH`), as the hosts' reply
       // streams do; a reader flushes first.
       const sync = deps.streams.__DO_NOT_USE_WILL_BREAK__sync();
       const deltaParts = new Set<string>();
       // The batch is also written when the model pauses (at the end of a
-      // burst of chunks), so a reset while it is quiet keeps what it sent.
-      let flushQueued = false;
+      // burst), so a reset while it is quiet keeps what it sent; but at most
+      // once per `PAUSE_FLUSH_MS`, so a model that streams a chunk every few
+      // milliseconds does not write each chunk as its own row.
+      let pauseTimer: ReturnType<typeof setTimeout> | undefined;
+      let lastPauseFlush = 0;
       const flushWhenQuiet = () => {
-        if (flushQueued) return;
-        flushQueued = true;
-        setTimeout(() => {
-          flushQueued = false;
-          try {
-            sync.flush(streamId);
-          } catch {
-            // The stream settled meanwhile: nothing is left to write.
-          }
-        }, 0);
+        if (pauseTimer !== undefined) return;
+        pauseTimer = setTimeout(
+          () => {
+            pauseTimer = undefined;
+            lastPauseFlush = Date.now();
+            try {
+              sync.flush(streamId);
+            } catch {
+              // The stream settled meanwhile: nothing is left to write.
+            }
+          },
+          Math.max(0, lastPauseFlush + PAUSE_FLUSH_MS - Date.now())
+        );
       };
-      const record = (chunk: UIMessageChunk) => {
+      /** Store `chunk`; its seq goes on the frame the tabs get (#1951). */
+      const record = (chunk: UIMessageChunk): number => {
         const json = JSON.stringify(chunk);
         const bytes = utf8Length(json);
+        let seq: number;
         // One past the capability's chunk limit goes through the writer,
         // which refuses it as it always has.
         if (bytes > Math.min(sync.maxChunkBytes, ROW_VALUE_BYTES)) {
-          out.append(chunk as never);
+          seq = out.append(chunk as never);
         } else {
-          sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
+          seq = sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
           flushWhenQuiet();
         }
         // A tool call's input and its outcome are written at once: a tool
@@ -1229,6 +2158,7 @@ export function chatTurnDefinition(
         ) {
           sync.flush(streamId);
         }
+        return seq;
       };
       const liveKey = sessionId;
       const live = liveTurnsOf(deps.streams);
@@ -1243,12 +2173,20 @@ export function chatTurnDefinition(
         (run.clientTools ?? []).map((tool) => tool.name)
       );
       const recorded = watchStall(
-        // Whatever `respond` returned, it is turned into chunks and read
-        // inside the turn's context.
-        insideTurn(
-          requestId,
-          step,
-          inTurn(requestId, step, () => chunksOf(source, requestId))
+        untilStopped(
+          withPartStarts(
+            // Read inside the turn's context, as the reply's hooks run.
+            insideTurn(
+              requestId,
+              step,
+              modelChunks ??
+                inTurn(requestId, step, () =>
+                  chunksOf(source as ChatModelStream, requestId)
+                )
+            ),
+            requestId
+          ),
+          step.signal
         ),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
         // An approved call of the reply continued runs with no new input.
@@ -1308,9 +2246,20 @@ export function chatTurnDefinition(
               live.delete(liveKey);
           },
           transform(chunk, controller) {
+            // After a stop or a clear, what the model still sends is dropped.
+            if (step.signal.aborted) return;
             // Every reply has an id: a continuation keeps the reply's, a new
             // reply keeps the model's or gets one from the run.
             if (!started) offerStream();
+            // A continuation's start goes to the tabs without its message
+            // id: a tab that gets one starts a second assistant message
+            // instead of extending the reply (#1229).
+            const replyBefore = continuingBefore;
+            const forTabs = (c: UIMessageChunk): UIMessageChunk => {
+              if (!continuing || c.type !== "start") return c;
+              const { messageId: _id, ...rest } = c as { messageId?: string };
+              return rest as UIMessageChunk;
+            };
             if (!started && chunk.type !== "start") {
               started = true;
               const synthetic = {
@@ -1324,13 +2273,20 @@ export function chatTurnDefinition(
                 inTurn(requestId, step, () =>
                   host.hooks?.transformChunk?.(synthetic, parts)
                 ) ?? synthetic;
-              record(start);
+              const startSeq = record(start);
               seen.push(start);
-              send({
-                body: JSON.stringify(start),
-                done: false,
-                ...(continuing && { continuation: true })
-              });
+              // A new reply the model began with no start reaches the tabs as
+              // the model sent it (a plain-text reply starts at its text);
+              // a continuation's start marks it as one.
+              if (continuing) {
+                send({
+                  body: JSON.stringify(forTabs(start)),
+                  done: false,
+                  seq: startSeq,
+                  continuation: true,
+                  messageId: continuing.id
+                });
+              }
               controller.enqueue(start);
             }
             started = true;
@@ -1347,21 +2303,86 @@ export function chatTurnDefinition(
               inTurn(requestId, step, () =>
                 host.hooks?.transformChunk?.(own, parts)
               ) ?? own;
-            // An in-band error is stored only if it ends the turn.
-            if (next.type !== "error") {
-              record(next);
-              seen.push(next);
-              checkAnswered();
+            // An in-band error is stored only if it ends the turn, and the
+            // tabs get it as an error frame when the turn ends.
+            if (next.type === "error") {
+              controller.enqueue(next);
+              return;
             }
-            send({
-              body: JSON.stringify(next),
-              done: false,
-              ...(continuing && { continuation: true })
-            });
-            controller.enqueue(next);
+            // A call's input that arrives after its approval request is
+            // followed by the request again: a tab moves the part to
+            // `input-available` on the input, and would lose the approval.
+            const asked =
+              next.type === "tool-input-available"
+                ? seen.find(
+                    (c) =>
+                      c.type === "tool-approval-request" &&
+                      (c as { toolCallId?: unknown }).toolCallId ===
+                        (next as { toolCallId?: unknown }).toolCallId
+                  )
+                : undefined;
+            // A provider that replays an earlier tool round trip (#1404)
+            // re-sends chunks for calls the reply holds: they are dropped,
+            // neither sent (they move a settled part back on a tab) nor
+            // stored (the reader would reopen the settled part). Judged
+            // against the reply as it was before this stream.
+            if (!asked && isReplayChunk(replyBefore as never, next as never)) {
+              return;
+            }
+            for (const out of asked ? [next, asked] : [next]) {
+              const seq = record(out);
+              seen.push(out);
+              checkAnswered();
+              // A continuation's chunks name the message they go into (D70).
+              send({
+                body: JSON.stringify(forTabs(out)),
+                done: false,
+                seq,
+                ...(continuing && {
+                  continuation: true,
+                  messageId: continuing.id
+                })
+              });
+              controller.enqueue(out);
+            }
           }
         })
       );
+      // What the reply streamed so far, stored as it ends cut off (a stop or
+      // a failure): an open text part closed, reasoning it ends in dropped
+      // (no provider takes a reply that ends that way), nothing stored when
+      // it then holds nothing.
+      const keepSoFar = async (
+        failed?: string
+      ): Promise<string | undefined> => {
+        // From the reply as it was before this stream: the reader has
+        // already put what this stream sent into `continuing`.
+        const base = partial && {
+          ...partial,
+          parts: structuredClone(continuingBefore).map(
+            (part) => settleInterruptedPart(part as never) as typeof part
+          )
+        };
+        const soFar = await messageOf(streamOf(seen), base).catch(() => base);
+        const settled =
+          soFar &&
+          stripTrailingReasoning({
+            ...soFar,
+            parts: soFar.parts.map(
+              (part) => settleInterruptedPart(part as never) as typeof part
+            )
+          });
+        const keep =
+          settled && !replyIsRemovedAsEmpty(settled)
+            ? repairCutOffTools(settled, host.hooks, run.clientTools ?? [])
+            : undefined;
+        // A failure with nothing to keep leaves its stream errored.
+        if (!keep && failed !== undefined) {
+          out.error(failed);
+          return undefined;
+        }
+        return storeReply(out, keep);
+      };
       try {
         reply = await messageOf(recorded, continuing, (snapshot) => {
           parts = snapshot.parts;
@@ -1375,22 +2396,23 @@ export function chatTurnDefinition(
         if (live.get(liveKey)?.requestId === requestId) live.delete(liveKey);
         if (step.signal.aborted) {
           // A cleared chat keeps nothing of the turn.
+          // It ends `skipped`, as a turn a clear reaches before it starts.
           if (cancelReason(step.signal.reason) === CHAT_CLEARED) {
             out.close({ discard: true });
-            return report({ requestId, status: "aborted" });
+            return report({ requestId, status: "skipped" });
           }
           // A stopped turn keeps what it streamed, as a stored reply.
-          const soFar = await messageOf(streamOf(seen), continuing).catch(
-            () => continuing
-          );
-          const kept = await storeReply(
-            out,
-            soFar && repairCutOffTools(soFar, host.hooks, run.clientTools ?? [])
-          );
+          const kept = await keepSoFar();
           return report({
             requestId,
             status: "aborted",
             ...(kept && { messageId: kept })
+          });
+        }
+        if (error instanceof StreamStalledError) {
+          deps.emit?.("chat:stream:stalled", {
+            requestId,
+            timeoutMs: error.ms
           });
         }
         const verdict =
@@ -1415,8 +2437,18 @@ export function chatTurnDefinition(
           return tryAgainAfter(error);
         }
         const text = error instanceof Error ? error.message : String(error);
-        out.error(text);
-        return report({ requestId, status: "error", error: text });
+        // A failed reply keeps what it streamed too, and the tabs see it
+        // stored before the error frame.
+        const kept = await keepSoFar(text);
+        return report(
+          {
+            requestId,
+            status: "error",
+            error: text,
+            ...(kept && { messageId: kept })
+          },
+          error instanceof InBandStreamError
+        );
       }
     }
 
@@ -1424,10 +2456,47 @@ export function chatTurnDefinition(
       reply && reply.parts.length > 0
         ? await storeReply(writer as StreamWriter, reply)
         : (writer?.close({ discard: true }), undefined);
+    // A turn that was recovered on the way says so, as it always has.
+    const recovered =
+      step.checkpoint.get<ChatRecoveryIncident>(INCIDENT_CHECKPOINT);
+    if (recovered) {
+      deps.emit?.("chat:recovery:completed", {
+        incidentId: requestId,
+        requestId,
+        attempt: recovered.attempt,
+        maxAttempts: recovered.maxAttempts,
+        recoveryKind: recovered.recoveryKind
+      });
+    }
     return report({
       requestId,
       status: "completed",
       ...(storedId && { messageId: storedId })
     });
+  };
+  return (input, step) => {
+    const sessionId =
+      ((input ?? {}) as ChatTurnInput).session ?? deps.session ?? "";
+    // A stop ends a run at once, while its attempt is still storing what it
+    // streamed: the next turn's attempt starts after that, so its question
+    // follows that reply. Only a stopped attempt is waited for: it ends as
+    // soon as it has stored its reply.
+    const unwinding = unwindingOf(deps.streams);
+    const earlier = unwinding.get(sessionId);
+    const mine = earlier?.signal.aborted
+      ? earlier.ended.then(() => attempt(input, step))
+      : attempt(input, step);
+    const entry: Unwinding = {
+      signal: step.signal,
+      ended: mine.then(
+        () => {},
+        () => {}
+      )
+    };
+    unwinding.set(sessionId, entry);
+    void entry.ended.then(() => {
+      if (unwinding.get(sessionId) === entry) unwinding.delete(sessionId);
+    });
+    return mine;
   };
 }

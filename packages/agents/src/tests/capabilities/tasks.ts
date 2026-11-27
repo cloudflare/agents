@@ -501,6 +501,20 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   readonly lifecycle = Lifecycle.install(this).use(this.tasks);
+
+  /**
+   * With `startupLaneRun` stored, an `onStart` that awaits its own lane run
+   * (`laned`, label "startup", lane "l"), as a host's `onStart` awaiting a
+   * turn does.
+   */
+  async onStart(): Promise<void> {
+    if (!this.ctx.storage.kv.get("startupLaneRun")) return;
+    await this.tasks.run(
+      "laned",
+      { label: "startup" },
+      { runId: "startup", lane: "l", local: "here", start: "now" }
+    );
+  }
 }
 
 /**

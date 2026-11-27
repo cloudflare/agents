@@ -1,5 +1,6 @@
+import { recentChatTerminal } from "../../chat/recent-terminals";
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
   CHAT_CLEARED,
@@ -153,6 +154,7 @@ describe("chatTurnDefinition", () => {
           tasks: instance.tasks,
           streams: instance.streams,
           sessions: instance.sessions,
+          kv: instance.kv,
           session: "s1"
         },
         instance.host
@@ -226,7 +228,9 @@ describe("chatTurnDefinition", () => {
         tasks: instance.tasks,
         streams: instance.streams,
         sessions: instance.sessions,
-        session: "s1"
+        kv: instance.kv,
+        session: "s1",
+        emit: (type, payload) => void instance.events.push({ type, payload })
       },
       host
     );
@@ -296,6 +300,9 @@ describe("chatTurnDefinition", () => {
       expect(exhausted).toEqual([
         { reason: "max_attempts_exceeded", attempt: 3 }
       ]);
+      expect(
+        instance.events.find((event) => event.type === "chat:recovery:failed")
+      ).toMatchObject({ payload: { reason: "max_attempts_exceeded" } });
       expect(instance.calls).toEqual([]);
       expect(
         await instance.streams.status(chatTurnStreamId("run-1"))
@@ -303,6 +310,355 @@ describe("chatTurnDefinition", () => {
       // What it streamed stays stored.
       const history = await instance.sessions.session("s1").getHistory();
       expect(JSON.stringify(history)).toContain("Hel");
+    });
+  });
+
+  it("a turn cut off while its reply waits on a client tool is not given up by the budget: it waits for the answer", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await instance.sessions.session("s1").appendMessage({
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Hi" }]
+      } as never);
+      const cut = await instance.streams.open(chatTurnStreamId("run-w"), {
+        tag: "run-w"
+      });
+      for (const chunk of [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "c1",
+          toolName: "ask",
+          input: {}
+        }
+      ]) {
+        cut.append(chunk as never);
+      }
+      const recoveries: number[] = [];
+      // The attempt limit was reached before, a minute ago, with nothing
+      // streamed since.
+      const kept = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-w",
+            requestId: "run-w",
+            recoveryKind: "continue",
+            attempt: 2,
+            maxAttempts: 2,
+            status: "attempting",
+            firstSeenAt: Date.now() - 120_000,
+            lastAttemptAt: Date.now() - 60_000,
+            progress: 1_000,
+            workBaseline: 0
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          ...instance.host.hooks,
+          onRecovery: (context) => void recoveries.push(context.attempt)
+        },
+        options: { recovery: { maxAttempts: 2 } }
+      })(
+        {
+          trigger: "submit-message",
+          questionId: "u1",
+          clientTools: [{ name: "ask" }]
+        },
+        laterAttempt("run-w", 2, undefined, kept)
+      );
+      expect(result).toMatchObject({
+        requestId: "run-w",
+        status: "skipped",
+        reason: "awaiting-client"
+      });
+      // The model is not asked. The app was, and did not object.
+      expect(instance.calls).toEqual([]);
+      expect(recoveries).toHaveLength(1);
+      expect(kept.get("chat:incident")).toMatchObject({ status: "attempting" });
+    });
+  });
+
+  it("gives up a turn whose attempts keep dying, at the interrupted-attempts limit, even when each streamed more", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const reasons: string[] = [];
+      // Two attempts died before; the one in flight was in another isolate,
+      // which is gone: that makes three.
+      const counted = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 1,
+            maxAttempts: 10,
+            status: "attempting",
+            firstSeenAt: Date.now() - 120_000,
+            lastAttemptAt: Date.now() - 60_000,
+            // Less than is stored now: this attempt made progress too.
+            progress: 1,
+            workBaseline: 0,
+            interruptedAttempts: 2,
+            attemptsInFlight: [{ isolate: "an-isolate-that-died", token: "t" }]
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: {
+          recovery: {
+            maxInterruptedAttempts: 3,
+            onExhausted: (context) => void reasons.push(context.reason)
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 4, undefined, counted)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "error" });
+      expect(reasons).toEqual(["interrupted_attempts_exceeded"]);
+      expect(instance.calls).toEqual([]);
+    });
+  });
+
+  it("still ends the turn with the terminal message when onExhausted throws", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const counted = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 1,
+            maxAttempts: 1,
+            status: "attempting",
+            firstSeenAt: Date.now() - 120_000,
+            lastAttemptAt: Date.now() - 60_000,
+            progress: 1_000,
+            workBaseline: 0
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: {
+          recovery: {
+            maxAttempts: 1,
+            terminalMessage: "gave up",
+            onExhausted: () => {
+              throw new Error("the app's hook failed");
+            }
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, counted)
+      );
+      expect(result).toMatchObject({
+        requestId: "run-1",
+        status: "error",
+        error: "gave up"
+      });
+    });
+  });
+
+  it("gives the turn up with recovery_error when onRecovery throws, as released, keeping what was streamed", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const exhausted: string[] = [];
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          ...instance.host.hooks,
+          onRecovery: () => {
+            throw new Error("the app's recovery hook failed");
+          }
+        },
+        options: {
+          recovery: {
+            terminalMessage: "Could not recover.",
+            onExhausted: (context) => void exhausted.push(context.reason)
+          }
+        }
+      })({ trigger: "submit-message" }, laterAttempt("run-1", 2));
+      // Nothing continues: the app is told why, and the tab gets the
+      // app's terminal message.
+      expect(result).toMatchObject({
+        requestId: "run-1",
+        status: "error",
+        error: "Could not recover."
+      });
+      expect(exhausted).toEqual(["recovery_error"]);
+      expect(
+        instance.events.find((event) => event.type === "chat:recovery:failed")
+      ).toMatchObject({ payload: { reason: "recovery_error" } });
+      expect(instance.calls).toEqual([]);
+      expect(
+        await instance.streams.status(chatTurnStreamId("run-1"))
+      ).toMatchObject({ state: "errored" });
+      const history = await instance.sessions.session("s1").getHistory();
+      expect(JSON.stringify(history)).toContain("Hel");
+    });
+  });
+
+  it.each([
+    {
+      name: "past the work budget, however much it streams",
+      // 3 chunks are stored; 2000 chunks of work were counted before.
+      counted: { progress: 2_000, workBaseline: 0, lastProgressAt: Date.now() },
+      recovery: { maxRecoveryWork: 100 },
+      reason: "work_budget_exceeded"
+    },
+    {
+      name: "after the no-progress window, below the attempt limit",
+      counted: {
+        progress: 1_000,
+        workBaseline: 1_000,
+        lastProgressAt: Date.now() - 10 * 60_000
+      },
+      recovery: {},
+      reason: "no_progress_timeout"
+    },
+    {
+      name: "after a custom no-progress window",
+      counted: {
+        progress: 1_000,
+        workBaseline: 1_000,
+        lastProgressAt: Date.now() - 5_000
+      },
+      recovery: { noProgressTimeoutMs: 1_000 },
+      reason: "no_progress_timeout"
+    },
+    {
+      name: "when shouldKeepRecovering says no",
+      counted: {
+        progress: 1_000,
+        workBaseline: 1_000,
+        lastProgressAt: Date.now()
+      },
+      recovery: { shouldKeepRecovering: () => false },
+      reason: "recovery_aborted"
+    }
+  ])("gives up a cut-off turn $name", async ({ counted, recovery, reason }) => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const reasons: string[] = [];
+      const kept = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 1,
+            maxAttempts: 10,
+            status: "attempting",
+            firstSeenAt: Date.now() - 20 * 60_000,
+            lastAttemptAt: Date.now() - 60_000,
+            ...counted
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: {
+          recovery: {
+            ...recovery,
+            onExhausted: (context) => void reasons.push(context.reason)
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, kept)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "error" });
+      expect(reasons).toEqual([reason]);
+      expect(instance.calls).toEqual([]);
+    });
+  });
+
+  it("counts attempts that come within half a minute without progress as one: a reconnect storm does not spend the budget", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      // The attempt limit was reached a second ago, with nothing streamed
+      // since: this is the same burst.
+      const kept = new Map<string, unknown>([
+        [
+          "chat:incident",
+          {
+            incidentId: "run-1",
+            requestId: "run-1",
+            recoveryKind: "continue",
+            attempt: 2,
+            maxAttempts: 2,
+            status: "attempting",
+            firstSeenAt: Date.now() - 5_000,
+            lastAttemptAt: Date.now() - 1_000,
+            progress: 1_000,
+            workBaseline: 1_000
+          }
+        ]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        options: { recovery: { maxAttempts: 2 } }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-1", 3, undefined, kept)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
+      expect(kept.get("chat:incident")).toMatchObject({ attempt: 2 });
+    });
+  });
+
+  it("hands onRecovery what the turn stashed and the request it was sent with", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-1");
+      const seen: Array<Record<string, unknown>> = [];
+      const kept = new Map<string, unknown>([
+        ["chat:stash", { responseId: "r-123" }]
+      ]);
+      const result = await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          ...instance.host.hooks,
+          onRecovery: (context) =>
+            void seen.push({
+              recoveryData: context.recoveryData,
+              lastBody: context.lastBody,
+              lastClientTools: context.lastClientTools
+            })
+        }
+      })(
+        {
+          trigger: "submit-message",
+          body: { model: "m" },
+          clientTools: [{ name: "pick", description: "Pick one" }]
+        },
+        laterAttempt("run-1", 2, undefined, kept)
+      );
+      expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
+      expect(seen).toEqual([
+        {
+          recoveryData: { responseId: "r-123" },
+          lastBody: { model: "m" },
+          lastClientTools: [{ name: "pick", description: "Pick one" }]
+        }
+      ]);
     });
   });
 
@@ -321,6 +677,16 @@ describe("chatTurnDefinition", () => {
       expect(result).toMatchObject({ requestId: "run-1", status: "completed" });
       // The first recovery of the turn, whatever the run's attempt number.
       expect(recoveries).toEqual([1]);
+      // The recovery is published, start to end.
+      expect(
+        instance.events
+          .map((event) => event.type)
+          .filter((type) => type.startsWith("chat:recovery:"))
+      ).toEqual([
+        "chat:recovery:detected",
+        "chat:recovery:attempt",
+        "chat:recovery:completed"
+      ]);
     });
   });
 
@@ -554,10 +920,40 @@ describe("chatTurnDefinition", () => {
     });
   });
 
+  it("gives up a turn whose model keeps failing transiently before it streams, at maxAttempts", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const kept = new Map<string, unknown>();
+      const definition = definitionOf(instance, {
+        respond: async () => {
+          throw new Error("overloaded");
+        },
+        hooks: { classifyError: () => "transient" },
+        options: {
+          recovery: { maxAttempts: 2, terminalMessage: "Gave up." }
+        }
+      });
+      const first = await definition(
+        { trigger: "server" },
+        laterAttempt("run-pre", 1, undefined, kept)
+      );
+      expect(first).toBeInstanceOf(TaskSettlement);
+      // The second failure spends the budget: the turn ends, and the lane
+      // is free for the next request.
+      const second = await definition(
+        { trigger: "server" },
+        laterAttempt("run-pre", 2, undefined, kept)
+      );
+      expect(second).toMatchObject({ status: "error", error: "Gave up." });
+    });
+  });
+
   it("treats a stream that stalls as interrupted, to retry after a backoff", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await instance.lifecycle.start();
+      const kept = new Map<string, unknown>();
       const result = await definitionOf(instance, {
         respond: async () =>
           new ReadableStream({
@@ -567,8 +963,27 @@ describe("chatTurnDefinition", () => {
             }
           }),
         options: { recovery: { stallTimeoutMs: 20 } }
-      })({ trigger: "server" }, laterAttempt("run-2", 1));
+      })({ trigger: "server" }, laterAttempt("run-2", 1, undefined, kept));
       expect(result).toBeInstanceOf(TaskSettlement);
+      // A turn given up after it is reports the stall as the release did.
+      expect(kept.get("chat:failed")).toMatchObject({
+        text: "Chat stream stalled: no activity for 20ms; the turn was aborted by the stall watchdog."
+      });
+      // The turn's recovery is announced as soon as the retry is planned.
+      expect(
+        instance.events.some(
+          (event) => event.type === "chat:recovery:scheduled"
+        )
+      ).toBe(true);
+      // The stall is published, with the timeout that caught it.
+      expect(
+        instance.events.filter((event) => event.type === "chat:stream:stalled")
+      ).toEqual([
+        {
+          type: "chat:stream:stalled",
+          payload: { requestId: "run-2", timeoutMs: 20 }
+        }
+      ]);
       // The stream stays open for the next attempt to continue.
       expect(
         await instance.streams.status(chatTurnStreamId("run-2"))
@@ -800,13 +1215,18 @@ describe("chatTurnDefinition", () => {
       const tab = {
         id: "tab-1",
         readyState: 1,
-        send: (text: string) => sent.push(JSON.parse(text))
+        send: (text: string) => {
+          // The response frames: the transcript lists are another test's.
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response") sent.push(frame);
+        }
       };
       await chatTurnDefinition(
         {
           tasks: instance.tasks,
           streams: instance.streams,
           sessions: instance.sessions,
+          kv: instance.kv,
           session: "s1",
           webSockets: { getConnections: () => [tab] } as never
         },
@@ -1537,7 +1957,7 @@ describe("chatTurnDefinition", () => {
           }
         }
       })({ trigger: "server" }, laterAttempt("clr-1", 1, stop.signal));
-      expect(result).toMatchObject({ status: "aborted" });
+      expect(result).toMatchObject({ status: "skipped" });
       expect(await instance.sessions.session("s1").getHistory()).toEqual([]);
     });
   });
@@ -1609,7 +2029,15 @@ describe("chatTurnDefinition", () => {
       await session.appendMessage({
         id: "a1",
         role: "assistant",
-        parts: [{ type: "text", text: "Asked" }]
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: {}
+          }
+        ]
       } as never);
       const sent: Array<Record<string, unknown>> = [];
       const tab = {
@@ -1622,6 +2050,7 @@ describe("chatTurnDefinition", () => {
           tasks: instance.tasks,
           streams: instance.streams,
           sessions: instance.sessions,
+          kv: instance.kv,
           session: "s1",
           webSockets: { getConnections: () => [tab] } as never
         },
@@ -1635,10 +2064,9 @@ describe("chatTurnDefinition", () => {
         }
       )({ trigger: "tool-answer" }, laterAttempt("cf-1", 1));
       expect(sent[0]).toMatchObject({ continuation: true });
-      expect(JSON.parse(String(sent[0].body))).toMatchObject({
-        type: "start",
-        messageId: "a1"
-      });
+      // The tabs get it without the message id, so they extend the reply
+      // instead of starting another (#1229); the stored chunk keeps it.
+      expect(JSON.parse(String(sent[0].body))).toEqual({ type: "start" });
     });
   });
 
@@ -2161,6 +2589,737 @@ describe("chatTurnDefinition", () => {
         laterAttempt("ap-5", 1)
       );
       expect(result).toBeInstanceOf(TaskSettlement);
+    });
+  });
+
+  it("reads only the newest messages that fit the hydration byte budget", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      for (const id of ["u1", "u2", "u3"]) {
+        await session.appendMessage({
+          id,
+          role: "user",
+          parts: [{ type: "text", text: "x".repeat(2000) }]
+        } as never);
+      }
+      await definitionOf(instance, {
+        ...instance.host,
+        options: { hydrationByteBudget: 3000 }
+      })({ trigger: "server" }, laterAttempt("h-1", 1));
+      const ids = instance.calls[0].messages.map((m) => m.id);
+      expect(ids.at(-1)).toBe("u3");
+      expect(ids).not.toContain("u1");
+    });
+  });
+
+  it("reads the whole path when the hydration budget is zero or not finite", async () => {
+    for (const budget of [0, -1, Number.POSITIVE_INFINITY]) {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        await instance.lifecycle.start();
+        const session = instance.sessions.session("s1");
+        for (const id of ["u1", "u2", "u3"]) {
+          await session.appendMessage({
+            id,
+            role: "user",
+            parts: [{ type: "text", text: "x".repeat(2000) }]
+          } as never);
+        }
+        await definitionOf(instance, {
+          ...instance.host,
+          options: { hydrationByteBudget: budget }
+        })({ trigger: "server" }, laterAttempt("h-2", 1));
+        expect(instance.calls[0].messages.map((m) => m.id)).toEqual([
+          "u1",
+          "u2",
+          "u3"
+        ]);
+      });
+    }
+  });
+
+  it("keeps at most maxPersistedMessages, dropping the oldest after a reply", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      for (const id of ["u1", "u2", "u3"]) {
+        await session.appendMessage({ id, role: "user", parts: [] } as never);
+      }
+      await definitionOf(instance, {
+        ...instance.host,
+        options: { maxPersistedMessages: 2 }
+      })({ trigger: "server" }, laterAttempt("m-1", 1));
+      const ids = (await session.getHistory()).map((m) => m.id);
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).toBe("u3");
+    });
+  });
+
+  it("a respond that throws before streaming ends the turn as an error with its message", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const result = await definitionOf(instance, {
+        respond: async () => {
+          throw new Error("Simulated onChatMessage error");
+        }
+      })({ trigger: "server" }, laterAttempt("th-1", 1));
+      expect(result).toMatchObject({
+        status: "error",
+        error: "Simulated onChatMessage error"
+      });
+    });
+  });
+
+  it("a model that answers after the turn was cleared sends the tabs nothing of it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => {
+          // The response frames: the transcript lists are another test's.
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response") sent.push(frame);
+        }
+      };
+      const stop = new AbortController();
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          // The model ignores its signal: the chat is cleared meanwhile,
+          // then it answers.
+          respond: async () => {
+            stop.abort(new TaskCancellation(CHAT_CLEARED));
+            return new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "start", messageId: "a1" } as never);
+                controller.enqueue({ type: "text-start", id: "t1" } as never);
+                controller.enqueue({
+                  type: "text-delta",
+                  id: "t1",
+                  delta: "late"
+                } as never);
+                controller.close();
+              }
+            });
+          }
+        }
+      )({ trigger: "server" }, laterAttempt("cl-2", 1, stop.signal));
+      expect(result).toMatchObject({ status: "aborted" });
+      expect(sent.filter((frame) => frame.done !== true)).toEqual([]);
+      expect(await instance.sessions.session("s1").getHistory()).toEqual([]);
+    });
+  });
+
+  it("a new question settles the call an earlier reply still waits on, before the model is asked", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      await session.appendMessage({
+        id: "u2",
+        role: "user",
+        parts: []
+      } as never);
+      await definitionOf(instance, instance.host)(
+        { trigger: "submit-message", questionId: "u2" },
+        laterAttempt("rp-1", 1)
+      );
+      const sent = (
+        instance.calls[0].messages.find((m) => m.id === "a1") as unknown as {
+          parts: Array<{ state?: string }>;
+        }
+      ).parts[0];
+      expect(sent.state).toBe("output-error");
+      expect(JSON.stringify(await session.getMessage("a1"))).toContain(
+        "output-error"
+      );
+    });
+  });
+
+  it("a stop ends a turn whose model ignores its signal and never ends", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const stop = new AbortController();
+      let cancelled = false;
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1"
+        },
+        {
+          // An event stream, as a model's HTTP response is.
+          respond: async () =>
+            new Response(
+              new ReadableStream({
+                start(controller) {
+                  for (const chunk of [
+                    { type: "start", messageId: "a1" },
+                    { type: "text-start", id: "t1" },
+                    { type: "text-delta", id: "t1", delta: "so far" }
+                  ]) {
+                    controller.enqueue(
+                      new TextEncoder().encode(
+                        `data: ${JSON.stringify(chunk)}\n\n`
+                      )
+                    );
+                  }
+                  // The user stops it once its first text is out.
+                  setTimeout(() => stop.abort("stopped by the user"), 20);
+                },
+                cancel() {
+                  cancelled = true;
+                }
+              }),
+              { headers: { "Content-Type": "text/event-stream" } }
+            )
+        }
+      )({ trigger: "server" }, laterAttempt("st-1", 1, stop.signal));
+      expect(result).toMatchObject({ status: "aborted" });
+      await vi.waitFor(() => expect(cancelled).toBe(true));
+    });
+  });
+
+  it("a continuation's end frame says it is a continuation, as its other frames do", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: {}
+          }
+        ]
+      } as never);
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () => {
+            throw new Error("The model is unavailable");
+          }
+        }
+      )({ trigger: "tool-answer" }, laterAttempt("cf-1", 1));
+      expect(result).toMatchObject({ status: "error" });
+      expect(sent.find((frame) => frame.done === true)).toMatchObject({
+        body: "The model is unavailable",
+        error: true,
+        continuation: true
+      });
+    });
+  });
+
+  it("a continuation closes the text part its reply was cut off in", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: {}
+          },
+          { type: "text", text: "Partial ", state: "streaming" }
+        ]
+      } as never);
+      await runTurn(instance, { trigger: "tool-answer" });
+      const stored = await session.getMessage("a1");
+      const texts = (
+        stored as unknown as { parts: Array<{ type: string; state?: string }> }
+      ).parts.filter((part) => part.type === "text");
+      expect(texts[0]).toMatchObject({ text: "Partial ", state: "done" });
+      expect(texts).toHaveLength(2);
+    });
+  });
+
+  it("a reply stopped in its reasoning is stored nowhere; one stopped after its text is stored with the text closed and no trailing reasoning", async () => {
+    for (const [chunks, expected] of [
+      [
+        [
+          { type: "start", messageId: "a1" },
+          { type: "reasoning-start", id: "r1" },
+          { type: "reasoning-delta", id: "r1", delta: "Let me think" }
+        ],
+        undefined
+      ],
+      [
+        [
+          { type: "start", messageId: "a1" },
+          { type: "text-start", id: "t1" },
+          { type: "text-delta", id: "t1", delta: "Partial" },
+          { type: "reasoning-start", id: "r1" },
+          { type: "reasoning-delta", id: "r1", delta: "Let me think" },
+          { type: "reasoning-end", id: "r1" }
+        ],
+        { type: "text", text: "Partial", state: "done" }
+      ]
+    ] as const) {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        await instance.lifecycle.start();
+        const stop = new AbortController();
+        const result = await chatTurnDefinition(
+          {
+            tasks: instance.tasks,
+            streams: instance.streams,
+            sessions: instance.sessions,
+            kv: instance.kv,
+            session: "s1"
+          },
+          {
+            respond: async () =>
+              new ReadableStream({
+                start(controller) {
+                  for (const chunk of chunks)
+                    controller.enqueue(chunk as never);
+                  setTimeout(() => stop.abort("stopped by the user"), 20);
+                }
+              })
+          }
+        )({ trigger: "server" }, laterAttempt("sr-1", 1, stop.signal));
+        expect(result).toMatchObject({ status: "aborted" });
+        const reply = await instance.sessions.session("s1").getMessage("a1");
+        if (expected === undefined) expect(reply).toBeNull();
+        else {
+          const parts = (reply as unknown as { parts: unknown[] }).parts;
+          expect(
+            parts.some((p) => (p as { type: string }).type === "reasoning")
+          ).toBe(false);
+          expect(parts.at(-1)).toEqual(expected);
+        }
+      });
+    }
+  });
+
+  it("text deltas a model sends with no start and no id are stored as one text part", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      instance.reply = [
+        { type: "start", messageId: "a1" },
+        { type: "text-delta", delta: "Hello " } as never,
+        { type: "text-delta", delta: "there" } as never,
+        { type: "finish" }
+      ];
+      const runId = await runTurn(instance, { trigger: "server" });
+      expect(await instance.resultFor(runId)).toMatchObject({
+        status: "completed"
+      });
+      const reply = await instance.sessions.session("s1").getMessage("a1");
+      expect(
+        (
+          reply as unknown as { parts: Array<{ type: string; text?: string }> }
+        ).parts
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+      ).toEqual(["Hello there"]);
+    });
+  });
+
+  it("a reply the model fails partway keeps what it streamed, stored before the error frame", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Partial" } as never;
+              throw new Error("The provider failed");
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("er-1", 1));
+      expect(result).toMatchObject({ status: "error", messageId: "a1" });
+      const reply = await instance.sessions.session("s1").getMessage("a1");
+      expect(JSON.stringify(reply)).toContain("Partial");
+      const list = sent.findIndex((f) => f.type === "cf_agent_chat_messages");
+      const end = sent.findIndex((f) => f.done === true);
+      expect(list).toBeGreaterThanOrEqual(0);
+      expect(list).toBeLessThan(end);
+    });
+  });
+
+  it("the model's own error chunk reaches the tabs as an error frame after the stored partial, then the end", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Partial" } as never;
+              yield { type: "error", errorText: "quota exceeded" } as never;
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("ib-1", 1));
+      const kinds = sent.map((frame) =>
+        frame.type === "cf_agent_chat_messages"
+          ? "messages"
+          : frame.done === true
+            ? "done"
+            : frame.error === true
+              ? "error"
+              : "chunk"
+      );
+      expect(kinds.slice(-3)).toEqual(["messages", "error", "done"]);
+      expect(sent.at(-2)).toMatchObject({
+        body: "quota exceeded",
+        error: true
+      });
+      // One error frame for the failure: the end does not repeat it.
+      expect(sent.at(-1)).toMatchObject({ done: true, outcome: "error" });
+      expect(sent.at(-1)?.error).toBe(false);
+      // A tab away meanwhile learns the error from the kept end.
+      expect(recentChatTerminal(instance.kv, ["ib-1"])).toMatchObject({
+        error: true,
+        body: "quota exceeded"
+      });
+    });
+  });
+
+  it("a reply whose body cannot be read ends the turn as an error, before anything streamed", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      // Its body is already taken by a reader.
+      const taken = new Response("hello");
+      taken.body!.getReader();
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1"
+        },
+        { respond: async () => taken }
+      )({ trigger: "server" }, laterAttempt("lk-1", 1));
+      expect(result).toMatchObject({ status: "error" });
+    });
+  });
+
+  it("a new reply the model began without a start reaches the tabs as the model sent it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const bodies: string[] = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => {
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response" && frame.body) {
+            bodies.push(JSON.parse(frame.body).type);
+          }
+        }
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Hi" } as never;
+              yield { type: "text-end", id: "t1" } as never;
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("ns-1", 1));
+      expect(bodies).toEqual(["text-start", "text-delta", "text-end"]);
+    });
+  });
+
+  it("a call's input that arrives after its approval request is followed by the request again", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const types: string[] = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => {
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response" && frame.body) {
+            const chunk = JSON.parse(frame.body);
+            if (chunk.toolCallId === "c1") types.push(chunk.type);
+          }
+        }
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield {
+                type: "tool-input-start",
+                toolCallId: "c1",
+                toolName: "del"
+              } as never;
+              yield {
+                type: "tool-approval-request",
+                approvalId: "ap1",
+                toolCallId: "c1"
+              } as never;
+              yield {
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "del",
+                input: { f: 1 }
+              } as never;
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("li-1", 1));
+      expect(types).toEqual([
+        "tool-input-start",
+        "tool-approval-request",
+        "tool-input-available",
+        "tool-approval-request"
+      ]);
+      const reply = await instance.sessions.session("s1").getMessage("a1");
+      expect(JSON.stringify(reply)).toContain("approval-requested");
+    });
+  });
+
+  it("a continuation's replay of a settled call's chunks is dropped: not sent, and the call keeps its output", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-pick",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: { ok: true }
+          }
+        ]
+      } as never);
+      const types: string[] = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => {
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response" && frame.body) {
+            types.push(JSON.parse(frame.body).type);
+          }
+        }
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start" } as never;
+              yield {
+                type: "tool-input-start",
+                toolCallId: "c1",
+                toolName: "pick"
+              } as never;
+              yield {
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "pick",
+                input: {}
+              } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Done" } as never;
+              yield { type: "text-end", id: "t1" } as never;
+            })()
+        }
+      )({ trigger: "tool-answer", replyId: "a1" }, laterAttempt("rp-9", 1));
+      expect(types).not.toContain("tool-input-start");
+      expect(types).not.toContain("tool-input-available");
+      expect(types).toContain("text-delta");
+      // The settled call keeps its output in the stored reply.
+      expect(JSON.stringify(await session.getMessage("a1"))).toContain(
+        "output-available"
+      );
+    });
+  });
+
+  it("a model that pauses every few milliseconds has its buffer written at most every 50 ms, not once per chunk", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const sent: number[] = [];
+      const pending = chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1"
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              for (let i = 0; i < 6; i++) {
+                yield { type: "text-delta", id: "t1", delta: `${i}` } as never;
+                sent.push(i);
+                await new Promise((resolve) => setTimeout(resolve, 3));
+              }
+              await held;
+              yield { type: "text-end", id: "t1" } as never;
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("pf-1", 1));
+      await vi.waitFor(() => expect(sent).toHaveLength(6));
+      // Within 50 ms of the first pause's write, the later deltas wait.
+      const stored = instance.streams
+        .__DO_NOT_USE_WILL_BREAK__sync()
+        .bounds(chatTurnStreamId("pf-1"));
+      const written = instance.streams
+        .__DO_NOT_USE_WILL_BREAK__sync()
+        .readChunks(chatTurnStreamId("pf-1"), stored.oldest, 100).length;
+      expect(written).toBeLessThan(8);
+      // Once the window passes, all of it is written.
+      await vi.waitFor(
+        () =>
+          expect(
+            instance.streams
+              .__DO_NOT_USE_WILL_BREAK__sync()
+              .readChunks(chatTurnStreamId("pf-1"), 0, 100).length
+          ).toBe(8),
+        { timeout: 2000 }
+      );
+      release();
+      await pending;
     });
   });
 });

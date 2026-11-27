@@ -140,6 +140,18 @@ export function recentChatTerminal(
   return null;
 }
 
+/**
+ * The last request to end, when it ended in an error: what a tab that waits
+ * on no request (a page loaded afterwards) is still told (#1645). A later
+ * turn's end supersedes it.
+ */
+export function lastChatTerminalError(
+  kv: RecentTerminalsKv
+): ChatRecentTerminal | null {
+  const last = read(kv).at(-1);
+  return last?.error === true ? last : null;
+}
+
 /** Forget every record (a chat clear). */
 export function clearRecentChatTerminals(kv: RecentTerminalsKv): void {
   kv.put(RECENT_TERMINALS_KEY, []);

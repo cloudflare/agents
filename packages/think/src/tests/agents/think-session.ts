@@ -11243,23 +11243,13 @@ export class ThinkProgrammaticTestAgent extends Think {
     if (kv.get<boolean>("test:hold-recovery")) {
       kv.delete("test:hold-recovery");
       kv.put("test:recovery-held", true);
-      // Until released, or for good if the isolate resets first.
-      await new Promise<void>((resolve) => {
-        this._releaseRecoveryForTest = resolve;
-      });
+      await new Promise<never>(() => {});
     }
     return kv.get<ChatRecoveryOptions>("test:recovery-answer") ?? {};
   }
 
   async holdRecoveryOnceForTest(): Promise<void> {
     this.ctx.storage.kv.put("test:hold-recovery", true);
-  }
-
-  private _releaseRecoveryForTest: (() => void) | undefined;
-
-  /** Let a held onChatRecovery return. */
-  async releaseRecoveryForTest(): Promise<void> {
-    this._releaseRecoveryForTest?.();
   }
 
   /** What onChatRecovery answers from now on, across resets. */

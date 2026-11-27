@@ -281,6 +281,13 @@ export type ChatRecoveryConfig =
   | true
   | {
       maxAttempts?: number;
+      /**
+       * @deprecated Has no effect. A recovered turn is the next attempt of
+       * the turn's own run in the chat's lane, so nothing else can be
+       * streaming when it starts and there is nothing to wait for. It was
+       * how long a recovery waited for the chat to be stable before it
+       * continued the reply.
+       */
       stableTimeoutMs?: number;
       terminalMessage?: string;
       /**
