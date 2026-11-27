@@ -1153,8 +1153,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * isolate streams it, earlier attempts' included, or as its stream stores
    * them), then each chunk it streams after that, then its end (it
    * settled: an attempt that ends for a retry is not the end), to
-   * `listener`. Snapshot and subscription are one synchronous step, so no
-   * chunk is missed or seen twice. Call after `lifecycle.ready()`.
+   * `listener`. The end comes once: every settled status (an abort
+   * too, queued or running) is reported as `done` or `unanswered`.
+   * Snapshot and subscription are one synchronous step, so no chunk is
+   * missed or seen twice: keep any `await` out of this method. Call after
+   * `lifecycle.ready()`.
    */
   followOperation(
     session: ThinkSessionId,
