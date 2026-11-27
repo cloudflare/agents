@@ -821,7 +821,7 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
-  it("a live tool answer's continuation extends the reply that asked, not a question queued meanwhile", async () => {
+  it("a live tool answer's continuation never extends a question queued meanwhile: the chat moved on, so it is dropped", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await instance.lifecycle.start();
@@ -843,8 +843,15 @@ describe("chat functions over a minimal host", () => {
       await chatDispatch(instance.deps, instance.lane, tab, toolResult("c1"));
       release();
       while (instance.results.length < 3) await instance.nextResult();
-      const continued = instance.calls.find((c) => c.trigger === "tool-answer");
-      expect(continued).toMatchObject({ mode: "continue", replyId: "a1" });
+      // The queued question was answered after a1, so the continuation has
+      // nothing to answer (as the release drops it): it calls no model and
+      // writes into no reply.
+      expect(
+        instance.calls.find((c) => c.trigger === "tool-answer")
+      ).toBeUndefined();
+      expect(instance.events.map((e) => e.payload.reason)).toEqual([
+        "moved_on"
+      ]);
     });
   });
 
