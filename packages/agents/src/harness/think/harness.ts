@@ -46,8 +46,10 @@ import {
   type ChatModelCall,
   type ChatTurnInput,
   type ChatTurnResult,
-  type InterruptedToolPart
+  type InterruptedToolPart,
+  type ChatDeps
 } from "../../chat/chat-host";
+import type { ChatLane } from "../../chat/chat-functions";
 import { TaskSettlement } from "../../tasks/settlement";
 import {
   ChatStreamStalledError,
@@ -1163,6 +1165,32 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return stored?.input.kind === "messages"
       ? stored.input.messages.map((message) => message.id)
       : [];
+  }
+
+  /**
+   * @internal The shared chat dispatch's lane for a session's operations
+   * (H2c): a tab's request runs as one of them, in the session's lane.
+   */
+  chatLane(session: ThinkSessionId): ChatLane {
+    return { definition: OPERATION_DEFINITION, lane: laneOf(session) };
+  }
+
+  /**
+   * @internal What the shared chat dispatch reads and writes for a session
+   * (H2c): the harness's own Tasks, Streams and Sessions, with the host's
+   * key-value store, sockets and observability.
+   */
+  chatDeps(
+    session: ThinkSessionId,
+    host: Pick<ChatDeps, "kv" | "webSockets" | "emit">
+  ): ChatDeps {
+    return {
+      tasks: this.#tasks,
+      streams: this.#streams,
+      sessions: this.#sessions,
+      session,
+      ...host
+    };
   }
 
   /** @internal Which of `ids` a session already stores (key probes). */
