@@ -709,6 +709,93 @@ describe("chat recovery, through public behaviour", () => {
     expect(shown.at(-1)?.id).toBe(regenerated?.id);
   }, 60_000);
 
+  it("retries a regeneration a reset cut off before its first chunk as a new branch, keeping the earlier answer", async () => {
+    const room = `regen-pre-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    async function tab() {
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      const seen = { chunks: 0, done: 0 };
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          body?: string;
+          done?: boolean;
+        };
+        if (frame.type !== "cf_agent_use_chat_response") return;
+        if (frame.done) seen.done++;
+        else if (frame.body?.includes("text-delta")) seen.chunks++;
+      });
+      return { ws, seen };
+    }
+    const send = (ws: WebSocket, body: Record<string, unknown>) =>
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: { method: "POST", body: JSON.stringify(body) }
+        })
+      );
+    const user = {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "explain monads" }]
+    };
+
+    const first = await tab();
+    send(first.ws, { messages: [user] });
+    await vi.waitFor(() => expect(first.seen.done).toBe(1), {
+      timeout: 10_000,
+      interval: 20
+    });
+    const [, earlier] = (await (await agent()).getMessages()) as Array<{
+      id: string;
+    }>;
+
+    await (await agent()).hangModelAtConnectForTest();
+    send(first.ws, { messages: [user], trigger: "regenerate-message" });
+    // Before any stream: the regeneration's model call waits on the provider.
+    await vi.waitFor(
+      async () => {
+        expect(await (await agent()).modelConnectingForTest()).toBe(true);
+      },
+      { timeout: 10_000, interval: 20 }
+    );
+    await (await agent()).resetIsolateForTest().catch(() => undefined);
+    first.ws.close();
+
+    // A new tab wakes the agent; its start recovers the regeneration.
+    const second = await tab();
+    await vi.waitFor(
+      async () => {
+        expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        const branches = await (await agent()).getBranchesForTest(user.id);
+        expect(branches).toHaveLength(2);
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    second.ws.close();
+
+    const branches = [
+      ...((await (await agent()).getBranchesForTest(user.id)) as Array<{
+        id: string;
+        parts: Array<{ type: string; text?: string }>;
+      }>)
+    ];
+    expect(branches.map((message) => message.id)).toContain(earlier?.id);
+    const regenerated = branches.find((message) => message.id !== earlier?.id);
+    const text = (regenerated?.parts ?? [])
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    // Asked again from the start, so a whole answer.
+    expect(text.length).toBeGreaterThan(0);
+  }, 60_000);
+
   // Successor of the platform-reset tests (think-session, "Think —
   // onChatRecovery", #1730/#2613): a recovery attempt the platform cuts
   // (here, a reset while onChatRecovery is running) does not end the turn:

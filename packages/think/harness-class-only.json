@@ -454,5 +454,14 @@
       "file": "think-session.test.ts",
       "test": "Think — waitUntilStable > does not wait on a stored unanswered call to a server tool: nothing will answer it"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > retries a pre-stream interrupted regeneration as a new branch (#2028)",
+    "reason": "an interrupted regeneration built from a seeded private fiber snapshot, recovered by hand (`runScheduledRecoveryRetryForTest`)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > retries a regeneration a reset cut off before its first chunk as a new branch, keeping the earlier answer"
+    }
   }
 ]
