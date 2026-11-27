@@ -1536,7 +1536,12 @@ export class Think<
     // the one the harness applied is what happened.
     const toolCallId = pending.descriptor.toolCallId;
     let final:
-      | { state?: unknown; output?: unknown; errorText?: unknown }
+      | {
+          state?: unknown;
+          output?: unknown;
+          errorText?: unknown;
+          approval?: { reason?: unknown };
+        }
       | undefined;
     for (const message of this.messages) {
       for (const part of message.parts) {
@@ -1549,7 +1554,12 @@ export class Think<
       return {
         status: "rejected",
         executionId,
-        reason: approved ? "Rejected by user" : (reason ?? "Rejected by user")
+        // The reason the applied rejection carries, whichever caller sent
+        // it.
+        reason:
+          (typeof final.approval?.reason === "string"
+            ? final.approval.reason
+            : undefined) ?? "Rejected by user"
       };
     }
     if (final?.state === "output-available") return final.output;
@@ -2856,6 +2866,7 @@ export class Think<
     // The model stays lazy, as in Think: spreading `context` would read
     // its `model` getter and resolve the default.
     const turnModel = config.model;
+    let grantModel: LanguageModel | undefined;
     const self = this;
     await this.#authorizeTurn(
       turn.operationId,
@@ -2864,10 +2875,12 @@ export class Think<
           system: config.system ?? context.system,
           messages: config.messages ?? context.messages,
           tools: context.tools,
+          // Resolved once, when first read.
           get model() {
-            return turnModel !== undefined
-              ? self.resolveModel(turnModel)
-              : resolveDefault();
+            return (grantModel ??=
+              turnModel !== undefined
+                ? self.resolveModel(turnModel)
+                : resolveDefault());
           },
           continuation: context.continuation,
           requestId: context.requestId
