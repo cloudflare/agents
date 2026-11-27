@@ -858,6 +858,7 @@ export class Think<
         },
         onChunk: ({ chunk, operationId }) => {
           this.#streamed.add(operationId);
+          this.#noteLiveCall(operationId, chunk);
           // A snapshot reads a delta's text as `text`, as a stream part has it.
           const text = "delta" in chunk ? chunk.delta : undefined;
           // In order, one after another, as Think awaits each chunk's hooks.
@@ -880,6 +881,7 @@ export class Think<
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
           const streamed = this.#streamed.delete(end.operationId);
+          this.#liveCalls.delete(end.operationId);
           this.#toolCalls.delete(end.operationId);
           const clearsAtStart = this.#clearsAtStart.get(end.operationId);
           this.#clearsAtStart.delete(end.operationId);
@@ -2142,6 +2144,48 @@ export class Think<
   }
 
   /**
+   * Each running operation's tool calls that have streamed and not had a
+   * result yet, by call id: what Think's in-flight accumulator holds before
+   * the reply is stored. Dropped at the operation's end.
+   */
+  readonly #liveCalls = new Map<
+    string,
+    Map<string, { toolName: string; approval: boolean }>
+  >();
+
+  /** Track a streamed tool call until its result streams too. */
+  #noteLiveCall(operationId: string, chunk: UIMessageChunk): void {
+    const calls = (): Map<string, { toolName: string; approval: boolean }> => {
+      let held = this.#liveCalls.get(operationId);
+      if (!held) {
+        held = new Map();
+        this.#liveCalls.set(operationId, held);
+      }
+      return held;
+    };
+    switch (chunk.type) {
+      case "tool-input-available":
+        calls().set(chunk.toolCallId, {
+          toolName: chunk.toolName,
+          approval: false
+        });
+        return;
+      case "tool-approval-request": {
+        const call = this.#liveCalls.get(operationId)?.get(chunk.toolCallId);
+        if (call) call.approval = true;
+        return;
+      }
+      case "tool-output-available":
+      case "tool-output-error":
+      case "tool-output-denied":
+        this.#liveCalls.get(operationId)?.delete(chunk.toolCallId);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /**
    * Whether the latest message has a tool call waiting on a client, as on
    * Think: an approval, or a call with no result to a tool a client
    * answers. A call to any other tool was the server's to run; unanswered
@@ -2149,6 +2193,16 @@ export class Think<
    * reconnected, included).
    */
   protected hasPendingInteraction(): boolean {
+    // A reply still streaming: its calls with no result yet, as Think's
+    // accumulator holds them.
+    for (const calls of this.#liveCalls.values()) {
+      for (const call of calls.values()) {
+        if (call.approval) return true;
+        if (new Set(this.#unexecutedToolNames()).has(call.toolName)) {
+          return true;
+        }
+      }
+    }
     const last = this.#transcript.messages.at(-1);
     const parts = last?.parts ?? [];
     if (!parts.some((part) => "toolCallId" in part)) return false;

@@ -508,5 +508,14 @@
       "file": "media-eviction.test.ts",
       "test": "mediaEviction — a pass that runs on its own > evicts media a late update puts on a row the view does not hold"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — waitUntilStable > detects a pending CLIENT-tool interaction living ONLY in the in-flight accumulator (mid-stream, pre-persist)",
+    "reason": "Seeds Think's private in-flight accumulator and client tools (_turns).",
+    "successor": {
+      "file": "client-tools.test.ts",
+      "test": "Think — a client tool's call while its reply streams > waits on it before the reply is stored"
+    }
   }
 ]
