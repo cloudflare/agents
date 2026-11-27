@@ -12,6 +12,7 @@ import type { Connection } from "agents";
 import type { UIMessage } from "ai";
 import {
   chatTurnStreamId,
+  heldQuestionsOf,
   liveTurnsOf,
   parkedIn,
   releaseParked,
@@ -116,13 +117,32 @@ export async function cancelTurn(
 ): Promise<boolean> {
   // A turn stopped before it started keeps its question, unanswered: it
   // would have stored it when it started.
+  // While a turn ahead still runs, it is held until that turn's reply is
+  // stored, so the transcript stays in lane order.
   const record = deps.tasks.peek(requestId);
   if (record?.status === "pending" && record.attempt === 0) {
     const input = deps.tasks.inputOf<ChatTurnInput>(requestId);
-    const session = deps.sessions.session(input?.session ?? deps.session ?? "");
-    for (const message of input?.messages ?? []) {
-      if (message.role === "user")
-        await session.upsertMessage(message as never);
+    const sessionId = input?.session ?? deps.session ?? "";
+    const questions = (input?.messages ?? []).filter((m) => m.role === "user");
+    // A turn of the same chat that runs now (it is ahead in the lane).
+    const ahead = deps.tasks
+      .peekList({
+        definition: record.definition,
+        status: ["running"],
+        results: false
+      })
+      .some(
+        (run) =>
+          (deps.tasks.inputOf<ChatTurnInput>(run.runId)?.session ??
+            deps.session ??
+            "") === sessionId
+      );
+    if (ahead) heldQuestionsOf(deps.streams, sessionId).push(...questions);
+    else {
+      const session = deps.sessions.session(sessionId);
+      for (const question of questions) {
+        await session.upsertMessage(question as never);
+      }
     }
   }
   return deps.tasks.cancel(requestId, "chat turn cancelled");
@@ -149,6 +169,15 @@ export type ToolAnswer =
       approved: boolean;
       approvalId?: string;
     };
+
+/** Replies whose batch an answer asked to continue, once it is answered. */
+const continueRequests = new WeakMap<object, Set<string>>();
+
+function continueWanted(deps: ChatDeps): Set<string> {
+  let wanted = continueRequests.get(deps.streams);
+  if (!wanted) continueRequests.set(deps.streams, (wanted = new Set()));
+  return wanted;
+}
 
 /** Tool answers being applied now, by chat, in this isolate. */
 const answering = new WeakMap<object, Map<string, number>>();
@@ -234,21 +263,22 @@ async function applyAnswer(
               output: answer.output
             }) as never
       );
-      // Once the batch is answered, one continuation of that reply waits
-      // behind the streaming turn in the lane.
+      // An answer that asks to continue is remembered for its batch: once
+      // the batch is answered (by any answer, or a server tool's output),
+      // one continuation of that reply waits behind the streaming turn.
       const replyId = live.replyId();
-      if (options.autoContinue && live.waitingCalls().length === 0) {
-        await submitTurn(
-          deps,
-          lane,
-          {
-            trigger: "tool-answer",
-            ...(replyId !== undefined && { replyId })
-          },
-          {
-            idempotencyKey: `continue:${live.requestId}`
-          }
-        );
+      const wanted = continueWanted(deps);
+      if (options.autoContinue && replyId !== undefined) wanted.add(replyId);
+      if (replyId !== undefined && wanted.has(replyId)) {
+        live.whenAnswered(() => {
+          if (!wanted.delete(replyId)) return;
+          void submitTurn(
+            deps,
+            lane,
+            { trigger: "tool-answer", replyId },
+            { idempotencyKey: `continue:${live.requestId}` }
+          );
+        });
       }
       return true;
     }
@@ -279,8 +309,11 @@ async function applyAnswer(
     };
     await session.upsertMessage(next as never);
     // One continuation per answered batch, however many answers race to
-    // complete it.
-    if (options.autoContinue && !waitsOnAnswer(next)) {
+    // complete it; an earlier answer of the batch may have asked for it.
+    const wanted = continueWanted(deps);
+    if (options.autoContinue && waitsOnAnswer(next)) wanted.add(next.id);
+    if (!waitsOnAnswer(next) && (options.autoContinue || wanted.has(next.id))) {
+      wanted.delete(next.id);
       await submitTurn(
         deps,
         lane,

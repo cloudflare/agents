@@ -191,6 +191,30 @@ export interface LiveTurn {
   /** The calls the reply holds with no answer yet, in the order asked. */
   waitingCalls(): string[];
   inject(chunk: UIMessageChunk): void;
+  /**
+   * Run `fn` once, when the reply's last waiting call is answered: by a
+   * tab's answer or by a server tool's output.
+   */
+  whenAnswered(fn: () => void): void;
+}
+
+/** Questions of stopped turns held until the turn ahead stores its reply. */
+const heldQuestions = new WeakMap<Streams, Map<string, UIMessage[]>>();
+
+/**
+ * @internal The questions of chat `session` that wait for the turn now
+ * running to store its reply: a turn stopped before it started keeps its
+ * question, in lane order.
+ */
+export function heldQuestionsOf(
+  streams: Streams,
+  session: string
+): UIMessage[] {
+  let chats = heldQuestions.get(streams);
+  if (!chats) heldQuestions.set(streams, (chats = new Map()));
+  let held = chats.get(session);
+  if (!held) chats.set(session, (held = []));
+  return held;
 }
 
 /**
@@ -551,6 +575,11 @@ export function chatTurnDefinition(
       });
     };
     const report = async (result: ChatTurnResult) => {
+      // The questions of turns stopped while this one ran follow its reply.
+      const held = heldQuestionsOf(deps.streams, sessionId);
+      for (const question of held.splice(0)) {
+        await session.upsertMessage(question as never);
+      }
       // A tab still waiting learns there is no stream to resume.
       if (parked.size > 0) {
         releaseParked(parked, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
@@ -823,6 +852,28 @@ export function chatTurnDefinition(
       };
       const liveKey = sessionId;
       const live = liveTurnsOf(deps.streams);
+      const answered: Array<() => void> = [];
+      const waitingCalls = () => {
+        const waiting: string[] = [];
+        for (const chunk of seen) {
+          const id = (chunk as { toolCallId?: unknown }).toolCallId;
+          if (typeof id !== "string") continue;
+          if (chunk.type === "tool-input-available") waiting.push(id);
+          if (
+            chunk.type === "tool-output-available" ||
+            chunk.type === "tool-output-error"
+          ) {
+            const at = waiting.indexOf(id);
+            if (at >= 0) waiting.splice(at, 1);
+          }
+        }
+        return waiting;
+      };
+      const checkAnswered = () => {
+        if (answered.length > 0 && waitingCalls().length === 0) {
+          for (const fn of answered.splice(0)) fn();
+        }
+      };
       const recorded = watchStall(
         chunksOf(source, requestId),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
@@ -851,21 +902,10 @@ export function chatTurnDefinition(
                 const start = seen.find((chunk) => chunk.type === "start");
                 return (start as { messageId?: string } | undefined)?.messageId;
               },
-              waitingCalls: () => {
-                const waiting: string[] = [];
-                for (const chunk of seen) {
-                  const id = (chunk as { toolCallId?: unknown }).toolCallId;
-                  if (typeof id !== "string") continue;
-                  if (chunk.type === "tool-input-available") waiting.push(id);
-                  if (
-                    chunk.type === "tool-output-available" ||
-                    chunk.type === "tool-output-error"
-                  ) {
-                    const at = waiting.indexOf(id);
-                    if (at >= 0) waiting.splice(at, 1);
-                  }
-                }
-                return waiting;
+              waitingCalls,
+              whenAnswered: (fn) => {
+                answered.push(fn);
+                checkAnswered();
               },
               // Stored and sent like the model's chunks, through the host's
               // chunk hook.
@@ -880,6 +920,7 @@ export function chatTurnDefinition(
                   ...(continuing && { continuation: true })
                 });
                 controller.enqueue(next);
+                checkAnswered();
               }
             });
           },
@@ -919,6 +960,7 @@ export function chatTurnDefinition(
             if (next.type !== "error") {
               record(next);
               seen.push(next);
+              checkAnswered();
             }
             send({
               body: JSON.stringify(next),
