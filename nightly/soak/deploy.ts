@@ -17,11 +17,20 @@ async function webSocketsReady(url: string, key: string) {
   const opens = () =>
     new Promise<boolean>((resolve) => {
       const socket = new WebSocket(ws);
+      // An attempt that neither opens nor errors counts as a failure.
+      const timer = setTimeout(() => {
+        socket.close();
+        resolve(false);
+      }, 10_000);
       socket.addEventListener("open", () => {
+        clearTimeout(timer);
         socket.close();
         resolve(true);
       });
-      socket.addEventListener("error", () => resolve(false));
+      socket.addEventListener("error", () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
     });
   const deadline = Date.now() + 60_000;
   let inARow = 0;
