@@ -2484,6 +2484,15 @@ export class Agent<
   }
 
   /**
+   * Empty this facet's storage, and its children's, just before its parent
+   * deletes it. Runs without this facet's start.
+   * @internal
+   */
+  async _cf_emptyFacetStorage(rootClassName: string): Promise<void> {
+    await this._dynamicAgents.emptyStorage(rootClassName);
+  }
+
+  /**
    * Agent pushes no host jobs, but earlier releases could leave some in a
    * facet's queue (#2299). A facet has no alarm, so they would only fail
    * every re-arm: drop them. On the root they complete when they fire.

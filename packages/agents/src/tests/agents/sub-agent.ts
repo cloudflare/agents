@@ -2851,6 +2851,10 @@ export class TestSubAgentParent extends Agent {
     return outer.scheduleInnerSet(innerName, delaySeconds, key, value);
   }
 
+  async nestedDeleteOuter(outerName: string): Promise<void> {
+    await this.deleteSubAgent(OuterSubAgent, outerName);
+  }
+
   async nestedPing(outerName: string): Promise<string> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     return outer.ping();

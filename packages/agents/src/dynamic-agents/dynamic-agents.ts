@@ -547,6 +547,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         );
       }
       await this.#closeConnectionsForDeletedPath(targetPath);
+      await this.#emptyChild(target.className, target.name);
       try {
         ctx.facets.delete(`${target.className}\0${target.name}`);
       } catch {
@@ -771,6 +772,63 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   /**
+   * Empty a child facet's storage, and its own children's, before the
+   * facet is deleted. On deployed Workers, deleting a facet under its
+   * `${class}\0${name}` key leaves its storage behind, so the child
+   * empties itself from inside. The child is reached without running its
+   * start: nothing in it runs again before it is deleted.
+   */
+  async #emptyChild(className: string, name: string): Promise<void> {
+    const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
+    const row = this.registry.row(className, name);
+    const Cls = ctx.exports?.[className];
+    if (!row || !Cls || !ctx.facets) return;
+    const rootClassName = this.#rootClassName();
+    const rootNs = ctx.exports?.[rootClassName] as unknown as
+      | Pick<DurableObjectNamespace, "idFromName">
+      | undefined;
+    if (!rootNs?.idFromName) return;
+    const identityName =
+      row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
+      typeof row.identity_name === "string"
+        ? row.identity_name
+        : name;
+    const stub = ctx.facets.get(`${className}\0${name}`, () => ({
+      class: Cls as DurableObjectClass,
+      id: rootNs.idFromName(identityName)
+    }));
+    await (
+      stub as unknown as {
+        _cf_emptyFacetStorage(rootClassName: string): Promise<void>;
+      }
+    )._cf_emptyFacetStorage(rootClassName);
+  }
+
+  /**
+   * Run inside a facet that is about to be deleted: empty its children,
+   * then its own storage. `rootClassName` comes from the parent, because
+   * this facet's start has not run to restore its path.
+   */
+  async emptyStorage(rootClassName: string): Promise<void> {
+    this.#rootClassNameOverride = rootClassName;
+    for (const child of this.registry.list()) {
+      await this.#emptyChild(child.className, child.name);
+    }
+    await this.#host.ctx.storage.deleteAll();
+  }
+
+  #rootClassNameOverride: string | undefined;
+
+  #rootClassName(): string {
+    return (
+      this.#rootClassNameOverride ??
+      this.#host._parentPath[0]?.className ??
+      (this.#host as unknown as { constructor: { name: string } }).constructor
+        .name
+    );
+  }
+
+  /**
    * Forcefully abort a running facet. Transitively aborts the child's
    * own children; storage is preserved.
    */
@@ -805,6 +863,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     const root = this.#host._isFacet ? await this.rootAlarmOwner() : undefined;
 
     await this.#closeConnectionsForDeletedPath(childPath, root);
+    await this.#emptyChild(className, name);
 
     // Remove the facet and its registry row before the awaited root
     // bookkeeping below, so a concurrent resolver observes "gone" as early
