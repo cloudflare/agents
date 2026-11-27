@@ -2549,6 +2549,7 @@ describe("Think — dynamic configuration", () => {
     // again, and its start lifts from it again.
     await agent.resetIsolateForTest().catch(() => {});
     const restarted = await freshLegacyConfigMigrationAgent(name);
+    expect(await restarted.legacyConfigTableExistsForTest()).toBe(false);
     expect(await restarted.getTestConfig()).toEqual({
       theme: "light",
       maxTokens: 2000

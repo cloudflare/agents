@@ -32,6 +32,8 @@ describe("Think upgraded over the prompt a release froze", () => {
     const system = await (
       await agent()
     ).systemOfNextTurnForTest("after the clear", true);
-    expect(system ?? "").not.toContain("think@0.24.0 froze");
+    // A request was sent, with a system prompt, and it is not the frozen one.
+    expect(system).toBeDefined();
+    expect(system).not.toContain("think@0.24.0 froze");
   });
 });

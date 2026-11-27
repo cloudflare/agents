@@ -24,7 +24,11 @@ describe("Think upgraded over the recovery incidents a release kept", () => {
       },
       { timeout: 8_000, interval: 100 }
     );
-    expect(await (await agent()).incidentIdsForTest()).not.toContain("stale");
-    expect(await (await agent()).incidentIdsForTest()).toContain("live");
+    expect(await (await agent()).incidentIdsForTest()).not.toContain(
+      "req-stale:u-stale"
+    );
+    expect(await (await agent()).incidentIdsForTest()).toContain(
+      "req-live:u-live"
+    );
   }, 15_000);
 });

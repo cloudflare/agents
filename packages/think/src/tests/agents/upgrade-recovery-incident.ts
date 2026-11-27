@@ -52,9 +52,12 @@ export class ThinkUpgradeRecoveryIncidentAgent extends Think {
    */
   async leaveReleasedIncidentsForTest(): Promise<void> {
     const now = Date.now();
-    const incident = (id: string, lastAttemptAt: number) => ({
-      incidentId: id,
-      requestId: `req-${id}`,
+    // The release's id is `<root request id>:<latest user message id>`
+    // (`chatRecoveryIncidentId`), and its key encodes that id.
+    const incident = (tag: string, lastAttemptAt: number) => ({
+      incidentId: `req-${tag}:u-${tag}`,
+      requestId: `req-${tag}`,
+      recoveryRootRequestId: `req-${tag}`,
       recoveryKind: "continue",
       attempt: 1,
       maxAttempts: 10,
@@ -64,11 +67,11 @@ export class ThinkUpgradeRecoveryIncidentAgent extends Think {
       lastProgressAt: lastAttemptAt
     });
     await this.ctx.storage.put(
-      `${RELEASED_INCIDENT_PREFIX}${encodeURIComponent("stale")}`,
+      `${RELEASED_INCIDENT_PREFIX}${encodeURIComponent("req-stale:u-stale")}`,
       incident("stale", now - 2 * 60 * 60 * 1000)
     );
     await this.ctx.storage.put(
-      `${RELEASED_INCIDENT_PREFIX}${encodeURIComponent("live")}`,
+      `${RELEASED_INCIDENT_PREFIX}${encodeURIComponent("req-live:u-live")}`,
       incident("live", now)
     );
   }

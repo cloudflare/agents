@@ -9148,7 +9148,8 @@ export class ThinkLegacyConfigMigrationAgent extends Think<Cloudflare.Env> {
     return (
       this.sql<{ name: string }>`
         SELECT name FROM sqlite_master
-        WHERE type = 'table' AND name = 'assistant_config'
+        WHERE type = 'table'
+          AND name IN ('assistant_config', 'assistant_config__lifted_v1')
       `.length > 0
     );
   }
