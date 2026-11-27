@@ -2503,6 +2503,85 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
+  it("a continuation stopped after its first text keeps one text part after the answered call", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "Where am I?" }]
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getUserLocation",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      // The continuation streams some text, then waits until it is stopped.
+      let streamed!: () => void;
+      const started = new Promise<void>((resolve) => (streamed = resolve));
+      (instance.host as { respond: typeof instance.host.respond }).respond =
+        async (call) =>
+          new ReadableStream<UIMessageChunk>({
+            async start(controller) {
+              controller.enqueue({ type: "start" });
+              controller.enqueue({ type: "text-start", id: "t2" });
+              controller.enqueue({
+                type: "text-delta",
+                id: "t2",
+                delta: "You are"
+              });
+              streamed();
+              await new Promise<void>((resolve) =>
+                call.signal.addEventListener("abort", () => resolve(), {
+                  once: true
+                })
+              );
+              controller.close();
+            }
+          });
+      const sent: Array<Record<string, unknown>> = [];
+      instance.tabs.push(recordingTab("tab-w", sent));
+      const done = instance.nextResult();
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c1", output: { city: "Lisbon" } },
+        { autoContinue: true }
+      );
+      await started;
+      // The tabs were sent the text before the stop.
+      await vi.waitFor(() =>
+        expect(
+          sent.some((frame) => String(frame.body).includes("You are"))
+        ).toBe(true)
+      );
+      const [running] = instance.tasks.peekList({
+        definition: instance.lane.definition,
+        lane: instance.lane.lane,
+        status: ["running"],
+        results: false
+      });
+      await cancelTurn(instance.deps, running.runId);
+      await done;
+      const reply = (await session.getMessage("a1")) as unknown as {
+        parts: Array<{ type: string; text?: string }>;
+      };
+      expect(reply.parts.map((part) => part.type)).toEqual([
+        "tool-getUserLocation",
+        "text"
+      ]);
+    });
+  });
+
   it("a stop of a continuation that has not streamed drops the next continuation of its reply", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {

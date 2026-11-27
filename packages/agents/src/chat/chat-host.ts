@@ -2154,9 +2154,15 @@ export function chatTurnDefinition(
       const keepSoFar = async (
         failed?: string
       ): Promise<string | undefined> => {
-        const soFar = await messageOf(streamOf(seen), continuing).catch(
-          () => continuing
-        );
+        // From the reply as it was before this stream: the reader has
+        // already put what this stream sent into `continuing`.
+        const base = partial && {
+          ...partial,
+          parts: structuredClone(continuingBefore).map(
+            (part) => settleInterruptedPart(part as never) as typeof part
+          )
+        };
+        const soFar = await messageOf(streamOf(seen), base).catch(() => base);
         const settled =
           soFar &&
           stripTrailingReasoning({
