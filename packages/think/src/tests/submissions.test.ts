@@ -94,6 +94,7 @@ type ThinkSubmissionTestStub = {
   setFinalAnswerResponseForTest(args: unknown): Promise<void>;
   getFinalAnswerCallsForTest(): Promise<string>;
   getAfterToolNamesForTest(): Promise<string[]>;
+  getBeforeToolNamesForTest(): Promise<string[]>;
   setTurnConfigOverride(config: Record<string, unknown> | null): Promise<void>;
   persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
@@ -2377,6 +2378,9 @@ describe("Think durable submissions", () => {
     const agent = await freshAgent();
     await finalAnswerCalls(agent, "hidden-hooks");
     expect(await agent.getAfterToolNamesForTest()).not.toContain(
+      "think_final_answer"
+    );
+    expect(await agent.getBeforeToolNamesForTest()).not.toContain(
       "think_final_answer"
     );
   }, 30_000);

@@ -11784,6 +11784,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._afterToolNames.push(ctx.toolName);
   }
 
+  private _beforeToolNames: string[] = [];
+
+  override beforeToolCall(ctx: ToolCallContext): void {
+    this._beforeToolNames.push(ctx.toolName);
+  }
+
+  /** The tools `beforeToolCall` heard of, in order. */
+  async getBeforeToolNamesForTest(): Promise<string[]> {
+    return this._beforeToolNames;
+  }
+
   /** The tools `afterToolCall` heard of, in order. */
   async getAfterToolNamesForTest(): Promise<string[]> {
     return this._afterToolNames;
