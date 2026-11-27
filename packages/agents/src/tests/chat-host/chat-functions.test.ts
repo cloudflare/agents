@@ -2844,4 +2844,38 @@ describe("chat functions over a minimal host", () => {
       );
     });
   });
+
+  it("a question sent again without the replies after it is answered in their place", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r1", "u1", "Hi")
+      );
+      await done;
+      instance.reply = [
+        { type: "start", messageId: "reply-2" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Again" },
+        { type: "text-end", id: "t1" },
+        { type: "finish" }
+      ];
+      done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r2", "u1", "Hi")
+      );
+      await done;
+      const ids = (await instance.sessions.session("s1").getHistory()).map(
+        (m) => m.id
+      );
+      expect(ids).toEqual(["u1", "reply-2"]);
+    });
+  });
 });

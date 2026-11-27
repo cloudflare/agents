@@ -997,8 +997,19 @@ export function chatTurnDefinition(
       if (fields.done === true) recordRecentChatTerminal(deps.kv, frame);
     };
     // A regenerated reply is a new branch under its question.
+    // So is the reply to a question a tab sent again with the replies after
+    // it taken off (a truncated list): the stored replies stay on the
+    // branch the transcript leaves.
+    const resent =
+      run.trigger === "submit-message" &&
+      run.questionId !== undefined &&
+      !(run.messages ?? []).some((m) => m.id === run.questionId) &&
+      ((await session.getLatestLeaf()) as { id?: string } | null)?.id !==
+        run.questionId &&
+      (await session.getMessage(run.questionId)) !== null;
     const placement =
-      run.trigger === "regenerate-message" && run.questionId !== undefined
+      (run.trigger === "regenerate-message" || resent) &&
+      run.questionId !== undefined
         ? { parentId: run.questionId }
         : {};
     // Tabs that asked to resume before this turn streamed.
