@@ -610,6 +610,7 @@ export {
   cancelTurn,
   chatDispatch,
   clearChat,
+  forgetTab,
   stopAllTurns,
   resumeChat,
   submitTurn,

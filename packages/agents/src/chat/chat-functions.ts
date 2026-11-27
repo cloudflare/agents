@@ -334,6 +334,15 @@ export async function stopAllTurns(
   }
 }
 
+/**
+ * A tab closed: it waits for no stream and is offered none (the chat's
+ * in-memory records of it go).
+ */
+export function forgetTab(deps: ChatDeps, connectionId: string): void {
+  parkedIn(deps.streams, deps.session ?? "").delete(connectionId);
+  offeredIn(deps.streams).delete(connectionId);
+}
+
 /** Clear the chat: no waiting or running turn goes on, and the transcript is emptied. */
 export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
   const waiting = deps.tasks.peekList({

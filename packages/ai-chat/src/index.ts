@@ -151,6 +151,7 @@ import type {
 import { nanoid } from "nanoid";
 import {
   cancelTurn,
+  forgetTab,
   resumeChat,
   chatClientView,
   hasPendingToolInteraction,
@@ -1443,6 +1444,8 @@ export class AIChatAgent<
         this._resumeHandshake(),
         connection.id
       );
+      // The chat module forgets the tab: it waits for no stream.
+      forgetTab(this._chatDeps(), connection.id);
       return _onClose(connection, code, reason, wasClean);
     };
 

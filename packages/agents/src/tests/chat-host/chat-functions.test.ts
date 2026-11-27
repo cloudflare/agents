@@ -9,6 +9,7 @@ import {
   cancelTurn,
   chatDispatch,
   clearChat,
+  forgetTab,
   replayTurn,
   resumeChat,
   submitTurn
@@ -17,6 +18,7 @@ import {
   type ChatHooks,
   chatTurnDefinition,
   chatTurnStreamId,
+  offeredIn,
   parkedIn
 } from "../../chat/chat-host";
 import { TaskSettlement } from "../../tasks/settlement";
@@ -3049,6 +3051,28 @@ describe("chat functions over a minimal host", () => {
         JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "nobody" })
       );
       expect(sent).toEqual([]);
+    });
+  });
+
+  it("a closed tab is forgotten: it waits for no stream and is offered none", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      const sent: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-gone", sent)
+      );
+      expect(offeredIn(instance.streams).get("tab-gone")).toBe("r1");
+      forgetTab(instance.deps, "tab-gone");
+      expect(offeredIn(instance.streams).has("tab-gone")).toBe(false);
+      expect(parkedIn(instance.streams, "s1").has("tab-gone")).toBe(false);
+      release();
+      await instance.resultFor("r1");
     });
   });
 });
