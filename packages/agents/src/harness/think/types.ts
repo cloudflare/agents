@@ -443,6 +443,15 @@ export type ThinkHarnessHooks = {
    * parts out of the transcript. A reply left with no parts is not stored.
    */
   readonly storedReply?: (message: UIMessage) => UIMessage;
+  /**
+   * @internal A model call overflowed the context window. Return whether
+   * room was made, so the call is tried again; without this hook the
+   * harness compacts the session and tries again.
+   */
+  readonly onContextOverflow?: (context: {
+    readonly session: ThinkSessionId;
+    readonly operationId: string;
+  }) => Promise<boolean>;
   /** After an operation settles. */
   readonly onTurnEnd?: (context: ThinkTurnEndContext) => void | Promise<void>;
   /** Observe a model call's error, before it is classified. */
