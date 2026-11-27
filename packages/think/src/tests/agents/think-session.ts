@@ -897,11 +897,12 @@ function promptLinesForTest(callOptions: MockModelCallOptions): string[] {
 /**
  * `model`, except that each call's stream sends its first `afterParts`
  * parts after `stream-start` and then nothing more, until the call is
- * aborted: a model stream that stalls.
+ * aborted: a model stream that stalls, for each call `stalls` allows.
  */
 function stallingModelForTest(
   model: LanguageModel,
-  afterParts: number
+  afterParts: number,
+  stalls: () => boolean
 ): LanguageModel {
   const inner = model as unknown as {
     doStream(options: { abortSignal?: AbortSignal }): Promise<{
@@ -911,7 +912,9 @@ function stallingModelForTest(
   return {
     ...(model as object),
     async doStream(options: { abortSignal?: AbortSignal }) {
-      const { stream } = await inner.doStream(options);
+      const result = await inner.doStream(options);
+      if (!stalls()) return result;
+      const { stream } = result;
       const reader = stream.getReader();
       let sent = 0;
       return {
@@ -5868,11 +5871,14 @@ export class ThinkTestAgent extends Think {
     ) {
       return model;
     }
-    if (this._stallAttemptsRemaining != null) {
-      if (this._stallAttemptsRemaining <= 0) return model;
+    // Counted per model call, as `_transformInferenceResult` counts them:
+    // a turn reads its model more than once.
+    return stallingModelForTest(model, this._stallAfterChunks, () => {
+      if (this._stallAttemptsRemaining == null) return true;
+      if (this._stallAttemptsRemaining <= 0) return false;
       this._stallAttemptsRemaining--;
-    }
-    return stallingModelForTest(model, this._stallAfterChunks);
+      return true;
+    });
   }
 
   private _baseModelForTest(): ThinkModel {
