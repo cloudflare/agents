@@ -64,7 +64,9 @@ SOAK_LOG=/tmp/soak.log pnpm run soak   # SOAK_LOG: one line per turn, for watchi
 
 ## perf
 
-The storage cost of each scenario from the perf probe (SQL statements, rows written and read, KV writes, alarm writes, `storage.sync()` calls, rows and jobs left), at the root and in facets. It runs on local workerd, once with the latest release of the three packages and once with this repository's build, and prints one markdown table, `release / this build`, bold where this build costs more. It is a report: it fails only when a scenario breaks on this build.
+The storage cost of each scenario from the perf probe (SQL statements, rows written and read, KV writes, alarm writes, `storage.sync()` calls, rows and jobs left), at the root and in facets. It runs on local workerd, once with the latest release of the three packages and once with this repository's build, and prints one markdown table, `release / this build`, bold where this build costs more. It is a report: it fails only when a scenario breaks on this build and not on the release (a scenario that fails on both is listed without numbers). A facet scenario also gets a `(sum)` row (leaf, `@mid` and `@root` together), and only that row is bolded. Each call has a 120 s deadline and each WebSocket open 30 s, so a scenario the build cannot finish fails its row. When the local runtime is found down after a scenario, a fresh one starts and the scenario runs once more; it is broken only if it fails again. Once the nightly workflow (#3341) runs it, the table also goes to the job summary.
+
+It differs from the perf probe's `PERF-BUDGET` tables in three rows and one column. The reconnect in `resume-mid-stream` acknowledges the offered stream, as `useAgentChat` does, so `think/resume-mid-stream` and `chat/resume-mid-stream` count the replay; `agent/task-5-steps` leaves its task polls out of the counts. Scenarios that need a stream in flight wait until one is streaming, not for a fixed time. There is no `bytes left` column.
 
 ```sh
 cd nightly

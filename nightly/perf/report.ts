@@ -139,9 +139,10 @@ function alive(port: number): Promise<boolean> {
 }
 
 /**
- * Run every scenario, one at a time. A scenario that takes the local runtime
- * down (the release does not recover some faults) gets a fresh one for the
- * scenarios after it.
+ * Run every scenario, one at a time. When the local runtime is found down
+ * after a scenario (the release does not recover some faults), a fresh one
+ * starts and that scenario runs once more on it: only a scenario that fails
+ * again on a fresh runtime is reported broken.
  */
 async function runLocal(
   out: string,
@@ -149,6 +150,7 @@ async function runLocal(
 ): Promise<Record<string, Result>> {
   let stop = await startDev(out, port);
   const results: Record<string, Result> = {};
+  const rerun = new Set<string>();
   try {
     for (;;) {
       let next: string | undefined;
@@ -159,17 +161,27 @@ async function runLocal(
         return true;
       });
       if (!next) break;
-      Object.assign(results, batch);
       if (!(await alive(port))) {
         stop();
         stop = await startDev(out, port);
+        if (!rerun.has(next) && Object.values(batch).some(failed)) {
+          rerun.add(next);
+          continue;
+        }
       }
+      Object.assign(results, batch);
     }
   } finally {
     stop();
   }
   return results;
 }
+
+/** A scenario that threw or timed out measured nothing comparable. */
+const failed = (r: Result) =>
+  r.ok === false ||
+  Boolean(r.error) ||
+  Boolean((r.value as { timeout?: boolean } | undefined)?.timeout);
 
 const sum = (c: Record<string, number> | undefined, keys: string[]) =>
   c ? keys.reduce((a, k) => a + (c[k] ?? 0), 0) : undefined;
@@ -197,18 +209,55 @@ function table(
     `| scenario | ${names.join(" | ")} |`,
     `|---|${names.map(() => "---").join("|")}|`
   ];
+  const get = (m: string, r: Result | undefined) =>
+    r && !failed(r) ? METRICS[m](r) : undefined;
+  // A facet scenario's levels (the leaf, @mid, @root) are one tree: its
+  // cost is their sum, so only the sum row is bolded.
+  const levelsOf = (results: Record<string, Result>, key: string) =>
+    Object.keys(results).filter((k) => k === key || k.startsWith(`${key}@`));
+  const total = (m: string, results: Record<string, Result>, key: string) => {
+    const vals = levelsOf(results, key).map((k) => get(m, results[k]));
+    return vals.length && vals.every((v) => v != null)
+      ? (vals as number[]).reduce((x, y) => x + y, 0)
+      : undefined;
+  };
+  const row = (
+    label: string,
+    cell: (m: string) => [number?, number?],
+    bold: boolean
+  ) =>
+    `| ${label} | ${names
+      .map((m) => {
+        const [a, b] = cell(m);
+        const txt = `${a ?? "–"} / ${b ?? "–"}`;
+        return bold && a != null && b != null && b > a ? `**${txt}**` : txt;
+      })
+      .join(" | ")} |`;
   for (const key of [
     ...new Set([...Object.keys(release), ...Object.keys(main)])
   ]) {
-    const cells = names.map((m) => {
-      const get = (r: Result | undefined) =>
-        r && r.ok !== false ? METRICS[m](r) : undefined;
-      const a = get(release[key]);
-      const b = get(main[key]);
-      const txt = `${a ?? "–"} / ${b ?? "–"}`;
-      return a != null && b != null && b > a ? `**${txt}**` : txt;
-    });
-    lines.push(`| ${key} | ${cells.join(" | ")} |`);
+    const facet = key.startsWith("facet/");
+    lines.push(
+      row(key, (m) => [get(m, release[key]), get(m, main[key])], !facet)
+    );
+  }
+  // The sum rows go after each facet tree's last level.
+  for (let i = lines.length - 1; i >= 2; i--) {
+    const key = lines[i].slice(2, lines[i].indexOf(" |"));
+    if (!key.startsWith("facet/")) continue;
+    const base = key.split("@")[0];
+    const nextKey = lines[i + 1]?.slice(2, lines[i + 1].indexOf(" |"));
+    if (nextKey?.split("@")[0] === base) continue;
+    if (levelsOf(main, base).length < 2) continue;
+    lines.splice(
+      i + 1,
+      0,
+      row(
+        `${base} (sum)`,
+        (m) => [total(m, release, base), total(m, main, base)],
+        true
+      )
+    );
   }
   return lines.join("\n");
 }
@@ -219,24 +268,34 @@ try {
   bundle(DIR, path.join(scratch, "main"));
   const release = await runLocal(path.join(scratch, "out"), 8791);
   const main = await runLocal(path.join(scratch, "main"), 8793);
-  // A scenario that threw or timed out measured nothing comparable.
-  const failed = (r: Result) =>
-    r.ok === false ||
-    Boolean(r.error) ||
-    Boolean((r.value as { timeout?: boolean } | undefined)?.timeout);
-  const broken = Object.entries(main).filter(([, r]) => failed(r));
+  const why = (r: Result) =>
+    r.error ??
+    ((r.value as { timeout?: boolean } | undefined)?.timeout
+      ? "no reply within 30 s"
+      : "failed");
+  const bad = Object.entries(main).filter(([, r]) => failed(r));
+  // Broken: fails on this build where the release did not. A scenario that
+  // fails on both is listed, but it is not this build's regression.
+  const broken = bad.filter(([k]) => !release[k] || !failed(release[k]));
+  const both = bad.filter(([k]) => release[k] && failed(release[k]));
   const report = [
     `## Storage cost per scenario: release (${Object.entries(versions)
       .map(([p, v]) => `${p}@${v}`)
       .join(", ")}) / this build`,
     "",
-    "Bold: this build costs more than the release.",
+    "Bold: this build costs more than the release. A facet scenario is bolded on its (sum) row: the leaf, @mid and @root are one tree.",
     "",
     table(release, main),
     ...(broken.length
       ? [
           "",
-          `Broken on this build: ${broken.map(([k, r]) => `${k} (${r.error})`).join("; ")}`
+          `Broken on this build: ${broken.map(([k, r]) => `${k} (${why(r)})`).join("; ")}`
+        ]
+      : []),
+    ...(both.length
+      ? [
+          "",
+          `Failing on the release and on this build (no numbers): ${both.map(([k, r]) => `${k} (${why(r)})`).join("; ")}`
         ]
       : [])
   ].join("\n");

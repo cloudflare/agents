@@ -60,6 +60,15 @@ function history(n: number): UIMessage[] {
   return out;
 }
 
+/** Until the host has a reply streaming (bounded at 10 s), outside the counts. */
+async function untilStreaming(h: { meter: Meter }) {
+  const deadline = Date.now() + 10_000;
+  while (!(await h.meter.quiet(() => replyStreaming(h)))) {
+    if (Date.now() > deadline) throw new Error("no reply started streaming");
+    await sleep(5);
+  }
+}
+
 /** Shared by the three classes. */
 interface Host {
   meter: Meter;
@@ -237,7 +246,7 @@ export class PerfThink extends Think<Env> {
       approve: async () => this.saveMessages([user("approve")]),
       queued: async () => {
         const first = this.saveMessages([user("long 50 delay 20")]);
-        await sleep(100);
+        await untilStreaming(this);
         const rest = [1, 2, 3].map((i) =>
           this.saveMessages([user(`queued ${i}`)])
         );
@@ -314,6 +323,9 @@ export class PerfThink extends Think<Env> {
     await this.ctx.storage.sync();
     this.ctx.abort("perf: reset");
   }
+  async perfStreaming() {
+    return { streaming: await this.meter.quiet(() => replyStreaming(this)) };
+  }
   async perfSinceStart() {
     return {
       doId: this.ctx.id.toString(),
@@ -386,7 +398,7 @@ export class PerfChat extends AIChatAgent<Env> {
       approve: async () => this.saveMessages([user("approve")]),
       queued: async () => {
         const first = this.saveMessages([user("long 50 delay 20")]);
-        await sleep(100);
+        await untilStreaming(this);
         const rest = [1, 2, 3].map((i) =>
           this.saveMessages([user(`queued ${i}`)])
         );
@@ -423,6 +435,9 @@ export class PerfChat extends AIChatAgent<Env> {
   async perfAbort() {
     await this.ctx.storage.sync();
     this.ctx.abort("perf: reset");
+  }
+  async perfStreaming() {
+    return { streaming: await this.meter.quiet(() => replyStreaming(this)) };
   }
   async perfSinceStart() {
     return {
@@ -597,7 +612,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const m = url.pathname.match(
-      /^\/(run|since|abort)\/(think|chat|agent|parent)\/([^/]+)(?:\/(\w+))?$/
+      /^\/(run|since|abort|streaming)\/(think|chat|agent|parent)\/([^/]+)(?:\/(\w+))?$/
     );
     if (m) {
       const [, verb, cls, room, scenario] = m;
@@ -622,17 +637,20 @@ export default {
         ): Promise<Record<string, unknown>>;
         perfAbort(): Promise<Record<string, unknown>>;
         perfSinceStart(): Promise<Record<string, unknown>>;
+        perfStreaming(): Promise<Record<string, unknown>>;
       };
       const arg = url.searchParams.get("arg") ?? undefined;
       try {
         const value =
           verb === "abort"
             ? await stub.perfAbort().catch(() => ({ aborted: true }))
-            : verb === "run"
-              ? await stub.perf(scenario, arg, {
-                  reset: url.searchParams.get("reset") !== "0"
-                })
-              : await stub.perfSinceStart();
+            : verb === "streaming"
+              ? await stub.perfStreaming()
+              : verb === "run"
+                ? await stub.perf(scenario, arg, {
+                    reset: url.searchParams.get("reset") !== "0"
+                  })
+                : await stub.perfSinceStart();
         return Response.json({ ok: true, rpcMs: Date.now() - t0, ...value });
       } catch (e) {
         return Response.json({

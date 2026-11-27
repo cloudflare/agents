@@ -23,9 +23,17 @@ export async function runScenarios(
   const tag = Math.random().toString(16).slice(2, 10);
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+  // A scenario the build cannot finish fails its row instead of hanging the run.
   async function call(path: string): Promise<Result> {
-    const res = await fetch(base + path);
-    const text = await res.text();
+    let text: string;
+    try {
+      const res = await fetch(base + path, {
+        signal: AbortSignal.timeout(120_000)
+      });
+      text = await res.text();
+    } catch (e) {
+      return { ok: false, error: String(e).slice(0, 300) };
+    }
     try {
       return JSON.parse(text);
     } catch {
@@ -44,6 +52,15 @@ export async function runScenarios(
     );
   const since = (cls: string, room: string) => call(`/since/${cls}/${room}`);
   const abort = (cls: string, room: string) => call(`/abort/${cls}/${room}`);
+  /** Until the room has a reply streaming (bounded at 10 s). */
+  async function streaming(cls: string, room: string) {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if ((await call(`/streaming/${cls}/${room}`)).streaming === true) return;
+      await sleep(20);
+    }
+    throw new Error("no reply started streaming within 10 s");
+  }
 
   function wsUrl(cls: string, room: string) {
     const u = new URL(base);
@@ -72,8 +89,18 @@ export async function runScenarios(
           : ((e.data as ArrayBuffer).byteLength ?? 0);
     };
     await new Promise<void>((res, rej) => {
-      ws.onopen = () => res();
-      ws.onerror = () => rej(new Error("ws error"));
+      const timer = setTimeout(() => {
+        ws.close();
+        rej(new Error("WebSocket did not open within 30 s"));
+      }, 30_000);
+      ws.onopen = () => {
+        clearTimeout(timer);
+        res();
+      };
+      ws.onerror = () => {
+        clearTimeout(timer);
+        rej(new Error("ws error"));
+      };
     });
     await sleep(holdMs);
     ws.close();
@@ -157,7 +184,7 @@ export async function runScenarios(
     add("resume-mid-stream", cls, async (room) => {
       await run(cls, room, "noop");
       const turn = run(cls, room, "long", "300 delay 5");
-      await sleep(700);
+      await streaming(cls, room);
       const ws = await connect(cls, room, 300);
       return { ...(await turn), ws };
     });
