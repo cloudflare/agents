@@ -3501,6 +3501,75 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return { runs, tablesLeft };
   }
 
+  /**
+   * A released version's agent-tool run in flight: its row, and its turn
+   * left cut off (a chat-turn run of the release). Start as an upgraded
+   * version does, carry the turn on as a wake does, and report the run.
+   */
+  async inFlightAgentToolRunAcrossUpgradeForTest(): Promise<{
+    keptForItsTurn: boolean;
+    status: string | undefined;
+    summary: string | undefined;
+    tablesLeft: string[];
+  }> {
+    const now = Date.now();
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_ai_chat_agent_tool_runs (
+        run_id TEXT PRIMARY KEY, request_id TEXT, status TEXT NOT NULL,
+        input_json TEXT, output_json TEXT, summary TEXT, error_message TEXT,
+        started_at INTEGER NOT NULL, completed_at INTEGER,
+        progress_json TEXT, last_signal_at INTEGER, event_delivery TEXT
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
+      VALUES ('released-live', 'req-live', 'running', '{"prompt":"go on"}', ${now})
+    `;
+    await this.persistMessages([
+      { id: "u-live", role: "user", parts: [{ type: "text", text: "go on" }] }
+    ]);
+    await insertInterruptedTurnForTest(
+      this,
+      this.ctx.storage,
+      `${AIChatAgent.CHAT_FIBER_NAME}:req-live`,
+      {
+        __cfAIChatFiberSnapshot: {
+          kind: "ai-chat-turn",
+          version: 1,
+          requestId: "req-live",
+          continuation: false,
+          latestMessageId: "u-live",
+          latestMessageRole: "user",
+          latestUserMessageId: "u-live",
+          startedAt: now,
+          lastBody: { agentToolInput: { prompt: "go on" } }
+        }
+      }
+    );
+    const carry = this as unknown as {
+      _carryForwardAgentToolChildRuns(): Promise<void>;
+    };
+    // At start, before the turn is carried: the run waits for it.
+    await carry._carryForwardAgentToolChildRuns();
+    const keptForItsTurn =
+      this.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM cf_ai_chat_agent_tool_runs
+      `[0]?.n === 1;
+    await recoverInterruptedTurnsForTest(this);
+    await this.tasks.wait("agent-tool:released-live", { timeoutMs: 10_000 });
+    const inspection = await this.inspectAgentToolRun("released-live");
+    const tablesLeft = this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('cf_ai_chat_agent_tool_runs', 'cf_ai_chat_agent_tool_milestones')
+    `.map((row) => row.name);
+    return {
+      keptForItsTurn,
+      status: inspection?.status,
+      summary: inspection?.summary,
+      tablesLeft
+    };
+  }
+
   /** The recorded end of `requestId` (the recent terminals), or null. */
   recentTerminalForTest(requestId: string): unknown {
     return recentChatTerminal(this.ctx.storage.kv, [requestId]);

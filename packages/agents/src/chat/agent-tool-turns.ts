@@ -592,7 +592,13 @@ export async function carryForwardAgentToolRuns(
   deps: ChatDeps,
   sql: SqlStorage,
   tables: { runs: string; milestones: string },
-  definition: string
+  definition: string,
+  /**
+   * Whether the released turn of request `requestId` still waits to be
+   * carried: its run stays in the table until that step keys it under the
+   * run's id (and calls this again).
+   */
+  pendingTurn: (requestId: string) => boolean = () => false
 ): Promise<void> {
   const exists = (name: string) =>
     sql
@@ -646,6 +652,8 @@ export async function carryForwardAgentToolRuns(
     }
   }
   const interrupted: string[] = [];
+  // Runs whose released turn is still to be carried: kept for that step.
+  const waiting: string[] = [];
   for (const row of sql
     .exec(
       `SELECT run_id, request_id, status, output_json, summary, error_message, started_at, completed_at, progress_json, event_delivery FROM ${tables.runs}`
@@ -680,6 +688,10 @@ export async function carryForwardAgentToolRuns(
           kept as Record<string, TaskJson>
         );
       }
+      continue;
+    }
+    if (open && row.request_id !== null && pendingTurn(row.request_id)) {
+      waiting.push(row.run_id);
       continue;
     }
     if (status === "error" && row.request_id !== null && open) {
@@ -726,6 +738,21 @@ export async function carryForwardAgentToolRuns(
         "Agent tool run was interrupted by an upgrade."
       );
     }
+  }
+  if (waiting.length > 0) {
+    // Everything else is carried: only the waiting rows stay.
+    const keep = waiting.map(() => "?").join(", ");
+    sql.exec(
+      `DELETE FROM ${tables.runs} WHERE run_id NOT IN (${keep})`,
+      ...waiting
+    );
+    if (exists(tables.milestones)) {
+      sql.exec(
+        `DELETE FROM ${tables.milestones} WHERE run_id NOT IN (${keep})`,
+        ...waiting
+      );
+    }
+    return;
   }
   sql.exec(`DROP TABLE IF EXISTS ${tables.milestones}`);
   sql.exec(`DROP TABLE ${tables.runs}`);

@@ -33,4 +33,16 @@ describe("agent-tool child rows a released version left", () => {
       tablesLeft: []
     });
   });
+
+  it("carry on when one was in flight: its cut-off turn runs as the run's turn", async () => {
+    const agent = await getAgentByName(
+      env.ChatRecoveryTestAgent as unknown as DurableObjectNamespace<ChatRecoveryTestAgent>,
+      `child-upgrade-live-${crypto.randomUUID()}`
+    );
+    const result = await agent.inFlightAgentToolRunAcrossUpgradeForTest();
+    expect(result.keptForItsTurn).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.summary).toBeTruthy();
+    expect(result.tablesLeft).toEqual([]);
+  });
 });

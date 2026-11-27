@@ -64,6 +64,7 @@ import {
   inspectAgentToolTurn,
   liveTurnsOf,
   recordAgentToolProgress,
+  releasedAgentToolRunOfRequest,
   startAgentToolTurn,
   tailAgentToolTurn,
   clientResolvableToolNames,
@@ -526,7 +527,8 @@ export class AIChatAgent<
         runs: "cf_ai_chat_agent_tool_runs",
         milestones: "cf_ai_chat_agent_tool_milestones"
       },
-      CHAT_TURN_DEFINITION
+      CHAT_TURN_DEFINITION,
+      (requestId) => this._releasedTurnWaits(requestId)
     );
   }
 
@@ -542,6 +544,66 @@ export class AIChatAgent<
       ...(last.messageIds && { messageIds: last.messageIds })
     });
     kv.delete(CHAT_LAST_TERMINAL_KEY);
+  }
+
+  /** Whether a released turn of `requestId` is still to be carried. */
+  private _releasedTurnWaits(requestId: string): boolean {
+    const fiber = (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME;
+    for (const record of this.tasks.peekList({
+      definition: [fiber, CHAT_RECOVERY_TASK_NAME],
+      status: ["pending", "running"]
+    })) {
+      if (
+        (record.metadata as { requestId?: unknown } | undefined)?.requestId ===
+        requestId
+      ) {
+        return true;
+      }
+      const input = this.tasks.inputOf<{
+        data?: { originalRequestId?: unknown };
+      }>(record.runId);
+      if (input?.data?.originalRequestId === requestId) return true;
+    }
+    const ledger = this.ctx.storage.sql
+      .exec(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_runs'"
+      )
+      .toArray();
+    return (
+      ledger.length > 0 &&
+      this.ctx.storage.sql
+        .exec(
+          "SELECT 1 FROM cf_agents_runs WHERE name = ? LIMIT 1",
+          `${fiber}:${requestId}`
+        )
+        .toArray().length > 0
+    );
+  }
+
+  /**
+   * The run id and metadata a released turn of `requestId` is carried
+   * under: its open agent-tool run's, so that run carries on, or its own.
+   */
+  private _carriedTurnKey(requestId: string): {
+    requestId: string;
+    metadata?: Record<string, TaskJson>;
+  } {
+    const run = releasedAgentToolRunOfRequest(
+      this.ctx.storage.sql,
+      "cf_ai_chat_agent_tool_runs",
+      requestId
+    );
+    if (!run) return { requestId };
+    return {
+      requestId: agentToolTurnId(run.runId),
+      metadata: {
+        agentTool: {
+          runId: run.runId,
+          startMessageId: null,
+          ...(run.terminalOnly && { terminalOnly: true })
+        }
+      }
+    };
   }
 
   private _restoreRequestContext(): void {
@@ -2485,7 +2547,8 @@ export class AIChatAgent<
     attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
     const { requestId } = turn;
-    if (await this.tasks.get(requestId)) return;
+    const key = this._carriedTurnKey(requestId);
+    if (await this.tasks.get(key.requestId)) return;
     const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
       "__cfAIChatFiberSnapshot",
       turn.persisted,
@@ -2598,17 +2661,23 @@ export class AIChatAgent<
             ...context
           },
       {
-        requestId,
+        requestId: key.requestId,
         // A carried turn takes its place in the lane: it is not a new
         // message that could skip the ones waiting.
         arrival: "queue",
-        // The user messages the request came from, so its end names them.
-        ...(snapshot?.originMessageIds &&
-          snapshot.originMessageIds.length > 0 && {
-            metadata: { chat: { messageIds: snapshot.originMessageIds } }
-          })
+        // An agent-tool run's turn: its run, kept for its parent.
+        ...(key.metadata && { retain: true }),
+        metadata: {
+          ...key.metadata,
+          // The user messages the request came from, so its end names them.
+          ...(snapshot?.originMessageIds &&
+            snapshot.originMessageIds.length > 0 && {
+              chat: { messageIds: snapshot.originMessageIds }
+            })
+        }
       }
     );
+    if (key.metadata) await this._carryForwardAgentToolChildRuns();
   }
 
   /**
@@ -2624,7 +2693,8 @@ export class AIChatAgent<
     // An old payload may not name its request: the turn still runs.
     const requestId = data.originalRequestId ?? nanoid();
     await this._forgetReleasedIncidents(requestId);
-    if (await this.tasks.get(requestId)) return;
+    const key = this._carriedTurnKey(requestId);
+    if (await this.tasks.get(key.requestId)) return;
     const leaf = await this.#session.getLatestLeaf();
     // Only while the message it was scheduled for is still the latest: a
     // conversation that moved on has nothing of this turn's to finish.
@@ -2650,14 +2720,19 @@ export class AIChatAgent<
         ? { trigger: "server", mode: "continue", ...context }
         : { trigger: "submit-message", questionId: leaf.id, ...context },
       {
-        requestId,
+        requestId: key.requestId,
         arrival: "queue",
-        ...(data.originMessageIds &&
-          data.originMessageIds.length > 0 && {
-            metadata: { chat: { messageIds: data.originMessageIds } }
-          })
+        ...(key.metadata && { retain: true }),
+        metadata: {
+          ...key.metadata,
+          ...(data.originMessageIds &&
+            data.originMessageIds.length > 0 && {
+              chat: { messageIds: data.originMessageIds }
+            })
+        }
       }
     );
+    if (key.metadata) await this._carryForwardAgentToolChildRuns();
   }
 
   /**
