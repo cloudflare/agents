@@ -301,10 +301,10 @@ async function waitForAgentToolRun(
  */
 async function socketBarrier(ws: WebSocket): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error("no answer to the resume request")),
-      5000
-    );
+    const timer = setTimeout(() => {
+      ws.removeEventListener("message", onMessage);
+      reject(new Error("no answer to the resume request"));
+    }, 5000);
     const onMessage = (e: MessageEvent) => {
       let type: string | undefined;
       try {
