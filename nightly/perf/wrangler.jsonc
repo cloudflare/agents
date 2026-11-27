@@ -1,0 +1,22 @@
+{
+  // The perf report's Worker. It runs on local workerd only (`wrangler dev`),
+  // built once on the latest release and once on this repository.
+  "name": "nightly-perf",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "PerfThink", "name": "PerfThink" },
+      { "class_name": "PerfChat", "name": "PerfChat" },
+      { "class_name": "PerfAgent", "name": "PerfAgent" },
+      { "class_name": "PerfParent", "name": "PerfParent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PerfThink", "PerfChat", "PerfAgent", "PerfParent"]
+    }
+  ]
+}
