@@ -3467,11 +3467,31 @@ export class Think<
             }
             return undefined;
           }
-          return writer({
+          const written = writer({
             // SAFETY: the parts are the AI SDK's stream parts.
             part: part as Parameters<MessageMetadataCallback>[0]["part"],
             continuation: turnContinuation
           });
+          // As on Think: a continuation that extends a stored reply keeps
+          // that reply's metadata; the writer adds only keys it lacks.
+          const extended =
+            kind === "start" && turn.continuation
+              ? turn.messages.at(-1)
+              : undefined;
+          const existing =
+            extended?.role === "assistant" ? extended.metadata : undefined;
+          if (
+            written === undefined ||
+            existing === null ||
+            typeof existing !== "object"
+          ) {
+            return written;
+          }
+          return Object.fromEntries(
+            Object.entries(written).filter(
+              ([key]) => !Object.prototype.hasOwnProperty.call(existing, key)
+            )
+          );
         }
       })
     } as ThinkTurnConfig;
