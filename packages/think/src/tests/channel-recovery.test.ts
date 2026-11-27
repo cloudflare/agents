@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
 import type { ThinkRecoveryTestAgent } from "./agents/think-session";
 
@@ -292,5 +292,56 @@ describe("recovery × channels", () => {
     expect(systems.at(-1)).toContain("VOICE MODE");
     const toolNames = await agent.getTurnClientToolNames();
     expect(toolNames.at(-1)).toContain("voiceMarker");
+  });
+});
+
+/**
+ * The same invariant through public behaviour and a real reset, so it runs
+ * on Think and on the harness-backed Think alike: a turn on a channel that a
+ * reset cuts off is recovered with that channel's policy.
+ */
+describe("recovery × channels, after a real reset", () => {
+  /** Run a turn whose model waits on its connect, then reset the object. */
+  async function resetBeforeStream(channel: string | undefined) {
+    const room = `channel-reset-${crypto.randomUUID()}`;
+    // A reset stub stays broken: each call takes a new one.
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    await (await agent()).hangModelAtConnectForTest();
+    const turn = (await agent())
+      .runChannelTurnForTest({ input: "hi", channel })
+      .catch(() => undefined);
+    await vi.waitFor(
+      async () =>
+        expect(await (await agent()).modelConnectingForTest()).toBe(true),
+      { timeout: 10_000, interval: 10 }
+    );
+    await (await agent()).resetIsolateForTest().catch(() => undefined);
+    await turn;
+    // The recovered turn runs in the new isolate, whose capture starts empty.
+    await vi.waitFor(
+      async () =>
+        expect(
+          (await (await agent()).getCapturedTurnChannelsForTest()).length
+        ).toBeGreaterThan(0),
+      { timeout: 15_000, interval: 50 }
+    );
+    return agent();
+  }
+
+  it("re-applies a channel's policy to a turn a reset cut off", async () => {
+    const agent = await resetBeforeStream("voice");
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual(["voice"]);
+    const log = await agent.getBeforeTurnLog();
+    expect(log.at(-1)?.system).toContain("VOICE MODE");
+    // The voice channel's tool policy removes every tool.
+    expect(log.at(-1)?.toolNames).toEqual([]);
+  });
+
+  it("recovers a turn with no channel stamp on no channel", async () => {
+    const agent = await resetBeforeStream(undefined);
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual([""]);
+    expect((await agent.getBeforeTurnLog()).at(-1)?.system).not.toContain(
+      "VOICE MODE"
+    );
   });
 });

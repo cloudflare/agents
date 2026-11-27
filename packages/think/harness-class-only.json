@@ -679,5 +679,50 @@
     "test": "Think — onChatRecovery > a genuinely superseding user turn marks the submission skipped, not errored",
     "reason": "a `running` submission and a recovery incident seeded in the class's shape (`seedRunningSubmissionForTest`, `seedIncidentForTest`), with the recovery callback run by hand, with a newer user leaf persisted by hand",
     "ruledOut": "a later request waits behind the recovery on the chat lane, so a recovery never finds a newer user leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov). On Think: submissions.test.ts 'a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order', which passes on both configs"
+  },
+  {
+    "file": "channel-recovery.test.ts",
+    "test": "recovery × channels > re-applies channel policy when CONTINUING a recovered partial turn",
+    "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
+    "successor": {
+      "file": "channel-recovery.test.ts",
+      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+    }
+  },
+  {
+    "file": "channel-recovery.test.ts",
+    "test": "recovery × channels > re-applies channel policy when RETRYING a recovered pre-stream turn",
+    "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
+    "successor": {
+      "file": "channel-recovery.test.ts",
+      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+    }
+  },
+  {
+    "file": "channel-recovery.test.ts",
+    "test": "recovery × channels > re-applies the channel TOOL policy (not just instructions) on a recovered continue turn",
+    "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
+    "successor": {
+      "file": "channel-recovery.test.ts",
+      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+    }
+  },
+  {
+    "file": "channel-recovery.test.ts",
+    "test": "recovery × channels > falls back to default policy when the recovered turn has NO channel stamp",
+    "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
+    "successor": {
+      "file": "channel-recovery.test.ts",
+      "test": "recovery × channels, after a real reset > recovers a turn with no channel stamp on no channel"
+    }
+  },
+  {
+    "file": "channel-recovery.test.ts",
+    "test": "recovery × channels > composes channel re-resolution AND agent-tool request_id rebind on the SAME recovered turn",
+    "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`; the successor covers its channel half, not the agent-tool rebind",
+    "successor": {
+      "file": "channel-recovery.test.ts",
+      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+    }
   }
 ]
