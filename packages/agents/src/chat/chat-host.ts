@@ -984,6 +984,7 @@ export function chatTurnDefinition(
       // Chunks are written in batches (`CHUNK_BATCH`), as the hosts' reply
       // streams do; a reader flushes first.
       const sync = deps.streams.__DO_NOT_USE_WILL_BREAK__sync();
+      const deltaParts = new Set<string>();
       const record = (chunk: UIMessageChunk) => {
         const json = JSON.stringify(chunk);
         const bytes = utf8Length(json);
@@ -995,10 +996,19 @@ export function chatTurnDefinition(
         // A tool call's input and its outcome are written at once: a tool
         // runs for as long as it takes, and a reset while it runs must find
         // the call stored (or the tool would run again).
-        // A preliminary output (progress) waits for the batch.
+        // A preliminary output (progress) waits for the batch. The first
+        // delta of a text or reasoning part is written at once, as the
+        // hosts' reply streams do: a short reply cut off is kept.
+        const partId = (chunk as { id?: unknown }).id;
+        const firstDelta =
+          (chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
+          typeof partId === "string" &&
+          !deltaParts.has(partId);
+        if (firstDelta) deltaParts.add(partId);
         if (
-          TOOL_EVENTS.has(chunk.type) &&
-          (chunk as { preliminary?: unknown }).preliminary !== true
+          firstDelta ||
+          (TOOL_EVENTS.has(chunk.type) &&
+            (chunk as { preliminary?: unknown }).preliminary !== true)
         ) {
           sync.flush(streamId);
         }
