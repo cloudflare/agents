@@ -715,6 +715,22 @@ export class AIChatAgent<
   /** The carry-forward of an earlier release's rows, while it runs (tests await it). */
   private _requestContextCarried: Promise<void> | undefined;
 
+  /**
+   * The upgrade from a released version: each step turns rows that version
+   * kept into the chat module's own, and drops them. Runs in the
+   * constructor, before the Tasks capability starts runs, so a run it
+   * creates is there when the lane is drained. Each step is cheap when it
+   * has nothing to do (one read that finds no table or no row).
+   */
+  private _upgradeReleasedRows(): void {
+    // ai-chat 0.12.x: `cf_ai_chat_request_context` → the session value.
+    this._restoreRequestContext();
+    // ai-chat 0.12.x: a turn left cut off (fiber row, incident, recovery
+    // runs, stream rows) → a chat-turn run under its request id
+    // (turn-task's step goes here). An open agent-tool turn → run
+    // `agent-tool:<runId>` (with #3346).
+  }
+
   private _restoreRequestContext(): void {
     const stored = this.#session.internal_configNow(CHAT_REQUEST_CONTEXT_KEY);
     if (stored !== null) {
@@ -1385,9 +1401,10 @@ export class AIChatAgent<
           }
         );
 
-        // The last request context, read now: boot recovery runs before
-        // onStart and needs the client tools.
-        this._restoreRequestContext();
+        // Rows an earlier release left, carried forward once, before any
+        // turn runs: the request context, and (turn-task's step) a turn
+        // that release left cut off.
+        this._upgradeReleasedRows();
 
         // Initialize resumable stream manager (creates its own tables + restores state)
         this._withAgentSpan(
