@@ -21,6 +21,7 @@ const GRANT_KEY = "test:grant";
 const REWRITE_KEY = "test:rewrite";
 const SWEEP_KEY = "test:sweep-settled";
 const GRANT_CONTEXT_KEY = "test:grant-context";
+const MODEL_FAILS_KEY = "test:model-fails";
 
 function finish(controller: ReadableStreamDefaultController, reason: string) {
   controller.enqueue({
@@ -93,7 +94,15 @@ const quiet: StreamCallback = {
 
 export class ThinkHarnessActionsAgent extends Think {
   override getModel(): LanguageModel {
+    if (this.ctx.storage.kv.get<boolean>(MODEL_FAILS_KEY)) {
+      throw new Error("no model today");
+    }
     return actionModel();
+  }
+
+  /** From now on, `getModel()` throws. */
+  failModelForTest(): void {
+    this.ctx.storage.kv.put(MODEL_FAILS_KEY, true);
   }
 
   override getActions(): Record<string, Action> {

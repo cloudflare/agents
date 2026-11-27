@@ -20,6 +20,7 @@ type ActionsStub = {
   grantContext(): Promise<
     { trigger: string | null; hasSignal: boolean } | undefined
   >;
+  failModelForTest(): Promise<void>;
   rejectExecution(
     executionId: string,
     reason?: string,
@@ -203,6 +204,20 @@ describe("harness-backed Think: actions that need a human", () => {
         error: expect.objectContaining({ name: "ActionAuthorizationError" })
       })
     ]);
+  });
+
+  it("runs a call approved after a restart when getModel() fails and the grant does not read the model", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    await think.failModelForTest();
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    expect(await fresh.approveExecution(pending.executionId)).toEqual({
+      charged: 5
+    });
+    expect(await fresh.charged()).toBe(1);
   });
 
   it("does not run an approved action whose input beforeToolCall changed", async () => {
