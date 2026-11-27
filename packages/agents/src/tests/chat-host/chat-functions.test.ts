@@ -757,13 +757,13 @@ describe("chat functions over a minimal host", () => {
     return release;
   }
 
-  function toolResult(toolCallId: string) {
+  function toolResult(toolCallId: string, autoContinue = true) {
     return JSON.stringify({
       type: "cf_agent_tool_result",
       toolCallId,
       toolName: "ask",
       output: { ok: toolCallId },
-      autoContinue: true
+      autoContinue
     });
   }
 
@@ -862,7 +862,8 @@ describe("chat functions over a minimal host", () => {
       const ids = (await instance.sessions.session("s1").getHistory()).map(
         (m) => m.id
       );
-      expect(ids).toContain("u2");
+      // In lane order: the reply it waited behind comes first.
+      expect(ids).toEqual(["u1", "a1", "u2"]);
     });
   });
 
@@ -940,6 +941,112 @@ describe("chat functions over a minimal host", () => {
       expect(sent).toHaveLength(5);
       release();
       await instance.resultFor("r1");
+    });
+  });
+
+  it("a batch asked to continue by one answer continues when an answer that did not ask finishes it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "c1",
+          toolName: "ask",
+          input: {}
+        },
+        {
+          type: "tool-input-available",
+          toolCallId: "c2",
+          toolName: "ask",
+          input: {}
+        }
+      ]);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        toolResult("c1", true)
+      );
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        toolResult("c2", false)
+      );
+      release();
+      while (instance.results.length < 2) await instance.nextResult();
+      expect(
+        instance.calls.filter((c) => c.trigger === "tool-answer")
+      ).toHaveLength(1);
+    });
+  });
+
+  it("a batch asked to continue continues when a server tool's output finishes it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let asked!: () => void;
+      const bothAsked = new Promise<void>((resolve) => (asked = resolve));
+      const respond = instance.host.respond;
+      let first = true;
+      instance.host.respond = async (call) => {
+        if (!first) return respond(call);
+        first = false;
+        return new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "start", messageId: "a1" });
+            controller.enqueue({
+              type: "tool-input-available",
+              toolCallId: "c1",
+              toolName: "ask",
+              input: {}
+            });
+            controller.enqueue({
+              type: "tool-input-available",
+              toolCallId: "s1",
+              toolName: "lookup",
+              input: {}
+            });
+            await released;
+            // The server tool finishes after the tab answered.
+            controller.enqueue({
+              type: "tool-output-available",
+              toolCallId: "s1",
+              output: 1
+            });
+            controller.close();
+          }
+        });
+      };
+      let count = 0;
+      (instance.host.hooks as { transformChunk?: unknown }).transformChunk =
+        (chunk: { type: string }) => {
+          if (chunk.type === "tool-input-available" && ++count === 2) asked();
+          return chunk;
+        };
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await bothAsked;
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        toolResult("c1", true)
+      );
+      release();
+      while (instance.results.length < 2) await instance.nextResult();
+      expect(
+        instance.calls.filter((c) => c.trigger === "tool-answer")
+      ).toHaveLength(1);
+      instance.host.respond = respond;
     });
   });
 });
