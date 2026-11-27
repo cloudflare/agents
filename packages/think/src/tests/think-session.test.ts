@@ -1773,6 +1773,114 @@ describe("Think — pre-Sessions session API keeps working", () => {
 
 // ── Context blocks ───────────────────────────────────────────────
 
+// Successors of the "context blocks" tests that read the base prompt
+// through the class's `_buildBaseSystemPrompt` seam: these read the system
+// prompt a turn actually sends, so they run on both test configs.
+describe("Think — the system prompt a turn sends", () => {
+  it("sends the context blocks, loaded on their own", async () => {
+    const agent = await freshSessionAgent("sys-ctx-blocks");
+    await agent.setContextBlock("memory", "User prefers Rust over Go.");
+    await agent.testChat("Hello");
+    const system = await agent.getLastSystemPromptForTest();
+    expect(system).toContain("MEMORY");
+    expect(system).toContain("User prefers Rust over Go.");
+  });
+
+  it("sends an empty writable block", async () => {
+    const agent = await freshSessionAgent("sys-ctx-empty");
+    await agent.testChat("Hello");
+    const system = await agent.getLastSystemPromptForTest();
+    expect(system).toContain("MEMORY");
+    expect(system).toContain("[writable]");
+  });
+
+  it("sends the skill catalog without Think's default prompt when getSystemPrompt is not overridden", async () => {
+    await (
+      await freshSessionAgent("sys-skills-default-parent")
+    ).getContextLabels();
+    for (const name of [
+      "sys-skills-default-first",
+      "sys-skills-default-second"
+    ]) {
+      const agent = await getAgentByName(
+        env.ThinkDefaultSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>,
+        `${name}-${crypto.randomUUID()}`
+      );
+      await agent.testChat("Hello");
+      const system = await agent.getLastSystemPromptForTest();
+      expect(system).toContain("map-reading");
+      expect(system).not.toContain("You are a careful, capable assistant");
+    }
+  });
+
+  it("sends an overridden getSystemPrompt above the skill catalog", async () => {
+    const agent = await getAgentByName(
+      env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
+      `sys-skills-override-${crypto.randomUUID()}`
+    );
+    await agent.runChatTurnForWarningTest();
+    const system = (await agent.getLastSystemPromptForTest()) ?? "";
+    expect(system.indexOf("You are Robbie, a pirate.")).toBe(0);
+    expect(system).toContain("knot-tying: How to tie useful knots.");
+  });
+
+  it("sends an inherited or class-field getSystemPrompt above the skill catalog", async () => {
+    for (const [namespace, name] of [
+      [env.ThinkInheritedSystemPromptSkillsAgent, "sys-skills-inherited"],
+      [env.ThinkSystemPromptFieldSkillsAgent, "sys-skills-field"]
+    ] as const) {
+      const agent = await getAgentByName(
+        namespace as unknown as DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>,
+        `${name}-${crypto.randomUUID()}`
+      );
+      await agent.testChat("Hello");
+      const system = (await agent.getLastSystemPromptForTest()) ?? "";
+      expect(system.indexOf("You are an experienced cartographer.")).toBe(0);
+      expect(system).toContain("map-reading: How to read a map.");
+    }
+  });
+
+  it("keeps the system prompt the same while Workspace skills change", async () => {
+    const agent = await getAgentByName(
+      env.ThinkWorkspaceSkillsAgent as unknown as DurableObjectNamespace<ThinkWorkspaceSkillsAgent>,
+      `sys-workspace-skills-${crypto.randomUUID()}`
+    );
+    await agent.testChat("Hello");
+    const first = await agent.getLastSystemPromptForTest();
+    expect(first).toContain("No skills are available.");
+    await agent.writeSkill("map-reading", "How to read a map.");
+    await agent.testChat("Hello again");
+    await expect(agent.getLastSystemPromptForTest()).resolves.toBe(first);
+    await agent.writeSkill("map-reading", "How to read a nautical chart.");
+    await agent.testChat("And again");
+    await expect(agent.getLastSystemPromptForTest()).resolves.toBe(first);
+  });
+
+  it("folds a changed skill catalog into the system prompt once history is cleared", async () => {
+    const agent = await getAgentByName(
+      env.ThinkWorkspaceSkillsAgent as unknown as DurableObjectNamespace<ThinkWorkspaceSkillsAgent>,
+      `sys-workspace-skills-clear-${crypto.randomUUID()}`
+    );
+    await agent.testChat("Hello");
+    await agent.writeSkill("map-reading", "How to read a map.");
+    await agent.testChat("Hello again");
+    await agent.clearSkillHistory();
+    await agent.testChat("After the clear");
+    await expect(agent.getLastSystemPromptForTest()).resolves.toContain(
+      "- map-reading: How to read a map."
+    );
+  });
+
+  it("sends the context blocks of an async configureSession", async () => {
+    const agent = await freshAsyncSessionAgent("sys-async-cfg-ctx");
+    await agent.setContextBlock("memory", "Async-configured fact.");
+    await agent.testChat("Hello");
+    const system = await agent.getLastSystemPromptForTest();
+    expect(system).toContain("MEMORY");
+    expect(system).toContain("Async-configured fact.");
+  });
+});
+
 describe("Think — context blocks", () => {
   it("should configure session with context blocks", async () => {
     const agent = await freshSessionAgent("ctx-basic");
