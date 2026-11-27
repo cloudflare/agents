@@ -16749,6 +16749,60 @@ export class ThinkOnStartHydrationFailureAgent extends Think {
 // long-lived session.
 
 export class ThinkWindowedHydrationAgent extends Think {
+  /**
+   * The socket successors' seam: when a test has asked for it, the next
+   * reconciliation is handed to the test, which sends `incoming` as a
+   * client's chat request; the fixture goes on once the test says the
+   * request ended. Otherwise the class's own reconciliation runs.
+   */
+  private _deliverOverSocket: {
+    incoming?: UIMessage[];
+    delivered?: () => void;
+  } | null = null;
+
+  private async _reconcileOrDeliverForTest(
+    incoming: UIMessage[],
+    options: {
+      requestId: string;
+      isRegeneration: boolean;
+      isCurrent: () => boolean;
+    }
+  ): Promise<void> {
+    const socket = this._deliverOverSocket;
+    if (socket) {
+      await new Promise<void>((resolve) => {
+        socket.incoming = incoming;
+        socket.delivered = resolve;
+      });
+      this._deliverOverSocket = null;
+      await this.syncMessagesFromStorage();
+      return;
+    }
+    await (
+      this as unknown as {
+        _reconcileAndPersistIncoming(
+          messages: UIMessage[],
+          opts: typeof options
+        ): Promise<unknown>;
+      }
+    )._reconcileAndPersistIncoming(incoming, options);
+  }
+
+  /** Hand the next reconciliation to the test, to send over a socket. */
+  async deliverNextReconcileOverSocketForTest(): Promise<void> {
+    this._deliverOverSocket = {};
+  }
+
+  /** The messages the fixture wants sent, once it has built them. */
+  async incomingToSendForTest(): Promise<UIMessage[] | null> {
+    return this._deliverOverSocket?.incoming ?? null;
+  }
+
+  /** The test sent them, and the request ended. */
+  async incomingSentForTest(): Promise<void> {
+    this._deliverOverSocket?.delivered?.();
+  }
+
   // ~30KB per message, 10 messages ≈ 300KB stored; budget 64KB → only the
   // most recent couple of messages fit the hydration window.
   override hydrationByteBudget = 64 * 1024;
@@ -16899,17 +16953,7 @@ export class ThinkWindowedHydrationAgent extends Think {
       await this.session.updateMessage(reply);
       copies.push({ ...reply, id: `copy-${id}` });
     }
-    const host = this as unknown as {
-      _reconcileAndPersistIncoming(
-        messages: UIMessage[],
-        options: {
-          requestId: string;
-          isRegeneration: boolean;
-          isCurrent: () => boolean;
-        }
-      ): Promise<unknown>;
-    };
-    await host._reconcileAndPersistIncoming(
+    await this._reconcileOrDeliverForTest(
       [
         ...copies,
         ...this.messages,
@@ -16936,17 +16980,7 @@ export class ThinkWindowedHydrationAgent extends Think {
    */
   async reconcileOnLongPathForTest(): Promise<string | null> {
     const oldest = await this.session.getMessage("m1");
-    const host = this as unknown as {
-      _reconcileAndPersistIncoming(
-        messages: UIMessage[],
-        options: {
-          requestId: string;
-          isRegeneration: boolean;
-          isCurrent: () => boolean;
-        }
-      ): Promise<unknown>;
-    };
-    await host._reconcileAndPersistIncoming(
+    await this._reconcileOrDeliverForTest(
       [
         oldest,
         {
@@ -16970,17 +17004,7 @@ export class ThinkWindowedHydrationAgent extends Think {
     older: UIMessage[],
     requestId: string
   ): Promise<void> {
-    const host = this as unknown as {
-      _reconcileAndPersistIncoming(
-        messages: UIMessage[],
-        options: {
-          requestId: string;
-          isRegeneration: boolean;
-          isCurrent: () => boolean;
-        }
-      ): Promise<unknown>;
-    };
-    await host._reconcileAndPersistIncoming(
+    await this._reconcileOrDeliverForTest(
       [
         ...older,
         ...this.messages,
@@ -17092,17 +17116,7 @@ export class ThinkWindowedHydrationAgent extends Think {
         parts: [{ type: "text", text: "next question" }]
       }
     ] as unknown as UIMessage[];
-    const host = this as unknown as {
-      _reconcileAndPersistIncoming(
-        messages: UIMessage[],
-        options: {
-          requestId: string;
-          isRegeneration: boolean;
-          isCurrent: () => boolean;
-        }
-      ): Promise<unknown>;
-    };
-    await host._reconcileAndPersistIncoming(incoming, {
+    await this._reconcileOrDeliverForTest(incoming, {
       requestId: "hidden-tool-result",
       isRegeneration: false,
       isCurrent: () => true
@@ -17131,17 +17145,7 @@ export class ThinkWindowedHydrationAgent extends Think {
         parts: [{ type: "text", text: "next question" }]
       }
     ] as UIMessage[];
-    const host = this as unknown as {
-      _reconcileAndPersistIncoming(
-        messages: UIMessage[],
-        options: {
-          requestId: string;
-          isRegeneration: boolean;
-          isCurrent: () => boolean;
-        }
-      ): Promise<unknown>;
-    };
-    await host._reconcileAndPersistIncoming(incoming, {
+    await this._reconcileOrDeliverForTest(incoming, {
       requestId: "optimistic-copy",
       isRegeneration: false,
       isCurrent: () => true
@@ -17164,17 +17168,7 @@ export class ThinkWindowedHydrationAgent extends Think {
         parts: [{ type: "text", text: "next question" }]
       }
     ] as UIMessage[];
-    const host = this as unknown as {
-      _reconcileAndPersistIncoming(
-        messages: UIMessage[],
-        options: {
-          requestId: string;
-          isRegeneration: boolean;
-          isCurrent: () => boolean;
-        }
-      ): Promise<unknown>;
-    };
-    await host._reconcileAndPersistIncoming(incoming, {
+    await this._reconcileOrDeliverForTest(incoming, {
       requestId: "reconcile-test",
       isRegeneration: false,
       isCurrent: () => true
