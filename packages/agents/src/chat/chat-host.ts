@@ -18,8 +18,20 @@ import type { TaskStep, TaskValue } from "../tasks/types";
 import type { StreamWriter } from "../streams/types";
 import type { WebSockets } from "../websockets/websockets";
 import type { ClientToolSchema } from "./client-tools";
-import type { ChatRecoveryContext, ChatRecoveryOptions } from "./lifecycle";
-import { chatRecoveryBackoffSeconds } from "./recovery-engine";
+import type {
+  ChatRecoveryConfig,
+  ChatRecoveryContext,
+  ChatRecoveryOptions
+} from "./lifecycle";
+import {
+  chatRecoveryBackoffSeconds,
+  retryAfterSeconds
+} from "./recovery-engine";
+import {
+  evaluateChatRecoveryIncident,
+  resolveChatRecoveryConfig
+} from "./recovery-incident";
+import type { ChatRecoveryIncident } from "./recovery-incident";
 import { TaskSettlement } from "../tasks/settlement";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
@@ -125,14 +137,19 @@ export interface ChatHooks {
 /** The options a host gives the chat-turn definition. */
 export interface ChatOptions {
   /**
-   * `false` gives up on an interrupted turn. Otherwise a turn is attempted
-   * up to `maxAttempts` times (default 3), with a backoff between attempts,
-   * and a stream that sends nothing for `stallTimeoutMs` is treated as
-   * interrupted.
+   * `false` gives up on an interrupted turn. Otherwise the host's
+   * `chatRecovery` budget decides, as it always has: `maxAttempts` attempts
+   * without progress (an attempt that streamed more starts the count
+   * again), the no-progress window, the work budget, the interrupted
+   * attempts, and the app's `shouldKeepRecovering`. A turn past it ends
+   * with `terminalMessage` and `onExhausted` is told why. A stream that
+   * sends nothing for `stallTimeoutMs` is treated as interrupted.
    */
   readonly recovery?:
     | false
-    | { readonly maxAttempts?: number; readonly stallTimeoutMs?: number };
+    | (Exclude<ChatRecoveryConfig, true> & {
+        readonly stallTimeoutMs?: number;
+      });
 }
 
 /** What a host supplies. */
@@ -174,12 +191,23 @@ const TOOL_EVENTS: ReadonlySet<string> = new Set([
 const BASE_CHECKPOINT = "chat:base";
 /** The run's checkpoint key counting the stream chunks recovery discarded. */
 const DISCARDED_CHECKPOINT = "chat:discarded";
+/**
+ * The run's checkpoint key for its recovery incident: what the budget
+ * counted so far (attempts, progress, interrupted attempts), read by the
+ * next attempt that finds this one cut off.
+ */
+const INCIDENT_CHECKPOINT = "chat:incident";
+/**
+ * The run's checkpoint key for the failure that sent it to be tried again
+ * (a provider's transient error, a stalled stream): its text, and how many
+ * recovery attempts have ended that way.
+ */
+const FAILED_CHECKPOINT = "chat:failed";
+/** Names this isolate among a turn's attempts; made on first use. */
+let isolateId: string | undefined;
 
 /** The run's checkpoint key holding the id of the reply it stored. */
 const REPLY_CHECKPOINT = "chat:reply";
-
-/** The default number of attempts of an interrupted turn. */
-const DEFAULT_MAX_ATTEMPTS = 3;
 
 /** The model's own error, sent as an `error` chunk in the stream. */
 class InBandStreamError extends Error {}
@@ -577,14 +605,31 @@ export function chatTurnDefinition(
         }
       });
     const recovery = host.options?.recovery;
-    const maxAttempts =
-      recovery === false ? 1 : (recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
-    // An interruption this attempt can't finish: the stream stays open and
-    // the next attempt continues it after a backoff, within the budget.
-    const interrupted = () =>
-      TaskSettlement.retry(
-        Date.now() + chatRecoveryBackoffSeconds(step.attempt) * 1000
+    const budget = resolveChatRecoveryConfig(
+      recovery === false ? undefined : recovery
+    );
+    const maxAttempts = recovery === false ? 1 : budget.maxAttempts;
+    // A failure worth another attempt: the stream stays open, and the next
+    // attempt continues it after a backoff, asking the app and the budget. A recovery attempt that fails this way counts against
+    // `maxAttempts`, however little time passed.
+    const tryAgainAfter = (error: unknown) => {
+      const before = step.checkpoint.get<{ failures: number; retries: number }>(
+        FAILED_CHECKPOINT
       );
+      const failures = (before?.failures ?? 0) + 1;
+      step.checkpoint.set(FAILED_CHECKPOINT, {
+        text: error instanceof Error ? error.message : String(error),
+        failures,
+        retries:
+          (before?.retries ?? 0) +
+          (step.checkpoint.get(INCIDENT_CHECKPOINT) === undefined ? 0 : 1)
+      });
+      // A provider that says how long to wait is believed, up to the cap.
+      return TaskSettlement.retry(
+        Date.now() +
+          chatRecoveryBackoffSeconds(failures, retryAfterSeconds(error)) * 1000
+      );
+    };
 
     // An earlier attempt of this run was cut off: what it streamed is the
     // reply this attempt continues.
@@ -652,30 +697,75 @@ export function chatTurnDefinition(
         }
       };
       const partialParts = (partial?.parts ?? []) as never[];
+      const partialText = (partial?.parts ?? [])
+        .map((part) => ("text" in part ? String(part.text) : ""))
+        .join("");
+      // The budget over this turn's attempts, as the host's `chatRecovery`
+      // sets it. What it counted is kept with the run.
+      const counted =
+        step.checkpoint.get<ChatRecoveryIncident>(INCIDENT_CHECKPOINT);
+      const failed = step.checkpoint.get<{
+        text: string;
+        failures: number;
+        retries: number;
+      }>(FAILED_CHECKPOINT);
+      const evaluated =
+        recovery === false
+          ? undefined
+          : await evaluateChatRecoveryIncident({
+              identity: {
+                requestId,
+                recoveryKind: partial ? "continue" : "retry"
+              },
+              trigger: {
+                kind: "interrupted",
+                attempt: {
+                  isolate: (isolateId ??= crypto.randomUUID()),
+                  token: crypto.randomUUID()
+                }
+              },
+              config: budget,
+              existing: counted
+                ? {
+                    ...counted,
+                    ...(failed &&
+                      failed.retries > 0 && {
+                        transientRetries: failed.retries
+                      })
+                  }
+                : null,
+              currentProgress: streamedCount,
+              awaitingClientInteraction: false,
+              now: Date.now(),
+              onShouldKeepRecoveringError: (error) =>
+                console.error(
+                  "[agents/chat] chatRecovery shouldKeepRecovering hook threw",
+                  error
+                )
+            });
+      if (evaluated) {
+        step.checkpoint.set(INCIDENT_CHECKPOINT, evaluated.incident as never);
+      }
+      const exhausted = recovery === false || evaluated?.exhausted === true;
+      const attempt = evaluated?.incident.attempt ?? step.attempt;
       let decision: ChatRecoveryOptions | void = undefined;
-      if (recovery !== false && step.attempt <= maxAttempts) {
+      if (!exhausted) {
         decision = await host.hooks?.onRecovery?.({
           incidentId: requestId,
           recoveryRootRequestId: requestId,
-          attempt: step.attempt,
+          attempt,
           maxAttempts,
           recoveryKind: partial ? "continue" : "retry",
           streamId,
           requestId,
-          partialText: (partial?.parts ?? [])
-            .map((part) => ("text" in part ? String(part.text) : ""))
-            .join(""),
+          partialText,
           partialParts,
           recoveryData: null,
           messages: (await session.getHistory()) as unknown as UIMessage[],
           createdAt: step.createdAt
         });
       }
-      if (
-        recovery === false ||
-        step.attempt > maxAttempts ||
-        decision?.continue === false
-      ) {
+      if (exhausted || decision?.continue === false) {
         // falls through below
       } else if (decision?.persist === false) {
         // Continue without what was streamed: the question is answered
@@ -683,20 +773,48 @@ export function chatTurnDefinition(
         await dropPartial();
         partial = undefined;
       }
-      if (
-        recovery === false ||
-        step.attempt > maxAttempts ||
-        decision?.continue === false
-      ) {
+      if (exhausted || decision?.continue === false) {
         // Given up: what was streamed stays stored (unless the app said
         // not to keep it), and the turn ends as an error.
         if (decision?.persist === false) await dropPartial();
         const writer = await deps.streams.open(streamId, { tag: requestId });
         writer.error("interrupted");
+        if (!evaluated?.exhausted) {
+          return report({
+            requestId,
+            status: "error",
+            // The failure the app chose not to recover from, when there
+            // was one.
+            error: failed?.text ?? "The turn was interrupted and not continued."
+          });
+        }
+        // The budget is spent: the app is told why, and the client gets the
+        // message the app chose for it.
+        try {
+          await budget.onExhausted?.({
+            incidentId: requestId,
+            requestId,
+            recoveryRootRequestId: requestId,
+            attempt,
+            maxAttempts,
+            recoveryKind: partial ? "continue" : "retry",
+            streamId,
+            createdAt: step.createdAt,
+            partialText,
+            partialParts,
+            reason: evaluated.incident.reason ?? "max_attempts_exceeded",
+            terminalMessage: budget.terminalMessage
+          });
+        } catch (error) {
+          console.error(
+            "[agents/chat] chatRecovery onExhausted hook threw",
+            error
+          );
+        }
         return report({
           requestId,
           status: "error",
-          error: "The turn was interrupted and not continued."
+          error: budget.terminalMessage
         });
       }
     }
@@ -922,7 +1040,7 @@ export function chatTurnDefinition(
           continue;
         }
         if (verdict === "transient" && recovery !== false) {
-          if (step.attempt < maxAttempts) return interrupted();
+          return tryAgainAfter(error);
         }
         const text = error instanceof Error ? error.message : String(error);
         out.error(text);

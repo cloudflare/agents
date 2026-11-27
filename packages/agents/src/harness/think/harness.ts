@@ -1580,8 +1580,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         }),
       options: {
         recovery: {
-          // The first attempt, then one per interruption it survives.
-          maxAttempts: (recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS) + 1,
+          // Recoveries without progress, as the turn definition counts
+          // them.
+          maxAttempts: recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
           // The loop watches each model call itself: a tool may take longer
           // than the model may stay silent.
           stallTimeoutMs: 0
@@ -1629,7 +1630,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           const decision = await this.#extensions.hook("onRecovery", {
             session,
             operationId,
-            attempt: context.attempt - 1,
+            attempt: context.attempt,
             partial
           });
           return decision === "abandon" ? { continue: false } : undefined;
