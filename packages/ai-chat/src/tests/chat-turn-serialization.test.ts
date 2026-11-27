@@ -203,12 +203,14 @@ describe("AIChatAgent chat turn serialization", () => {
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-save-1"]);
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
-    await expect(
-      Promise.race([
-        waitForIdlePromise.then(() => "idle"),
-        delay(100).then(() => "pending")
-      ])
-    ).resolves.toBe("pending");
+    // The idle wait has not settled: a round trip to the agent, while the
+    // turn is held, comes back first.
+    let idleSettled = false;
+    void waitForIdlePromise.then(() => {
+      idleSettled = true;
+    });
+    expect(await agentStub.isStreamHeldForTest("req-save-1")).toBe(true);
+    expect(idleSettled).toBe(false);
 
     await agentStub.releaseStreamForTest("req-save-1");
     await savePromise;
