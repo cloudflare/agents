@@ -1979,6 +1979,55 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
+  it.each([
+    ["a stop", "user_cancelled"],
+    ["a clear", "cleared"]
+  ] as const)(
+    "%s while a turn waits out its retry backoff ends its recovery: the hosts' recovering status goes off",
+    async (how, reason) => {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        const requestId = await cutOffIntoBackoff(instance);
+        instance.events.length = 0;
+        if (how === "a stop") await cancelTurn(instance.deps, requestId);
+        else await clearChat(instance.deps, instance.lane);
+        expect(instance.events).toContainEqual({
+          type: "chat:recovery:skipped",
+          payload: expect.objectContaining({ requestId, reason })
+        });
+      });
+    }
+  );
+
+  it("a tab that comes back for a request that completed while it was away is sent the transcript before the end", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await instance.resultFor("r1");
+      const sent: Array<Record<string, unknown>> = [];
+      const back = recordingTab("tab-stale", sent);
+      await resumeChat(instance.deps, instance.lane, back, undefined, ["r1"]);
+      await replayTurn(instance.deps, back, "r1");
+      // The page holds whatever it had drawn when it left: the stored
+      // messages replace it, then the request ends.
+      expect(sent.map((frame) => frame.type)).toEqual([
+        "cf_agent_stream_resuming",
+        "cf_agent_chat_messages",
+        "cf_agent_use_chat_response"
+      ]);
+      const history = await instance.sessions.session("s1").getHistory();
+      expect(
+        (sent[1].messages as Array<{ id: string }>).map((m) => m.id)
+      ).toEqual(history.map((message) => message.id));
+    });
+  });
+
   it("a stop while a turn waits out its retry backoff stores its reply before the next turn stores its question", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
@@ -2108,7 +2157,8 @@ describe("chat functions over a minimal host", () => {
         back,
         JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "r1" })
       );
-      expect(sent[1]).toMatchObject({
+      // The stored messages come first, then the request's end.
+      expect(sent.at(-1)).toMatchObject({
         type: "cf_agent_use_chat_response",
         id: "r1",
         done: true,
@@ -2147,7 +2197,8 @@ describe("chat functions over a minimal host", () => {
         fresh,
         JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "r1" })
       );
-      expect(sent[1]).toMatchObject({
+      // The stored messages come first, then the request's end.
+      expect(sent.at(-1)).toMatchObject({
         type: "cf_agent_use_chat_response",
         id: "r1",
         error: true,
@@ -2251,7 +2302,8 @@ describe("chat functions over a minimal host", () => {
       await resumeChat(instance.deps, instance.lane, back, undefined, ["r2"]);
       expect(sent[0]).toEqual({ type: "cf_agent_stream_resuming", id: "r2" });
       await replayTurn(instance.deps, back, "r2");
-      expect(sent[1]).toMatchObject({
+      // The stored messages come first, then the request's end.
+      expect(sent.at(-1)).toMatchObject({
         id: "r2",
         done: true,
         outcome: "skipped"

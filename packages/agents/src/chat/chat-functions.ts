@@ -314,6 +314,12 @@ export async function cancelTurn(
     // Its handler does not run again to say how it ended: every tab was
     // shown it streaming, so every tab is told.
     endUnstarted(deps, requestId, "aborted", undefined);
+    // Its recovery is over too (the hosts' recovering status reads this).
+    deps.emit?.("chat:recovery:skipped", {
+      incidentId: requestId,
+      requestId,
+      reason: "user_cancelled"
+    });
   }
   return cancelled;
 }
@@ -372,9 +378,10 @@ export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
     status: ["pending"],
     results: false
   });
-  const retrying = waiting.flatMap(
-    (run) => retryingTurn(deps, run.runId) ?? []
-  );
+  const retrying = waiting.flatMap((run) => {
+    const turn = retryingTurn(deps, run.runId);
+    return turn ? [{ id: run.runId, turn }] : [];
+  });
   // The turns that had not started end skipped, and their tabs are told.
   const unstarted = waiting
     .filter((run) => (deps.tasks.peek(run.runId)?.attempt ?? 0) === 0)
@@ -393,7 +400,15 @@ export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
     endUnstarted(deps, run.id, "skipped", run.metadata);
   }
 
-  for (const turn of retrying) await turn.settle(false);
+  for (const { id, turn } of retrying) {
+    await turn.settle(false);
+    // Its recovery is over too (the hosts' recovering status reads this).
+    deps.emit?.("chat:recovery:skipped", {
+      incidentId: id,
+      requestId: id,
+      reason: "cleared"
+    });
+  }
   await deps.sessions.session(deps.session ?? "").clearMessages();
   continueRequestsOf(deps.streams).clear();
   clearRecentChatTerminals(deps.kv);
@@ -855,10 +870,19 @@ export async function replayTurn(
     if (offered.get(connection.id) === requestId) offered.delete(connection.id);
   };
   if ((await deps.streams.status(streamId))?.state !== "streaming") {
-    // It ended while the tab was away: its recorded end.
+    // It ended while the tab was away: its recorded end, after the stored
+    // messages, which replace whatever the page had drawn when it left
+    // (the reply's chunks are gone with its stream).
     release();
     const ended = recentChatTerminal(deps.kv, [requestId]);
-    if (ended) sendIfOpen(connection, endedFrame(ended));
+    if (ended) {
+      const text = frameText({
+        type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES,
+        messages: await deps.sessions.session(deps.session ?? "").getHistory()
+      } as { type: string });
+      if (text !== undefined) sendIfOpen(connection, text);
+      sendIfOpen(connection, endedFrame(ended));
+    }
     return;
   }
   // A tab that was not held back (the one whose answer started the

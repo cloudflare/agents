@@ -3495,6 +3495,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       throw new Error(message);
     }
 
+    // A hold kept for the isolate after a reset: taken by its first turn.
+    if (
+      this.ctx.storage.kv.get("test:hold-turn-after-reset") &&
+      !this._turnHold
+    ) {
+      this.ctx.storage.kv.delete("test:hold-turn-after-reset");
+      this.holdNextTurnForTest();
+    }
     const hold = this._turnHold;
     if (hold && !hold.waiting) {
       hold.waiting = true;
@@ -3740,6 +3748,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       release = resolve;
     });
     this._turnHold = { waiting: false, released, release };
+  }
+
+  /**
+   * Reset this isolate; the first turn of the next one is held on the
+   * model as {@link holdNextTurnForTest} holds one (kept in storage).
+   */
+  async resetHoldingNextTurnForTest(): Promise<void> {
+    this.ctx.storage.kv.put("test:hold-turn-after-reset", true);
+    await this.ctx.storage.sync();
+    this.ctx.abort("test: forced reset");
   }
 
   private _heldTurnRequestId: string | null = null;

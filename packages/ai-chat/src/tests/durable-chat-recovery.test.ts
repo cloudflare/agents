@@ -300,6 +300,7 @@ interface ChatRecoveryTestStub {
   ): Promise<string>;
   startedFailingTurnStatusForTest(): Promise<string>;
   endedRequestIdsForTest(): Promise<string[]>;
+  resetHoldingNextTurnForTest(): Promise<void>;
   leaveReleasedLastTerminalForTest(record: {
     requestId: string;
     body: string;
@@ -2371,6 +2372,7 @@ describe("platform-transient reader errors (#1964)", () => {
     const { ws } = await connectChatWS(
       `/agents/chat-recovery-test-agent/${room}`
     );
+    const frames = seenFrames(ws) as Array<Record<string, unknown>>;
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
@@ -2380,6 +2382,18 @@ describe("platform-transient reader errors (#1964)", () => {
     // The stop ends the turn: its caller gets its result now, not in a
     // minute.
     expect(await agentStub.startedFailingTurnStatusForTest()).toBe("aborted");
+    // Its recovery is over: the tab's recovering status goes off (#1620).
+    await expect
+      .poll(
+        () =>
+          frames
+            .filter(
+              (frame) => frame.type === MessageType.CF_AGENT_CHAT_RECOVERING
+            )
+            .at(-1)?.recovering,
+        { timeout: 5_000 }
+      )
+      .toBe(false);
     ws.close(1000);
 
     // Its run is gone (nothing holds the lane for a minute), and the model
@@ -2427,6 +2441,80 @@ describe("platform-transient reader errors (#1964)", () => {
     );
     expect(await agentStub.openChatLaneRunsForTest()).toBe(0);
   }, 20_000);
+
+  it("a tab that opens after a reset cut a recovered attempt is offered the reply and shown the rest of it (F26)", async () => {
+    const room = `reset-in-recovery-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // The first attempt is cut off; the next one is held on the model, and
+    // a reset cuts that one too. The attempt after it is held as well, so
+    // the reply is still on its way when the tab asks.
+    const requestId = await agentStub.startFailingReaderTurnForTest(
+      "Network connection lost.",
+      1,
+      { responseHeaders: { "retry-after": "1" }, waitsAtLeastMs: 500 }
+    );
+    await agentStub.holdNextTurnForTest();
+    await expect
+      .poll(() => agentStub.isTurnHeldForTest(), { timeout: 10_000 })
+      .toBe(true);
+    await agentStub.resetHoldingNextTurnForTest().catch(() => {});
+
+    // A tab opens, the first thing the new isolate sees, and asks what is
+    // going on: it waits on no request.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const frames = seenFrames(ws) as Array<Record<string, unknown>>;
+    const ended = new Promise<void>((resolve) => {
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const frame = JSON.parse(event.data as string) as Record<
+          string,
+          unknown
+        >;
+        if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+          ws.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+              id: frame.id
+            })
+          );
+        }
+        if (
+          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.done === true
+        ) {
+          resolve();
+        }
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+        probeId: "p-f26"
+      })
+    );
+    await socketBarrier(ws, frames);
+    const restarted = await getTestAgent(room);
+    await expect
+      .poll(() => restarted.isTurnHeldForTest(), { timeout: 10_000 })
+      .toBe(true);
+    await restarted.releaseHeldTurnForTest();
+    await ended;
+    ws.close(1000);
+
+    const types = frames.map((frame) => frame.type);
+    expect(types).toContain(MessageType.CF_AGENT_STREAM_RESUMING);
+    expect(types).not.toContain(MessageType.CF_AGENT_STREAM_RESUME_NONE);
+    expect(types).toContain(MessageType.CF_AGENT_CHAT_MESSAGES);
+    expect(
+      frames.find(
+        (frame) =>
+          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.done === true
+      )
+    ).toMatchObject({ id: requestId, outcome: "completed" });
+  }, 30_000);
 
   it("abortAllRequests() stops a turn that waits for its next attempt", async () => {
     const room = `transient-stop-all-${crypto.randomUUID()}`;
