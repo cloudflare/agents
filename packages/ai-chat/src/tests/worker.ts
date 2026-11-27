@@ -3402,6 +3402,78 @@ export class LogOnlyOnErrorAgent extends AIChatAgent<Env> {
 // ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
+  /**
+   * Seed the agent-tool child rows a released version kept (its exact
+   * tables), one per settled outcome, for R3-identity's upgrade test.
+   */
+  async seedReleasedAgentToolChildRowsForTest(): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_ai_chat_agent_tool_runs (
+        run_id TEXT PRIMARY KEY, request_id TEXT, status TEXT NOT NULL,
+        input_json TEXT, output_json TEXT, summary TEXT, error_message TEXT,
+        started_at INTEGER NOT NULL, completed_at INTEGER,
+        progress_json TEXT, last_signal_at INTEGER, event_delivery TEXT
+      )
+    `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_ai_chat_agent_tool_milestones (
+        run_id TEXT NOT NULL, sequence INTEGER NOT NULL, name TEXT NOT NULL,
+        data_json TEXT, at INTEGER NOT NULL, PRIMARY KEY (run_id, sequence)
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, summary, output_json, started_at, completed_at)
+      VALUES ('released-done', 'req-done', 'completed', 'done', '"the answer"', ${now}, ${now})
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_milestones (run_id, sequence, name, data_json, at)
+      VALUES ('released-done', 0, 'found', NULL, ${now})
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, error_message, started_at, completed_at)
+      VALUES ('released-failed', 'req-failed', 'error', 'boom', ${now}, ${now})
+    `;
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, started_at, completed_at)
+      VALUES ('released-stopped', 'req-stopped', 'aborted', ${now}, ${now})
+    `;
+  }
+
+  /**
+   * Start as an upgraded version does over those rows, then what a parent
+   * inspecting each run sees, and whether the released tables are left.
+   */
+  async upgradedAgentToolChildRowsForTest(): Promise<{
+    runs: Record<string, unknown>;
+    tablesLeft: string[];
+  }> {
+    // R3-identity's carry-forward of released child rows (not on main yet).
+    await (
+      this as unknown as { _carryForwardAgentToolChildRuns?(): Promise<void> }
+    )._carryForwardAgentToolChildRuns?.();
+    const runs: Record<string, unknown> = {};
+    for (const runId of [
+      "released-done",
+      "released-failed",
+      "released-stopped"
+    ]) {
+      const inspection = await this.inspectAgentToolRun(runId);
+      runs[runId] = inspection && {
+        status: inspection.status,
+        summary: inspection.summary,
+        output: inspection.output,
+        error: inspection.error,
+        milestones: inspection.milestones?.map((m) => m.name)
+      };
+    }
+    const tablesLeft = this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('cf_ai_chat_agent_tool_runs', 'cf_ai_chat_agent_tool_milestones')
+    `.map((row) => row.name);
+    return { runs, tablesLeft };
+  }
+
   /** The recorded end of `requestId` (the recent terminals), or null. */
   recentTerminalForTest(requestId: string): unknown {
     return recentChatTerminal(this.ctx.storage.kv, [requestId]);
