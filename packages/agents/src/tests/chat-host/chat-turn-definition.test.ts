@@ -343,7 +343,12 @@ describe("chatTurnDefinition", () => {
     });
   });
 
-  it.each(["a stream", "an async iterable"] as const)(
+  it.each([
+    "a stream",
+    "an async iterable",
+    "a response",
+    "an object with toUIMessageStream"
+  ] as const)(
     "names the running turn to a reply produced as it is read: %s",
     async (kind) => {
       const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
@@ -371,12 +376,47 @@ describe("chatTurnDefinition", () => {
                 }
               });
             }
-            return (async function* () {
+            if (kind === "a response") {
+              const encoder = new TextEncoder();
+              let next = 0;
+              return new Response(
+                new ReadableStream({
+                  pull(controller) {
+                    seen.push(runningChatTurn());
+                    if (next < chunks.length) {
+                      controller.enqueue(
+                        encoder.encode(
+                          `data: ${JSON.stringify(chunks[next++])}\n\n`
+                        )
+                      );
+                    } else controller.close();
+                  }
+                }),
+                { headers: { "content-type": "text/event-stream" } }
+              );
+            }
+            const iterable = (async function* () {
               for (const chunk of chunks) {
                 seen.push(runningChatTurn());
                 yield chunk as never;
               }
             })();
+            if (kind === "an async iterable") return iterable;
+            // Both shapes at once: the method is the one that is read.
+            return Object.assign(iterable, {
+              toUIMessageStream: () => {
+                seen.push(runningChatTurn());
+                let next = 0;
+                return new ReadableStream({
+                  pull(controller) {
+                    seen.push(runningChatTurn());
+                    if (next < chunks.length) {
+                      controller.enqueue(chunks[next++] as never);
+                    } else controller.close();
+                  }
+                });
+              }
+            });
           }
         })({ trigger: "server" }, laterAttempt(`run-read-${kind}`, 1));
         expect(result).toMatchObject({ status: "completed" });

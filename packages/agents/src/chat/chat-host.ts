@@ -440,50 +440,22 @@ function chunksOf(
 const runningTurn = new AsyncLocalStorage<string>();
 
 /**
- * `source`, read inside the turn's context: a host that produces its reply
+ * `chunks`, read inside the turn's context: a host that produces its reply
  * as it is read (its hooks and tools run then) runs that code there too.
- * A `Response` or an object with `toUIMessageStream` is left as it is: what
- * `respond` started for it is inside already.
  */
 function insideTurn(
   requestId: string,
-  source: ChatModelStream | undefined
-): ChatModelStream | undefined {
-  if (source instanceof ReadableStream) {
-    const reader = source.getReader();
-    return new ReadableStream<UIMessageChunk>({
-      async pull(controller) {
-        const next = await runningTurn.run(requestId, () => reader.read());
-        if (next.done) controller.close();
-        else controller.enqueue(next.value);
-      },
-      cancel: (reason) =>
-        runningTurn.run(requestId, () => reader.cancel(reason))
-    });
-  }
-  if (source && Symbol.asyncIterator in source) {
-    const chunks = source;
-    return {
-      [Symbol.asyncIterator]() {
-        const iterator = runningTurn.run(requestId, () =>
-          chunks[Symbol.asyncIterator]()
-        );
-        return {
-          next: () => runningTurn.run(requestId, () => iterator.next()),
-          return: (value?: unknown) =>
-            runningTurn.run(
-              requestId,
-              async () =>
-                (await iterator.return?.(value)) ?? {
-                  done: true as const,
-                  value: undefined
-                }
-            )
-        };
-      }
-    };
-  }
-  return source;
+  chunks: ReadableStream<UIMessageChunk>
+): ReadableStream<UIMessageChunk> {
+  const reader = chunks.getReader();
+  return new ReadableStream<UIMessageChunk>({
+    async pull(controller) {
+      const next = await runningTurn.run(requestId, () => reader.read());
+      if (next.done) controller.close();
+      else controller.enqueue(next.value);
+    },
+    cancel: (reason) => runningTurn.run(requestId, () => reader.cancel(reason))
+  });
 }
 
 /**
@@ -772,10 +744,7 @@ export function chatTurnDefinition(
     let reply: UIMessage | undefined;
     let overflowTried = false;
     for (;;) {
-      const source = insideTurn(
-        requestId,
-        await runningTurn.run(requestId, () => host.respond(call))
-      );
+      const source = await runningTurn.run(requestId, () => host.respond(call));
       if (!source) {
         writer?.close({ discard: true });
         return report({ requestId, status: "skipped" });
@@ -839,7 +808,12 @@ export function chatTurnDefinition(
         }
       };
       const recorded = watchStall(
-        chunksOf(source, requestId),
+        // Whatever `respond` returned, it is turned into chunks and read
+        // inside the turn's context.
+        insideTurn(
+          requestId,
+          runningTurn.run(requestId, () => chunksOf(source, requestId))
+        ),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
         // An approved call of the reply continued runs with no new input.
         (continuing?.parts ?? []).flatMap((part) => {
