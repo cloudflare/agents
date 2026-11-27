@@ -6078,6 +6078,156 @@ describe("malformed tool_use.input repair (provider 400 wedge)", () => {
   });
 });
 
+// Successors of the before-turn repair tests above ("repairInterruptedToolPart
+// override", "malformed tool_use.input repair" and "a repair after a
+// continuation turn ended…"): what the next turn sends the model for a stored
+// transcript.
+describe("Think — the transcript the next turn repairs", () => {
+  type PromptPart = {
+    type: string;
+    text?: string;
+    toolCallId?: string;
+    input?: unknown;
+    output?: { type: string };
+  };
+
+  async function promptOfNextTurn(
+    agent: Awaited<ReturnType<typeof freshAgent>>,
+    messages: UIMessage[]
+  ): Promise<PromptPart[]> {
+    await agent.setTextOnlyMode(true);
+    await agent.persistToolCallMessage(messages);
+    expect(await agent.saveMessagesForTest("and now?")).toBe("completed");
+    const prompt = (await agent.getTextOnlyPromptsForTest()).at(-1) as Array<{
+      role: string;
+      content: string | PromptPart[];
+    }>;
+    return prompt.flatMap((message) =>
+      typeof message.content === "string" ? [] : message.content
+    );
+  }
+
+  function assistant(part: Record<string, unknown>): UIMessage {
+    return {
+      id: `a-${crypto.randomUUID()}`,
+      role: "assistant",
+      parts: [part]
+    } as unknown as UIMessage;
+  }
+
+  const call = (parts: PromptPart[], id: string) =>
+    parts.find((part) => part.type === "tool-call" && part.toolCallId === id);
+  const result = (parts: PromptPart[], id: string) =>
+    parts.find((part) => part.type === "tool-result" && part.toolCallId === id);
+
+  it("sends an interrupted ask_user as text carrying its prompt", async () => {
+    const agent = await freshAgent();
+    const parts = await promptOfNextTurn(agent, [
+      makeUserMessage("hi"),
+      assistant({
+        type: "tool-ask_user",
+        toolCallId: "tc1",
+        state: "input-available",
+        input: { prompt: "Ship it tonight?" }
+      })
+    ]);
+    expect(call(parts, "tc1")).toBeUndefined();
+    expect(parts).toContainEqual(
+      expect.objectContaining({ type: "text", text: "Ship it tonight?" })
+    );
+  });
+
+  it("sends another interrupted tool call with an errored result", async () => {
+    const agent = await freshAgent();
+    const parts = await promptOfNextTurn(agent, [
+      makeUserMessage("hi"),
+      assistant({
+        type: "tool-client_action",
+        toolCallId: "tc1",
+        state: "input-available",
+        input: {}
+      })
+    ]);
+    expect(call(parts, "tc1")).toBeDefined();
+    expect(result(parts, "tc1")?.output?.type).toBe("error-text");
+  });
+
+  it("sends a settled ask_user as it was", async () => {
+    const agent = await freshAgent();
+    const parts = await promptOfNextTurn(agent, [
+      makeUserMessage("hi"),
+      assistant({
+        type: "tool-ask_user",
+        toolCallId: "tc1",
+        state: "output-available",
+        input: { prompt: "Q?" },
+        output: { answer: "yes" }
+      })
+    ]);
+    expect(call(parts, "tc1")?.input).toEqual({ prompt: "Q?" });
+    expect(result(parts, "tc1")?.output?.type).not.toBe("error-text");
+  });
+
+  it.each([
+    ["empty string", ""],
+    ["null", null],
+    ["array", [{ id: 1 }]],
+    ["number", 7]
+  ])("sends a settled tool input %s as {}", async (_label, value) => {
+    const agent = await freshAgent();
+    const parts = await promptOfNextTurn(agent, [
+      makeUserMessage("hi"),
+      assistant({
+        type: "tool-doThing",
+        toolCallId: "tc1",
+        state: "output-available",
+        input: value,
+        output: { ok: true }
+      })
+    ]);
+    expect(call(parts, "tc1")?.input).toEqual({});
+    expect(result(parts, "tc1")?.output?.type).not.toBe("error-text");
+  });
+
+  it("sends a stringified-JSON object input parsed", async () => {
+    const agent = await freshAgent();
+    const parts = await promptOfNextTurn(agent, [
+      makeUserMessage("hi"),
+      assistant({
+        type: "tool-doThing",
+        toolCallId: "tc1",
+        state: "output-available",
+        input: '{"prompt":"a cat"}',
+        output: { ok: true }
+      })
+    ]);
+    expect(call(parts, "tc1")?.input).toEqual({ prompt: "a cat" });
+  });
+
+  it("settles a client's call for a new turn after a continuation turn ended", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await agent.setTextOnlyMode(true);
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    // A continuation turn runs to its end.
+    expect((await agent.continueLastTurnForTest()).status).toBe("completed");
+
+    // The next turn is not a continuation: it settles the client's call.
+    const parts = await promptOfNextTurn(agent, [
+      makeUserMessage("do it"),
+      makeToolMessage("tc-after", "client_action", "input-available")
+    ]);
+    expect(result(parts, "tc-after")?.output?.type).toBe("error-text");
+    await closeWS(ws);
+  });
+});
+
 // ── Client tools over the sub-agent RPC chat() path (#1709) ──────
 
 describe("Think — client tools via chat() RPC", () => {
