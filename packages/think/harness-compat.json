@@ -1,9 +1,9 @@
 {
   "total": 1719,
-  "passed": 976,
-  "needThink": 1337,
-  "needThinkPassed": 665,
-  "classOnly": 71,
+  "passed": 981,
+  "needThink": 1342,
+  "needThinkPassed": 670,
+  "classOnly": 66,
   "mechanicsOnly": 10,
   "files": {
     "action-pause-recovery.test.ts": {
@@ -168,7 +168,7 @@
     },
     "messengers.test.ts": {
       "total": 126,
-      "passed": 113
+      "passed": 118
     },
     "nested-agent-tools.test.ts": {
       "total": 3,
@@ -834,7 +834,11 @@
     "messengers.test.ts > think messengers core > preserves attachment fetchMetadata and backfills id when converting",
     "messengers.test.ts > think messengers core > preserves delivery errors when cancelling local self targets",
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled",
+    "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > apologizes on start for a pending reply whose incident is gone",
+    "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > holds a migrated reply whose incident still recovers, so recovery's release delivers it",
+    "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > keeps a pending reply on start while its incident is still recovering",
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > never posts again a part of a reply think@0.24.0 settled that was rejected",
+    "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > posts each chunk once when overlapping deliveries share a recovered reply",
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > posts every recovered attempt's text after a second interruption",
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > posts the apology once when recovery is exhausted",
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > posts the empty-response text when recovery completes without text",
@@ -842,6 +846,7 @@
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > posts the recovered answer instead of the apology (conversation: thread)",
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > posts the recovered reply, not a newer message, to the thread",
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart",
+    "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > resumes a multi-post recovered reply after its last checkpoint",
     "messengers.test.ts > think messengers core > recovered replies reach the thread (#2106) > retries a recovered reply whose live delivery fails, never re-sending a rejected post",
     "messengers.test.ts > think messengers core > refuses a webhook its messenger's verification rejects",
     "messengers.test.ts > think messengers core > rejects duplicate adapter names before creating a shared Chat runtime",
