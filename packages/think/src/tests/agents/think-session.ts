@@ -3343,6 +3343,36 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * Reset this agent's isolate at the moment a recovery attempt is about to
+   * record that its turn completed: the recovered turn has ended, and its
+   * outcome is not written yet.
+   */
+  async resetBeforeRecoveryOutcomeForTest(): Promise<string> {
+    const engine = (
+      this as unknown as { _chatRecoveryEngine(): unknown }
+    )._chatRecoveryEngine() as {
+      updateIncident(id: unknown, status: string, ...rest: unknown[]): unknown;
+    };
+    const update = engine.updateIncident.bind(engine);
+    engine.updateIncident = async (id, status, ...rest) => {
+      if (status !== "completed") return update(id, status, ...rest);
+      // What was written so far is on disk, as it is a moment later in a
+      // real reset: the abort alone would drop it.
+      await this.ctx.storage.sync();
+      this.ctx.abort("test: forced reset");
+      throw new Error("test: forced reset");
+    };
+    return this._isolateForTest;
+  }
+
+  /** Differs after each reset of this agent's isolate. */
+  private readonly _isolateForTest = crypto.randomUUID();
+
+  async isolateForTest(): Promise<string> {
+    return this._isolateForTest;
+  }
+
   /** Stream the next turns slowly, one chunk every `delayMs`. */
   async useSlowModelForTest(chunks: string[], delayMs: number): Promise<void> {
     this._turnConfigOverride = {
@@ -6507,6 +6537,84 @@ export class ThinkAgentToolParent extends Agent {
       child: inspection
         ? { status: inspection.status, error: inspection.error }
         : null
+    };
+  }
+
+  /**
+   * A Think child's run is cut off by a reset, and a second reset lands
+   * after its recovered turn ended, before the recovery recorded that.
+   */
+  async runThinkChildThroughResetAtOutcomeForTest(): Promise<{
+    child: { status: string; error?: string } | null;
+    incidents: Array<{ status: string; reason?: string }>;
+    assistantMessages: number;
+    resetAtOutcome: boolean;
+    modelCallsAfterReset: number;
+  }> {
+    const runId = crypto.randomUUID();
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.useSlowModelForTest(["one ", "two ", "three ", "four "], 100);
+    const running = this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input: "work through two resets",
+      inputPreview: "work through two resets"
+    });
+    const streaming = Date.now() + 5000;
+    while (
+      (await child.getAgentToolChunks(runId)).length === 0 &&
+      Date.now() < streaming
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await child.resetIsolateForTest().catch(() => {});
+    // The new isolate recovers the turn after a backoff: the second reset
+    // is armed before that.
+    const armed = await (
+      await this.subAgent(ThinkTestAgent, runId)
+    ).resetBeforeRecoveryOutcomeForTest();
+    // What the parent hands back after two resets of its child is its own
+    // re-attach policy: the child is what recovery owns.
+    await running;
+    const deadline = Date.now() + 15_000;
+    let inspection: { status: string; error?: string } | null = null;
+    let incidents: Array<{ status: string; reason?: string }> = [];
+    let assistantMessages = 0;
+    let resetAtOutcome = false;
+    let modelCallsAfterReset = 0;
+    while (Date.now() < deadline) {
+      try {
+        const fresh = await this.subAgent(ThinkTestAgent, runId);
+        inspection = await fresh.inspectAgentToolRun(runId);
+        incidents = await fresh.recoveryOutcomesForTest();
+        assistantMessages = (await fresh.getMessages()).filter(
+          (message) => message.role === "assistant"
+        ).length;
+        // The armed isolate is gone: the second reset happened.
+        resetAtOutcome = (await fresh.isolateForTest()) !== armed;
+        // What the isolate after that reset asked the model.
+        modelCallsAfterReset = (await fresh.getBeforeStepLog()).length;
+        if (
+          resetAtOutcome &&
+          inspection &&
+          inspection.status !== "running" &&
+          inspection.status !== "starting"
+        ) {
+          break;
+        }
+      } catch {
+        // The isolate is resetting.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return {
+      child: inspection
+        ? { status: inspection.status, error: inspection.error }
+        : null,
+      incidents,
+      assistantMessages,
+      resetAtOutcome,
+      modelCallsAfterReset
     };
   }
 

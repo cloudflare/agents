@@ -2991,7 +2991,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     turnBody: (continuation, body, requestId) =>
       this._chatRecoveryEngine().turnBody(continuation, body, requestId),
     turnAccepted: (requestId) => this._turns.turnAccepted(requestId),
-    inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt
+    inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt,
+    recoveryAttemptEnded: () => this._chatRecoveryEngine().attemptEnded
   });
 
   /**
@@ -9502,7 +9503,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           this._recordTerminalChatStatus("error", requestId, errorText),
         endRequest: (requestId, outcome) =>
           this._frames.endUnstarted(null, requestId, outcome),
-        reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
+        reconcileAgentToolChildRuns: (endedRequestId) =>
+          this._agentToolRuns.reconcileOwn(endedRequestId),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
         latestMessage: () => this.messages.at(-1),
@@ -9823,9 +9825,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string;
     persisted: unknown;
     createdAt: number;
+    ended?: { incidentId: string; delivery: number };
     attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
-    if (await this._settlePersistedChatTurn(turn.requestId)) return;
+    // A turn that had ended still has its recovery to settle: the engine
+    // does that below, and asks the model nothing.
+    if ((await this._settlePersistedChatTurn(turn.requestId)) && !turn.ended) {
+      return;
+    }
     const { snapshot, user } = unwrapChatFiberSnapshot<"think-chat-turn">(
       "__cfThinkChatFiberSnapshot",
       turn.persisted,
@@ -9837,7 +9844,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         snapshot,
         recoveryData: user,
         createdAt: turn.createdAt,
-        attempt: turn.attempt
+        attempt: turn.attempt,
+        ...(turn.ended && { ended: turn.ended })
       },
       this._chatRecoveryWakeHooks()
     );

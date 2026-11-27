@@ -18,7 +18,10 @@ import { isTaskSuspension } from "../tasks/replay";
 import { TaskSettlement } from "../tasks/settlement";
 import type { TaskCheckpoint } from "../tasks/types";
 import type { ChatAdmissionInput, ChatAdmissionRecord } from "./admissions";
-import type { ChatRecoveryAttemptInput } from "./recovery-engine";
+import type {
+  ChatRecoveryAttemptInput,
+  ChatRecoveryEndedTurn
+} from "./recovery-engine";
 import {
   journalableAttempt,
   runChatRecoveryAttempt,
@@ -39,6 +42,15 @@ export type ChatTurnClosureEntry = {
     resolve(value: unknown): void;
     reject(error: unknown): void;
   };
+  /**
+   * For the turn of a recovery attempt, called once its caller is settled.
+   * `until` settles once the attempt has recorded the turn's outcome: the
+   * run stays open until then, so a reset before that write replays the
+   * run, which settles the recovery. It never rejects. `ended` is set when
+   * the turn returned, as opposed to throwing an error the attempt
+   * handles: the schedule of the incident the turn was the turn of.
+   */
+  hold?(): { ended?: ChatRecoveryEndedTurn; until: Promise<void> };
 };
 
 /**
@@ -128,6 +140,11 @@ export type ChatTurnTaskHooks = {
     requestId: string;
     persisted: unknown;
     createdAt: number;
+    /**
+     * The turn, a recovery attempt's, had ended: only the attempt's record
+     * of the outcome may be missing (`InterruptedChatTurn.ended`).
+     */
+    ended?: ChatRecoveryEndedTurn;
     attempt: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void>;
   /** The host's recovery callbacks, bounded to their model handoff. */
@@ -159,6 +176,18 @@ export type ChatTurnTaskHooks = {
    */
   backingOff(runId: string, requestId: string, waiting: boolean): void;
 };
+
+/** The run's {@link ENDED} mark, when it holds one. */
+function endedTurn(step: TaskStep): ChatRecoveryEndedTurn | undefined {
+  const mark = step.checkpoint.get(ENDED);
+  if (!mark || typeof mark !== "object" || Array.isArray(mark)) {
+    return undefined;
+  }
+  const { incidentId, delivery } = mark;
+  return typeof incidentId === "string" && typeof delivery === "number"
+    ? { incidentId, delivery }
+    : undefined;
+}
 
 /** The Tasks lane the chat turns of an agent run on, one at a time. */
 export const CHAT_TURN_LANE = "chat";
@@ -201,6 +230,11 @@ const STASH = "stash";
  * runs it.
  */
 const ATTEMPT = "attempt";
+/**
+ * The run's checkpoint key that says its turn, a recovery attempt's, ended,
+ * and the run stayed open for the attempt to record the outcome.
+ */
+const ENDED = "ended";
 /**
  * The checkpoint entry holding a lane turn's envelope, written when its
  * model call begins (`null` when it could not be kept). A turn accepted
@@ -345,6 +379,7 @@ export function createChatTurnTaskDefinition(
               requestId,
               persisted,
               createdAt: typeof beganAt === "number" ? beganAt : step.createdAt,
+              ...(endedTurn(step) && { ended: endedTurn(step) }),
               attempt: (next) => {
                 if (!journalableAttempt(next)) return false;
                 scheduled = next;
@@ -396,6 +431,17 @@ export function createChatTurnTaskDefinition(
           // run; the lane that waits for the reply waits for that too.
           if (scheduled && !lane) continueHeldLane(step.id, requestId);
           entry.settle.resolve(value);
+          // The attempt that started this turn records its outcome only
+          // now, in memory. Were the run to end first, a reset in between
+          // would leave a recovery nothing runs again. A turn cut off
+          // again kept its next attempt in this run: that is its outcome.
+          const held = scheduled ? undefined : entry.hold?.();
+          if (held) {
+            // Kept with the run: its replay must not ask the model to
+            // continue a reply that is finished.
+            if (held.ended) step.checkpoint.set(ENDED, held.ended);
+            await held.until;
+          }
         } catch (error) {
           entry.settle.reject(error);
           throw error;

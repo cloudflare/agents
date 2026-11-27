@@ -20,3 +20,4 @@ Chat recovery after a restart or a dropped stream.
 - A stop that lands just as a reply is cut off no longer makes the next message wait out the cancelled recovery's backoff.
 - An agent-tool run on a sub-agent whose chat recovery gave up before running a turn now ends `error`; it stayed `running`.
 - A tool cut off by a reset after reporting only progress (an `async function*` `execute`) is reported interrupted, not given its progress as its result.
+- A reset that lands just after a recovered reply ends no longer leaves its recovery open with nothing to finish it; an agent-tool run on a sub-agent stayed `running` in that case.

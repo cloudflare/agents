@@ -849,7 +849,8 @@ export class AIChatAgent<
     turnBody: (continuation, body, requestId) =>
       this._chatRecoveryEngine().turnBody(continuation, body, requestId),
     turnAccepted: (requestId) => this._turns.turnAccepted(requestId),
-    inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt
+    inRecoveryAttempt: () => this._chatRecoveryEngine().inAttempt,
+    recoveryAttemptEnded: () => this._chatRecoveryEngine().attemptEnded
   });
 
   /**
@@ -3311,7 +3312,8 @@ export class AIChatAgent<
           this._recordChatTerminal(requestId, errorText),
         endRequest: (requestId, outcome) =>
           this._frames.endUnstarted(null, requestId, outcome),
-        reconcileAgentToolChildRuns: () => this._agentToolRuns.reconcileOwn(),
+        reconcileAgentToolChildRuns: (endedRequestId) =>
+          this._agentToolRuns.reconcileOwn(endedRequestId),
         trackAlarmWork: (turn) => this.lifecycle.trackAlarmWork(turn),
         attemptScope: new AsyncLocalStorage<ChatRecoveryAttemptScope>(),
         latestMessage: () => this.messages.at(-1),
@@ -3551,6 +3553,7 @@ export class AIChatAgent<
     requestId: string;
     persisted: unknown;
     createdAt: number;
+    ended?: { incidentId: string; delivery: number };
     attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
     const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
@@ -3563,7 +3566,8 @@ export class AIChatAgent<
       snapshot,
       recoveryData: user,
       createdAt: turn.createdAt,
-      attempt: turn.attempt
+      attempt: turn.attempt,
+      ...(turn.ended && { ended: turn.ended })
     };
     await this._chatRecoveryEngine().recoverInterruptedTurn(recovered, {
       // Read from storage, not `this.messages`: a chat fiber row an older

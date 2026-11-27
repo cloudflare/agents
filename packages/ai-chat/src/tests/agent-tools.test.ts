@@ -527,6 +527,34 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(outcome.parentRow).toBe("completed");
   }, 30_000);
 
+  it("ends a run whose child reset after its recovered turn ended, before the recovery recorded it", async () => {
+    const parent = await getAgentByName(
+      env.AIChatAgentToolParent,
+      crypto.randomUUID()
+    );
+    const outcome = await (
+      parent as unknown as {
+        runChildThroughResetAtOutcomeForTest(): Promise<{
+          child: { status: string; error?: string } | null;
+          incidents: string[];
+          assistantMessages: number;
+          modelCalls: number;
+          resetAtOutcome: boolean;
+        }>;
+      }
+    ).runChildThroughResetAtOutcomeForTest();
+    expect(outcome.resetAtOutcome).toBe(true);
+    // The recovered turn's run was still open at the reset: its replay
+    // found the reply already streamed to its end and settled the
+    // recovery. Nothing is left scheduled with nothing to run it.
+    expect(outcome.incidents).not.toContain("scheduled");
+    expect(outcome.child).toEqual({ status: "completed", error: undefined });
+    // The reply was finished: the isolate after the reset does not ask the
+    // model to continue it.
+    expect(outcome.modelCalls).toBe(0);
+    expect(outcome.assistantMessages).toBe(1);
+  }, 40_000);
+
   it("seals the executing facet's recovery incident when the root alarm breaker seals", async () => {
     const parentName = crypto.randomUUID();
     const parent = await getParent(parentName);

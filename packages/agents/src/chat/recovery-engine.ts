@@ -345,8 +345,13 @@ export interface ChatRecoveryTurnBindings {
    * waits on the request learns only that recovery is over.
    */
   endRequest?(requestId: string, outcome: "skipped" | "aborted"): void;
-  /** Close agent-tool child runs a recovered turn settled. */
-  reconcileAgentToolChildRuns(): Promise<void>;
+  /**
+   * Close agent-tool child runs a recovered turn settled.
+   *
+   * @param endedRequestId - The turn an attempt just ended. Its run may
+   *   still be closing, and is not a turn that waits for recovery.
+   */
+  reconcileAgentToolChildRuns(endedRequestId?: string): Promise<void>;
   /** Keep a detached recovered turn inside the current alarm's domain. */
   trackAlarmWork(turn: Promise<void>): void;
   /**
@@ -436,7 +441,19 @@ export interface InterruptedChatTurn {
    * run of its own (`ChatRecoveryTurnBindings.startAttemptRun`).
    */
   attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
+  /**
+   * The turn was a recovery attempt's and had returned: only the attempt's
+   * record of the outcome may be missing (the isolate went away before it
+   * was written). Nothing is continued. Names the schedule of the incident
+   * the turn was the turn of: the outcome is written only while that is
+   * still the incident's schedule. A turn that was cut off again left a
+   * later schedule, whose attempt owns the reply.
+   */
+  ended?: ChatRecoveryEndedTurn;
 }
+
+/** The schedule of an incident whose turn has returned. */
+export type ChatRecoveryEndedTurn = { incidentId: string; delivery: number };
 
 /**
  * One scheduled recovery attempt: the host callback, its payload, and how
@@ -754,6 +771,62 @@ export class ChatRecoveryEngine {
       await wake.latestMessage()
     );
     const recoveryRootRequestId = snapshot?.recoveryRootRequestId ?? requestId;
+
+    if (turn.ended) {
+      // The turn finished: it is not an interrupted attempt, so nothing is
+      // counted against the budget and the model is not asked again.
+      try {
+        const { incidentId, delivery } = turn.ended;
+        const incident = await this.readIncident(incidentId);
+        // A later schedule: the turn was cut off again and its next attempt
+        // runs elsewhere. That attempt owns the reply; nothing ended here.
+        const later =
+          incident !== null && (incident.scheduleCount ?? 0) > delivery;
+        // Still this turn's schedule, with nothing written since: the
+        // attempt did not get to write the outcome.
+        const unrecorded =
+          incident?.status === "scheduled" &&
+          incident.scheduleCount === delivery &&
+          incident.startedDelivery === delivery;
+        // What the attempt recorded, or would have: a completed recovery
+        // deletes its incident.
+        const outcome =
+          incident === null
+            ? "completed"
+            : incident.status === "failed"
+              ? "error"
+              : unrecorded
+                ? streamStatus === "error"
+                  ? "error"
+                  : "completed"
+                : undefined;
+        if (!later && outcome) {
+          if (streamStillActive) await wake.completeRecoveredStream(streamId);
+          // The host's own settlement (a submission, in Think) follows the
+          // incident's write in the attempt, so it can be missing even
+          // when the incident has its outcome. It does nothing when done.
+          await wake.onStreamEnded?.({
+            requestId,
+            recoveryRootRequestId,
+            streamStatus: outcome
+          });
+          if (unrecorded) {
+            await this.updateIncident(
+              incidentId,
+              outcome === "error" ? "failed" : "completed",
+              outcome === "error"
+                ? "Recovered chat stream had errored."
+                : undefined
+            );
+          }
+        }
+        // The turn's run is still open while it is replayed here.
+        await adapter.turns?.reconcileAgentToolChildRuns(requestId);
+      } finally {
+        this.#settled();
+      }
+      return;
+    }
 
     // An interrupted turn is a run whose isolate died before it finished. The
     // replay is itself an attempt: it counts the death and records itself so
@@ -1665,8 +1738,34 @@ export class ChatRecoveryEngine {
       turnRequestId?: string;
       /** The schedule whose turn the attempt started. */
       turnDelivery?: number;
+      /** Settles when the attempt ends. */
+      ended: Promise<void>;
     }
   >();
+
+  /**
+   * For code that runs inside a recovery attempt: `until` settles when that
+   * attempt has ended, its turn's outcome recorded. The run of the
+   * attempt's turn stays open until then (`ChatTurnClosureEntry.hold`).
+   * `schedule` names the schedule of the incident the attempt is a delivery
+   * of, when it has a number. `undefined` outside an attempt.
+   */
+  get attemptEnded():
+    | { until: Promise<void>; schedule?: ChatRecoveryEndedTurn }
+    | undefined {
+    const scope = this.adapter.turns?.attemptScope.getStore();
+    const incidentId = scope?.incidentId;
+    const until = incidentId
+      ? this.#runningAttempts.get(incidentId)?.ended
+      : undefined;
+    if (!incidentId || !until) return undefined;
+    return {
+      until,
+      ...(scope?.delivery !== undefined && {
+        schedule: { incidentId, delivery: scope.delivery }
+      })
+    };
+  }
 
   /**
    * Register a running recovery attempt. `superseded` aborts when another
@@ -1680,11 +1779,22 @@ export class ChatRecoveryEngine {
   beginAttempt(incidentId: string | undefined): {
     superseded: AbortSignal;
     stopped: AbortSignal;
-    end(): void;
+    /** @returns The request id of the turn the attempt started, if any. */
+    end(): string | undefined;
   } {
-    const attempt = {
+    let ended!: () => void;
+    const attempt: {
+      superseded: AbortController;
+      stopped: AbortController;
+      turnRequestId?: string;
+      turnDelivery?: number;
+      ended: Promise<void>;
+    } = {
       superseded: new AbortController(),
-      stopped: new AbortController()
+      stopped: new AbortController(),
+      ended: new Promise<void>((resolve) => {
+        ended = resolve;
+      })
     };
     if (incidentId) this.#runningAttempts.set(incidentId, attempt);
     return {
@@ -1694,6 +1804,8 @@ export class ChatRecoveryEngine {
         if (incidentId && this.#runningAttempts.get(incidentId) === attempt) {
           this.#runningAttempts.delete(incidentId);
         }
+        ended();
+        return attempt.turnRequestId;
       }
     };
   }

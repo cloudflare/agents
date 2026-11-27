@@ -672,6 +672,23 @@ describe("AgentToolRuns", () => {
     await skipped.runs.reconcileStale("run-1");
     expect(skipped.store.read("run-1")?.status).toBe("error");
 
+    // The run of a recovered turn whose attempt just recorded its outcome
+    // is still closing: it is not a turn that waits for recovery.
+    const ended = setup();
+    ended.store.seed("run-1");
+    ended.store.bindRequest("run-1", "req-1");
+    ended.store.raw(
+      `create table cf_agents_task_runs (run_id text, definition text, input text, status text, wait_reason text, metadata text, lane text, checkpoint text)`
+    );
+    ended.store.raw(
+      `insert into cf_agents_task_runs (run_id, definition, input, status, metadata) values ('chat_x', 'chat-turn', '{"requestId":"req-1"}', 'running', null)`
+    );
+    ended.setReply(true);
+    await ended.runs.reconcileOwn("another-request");
+    expect(ended.store.read("run-1")?.status).toBe("running");
+    await ended.runs.reconcileOwn("req-1");
+    expect(ended.store.read("run-1")?.status).toBe("completed");
+
     // Once that run settles, the stale row is settled as before.
     store.raw(`update cf_agents_task_runs set status = 'completed'`);
     await runs.reconcileStale("run-1");

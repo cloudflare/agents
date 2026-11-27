@@ -210,6 +210,82 @@ describe("createChatTurnTaskDefinition", () => {
     warn.mockRestore();
   });
 
+  it("keeps the run of a recovery attempt's turn open until the attempt recorded its outcome", async () => {
+    const resolve = vi.fn();
+    const holds: number[] = [];
+    let recorded!: () => void;
+    const entry: ChatTurnClosureEntry = {
+      onStash: () => {},
+      run: (inside) => inside(async () => "reply"),
+      settle: { resolve, reject: () => {} },
+      hold: () => {
+        // Asked only once the caller has the turn's result.
+        holds.push(resolve.mock.calls.length);
+        return {
+          ended: { incidentId: "i1", delivery: 2 },
+          until: new Promise<void>((done) => {
+            recorded = done;
+          })
+        };
+      }
+    };
+    const { step, checkpoint } = fakeStep(entry);
+    let ended = false;
+    const run = createChatTurnTaskDefinition(hooks)(
+      { requestId: "r1", continuation: true, nonce: "n1" },
+      step
+    ).then(() => {
+      ended = true;
+    });
+    // The attempt has the turn's result, and the run is still open.
+    await vi.waitFor(() => expect(resolve).toHaveBeenCalledWith("reply"));
+    await new Promise((turn) => setTimeout(turn, 0));
+    expect(ended).toBe(false);
+
+    expect(holds).toEqual([1]);
+    // Kept with the run, for its replay after a reset.
+    expect(JSON.parse(checkpoint.get("ended")!)).toEqual({
+      incidentId: "i1",
+      delivery: 2
+    });
+
+    recorded();
+    await run;
+    expect(ended).toBe(true);
+  });
+
+  it("tells recovery that a replayed run's turn had ended", async () => {
+    for (const ended of [true, false]) {
+      const recovered: unknown[] = [];
+      const { step, checkpoint } = fakeStep(undefined);
+      if (ended) {
+        checkpoint.set(
+          "ended",
+          JSON.stringify({ incidentId: "i1", delivery: 2 })
+        );
+      }
+      await createChatTurnTaskDefinition({
+        ...hooks,
+        storage: {
+          get: async () => undefined,
+          delete: async () => true
+        } as unknown as DurableObjectStorage,
+        recover: async (turn) => void recovered.push(turn.ended)
+      })(
+        {
+          requestId: "r1",
+          continuation: true,
+          nonce: "n1",
+          envelope: { __snapshot: { s: 1 }, user: null }
+        },
+        step
+      );
+      expect(recovered).toEqual([
+        ended ? { incidentId: "i1", delivery: 2 } : undefined
+      ]);
+    }
+  });
+
   it("keeps only the app's stash data in the checkpoint", async () => {
     const stashed: unknown[] = [];
     const entry: ChatTurnClosureEntry = {
