@@ -95,6 +95,8 @@ function fakeModel(sql: Sql, build: string): LanguageModel {
       // Which build made each model call: work in flight at the deploy must
       // reach the new build.
       countRun(sql, "call", build);
+      // And for which user message, so a turn that ran twice shows.
+      countRun(sql, "turn", `${build}|${lastUserText(prompt)}`);
       const callTool =
         prompt.at(-1)?.role === "user" &&
         lastUserText(prompt).includes("[approve]");

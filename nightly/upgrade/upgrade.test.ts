@@ -297,13 +297,28 @@ describe("an upgrade from the latest release, mid-turn", () => {
       "submission 2",
       "submission 3"
     ]);
-    // Some of the queue ran on the new build: it crossed the deploy. One
-    // call per submission, plus at most one for the turn the deploy cut off.
-    const calls = runsOf(p, "call");
-    expect(calls.map((r) => r.id)).toContain("main");
-    const total = calls.reduce((sum, r) => sum + r.n, 0);
-    expect(total).toBeGreaterThanOrEqual(3);
-    expect(total).toBeLessThanOrEqual(4);
+    // Some of the queue ran on the new build: it crossed the deploy. Each
+    // submission's turn calls the model once, except the one the deploy cut
+    // off, which the new build runs again: once on each build.
+    const turns = runsOf(p, "turn");
+    const breakdown = JSON.stringify(turns);
+    expect(
+      runsOf(p, "call").map((r) => r.id),
+      breakdown
+    ).toContain("main");
+    for (const n of [1, 2, 3]) {
+      const runs = turns.filter((r) => r.id.endsWith(`|submission ${n}`));
+      expect(
+        runs.every((r) => r.n === 1),
+        breakdown
+      ).toBe(true);
+      expect(runs.length, breakdown).toBeGreaterThanOrEqual(1);
+    }
+    expect(
+      turns.filter((r) => r.id.startsWith("release|")).length,
+      breakdown
+    ).toBeGreaterThanOrEqual(1);
+    expect(turns.length, breakdown).toBeLessThanOrEqual(4);
   });
 
   it("agent: the running fiber is recovered once, from its last checkpoint", async () => {
