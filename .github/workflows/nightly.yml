@@ -133,6 +133,9 @@ jobs:
           - name: Think and AIChatAgent faults (root and facets)
             dir: nightly
             run: pnpm run faults
+          - name: reset fuzz (seeded)
+            dir: nightly
+            run: pnpm run fuzz
           - name: upgrade from the latest release
             dir: nightly
             run: pnpm run upgrade
