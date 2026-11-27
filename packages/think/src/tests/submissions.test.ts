@@ -13,6 +13,10 @@ import type {
 
 type ThinkSubmissionTestStub = {
   holdRecoveryOnceForTest(): Promise<void>;
+  answerRecoveryForTest(answer: {
+    continue?: boolean;
+    persist?: boolean;
+  }): Promise<void>;
   recoveryHeldForTest(): Promise<boolean>;
   holdChunksAfterResetForTest(
     chunks: string[],
@@ -838,6 +842,38 @@ describe("Think durable submissions", () => {
         { timeout: 20_000, interval: 50 }
       );
     }, 30_000);
+
+    // Successor of think-session's "marks the root submission errored when a
+    // chained continuation is abandoned": the second reset cuts the
+    // recovery's own continuation, whose request is not the submission's.
+    it("ends failed, not running, when a reset cuts its recovered reply and the next recovery declines", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("interrupt me twice", {
+        submissionId: "sub-chain-declined"
+      });
+      await chunkStreamHeld(agent);
+      // The recovered reply streams, and waits after its first chunk.
+      await agent.holdChunksAfterResetForTest(["e ", "f ", "g "], 50, 1);
+      await agent.resetIsolateForTest().catch(() => {});
+      const recovering = await freshAgent(name);
+      await chunkStreamHeld(recovering);
+      await recovering.answerRecoveryForTest({ continue: false });
+      await recovering.resetIsolateForTest().catch(() => {});
+
+      const restarted = await freshAgent(name);
+      await expect(
+        restarted.waitForSubmissionForTest("sub-chain-declined", {
+          timeoutMs: 15_000
+        })
+      ).resolves.toMatchObject({ status: "error" });
+      await tasksIdle(restarted);
+      await expect(
+        restarted.inspectSubmissionForTest("sub-chain-declined")
+      ).resolves.toMatchObject({ status: "error" });
+    }, 40_000);
 
     it("stays aborted when it is cancelled while its reply is being recovered", async () => {
       const name = crypto.randomUUID();

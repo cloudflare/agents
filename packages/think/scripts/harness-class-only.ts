@@ -10,6 +10,12 @@
  * A mechanics-only test asserts nothing an app can observe (an id format, a
  * skipped write, how a pass keeps its own books), so it has no successor:
  * its row says what private thing it pins, and the score counts it apart.
+ *
+ * A probe-covered test asserts something an app can observe, but only a
+ * platform fault a Workers test cannot raise reaches it (an error shape the
+ * runtime throws). Its row names the deployed verify scenario that covers it
+ * on both Thinks, and the PR and head that scenario passed on; the score
+ * counts it apart too.
  */
 import { existsSync, readFileSync } from "node:fs";
 
@@ -23,14 +29,28 @@ type ClassOnlyTest = {
   reason: string;
 };
 
+/** The deployed verify scenario that covers a probe-covered test. */
+export type ProbeCoverage = {
+  /** The scenario's name in verify's fault suite. */
+  scenario: string;
+  /** The PR and head it passed on, on both Thinks: "#3474@9c8bf5234". */
+  verified: string;
+};
+
 /**
- * One class-only test, and either the test that succeeds it or, for a test
- * that asserts nothing an app can observe, `mechanicsOnly`.
+ * One class-only test, and either the test that succeeds it, or, for a test
+ * that asserts nothing an app can observe, `mechanicsOnly`, or, for one only
+ * a platform fault reaches, `probeCovered`.
  */
 export type ClassOnlyEntry = ClassOnlyTest &
   (
-    | { successor: { file: string; test: string }; mechanicsOnly?: never }
-    | { mechanicsOnly: true; successor?: never }
+    | {
+        successor: { file: string; test: string };
+        mechanicsOnly?: never;
+        probeCovered?: never;
+      }
+    | { mechanicsOnly: true; successor?: never; probeCovered?: never }
+    | { probeCovered: ProbeCoverage; successor?: never; mechanicsOnly?: never }
   );
 
 /** Whether an entry is mechanics-only: class-only with no successor. */
@@ -39,6 +59,23 @@ export function isMechanicsOnly(
 ): entry is ClassOnlyTest & { mechanicsOnly: true } {
   return entry.mechanicsOnly === true;
 }
+
+/** Whether an entry is probe-covered: a deployed scenario, no successor. */
+export function isProbeCovered(
+  entry: ClassOnlyEntry
+): entry is ClassOnlyTest & { probeCovered: ProbeCoverage } {
+  return entry.probeCovered !== undefined;
+}
+
+/** Whether an entry has a successor test. */
+function hasSuccessor(
+  entry: ClassOnlyEntry
+): entry is ClassOnlyTest & { successor: { file: string; test: string } } {
+  return entry.successor !== undefined;
+}
+
+/** A verify PR and head: "#3474@9c8bf5234". */
+const VERIFIED = /^#\d+@[0-9a-f]{7,40}$/;
 
 /** A test's id in the score: its file and full name. */
 export function testId(file: string, test: string): string {
@@ -77,6 +114,7 @@ export function readClassOnly(file: string): {
       reason?: unknown;
       successor?: { file?: unknown; test?: unknown };
       mechanicsOnly?: unknown;
+      probeCovered?: { scenario?: unknown; verified?: unknown };
     };
     const successor = entry.successor ?? {};
     const label = isText(entry.test) ? `"${entry.test}"` : `entry ${index + 1}`;
@@ -88,6 +126,28 @@ export function readClassOnly(file: string): {
       problems.push(
         `${label}: needs a reason (the private row, method or seam)`
       );
+      return;
+    }
+    if (entry.probeCovered !== undefined) {
+      const probe = entry.probeCovered ?? {};
+      if (
+        entry.successor !== undefined ||
+        entry.mechanicsOnly !== undefined ||
+        !isText(probe.scenario) ||
+        !isText(probe.verified) ||
+        !VERIFIED.test(probe.verified)
+      ) {
+        problems.push(
+          `${label}: a probe-covered entry has probeCovered: { scenario, verified: "#<pr>@<head>" }, and no successor or mechanicsOnly`
+        );
+        return;
+      }
+      entries.push({
+        file: entry.file,
+        test: entry.test,
+        reason: entry.reason,
+        probeCovered: { scenario: probe.scenario, verified: probe.verified }
+      });
       return;
     }
     if (entry.mechanicsOnly !== undefined) {
@@ -107,7 +167,7 @@ export function readClassOnly(file: string): {
     }
     if (!isText(successor.file) || !isText(successor.test)) {
       problems.push(
-        `${label}: needs a successor (file and test), or mechanicsOnly: true`
+        `${label}: needs a successor (file and test), mechanicsOnly: true, or probeCovered`
       );
       return;
     }
@@ -130,7 +190,7 @@ export function successorCounts(
 ): Map<string, number> {
   const counts = new Map<string, number>();
   for (const entry of entries) {
-    if (isMechanicsOnly(entry)) continue;
+    if (!hasSuccessor(entry)) continue;
     const successor = testId(entry.successor.file, entry.successor.test);
     counts.set(successor, (counts.get(successor) ?? 0) + 1);
   }
@@ -176,7 +236,7 @@ export function checkClassOnly(
         `passes on the harness-backed Think, so it is not class-only (delete its row): ${own}`
       );
     }
-    if (isMechanicsOnly(entry)) continue;
+    if (!hasSuccessor(entry)) continue;
     const successor = testId(entry.successor.file, entry.successor.test);
     if (listed.has(successor)) {
       problems.push(
@@ -212,7 +272,9 @@ export function classOnlyTable(entries: readonly ClassOnlyEntry[]): string {
   const rows = entries.map((entry) =>
     isMechanicsOnly(entry)
       ? `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | none: mechanics only | |`
-      : `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | \`${entry.successor.file}\`: ${cell(entry.successor.test)} | ${counts.get(testId(entry.successor.file, entry.successor.test))} |`
+      : isProbeCovered(entry)
+        ? `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | probe: verify's \`${cell(entry.probeCovered.scenario)}\`, passed on ${cell(entry.probeCovered.verified)} | |`
+        : `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | \`${entry.successor.file}\`: ${cell(entry.successor.test)} | ${counts.get(testId(entry.successor.file, entry.successor.test))} |`
   );
   return `
 ## Class-only tests
@@ -225,6 +287,10 @@ suite (\`pnpm test:workers\`, which CI runs). The list is
 
 A mechanics-only test asserts nothing an app can observe, so it has no
 successor; its row says what private thing it pins.
+
+A probe-covered test is reached only by a platform fault a Workers test
+cannot raise; its row names the deployed verify scenario that covers it on
+both Thinks, and the PR and head it passed on.
 
 The last column is how many class-only tests the successor stands for, at
 most ${MAX_ENTRIES_PER_SUCCESSOR}.

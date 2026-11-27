@@ -969,6 +969,68 @@ function promptLinesForTest(callOptions: MockModelCallOptions): string[] {
 }
 
 /**
+ * A model that asks the client's `client_action` tool and then keeps its
+ * stream open until aborted, unless the prompt already holds the tool's
+ * result: then it answers "Done after the client".
+ */
+function clientToolThenHangModelForTest(onCall: () => void): LanguageModel {
+  const whenAborted = (signal: AbortSignal | undefined) =>
+    new Promise<void>((resolve) => {
+      if (!signal) return;
+      if (signal.aborted) return resolve();
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-client-tool-then-hang",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    async doStream(options: {
+      abortSignal?: AbortSignal;
+      prompt?: Array<{ role: string }>;
+    }) {
+      onCall();
+      const answered = (options.prompt ?? []).some(
+        (message) => message.role === "tool"
+      );
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (answered) {
+            controller.enqueue({ type: "text-start", id: "t-1" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-1",
+              delta: "Done after the client"
+            });
+            controller.enqueue({ type: "text-end", id: "t-1" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }
+            });
+            controller.close();
+            return;
+          }
+          controller.enqueue({
+            type: "tool-call",
+            toolCallId: "tc-client",
+            toolName: "client_action",
+            input: JSON.stringify({ action: "confirm" })
+          });
+          await whenAborted(options.abortSignal);
+          controller.error(options.abortSignal?.reason);
+        }
+      });
+      return { stream };
+    }
+  } as unknown as LanguageModel;
+}
+
+/**
  * `model`, except that each call's stream sends its first `afterParts`
  * parts after `stream-start` and then nothing more, until the call is
  * aborted: a model stream that stalls, for each call `stalls` allows.
@@ -1661,6 +1723,8 @@ const RECOVERY_HELD_KEY = "test:recovery-held";
 const RECOVERY_CALLS_KEY = "test:recovery-calls";
 /** Where a test keeps `chatRecovery` across resets. */
 const RECOVERY_CONFIG_KEY = "test:recovery-config";
+/** Where a test keeps a model that asks a client tool and hangs, across resets. */
+const CLIENT_TOOL_MODEL_KEY = "test:client-tool-model";
 /** Where a test keeps a model that never answers, across resets. */
 const HANG_MODEL_KEY = "test:hang-model";
 /** Where a test keeps a slow model across resets: chunks and delay. */
@@ -1717,6 +1781,8 @@ export class ThinkTestAgent extends Think {
     requestId: string;
     recoveryRootRequestId: string;
     streamId: string;
+    /** When onChatRecovery was called. */
+    calledAt: number;
   }> = [];
   private _stashInBeforeTurnForTest: string | undefined;
   private _turnIdentityLog: TurnIdentityLogEntry[] = [];
@@ -1737,7 +1803,8 @@ export class ThinkTestAgent extends Think {
       createdAt: ctx.createdAt,
       requestId: ctx.requestId,
       recoveryRootRequestId: ctx.recoveryRootRequestId,
-      streamId: ctx.streamId
+      streamId: ctx.streamId,
+      calledAt: Date.now()
     });
     if (this._recoveryHookForTest === "throw") {
       throw new Error("recovery hook boom");
@@ -2486,6 +2553,17 @@ export class ThinkTestAgent extends Think {
 
   override onChatResponse(result: ChatResponseResult): void | Promise<void> {
     this._responseLog.push(result);
+    // A test can count the hook's calls across resets, and hold the first
+    // one (to reset the isolate inside it).
+    const kv = this.ctx.storage.kv;
+    const calls = kv.get<string[]>("test:response-hook-calls");
+    if (calls) {
+      kv.put("test:response-hook-calls", [...calls, result.status]);
+      if (kv.get<boolean>("test:hold-response-hook")) {
+        kv.delete("test:hold-response-hook");
+        return new Promise<never>(() => {});
+      }
+    }
     if (!this._followUpFromResponse || result.status !== "completed") return;
     this._followUpFromResponse = false;
     // `saveMessages` is refused inside a turn; a submission is the way to
@@ -2499,6 +2577,20 @@ export class ThinkTestAgent extends Think {
     ]).then((submission) => {
       this._followUpSubmissionId = submission.submissionId;
     });
+  }
+
+  /**
+   * Count onChatResponse's calls in storage from now on, across resets, and
+   * hold the first one forever.
+   */
+  async holdResponseHookOnceForTest(): Promise<void> {
+    this.ctx.storage.kv.put("test:response-hook-calls", []);
+    this.ctx.storage.kv.put("test:hold-response-hook", true);
+  }
+
+  /** onChatResponse's calls, by status, since {@link holdResponseHookOnceForTest}. */
+  async responseHookCallsForTest(): Promise<string[]> {
+    return this.ctx.storage.kv.get<string[]>("test:response-hook-calls") ?? [];
   }
 
   /** The next reply stalls once after two chunks, and recovery retries it. */
@@ -4041,6 +4133,19 @@ export class ThinkTestAgent extends Think {
     });
     this.ctx.storage.kv.put(RECOVERY_CONFIG_KEY, options.config);
     this.chatRecovery = options.config;
+  }
+
+  /**
+   * From now on, across resets: each model call asks the client's
+   * `client_action` tool, then hangs until its result is in the prompt; and
+   * `chatRecovery` is `config`.
+   */
+  async askClientToolAcrossResetsForTest(config: {
+    stableTimeoutMs?: number;
+  }): Promise<void> {
+    this.ctx.storage.kv.put(CLIENT_TOOL_MODEL_KEY, true);
+    this.ctx.storage.kv.put(RECOVERY_CONFIG_KEY, config);
+    this.chatRecovery = config;
   }
 
   /** From now on, across resets: no model call answers, and `config`. */
@@ -6670,6 +6775,13 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): ThinkModel {
+    // A test can have every call ask the client's tool and then hang,
+    // across resets.
+    if (this.ctx.storage.kv.get<boolean>(CLIENT_TOOL_MODEL_KEY)) {
+      return clientToolThenHangModelForTest(() => {
+        this._modelPromptsForTest.push([]);
+      });
+    }
     // A test can leave every model call hanging on the provider, across
     // resets: no turn ever makes progress.
     if (this.ctx.storage.kv.get<boolean>(HANG_MODEL_KEY)) {
@@ -11096,11 +11208,16 @@ export class ThinkProgrammaticTestAgent extends Think {
       kv.put("test:recovery-held", true);
       await new Promise<never>(() => {});
     }
-    return {};
+    return kv.get<ChatRecoveryOptions>("test:recovery-answer") ?? {};
   }
 
   async holdRecoveryOnceForTest(): Promise<void> {
     this.ctx.storage.kv.put("test:hold-recovery", true);
+  }
+
+  /** What onChatRecovery answers from now on, across resets. */
+  async answerRecoveryForTest(answer: ChatRecoveryOptions): Promise<void> {
+    this.ctx.storage.kv.put("test:recovery-answer", answer);
   }
 
   async recoveryHeldForTest(): Promise<boolean> {

@@ -534,6 +534,97 @@ describe("Think — error handling", () => {
     );
   });
 
+  // Successors of D140 and D142 through a tab's own socket.
+  it("reports each chat request from a tab whose body cannot be parsed, and runs nothing", async () => {
+    const room = `parse-failed-ws-${crypto.randomUUID()}`;
+    const events: Array<{ payload: { requestId?: string; stage?: string } }> =
+      [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed" && event.name === room) {
+        events.push(event);
+      }
+    });
+    try {
+      const ws = await connectThinkTestAgentWS(room);
+      for (const [id, body] of [
+        ["no-body", undefined],
+        ["bad-json", "{nope"],
+        ["no-messages", JSON.stringify({ text: "hi" })]
+      ] as const) {
+        ws.send(
+          JSON.stringify({
+            type: "cf_agent_use_chat_request",
+            id,
+            init: { method: "POST", ...(body !== undefined && { body }) }
+          })
+        );
+      }
+      await vi.waitFor(() => expect(events).toHaveLength(3), {
+        timeout: 5_000,
+        interval: 20
+      });
+      ws.close();
+    } finally {
+      unsubscribe();
+    }
+    expect(
+      events.map((event) => [event.payload.requestId, event.payload.stage])
+    ).toEqual([
+      ["no-body", "parse"],
+      ["bad-json", "parse"],
+      ["no-messages", "parse"]
+    ]);
+    const agent = await freshAgent(room);
+    expect(await agent.getChatErrorLog()).toHaveLength(3);
+    expect(await agent.getMessages()).toEqual([]);
+  });
+
+  it("reports a tab's tool result, tool approval and cancel, even with nothing to apply them to", async () => {
+    const room = `protocol-events-ws-${crypto.randomUUID()}`;
+    const types: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      if (event.name === room) types.push(event.type);
+    });
+    try {
+      const ws = await connectThinkTestAgentWS(room);
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "call-missing",
+          toolName: "pick",
+          output: 1
+        })
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_tool_approval",
+          toolCallId: "call-missing",
+          approved: true
+        })
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_chat_request_cancel",
+          id: "nothing-running"
+        })
+      );
+      await vi.waitFor(
+        () =>
+          expect(types).toEqual(
+            expect.arrayContaining([
+              "tool:result",
+              "tool:approval",
+              "message:cancel"
+            ])
+          ),
+        { timeout: 5_000, interval: 20 }
+      );
+      ws.close();
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("emits chat:request:failed when a chat stream fails", async () => {
     const agent = await freshAgent(`err-event-${crypto.randomUUID()}`);
     const events: Array<{
@@ -1047,6 +1138,59 @@ describe("Think — error handling", () => {
     expect(result.responses).toBe(1);
     expect(result.status).toBe("error");
     expect(result.streamStates).toEqual(["errored"]);
+  });
+
+  // Successor of the next test through a real reset: the platform cuts
+  // the hook, and the next isolate delivers it.
+  it("calls onChatResponse again after a reset cuts it, with the completed reply", async () => {
+    const room = `hook-reset-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.holdResponseHookOnceForTest();
+    const ws = await connectThinkTestAgentWS(room);
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: crypto.randomUUID(),
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: "hello" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    // The hook has been called, and holds.
+    await vi.waitFor(
+      async () =>
+        expect(await agent.responseHookCallsForTest()).toEqual(["completed"]),
+      { timeout: 5_000, interval: 20 }
+    );
+    ws.close();
+    await agent.resetIsolateForTest().catch(() => undefined);
+
+    await vi.waitFor(
+      async () =>
+        expect(
+          await (await freshAgent(room)).responseHookCallsForTest()
+        ).toEqual(["completed", "completed"]),
+      { timeout: 10_000, interval: 50 }
+    );
+    // And only once more: nothing else runs it again.
+    const restarted = await freshAgent(room);
+    await vi.waitFor(
+      async () => expect(await restarted.stableWithinForTest(2_000)).toBe(true),
+      { timeout: 10_000, interval: 50 }
+    );
+    expect(await restarted.responseHookCallsForTest()).toEqual([
+      "completed",
+      "completed"
+    ]);
   });
 
   it("replays onChatResponse when bookkeeping before it fails", async () => {

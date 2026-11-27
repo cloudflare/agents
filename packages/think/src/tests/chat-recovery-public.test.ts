@@ -339,7 +339,7 @@ describe("chat recovery, through public behaviour", () => {
         noProgressTimeoutMs?: number;
       },
       done: (progress: {
-        recoveryCalls: unknown[];
+        recoveryCalls: Array<{ calledAt: number }>;
         exhausted: unknown[];
         lastAssistantText: string;
       }) => boolean
@@ -445,16 +445,20 @@ describe("chat recovery, through public behaviour", () => {
         "progress-survives",
         {
           afterParts: 25,
-          stalledCalls: 6,
+          stalledCalls: 12,
           maxAttempts: 50,
           progressing: true,
           noProgressTimeoutMs: 300
         },
-        (p) => p.exhausted.length > 0 || p.lastAssistantText.includes("a7-29")
+        (p) => p.exhausted.length > 0 || p.lastAssistantText.includes("a13-29")
       );
 
       expect(progress.exhausted).toEqual([]);
-      expect(progress.recoveryCalls.length).toBeGreaterThanOrEqual(6);
+      expect(progress.recoveryCalls.length).toBeGreaterThanOrEqual(12);
+      // The window was crossed: recovery went on checking well after
+      // noProgressTimeoutMs had passed since the first interruption.
+      const calledAt = progress.recoveryCalls.map((call) => call.calledAt);
+      expect(calledAt.at(-1)! - calledAt[0]!).toBeGreaterThan(300);
     }, 30_000);
 
     it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
@@ -513,6 +517,52 @@ describe("chat recovery, through public behaviour", () => {
       expect(text).not.toContain("six");
       // No model call or continuation ran after the reset.
       expect(await (await agent()).modelCallsForTest()).toBe(0);
+    }, 30_000);
+
+    it("tells a tab that reconnects after onChatRecovery says continue: false that the turn ended in an error", async () => {
+      const { agent, room } = await resetDuringTurn(
+        "answer-no-continue-tab",
+        2,
+        {
+          continue: false
+        }
+      );
+      await settle(agent);
+
+      // A tab coming back finds the turn ended, not frozen half-streamed.
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      const errors: string[] = [];
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          error?: boolean;
+          body?: string;
+          id?: string;
+        };
+        // The tab takes up the stream it is offered, as useChat does.
+        if (frame.type === "cf_agent_stream_resuming") {
+          ws.send(
+            JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+          );
+        }
+        if (frame.type === "cf_agent_use_chat_response" && frame.error) {
+          errors.push(frame.body ?? "");
+        }
+      });
+      ws.accept();
+      ws.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+      await vi.waitFor(() => expect(errors).toHaveLength(1), {
+        timeout: 10_000,
+        interval: 20
+      });
+      ws.close();
+
+      expect(errors[0]).toContain("automatic continuation was declined");
     }, 30_000);
 
     // Successors of the pre-stream retry tests (think-session, "Think —
@@ -946,6 +996,9 @@ describe("chat recovery, through public behaviour", () => {
         exhausted.push(event.payload as { reason?: string });
       }
     });
+    // Terminal errors the last tab opened was sent; earlier tabs don't count.
+    let terminalErrors = 0;
+    let tabs = 0;
     async function tab() {
       const res = await exports.default.fetch(
         `http://example.com/agents/think-test-agent/${room}`,
@@ -954,6 +1007,18 @@ describe("chat recovery, through public behaviour", () => {
       const ws = res.webSocket;
       if (!ws) throw new Error("no socket");
       ws.accept();
+      const tabNumber = ++tabs;
+      terminalErrors = 0;
+      ws.addEventListener("message", (event) => {
+        if (tabNumber !== tabs) return;
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          error?: boolean;
+        };
+        if (frame.type === "cf_agent_use_chat_response" && frame.error) {
+          terminalErrors++;
+        }
+      });
       return ws;
     }
     try {
@@ -1001,6 +1066,19 @@ describe("chat recovery, through public behaviour", () => {
         ws.close();
         ws = await tab();
       }
+      // The open tab is told the turn ended in an error.
+      await vi.waitFor(() => expect(terminalErrors).toBeGreaterThan(0), {
+        timeout: 15_000,
+        interval: 20
+      });
+      await vi.waitFor(
+        async () => {
+          expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      // The open tab is told the turn ended in an error, once.
+      expect(terminalErrors).toBe(1);
       ws.close();
 
       expect(exhausted.map((entry) => entry.reason)).toEqual([
@@ -1010,4 +1088,131 @@ describe("chat recovery, through public behaviour", () => {
       unsubscribe();
     }
   }, 90_000);
+
+  // Successor of think-session's "PARKS a continuation … while a CLIENT
+  // interaction is pending": a turn waiting on
+  // the client's tool is not stuck, so a reset there spends no attempt and
+  // gives nothing up, and the client's answer finishes the reply.
+  it("waits for the client's tool answer after a reset, giving nothing up, then finishes the reply", async () => {
+    const room = `client-wait-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    const exhausted: unknown[] = [];
+    const skipped: Array<{ reason?: string; recoveryKind?: string }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.name !== room) return;
+      if (event.type === "chat:recovery:exhausted") {
+        exhausted.push(event.payload);
+      }
+      if (event.type === "chat:recovery:skipped") {
+        skipped.push(
+          event.payload as { reason?: string; recoveryKind?: string }
+        );
+      }
+    });
+    const frames: Array<{ type?: string; body?: string; error?: boolean }> = [];
+    async function tab() {
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.addEventListener("message", (event) => {
+        frames.push(JSON.parse(String(event.data)));
+      });
+      ws.accept();
+      return ws;
+    }
+    try {
+      await (
+        await agent()
+      ).askClientToolAcrossResetsForTest({
+        stableTimeoutMs: 200
+      });
+      let ws = await tab();
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "confirm it with me" }]
+                }
+              ],
+              clientTools: [
+                { name: "client_action", description: "A client tool" }
+              ]
+            })
+          }
+        })
+      );
+      // The model has asked the client's tool.
+      await vi.waitFor(
+        () =>
+          expect(
+            frames.some((frame) =>
+              frame.body?.includes('"tool-input-available"')
+            )
+          ).toBe(true),
+        { timeout: 10_000, interval: 20 }
+      );
+      await (await agent()).resetIsolateForTest().catch(() => undefined);
+      ws.close();
+      ws = await tab();
+      // Recovery finds the turn waiting on the client, and leaves it to the
+      // client's answer.
+      await vi.waitFor(
+        () =>
+          expect(skipped).toMatchObject([
+            { reason: "awaiting_client_interaction", recoveryKind: "continue" }
+          ]),
+        { timeout: 15_000, interval: 20 }
+      );
+
+      // Nothing given up, and the model not asked again: the turn waits.
+      expect(exhausted).toEqual([]);
+      expect(await (await agent()).modelCallsForTest()).toBe(0);
+      const waiting = (await (await agent()).getMessages()) as Array<{
+        role: string;
+        parts: Array<{ type: string; state?: string }>;
+      }>;
+      expect(waiting.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(
+        waiting[1]?.parts.find((part) => part.type === "tool-client_action")
+          ?.state
+      ).toBe("input-available");
+
+      // The client answers, and the reply goes on.
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "tc-client",
+          toolName: "client_action",
+          output: { confirmed: true },
+          autoContinue: true
+        })
+      );
+      await vi.waitFor(
+        async () => {
+          expect(await (await agent()).lastAssistantTextForTest()).toContain(
+            "Done after the client"
+          );
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      ws.close();
+      expect(exhausted).toEqual([]);
+      expect(frames.some((frame) => frame.error)).toBe(false);
+    } finally {
+      unsubscribe();
+    }
+  }, 60_000);
 });
