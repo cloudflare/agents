@@ -271,8 +271,10 @@ describe("Think — agentic loop", () => {
       testProactive(message: string): Promise<OverflowResult>;
       testProactiveMultiFire(
         message: string,
-        maxCompactions?: number
+        maxCompactions?: number,
+        endWithAssistant?: boolean
       ): Promise<OverflowResult>;
+      getCompactedBranches(): Promise<string[][]>;
       testProactiveNoOp(message: string): Promise<OverflowResult>;
       testChatAbortDuringRecovery(message: string): Promise<OverflowResult>;
       testProgrammaticAbortDuringRecovery(
@@ -845,6 +847,22 @@ describe("Think — agentic loop", () => {
           content: [{ type: "text", text: "Replacement context" }]
         }
       ]);
+    });
+
+    it("compacts the branch a programmatic input ending with an assistant message leaves", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent;
+      const result = await agent.testProactiveMultiFire(
+        "use the echo tool",
+        1,
+        true
+      );
+      expect(result.done).toBe(true);
+      const [branch] = await agent.getCompactedBranches();
+      // The supplied assistant message is part of the turn's branch.
+      expect(branch).toContain("supplied-assistant");
     });
 
     it("keeps sending the compacted history after the guard's budget is spent", async () => {

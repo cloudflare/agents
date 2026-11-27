@@ -968,6 +968,7 @@ export class OverflowRecoveryTestAgent extends Think {
   override configureSession(session: Session): Session {
     return session.onCompaction(async (messages) => {
       this.compactionCount++;
+      this.compactedBranches.push(messages.map((m) => m.id));
       // A stop that lands while the history is being compacted.
       if (this.abortDuringCompaction) this.abortAllRequests();
       if (this.compactionThrows) throw new Error("Test compaction failed");
@@ -1226,7 +1227,8 @@ export class OverflowRecoveryTestAgent extends Think {
    */
   async testProactiveMultiFire(
     message: string,
-    maxCompactions = 2
+    maxCompactions = 2,
+    endWithAssistant = false
   ): Promise<OverflowChatResult> {
     this.proactiveMode = true;
     this.proactiveMultiFire = true;
@@ -1259,7 +1261,24 @@ export class OverflowRecoveryTestAgent extends Think {
     });
 
     const cb = new TestCollectingCallback();
-    await this.chat(message, cb);
+    // Programmatic input may end with an assistant message of its own.
+    await this.chat(
+      endWithAssistant
+        ? [
+            {
+              id: "supplied-question",
+              role: "user",
+              parts: [{ type: "text", text: message }]
+            },
+            {
+              id: "supplied-assistant",
+              role: "assistant",
+              parts: [{ type: "text", text: "a supplied answer" }]
+            }
+          ]
+        : message,
+      cb
+    );
     return {
       done: cb.doneCalled,
       error: cb.errorMessage,
@@ -1270,6 +1289,13 @@ export class OverflowRecoveryTestAgent extends Think {
       beforeTurnContinuations: this.beforeTurnContinuations,
       promptIncludedSeedMarker: this.promptIncludedSeedMarker
     };
+  }
+
+  /** The ids of each branch a compaction was given. */
+  compactedBranches: string[][] = [];
+
+  async getCompactedBranches(): Promise<string[][]> {
+    return this.compactedBranches;
   }
 
   /**
