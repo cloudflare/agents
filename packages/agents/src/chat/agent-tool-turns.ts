@@ -74,7 +74,14 @@ export async function startAgentToolTurn(
     {
       requestId: agentToolTurnId(runId),
       retain: true,
-      metadata: { agentTool: agentTool as unknown as TaskJson }
+      metadata: {
+        agentTool: agentTool as unknown as TaskJson,
+        // The turn's stream is kept, completed, once the reply is stored: a
+        // parent following it reads every chunk to the end, and one that
+        // comes later replays the chunks a live parent got. (The turn
+        // writes its last chunks in the step that would drop the stream.)
+        chat: { keepStream: true }
+      }
     }
   );
 }

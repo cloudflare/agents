@@ -723,11 +723,12 @@ describe("AIChatAgent as an agent-tool child", () => {
     });
 
     const events = await parent.getEventsForTest();
-    // The run settled before its parent followed it, so the parent gets
-    // the stored reply as chunks: its start, its text part's start, delta
-    // and end, and the finish.
+    // The reply's own start (with its message id) comes first, then the
+    // model's five chunks: what a live parent gets, also when the run
+    // settled before its parent followed it.
     expect(events.map((event) => event.event.kind)).toEqual([
       "started",
+      "chunk",
       "chunk",
       "chunk",
       "chunk",
@@ -771,37 +772,42 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(laterChunks).toEqual(chunks.slice(1));
   });
 
-  it("forwards every step of a multi-step reply to a parent that follows the run live", async () => {
-    const parent = await getParent();
-    const runId = crypto.randomUUID();
-    const result = await parent.runChild(
-      {
-        prompt: "look it up",
-        chunkDelayMs: 30,
-        toolThenText: true,
-        milestoneAfterMs: 50
-      },
-      runId
-    );
-    expect(result.status).toBe("completed");
-    const chunks = (await parent.getEventsForTest())
-      .filter((event) => event.event.kind === "chunk")
-      .map(
-        (event) =>
-          (
-            JSON.parse(
-              (event.event as { kind: "chunk"; body: string }).body
-            ) as { type: string }
-          ).type
+  // With no delay the turn writes its last chunks as it ends: the parent
+  // still gets every one.
+  it.each([30, 0])(
+    "forwards every step of a multi-step reply to its parent (%i ms between chunks)",
+    async (chunkDelayMs) => {
+      const parent = await getParent();
+      const runId = crypto.randomUUID();
+      const result = await parent.runChild(
+        {
+          prompt: "look it up",
+          chunkDelayMs,
+          toolThenText: true,
+          milestoneAfterMs: 50
+        },
+        runId
       );
-    // The tool step (with the milestone reported meanwhile), then the
-    // text step, then the finish.
-    expect(chunks).toContain("data-agent-milestone");
-    expect(chunks).toContain("tool-output-available");
-    expect(chunks).toContain("text-delta");
-    expect(chunks.filter((type) => type === "finish-step")).toHaveLength(2);
-    expect(chunks.at(-1)).toBe("finish");
-  });
+      expect(result.status).toBe("completed");
+      const chunks = (await parent.getEventsForTest())
+        .filter((event) => event.event.kind === "chunk")
+        .map(
+          (event) =>
+            (
+              JSON.parse(
+                (event.event as { kind: "chunk"; body: string }).body
+              ) as { type: string }
+            ).type
+        );
+      // The tool step (with the milestone reported meanwhile), then the
+      // text step, then the finish.
+      expect(chunks).toContain("data-agent-milestone");
+      expect(chunks).toContain("tool-output-available");
+      expect(chunks).toContain("text-delta");
+      expect(chunks.filter((type) => type === "finish-step")).toHaveLength(2);
+      expect(chunks.at(-1)).toBe("finish");
+    }
+  );
 
   it("forwards the reply's finish to a parent that follows the run live", async () => {
     const parent = await getParent();
