@@ -875,34 +875,36 @@ export class Think<
       options?.timeout != null ? Date.now() + options.timeout : null;
     const session = this.harness.session();
     for (;;) {
-      // Listen before looking, so a change in between still wakes us.
+      // Listen before looking, so a change in between still wakes us. The
+      // waiter goes when this round ends, however it ends.
       let wake!: () => void;
       const ended = new Promise<void>((resolve) => {
         wake = resolve;
         this.#stableWaiters.push(resolve);
       });
-      if ((await session.pending()).length === 0) {
-        await this.#sync();
-        if (!this.hasPendingInteraction()) return true;
-      }
-      if (deadline === null) {
-        await ended;
-        continue;
-      }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timedOut = await Promise.race([
-        ended.then(() => false),
-        new Promise<boolean>((resolve) => {
-          timer = setTimeout(() => resolve(true), remaining);
-        })
-      ]);
-      clearTimeout(timer);
-      if (timedOut) {
+      try {
+        if ((await session.pending()).length === 0) {
+          await this.#sync();
+          if (!this.hasPendingInteraction()) return true;
+        }
+        if (deadline === null) {
+          await ended;
+          continue;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timedOut = await Promise.race([
+          ended.then(() => false),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(true), remaining);
+          })
+        ]);
+        clearTimeout(timer);
+        if (timedOut) return false;
+      } finally {
         const index = this.#stableWaiters.indexOf(wake);
         if (index !== -1) this.#stableWaiters.splice(index, 1);
-        return false;
       }
     }
   }
