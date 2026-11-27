@@ -871,9 +871,6 @@ export class ChatRecoveryEngine {
       ) {
         await wake.persistOrphanedStream(streamId);
       }
-      // Nothing continues the reply: its stream ends here. Left active, it
-      // would also read as a turn still running to the reconcile below.
-      if (streamStillActive) await wake.completeRecoveredStream(streamId);
       await adapter.exhaustChatRecovery(
         incident,
         config,
@@ -882,6 +879,11 @@ export class ChatRecoveryEngine {
         createdAt,
         snapshot?.originMessageIds
       );
+      // Nothing continues the reply: its stream ends here. Left active, it
+      // would read as a turn still running to the reconcile below. After
+      // the give-up was delivered: a write that fails must not cost the
+      // tab its terminal message.
+      if (streamStillActive) await wake.completeRecoveredStream(streamId);
       this.#settled();
       await this.#reconcileChildRuns();
       return;

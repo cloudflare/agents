@@ -2154,6 +2154,10 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     // ended first, or the run would read as still streaming.
     expect(reconciled).toBe(1);
     expect(streamsEndedAtReconcile).toEqual(["s1"]);
+    // The give-up is delivered before the stream's write, which may fail.
+    expect(h.calls.indexOf("exhaust")).toBeLessThan(
+      h.calls.indexOf("complete")
+    );
 
     // Exhausted path: persist gate (no options) + exhaustChatRecovery, with the
     // turn's createdAt; never consults onChatRecovery or schedules.
