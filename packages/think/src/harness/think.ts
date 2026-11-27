@@ -13,6 +13,12 @@ import {
   type ConnectionContext,
   type WSMessage
 } from "agents";
+import {
+  DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
+  type ChatRecoveryConfig,
+  type ChatRecoveryContext,
+  type ChatRecoveryOptions
+} from "agents/chat";
 import type {
   ChatResponseResult,
   SaveMessagesOptions,
@@ -478,7 +484,12 @@ export class Think<
         this.#submissionStatuses.run(status.operationId, () =>
           this.#submissionStatus(status)
         ),
+      // Think's `chatRecovery`, read when a run starts, as on Think.
+      get recovery() {
+        return self.#recoveryOptions();
+      },
       hooks: {
+        onRecovery: (context) => this.#onRecovery(context),
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
           // The step's chunks reach extensions before its tool calls do.
@@ -1711,6 +1722,73 @@ export class Think<
   // Scheduler jobs that the previous engine queued call these by name. The
   // turns they would have recovered are gone after the move, so each
   // completes without doing anything instead of failing on retry.
+  /**
+   * As on Think: how often an interrupted turn is attempted again. `true`
+   * keeps the default budget.
+   */
+  chatRecovery: ChatRecoveryConfig = true;
+
+  /**
+   * As on Think: decide what an interrupted turn does. Return
+   * `{ continue: false }` to give it up; the default continues it within
+   * the `chatRecovery` budget.
+   */
+  protected async onChatRecovery(
+    _ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions | void> {
+    return {};
+  }
+
+  /**
+   * As on Think: how long a model stream may send nothing before the turn
+   * is treated as interrupted. `0`, the default, turns the watchdog off.
+   */
+  chatStreamStallTimeoutMs = 0;
+
+  /** The running model call's own stall timeout, from `beforeTurn`. */
+  #turnStallTimeoutMs: number | undefined;
+
+  #recoveryOptions(): { maxAttempts?: number; stallTimeoutMs: number } {
+    const config = this.chatRecovery;
+    const stallTimeoutMs =
+      this.#turnStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
+    if (config === true || config.maxAttempts === undefined) {
+      return { stallTimeoutMs };
+    }
+    return { maxAttempts: config.maxAttempts, stallTimeoutMs };
+  }
+
+  async #onRecovery(context: {
+    readonly operationId: string;
+    readonly attempt: number;
+    readonly partial: UIMessage | undefined;
+  }): Promise<"continue" | "abandon"> {
+    const parts = [...(context.partial?.parts ?? [])];
+    const config = this.chatRecovery;
+    const decision = await this.onChatRecovery({
+      // One incident per operation: the harness attempts an operation
+      // again until it is answered or given up.
+      incidentId: context.operationId,
+      recoveryRootRequestId: context.operationId,
+      attempt: context.attempt,
+      maxAttempts:
+        config === true
+          ? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS
+          : (config.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS),
+      recoveryKind: parts.length > 0 ? "continue" : "retry",
+      streamId: context.operationId,
+      requestId: context.operationId,
+      partialText: parts
+        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .join(""),
+      partialParts: parts,
+      recoveryData: null,
+      messages: [...this.messages],
+      createdAt: Date.now()
+    });
+    return decision?.continue === false ? "abandon" : "continue";
+  }
+
   async _chatRecoveryRetry(): Promise<void> {}
   async _chatRecoveryContinue(): Promise<void> {}
   async _cfRetryMessengerRecoveryDelivery(): Promise<void> {}
@@ -1781,6 +1859,9 @@ export class Think<
         ...(resolved && { defaultModel: resolved })
       };
     }
+    // As on Think: a turn may set its own stall timeout. The harness asks
+    // before every model call and reads `recovery` right after.
+    this.#turnStallTimeoutMs = own?.chatStreamStallTimeoutMs;
     // The sandboxed extensions see the subclass's config, as in Think,
     // once per operation: Think prepares a turn once for its whole tool
     // loop, and the harness asks before every model call.

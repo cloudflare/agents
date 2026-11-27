@@ -530,8 +530,17 @@ function pendingRecoveryRunIds(agent: Think, callback: string): string[] {
  */
 const turnAttemptReasons = new WeakMap<Think, string[]>();
 
+/**
+ * Whether `agent` is the harness-backed Think (`pnpm test:harness`). It has
+ * no chat recovery engine: the harness retries an interrupted turn through
+ * its own Tasks run, which no fixture holds.
+ */
+function isHarnessBackedForTest(agent: Think): boolean {
+  return !("_turnQueue" in agent);
+}
+
 function trackTurnAttemptReasons(agent: Think): void {
-  if (turnAttemptReasons.has(agent)) return;
+  if (turnAttemptReasons.has(agent) || isHarnessBackedForTest(agent)) return;
   const reasons: string[] = [];
   turnAttemptReasons.set(agent, reasons);
   const engine = (
@@ -580,7 +589,7 @@ const heldAttempts = new WeakMap<
  * can look at it.
  */
 function holdTurnAttemptsForTest(agent: Think): void {
-  if (heldAttempts.has(agent)) return;
+  if (heldAttempts.has(agent) || isHarnessBackedForTest(agent)) return;
   const held: Array<{ callback: string; delaySeconds: number }> = [];
   heldAttempts.set(agent, held);
   const engine = (
@@ -883,6 +892,61 @@ function promptLinesForTest(callOptions: MockModelCallOptions): string[] {
             .join("");
     return `${message.role}: ${text}`;
   });
+}
+
+/**
+ * `model`, except that each call's stream sends its first `afterParts`
+ * parts after `stream-start` and then nothing more, until the call is
+ * aborted: a model stream that stalls, for each call `stalls` allows.
+ */
+function stallingModelForTest(
+  model: LanguageModel,
+  afterParts: number,
+  stalls: () => boolean
+): LanguageModel {
+  const inner = model as unknown as {
+    doStream(options: { abortSignal?: AbortSignal }): Promise<{
+      stream: ReadableStream<{ type: string }>;
+    }>;
+  };
+  return {
+    ...(model as object),
+    async doStream(options: { abortSignal?: AbortSignal }) {
+      const result = await inner.doStream(options);
+      if (!stalls()) return result;
+      const { stream } = result;
+      const reader = stream.getReader();
+      let sent = 0;
+      return {
+        stream: new ReadableStream<{ type: string }>({
+          async pull(controller) {
+            if (sent >= afterParts) {
+              // Silence until the watchdog aborts the call.
+              await new Promise<void>((resolve) => {
+                if (options.abortSignal?.aborted) resolve();
+                options.abortSignal?.addEventListener(
+                  "abort",
+                  () => resolve(),
+                  {
+                    once: true
+                  }
+                );
+              });
+              controller.error(options.abortSignal?.reason);
+              return;
+            }
+            const next = await reader.read();
+            if (next.done) {
+              controller.close();
+              return;
+            }
+            if (next.value.type !== "stream-start") sent++;
+            controller.enqueue(next.value);
+          }
+        })
+      };
+    }
+  } as unknown as LanguageModel;
 }
 
 /** Create a streaming text model with static or prompt-derived output. */
@@ -1426,6 +1490,9 @@ export class ThinkTestAgent extends Think {
   private _errorAttemptsRemaining: number | null = null;
   private _stripTextResponseForTest = false;
   private _stallAfterChunks: number | null = null;
+  /** A stall in the model itself, on both Thinks: parts sent, then calls left to stall. */
+  private _modelStallForTest: { afterParts: number; calls: number } | null =
+    null;
   // #1626 stall-recovery: when set, only the first N inferences stall (then the
   // continuation streams normally). `null` = every inference stalls (the
   // original terminal-watchdog behavior).
@@ -3218,6 +3285,68 @@ export class ThinkTestAgent extends Think {
       SELECT value FROM think_config WHERE key = ${key}
     `;
     return rows[0]?.value ?? null;
+  }
+
+  /**
+   * Recovery as an app sees it, on both Thinks: the model stalls on its
+   * first `stalledCalls` calls after `afterParts` parts, the turn runs, and
+   * the agent is waited on until it is stable. Only public API is read.
+   */
+  async stallRecoveryForTest(options: {
+    afterParts: number;
+    stalledCalls: number;
+    timeoutMs: number;
+    /** Arm the watchdog through `beforeTurn` only, the instance's left off. */
+    perTurn?: boolean;
+    recovery?: ChatRecoveryOptions;
+    chatRecovery?: ChatRecoveryConfig;
+  }): Promise<{
+    first: TestChatResult;
+    stable: boolean;
+    recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];
+    roles: string[];
+    lastAssistantText: string;
+  }> {
+    this._modelStallForTest = {
+      afterParts: options.afterParts,
+      calls: options.stalledCalls
+    };
+    const turnConfig = this._turnConfigOverride;
+    if (options.perTurn) {
+      this._turnConfigOverride = {
+        ...turnConfig,
+        chatStreamStallTimeoutMs: options.timeoutMs
+      };
+    } else {
+      this.chatStreamStallTimeoutMs = options.timeoutMs;
+    }
+    this._recoveryHookForTest = options.recovery ?? null;
+    this._recoveryCallsForTest = [];
+    const chatRecovery = this.chatRecovery;
+    if (options.chatRecovery !== undefined) {
+      this.chatRecovery = options.chatRecovery;
+    }
+    try {
+      const first = await this.testChat("stall, then recover");
+      const stable = await this.waitUntilStable({ timeout: 8_000 });
+      const messages = await this.getMessages();
+      const last = messages.filter((m) => m.role === "assistant").at(-1);
+      return {
+        first,
+        stable,
+        recoveryCalls: this._recoveryCallsForTest,
+        roles: messages.map((m) => m.role),
+        lastAssistantText: (last?.parts ?? [])
+          .map((p) => (p.type === "text" ? p.text : ""))
+          .join("")
+      };
+    } finally {
+      this._modelStallForTest = null;
+      this.chatStreamStallTimeoutMs = 0;
+      this._turnConfigOverride = turnConfig;
+      this._recoveryHookForTest = null;
+      this.chatRecovery = chatRecovery;
+    }
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -5797,6 +5926,35 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): ThinkModel {
+    const model = this._baseModelForTest();
+    const modelStall = this._modelStallForTest;
+    if (modelStall && typeof model !== "string") {
+      return stallingModelForTest(model, modelStall.afterParts, () => {
+        if (modelStall.calls <= 0) return false;
+        modelStall.calls--;
+        return true;
+      });
+    }
+    // The harness-backed Think has no `_transformInferenceResult`: a stall
+    // armed by a test is the model's own silence there.
+    if (
+      this._stallAfterChunks == null ||
+      !isHarnessBackedForTest(this) ||
+      typeof model === "string"
+    ) {
+      return model;
+    }
+    // Counted per model call, as `_transformInferenceResult` counts them:
+    // a turn reads its model more than once.
+    return stallingModelForTest(model, this._stallAfterChunks, () => {
+      if (this._stallAttemptsRemaining == null) return true;
+      if (this._stallAttemptsRemaining <= 0) return false;
+      this._stallAttemptsRemaining--;
+      return true;
+    });
+  }
+
+  private _baseModelForTest(): ThinkModel {
     if (this._stringModelForTest) return this._stringModelForTest;
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
