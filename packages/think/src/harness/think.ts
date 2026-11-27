@@ -16,6 +16,7 @@ import {
 } from "agents";
 import {
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
+  unexecutedToolNames,
   type ChatRecoveryConfig,
   type ChatRecoveryContext,
   type ChatRecoveryOptions
@@ -1997,23 +1998,79 @@ export class Think<
   }
 
   /**
+   * The tools a client answers, as on Think: those the last turn had that
+   * the server does not run (the client's own, and the app's declared with
+   * no `execute`). Read once per isolate, since `hasPendingInteraction()`
+   * is polled; stored, so the answer is there after a restart.
+   */
+  #unexecutedTools: string[] | undefined;
+  /** Whether a `think_config` row holds the list; read once per isolate. */
+  #unexecutedToolsStored: boolean | undefined;
+
+  /** Store which of a turn's tools the server does not run, as Think does. */
+  #recordUnexecutedTools(tools: ToolSet): void {
+    const names = unexecutedToolNames(tools);
+    this.#unexecutedTools = names;
+    // An empty list with no row stored says nothing a reader does not
+    // already assume, so it costs no write; an unchanged one is skipped by
+    // the store.
+    this.#unexecutedToolsStored ??=
+      this.#config.get("unexecutedTools") !== undefined;
+    if (names.length === 0 && !this.#unexecutedToolsStored) return;
+    this.#config.set("unexecutedTools", JSON.stringify(names));
+    this.#unexecutedToolsStored = true;
+  }
+
+  /**
+   * The list, read once per isolate. Before the first turn on this version
+   * there is no record, so read `getTools()`, where an app declares a tool
+   * without `execute`, as Think does.
+   */
+  #unexecutedToolNames(): string[] {
+    if (this.#unexecutedTools) return this.#unexecutedTools;
+    const stored = this.#config.get("unexecutedTools");
+    if (stored !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          this.#unexecutedTools = parsed.filter(
+            (name): name is string => typeof name === "string"
+          );
+          return this.#unexecutedTools;
+        }
+      } catch {
+        // Fall through to the app's tools.
+      }
+    }
+    try {
+      this.#unexecutedTools = unexecutedToolNames(this.getTools());
+    } catch {
+      // `getTools()` can need turn-time context: without it, nothing is
+      // known to be a client's.
+      this.#unexecutedTools = [];
+    }
+    return this.#unexecutedTools;
+  }
+
+  /**
    * Whether the latest message has a tool call waiting on a client, as on
-   * Think: an approval, or a call with no result to a tool the server does
-   * not run. An unanswered call to a server tool is dead (a cut-off reply
-   * stored it that way), and nothing will answer it.
+   * Think: an approval, or a call with no result to a tool a client
+   * answers. A call to any other tool was the server's to run; unanswered
+   * in a stored reply, it is dead (a removed tool, or an MCP tool not yet
+   * reconnected, included).
    */
   protected hasPendingInteraction(): boolean {
     const last = this.#transcript.messages.at(-1);
     const parts = last?.parts ?? [];
     if (!parts.some((part) => "toolCallId" in part)) return false;
-    const tools = this.getTools();
+    const answerable = new Set(this.#unexecutedToolNames());
     return parts.some((part) => {
       if (!("toolCallId" in part)) return false;
       if (part.state === "approval-requested") return true;
       if (part.state !== "input-available") return false;
-      const server =
-        tools[getToolName(part as Parameters<typeof getToolName>[0])];
-      return server?.execute === undefined;
+      return answerable.has(
+        getToolName(part as Parameters<typeof getToolName>[0])
+      );
     });
   }
 
@@ -2802,6 +2859,7 @@ export class Think<
     };
     // The first call of an operation says whether it continues a reply.
     if (!this.#continued.has(turn.operationId)) {
+      this.#recordUnexecutedTools(tools);
       this.#continued.set(turn.operationId, turn.continuation);
       this.#clearsAtStart.set(turn.operationId, this.#clears);
     }

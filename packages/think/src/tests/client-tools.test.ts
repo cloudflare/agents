@@ -707,6 +707,24 @@ describe("Think — tool approval", () => {
   });
 });
 
+describe("Think — a call to a tool the client sent", () => {
+  it("waits on a call to a tool the client sent in its request", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    await waitUntil(async () => !(await agent.isChatTurnActiveForTest()), 5000);
+    // The reply ends on the client tool's call: the client answers it.
+    expect(await agent.waitsOnClientForTest()).toBe(true);
+    await closeWS(ws);
+  });
+});
+
 // ── Auto-continuation ────────────────────────────────────────────
 
 describe("Think — auto-continuation", () => {
