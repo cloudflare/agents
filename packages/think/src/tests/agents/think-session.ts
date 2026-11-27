@@ -11438,6 +11438,63 @@ export class ThinkProgrammaticTestAgent extends Think {
     this.resetTurnState();
   }
 
+  /** What a `chat()` started between two resets, or with a stopped signal, hears. */
+  async chatCutOffForTest(how: "reset" | "signal"): Promise<{
+    started: boolean;
+    done: boolean;
+    error: string | null;
+  }> {
+    const callback = new TestCollectingCallback();
+    let started = false;
+    const onStart = callback.onStart.bind(callback);
+    callback.onStart = (event) => {
+      started = true;
+      return onStart(event);
+    };
+    if (how === "signal") {
+      const controller = new AbortController();
+      controller.abort();
+      await this.chat("never runs", callback, { signal: controller.signal });
+    } else {
+      this.resetTurnState();
+      const chatting = this.chat("between the resets", callback);
+      this.resetTurnState();
+      await chatting;
+    }
+    return {
+      started,
+      done: callback.doneCalled,
+      error: callback.errorMessage ?? null
+    };
+  }
+
+  /** A turn saved between two resets, in the same call. */
+  async saveBetweenResetsForTest(): Promise<string> {
+    this.resetTurnState();
+    const saving = this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "between the resets" }]
+      }
+    ]);
+    this.resetTurnState();
+    return (await saving).status;
+  }
+
+  /** A turn saved straight after a reset, in the same call. */
+  async saveRightAfterResetForTest(): Promise<string> {
+    this.resetTurnState();
+    const result = await this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "after the reset" }]
+      }
+    ]);
+    return result.status;
+  }
+
   async recoverChatFiberForTest(requestId: string): Promise<void> {
     await this._handleInternalFiberRecovery({
       id: `fiber-${requestId}`,
@@ -12147,8 +12204,12 @@ export class ThinkProgrammaticTestAgent extends Think {
    * non-zero between tests means a controller leaked.
    */
   async getAbortControllerCount(): Promise<number> {
-    return (this as unknown as { _turns: { aborts: { size: number } } })._turns
-      .aborts.size;
+    const turns = (this as unknown as { _turns?: { aborts: { size: number } } })
+      ._turns;
+    // The harness-backed Think (`pnpm test:harness`) keeps no controller
+    // registry: what would leak is a turn still running.
+    if (!turns) return this.activeTurn === undefined ? 0 : 1;
+    return turns.aborts.size;
   }
 
   async getStoredMessages(): Promise<UIMessage[]> {

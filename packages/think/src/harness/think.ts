@@ -221,22 +221,32 @@ function taskStatusesFor(
   return [...out];
 }
 
-/** A programmatic turn whose caller's signal had aborted before it began. */
-function stoppedBeforeStart(): SaveMessagesResult {
-  return {
-    requestId: crypto.randomUUID(),
-    status: "aborted",
-    reason: "stopped"
-  };
+/** What a `chat()` caller is told when a reset cuts its turn off. As on Think. */
+const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
+
+/** A programmatic turn stopped, or cleared by a reset, before it began. */
+function cutOffBeforeStart(cut: "stopped" | "cleared"): SaveMessagesResult {
+  return cut === "cleared"
+    ? { requestId: crypto.randomUUID(), status: "skipped", reason: "cleared" }
+    : { requestId: crypto.randomUUID(), status: "aborted", reason: "stopped" };
 }
 
 function saveResult(result: ThinkOperationResult): SaveMessagesResult {
   if (result.status === "done") {
     return { requestId: result.operationId, status: "completed" };
   }
+  // A stopped turn ends "aborted"; one stopped while it waited, before it
+  // started, ends "withdrawn". Think reports both as aborted by a stop.
+  if (result.reason === "aborted" || result.reason === "withdrawn") {
+    return {
+      requestId: result.operationId,
+      status: "aborted",
+      reason: "stopped"
+    };
+  }
   return {
     requestId: result.operationId,
-    status: result.reason === "aborted" ? "aborted" : "error",
+    status: "error",
     ...(result.reason !== undefined && { error: result.reason })
   };
 }
@@ -958,7 +968,8 @@ export class Think<
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     // As on Think: a turn stopped before it starts builds and stores nothing.
-    if (options?.signal?.aborted) return stoppedBeforeStart();
+    const cut = await this.#cutOffByStop(options?.signal);
+    if (cut) return cutOffBeforeStart(cut);
     await this.#sync();
     const resolved =
       typeof messages === "function" ? await messages(this.messages) : messages;
@@ -993,7 +1004,8 @@ export class Think<
         reason: "nothing-to-continue"
       };
     }
-    if (options?.signal?.aborted) return stoppedBeforeStart();
+    const cut = await this.#cutOffByStop(options?.signal);
+    if (cut) return cutOffBeforeStart(cut);
     const receipt = await this.harness.session().continue();
     return this.#waitForTurn(receipt.operationId, options?.signal);
   }
@@ -1465,7 +1477,18 @@ export class Think<
     callback: StreamCallback,
     options?: ChatOptions
   ): Promise<void> {
+    const cut = await this.#cutOffByStop(options?.signal);
     const operationId = crypto.randomUUID();
+    if (cut) {
+      // As on Think: the caller hears the request start. One its own signal
+      // stopped hears nothing more; one a reset cut off is told the chat was
+      // cleared, since a silent end would read as an answer.
+      await callback.onStart({ requestId: operationId });
+      if (cut === "cleared" && !options?.signal?.aborted) {
+        await callback.onError(CHAT_CLEARED_ERROR);
+      }
+      return;
+    }
     const messages =
       typeof userMessage === "function"
         ? await userMessage(this.messages)
@@ -1537,6 +1560,56 @@ export class Think<
 
   async cancelChat(requestId: string): Promise<void> {
     await this.harness.session().abort(requestId);
+  }
+
+  /** Stop every turn, running or waiting; each ends `aborted`. */
+  protected abortAllRequests(): void {
+    this.#stopEveryTurn("stopped");
+  }
+
+  /**
+   * Stop every turn, running or waiting, and keep the transcript. A
+   * `clearMessages` resets the session as well.
+   */
+  protected resetTurnState(): void {
+    this.#stopEveryTurn("cleared");
+  }
+
+  /**
+   * A stop of every turn that is open now. The harness reads the open turns
+   * once it is ready, so the turns this shell starts afterwards wait for the
+   * stop first, as Think's synchronous reset cuts them off.
+   */
+  #stopping: Promise<unknown> = Promise.resolve();
+  /** Counts the stops of every turn, so a turn waiting for one sees the next. */
+  #stops = 0;
+  /** What the latest stop does to a turn it cuts off before it starts. */
+  #lastStop: "stopped" | "cleared" = "stopped";
+  #stopEveryTurn(kind: "stopped" | "cleared"): void {
+    this.#stops++;
+    this.#lastStop = kind;
+    const stopping = this.harness.session().abort();
+    // A failed stop is reported, and does not fail the turns after it.
+    this.#stopping = stopping.catch(() => {});
+    void this.keepAliveWhile(() => stopping).catch((error: unknown) =>
+      console.error("[Think] Stopping every turn failed", error)
+    );
+  }
+
+  /**
+   * Wait for the stop in progress, and say what cut a turn off before it
+   * started, if anything: its caller's signal, or another stop that came
+   * while it waited (that stop was meant for it too). As on Think, a reset
+   * skips it as cleared, and `abortAllRequests` stops it.
+   */
+  async #cutOffByStop(
+    signal: AbortSignal | undefined
+  ): Promise<"stopped" | "cleared" | undefined> {
+    if (signal?.aborted) return "stopped";
+    const stops = this.#stops;
+    await this.#stopping;
+    if (this.#stops !== stops) return this.#lastStop;
+    return signal?.aborted ? "stopped" : undefined;
   }
 
   async cancelAllChats(): Promise<void> {
