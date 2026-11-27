@@ -25,5 +25,23 @@
       "file": "submissions.test.ts",
       "test": "Think durable submissions > while a submission runs > a bulk delete that asks for every status deletes only the finished one"
     }
+  },
+  {
+    "file": "hooks.test.ts",
+    "test": "Think — host bridge methods > _insideInferenceLoop is false outside a turn",
+    "reason": "reads the class's private `_insideInferenceLoop` flag (`isInsideInferenceLoop`), the seam `addMessages` uses to hold its broadcast mid-turn",
+    "successor": {
+      "file": "hooks.test.ts",
+      "test": "Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
+    }
+  },
+  {
+    "file": "hooks.test.ts",
+    "test": "Think — host bridge methods > _insideInferenceLoop is false after a completed turn",
+    "reason": "reads the class's private `_insideInferenceLoop` flag (`isInsideInferenceLoop`), the seam `addMessages` uses to hold its broadcast mid-turn",
+    "successor": {
+      "file": "hooks.test.ts",
+      "test": "Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
+    }
   }
 ]
