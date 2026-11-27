@@ -228,12 +228,15 @@ describe("chat recovery, through public behaviour", () => {
       await (await agent()).resetIsolateForTest().catch(() => undefined);
       ws.close();
       // The next start recovers the turn and asks onChatRecovery.
-      let calls: Awaited<
-        ReturnType<Awaited<ReturnType<typeof agent>>["recoveryCallsForTest"]>
-      > = [];
+      let calls: Array<{
+        partialText: string;
+        streamId: string;
+        createdAt: number;
+        recoveryRootRequestId: string;
+      }> = [];
       await vi.waitFor(
         async () => {
-          calls = await (await agent()).recoveryCallsForTest();
+          calls = [...(await (await agent()).recoveryCallsForTest())];
           expect(calls.length).toBeGreaterThanOrEqual(1);
         },
         { timeout: 15_000, interval: 50 }
