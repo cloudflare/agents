@@ -1,4 +1,4 @@
-import { CHAT_REQUEST_CONTEXT_KEY } from "agents/chat";
+import { CHAT_REQUEST_CONTEXT_KEY, type ChatTurnInput } from "agents/chat";
 import {
   AIChatAgent,
   type ChatResponseResult,
@@ -139,21 +139,32 @@ type ContinuationStateForTest = {
 function continuationStateForTest(
   agent: AIChatAgent
 ): ContinuationStateForTest {
-  const continuation = (
+  // The chat module's continuation turns: those of the lane that continue a
+  // reply, waiting or running.
+  const open = (
     agent as unknown as {
-      _continuation: {
-        pending: unknown;
-        running: unknown;
-        activeRequestId: string | null;
-        activeConnectionId: string | null;
-      };
+      _openChatTurns(): readonly { runId: string; status: string }[];
     }
-  )._continuation;
+  )._openChatTurns();
+  const continuations = open.filter(
+    (run) =>
+      agent.tasks.inputOf<ChatTurnInput>(run.runId)?.mode === "continue" ||
+      agent.tasks.inputOf<ChatTurnInput>(run.runId)?.trigger === "tool-answer"
+  );
+  const running = continuations.find((run) => run.status === "running");
+  const waiting = continuations.some((run) => run.status === "pending");
+  const origin = running
+    ? (
+        agent.tasks.peek(running.runId)?.metadata as
+          | { chat?: { origin?: string } }
+          | undefined
+      )?.chat?.origin
+    : undefined;
   return {
-    hasPending: continuation.pending !== null || continuation.running !== null,
-    hasNext: continuation.pending !== null && continuation.running !== null,
-    activeRequestId: continuation.activeRequestId,
-    activeConnectionId: continuation.activeConnectionId
+    hasPending: continuations.length > 0,
+    hasNext: waiting && running !== undefined,
+    activeRequestId: running?.runId ?? null,
+    activeConnectionId: origin ?? null
   };
 }
 
@@ -1491,7 +1502,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 
   getChatMessageCallCountForTest(): number {
@@ -2608,7 +2619,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         (value) => value.status,
         (error) => `threw: ${error instanceof Error ? error.message : error}`
       );
-      await this.waitUntilStable();
+      await this.waitUntilStable({ pendingInteraction: () => false });
       return {
         status,
         responses: this._chatResponseResults.map((r) => r.status),
@@ -2675,7 +2686,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<boolean> {
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
     return true;
   }
 
@@ -2687,7 +2698,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     started: string[];
     active: boolean;
   }> {
-    await this["_turns"].waitForIdle();
+    await this.waitUntilStable({ pendingInteraction: () => false });
     return {
       started: [...this._startedRequestIds],
       active: this.isChatTurnActiveForTest()
@@ -3156,7 +3167,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {
@@ -3174,7 +3185,7 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this["_turns"].waitForIdle();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 
   private _responseResults: ChatResponseResult[] = [];
@@ -3306,7 +3317,7 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {
@@ -4704,7 +4715,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       UPDATE cf_agents_jobs SET time = ${past} WHERE id LIKE 'task:%'
     `;
     await this.alarm();
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 
   async rvContinueWithStreamErrorForTest(message: string): Promise<string> {
@@ -5154,7 +5165,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await new Promise((resolve) => setTimeout(resolve, 50));
       inspection = await this.inspectAgentToolRun(runId);
     }
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
     return { status: inspection?.status, body: this._lastBody };
   }
 
@@ -5193,7 +5204,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await new Promise((resolve) => setTimeout(resolve, 50));
       inspection = await this.inspectAgentToolRun(runId);
     }
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
     const followUp = this._followUpRequestId;
     const row = this["_agentToolRuns"].store.read(runId);
     const followUpStream = followUp
@@ -5586,7 +5597,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       WHERE id = ${`task:${runId}`}
     `;
     await this.alarm();
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
     return true;
   }
 
@@ -5631,7 +5642,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       LIMIT 1
     `;
     if (!rows[0]) {
-      await this.waitUntilStable();
+      await this.waitUntilStable({ pendingInteraction: () => false });
       return;
     }
     await this._chatRecoveryRetryDetached(
@@ -5654,7 +5665,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       LIMIT 1
     `;
     if (!rows[0]) {
-      await this.waitUntilStable();
+      await this.waitUntilStable({ pendingInteraction: () => false });
       return;
     }
     await this._chatRecoveryContinueDetached(
@@ -5965,7 +5976,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 
   async triggerInterruptedStreamCheck(): Promise<void> {
@@ -6253,7 +6264,7 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 }
 
@@ -6367,7 +6378,7 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this.waitUntilStable();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 }
 
@@ -7102,7 +7113,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     ) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    await this["_turnQueue"].waitForIdle();
+    await this.waitUntilStable({ pendingInteraction: () => false });
   }
 
   private _userTextsForTest(): string[] {

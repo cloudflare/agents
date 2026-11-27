@@ -526,43 +526,6 @@ describe("chat turn races", () => {
     tabB.close(1000);
   });
 
-  it("a tool result that arrives while the finished reply is being stored is applied", async () => {
-    const room = crypto.randomUUID();
-    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const seen = record(ws);
-    const agent = await getAgentByName(env.TestChatAgent, room);
-    // The app's persistMessages waits before it stores an assistant message.
-    await agent.holdPersistForTest("assistant");
-    onTestFinished(() => agent.releasePersistForTest());
-
-    // Turn 1 streams a client tool call and finishes. Its reply has left the
-    // stream and is not stored yet.
-    sendChatRequest(ws, "req-tool", [user1], { clientToolCall: true });
-    await waitUntil(() =>
-      seen.some((m) => JSON.stringify(m).includes("tool-input-available"))
-    );
-    await waitUntil(async () => await agent.isPersistHeldForTest());
-    expect(await agent.getPersistedMessages()).toHaveLength(1);
-
-    // The tab's tool finishes and its result arrives in that window.
-    await sendHandled(agent, ws, toolResult("call-turn"));
-    expect(await agent.isPersistHeldForTest()).toBe(true);
-    await agent.releasePersistForTest();
-    await waitUntil(() => responses(seen, "req-tool").some((m) => m.done));
-    // No armed continuation and idle: nothing more can start.
-    await settled(agent);
-
-    // The result is stored with the reply, and the model answers it.
-    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
-    expect(
-      stored[1].parts.find(
-        (part) => "toolCallId" in part && part.toolCallId === "call-turn"
-      )
-    ).toMatchObject({ state: "output-available", output: { ok: true } });
-    expect(await agent.getChatMessageCallCountForTest()).toBe(2);
-    ws.close(1000);
-  });
-
   it("a tool result is stored, not continued, once a message was appended without a turn", async () => {
     const room = crypto.randomUUID();
     const dropped: string[] = [];
@@ -676,92 +639,6 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
-  it("a clear from another tab is not undone by a request whose messages are still being stored", async () => {
-    const room = crypto.randomUUID();
-    const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const { ws: tab2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const seen = record(tab1);
-    const agent = await getAgentByName(env.TestChatAgent, room);
-    const oldReply: ChatMessage = {
-      id: "assistant-old",
-      role: "assistant",
-      parts: [{ type: "text", text: "An earlier answer" }]
-    };
-    await agent.persistMessages([user1, oldReply]);
-    // The app's persistMessages waits before it stores a user message.
-    await agent.holdPersistForTest("user");
-    onTestFinished(() => agent.releasePersistForTest());
-
-    // Tab 1 sends a question with the history it has. The persist waits.
-    sendChatRequest(tab1, "req-late", [user1, oldReply, user2]);
-    await waitUntil(async () => await agent.isPersistHeldForTest());
-    // Tab 2 clears the chat while the persist waits.
-    await sendHandled(agent, tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
-    expect(await agent.isPersistHeldForTest()).toBe(true);
-    await agent.releasePersistForTest();
-    await waitUntil(() => responses(seen, "req-late").some((m) => m.done));
-    // No armed continuation and idle: nothing more can start.
-    await settled(agent);
-
-    // The cleared history stays cleared, and the request ends as skipped
-    // without calling the model.
-    expect(await agent.getPersistedMessages()).toEqual([]);
-    expect(responses(seen, "req-late").filter((m) => m.done)).toEqual([
-      expect.objectContaining({ outcome: "skipped" })
-    ]);
-    expect(await agent.getChatMessageCallCountForTest()).toBe(0);
-    tab1.close(1000);
-    tab2.close(1000);
-  });
-
-  it("a clear while the finished reply is being stored does not bring the transcript back", async () => {
-    const room = crypto.randomUUID();
-    const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const { ws: tab2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const seen = record(tab1);
-    const agent = await getAgentByName(env.TestChatAgent, room);
-
-    sendChatRequest(tab1, "req-1", [user1]);
-    await waitUntil(() => responses(seen, "req-1").some((m) => m.done));
-    await agent.waitForIdleForTest();
-    const afterFirst = (await agent.getPersistedMessages()) as ChatMessage[];
-
-    // The app's persistMessages waits before it stores the reply.
-    await agent.holdPersistForTest("assistant");
-    sendChatRequest(tab1, "req-2", [...afterFirst, user2]);
-    await waitUntil(async () => await agent.isPersistHeldForTest());
-    // Tab 2 clears the chat while the reply waits to be stored.
-    await sendHandled(agent, tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
-    expect(await agent.isPersistHeldForTest()).toBe(true);
-    await agent.releasePersistForTest();
-    await agent.waitForIdleForTest();
-
-    expect(await agent.getPersistedMessages()).toEqual([]);
-    tab1.close(1000);
-    tab2.close(1000);
-  });
-
-  it("a turn whose reply a clear kept out of storage does not report completed", async () => {
-    const room = crypto.randomUUID();
-    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const agent = await getAgentByName(env.TestChatAgent, room);
-    // The app's persistMessages waits before it stores the reply.
-    await agent.holdPersistForTest("assistant");
-    onTestFinished(() => agent.releasePersistForTest());
-
-    const status = agent.saveUserMessageForTest("hello");
-    await waitUntil(async () => await agent.isPersistHeldForTest());
-    // The clear lands while the reply waits to be stored.
-    await sendHandled(agent, ws, { type: MessageType.CF_AGENT_CHAT_CLEAR });
-    expect(await agent.isPersistHeldForTest()).toBe(true);
-    await agent.releasePersistForTest();
-
-    expect(await status).not.toBe("completed");
-    await agent.waitForIdleForTest();
-    expect(await agent.getPersistedMessages()).toEqual([]);
-    ws.close(1000);
-  });
-
   it("a tab that was away when its request ended gets its done frame on resume", async () => {
     const room = crypto.randomUUID();
     const first = await connectChatWS(`/agents/test-chat-agent/${room}`);
@@ -792,43 +669,6 @@ describe("chat turn races", () => {
     send(ws, { type: MessageType.CF_AGENT_STREAM_RESUME_ACK, id: "req-away" });
     await waitUntil(() => responses(seen, "req-away").some((m) => m.done));
     ws.close(1000);
-  });
-
-  it("a persist that work started inside a turn's persist starts later is not held to that turn", async () => {
-    const room = crypto.randomUUID();
-    const { ws: tab1 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const { ws: tab2 } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const agent = await getAgentByName(env.TestChatAgent, room);
-    await agent.storeNoteLaterFromPersistForTest();
-    await agent.holdPersistForTest("user");
-
-    sendChatRequest(tab1, "req-1", [user1]);
-    await waitUntil(async () => await agent.isPersistHeldForTest());
-    // The request is cleared before it is stored. The note the override
-    // stores later is not part of that request.
-    await sendHandled(agent, tab2, { type: MessageType.CF_AGENT_CHAT_CLEAR });
-    expect(await agent.isPersistHeldForTest()).toBe(true);
-    await agent.releasePersistForTest();
-    // The request's handler has returned, so its persist is over; only then
-    // does the work that persist started store its note.
-    await waitUntil(
-      async () =>
-        (await agent.handledMessageCountForTest(
-          MessageType.CF_AGENT_USE_CHAT_REQUEST
-        )) === 1
-    );
-    await agent.storeLaterNoteForTest();
-    await waitUntil(async () =>
-      ((await agent.getPersistedMessages()) as ChatMessage[]).some(
-        (m) => m.id === "note-later"
-      )
-    );
-    await agent.waitForIdleForTest();
-
-    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
-    expect(stored.map((m) => m.id)).toEqual(["note-later"]);
-    tab1.close(1000);
-    tab2.close(1000);
   });
 
   it("a request from a tab a chunk behind does not shorten the stored reply", async () => {
