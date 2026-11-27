@@ -1193,15 +1193,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /**
    * @internal The chunks an operation's reply has streamed so far, while it
    * runs: none once its reply is stored, or for an operation that never ran.
+   * Chunks recovery discarded (`persist: false`) are left out but keep
+   * their stream positions: `first` is the position of `chunks[0]`, so an
+   * agent-tool reader's cursor stays valid.
    */
   async operationChunks(
     session: ThinkSessionId,
     operationId: string
-  ): Promise<UIMessageChunk[]> {
+  ): Promise<{ first: number; chunks: UIMessageChunk[] }> {
     await this.lifecycle.ready();
-    // By stream position, as an agent-tool reader's cursor counts them:
-    // chunks recovery discarded keep theirs.
-    return this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+    const runId = runIdOf(session, operationId);
+    const all = this.#streamChunks(chatTurnStreamId(runId));
+    const first = Math.min(this.#discardedOf(runId), all.length);
+    return { first, chunks: all.slice(first) };
   }
 
   /**
@@ -1221,7 +1225,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     listener: (
       event: { type: "chunk"; chunk: UIMessageChunk } | { type: "end" }
     ) => void
-  ): { chunks: UIMessageChunk[]; stop(): void } {
+  ): { first: number; chunks: UIMessageChunk[]; stop(): void } {
     const stop = this.#events.subscribe(session, (event) => {
       if (event.type === "chunk" && event.operationId === operationId) {
         listener({ type: "chunk", chunk: event.chunk });
@@ -1237,11 +1241,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // attempts' chunks back yet (its partial is empty): the stored stream
     // has them then. A live partial with chunks already holds them.
     const live = this.#live.get(session);
-    const chunks =
+    const runId = runIdOf(session, operationId);
+    const [all, discarded] =
       live?.operationId === operationId && live.partial.length > 0
-        ? [...live.partial]
-        : this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
-    return { chunks, stop };
+        ? [live.partial, live.discarded]
+        : [
+            this.#streamChunks(chatTurnStreamId(runId)),
+            this.#discardedOf(runId)
+          ];
+    // As `operationChunks`: what recovery discarded is left out, at its
+    // positions.
+    const first = Math.min(discarded, all.length);
+    return { first, chunks: all.slice(first), stop };
   }
 
   /**
@@ -3458,9 +3469,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   #turnChunks(runId: string): UIMessageChunk[] {
     const chunks = this.#streamChunks(chatTurnStreamId(runId));
-    const discarded =
-      this.#tasks.checkpointOf<number>(runId, CHAT_DISCARDED_CHECKPOINT) ?? 0;
+    const discarded = this.#discardedOf(runId);
     return discarded > 0 ? chunks.slice(discarded) : chunks;
+  }
+
+  /** How many of run `runId`'s first stream chunks recovery discarded. */
+  #discardedOf(runId: string): number {
+    return (
+      this.#tasks.checkpointOf<number>(runId, CHAT_DISCARDED_CHECKPOINT) ?? 0
+    );
   }
 
   #streamChunks(streamId: string | null | undefined): UIMessageChunk[] {

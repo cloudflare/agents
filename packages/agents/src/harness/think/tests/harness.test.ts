@@ -1312,7 +1312,7 @@ describe("ThinkHarness durability", () => {
     );
   });
 
-  it("keeps the stream positions of chunks recovery dropped for an agent-tool reader", async () => {
+  it("leaves out what recovery dropped for an agent-tool reader, at its stream positions", async () => {
     const stub = fresh();
     await stub.setStallTimeout(50);
     await stub.answerRecovery({ persist: false });
@@ -1320,11 +1320,16 @@ describe("ThinkHarness durability", () => {
     await stub.throwInBeforeTurn(3);
     const receipt = await stub.submit("slow");
     expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
-    // The recovery attempt's reader is handed the dropped attempt's chunks
-    // too: a cursor into them stays valid, and the new ones follow.
-    const [stored, followed] = (await stub.operationChunksAt(2)) ?? [0, 0];
-    expect(stored).toBeGreaterThan(0);
-    expect(followed).toBe(stored);
+    // Each attempt's readers are handed none of what recovery dropped, and
+    // the chunks still to come are numbered after it: positions only grow,
+    // so a cursor into a dropped attempt stays valid and nothing is seen
+    // twice.
+    const second = await stub.operationChunksAt(2);
+    const third = await stub.operationChunksAt(3);
+    expect(second?.[0]).toBeGreaterThan(0);
+    expect(second).toEqual([second?.[0], 0, second?.[0], 0]);
+    expect(third?.[0]).toBeGreaterThan(second?.[0] ?? 0);
+    expect(third).toEqual([third?.[0], 0, third?.[0], 0]);
   });
 
   it("keeps a reply recovery dropped out of the transcript when the next attempt fails", async () => {

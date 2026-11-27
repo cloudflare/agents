@@ -340,16 +340,24 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         const calls =
           (this.ctx.storage.kv.get<number>(BEFORE_TURN_CALLS_KEY) ?? 0) + 1;
         this.ctx.storage.kv.put(BEFORE_TURN_CALLS_KEY, calls);
+        // What an agent-tool reader of this operation is handed as each
+        // call begins: the position of its first chunk, and how many.
+        const stored = await this.harness.operationChunks(session, operationId);
+        const followed = this.harness.followOperation(
+          session,
+          operationId,
+          () => {}
+        );
+        followed.stop();
+        this.ctx.storage.kv.put(`${OPERATION_CHUNKS_KEY}:${calls}`, [
+          stored.first,
+          stored.chunks.length,
+          followed.first,
+          followed.chunks.length
+        ]);
         if (this.ctx.storage.kv.get<number>(THROW_AT_KEY) === calls) {
           throw new Error("beforeTurn failed");
         }
-        // What an agent-tool reader of this operation is handed, by stream
-        // position, as each call begins.
-        this.ctx.storage.kv.put(`${OPERATION_CHUNKS_KEY}:${calls}`, [
-          (await this.harness.operationChunks(session, operationId)).length,
-          this.harness.followOperation(session, operationId, () => {}).chunks
-            .length
-        ]);
         // A hook that waits on I/O, given the operation's signal.
         if (this.ctx.storage.kv.get<boolean>(WAIT_ON_SIGNAL_KEY)) {
           this.ctx.storage.kv.put(SIGNAL_SEEN_KEY, "waiting");
@@ -1306,7 +1314,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** What `operationChunks` and `followOperation` held at `beforeTurn` `call`. */
-  operationChunksAt(call: number): [number, number] | undefined {
+  operationChunksAt(
+    call: number
+  ): [number, number, number, number] | undefined {
     return this.ctx.storage.kv.get(`${OPERATION_CHUNKS_KEY}:${call}`);
   }
 

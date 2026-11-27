@@ -3837,8 +3837,12 @@ export class Think<
   ): Promise<AgentToolStoredChunk[]> {
     const session = this.harness.session().id;
     const operationId = agentToolOperationId(runId);
-    let chunks = await this.harness.operationChunks(session, operationId);
-    if (chunks.length === 0) {
+    const stored = await this.harness.operationChunks(session, operationId);
+    // Numbered by stream position: what recovery discarded is left out, and
+    // the rest keep their places.
+    let first = stored.first;
+    let chunks = stored.chunks;
+    if (chunks.length === 0 && first === 0) {
       // Settled: the reply is stored and its stream gone. A replay from the
       // start gets the reply; a reader with a position saw it live.
       if (afterSequence >= 0) return [];
@@ -3851,7 +3855,10 @@ export class Think<
       chunks = message ? chunksOfMessage(message) : [];
     }
     return chunks
-      .map((chunk, sequence) => ({ sequence, body: JSON.stringify(chunk) }))
+      .map((chunk, at) => ({
+        sequence: first + at,
+        body: JSON.stringify(chunk)
+      }))
       .filter((chunk) => chunk.sequence > afterSequence);
   }
 
@@ -3918,6 +3925,8 @@ export class Think<
           }
         );
         follow = followed;
+        // Positions recovery discarded are skipped, not renumbered.
+        next = followed.first;
         for (const chunk of followed.chunks) emit(chunk);
         onAbort = close;
         if (signal?.aborted) return close();
