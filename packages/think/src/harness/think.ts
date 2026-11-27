@@ -46,6 +46,7 @@ import {
   tool,
   type LanguageModel,
   type LanguageModelUsage,
+  type ModelMessage,
   type ToolSet,
   type TypedToolCall,
   type UIMessage,
@@ -538,6 +539,8 @@ export class Think<
         messages?: TurnConfig["messages"];
         /** How many parts of a continued reply the rewrite already had. */
         replyParts?: number;
+        /** The proactive compactions the turn tried (`contextOverflow`). */
+        proactive?: number;
       }
     | undefined;
   /**
@@ -3048,6 +3051,9 @@ export class Think<
     // The step before this call ran its tools: it ends now, before this
     // call's hooks, as an AI SDK step ends before the next `prepareStep`.
     const reply = turn.messages.at(-1);
+    // The step that just ended, whose usage the proactive guard reads.
+    const lastUsage =
+      turn.step > 0 ? this.#openSteps.get(turn.operationId)?.usage : undefined;
     if (turn.step > 0 && reply?.role === "assistant") {
       await this.#endStep(turn.operationId, reply);
     }
@@ -3186,6 +3192,7 @@ export class Think<
           ? continued.parts.length
           : 0;
     }
+    const compacted = await this.#compactBeforeStep(turn, lastUsage, tools);
     const rewritten = this.#ownTurn?.messages;
     // This turn's reply, and what follows it (a context reminder), as the
     // harness projects them for this call.
@@ -3204,8 +3211,9 @@ export class Think<
             ...turn.messages.slice(replyAt + 1)
           ].filter((m) => m.parts.length > 0)
         : [];
-    const turnMessages =
-      rewritten === undefined
+    const turnMessages = compacted
+      ? compacted
+      : rewritten === undefined
         ? undefined
         : added.length === 0
           ? rewritten
@@ -3458,6 +3466,53 @@ export class Think<
       this.#extensionTurn = undefined;
     }
     return shortened;
+  }
+
+  /**
+   * Think's proactive guard (`contextOverflow.proactive`): when the step
+   * before reported input tokens past the budget, compact the session and
+   * send this call the compacted history with the turn's reply so far.
+   * Best-effort: on any failure the call goes on unchanged.
+   */
+  async #compactBeforeStep(
+    turn: ThinkTurnContext,
+    usage: LanguageModelUsage | undefined,
+    tools: ToolSet
+  ): Promise<ModelMessage[] | undefined> {
+    const guard = this.contextOverflow?.proactive;
+    const own = this.#ownTurn;
+    if (!guard || guard.maxInputTokens <= 0) return undefined;
+    if (own?.operationId !== turn.operationId) return undefined;
+    const tried = own.proactive ?? 0;
+    if (tried >= Math.max(1, guard.maxCompactions ?? 1)) return undefined;
+    const used = usage?.inputTokens ?? usage?.totalTokens;
+    if (used == null || !Number.isFinite(used)) return undefined;
+    if (used < guard.maxInputTokens * (guard.headroom ?? 0.9)) return undefined;
+    try {
+      // The attempt counts, so a no-op compaction isn't tried every step.
+      own.proactive = tried + 1;
+      const shortened = Boolean(await this.session.compact());
+      this._emit("chat:context:compacted", {
+        reason: "proactive",
+        shortened
+      });
+      if (!shortened) return undefined;
+      const head = (await this.session.getHistory()) as UIMessage[];
+      const reply = turn.messages.at(-1);
+      const messages =
+        reply?.role === "assistant" && !head.some((m) => m.id === reply.id)
+          ? [...head, reply]
+          : head;
+      return await convertToModelMessages(messages, {
+        tools,
+        ignoreIncompleteToolCalls: true
+      });
+    } catch (error) {
+      console.warn(
+        `[Think] proactive context compaction failed; proceeding without it: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return undefined;
+    }
   }
 
   #classify(error: unknown): ThinkErrorClass {
