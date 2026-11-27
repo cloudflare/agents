@@ -24,6 +24,7 @@ type AdmissionStub = {
   listSubmissions(): Promise<Array<{ submissionId: string; status: string }>>;
   getMessagesForTest(): Promise<UIMessage[]>;
   getIncidentsForTest(): Promise<string[]>;
+  admissionsRecordedForTest(): Promise<boolean>;
   getAdmissionsForTest(): Promise<
     Array<{ requestId: string; stopped: boolean }>
   >;
@@ -139,6 +140,8 @@ async function streaming(frames: Array<Record<string, unknown>>, id: string) {
 
 /** Wait until request `id` has its admission record. */
 async function admitted(binding: Binding, room: string, id: string) {
+  // The harness-backed Think keeps no admission records to wait for.
+  if (!(await (await agent(binding, room)).admissionsRecordedForTest())) return;
   const records = await waitFor(
     async () => (await agent(binding, room)).getAdmissionsForTest(),
     (list) => list.some((r) => r.requestId === id),
