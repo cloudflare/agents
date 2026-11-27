@@ -231,6 +231,7 @@ describe("chat recovery, through public behaviour", () => {
         },
         { timeout: 10_000, interval: 10 }
       );
+      const resetAt = Date.now();
       await (await agent()).resetIsolateForTest().catch(() => undefined);
       ws.close();
       // The next start recovers the turn and asks onChatRecovery.
@@ -247,22 +248,29 @@ describe("chat recovery, through public behaviour", () => {
         },
         { timeout: 15_000, interval: 50 }
       );
-      return { requestId, calls, startedAt };
+      return { requestId, calls, startedAt, resetAt };
     }
 
     it("tells onChatRecovery the partial a reset cut off mid-reply", async () => {
-      const { requestId, calls, startedAt } = await resetDuringTurn(
-        "reset-mid",
-        2
-      );
+      const { requestId, calls } = await resetDuringTurn("reset-mid", 2);
       const [first] = calls;
       // What the reset left of the reply: text the tab had seen, not empty.
       expect(first?.partialText).toMatch(/^one /);
       expect(first?.streamId).toEqual(expect.any(String));
       expect(first?.streamId).not.toBe("");
-      expect(first?.createdAt).toBeGreaterThanOrEqual(startedAt);
-      expect(first?.createdAt).toBeLessThanOrEqual(Date.now());
+      expect(first?.createdAt).toEqual(expect.any(Number));
       expect(first?.recoveryRootRequestId).toBe(requestId);
+    }, 30_000);
+
+    it("dates a reset-interrupted turn by when it started, not by when it was recovered", async () => {
+      const { calls, startedAt, resetAt } = await resetDuringTurn(
+        "reset-created-at",
+        2
+      );
+      // `createdAt` is the interrupted turn's start: before the reset that
+      // cut it off, so before the recovery that runs after it.
+      expect(calls[0]?.createdAt).toBeGreaterThanOrEqual(startedAt);
+      expect(calls[0]?.createdAt).toBeLessThanOrEqual(resetAt);
     }, 30_000);
 
     it("tells onChatRecovery of a turn a reset cut off before its first chunk, with no partial", async () => {
