@@ -79,6 +79,7 @@ import {
   loadThinkExtensions,
   ThinkExtensionHooks
 } from "../extensions/wiring";
+import { turnMetadataFromMessages } from "../turn-metadata";
 import type {
   ExtensionConfig,
   MessageMetadataCallback,
@@ -1224,9 +1225,13 @@ export class Think<
     return undefined;
   }
 
-  /** Metadata of the running turn. Not supported. */
-  get activeTurnMetadata(): undefined {
-    return undefined;
+  /**
+   * The server-supplied metadata stamped on the running turn's user
+   * message (`ChatOptions.metadata`), as on Think: read from the transcript,
+   * so a recovered or continued turn sees the same value.
+   */
+  get activeTurnMetadata(): Record<string, unknown> | undefined {
+    return turnMetadataFromMessages(this.messages);
   }
 
   /** The turn running now, if any. */
@@ -1971,10 +1976,32 @@ export class Think<
       }
       return;
     }
-    const messages =
+    const given =
       typeof userMessage === "function"
         ? await userMessage(this.messages)
         : toInput(userMessage);
+    // As on Think: the caller's channel and metadata are stamped on the
+    // user messages, under keys a client's writes cannot set.
+    const stamp = {
+      ...(options?.channel !== undefined && { channel: options.channel }),
+      ...(options?.metadata !== undefined && {
+        turnMetadata: options.metadata
+      })
+    };
+    const messages =
+      Object.keys(stamp).length === 0
+        ? given
+        : given.map((message) =>
+            message.role === "user"
+              ? {
+                  ...message,
+                  metadata: {
+                    ...(message.metadata as object | undefined),
+                    ...stamp
+                  }
+                }
+              : message
+          );
     this.#turns.set(operationId, { trigger: "rpc" });
     options?.signal?.addEventListener(
       "abort",

@@ -160,5 +160,14 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > ends a stalled turn with an error when onChatRecovery throws"
     }
+  },
+  {
+    "file": "turn-metadata.test.ts",
+    "test": "turn metadata > strips reserved metadata keys from client-supplied messages at intake",
+    "reason": "Writes through Think's private intake seam `_persistIncomingMessage`, without a request.",
+    "successor": {
+      "file": "turn-metadata.test.ts",
+      "test": "turn metadata > strips reserved metadata keys a client's chat request sends"
+    }
   }
 ]
