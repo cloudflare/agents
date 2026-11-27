@@ -1075,4 +1075,131 @@ describe("chat recovery, through public behaviour", () => {
       unsubscribe();
     }
   }, 90_000);
+
+  // Successor of think-session's "PARKS a continuation … while a CLIENT
+  // interaction is pending": a turn waiting on
+  // the client's tool is not stuck, so a reset there spends no attempt and
+  // gives nothing up, and the client's answer finishes the reply.
+  it("waits for the client's tool answer after a reset, giving nothing up, then finishes the reply", async () => {
+    const room = `client-wait-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    const exhausted: unknown[] = [];
+    const skipped: Array<{ reason?: string; recoveryKind?: string }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.name !== room) return;
+      if (event.type === "chat:recovery:exhausted") {
+        exhausted.push(event.payload);
+      }
+      if (event.type === "chat:recovery:skipped") {
+        skipped.push(
+          event.payload as { reason?: string; recoveryKind?: string }
+        );
+      }
+    });
+    const frames: Array<{ type?: string; body?: string; error?: boolean }> = [];
+    async function tab() {
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.addEventListener("message", (event) => {
+        frames.push(JSON.parse(String(event.data)));
+      });
+      ws.accept();
+      return ws;
+    }
+    try {
+      await (
+        await agent()
+      ).askClientToolAcrossResetsForTest({
+        stableTimeoutMs: 200
+      });
+      let ws = await tab();
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "confirm it with me" }]
+                }
+              ],
+              clientTools: [
+                { name: "client_action", description: "A client tool" }
+              ]
+            })
+          }
+        })
+      );
+      // The model has asked the client's tool.
+      await vi.waitFor(
+        () =>
+          expect(
+            frames.some((frame) =>
+              frame.body?.includes('"tool-input-available"')
+            )
+          ).toBe(true),
+        { timeout: 10_000, interval: 20 }
+      );
+      await (await agent()).resetIsolateForTest().catch(() => undefined);
+      ws.close();
+      ws = await tab();
+      // Recovery finds the turn waiting on the client, and leaves it to the
+      // client's answer.
+      await vi.waitFor(
+        () =>
+          expect(skipped).toMatchObject([
+            { reason: "awaiting_client_interaction", recoveryKind: "continue" }
+          ]),
+        { timeout: 15_000, interval: 20 }
+      );
+
+      // Nothing given up, and the model not asked again: the turn waits.
+      expect(exhausted).toEqual([]);
+      expect(await (await agent()).modelCallsForTest()).toBe(0);
+      const waiting = (await (await agent()).getMessages()) as Array<{
+        role: string;
+        parts: Array<{ type: string; state?: string }>;
+      }>;
+      expect(waiting.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(
+        waiting[1]?.parts.find((part) => part.type === "tool-client_action")
+          ?.state
+      ).toBe("input-available");
+
+      // The client answers, and the reply goes on.
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "tc-client",
+          toolName: "client_action",
+          output: { confirmed: true },
+          autoContinue: true
+        })
+      );
+      await vi.waitFor(
+        async () => {
+          expect(await (await agent()).lastAssistantTextForTest()).toContain(
+            "Done after the client"
+          );
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      ws.close();
+      expect(exhausted).toEqual([]);
+      expect(frames.some((frame) => frame.error)).toBe(false);
+    } finally {
+      unsubscribe();
+    }
+  }, 60_000);
 });
