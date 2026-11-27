@@ -871,6 +871,21 @@ export class ChatRecoveryEngine {
       ) {
         await wake.persistOrphanedStream(streamId);
       }
+      // Nothing continues the reply: its stream ends here. Before the
+      // give-up is delivered, so a tab that was offered the stream and has
+      // not answered gets the terminal message too; left active, the stream
+      // would also read as a turn still running to the reconcile below. A
+      // write that fails must not cost the tabs that message: the give-up
+      // is delivered all the same, and the failure is thrown after it, so
+      // the run is replayed.
+      let streamFailure: { error: unknown } | undefined;
+      if (streamStillActive) {
+        try {
+          await wake.completeRecoveredStream(streamId);
+        } catch (error) {
+          streamFailure = { error };
+        }
+      }
       await adapter.exhaustChatRecovery(
         incident,
         config,
@@ -879,7 +894,9 @@ export class ChatRecoveryEngine {
         createdAt,
         snapshot?.originMessageIds
       );
+      if (streamFailure) throw streamFailure.error;
       this.#settled();
+      await this.#reconcileChildRuns();
       return;
     }
 
@@ -2055,6 +2072,7 @@ export class ChatRecoveryEngine {
         adapter.onGiveUpBookkeepingError("seal", writeError);
       }
     }
+    await this.#reconcileChildRuns();
   }
 
   /**
@@ -2124,26 +2142,29 @@ export class ChatRecoveryEngine {
     ) {
       await adapter.setRecovering(false);
     }
-    // A recovery that ends without a turn (skipped, failed) settles nothing
-    // itself. If this agent is an agent-tool child, close the runs it held
-    // open, so a parent that follows one is not left waiting. An attempt
-    // does this as it ends.
-    const turns = adapter.turns;
-    if (
-      (status === "skipped" || status === "failed") &&
-      turns &&
-      !turns.attemptScope.getStore()
-    ) {
-      try {
-        await turns.reconcileAgentToolChildRuns();
-      } catch (error) {
-        console.error(
-          `${turns.label} failed to reconcile agent-tool child runs after recovery ended`,
-          error
-        );
-      }
+    if (status === "skipped" || status === "failed") {
+      await this.#reconcileChildRuns();
     }
     return true;
+  }
+
+  /**
+   * A recovery that ends without a turn (skipped, failed, given up) settles
+   * nothing itself. If this agent is an agent-tool child, close the runs it
+   * held open, so a parent that follows one is not left waiting. An attempt
+   * does this as it ends.
+   */
+  async #reconcileChildRuns(): Promise<void> {
+    const turns = this.adapter.turns;
+    if (!turns || turns.attemptScope.getStore()) return;
+    try {
+      await turns.reconcileAgentToolChildRuns();
+    } catch (error) {
+      console.error(
+        `${turns.label} failed to reconcile agent-tool child runs after recovery ended`,
+        error
+      );
+    }
   }
 }
 
