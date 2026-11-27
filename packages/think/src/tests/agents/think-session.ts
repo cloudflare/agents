@@ -1717,6 +1717,8 @@ export class ThinkTestAgent extends Think {
     requestId: string;
     recoveryRootRequestId: string;
     streamId: string;
+    /** When onChatRecovery was called. */
+    calledAt: number;
   }> = [];
   private _stashInBeforeTurnForTest: string | undefined;
   private _turnIdentityLog: TurnIdentityLogEntry[] = [];
@@ -1737,7 +1739,8 @@ export class ThinkTestAgent extends Think {
       createdAt: ctx.createdAt,
       requestId: ctx.requestId,
       recoveryRootRequestId: ctx.recoveryRootRequestId,
-      streamId: ctx.streamId
+      streamId: ctx.streamId,
+      calledAt: Date.now()
     });
     if (this._recoveryHookForTest === "throw") {
       throw new Error("recovery hook boom");

@@ -339,7 +339,7 @@ describe("chat recovery, through public behaviour", () => {
         noProgressTimeoutMs?: number;
       },
       done: (progress: {
-        recoveryCalls: unknown[];
+        recoveryCalls: Array<{ calledAt: number }>;
         exhausted: unknown[];
         lastAssistantText: string;
       }) => boolean
@@ -445,16 +445,20 @@ describe("chat recovery, through public behaviour", () => {
         "progress-survives",
         {
           afterParts: 25,
-          stalledCalls: 6,
+          stalledCalls: 12,
           maxAttempts: 50,
           progressing: true,
           noProgressTimeoutMs: 300
         },
-        (p) => p.exhausted.length > 0 || p.lastAssistantText.includes("a7-29")
+        (p) => p.exhausted.length > 0 || p.lastAssistantText.includes("a13-29")
       );
 
       expect(progress.exhausted).toEqual([]);
-      expect(progress.recoveryCalls.length).toBeGreaterThanOrEqual(6);
+      expect(progress.recoveryCalls.length).toBeGreaterThanOrEqual(12);
+      // The window was crossed: recovery went on checking well after
+      // noProgressTimeoutMs had passed since the first interruption.
+      const calledAt = progress.recoveryCalls.map((call) => call.calledAt);
+      expect(calledAt.at(-1)! - calledAt[0]!).toBeGreaterThan(300);
     }, 30_000);
 
     it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
@@ -946,6 +950,7 @@ describe("chat recovery, through public behaviour", () => {
         exhausted.push(event.payload as { reason?: string });
       }
     });
+    let terminalErrors = 0;
     async function tab() {
       const res = await exports.default.fetch(
         `http://example.com/agents/think-test-agent/${room}`,
@@ -954,6 +959,15 @@ describe("chat recovery, through public behaviour", () => {
       const ws = res.webSocket;
       if (!ws) throw new Error("no socket");
       ws.accept();
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          error?: boolean;
+        };
+        if (frame.type === "cf_agent_use_chat_response" && frame.error) {
+          terminalErrors++;
+        }
+      });
       return ws;
     }
     try {
@@ -1001,6 +1015,11 @@ describe("chat recovery, through public behaviour", () => {
         ws.close();
         ws = await tab();
       }
+      // The open tab is told the turn ended in an error.
+      await vi.waitFor(() => expect(terminalErrors).toBe(1), {
+        timeout: 15_000,
+        interval: 20
+      });
       ws.close();
 
       expect(exhausted.map((entry) => entry.reason)).toEqual([
