@@ -205,7 +205,7 @@ describe("a message queued behind a running turn", () => {
     expect(idle).toBe(true);
     const barrier = seenB.length;
     tabB.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
-    await waitFor(
+    const answered = await waitFor(
       async () =>
         seenB
           .slice(barrier)
@@ -213,8 +213,15 @@ describe("a message queued behind a running turn", () => {
       (yes) => yes,
       5000
     );
+    expect(answered).toBe(true);
     const lists = seenB.filter((f) => f.type === "cf_agent_chat_messages");
-    expect(lists.at(-1)?.queuedMessageIds).toBeUndefined();
+    // The last list is an update that holds the queued question, not the
+    // snapshot the tab got when it connected.
+    const last = lists.at(-1);
+    expect(((last?.messages ?? []) as UIMessage[]).map((m) => m.id)).toContain(
+      "u2"
+    );
+    expect(last?.queuedMessageIds).toBeUndefined();
     tabA.close();
     tabB.close();
     tabC.close();
