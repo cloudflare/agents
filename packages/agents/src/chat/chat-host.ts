@@ -226,20 +226,58 @@ export interface LiveTurn {
 /** Questions of stopped turns held until the turn ahead stores its reply. */
 const heldQuestions = new WeakMap<Streams, Map<string, UIMessage[]>>();
 
-/**
- * @internal The questions of chat `session` that wait for the turn now
- * running to store its reply: a turn stopped before it started keeps its
- * question, in lane order.
- */
-export function heldQuestionsOf(
-  streams: Streams,
-  session: string
-): UIMessage[] {
+/** The session config key the held questions are kept under, for a reset. */
+const HELD_QUESTIONS_KEY = "transcript:chat:held";
+
+function heldIn(streams: Streams, session: string): UIMessage[] {
   let chats = heldQuestions.get(streams);
   if (!chats) heldQuestions.set(streams, (chats = new Map()));
   let held = chats.get(session);
   if (!held) chats.set(session, (held = []));
   return held;
+}
+
+/**
+ * @internal Hold the questions of a turn stopped before it started until
+ * the turn of chat `session` now running stores its reply, so they follow
+ * it in lane order. Kept in the session's config too, for a reset before
+ * then.
+ */
+export async function holdQuestions(
+  deps: ChatDeps,
+  session: string,
+  questions: readonly UIMessage[]
+): Promise<void> {
+  if (questions.length === 0) return;
+  const handle = deps.sessions.session(session);
+  const stored = await handle.internal_config(HELD_QUESTIONS_KEY);
+  const held = [
+    ...(stored ? (JSON.parse(stored) as UIMessage[]) : []),
+    ...questions
+  ];
+  await handle.internal_setConfig(HELD_QUESTIONS_KEY, JSON.stringify(held));
+  heldIn(deps.streams, session).push(...questions);
+}
+
+/** @internal A chat clear: held questions are dropped with the rest. */
+export async function dropHeldQuestions(
+  deps: ChatDeps,
+  session: string
+): Promise<void> {
+  heldIn(deps.streams, session).splice(0);
+  await deps.sessions
+    .session(session)
+    .internal_setConfig(HELD_QUESTIONS_KEY, null);
+}
+
+/** Replies whose batch an answer asked to continue, once it is answered. */
+const continueRequests = new WeakMap<Streams, Set<string>>();
+
+/** @internal The replies of this chat host an answer asked to continue. */
+export function continueRequestsOf(streams: Streams): Set<string> {
+  let wanted = continueRequests.get(streams);
+  if (!wanted) continueRequests.set(streams, (wanted = new Set()));
+  return wanted;
 }
 
 /**
@@ -266,6 +304,24 @@ export const CHUNK_BATCH = {
   maxBytes: 512_000,
   fillBlocks: true
 } as const;
+
+/** The calls asked in `chunks` with no answer after them, in order. */
+function waitingCallsOf(chunks: readonly UIMessageChunk[]): string[] {
+  const waiting: string[] = [];
+  for (const chunk of chunks) {
+    const id = (chunk as { toolCallId?: unknown }).toolCallId;
+    if (typeof id !== "string") continue;
+    if (chunk.type === "tool-input-available") waiting.push(id);
+    if (
+      chunk.type === "tool-output-available" ||
+      chunk.type === "tool-output-error"
+    ) {
+      const at = waiting.indexOf(id);
+      if (at >= 0) waiting.splice(at, 1);
+    }
+  }
+  return waiting;
+}
 
 /** The run's checkpoint key holding the reply a continuation extends. */
 const BASE_CHECKPOINT = "chat:base";
@@ -604,9 +660,23 @@ export function chatTurnDefinition(
     };
     const report = async (result: ChatTurnResult) => {
       // The questions of turns stopped while this one ran follow its reply.
-      const held = heldQuestionsOf(deps.streams, sessionId);
-      for (const question of held.splice(0)) {
-        await session.upsertMessage(question as never);
+      // After a reset they are read back from the session's config; a first
+      // attempt holds them in memory when there are any.
+      const inMemory = heldIn(deps.streams, sessionId).splice(0);
+      const stored =
+        inMemory.length === 0 && step.attempt > 1
+          ? await session.internal_config(HELD_QUESTIONS_KEY)
+          : null;
+      const held = stored ? (JSON.parse(stored) as UIMessage[]) : inMemory;
+      if (held.length > 0) {
+        for (const question of held) {
+          await session.upsertMessage(question as never);
+        }
+        await session.internal_setConfig(HELD_QUESTIONS_KEY, null);
+      }
+      // A reply that waits on no call has no batch left to continue.
+      if (result.messageId !== undefined && waitingCallsOf(seen).length === 0) {
+        continueRequestsOf(deps.streams).delete(result.messageId);
       }
       // A tab still waiting learns there is no stream to resume.
       if (parked.size > 0) {
@@ -923,34 +993,20 @@ export function chatTurnDefinition(
 
       // Chunks are written in batches (`CHUNK_BATCH`), as the hosts' reply
       // streams do; a reader flushes first.
+      const sync = deps.streams.__DO_NOT_USE_WILL_BREAK__sync();
       const record = (chunk: UIMessageChunk) => {
         const json = JSON.stringify(chunk);
         const bytes = utf8Length(json);
-        if (bytes > ROW_VALUE_BYTES) out.append(chunk as never);
-        else
-          deps.streams
-            .__DO_NOT_USE_WILL_BREAK__sync()
-            .appendJson(streamId, json, bytes, CHUNK_BATCH);
+        // One past the capability's chunk limit goes through the writer,
+        // which refuses it as it always has.
+        if (bytes > Math.min(sync.maxChunkBytes, ROW_VALUE_BYTES)) {
+          out.append(chunk as never);
+        } else sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
       };
       const liveKey = sessionId;
       const live = liveTurnsOf(deps.streams);
       const answered: Array<() => void> = [];
-      const waitingCalls = () => {
-        const waiting: string[] = [];
-        for (const chunk of seen) {
-          const id = (chunk as { toolCallId?: unknown }).toolCallId;
-          if (typeof id !== "string") continue;
-          if (chunk.type === "tool-input-available") waiting.push(id);
-          if (
-            chunk.type === "tool-output-available" ||
-            chunk.type === "tool-output-error"
-          ) {
-            const at = waiting.indexOf(id);
-            if (at >= 0) waiting.splice(at, 1);
-          }
-        }
-        return waiting;
-      };
+      const waitingCalls = () => waitingCallsOf(seen);
       const checkAnswered = () => {
         if (answered.length > 0 && waitingCalls().length === 0) {
           for (const fn of answered.splice(0)) fn();
@@ -995,6 +1051,8 @@ export function chatTurnDefinition(
                 const next =
                   host.hooks?.transformChunk?.(chunk, parts) ?? chunk;
                 record(next);
+                // An answer the tab gave is durable before it is acted on.
+                sync.flush(streamId);
                 seen.push(next);
                 send({
                   body: JSON.stringify(next),

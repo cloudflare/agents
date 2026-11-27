@@ -1049,4 +1049,39 @@ describe("chat functions over a minimal host", () => {
       instance.host.respond = respond;
     });
   });
+
+  it("a tab's answer to a live call is written before it is acted on", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "c1",
+          toolName: "ask",
+          input: {}
+        }
+      ]);
+      await chatDispatch(instance.deps, instance.lane, tab, toolResult("c1"));
+      // Read the stored chunks without flushing: a reset now keeps them.
+      const stop = new AbortController();
+      const types: string[] = [];
+      try {
+        for await (const batch of instance.streams.readBatches(
+          chatTurnStreamId("r1"),
+          { signal: stop.signal, onUpToDate: () => stop.abort() }
+        )) {
+          for (const item of batch)
+            types.push((item.chunk as { type: string }).type);
+          if (stop.signal.aborted) break;
+        }
+      } catch (error) {
+        if (!stop.signal.aborted) throw error;
+      }
+      expect(types).toContain("tool-output-available");
+      release();
+      while (instance.results.length < 2) await instance.nextResult();
+    });
+  });
 });
