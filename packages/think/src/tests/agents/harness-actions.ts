@@ -19,6 +19,7 @@ import type {
 const COUNT_KEY = "test:charged";
 const GRANT_KEY = "test:grant";
 const REWRITE_KEY = "test:rewrite";
+const SWEEP_KEY = "test:sweep-settled";
 
 function finish(controller: ReadableStreamDefaultController, reason: string) {
   controller.enqueue({
@@ -118,6 +119,26 @@ export class ThinkHarnessActionsAgent extends Think {
     return grant === undefined
       ? true
       : { allowed: true, grantedPermissions: grant };
+  }
+
+  override async onStart(): Promise<void> {
+    if (this.ctx.storage.kv.get<boolean>(SWEEP_KEY)) {
+      this.actionLedgerRetention = {
+        ...this.actionLedgerRetention,
+        settledMs: 0
+      };
+    }
+  }
+
+  /** Keep settled ledger rows for no time from the next start. */
+  sweepSettledForTest(): void {
+    this.ctx.storage.kv.put(SWEEP_KEY, true);
+  }
+
+  /** The action ledger's rows. */
+  ledgerRowsForTest(): number {
+    return this.tasks.peekList({ definition: "__cf_think_action_effect" })
+      .length;
   }
 
   override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {

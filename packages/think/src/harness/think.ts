@@ -77,7 +77,8 @@ import {
 import {
   createEffectState,
   registerEffectTask,
-  stableStringify
+  stableStringify,
+  sweepEffects
 } from "../action-ledger";
 import { runLedgeredAction } from "../action-run";
 import type {
@@ -1011,6 +1012,12 @@ export class Think<
       await onStart(props);
       // Best-effort, as in Think: a getScheduledTasks() that throws must
       // not stop the agent from starting.
+      // As in Think: expired action ledger rows are deleted at start.
+      try {
+        await this.#sweepActionLedger();
+      } catch (error) {
+        console.error("[Think] The action ledger was not swept", error);
+      }
       await this.#bestEffortStartStep(
         "scheduled-task-reconcile",
         () => this.internal_reconcileScheduledTasks(),
@@ -1207,6 +1214,38 @@ export class Think<
         await this.authorizeTurn(await context())
       )
     };
+  }
+
+  /**
+   * As on Think: how long settled and pending action ledger rows are kept.
+   * Deleting a row ends the idempotency guarantee for its key.
+   */
+  actionLedgerRetention: {
+    settledMs: number | false;
+    pendingMs: number | false;
+    maxSweepRows: number;
+  } = {
+    settledMs: 30 * 24 * 60 * 60 * 1000,
+    pendingMs: 90 * 24 * 60 * 60 * 1000,
+    maxSweepRows: 500
+  };
+
+  async #sweepActionLedger(): Promise<void> {
+    const now = Date.now();
+    const retention = this.actionLedgerRetention;
+    const swept = await sweepEffects(this.tasks, {
+      settledBefore:
+        retention.settledMs === false ? null : now - retention.settledMs,
+      pendingBefore:
+        retention.pendingMs === false ? null : now - retention.pendingMs,
+      limit: Math.max(0, Math.floor(retention.maxSweepRows))
+    });
+    (
+      this._emit as unknown as (
+        type: string,
+        payload: Record<string, unknown>
+      ) => void
+    ).call(this, "action:ledger:swept", { ...swept });
   }
 
   /** As on Think: how long a stale claim of a keyed action is held. */

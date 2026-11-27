@@ -12,6 +12,8 @@ type ActionsStub = {
   grantForTest(permissions: string[] | undefined): Promise<void>;
   toolOutputs(): Promise<unknown[]>;
   rewriteForTest(amount: number): Promise<void>;
+  sweepSettledForTest(): Promise<void>;
+  ledgerRowsForTest(): Promise<number>;
   pendingApprovals(executionId?: string): Promise<PendingApproval[]>;
   approveExecution(executionId: string): Promise<unknown>;
   rejectExecution(
@@ -199,5 +201,19 @@ describe("harness-backed Think: actions that need a human", () => {
     const approved = await call("approveExecution", [pending.executionId]);
     expect(approved).toMatchObject({ success: true, result: { charged: 5 } });
     ws.close();
+  });
+
+  it("deletes settled ledger rows past their retention at start", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    await think.approveExecution(pending.executionId);
+    expect(await think.ledgerRowsForTest()).toBe(1);
+    await think.sweepSettledForTest();
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    await fresh.pendingApprovals();
+    expect(await fresh.ledgerRowsForTest()).toBe(0);
   });
 });
