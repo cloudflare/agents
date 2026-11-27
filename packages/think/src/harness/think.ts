@@ -612,8 +612,10 @@ export class Think<
           // A turn that never ran has no response: one stopped while it
           // waited, or input the harness turned away before a model call (a
           // tool result no call waits for, an empty or unknown operation).
+          // A turn that wrote a message ran, whatever its reason's text.
           if (
             end.status === "unanswered" &&
+            end.message === undefined &&
             end.reason !== undefined &&
             NEVER_RAN.has(end.reason)
           ) {
