@@ -191,7 +191,8 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
             start: "alarm"
           });
           backdateTaskWake(state.storage, runId);
-          await instance.lifecycle.rearmAlarm();
+          // Armed a minute out, so only the direct call below drives it.
+          await state.storage.setAlarm(Date.now() + 60_000);
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
           await waitForStrikes(state.storage, (strikes) => strikes !== 1);
         }
@@ -230,7 +231,8 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
             start: "alarm"
           });
           backdateTaskWake(state.storage, runId);
-          await instance.lifecycle.rearmAlarm();
+          // Armed a minute out, so only the direct call below drives it.
+          await state.storage.setAlarm(Date.now() + 60_000);
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
           await waitForStrikes(state.storage, (strikes) => strikes === 1);
           // The clean sibling settles ~2s after the strike — comfortably
@@ -277,7 +279,8 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
             start: "alarm"
           });
           backdateTaskWake(state.storage, runId);
-          await instance.lifecycle.rearmAlarm();
+          // Armed a minute out, so only the direct call below drives it.
+          await state.storage.setAlarm(Date.now() + 60_000);
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
           await waitForStrikes(state.storage, (strikes) => strikes === 1);
         }
@@ -348,7 +351,8 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
           start: "alarm"
         });
         backdateTaskWake(state.storage, receipt.runId);
-        await instance.lifecycle.rearmAlarm();
+        // Armed a minute out, so only the direct call below drives it.
+        await state.storage.setAlarm(Date.now() + 60_000);
         await (instance as unknown as { alarm(): Promise<void> }).alarm();
 
         // The alarm returned at the handoff with the attempt still running,
@@ -391,7 +395,8 @@ describe("Tasks under the alarm memory-limit breaker (#1825)", () => {
             past,
             `task:${doomedRunId}`
           );
-          await instance.lifecycle.rearmAlarm();
+          // Armed a minute out, so only the direct call below drives it.
+          await state.storage.setAlarm(Date.now() + 60_000);
           await (instance as unknown as { alarm(): Promise<void> }).alarm();
           await waitForStrikes(state.storage, (strikes) => strikes !== 2);
         }
