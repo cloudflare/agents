@@ -11012,9 +11012,11 @@ export class ThinkProgrammaticTestAgent extends Think {
           input: "sent by work the first turn left running"
         });
         try {
-          const settled = await this.waitForSubmission(submitted.submissionId, {
+          const waiting = this.waitForSubmission(submitted.submissionId, {
             timeoutMs: 10_000
           });
+          this._detachedWaiting = true;
+          const settled = await waiting;
           return settled?.status ?? "missing";
         } catch (error) {
           return `threw: ${error instanceof Error ? error.message : String(error)}`;
@@ -11415,10 +11417,12 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   private _detachedWaitGate: Promise<void> | null = null;
   private _detachedWait: Promise<string> | null = null;
+  private _detachedWaiting = false;
 
   /**
-   * A turn starts work that outlives it. Once the turn has ended, that work
-   * submits a message and waits for it. Returns how the wait ended.
+   * A turn starts work that outlives it. Once the turn has ended and while a
+   * later turn runs, that work submits a message and waits for it. Returns
+   * how the wait ended.
    */
   async waitFromWorkATurnLeftRunningForTest(): Promise<string> {
     let release = () => {};
@@ -11428,8 +11432,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._detachedWait = null;
     try {
       await this.testChat("a turn that leaves work running");
-      release();
       if (!this._detachedWait) throw new Error("the turn started no work");
+      // Another turn is running when the old work waits.
+      const active = await this._holdActiveTurnForTest("a later turn");
+      try {
+        release();
+        const deadline = Date.now() + 5_000;
+        while (!this._detachedWaiting) {
+          if (Date.now() > deadline) throw new Error("the work never waited");
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      } finally {
+        active.release();
+      }
+      await active.turn;
       return await (this._detachedWait as Promise<string>);
     } finally {
       this._detachedWaitGate = null;

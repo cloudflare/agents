@@ -1092,16 +1092,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /**
    * @internal The operation of `session` whose reply the caller runs
-   * inside, while that operation is still open. Work an earlier operation
-   * left running (its context outlives it) is inside nothing.
+   * inside, while that operation's run is in progress here (until it has
+   * left, a cancelled one included). Work an earlier operation left
+   * running (its context outlives it) is inside nothing.
    */
   insideOperation(session: ThinkSessionId): string | undefined {
     const runId = runningChatTurn();
     if (runId === undefined) return undefined;
-    const record = this.#tasks.peek(runId);
-    if (!record || TERMINAL.includes(record.status)) return undefined;
     const [id, operationId] = operationOf(runId);
-    return id === session ? operationId : undefined;
+    return id === session &&
+      this.#live.get(session)?.operationId === operationId
+      ? operationId
+      : undefined;
   }
 
   /** @internal Wait for an operation to settle. */
