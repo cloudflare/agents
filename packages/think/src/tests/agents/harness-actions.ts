@@ -8,9 +8,18 @@ import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { action, type Action } from "../../actions";
 import { Think } from "../../harness/think";
-import type { StreamCallback } from "../../think";
+import type {
+  ActionAuthorizationDecision,
+  StreamCallback,
+  ToolCallContext,
+  ToolCallDecision,
+  TurnContext
+} from "../../think";
 
 const COUNT_KEY = "test:charged";
+const GRANT_KEY = "test:grant";
+const REWRITE_KEY = "test:rewrite";
+const SWEEP_KEY = "test:sweep-settled";
 
 function finish(controller: ReadableStreamDefaultController, reason: string) {
   controller.enqueue({
@@ -37,6 +46,10 @@ function actionModel(): LanguageModel {
     doStream(options: { prompt: { role: string; content: unknown }[] }) {
       const last = options.prompt[options.prompt.length - 1];
       const prompt = JSON.stringify(options.prompt);
+      // The reply after the tool result fails when the question asks so.
+      if (last.role === "tool" && prompt.includes("then fail")) {
+        return Promise.reject(new Error("the follow-up reply failed"));
+      }
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -51,7 +64,11 @@ function actionModel(): LanguageModel {
             finish(controller, "stop");
             return;
           }
-          const toolName = prompt.includes("pause") ? "pauseCharge" : "charge";
+          const toolName = prompt.includes("receipt")
+            ? "receipt"
+            : prompt.includes("pause")
+              ? "pauseCharge"
+              : "charge";
           controller.enqueue({
             type: "tool-call",
             toolCallId: "call-1",
@@ -94,13 +111,77 @@ export class ThinkHarnessActionsAgent extends Think {
         approval: true,
         execute: run
       }),
+      receipt: action({
+        description: "Send a receipt",
+        inputSchema: z.object({ amount: z.number() }),
+        execute: ({ amount }, ctx) => {
+          ctx.attachReply({ type: "receipt", amount });
+          // @ts-expect-error: a value that is not an attachment is ignored
+          ctx.attachReply("not an attachment");
+          return { sent: true };
+        }
+      }),
       pauseCharge: action({
         description: "Charge the card after a human approves",
         kind: "durable-pause",
+        // Computed from the input.
+        permissions: ({ input }) => [`billing:charge:${input.amount}`],
         inputSchema: z.object({ amount: z.number() }),
         execute: run
       })
     };
+  }
+
+  override authorizeTurn(_ctx: TurnContext): ActionAuthorizationDecision {
+    const grant = this.ctx.storage.kv.get<string[]>(GRANT_KEY);
+    return grant === undefined
+      ? true
+      : { allowed: true, grantedPermissions: grant };
+  }
+
+  override async onStart(): Promise<void> {
+    if (this.ctx.storage.kv.get<boolean>(SWEEP_KEY)) {
+      this.actionLedgerRetention = {
+        ...this.actionLedgerRetention,
+        settledMs: 0
+      };
+    }
+  }
+
+  /** Keep settled ledger rows for no time from the next start. */
+  sweepSettledForTest(): void {
+    this.ctx.storage.kv.put(SWEEP_KEY, true);
+  }
+
+  /** The action ledger's rows. */
+  ledgerRowsForTest(): number {
+    return this.tasks.peekList({ definition: "__cf_think_action_effect" })
+      .length;
+  }
+
+  override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    const amount = this.ctx.storage.kv.get<number>(REWRITE_KEY);
+    if (amount === undefined || ctx.toolName !== "charge") return;
+    return { action: "allow", input: { amount } };
+  }
+
+  /** Rewrite each `charge` call's input to this amount. */
+  rewriteForTest(amount: number): void {
+    this.ctx.storage.kv.put(REWRITE_KEY, amount);
+  }
+
+  /** The permissions the next turn is granted; `undefined` grants all. */
+  grantForTest(permissions: string[] | undefined): void {
+    if (permissions === undefined) this.ctx.storage.kv.delete(GRANT_KEY);
+    else this.ctx.storage.kv.put(GRANT_KEY, permissions);
+  }
+
+  async toolOutputs(): Promise<unknown[]> {
+    return this.messages.flatMap((message) =>
+      message.parts.flatMap((part) =>
+        "toolCallId" in part && "output" in part ? [part.output] : []
+      )
+    );
   }
 
   async say(text: string): Promise<void> {
@@ -110,6 +191,10 @@ export class ThinkHarnessActionsAgent extends Think {
   /** Ends this object, so the next call meets a fresh isolate. */
   resetForTest(): void {
     this.ctx.abort("test: reset");
+  }
+
+  attachmentsForTest(requestId?: string): unknown[] {
+    return this.replyAttachments(requestId);
   }
 
   charged(): number {

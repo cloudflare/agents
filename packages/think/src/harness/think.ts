@@ -11,7 +11,8 @@ import {
   type AgentContext,
   type Connection,
   type ConnectionContext,
-  type WSMessage
+  type WSMessage,
+  callable
 } from "agents";
 import {
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
@@ -66,15 +67,30 @@ import { fetchExtension } from "./extensions/fetch";
 import { skillsExtension } from "./extensions/skills";
 import { sandboxedExtensions } from "./extensions/sandboxed";
 import { actionsExtension } from "./extensions/actions";
-import { compileActionTools, type ActionToolHost } from "../action-tools";
-import { createEffectState, registerEffectTask } from "../action-ledger";
+import {
+  actionApprovalInputErrorEnvelope,
+  compileActionTools,
+  normalizeActionAuthorization,
+  resolveActionPermissions,
+  type ActionToolHost
+} from "../action-tools";
+import {
+  createEffectState,
+  registerEffectTask,
+  stableStringify,
+  sweepEffects
+} from "../action-ledger";
 import { runLedgeredAction } from "../action-run";
+import { ReplyAttachments } from "../reply-attachments";
 import type {
   Action,
   ActionApprovalDescriptor,
   ActionAuthorizationContext,
   ActionAuthorizationDecision,
-  CompiledActionMetadata
+  ActionPermissionSpec,
+  CompiledActionMetadata,
+  ReplyAttachment,
+  NormalizedActionAuthorization
 } from "../actions";
 import {
   callThinkHostApi,
@@ -492,6 +508,8 @@ export class Think<
     gateway: (model) => this.getGateway(model),
     sessionAffinity: () => this.sessionAffinity
   });
+  /** The latest turn's reply attachments, as on Think. */
+  readonly #replyAttachments = new ReplyAttachments();
   /** The action ledger's coalescing, as on Think. */
   readonly #effects = createEffectState();
   /** Each approval-gated action's summary, permissions and risk. */
@@ -636,7 +654,55 @@ export class Think<
         beforeToolCall: async (call) => {
           // The step's chunks reach extensions before its tool calls do.
           await this.#chunkHooks;
+          // A call approved after a restart runs before any model call of
+          // its turn: the turn's grant is asked for here.
+          await this.#authorizeTurn(call.operationId, async () => {
+            // Asked for here, and only resolved when the grant reads it:
+            // a failing `getModel()` fails that read, as in Think.
+            let chosen: ThinkModel | undefined;
+            let failure: unknown;
+            try {
+              chosen = await this.getModel();
+            } catch (error) {
+              failure = error;
+            }
+            let model: LanguageModel | undefined;
+            const self = this;
+            return {
+              system: this.getSystemPrompt(),
+              messages: await convertToModelMessages(this.messages, {
+                ignoreIncompleteToolCalls: true
+              }),
+              tools: {},
+              // Resolved only when read, as in Think.
+              get model() {
+                if (failure !== undefined) throw failure;
+                return (model ??= self.resolveModel(chosen as ThinkModel));
+              },
+              continuation: true,
+              requestId: call.operationId
+            } as unknown as TurnContext;
+          });
           const decision = await this.#beforeToolCall(call);
+          // As in Think: an approved action runs with the input a human
+          // approved, or not at all.
+          if (
+            decision?.action === "run" &&
+            decision.input !== undefined &&
+            this.#actionMetadata.has(call.toolName)
+          ) {
+            const approved = await this.#approvedInput(call.toolCallId);
+            if (
+              approved.found &&
+              stableStringify(decision.input) !==
+                stableStringify(approved.input)
+            ) {
+              return {
+                action: "substitute",
+                output: actionApprovalInputErrorEnvelope()
+              };
+            }
+          }
           // As in Think: extensions hear of a call that runs, with the
           // input it runs with.
           if (!decision || decision.action === "run") {
@@ -819,6 +885,7 @@ export class Think<
         this.#wakeStableWaiters();
         this.#running = undefined;
         this.#ownTurn = undefined;
+        this.#actionTurn = undefined;
         this.#extensionTurn = undefined;
         this.#turnMaxSteps = undefined;
       }
@@ -962,6 +1029,12 @@ export class Think<
       await onStart(props);
       // Best-effort, as in Think: a getScheduledTasks() that throws must
       // not stop the agent from starting.
+      // As in Think: expired action ledger rows are deleted at start.
+      try {
+        await this.#sweepActionLedger();
+      } catch (error) {
+        console.error("[Think] The action ledger was not swept", error);
+      }
       await this.#bestEffortStartStep(
         "scheduled-task-reconcile",
         () => this.internal_reconcileScheduledTasks(),
@@ -1107,12 +1180,90 @@ export class Think<
   }
 
   /**
-   * Authorize a single action call, as on Think. The default allows it.
+   * Authorize action permissions for the current turn, as on Think.
+   * Returning `true` grants all of them; `grantedPermissions` limits the
+   * default `authorizeAction` to that set.
    */
-  authorizeAction(
-    _ctx: ActionAuthorizationContext
+  authorizeTurn(
+    _ctx: TurnContext
   ): ActionAuthorizationDecision | Promise<ActionAuthorizationDecision> {
     return true;
+  }
+
+  /**
+   * Authorize a single action call, as on Think. The default enforces the
+   * grant `authorizeTurn` returned for the turn.
+   */
+  authorizeAction(
+    ctx: ActionAuthorizationContext
+  ): ActionAuthorizationDecision | Promise<ActionAuthorizationDecision> {
+    const turn = this.#actionTurn?.authorization ?? { allowed: true };
+    if (!turn.allowed) return { allowed: false, reason: turn.reason };
+    if (turn.grantedPermissions === undefined) return true;
+    const granted = new Set(turn.grantedPermissions);
+    const missing = ctx.requiredPermissions.filter(
+      (permission) => !granted.has(permission)
+    );
+    if (missing.length === 0) return true;
+    return {
+      allowed: false,
+      reason: `Missing required permission: ${missing.join(", ")}`
+    };
+  }
+
+  /**
+   * The running operation and what `authorizeTurn` granted it. Set before
+   * its first model call, or, for a call approved after a restart, before
+   * that call runs.
+   */
+  #actionTurn:
+    | { operationId: string; authorization: NormalizedActionAuthorization }
+    | undefined;
+
+  async #authorizeTurn(
+    operationId: string,
+    context: () => Promise<TurnContext>
+  ): Promise<void> {
+    if (this.#actionTurn?.operationId === operationId) return;
+    this.#replyAttachments.begin(operationId);
+    this.#actionTurn = {
+      operationId,
+      authorization: normalizeActionAuthorization(
+        await this.authorizeTurn(await context())
+      )
+    };
+  }
+
+  /**
+   * As on Think: how long settled and pending action ledger rows are kept.
+   * Deleting a row ends the idempotency guarantee for its key.
+   */
+  actionLedgerRetention: {
+    settledMs: number | false;
+    pendingMs: number | false;
+    maxSweepRows: number;
+  } = {
+    settledMs: 30 * 24 * 60 * 60 * 1000,
+    pendingMs: 90 * 24 * 60 * 60 * 1000,
+    maxSweepRows: 500
+  };
+
+  async #sweepActionLedger(): Promise<void> {
+    const now = Date.now();
+    const retention = this.actionLedgerRetention;
+    const swept = await sweepEffects(this.tasks, {
+      settledBefore:
+        retention.settledMs === false ? null : now - retention.settledMs,
+      pendingBefore:
+        retention.pendingMs === false ? null : now - retention.pendingMs,
+      limit: Math.max(0, Math.floor(retention.maxSweepRows))
+    });
+    (
+      this._emit as unknown as (
+        type: string,
+        payload: Record<string, unknown>
+      ) => void
+    ).call(this, "action:ledger:swept", { ...swept });
   }
 
   /** As on Think: how long a stale claim of a keyed action is held. */
@@ -1122,15 +1273,31 @@ export class Think<
   readonly #actionToolHost: ActionToolHost = {
     agent: this as unknown as LegacyThink,
     env: () => this.env as Cloudflare.Env,
-    requestId: () => "",
+    requestId: () => this.#actionTurn?.operationId ?? "",
     // An approved call runs without asking again: the harness decides that
     // from its answered approval.
     isApproved: () => false,
-    grantedPermissions: () => undefined,
+    grantedPermissions: () =>
+      this.#actionTurn?.authorization.grantedPermissions,
     authorizeAction: (ctx) => this.authorizeAction(ctx),
     recordApprovalDescriptor: (toolCallId, descriptor) =>
       this.#actionDescriptors.set(toolCallId, descriptor),
-    recordReplyAttachment: () => {},
+    recordReplyAttachment: (requestId, attachment, actionName) => {
+      const attachmentType = this.#replyAttachments.record(
+        requestId,
+        attachment
+      );
+      if (attachmentType === undefined) return;
+      (
+        this._emit as unknown as (
+          type: string,
+          payload: Record<string, unknown>
+        ) => void
+      ).call(this, "action:reply-attached", {
+        action: actionName,
+        attachmentType
+      });
+    },
     runLedgered: (args) =>
       runLedgeredAction(
         {
@@ -1144,11 +1311,23 @@ export class Think<
                 payload: Record<string, unknown>
               ) => void
             ).call(this, event.type, event.payload),
-          attachments: { count: () => 0, truncate: () => {} }
+          attachments: {
+            count: () => this.#replyAttachments.count(),
+            truncate: (n) => this.#replyAttachments.truncate(n)
+          }
         },
         args
       )
   };
+
+  /**
+   * Advisory reply attachments the latest turn's actions recorded through
+   * `ctx.attachReply`, as on Think: with a `requestId`, only if they belong
+   * to that turn.
+   */
+  replyAttachments(requestId?: string): ReplyAttachment[] {
+    return this.#replyAttachments.list(requestId);
+  }
 
   /**
    * Everything awaiting human approval: the action calls of the latest reply
@@ -1156,13 +1335,10 @@ export class Think<
    * `approveExecution` or `rejectExecution`, by its `executionId`.
    */
   async pendingApprovals(executionId?: string): Promise<PendingApproval[]> {
+    const actions = await this.getActions();
     if (this.#actionMetadata.size === 0) {
       // A fresh isolate: compile the actions once for their metadata.
-      compileActionTools(
-        await this.getActions(),
-        this.#actionToolHost,
-        this.#actionMetadata
-      );
+      compileActionTools(actions, this.#actionToolHost, this.#actionMetadata);
     }
     const out: PendingApproval[] = [];
     for (const call of await this.harness.pendingApprovals(
@@ -1182,7 +1358,28 @@ export class Think<
           action: metadata.actionName,
           summary: metadata.summary,
           input: call.input,
-          permissions: [...(metadata.permissions ?? [])],
+          // Computed again from the input, as when the call was asked.
+          permissions:
+            metadata.permissions !== undefined
+              ? [...metadata.permissions]
+              : await resolveActionPermissions(
+                  Object.entries(actions).find(
+                    ([key, action]) =>
+                      (action.config.name ?? key) === call.toolName
+                  )?.[1].config.permissions as
+                    | ActionPermissionSpec<unknown>
+                    | undefined,
+                  call.input,
+                  {
+                    agent: this as unknown as LegacyThink,
+                    env: this.env as Cloudflare.Env,
+                    requestId: "",
+                    toolCallId: call.toolCallId,
+                    messages: [],
+                    signal: new AbortController().signal,
+                    attachReply: () => {}
+                  }
+                ),
           ...(metadata.risk !== undefined && { risk: metadata.risk }),
           kind: metadata.kind
         }
@@ -1219,7 +1416,7 @@ export class Think<
       return {
         status: "error",
         executionId,
-        error: `No pending approval "${executionId}"`
+        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
       };
     }
     const session = this.harness.session();
@@ -1237,7 +1434,51 @@ export class Think<
     this.#actionDescriptors.delete(pending.descriptor.toolCallId);
     const result = await session.wait(receipt.operationId);
     await this.#sync();
-    return saveResult(result);
+    // A decision the harness did not apply leaves the call waiting: that
+    // alone is an error. A follow-up reply that failed after the action
+    // ran is not.
+    if ((await this.pendingApprovals(executionId)).length > 0) {
+      return {
+        status: "error",
+        executionId,
+        error:
+          result.status === "done"
+            ? "not applied"
+            : (result.reason ?? result.status)
+      };
+    }
+    // As on Think: the action's outcome, or the rejection. Read from the
+    // call's final state, not from this decision: when two decisions race,
+    // the one the harness applied is what happened.
+    const toolCallId = pending.descriptor.toolCallId;
+    let final:
+      | { state?: unknown; output?: unknown; errorText?: unknown }
+      | undefined;
+    for (const message of this.messages) {
+      for (const part of message.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          final = part as typeof final;
+        }
+      }
+    }
+    if (final?.state === "output-denied") {
+      return {
+        status: "rejected",
+        executionId,
+        reason: approved ? "Rejected by user" : (reason ?? "Rejected by user")
+      };
+    }
+    if (final?.state === "output-available") return final.output;
+    if (final?.state === "output-error") {
+      return { status: "error", executionId, error: final.errorText };
+    }
+    return {
+      status: "error",
+      executionId,
+      error:
+        "The decision was recorded; its outcome is written when the " +
+        "action can run."
+    };
   }
   getMessengers(): ThinkMessengers {
     return {};
@@ -2383,9 +2624,28 @@ export class Think<
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
     this.#turnMaxSteps = config.maxSteps;
+    // The model stays lazy, as in Think: spreading `context` would read
+    // its `model` getter and resolve the default.
+    const turnModel = config.model;
+    const self = this;
+    await this.#authorizeTurn(
+      turn.operationId,
+      async () =>
+        ({
+          system: config.system ?? context.system,
+          messages: config.messages ?? context.messages,
+          tools: context.tools,
+          get model() {
+            return turnModel !== undefined
+              ? self.resolveModel(turnModel)
+              : resolveDefault();
+          },
+          continuation: context.continuation,
+          requestId: context.requestId
+        }) as unknown as TurnContext
+    );
     // Then `beforeStep`, before each model call, as the AI SDK's
     // `prepareStep` runs in Think. Its fields win for this call.
-    const self = this;
     const step: StepFields = isMethodOverridden(this, "beforeStep")
       ? (((await this.beforeStep({
           stepNumber: turn.step,
@@ -2437,6 +2697,27 @@ export class Think<
         temperature: config.temperature
       })
     };
+  }
+
+  /** The input a human approved for a call, from the latest reply. */
+  async #approvedInput(
+    toolCallId: string
+  ): Promise<{ found: false } | { found: true; input: unknown }> {
+    const leaf = await (await this.#rootHandle()).getLatestLeaf();
+    for (const part of leaf?.parts ?? []) {
+      const record = part as {
+        toolCallId?: unknown;
+        input?: unknown;
+        approval?: { approved?: unknown };
+      };
+      if (
+        record.toolCallId === toolCallId &&
+        record.approval?.approved === true
+      ) {
+        return { found: true, input: record.input };
+      }
+    }
+    return { found: false };
   }
 
   async #beforeToolCall(call: {
@@ -2669,4 +2950,13 @@ function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
   }
   // SAFETY: every key is one of `folded`'s, a TurnConfig's.
   return changes as TurnConfig;
+}
+
+// The approval methods are client-callable, as on Think.
+for (const method of [
+  Think.prototype.pendingApprovals,
+  Think.prototype.approveExecution,
+  Think.prototype.rejectExecution
+]) {
+  callable()(method, undefined as unknown as ClassMethodDecoratorContext);
 }

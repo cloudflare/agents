@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { PendingApproval } from "../think";
@@ -9,6 +9,12 @@ type ActionsStub = {
   toolStates(): Promise<string[]>;
   lastText(): Promise<string>;
   resetForTest(): Promise<void>;
+  grantForTest(permissions: string[] | undefined): Promise<void>;
+  toolOutputs(): Promise<unknown[]>;
+  rewriteForTest(amount: number): Promise<void>;
+  sweepSettledForTest(): Promise<void>;
+  ledgerRowsForTest(): Promise<number>;
+  attachmentsForTest(requestId?: string): Promise<unknown[]>;
   pendingApprovals(executionId?: string): Promise<PendingApproval[]>;
   approveExecution(executionId: string): Promise<unknown>;
   rejectExecution(
@@ -49,7 +55,10 @@ describe("harness-backed Think: actions that need a human", () => {
       }
     ]);
 
-    await think.approveExecution(pending[0].executionId);
+    // As on Think: approving answers the action's outcome.
+    expect(await think.approveExecution(pending[0].executionId)).toEqual({
+      charged: 5
+    });
     expect(await think.charged()).toBe(1);
     expect(await think.toolStates()).toEqual(["output-available"]);
     expect(await think.lastText()).toContain("charged");
@@ -72,10 +81,49 @@ describe("harness-backed Think: actions that need a human", () => {
       kind: "durable-pause"
     });
 
-    await think.rejectExecution(pending.executionId, "too much");
+    expect(
+      await think.rejectExecution(pending.executionId, "too much")
+    ).toEqual({
+      status: "rejected",
+      executionId: pending.executionId,
+      reason: "too much"
+    });
     expect(await think.charged()).toBe(0);
     expect(await think.toolStates()).toEqual(["output-denied"]);
     expect(await think.pendingApprovals()).toEqual([]);
+  });
+
+  it("answers an approved action's output even when the reply after it fails", async () => {
+    const think = await agent();
+    await think.say("charge 5 then fail");
+    const [pending] = await think.pendingApprovals();
+
+    expect(await think.approveExecution(pending.executionId)).toEqual({
+      charged: 5
+    });
+    expect(await think.charged()).toBe(1);
+  });
+
+  it("answers both racing decisions with what the harness applied", async () => {
+    const think = await agent();
+    await think.say("charge 7");
+    const [pending] = await think.pendingApprovals();
+
+    const [approved, rejected] = await Promise.all([
+      think.approveExecution(pending.executionId),
+      think.rejectExecution(pending.executionId, "too late")
+    ]);
+
+    const ran = (await think.charged()) === 1;
+    const answers = [approved, rejected].map((answer) =>
+      (answer as { status?: string }).status === "rejected"
+        ? "rejected"
+        : (answer as { charged?: number }).charged !== undefined
+          ? "ran"
+          : "other"
+    );
+    // Neither answer contradicts what happened to the call.
+    expect(answers).not.toContain(ran ? "rejected" : "ran");
   });
 
   it("lists the same descriptor after a restart, from the action and its input", async () => {
@@ -87,8 +135,128 @@ describe("harness-backed Think: actions that need a human", () => {
     await think.resetForTest().catch(() => {});
     const fresh = await agent(name);
     const [after] = await fresh.pendingApprovals();
-    expect(after).toEqual(before);
+    // The same, except the asking turn's id, which only memory knew.
+    expect(before.descriptor.requestId).not.toBe("");
+    expect({
+      ...after,
+      descriptor: { ...after.descriptor, requestId: "" }
+    }).toEqual({
+      ...before,
+      descriptor: { ...before.descriptor, requestId: "" }
+    });
     await fresh.approveExecution(after.executionId);
     expect(await fresh.charged()).toBe(1);
+  });
+
+  it("refuses an action whose permission the turn was not granted, without asking", async () => {
+    const think = await agent();
+    await think.grantForTest([]);
+    await think.say("charge 5");
+    expect(await think.pendingApprovals()).toEqual([]);
+    expect(await think.charged()).toBe(0);
+    expect(await think.toolOutputs()).toEqual([
+      expect.objectContaining({
+        error: expect.objectContaining({
+          name: "ActionAuthorizationError",
+          permissions: ["billing:charge"]
+        })
+      })
+    ]);
+  });
+
+  it("asks the turn's grant again for a call approved after a restart", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    // The grant is withdrawn while the call waits, then the object restarts.
+    await think.grantForTest([]);
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    await fresh.approveExecution(pending.executionId);
+    expect(await fresh.charged()).toBe(0);
+    expect(await fresh.toolOutputs()).toEqual([
+      expect.objectContaining({
+        error: expect.objectContaining({ name: "ActionAuthorizationError" })
+      })
+    ]);
+  });
+
+  it("does not run an approved action whose input beforeToolCall changed", async () => {
+    const think = await agent();
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    await think.rewriteForTest(500);
+    await think.approveExecution(pending.executionId);
+    expect(await think.charged()).toBe(0);
+    expect(await think.toolOutputs()).toEqual([
+      expect.objectContaining({
+        error: expect.objectContaining({ name: "ActionApprovalInputError" })
+      })
+    ]);
+  });
+
+  it("lists permissions computed from the input, also after a restart", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("pause and charge 5");
+    const [before] = await think.pendingApprovals();
+    expect(before.descriptor.permissions).toEqual(["billing:charge:5"]);
+    await think.resetForTest().catch(() => {});
+    const [after] = await (await agent(name)).pendingApprovals();
+    expect(after.descriptor.permissions).toEqual(["billing:charge:5"]);
+  });
+
+  it("answers the approval methods over a tab's RPC", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-harness-actions-agent/${name}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const call = (method: string, args: unknown[]) =>
+      new Promise<Record<string, unknown>>((resolve) => {
+        const id = crypto.randomUUID();
+        ws.addEventListener("message", (event) => {
+          const frame = JSON.parse(String(event.data)) as Record<
+            string,
+            unknown
+          >;
+          if (frame.type === "rpc" && frame.id === id) resolve(frame);
+        });
+        ws.send(JSON.stringify({ type: "rpc", id, method, args }));
+      });
+    const listed = await call("pendingApprovals", []);
+    expect(listed.success).toBe(true);
+    const [pending] = listed.result as PendingApproval[];
+    const approved = await call("approveExecution", [pending.executionId]);
+    expect(approved).toMatchObject({ success: true, result: { charged: 5 } });
+    ws.close();
+  });
+
+  it("deletes settled ledger rows past their retention at start", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    await think.approveExecution(pending.executionId);
+    expect(await think.ledgerRowsForTest()).toBe(1);
+    await think.sweepSettledForTest();
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    await fresh.pendingApprovals();
+    expect(await fresh.ledgerRowsForTest()).toBe(0);
+  });
+
+  it("keeps the reply attachments an action recorded in its turn", async () => {
+    const think = await agent();
+    await think.say("send a receipt for 5");
+    expect(await think.attachmentsForTest()).toEqual([
+      { type: "receipt", amount: 5 }
+    ]);
+    expect(await think.attachmentsForTest("another-turn")).toEqual([]);
   });
 });
