@@ -33,6 +33,8 @@
  */
 
 import { tryN } from "../retries";
+import { CHAT_REQUEST_CONTEXT_KEY, storableRequestContext } from "./chat-host";
+export { CHAT_REQUEST_CONTEXT_KEY, storableRequestContext };
 import type { UIMessage } from "ai";
 import {
   ChatAdmissions,
@@ -101,7 +103,6 @@ import {
   hasPendingToolInteraction
 } from "./tool-state";
 import type { ClientToolSchema } from "./client-tools";
-import { ROW_VALUE_BYTES } from "../internal/platform-limits";
 import {
   reportTurnFailure,
   type TurnFailure,
@@ -119,16 +120,6 @@ import type {
   ChatRecoveryScheduleReason
 } from "./recovery-engine";
 
-const utf8 = new TextEncoder();
-
-/**
- * The session value the last request context is kept in. Under
- * `transcript:`, so a chat clear drops it.
- *
- * @internal
- */
-export const CHAT_REQUEST_CONTEXT_KEY = "transcript:chat:request";
-
 /**
  * The stored form of a request context kept by an earlier release as two
  * JSON strings (`lastClientTools`, `lastBody`), or `null` when neither
@@ -136,21 +127,6 @@ export const CHAT_REQUEST_CONTEXT_KEY = "transcript:chat:request";
  *
  * @internal
  */
-/**
- * `json` when it fits one row (`ROW_VALUE_BYTES`), else `null` with a
- * warning: a request context that large is kept in memory only.
- *
- * @internal
- */
-export function storableRequestContext(json: string | null): string | null {
-  if (json === null || json.length * 3 <= ROW_VALUE_BYTES) return json;
-  if (utf8.encode(json).byteLength <= ROW_VALUE_BYTES) return json;
-  console.warn(
-    `[agents/chat] The last request's client tools and body (${json.length} characters) are over the ${ROW_VALUE_BYTES}-byte row budget, so they are kept in memory only: after a restart, a server-started turn runs without them.`
-  );
-  return null;
-}
-
 export function requestContextFromLegacy(
   lastClientTools: string | undefined,
   lastBody: string | undefined

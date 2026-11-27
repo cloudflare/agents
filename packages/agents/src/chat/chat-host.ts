@@ -330,6 +330,32 @@ const BASE_CHECKPOINT = "chat:base";
 /** The run's checkpoint key counting the stream chunks recovery discarded. */
 const DISCARDED_CHECKPOINT = "chat:discarded";
 
+/**
+ * The session value the last request context is kept in. Under
+ * `transcript:`, so a chat clear drops it.
+ *
+ * @internal
+ */
+export const CHAT_REQUEST_CONTEXT_KEY = "transcript:chat:request";
+
+/**
+ * `json` when it fits one row (`ROW_VALUE_BYTES`), else `null` with a
+ * warning: a request context that large is kept in memory only.
+ *
+ * @internal
+ */
+export function storableRequestContext(json: string | null): string | null {
+  if (json === null || json.length * 3 <= ROW_VALUE_BYTES) return json;
+  if (utf8Length(json) <= ROW_VALUE_BYTES) return json;
+  console.warn(
+    `[agents/chat] The last request's client tools and body (${json.length} characters) are over the ${ROW_VALUE_BYTES}-byte row budget, so they are kept in memory only: after a restart, a server-started turn runs without them.`
+  );
+  return null;
+}
+
+/** The run's checkpoint key: its request context was stored. */
+const CONTEXT_CHECKPOINT = "chat:context";
+
 /** The run's checkpoint key holding the id of the reply it stored. */
 const REPLY_CHECKPOINT = "chat:reply";
 
@@ -485,6 +511,8 @@ export interface ChatTurnInput {
   readonly messages?: readonly UIMessage[];
   /** For a tool answer: the reply holding the answered call, to continue. */
   readonly replyId?: string;
+  /** A host turn that stores its tools and body as the request context. */
+  readonly storeContext?: true;
 }
 
 /** The stream id a turn's reply is written under. */
@@ -747,10 +775,98 @@ export function chatTurnDefinition(
 ) => Promise<ChatTurnResult | TaskSettlement> {
   void options;
   return async (input, step) => {
-    const run = (input ?? {}) as ChatTurnInput;
+    const given = (input ?? {}) as ChatTurnInput;
     const requestId = step.id;
-    const sessionId = run.session ?? deps.session ?? "";
+    const sessionId = given.session ?? deps.session ?? "";
     const session = deps.sessions.session(sessionId);
+    const client =
+      given.trigger === "submit-message" ||
+      given.trigger === "regenerate-message";
+    // A regenerate a question sent after it overtook has nothing to answer:
+    // it never runs, and leaves the stored tools and body alone.
+    if (
+      given.trigger === "regenerate-message" &&
+      step.checkpoint.get(CONTEXT_CHECKPOINT) === undefined
+    ) {
+      const noted = (
+        deps.tasks.peek(requestId)?.metadata?.chat as
+          | { questions?: unknown }
+          | undefined
+      )?.questions;
+      if (Array.isArray(noted)) {
+        const known = new Set([
+          ...(noted as string[]),
+          ...(given.messages ?? []).map((message) => message.id)
+        ]);
+        const overtaken = ((await session.getHistory()) as UIMessage[]).some(
+          (message) => message.role === "user" && !known.has(message.id)
+        );
+        if (overtaken) {
+          const frame = {
+            type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+            id: requestId,
+            body: "",
+            done: true,
+            outcome: "skipped"
+          };
+          const text = frameText(frame);
+          if (deps.webSockets && text !== undefined) {
+            for (const connection of deps.webSockets.getConnections()) {
+              sendIfOpen(connection, text);
+            }
+          }
+          recordRecentChatTerminal(deps.kv, frame);
+          const skipped = { requestId, status: "skipped" } as const;
+          await host.hooks?.onResponse?.(skipped);
+          return skipped;
+        }
+      }
+    }
+    // The request context, once per turn: a client's request (or a host
+    // turn told to) stores its tools and body; a turn that brings none
+    // runs with the stored ones, read now.
+    if (
+      (client || given.storeContext) &&
+      step.checkpoint.get(CONTEXT_CHECKPOINT) === undefined
+    ) {
+      await session.internal_setConfig(
+        CHAT_REQUEST_CONTEXT_KEY,
+        // One past the row budget is not kept (a later server turn runs
+        // without it), as the hosts do today.
+        storableRequestContext(
+          given.clientTools?.length ||
+            (given.body && Object.keys(given.body).length)
+            ? JSON.stringify({
+                ...(given.clientTools?.length && {
+                  clientTools: given.clientTools
+                }),
+                ...(given.body && { body: given.body })
+              })
+            : null
+        )
+      );
+      step.checkpoint.set(CONTEXT_CHECKPOINT, true);
+    }
+    let run = given;
+    if (
+      !client &&
+      (given.clientTools === undefined || given.body === undefined)
+    ) {
+      const stored = await session.internal_config(CHAT_REQUEST_CONTEXT_KEY);
+      if (stored) {
+        const context = JSON.parse(stored) as Pick<
+          ChatTurnInput,
+          "clientTools" | "body"
+        >;
+        const clientTools = given.clientTools ?? context.clientTools;
+        const body = given.body ?? context.body;
+        run = {
+          ...given,
+          ...(clientTools !== undefined && { clientTools }),
+          ...(body !== undefined && { body })
+        };
+      }
+    }
     const streamId = chatTurnStreamId(requestId);
     // Every tab sees the reply as it streams, and how it ended.
     const send = (fields: Record<string, unknown>) => {

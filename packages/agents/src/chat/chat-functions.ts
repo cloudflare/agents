@@ -36,7 +36,7 @@ import { parseChatRequest } from "./protocol-dispatch";
 import {
   CHAT_REQUEST_CONTEXT_KEY as REQUEST_CONTEXT_KEY,
   storableRequestContext
-} from "./chat-turns";
+} from "./chat-host";
 import { parseProtocolMessage } from "./parse-protocol";
 import {
   applyToolUpdate,
@@ -149,54 +149,30 @@ export async function submitTurn(
   const given: ChatTurnInput = fresh.length
     ? { ...rest, messages: fresh }
     : rest;
-  // A client's request sets the tools and body later turns that no client
-  // sent (a server turn, a tool answer's continuation) run with.
-  let run: ChatTurnInput = given;
-  // A client's request stores its context; so does a host turn told to
-  // (`storeContext`: AIChatAgent's `continueLastTurn(body)`). A host turn
-  // that is not told so runs with what it brings, for itself only.
-  if (
-    given.trigger === "submit-message" ||
-    given.trigger === "regenerate-message" ||
-    options.storeContext
-  ) {
-    await session.internal_setConfig(
-      REQUEST_CONTEXT_KEY,
-      // One past the row budget is not kept (a later server turn runs
-      // without it), as the hosts do today.
-      storableRequestContext(
-        given.clientTools?.length ||
-          (given.body && Object.keys(given.body).length)
-          ? JSON.stringify({
-              ...(given.clientTools?.length && {
-                clientTools: given.clientTools
-              }),
-              ...(given.body && { body: given.body })
-            })
-          : null
-      )
-    );
-  } else if (given.clientTools === undefined || given.body === undefined) {
-    // What the turn does not bring comes from the stored context.
-    const stored = await session.internal_config(REQUEST_CONTEXT_KEY);
-    if (stored) {
-      const context = JSON.parse(stored) as Pick<
-        ChatTurnInput,
-        "clientTools" | "body"
-      >;
-      const clientTools = given.clientTools ?? context.clientTools;
-      const body = given.body ?? context.body;
-      run = {
-        ...given,
-        ...(clientTools !== undefined && { clientTools }),
-        ...(body !== undefined && { body })
-      };
-    }
-  }
+  // The tools and body: a client's request stores them as the chat's
+  // request context when its turn starts, and a turn that brings none reads
+  // them then (`storeContext` makes a host turn store its own).
+  const run: ChatTurnInput = options.storeContext
+    ? { ...given, storeContext: true }
+    : given;
+  // A regenerate notes the questions the chat held when it arrived: one sent
+  // after it makes it skip.
+  const metadata =
+    given.trigger === "regenerate-message"
+      ? {
+          ...options.metadata,
+          chat: {
+            ...((options.metadata?.chat as Record<string, TaskJson>) ?? {}),
+            questions: ((await session.getHistory()) as UIMessage[])
+              .filter((message) => message.role === "user")
+              .map((message) => message.id)
+          }
+        }
+      : options.metadata;
   const receipt = await deps.tasks.run(lane.definition, run as never, {
     lane: lane.lane,
     retain: options.retain ?? false,
-    ...(options.metadata !== undefined && { metadata: options.metadata }),
+    ...(metadata !== undefined && { metadata }),
     policy: arrival === "merge" ? "latest" : arrival,
     ...(options.requestId !== undefined && { runId: options.requestId }),
     ...(options.idempotencyKey !== undefined && {

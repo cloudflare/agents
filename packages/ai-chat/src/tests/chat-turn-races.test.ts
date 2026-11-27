@@ -1418,7 +1418,6 @@ describe("chat turn races", () => {
       owner: "tab-a"
     });
     await waitUntil(() => responses(seen, "req-1").some((m) => m.body));
-    const beforeRegenerate = seen.length;
     send(tabB, {
       type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
       id: "req-2",
@@ -1432,11 +1431,8 @@ describe("chat turn races", () => {
         })
       }
     });
-    await waitUntil(() =>
-      seen
-        .slice(beforeRegenerate)
-        .some((m) => m.type === MessageType.CF_AGENT_CHAT_MESSAGES)
-    );
+    // Tab B's request waits in the queue behind the running reply.
+    await waitUntil(async () => (await agent.queuedTurnCountForTest()) === 2);
     // A question is stored while the regenerate waits, so it is skipped.
     await agent.persistMessages([user1, user2]);
     await agent.releaseStreamForTest("req-1");

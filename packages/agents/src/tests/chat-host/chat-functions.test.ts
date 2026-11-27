@@ -2469,4 +2469,54 @@ describe("chat functions over a minimal host", () => {
       await vi.waitFor(() => expect(listeners).toBe(0));
     });
   });
+
+  it("a regenerate a later question overtook while it waited is skipped and leaves the stored context alone", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      const context = await instance.sessions
+        .session("s1")
+        .internal_config(CHAT_REQUEST_CONTEXT_KEY);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: "rg",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              trigger: "regenerate-message",
+              messages: [
+                {
+                  id: "u1",
+                  role: "user",
+                  parts: [{ type: "text", text: "Hi" }]
+                }
+              ],
+              owner: "tab-b"
+            })
+          }
+        })
+      );
+      // Another tab's question is stored while the regenerate waits.
+      await instance.sessions
+        .session("s1")
+        .appendMessage({ id: "u2", role: "user", parts: [] } as never);
+      release();
+      expect(await instance.resultFor("rg")).toMatchObject({
+        status: "skipped"
+      });
+      expect(instance.calls.filter((c) => c.requestId === "rg")).toEqual([]);
+      expect(
+        await instance.sessions
+          .session("s1")
+          .internal_config(CHAT_REQUEST_CONTEXT_KEY)
+      ).toBe(context);
+    });
+  });
 });
