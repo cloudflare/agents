@@ -1,9 +1,12 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, onTestFinished, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS, waitUntilHandled } from "./test-utils";
 import { getAgentByName } from "agents";
+
+/** Bounds for waits on the agent: a loaded CI needs more than 1 s. */
+const BOUNDS = { timeout: 10_000, interval: 20 };
 
 function collectMessages(ws: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [];
@@ -137,7 +140,7 @@ describe("Client tools continuation", () => {
     // Wait for the continuation: it captures its request context again.
     await vi.waitFor(async () => {
       expect(await agentStub.getCapturedClientTools()).toBeDefined();
-    });
+    }, BOUNDS);
 
     // Step 5: Verify continuation received client tools
     const continuationClientTools = await agentStub.getCapturedClientTools();
@@ -464,6 +467,8 @@ describe("Client tools continuation", () => {
       receivedMessages.push(JSON.parse(e.data as string));
     });
 
+    await agentStub.holdNextModelCallForTest();
+    onTestFinished(() => agentStub.releaseModelCallForTest());
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -474,18 +479,26 @@ describe("Client tools continuation", () => {
       })
     );
 
-    // The continuation is pending or running before the resume request.
+    // The continuation is held inside its model call, so the resume request
+    // lands in its pre-stream window and is told to wait.
     await vi.waitFor(async () => {
-      expect((await agentStub.getContinuationStateForTest()).hasPending).toBe(
-        true
-      );
-    });
+      expect(await agentStub.isModelCallHeldForTest()).toBe(true);
+    }, BOUNDS);
 
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
       })
     );
+    await vi.waitFor(() => {
+      expect(
+        receivedMessages.some(
+          (message) => message.type === MessageType.CF_AGENT_STREAM_PENDING
+        )
+      ).toBe(true);
+    }, BOUNDS);
+
+    await agentStub.releaseModelCallForTest();
 
     const waitForMessage = async (
       predicate: (message: Record<string, unknown>) => boolean,
@@ -1157,6 +1170,8 @@ describe("Client tools continuation", () => {
       receivedMessages.push(JSON.parse(e.data as string));
     });
 
+    await agentStub.holdNextModelCallForTest();
+    onTestFinished(() => agentStub.releaseModelCallForTest());
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -1167,18 +1182,26 @@ describe("Client tools continuation", () => {
       })
     );
 
-    // The continuation is pending or running before the resume request.
+    // The continuation is held inside its model call, so the resume request
+    // lands in its pre-stream window and is told to wait.
     await vi.waitFor(async () => {
-      expect((await agentStub.getContinuationStateForTest()).hasPending).toBe(
-        true
-      );
-    });
+      expect(await agentStub.isModelCallHeldForTest()).toBe(true);
+    }, BOUNDS);
 
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
       })
     );
+    await vi.waitFor(() => {
+      expect(
+        receivedMessages.some(
+          (message) => message.type === MessageType.CF_AGENT_STREAM_PENDING
+        )
+      ).toBe(true);
+    }, BOUNDS);
+
+    await agentStub.releaseModelCallForTest();
 
     const waitForMessage = async (
       predicate: (message: Record<string, unknown>) => boolean,
@@ -1551,6 +1574,8 @@ describe("Client tools continuation", () => {
       receivedMessages.push(JSON.parse(e.data as string));
     });
 
+    await agentStub.holdNextModelCallForTest();
+    onTestFinished(() => agentStub.releaseModelCallForTest());
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -1561,18 +1586,24 @@ describe("Client tools continuation", () => {
       })
     );
 
-    // The continuation is pending or running before the resume request.
+    // The continuation is held inside its model call, so the resume request
+    // lands in its pre-stream window and is told to wait.
     await vi.waitFor(async () => {
-      expect((await agentStub.getContinuationStateForTest()).hasPending).toBe(
-        true
-      );
-    });
+      expect(await agentStub.isModelCallHeldForTest()).toBe(true);
+    }, BOUNDS);
 
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
       })
     );
+    await vi.waitFor(() => {
+      expect(
+        receivedMessages.some(
+          (message) => message.type === MessageType.CF_AGENT_STREAM_PENDING
+        )
+      ).toBe(true);
+    }, BOUNDS);
 
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
 
