@@ -353,12 +353,7 @@ export class Think<
       // As in Think: an overridden getSystemPrompt() stays above the
       // context blocks; the default is only the fallback for no blocks,
       // the skill catalog's included.
-      system: () =>
-        isMethodOverridden(this, "getSystemPrompt") ||
-        ((!this.#context || this.#context.getBlocks().length === 0) &&
-          !this.#skills.loaded)
-          ? this.getSystemPrompt()
-          : undefined,
+      system: () => this.#ownSystemPrompt(),
       tools: () => this.getTools(),
       // A turn's `beforeTurn` may set its own, as in Think.
       get maxSteps() {
@@ -683,6 +678,35 @@ export class Think<
    */
   protected _migrateLegacyConfigToThinkTable(): void {
     this.#config.migrateLegacy();
+  }
+
+  /**
+   * The system prompt the shell gives the harness. As in Think: an
+   * overridden getSystemPrompt() stays above the context blocks; the
+   * default is only the fallback for no blocks, the skill catalog's
+   * included.
+   */
+  #ownSystemPrompt(): string | undefined {
+    return isMethodOverridden(this, "getSystemPrompt") ||
+      ((!this.#context || this.#context.getBlocks().length === 0) &&
+        !this.#skills.loaded)
+      ? this.getSystemPrompt()
+      : undefined;
+  }
+
+  /**
+   * The base system prompt of a turn: the shell's own prompt, then the
+   * frozen context blocks, joined as the harness joins them, as Think's
+   * seam of the same name returns it.
+   * @internal Exposed to subclasses for tests, as on Think.
+   */
+  protected async _buildBaseSystemPrompt(
+    blocksPrompt?: string
+  ): Promise<string> {
+    const blocks = blocksPrompt ?? (await this.context.freezeSystemPrompt());
+    const own = this.#ownSystemPrompt();
+    if (!blocks) return own ?? "";
+    return own ? `${own}\n\n${blocks}` : blocks;
   }
 
   /** The skill sources, as in Think: none unless overridden. */
