@@ -242,8 +242,6 @@ type PlacedTurn = {
   readonly owner?: string;
   /** Whether the turn continues a reply stored before it began. */
   readonly continues: boolean;
-  /** The request body the turn was asked with, for `beforeTurn`. */
-  readonly body?: { readonly [key: string]: TaskJson };
 };
 
 /**
@@ -358,12 +356,16 @@ function callerKeyOf(stored: string): string {
   return (JSON.parse(stored) as [string, string])[1];
 }
 
-function operationOf(runId: string): [ThinkSessionId, string] {
-  // A run the shared chat dispatch submitted is named by its request id
-  // alone: it is the root session's (H2c).
-  if (!runId.startsWith("[")) return ["", runId];
-  // SAFETY: every other run of the operation definition is named by runIdOf.
-  return JSON.parse(runId) as [ThinkSessionId, string];
+/**
+ * Whether a stored input is the harness's own operation input, rather than
+ * the chat-turn input the shared chat dispatch submitted (H2c).
+ */
+function isOperationRunInput(input: unknown): input is OperationRunInput {
+  return (
+    input !== null &&
+    typeof input === "object" &&
+    (input as { readonly input?: unknown }).input !== undefined
+  );
 }
 
 /**
@@ -376,7 +378,7 @@ function operationInputOf(input: unknown): OperationRunInput {
     readonly messages?: readonly UIMessage[];
     readonly trigger?: string;
   };
-  if (value.input !== undefined) return value as OperationRunInput;
+  if (isOperationRunInput(value)) return value;
   const chat = input as {
     readonly body?: unknown;
     readonly trigger?: string;
@@ -927,7 +929,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   async pending(session?: ThinkSessionId): Promise<ThinkPendingOperation[]> {
     await this.lifecycle.ready();
     return this.#open(session).map((record) => {
-      const [id, operationId] = operationOf(record.runId);
+      const [id, operationId] = this.#operationOf(record.runId);
       return {
         operationId,
         session: id,
@@ -997,7 +999,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // Two first submissions of one key can race past the checks above;
     // Tasks dedupes them, and its receipt names the operation that won.
     return {
-      operationId: operationOf(receipt.runId)[1],
+      operationId: this.#operationOf(receipt.runId)[1],
       session,
       accepted: receipt.accepted
     };
@@ -1012,7 +1014,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const record = this.#tasks.peekByIdempotencyKey(
       keyOf(session, idempotencyKey)
     );
-    return record && operationOf(record.runId)[1];
+    return record && this.#operationOf(record.runId)[1];
   }
 
   /**
@@ -1141,8 +1143,23 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /** A run's status. */
+  /**
+   * The session and operation id a run names. The harness's own runs are
+   * named by runIdOf; a run the shared chat dispatch submitted is named by
+   * its request id, and its input names the session (the root when none).
+   */
+  #operationOf(runId: string): [ThinkSessionId, string] {
+    const input = this.#tasks.inputOf(runId);
+    if (input === undefined || isOperationRunInput(input)) {
+      // SAFETY: the harness names its own runs with runIdOf.
+      return JSON.parse(runId) as [ThinkSessionId, string];
+    }
+    const session = (input as { readonly session?: unknown }).session;
+    return [typeof session === "string" ? session : "", runId];
+  }
+
   #status(record: TaskRecord): ThinkOperationStatus {
-    const [session, operationId] = operationOf(record.runId);
+    const [session, operationId] = this.#operationOf(record.runId);
     return TERMINAL.includes(record.status)
       ? this.#result(record)
       : {
@@ -1331,12 +1348,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const state: SessionState = {
       messages: messages.map((message) => transcriptOf(message, tools)),
       pending: open.map((record) => ({
-        operationId: operationOf(record.runId)[1],
+        operationId: this.#operationOf(record.runId)[1],
         status: isQueued(record) ? "queued" : "placed"
       })),
       ...(running && {
         run: {
-          operations: [operationOf(running.runId)[1]],
+          operations: [this.#operationOf(running.runId)[1]],
           ...(partial.length > 0 && {
             partial: partial.flatMap((chunk) => {
               const converted = toResponseChunk(chunk, {
@@ -1359,7 +1376,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     await this.lifecycle.ready();
     const running = this.#open(session).find((record) => !isQueued(record));
     if (!running) return undefined;
-    const operationId = operationOf(running.runId)[1];
+    const operationId = this.#operationOf(running.runId)[1];
     const live = this.#live.get(session);
     if (live?.operationId === operationId) {
       return {
@@ -1427,7 +1444,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   async listSessions(): Promise<ThinkSessionInfo[]> {
     await this.lifecycle.ready();
     const busy = new Set(
-      this.#open().map((record) => operationOf(record.runId)[0])
+      this.#open().map((record) => this.#operationOf(record.runId)[0])
     );
     return (await this.#sessions.internal_configs(SESSION_KEY))
       .map(({ sessionId, value }) => ({
@@ -1457,7 +1474,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     stored: OperationRunInput,
     run: TaskStep
   ): Promise<OperationOutcome | TaskSettlement> {
-    const [session, operationId] = operationOf(run.id);
+    const [session, operationId] = this.#operationOf(run.id);
     let finish = () => {};
     const live: LiveRun = {
       operationId,
@@ -1728,11 +1745,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             trigger: "submit-message",
             questionId: last.id,
             continues: false,
-            ...(input.owner !== undefined && { owner: input.owner }),
-            // SAFETY: a request body is JSON, as the tab sent it.
-            ...(stored.body !== undefined && {
-              body: stored.body as { readonly [key: string]: TaskJson }
-            })
+            ...(input.owner !== undefined && { owner: input.owner })
           });
         });
         break;
@@ -2177,6 +2190,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       optionsSystem = built.allSections;
     }
     const system = joinSystem(optionsSystem, contextSystem);
+    const body = operationInputOf(this.#tasks.inputOf(turn.run.id)).body;
     const config =
       (await hooks?.beforeTurn?.({
         session,
@@ -2188,7 +2202,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         tools: Object.keys(tools),
         // A copy: a hook that edits it does not change what is offered.
         toolSet: { ...tools },
-        ...(placed.body !== undefined && { body: placed.body })
+        // The request body is read from the run's input, where it is kept
+        // once, not copied into the placement.
+        ...(body !== undefined && { body })
       })) ?? {};
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
@@ -2621,7 +2637,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** An operation's status report: its event, and a settled one's end. */
   async #reportStatus(record: TaskRecord): Promise<void> {
-    const [session, operationId] = operationOf(record.runId);
+    const [session, operationId] = this.#operationOf(record.runId);
     if (isQueued(record)) {
       this.#events.emit(session, {
         type: "operation",
@@ -2681,7 +2697,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** A settled operation's result, from its run. */
   #result(record: TaskRecord): ThinkOperationResult {
-    const [session, operationId] = operationOf(record.runId);
+    const [session, operationId] = this.#operationOf(record.runId);
     const unanswered = (reason: string | undefined): ThinkOperationResult => ({
       operationId,
       session,
