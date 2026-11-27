@@ -364,5 +364,23 @@
       "file": "prompt-cache.test.ts",
       "test": "prompt-cache prefix stability (#2200) > evicts media sent every turn once per truncation step, by passes that run on their own"
     }
+  },
+  {
+    "file": "agent-tools.test.ts",
+    "test": "Think agent tools > never starts a run cancelled while its turn waited in the queue",
+    "reason": "the class's run tracker (`_agentToolRuns.controllers`) waited on, and the status read from the class's run row (`_readChildRunStatusForTest`)",
+    "successor": {
+      "file": "agent-tools.test.ts",
+      "test": "Think agent tools > a run cancelled by cancelAgentToolRun while it waits behind a running turn ends aborted before that turn ends, and never runs"
+    }
+  },
+  {
+    "file": "agent-tools.test.ts",
+    "test": "Think agent tools > the parent's signal cancels a queued run at once, and the run never starts",
+    "reason": "the class's run tracker (`_agentToolRuns.isLive`) waited on",
+    "successor": {
+      "file": "agent-tools.test.ts",
+      "test": "Think agent tools > a run cancelled by its caller's signal while it waits behind a running turn ends aborted before that turn ends, and never runs"
+    }
   }
 ]

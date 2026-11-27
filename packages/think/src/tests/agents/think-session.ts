@@ -4076,6 +4076,72 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * An agent-tool run is cancelled (by `cancelAgentToolRun` or by its
+   * caller's signal) while its turn waits behind a running turn, read
+   * through the public API only.
+   */
+  async cancelQueuedRunThroughPublicApiForTest(
+    by: "cancel" | "signal"
+  ): Promise<{
+    atCancel: { status: string | undefined; error: string | undefined };
+    status: string | undefined;
+    error: string | undefined;
+    userTexts: string[];
+    steps: number;
+    activeDone: boolean;
+    replies: number;
+  }> {
+    const active = await this._holdActiveRpcTurnForTest();
+    const runId = crypto.randomUUID();
+    const parent = new AbortController();
+    await this.startAgentToolRun("queued run", {
+      runId,
+      signal: parent.signal
+    });
+    if (by === "cancel") await this.cancelAgentToolRun(runId, "stop");
+    else parent.abort(new Error("parent stopped"));
+    // Settled while the turn ahead is still held: the cancel does not wait
+    // for the queue.
+    let atCancel = await this.inspectAgentToolRun(runId);
+    const settleBy = Date.now() + 2000;
+    while (atCancel?.status === "running" && Date.now() < settleBy) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      atCancel = await this.inspectAgentToolRun(runId);
+    }
+    await this.releaseBeforeStepForTest();
+    await active.turn;
+    // Settled: a cancelled turn that wrongly started after the one ahead
+    // would show in the transcript and the step count read below.
+    if (!(await this.waitUntilStable({ timeout: 5000 }))) {
+      throw new Error("the agent never became stable");
+    }
+    let inspection = await this.inspectAgentToolRun(runId);
+    const deadline = Date.now() + 5000;
+    while (inspection?.status === "running" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inspection = await this.inspectAgentToolRun(runId);
+    }
+    return {
+      atCancel: { status: atCancel?.status, error: atCancel?.error },
+      status: inspection?.status,
+      error: inspection?.error,
+      userTexts: this._userTextsForTest(),
+      steps: this._beforeStepLog.length,
+      // The turn ahead ran to its end: the cancel did not stop it too.
+      activeDone:
+        active.callback.doneCalled &&
+        active.callback.errorMessage === undefined,
+      replies: this.messages.filter(
+        (message) =>
+          message.role === "assistant" &&
+          message.parts.some(
+            (part) => part.type === "text" && part.text.length > 0
+          )
+      ).length
+    };
+  }
+
+  /**
    * A cancel of a run being recovered stops what runs under the request ids
    * on its row (the recovered turn, a recovery attempt registered under the
    * first id) and nothing else on the agent.
