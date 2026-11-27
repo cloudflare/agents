@@ -1889,9 +1889,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 ? "overflow"
                 : "terminal"
             : "terminal",
-        onContextOverflow: async () => {
+        onContextOverflow: async (call) => {
           if (hooks?.onContextOverflow) {
-            return hooks.onContextOverflow({ session, operationId });
+            return hooks.onContextOverflow({
+              session,
+              operationId,
+              signal: call.signal
+            });
           }
           try {
             await this.#handle(session).compact();
@@ -2362,7 +2366,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             // transient (a lost connection) is tried again.
             const kind =
               (await this.#extensions.hook("classifyError", {
-                error: failure
+                error: failure,
+                session: turn.session,
+                operationId: turn.operationId
               })) ?? (isPlatformTransientError(failure) ? "retry" : "fail");
             if (kind === "context-overflow" && progressed) {
               // This attempt ran model calls or tools the transcript does
