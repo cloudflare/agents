@@ -726,6 +726,14 @@ export class Think<
               toolCall: { ...call, input } as unknown as TypedToolCall<ToolSet>,
               stepNumber: undefined
             });
+            // The call's time starts as it runs, after the extensions heard.
+            const kept = this.#modelInputs.get(call.toolCallId);
+            if (kept) {
+              this.#modelInputs.set(call.toolCallId, {
+                ...kept,
+                started: Date.now()
+              });
+            }
           }
           return decision;
         },
