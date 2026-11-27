@@ -733,5 +733,59 @@
       "file": "turn-metadata.test.ts",
       "test": "turn metadata > strips reserved metadata keys a client's chat request sends"
     }
+  },
+  {
+    "file": "assistant-agent-loop.test.ts",
+    "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > does not run the model again for a turn stopped while its history was compacted",
+    "reason": "Reads terminal frames through an override of the class's `broadcast` and its terminal-record storage key (`cf:chat:last-terminal`).",
+    "successor": {
+      "file": "assistant-agent-loop.test.ts",
+      "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > sends a tab the aborted frame for a turn stopped while its history was compacted"
+    }
+  },
+  {
+    "file": "assistant-agent-loop.test.ts",
+    "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > ends the stream of a continued turn whose overflow cannot be recovered",
+    "reason": "Reads terminal frames through an override of the class's `broadcast` and its terminal-record storage key (`cf:chat:last-terminal`).",
+    "successor": {
+      "file": "assistant-agent-loop.test.ts",
+      "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > sends a tab the error frame for a continued turn whose overflow cannot be recovered"
+    }
+  },
+  {
+    "file": "assistant-agent-loop.test.ts",
+    "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > fires onChatResponse once for a tool continuation whose overflow cannot be recovered",
+    "reason": "Starts the continuation through the class's private `_cfRunConnectionlessContinuation`, and reads its `broadcast` and terminal-record key.",
+    "successor": {
+      "file": "assistant-agent-loop.test.ts",
+      "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > sends a tab the error frame for a continued turn whose overflow cannot be recovered"
+    }
+  },
+  {
+    "file": "assistant-agent-loop.test.ts",
+    "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > ends the stream of a retried turn whose overflow cannot be recovered",
+    "reason": "Starts the retry through the class's private `_retryLastUserTurn`, and reads its `broadcast` and terminal-record key.",
+    "successor": {
+      "file": "assistant-agent-loop.test.ts",
+      "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > stops after contextOverflow.maxRetries when the overflow persists (no infinite loop)"
+    }
+  },
+  {
+    "file": "assistant-agent-loop.test.ts",
+    "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > recovers a context overflow during a continuation turn",
+    "reason": "Starts the continuation through the class's private `_cfRunConnectionlessContinuation`.",
+    "successor": {
+      "file": "assistant-agent-loop.test.ts",
+      "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > recovers a context overflow during continueLastTurn"
+    }
+  },
+  {
+    "file": "assistant-agent-loop.test.ts",
+    "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > recovers a context overflow during the recovery retry",
+    "reason": "Starts the retry through the class's private `_retryLastUserTurn`.",
+    "successor": {
+      "file": "assistant-agent-loop.test.ts",
+      "test": "Think \u2014 agentic loop > mid-turn context-overflow recovery (opt-in) > compacts and retries when enabled, recovering the turn"
+    }
   }
 ]

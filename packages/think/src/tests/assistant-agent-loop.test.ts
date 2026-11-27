@@ -516,6 +516,61 @@ describe("Think — agentic loop", () => {
       ]);
     });
 
+    it("sends a tab the aborted frame for a turn stopped while its history was compacted", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectWS("OverflowRecoveryTestAgent", room);
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+      const done = waitForDone(ws);
+
+      const result =
+        await agent.testProgrammaticAbortDuringCompaction("trigger overflow");
+
+      // Compacted once, stopped there: no second model call, no error.
+      expect(result.compactionCount).toBe(1);
+      expect(result.modelCalls).toBe(1);
+      expect(result.status).toBe("aborted");
+      expect(result.errorClassification).toBeUndefined();
+      expect(result.responses).toEqual([
+        { status: "aborted", continuation: false }
+      ]);
+      // The tab following the turn is told it ended, as stopped.
+      expect((await done).at(-1)).toMatchObject({
+        type: MSG_CHAT_RESPONSE,
+        done: true,
+        outcome: "aborted"
+      });
+      ws.close();
+    });
+
+    it("sends a tab the error frame for a continued turn whose overflow cannot be recovered", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectWS("OverflowRecoveryTestAgent", room);
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+      const done = waitForDone(ws);
+
+      const result = await agent.testContinueOverflow(true);
+
+      // No retry is left: the error reaches onChatError classified, and
+      // onChatResponse once.
+      expect(result.status).toBe("error");
+      expect(result.errorClassification).toBe("context_overflow");
+      expect(result.responses).toEqual([
+        { status: "error", continuation: true }
+      ]);
+      expect((await done).at(-1)).toMatchObject({
+        type: MSG_CHAT_RESPONSE,
+        done: true,
+        error: true
+      });
+      ws.close();
+    });
+
     it("ends the stream of a continued turn whose overflow cannot be recovered", async () => {
       const room = crypto.randomUUID();
       const agent = (await getAgentByName(

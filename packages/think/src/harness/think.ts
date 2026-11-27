@@ -978,9 +978,26 @@ export class Think<
           this.#dispatchChunk(part);
         },
         onTurnEnd: async (end) => {
-          // A turn no `chat()` caller waits on has nobody to tell.
-          if (!this.#chatClears.has(end.operationId)) {
-            this.#overflowed.delete(end.operationId);
+          // A turn no `chat()` caller waits on: an overflow it could not
+          // recover reaches `onChatError` here, classified, as Think reports
+          // it for every turn. A stopped turn did not fail.
+          if (
+            !this.#chatClears.has(end.operationId) &&
+            this.#overflowed.delete(end.operationId) &&
+            end.status === "unanswered" &&
+            end.reason !== "aborted" &&
+            end.reason !== "withdrawn"
+          ) {
+            try {
+              this.onChatError(end.reason ?? "Context window exceeded.", {
+                requestId: end.operationId,
+                stage: "stream",
+                messagesPersisted: true,
+                classification: "context_overflow"
+              });
+            } catch (error) {
+              console.error("[Think] onChatError threw", error);
+            }
           }
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
