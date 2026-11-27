@@ -3278,14 +3278,28 @@ function operationIdOf(id: string): string {
   }
 }
 
-/** A recovery context with its ids as the operation ids an app knows. */
+/**
+ * A recovery context with its ids as the operation ids an app knows, the
+ * ones `onChatRecovery` is given: one incident id across every hook.
+ */
 function withOperationIds<
-  T extends { requestId: string; recoveryRootRequestId: string }
+  T extends {
+    requestId: string;
+    recoveryRootRequestId: string;
+    incidentId?: string;
+    streamId?: string;
+  }
 >(ctx: T): T {
   return {
     ...ctx,
     requestId: operationIdOf(ctx.requestId),
-    recoveryRootRequestId: operationIdOf(ctx.recoveryRootRequestId)
+    recoveryRootRequestId: operationIdOf(ctx.recoveryRootRequestId),
+    ...(ctx.incidentId !== undefined && {
+      incidentId: operationIdOf(ctx.incidentId)
+    }),
+    ...(ctx.streamId !== undefined && {
+      streamId: operationIdOf(ctx.streamId)
+    })
   };
 }
 
