@@ -128,6 +128,7 @@ import {
   loadThinkExtensions,
   ThinkExtensionHooks
 } from "../extensions/wiring";
+import { turnMetadataFromMessages } from "../turn-metadata";
 import type {
   ExtensionConfig,
   MessageMetadataCallback,
