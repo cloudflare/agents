@@ -493,24 +493,6 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > credits forwarding a sub-agent's stream as parent forward progress (N9)",
-    "reason": "needs interruptions more than CHAT_RECOVERY_ALARM_DEBOUNCE_MS (30 s) apart, which no test config can move the clock across; drives `beginIncident` with a hand-set `nowMs`, and feeds the private `_forwardAgentToolStream`. The visible counterpart (onChatRecovery told attempt 1 while a turn makes progress) is asserted in chat-recovery-public.test.ts",
-    "mechanicsOnly": true
-  },
-  {
-    "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > does NOT credit a silent/hung sub-agent, so the parent still exhausts (N9)",
-    "reason": "needs interruptions more than CHAT_RECOVERY_ALARM_DEBOUNCE_MS (30 s) apart, which no test config can move the clock across; drives `beginIncident` with a hand-set `nowMs`, and feeds the private `_forwardAgentToolStream`",
-    "mechanicsOnly": true
-  },
-  {
-    "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > detects forward progress even after compaction collapses the transcript (#1628)",
-    "reason": "needs interruptions more than CHAT_RECOVERY_ALARM_DEBOUNCE_MS (30 s) apart, which no test config can move the clock across; drives `beginIncident` with a hand-set `nowMs`, and bumps the private progress marker (`bumpRecoveryProgressForTest`, `dropAssistantMessagesForTest`)",
-    "mechanicsOnly": true
-  },
-  {
-    "file": "think-session.test.ts",
     "test": "Think — onChatRecovery > a progressing turn survives past the old wall-clock ceiling (rfc-chat-recovery-work-budget)",
     "reason": "needs an incident first seen 30 minutes ago (a seeded private incident row), which no test can reach in time; drives `beginIncident`. The work budget that replaced the ceiling is asserted in chat-recovery-public.test.ts ('seals a turn that keeps making progress once the work budget is spent')",
     "mechanicsOnly": true
