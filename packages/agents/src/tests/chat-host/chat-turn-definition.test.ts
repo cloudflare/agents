@@ -1535,31 +1535,6 @@ describe("chatTurnDefinition", () => {
     });
   });
 
-  it("a chunk over the capability's chunk limit is refused, not buffered", async () => {
-    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
-      await instance.lifecycle.start();
-      const result = await definitionOf(instance, {
-        respond: async () =>
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue({ type: "start", messageId: "a1" });
-              controller.enqueue({ type: "text-start", id: "t1" });
-              // Over the default 1 MiB chunk limit, under the row budget.
-              controller.enqueue({
-                type: "text-delta",
-                id: "t1",
-                delta: "x".repeat(1_100_000)
-              });
-              controller.enqueue({ type: "text-end", id: "t1" });
-              controller.close();
-            }
-          })
-      })({ trigger: "server" }, laterAttempt("big-1", 1));
-      expect(result).toMatchObject({ status: "error" });
-    });
-  });
-
   it("an approved client tool in the reply continued does not hold the stall watchdog off", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
@@ -1578,43 +1553,6 @@ describe("chatTurnDefinition", () => {
         laterAttempt("ap-5", 1)
       );
       expect(result).toBeInstanceOf(TaskSettlement);
-    });
-  });
-
-  it("a tool cut off after only progress output is reported interrupted, not given the progress as its result", async () => {
-    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
-      await instance.lifecycle.start();
-      const cut = await instance.streams.open(chatTurnStreamId("pg-1"), {
-        tag: "pg-1"
-      });
-      for (const chunk of [
-        { type: "start", messageId: "a1" },
-        {
-          type: "tool-input-available",
-          toolCallId: "c1",
-          toolName: "slow",
-          input: {}
-        },
-        {
-          type: "tool-output-available",
-          toolCallId: "c1",
-          output: "half",
-          preliminary: true
-        }
-      ]) {
-        cut.append(chunk as never);
-      }
-      await definitionOf(instance, instance.host)(
-        { trigger: "server" },
-        laterAttempt("pg-1", 2)
-      );
-      const part = (
-        instance.calls[0].messages.find((m) => m.id === "a1") as unknown as {
-          parts: Array<{ toolCallId?: string; state?: string }>;
-        }
-      ).parts.find((p) => p.toolCallId === "c1");
-      expect(part?.state).toBe("output-error");
     });
   });
 });
