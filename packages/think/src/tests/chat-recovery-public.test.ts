@@ -298,6 +298,37 @@ describe("chat recovery, through public behaviour", () => {
       expect(first?.recoveryRootRequestId).toBe(requestId);
     }, 30_000);
   });
+  it("finishes a reply a reset cut off in that same message, and a runTurn after it adds one question and one answer", async () => {
+    const { agent } = await resetDuringTurn("reset-then-runturn", 2);
+    await vi.waitFor(
+      async () =>
+        expect(await (await agent()).stableWithinForTest(1_000)).toBe(true),
+      { timeout: 20_000, interval: 100 }
+    );
+    const text = (message: { parts: Array<{ type: string; text?: string }> }) =>
+      message.parts
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("");
+    const recovered = await (await agent()).getMessages();
+    // One reply, continued from what the reset left of it, not a second one.
+    expect(recovered.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(text(recovered[1])).toMatch(/^one /);
+
+    await (await agent()).runChannelTurnForTest({ input: "a follow-up" });
+    const after = await (await agent()).getMessages();
+    expect(after.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
+    expect(after[1].id).toBe(recovered[1].id);
+  }, 40_000);
+
   it("gives every recovery hook one incident id and stream id", async () => {
     const agent = await freshAgent("recover-one-incident");
     await agent.armGiveUpForTest(2);
