@@ -12,6 +12,12 @@ import type {
 } from "../think";
 
 type ThinkSubmissionTestStub = {
+  holdChunksAfterResetForTest(
+    chunks: string[],
+    delayMs: number,
+    after: number
+  ): Promise<void>;
+  resetIsolateForTest(): Promise<void>;
   setDelayedChunkResponse(chunks: string[], delayMs: number): Promise<void>;
   holdChunksAfterForTest(after: number): Promise<void>;
   isChunkStreamHeldForTest(): Promise<boolean>;
@@ -70,7 +76,9 @@ type ThinkSubmissionTestStub = {
   statusReportsQueuedForTest(submissionId: string): Promise<number>;
   releaseSubmissionStatusHookForTest(): Promise<void>;
   setProgrammaticResponseForTest(response: string): Promise<void>;
-  useRecoveryToolModelForTest(): Promise<void>;
+  useRecoveryToolModelForTest(options?: {
+    resetAfterTool?: boolean;
+  }): Promise<void>;
   getRecoveryToolExecutionsForTest(): Promise<number>;
   getMessagesForTest(): Promise<UIMessage[]>;
   setFinalAnswerResponseForTest(args: unknown): Promise<void>;
@@ -319,6 +327,18 @@ async function chunkStreamHeld(agent: ThinkSubmissionTestStub): Promise<void> {
   );
 }
 
+/**
+ * Wait until no Tasks run is open: every turn, recovery and status report
+ * has ended. Holds on the harness-backed Think as well, which has no turn
+ * queue to wait on.
+ */
+async function tasksIdle(agent: ThinkSubmissionTestStub): Promise<void> {
+  await vi.waitFor(
+    async () => expect(await agent.isTasksIdleForTest()).toBe(true),
+    { timeout: 10_000, interval: 20 }
+  );
+}
+
 /** Wait until the held `onSubmissionStatus` call is running. */
 async function statusHookHeld(agent: ThinkSubmissionTestStub): Promise<void> {
   await vi.waitFor(
@@ -481,6 +501,150 @@ describe("Think durable submissions", () => {
     });
     expect(done?.status).toBe("completed");
     expect(done?.messageId).toBeDefined();
+  });
+
+  // Through a real eviction, as an app sees it: the successors of the tests
+  // below that seed a `running` row with the class's own recovery facts.
+  describe("a submission whose isolate is evicted while it runs", () => {
+    /** Submit, hold the reply after its first chunk, and evict. */
+    async function evictedMidReply(submissionId: string) {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("interrupt me", { submissionId });
+      await chunkStreamHeld(agent);
+      await agent.resetIsolateForTest().catch(() => {});
+      return freshAgent(name);
+    }
+
+    it("finishes it once: one question, one reply, and the submission completed", async () => {
+      const restarted = await evictedMidReply("sub-evicted");
+
+      const done = await restarted.waitForSubmissionForTest("sub-evicted", {
+        timeoutMs: 20_000
+      });
+      expect(done).toMatchObject({ status: "completed" });
+      const stored = await restarted.getStoredMessages();
+      expect(stored.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      // The submission names the reply it ended with.
+      expect(done?.messageId).toBe(stored[1].id);
+      // And it is terminal for good: nothing runs it again.
+      await tasksIdle(restarted);
+      expect(
+        (await restarted.getStoredMessages()).map((message) => message.role)
+      ).toEqual(["user", "assistant"]);
+    }, 30_000);
+
+    it("is never reported as failed while its reply is being recovered", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("interrupt me", {
+        submissionId: "sub-evicted-running"
+      });
+      await chunkStreamHeld(agent);
+      await agent.holdChunksAfterResetForTest(["e ", "f ", "g "], 50, 1);
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+      onTestFinished(() => restarted.releaseChunksForTest());
+      // The recovered reply is streaming, and waits.
+      await chunkStreamHeld(restarted);
+
+      await expect(
+        restarted.inspectSubmissionForTest("sub-evicted-running")
+      ).resolves.toMatchObject({ status: "running" });
+      await restarted.releaseChunksForTest();
+      await expect(
+        restarted.waitForSubmissionForTest("sub-evicted-running", {
+          timeoutMs: 20_000
+        })
+      ).resolves.toMatchObject({ status: "completed" });
+      // Its status went to `completed` and nowhere else since the reset.
+      const reported = (await restarted.getSubmissionLog())
+        .filter((entry) => entry.submissionId === "sub-evicted-running")
+        .map((entry) => entry.status);
+      expect(reported).not.toContain("error");
+      expect(reported).not.toContain("aborted");
+      expect(reported.at(-1)).toBe("completed");
+    }, 30_000);
+
+    it("keeps a tool's result and does not run the tool again", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      // The isolate resets as the model is asked again with the result.
+      await agent.useRecoveryToolModelForTest({ resetAfterTool: true });
+      await agent.testSubmitMessages("run the tool", {
+        submissionId: "sub-evicted-tool"
+      });
+
+      // Whichever isolate answers: the reset may still be under way.
+      const done = await vi.waitFor(
+        async () => {
+          const submission = await (
+            await freshAgent(name)
+          ).inspectSubmissionForTest("sub-evicted-tool");
+          expect(submission).toMatchObject({ status: "completed" });
+          return submission;
+        },
+        { timeout: 20_000, interval: 50 }
+      );
+      const restarted = await freshAgent(name);
+      expect(await restarted.getRecoveryToolExecutionsForTest()).toBe(1);
+      const stored = await restarted.getStoredMessages();
+      expect(stored.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      // One reply: the tool's call with its result, then the text that
+      // followed the reset.
+      const parts = stored[1].parts as Array<{
+        type: string;
+        state?: string;
+        text?: string;
+      }>;
+      expect(
+        parts.filter((part) => part.type.startsWith("tool-"))
+      ).toMatchObject([{ state: "output-available", output: "echo: hello" }]);
+      expect(
+        parts.some(
+          (part) => part.type === "text" && part.text === "Done with tools"
+        )
+      ).toBe(true);
+      expect(done?.messageId).toBe(stored[1].id);
+    }, 30_000);
+
+    it("stays aborted when it is cancelled while its reply is being recovered", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("interrupt me", {
+        submissionId: "sub-evicted-cancel"
+      });
+      await chunkStreamHeld(agent);
+      // The recovered reply waits after its first chunk too.
+      await agent.holdChunksAfterResetForTest(["e ", "f ", "g "], 50, 1);
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+      onTestFinished(() => restarted.releaseChunksForTest());
+      await chunkStreamHeld(restarted);
+
+      await expect(
+        restarted.cancelSubmissionForTest("sub-evicted-cancel", "stop")
+      ).resolves.toMatchObject({ outcome: "cancelled" });
+      // The recovered reply ends after the cancel: it must not write a
+      // completion over it.
+      await restarted.releaseChunksForTest();
+      await tasksIdle(restarted);
+      await expect(
+        restarted.inspectSubmissionForTest("sub-evicted-cancel")
+      ).resolves.toMatchObject({ status: "aborted", error: "stop" });
+    }, 30_000);
   });
 
   it("accepts a submission quickly and completes it through the normal turn path", async () => {
@@ -1273,7 +1437,12 @@ describe("Think durable submissions", () => {
     await agent.isSubmissionStatusHookHeldForTest();
     expect(waitSettled).toBe(false);
     await agent.releaseSubmissionStatusHookForTest();
-    await expect(waiting).resolves.toMatchObject({ status: "aborted" });
+    // The waiter gets it as it settled, with the cancel's reason, though
+    // the record is gone by now.
+    await expect(waiting).resolves.toMatchObject({
+      status: "aborted",
+      error: "stop"
+    });
     const hookRan = (await agent.getSubmissionLog()).some(
       (entry) =>
         entry.submissionId === "sub-del-hook" && entry.status === "aborted"

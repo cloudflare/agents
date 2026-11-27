@@ -1,1 +1,11 @@
-[]
+[
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > aborts an active recovered continuation without a late overwrite",
+    "reason": "a `running` submission run imported in the class's shape (`insertSubmissionForTest`) and the class's recovery callback run by hand (`cancelDuringRecoveredContinuationForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays aborted when it is cancelled while its reply is being recovered"
+    }
+  }
+]
