@@ -841,5 +841,11 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > keeps a reply recovered twice once, with its partial once, when onChatRecovery says continue: false"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > ends a turn found interrupted whose conversation moved on for the tabs",
+    "reason": "an interrupted stream and chat fiber row inserted in the class's shape, with a newer user message persisted by hand after it, and recovery triggered by hand",
+    "ruledOut": "a later request waits behind the recovery on the chat lane, so a recovery never finds a newer user leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov). On Think: submissions.test.ts 'a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order', which passes on both configs"
   }
 ]
