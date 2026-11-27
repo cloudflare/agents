@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -102,6 +102,27 @@ function buildReferencedOpenApiSpec({
 }
 
 describe("codeMcpServer", () => {
+  it("should use the Workers-safe JSON schema validator for the upstream client", async () => {
+    const validators: string[] = [];
+    const original = Client.prototype.listTools;
+    const spy = vi
+      .spyOn(Client.prototype, "listTools")
+      .mockImplementation(function (this: Client, ...args) {
+        validators.push(
+          (this as unknown as { _jsonSchemaValidator: object })
+            ._jsonSchemaValidator.constructor.name
+        );
+        return original.apply(this, args);
+      });
+    try {
+      const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+      await codeMcpServer({ server: createUpstreamServer(), executor });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(validators).toEqual(["CfWorkerJsonSchemaValidator"]);
+  });
+
   it("should expose a single code tool", async () => {
     const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });

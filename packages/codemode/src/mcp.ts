@@ -131,7 +131,10 @@ export async function codeMcpServer(
 
   await server.connect(serverTransport);
 
-  const client = new Client({ name: "codemode-proxy", version: "1.0.0" });
+  const client = new Client(
+    { name: "codemode-proxy", version: "1.0.0" },
+    { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() }
+  );
   await client.connect(clientTransport);
 
   const { tools } = await client.listTools();
