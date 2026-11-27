@@ -1734,11 +1734,16 @@ export function chatTurnDefinition(
               } as UIMessageChunk;
               record(start);
               seen.push(start);
-              send({
-                body: JSON.stringify(forTabs(start)),
-                done: false,
-                ...(continuing && { continuation: true })
-              });
+              // A new reply the model began with no start reaches the tabs as
+              // the model sent it (a plain-text reply starts at its text);
+              // a continuation's start marks it as one.
+              if (continuing) {
+                send({
+                  body: JSON.stringify(forTabs(start)),
+                  done: false,
+                  continuation: true
+                });
+              }
               controller.enqueue(start);
             }
             started = true;

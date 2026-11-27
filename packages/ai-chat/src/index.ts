@@ -1079,7 +1079,9 @@ export class AIChatAgent<
           ...(call.clientTools.length > 0 && {
             clientTools: [...call.clientTools]
           }),
-          ...(call.body !== undefined && { body: { ...call.body } }),
+          // A request with no custom fields has no body, as before.
+          ...(call.body !== undefined &&
+            Object.keys(call.body).length > 0 && { body: { ...call.body } }),
           continuation: call.mode === "continue"
         });
         // It answered with a reply: however that reply ends, the hook

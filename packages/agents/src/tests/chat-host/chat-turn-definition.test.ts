@@ -2072,4 +2072,41 @@ describe("chatTurnDefinition", () => {
       expect(result).toMatchObject({ status: "error" });
     });
   });
+
+  it("a new reply the model began without a start reaches the tabs as the model sent it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const bodies: string[] = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => {
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response" && frame.body) {
+            bodies.push(JSON.parse(frame.body).type);
+          }
+        }
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Hi" } as never;
+              yield { type: "text-end", id: "t1" } as never;
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("ns-1", 1));
+      expect(bodies).toEqual(["text-start", "text-delta", "text-end"]);
+    });
+  });
 });

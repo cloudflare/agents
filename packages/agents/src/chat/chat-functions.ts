@@ -829,14 +829,24 @@ export async function chatDispatch(
     case "chat-request": {
       const request = parseChatRequest(event.id, event.init.body);
       if (!("messages" in request)) {
-        // A request that cannot run ends at once, with the reason.
-        const text = frameText({
+        // A request that cannot run ends at once, with the reason; its end
+        // is kept for the tab if it resumes by the request's id, and the
+        // failure is published.
+        const frame = {
           type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
           id: event.id,
           body: `Ignoring chat request ${event.id}: ${request.reason}`,
           done: true,
           error: true
-        } as { type: string });
+        };
+        recordRecentChatTerminal(deps.kv, frame);
+        deps.emit?.("chat:request:failed", {
+          requestId: event.id,
+          stage: "parse",
+          messagesPersisted: false,
+          error: request.reason
+        });
+        const text = frameText(frame as { type: string });
         if (text !== undefined) sendIfOpen(connection, text);
         return true;
       }

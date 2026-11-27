@@ -2752,4 +2752,40 @@ describe("chat functions over a minimal host", () => {
       ).toBe(true);
     });
   });
+
+  it("a chat request with no messages ends on its tab, is kept for a resume by its id, and is published", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-x", sent),
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: "bad",
+          init: { method: "POST", body: JSON.stringify({ text: "hi" }) }
+        })
+      );
+      expect(sent).toContainEqual(
+        expect.objectContaining({ id: "bad", done: true, error: true })
+      );
+      expect(instance.events.map((e) => [e.type, e.payload.stage])).toEqual([
+        ["chat:request:failed", "parse"]
+      ]);
+      const back: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-x2", back),
+        undefined,
+        ["bad"]
+      );
+      expect(back[0]).toMatchObject({
+        type: "cf_agent_stream_resuming",
+        id: "bad"
+      });
+    });
+  });
 });
