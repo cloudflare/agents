@@ -235,6 +235,17 @@ function toInput(
   return Array.isArray(input) ? input : [input];
 }
 
+type StaticTurnInput = Exclude<
+  TurnInputMessages,
+  (current: UIMessage[]) => unknown
+>;
+
+/** As Think's runTurn reads static input: an empty string is no message. */
+function runTurnMessages(input: StaticTurnInput): UIMessage[] {
+  if (typeof input === "string" && input.length === 0) return [];
+  return toInput(input);
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -2468,24 +2479,49 @@ export class Think<
     if (options === null || typeof options !== "object") {
       throw new TypeError("runTurn: options must be an object");
     }
-    const mode = options.mode ?? "wait";
+    // As on Think: the same checks, in the same order, with the same words.
+    const mode = (options as { mode?: unknown }).mode ?? "wait";
+    if (mode !== "wait" && mode !== "submit" && mode !== "stream") {
+      throw new TypeError(
+        'runTurn: mode must be "wait", "submit", or "stream"'
+      );
+    }
+    if (mode !== "wait" && (options as RunTurnWait).continuation === true) {
+      throw new TypeError(
+        'runTurn: continuation is only supported with mode: "wait"'
+      );
+    }
+    if (mode === "stream" && !(options as RunTurnStream).callback) {
+      throw new TypeError('runTurn: mode "stream" requires callback');
+    }
+    if (mode !== "wait" && options.input === undefined) {
+      throw new TypeError(`runTurn: mode "${mode}" requires input`);
+    }
     if (mode === "stream") {
       const stream = options as RunTurnStream;
-      if (!stream.input)
-        throw new TypeError('runTurn: mode "stream" requires input');
-      return this.chat(stream.input, stream.callback, {
+      // As on Think: static input with no messages streams an empty turn.
+      if (
+        typeof stream.input !== "function" &&
+        runTurnMessages(stream.input as StaticTurnInput).length === 0
+      ) {
+        await stream.callback.onStart({ requestId: crypto.randomUUID() });
+        await stream.callback.onDone();
+        return;
+      }
+      return this.chat(stream.input as TurnInputMessages, stream.callback, {
         ...(stream.signal && { signal: stream.signal }),
         ...(stream.channel !== undefined && { channel: stream.channel })
       });
     }
     if (mode === "submit") {
       const submit = options as RunTurnSubmit;
-      if (!submit.input)
-        throw new TypeError('runTurn: mode "submit" requires input');
-      const messages =
-        typeof submit.input === "function"
-          ? await submit.input(this.messages)
-          : toInput(submit.input);
+      // As on Think: a submission's input is fixed when it is accepted.
+      if (typeof submit.input === "function") {
+        throw new Error(
+          'runTurn({ mode: "submit" }) does not support function input until _admitTurn (step 3)'
+        );
+      }
+      const messages = runTurnMessages(submit.input as StaticTurnInput);
       return this.submitMessages(messages, {
         ...(submit.submissionId !== undefined && {
           submissionId: submit.submissionId
@@ -2505,6 +2541,14 @@ export class Think<
     }
     if (wait.input === undefined && !wait.continuation) {
       throw new TypeError("runTurn: supply either input or continuation: true");
+    }
+    // As on Think: static input with no messages runs no turn.
+    if (
+      wait.input !== undefined &&
+      typeof wait.input !== "function" &&
+      runTurnMessages(wait.input as StaticTurnInput).length === 0
+    ) {
+      return { requestId: "", status: "skipped", continuation: false };
     }
     // As saveMessages: a turn stopped before it starts builds nothing.
     const cut = await this.#cutOffByStop(wait.signal);
