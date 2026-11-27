@@ -42,6 +42,7 @@ type ThinkSubmissionTestStub = {
     mode?: "react" | "narrate";
   }): Promise<void>;
   serializedDetachedDeliveryOrderingForTest(): Promise<string[]>;
+  waitFromWorkATurnLeftRunningForTest(): Promise<string>;
   runNestedAdmissionScenario(
     mode: "detachedNotify" | "submitThenWait"
   ): Promise<{
@@ -1563,6 +1564,14 @@ describe("Think durable submissions", () => {
     expect(result.succeeded).toBe(false);
     expect(result.error).toContain(
       "waitForSubmission() cannot be called from inside an active turn"
+    );
+  });
+
+  it("waitForSubmission waits for work a turn left running, while a later turn runs", async () => {
+    const agent = await freshAgent();
+    // The work was started inside a turn, but it is not inside one now.
+    await expect(agent.waitFromWorkATurnLeftRunningForTest()).resolves.toBe(
+      "completed"
     );
   });
 

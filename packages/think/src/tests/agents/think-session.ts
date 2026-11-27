@@ -11126,6 +11126,28 @@ export class ThinkProgrammaticTestAgent extends Think {
       body: ctx.body as RpcJsonObject | undefined,
       ...(channel !== undefined && { channel })
     });
+    if (this._detachedWaitGate && !this._detachedWait) {
+      // Started inside this turn, carried on after it: see
+      // `waitFromWorkATurnLeftRunningForTest`.
+      const gate = this._detachedWaitGate;
+      this._detachedWait = (async () => {
+        await gate;
+        const submitted = await this.runTurn({
+          mode: "submit",
+          input: "sent by work the first turn left running"
+        });
+        try {
+          const waiting = this.waitForSubmission(submitted.submissionId, {
+            timeoutMs: 10_000
+          });
+          this._detachedWaiting = true;
+          const settled = await waiting;
+          return settled?.status ?? "missing";
+        } catch (error) {
+          return `threw: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      })();
+    }
     if (this._nestedAdmissionMode && !this._nestedAdmissionAttempted) {
       this._nestedAdmissionAttempted = true;
       try {
@@ -11516,6 +11538,43 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async testSaveMessagesEmptyFunction(): Promise<SaveMessagesResult> {
     return this.saveMessages(() => []);
+  }
+
+  private _detachedWaitGate: Promise<void> | null = null;
+  private _detachedWait: Promise<string> | null = null;
+  private _detachedWaiting = false;
+
+  /**
+   * A turn starts work that outlives it. Once the turn has ended and while a
+   * later turn runs, that work submits a message and waits for it. Returns
+   * how the wait ended.
+   */
+  async waitFromWorkATurnLeftRunningForTest(): Promise<string> {
+    let release = () => {};
+    this._detachedWaitGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this._detachedWait = null;
+    try {
+      await this.testChat("a turn that leaves work running");
+      if (!this._detachedWait) throw new Error("the turn started no work");
+      // Another turn is running when the old work waits.
+      const active = await this._holdActiveTurnForTest("a later turn");
+      try {
+        release();
+        const deadline = Date.now() + 5_000;
+        while (!this._detachedWaiting) {
+          if (Date.now() > deadline) throw new Error("the work never waited");
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      } finally {
+        active.release();
+      }
+      await active.turn;
+      return await (this._detachedWait as Promise<string>);
+    } finally {
+      this._detachedWaitGate = null;
+    }
   }
 
   async runNestedAdmissionScenario(
