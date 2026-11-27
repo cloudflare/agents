@@ -166,7 +166,7 @@
       "total": 11,
       "passed": 4
     },
-    "messenger-upgrade.test.ts": {
+    "upgrade-messenger-rows.test.ts": {
       "total": 7,
       "passed": 7
     },
@@ -786,13 +786,13 @@
     "message-reconciliation.test.ts > Think \u2014 message reconciliation on incoming submits > does not re-repair an already-errored tool call or clobber its errorText",
     "message-reconciliation.test.ts > Think \u2014 message reconciliation on incoming submits > merges server tool outputs into a stale client snapshot when IDs match",
     "message-reconciliation.test.ts > Think \u2014 message reconciliation on incoming submits > preserves a denied tool approval (output-denied) instead of flipping it to errored",
-    "messenger-upgrade.test.ts > messenger rows think@0.24.0 left, after the upgrade > answers a reply run it left before any text went out",
-    "messenger-upgrade.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it held when its recovery job runs",
-    "messenger-upgrade.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it left unsettled, its incident gone",
-    "messenger-upgrade.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it settled as interrupted",
-    "messenger-upgrade.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a reply run it left mid-stream",
-    "messenger-upgrade.test.ts > messenger rows think@0.24.0 left, after the upgrade > posts nothing more for a reply run it left completed",
-    "messenger-upgrade.test.ts > messenger rows think@0.24.0 left, after the upgrade > posts the rest of a recovered reply it settled, from its cursor",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > answers a reply run it left before any text went out",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it held when its recovery job runs",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it left unsettled, its incident gone",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it settled as interrupted",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a reply run it left mid-stream",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > posts nothing more for a reply run it left completed",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > posts the rest of a recovered reply it settled, from its cursor",
     "messengers.test.ts > telegram messenger provider > classifies Telegram no-op edit errors",
     "messengers.test.ts > telegram messenger provider > requires explicit webhook verification posture",
     "messengers.test.ts > telegram messenger provider > splits long Telegram follow-up text without dropping content",

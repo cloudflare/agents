@@ -62,7 +62,7 @@ end. The per-file counts below include it.
 | `mcp-tool-materialization.test.ts`     | 5 / 5     | 100% |
 | `media-eviction.test.ts`               | 19 / 32   | 59%  |
 | `message-reconciliation.test.ts`       | 4 / 11    | 36%  |
-| `messenger-upgrade.test.ts`            | 7 / 7     | 100% |
+| `upgrade-messenger-rows.test.ts`            | 7 / 7     | 100% |
 | `messengers.test.ts`                   | 121 / 129 | 93%  |
 | `nested-agent-tools.test.ts`           | 3 / 3     | 100% |
 | `onconnect-broadcast.test.ts`          | 4 / 17    | 23%  |
