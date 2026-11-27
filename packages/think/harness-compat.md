@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**705 of 1353 (80 class-only, 10 of them mechanics-only, the rest each with a successor) tests that construct Think pass (52%).** Across the whole suite, 1020 of 1749.
+**706 of 1358 (81 class-only, 10 of them mechanics-only, the rest each with a successor) tests that construct Think pass (51%).** Across the whole suite, 1022 of 1755.
 
 A class-only test reaches its behaviour through something private to the
 Think class. It is left out of the headline, it has a successor that
@@ -37,7 +37,7 @@ end. The per-file counts below include it.
 | `channel-recovery.test.ts`             | 2 / 7     | 28%  |
 | `channel-threading.test.ts`            | 5 / 5     | 100% |
 | `channels.test.ts`                     | 8 / 8     | 100% |
-| `chat-recovery-public.test.ts`         | 24 / 29   | 82%  |
+| `chat-recovery-public.test.ts`         | 24 / 31   | 77%  |
 | `client-tools.test.ts`                 | 45 / 144  | 31%  |
 | `cold-rpc-initialization.test.ts`      | 4 / 4     | 100% |
 | `connection-state.test.ts`             | 2 / 2     | 100% |
@@ -85,11 +85,11 @@ end. The per-file counts below include it.
 | `stop-reason.test.ts`                  | 36 / 46   | 78%  |
 | `stream-cleanup.test.ts`               | 0 / 5     | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1     | 100% |
-| `submissions.test.ts`                  | 59 / 136  | 43%  |
+| `submissions.test.ts`                  | 59 / 137  | 43%  |
 | `telegram-messenger.test.ts`           | 2 / 2     | 100% |
 | `terminal-frame-order.test.ts`         | 2 / 4     | 50%  |
 | `think-eviction.test.ts`               | 3 / 3     | 100% |
-| `think-session.test.ts`                | 131 / 332 | 39%  |
+| `think-session.test.ts`                | 132 / 335 | 39%  |
 | `turn-metadata.test.ts`                | 3 / 4     | 75%  |
 | `upgrade-action-ledger.test.ts`        | 1 / 3     | 33%  |
 | `upgrade-messenger-rows.test.ts`       | 7 / 7     | 100% |
@@ -107,6 +107,10 @@ suite (`pnpm test:workers`, which CI runs). The list is
 
 A mechanics-only test asserts nothing an app can observe, so it has no
 successor; its row says what private thing it pins.
+
+A probe-covered test is reached only by a platform fault a Workers test
+cannot raise; its row names the deployed verify scenario that covers it on
+both Thinks, and the PR and head it passed on.
 
 The last column is how many class-only tests the successor stands for, at
 most 4.
@@ -187,6 +191,7 @@ most 4.
 | `messengers.test.ts`: think messengers core > burst replies end to end (#2312) > drains queued messages once a failed recovery is not retried                     | drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, with a failed post the class's reply run gives up                                                                                                                                                                          | `messengers.test.ts`: think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off                                                                       | 4          |
 | `messengers.test.ts`: think messengers core > burst replies end to end (#2312) > keeps no message text with a reply once it is answered                           | reads the class's kept reply-run rows (`__cf_delivery:messenger-reply`); the shell keeps no reply run once delivered                                                                                                                                                                                                                                                                              | `messengers.test.ts`: think messengers core > burst replies end to end (#2312) > keeps no message text in a delivery once the reply is answered                                                                | 1          |
 | `submissions.test.ts`: Think durable submissions > marks stale running submissions with applied messages as error without replaying                               | a submission run imported as `running` in the class's shape with an old start time (`insertSubmissionForTest`); the class's start-up reconciliation judges it                                                                                                                                                                                                                                     | `submissions.test.ts`: Think durable submissions > a submission whose isolate is evicted while it runs > ends in error, without asking the model again, when its turn started longer ago than the stale window | 1          |
+| `think-session.test.ts`: Think — onChatRecovery > marks the root submission errored when a chained continuation is abandoned (recovery disabled)                  | a `running` submission seeded in the class's shape (`seedRunningSubmissionForTest`), with an interrupted continuation's stream and fiber row inserted by hand                                                                                                                                                                                                                                     | `submissions.test.ts`: Think durable submissions > a submission whose isolate is evicted while it runs > ends failed, not running, when a reset cuts its recovered reply and the next recovery declines        | 1          |
 | `channel-recovery.test.ts`: recovery × channels > re-applies channel policy when CONTINUING a recovered partial turn                                              | seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`                                                                                                                                                                        | `channel-recovery.test.ts`: recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off                                                                                  | 4          |
 | `channel-recovery.test.ts`: recovery × channels > re-applies channel policy when RETRYING a recovered pre-stream turn                                             | seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`                                                                                                                                                                        | `channel-recovery.test.ts`: recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off                                                                                  | 4          |
 | `channel-recovery.test.ts`: recovery × channels > re-applies the channel TOOL policy (not just instructions) on a recovered continue turn                         | seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`                                                                                                                                                                        | `channel-recovery.test.ts`: recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off                                                                                  | 4          |
