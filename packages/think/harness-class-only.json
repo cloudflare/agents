@@ -838,5 +838,23 @@
       "file": "submissions.test.ts",
       "test": "Think durable submissions > a submission whose isolate is evicted while it runs > ends in error with the model's own error text when its recovered reply fails"
     }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not duplicate a tool call the continued message already held when the continuation replays it (#1404)",
+    "reason": "a continuation stream seeded in the class's shape and replayed by the class's private orphan persistence (`persistContinuationOrphanForTest` \u2192 `_persistOrphanedStream`)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > recovers a continuation a reset cut off after a tool answer: the tool's result once, then the text to its end"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > recovers a continuation's result for a tool call the continued message already held",
+    "reason": "a continuation stream seeded in the class's shape and replayed by the class's private orphan persistence (`persistContinuationOrphanForTest` \u2192 `_persistOrphanedStream`)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > recovers a continuation a reset cut off after a tool answer: the tool's result once, then the text to its end"
+    }
   }
 ]

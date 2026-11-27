@@ -1031,6 +1031,69 @@ function clientToolThenHangModelForTest(onCall: () => void): LanguageModel {
 }
 
 /**
+ * Asks the client's tool; once the prompt holds its result, answers in
+ * twelve chunks `delayMs` apart, so a reset can land mid-continuation.
+ */
+function clientToolThenSlowAnswerModelForTest(delayMs: number): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-client-tool-then-slow-answer",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    async doStream(options: {
+      abortSignal?: AbortSignal;
+      prompt?: Array<{ role: string }>;
+    }) {
+      const answered = (options.prompt ?? []).some(
+        (message) => message.role === "tool"
+      );
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (!answered) {
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-slow",
+              toolName: "client_action",
+              input: JSON.stringify({ action: "confirm" })
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }
+            });
+            controller.close();
+            return;
+          }
+          controller.enqueue({ type: "text-start", id: "t-slow" });
+          for (let i = 0; i < 12; i++) {
+            if (options.abortSignal?.aborted) break;
+            // A model streaming its continuation, chunk by chunk.
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-slow",
+              delta: `c${i} `
+            });
+          }
+          controller.enqueue({ type: "text-end", id: "t-slow" });
+          controller.enqueue({
+            type: "finish",
+            finishReason: "stop",
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }
+          });
+          controller.close();
+        }
+      });
+      return { stream };
+    }
+  } as unknown as LanguageModel;
+}
+
+/**
  * `model`, except that each call's stream sends its first `afterParts`
  * parts after `stream-start` and then nothing more, until the call is
  * aborted: a model stream that stalls, for each call `stalls` allows.
@@ -1725,6 +1788,7 @@ const RECOVERY_CALLS_KEY = "test:recovery-calls";
 const RECOVERY_CONFIG_KEY = "test:recovery-config";
 /** Where a test keeps a model that asks a client tool and hangs, across resets. */
 const CLIENT_TOOL_MODEL_KEY = "test:client-tool-model";
+const SLOW_CONTINUATION_MODEL_KEY = "test:slow-continuation-model";
 /** Where a test keeps a model that never answers, across resets. */
 const HANG_MODEL_KEY = "test:hang-model";
 /** Where a test keeps a slow model across resets: chunks and delay. */
@@ -4140,6 +4204,11 @@ export class ThinkTestAgent extends Think {
    * `client_action` tool, then hangs until its result is in the prompt; and
    * `chatRecovery` is `config`.
    */
+  /** From now on, across resets: a client tool, then a slow continuation. */
+  async askClientToolThenAnswerSlowlyForTest(): Promise<void> {
+    this.ctx.storage.kv.put(SLOW_CONTINUATION_MODEL_KEY, true);
+  }
+
   async askClientToolAcrossResetsForTest(config: {
     stableTimeoutMs?: number;
   }): Promise<void> {
@@ -6807,6 +6876,11 @@ export class ThinkTestAgent extends Think {
   override getModel(): ThinkModel {
     // A test can have every call ask the client's tool and then hang,
     // across resets.
+    // A client tool, then a slow continuation once it is answered, across
+    // resets.
+    if (this.ctx.storage.kv.get<boolean>(SLOW_CONTINUATION_MODEL_KEY)) {
+      return clientToolThenSlowAnswerModelForTest(150);
+    }
     if (this.ctx.storage.kv.get<boolean>(CLIENT_TOOL_MODEL_KEY)) {
       return clientToolThenHangModelForTest(() => {
         this._modelPromptsForTest.push([]);
