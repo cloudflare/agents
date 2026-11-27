@@ -13,82 +13,120 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**441 of 1313 (0 class-only, each with a successor) tests that construct Think pass (33%).** Across the whole suite, 736 of 1608.
+**531 of 1333 (20 class-only, each with a successor) tests that construct Think pass (39%).** Across the whole suite, 830 of 1652.
 
 A class-only test reaches its behaviour through something private to the
 Think class. It is left out of the headline, it has a successor that
 asserts the same behaviour through the public API, and it is listed at the
 end. The per-file counts below include it.
 
-| File                                   | Passing  |      |
-| -------------------------------------- | -------- | ---- |
-| `action-pause-recovery.test.ts`        | 0 / 3    | 0%   |
-| `actions-attach-reply.test.ts`         | 0 / 12   | 0%   |
-| `actions-durable-pause.test.ts`        | 2 / 56   | 3%   |
-| `agent-tool-reattach-recovery.test.ts` | 0 / 2    | 0%   |
-| `agent-tool-rebind-noop.test.ts`       | 0 / 6    | 0%   |
-| `agent-tools.test.ts`                  | 12 / 68  | 17%  |
-| `assistant-agent-loop.test.ts`         | 10 / 33  | 30%  |
-| `assistant-agent.test.ts`              | 5 / 5    | 100% |
-| `assistant-message-metadata.test.ts`   | 1 / 9    | 11%  |
-| `attachment-consumption.test.ts`       | 0 / 4    | 0%   |
-| `browser-tools.test.ts`                | 6 / 6    | 100% |
-| `channel-policy.test.ts`               | 1 / 3    | 33%  |
-| `channel-recovery.test.ts`             | 0 / 5    | 0%   |
-| `channel-threading.test.ts`            | 1 / 4    | 25%  |
-| `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 38 / 141 | 26%  |
-| `cold-rpc-initialization.test.ts`      | 4 / 4    | 100% |
-| `connection-state.test.ts`             | 2 / 2    | 100% |
-| `context-upgrade.test.ts`              | 8 / 11   | 72%  |
-| `deliver-notice.test.ts`               | 0 / 7    | 0%   |
-| `detached-reconcile-lane.test.ts`      | 0 / 1    | 0%   |
-| `durable-admission.test.ts`            | 4 / 9    | 44%  |
-| `empty-reply.test.ts`                  | 0 / 10   | 0%   |
-| `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
-| `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
-| `execute-hitl.test.ts`                 | 0 / 16   | 0%   |
-| `execute-tool.test.ts`                 | 6 / 6    | 100% |
-| `extension-manager.test.ts`            | 50 / 50  | 100% |
-| `facet-request-order.test.ts`          | 0 / 1    | 0%   |
-| `fetch-tools.test.ts`                  | 53 / 53  | 100% |
-| `fiber.test.ts`                        | 7 / 7    | 100% |
-| `harness-tool-recovery.test.ts`        | 2 / 2    | 100% |
-| `hooks.test.ts`                        | 83 / 149 | 55%  |
-| `hydration-budget.test.ts`             | 2 / 19   | 10%  |
-| `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
-| `mcp-tool-materialization.test.ts`     | 5 / 5    | 100% |
-| `media-eviction.test.ts`               | 3 / 22   | 13%  |
-| `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
-| `messengers.test.ts`                   | 94 / 116 | 81%  |
-| `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
-| `onconnect-broadcast.test.ts`          | 4 / 17   | 23%  |
-| `onstart-degraded.test.ts`             | 3 / 5    | 60%  |
-| `origin-message-ids.test.ts`           | 0 / 8    | 0%   |
-| `periphery-action-tools.test.ts`       | 9 / 9    | 100% |
-| `periphery-channels.test.ts`           | 12 / 12  | 100% |
-| `periphery-extensions.test.ts`         | 12 / 12  | 100% |
-| `periphery-inference.test.ts`          | 19 / 19  | 100% |
-| `periphery-modules.test.ts`            | 14 / 19  | 73%  |
-| `periphery-transcript.test.ts`         | 12 / 12  | 100% |
-| `periphery-turn-policy.test.ts`        | 13 / 13  | 100% |
-| `prefix-changed.test.ts`               | 1 / 1    | 100% |
-| `prompt-cache.test.ts`                 | 4 / 10   | 40%  |
-| `queued-order.test.ts`                 | 0 / 5    | 0%   |
-| `rpc-chat-turns.test.ts`               | 0 / 5    | 0%   |
-| `run-turn-recovery.test.ts`            | 1 / 11   | 9%   |
-| `run-turn.test.ts`                     | 14 / 35  | 40%  |
-| `scheduled-tasks.test.ts`              | 9 / 9    | 100% |
-| `skills-tools.test.ts`                 | 2 / 2    | 100% |
-| `stop-reason.test.ts`                  | 36 / 46  | 78%  |
-| `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
-| `streaming-message-id.test.ts`         | 1 / 1    | 100% |
-| `submissions.test.ts`                  | 40 / 123 | 32%  |
-| `telegram-messenger.test.ts`           | 2 / 2    | 100% |
-| `terminal-frame-order.test.ts`         | 2 / 4    | 50%  |
-| `think-eviction.test.ts`               | 2 / 3    | 66%  |
-| `think-session.test.ts`                | 97 / 317 | 30%  |
-| `turn-metadata.test.ts`                | 1 / 4    | 25%  |
-| `workflows.test.ts`                    | 3 / 3    | 100% |
-| `workspace-tools.test.ts`              | 9 / 10   | 90%  |
-| `ws-web-channel.test.ts`               | 1 / 10   | 10%  |
+| File                                   | Passing   |      |
+| -------------------------------------- | --------- | ---- |
+| `action-pause-recovery.test.ts`        | 0 / 3     | 0%   |
+| `actions-attach-reply.test.ts`         | 0 / 12    | 0%   |
+| `actions-durable-pause.test.ts`        | 2 / 56    | 3%   |
+| `agent-tool-reattach-recovery.test.ts` | 0 / 2     | 0%   |
+| `agent-tool-rebind-noop.test.ts`       | 0 / 6     | 0%   |
+| `agent-tools.test.ts`                  | 12 / 68   | 17%  |
+| `assistant-agent-loop.test.ts`         | 10 / 33   | 30%  |
+| `assistant-agent.test.ts`              | 5 / 5     | 100% |
+| `assistant-message-metadata.test.ts`   | 1 / 9     | 11%  |
+| `attachment-consumption.test.ts`       | 0 / 4     | 0%   |
+| `browser-tools.test.ts`                | 6 / 6     | 100% |
+| `channel-policy.test.ts`               | 1 / 3     | 33%  |
+| `channel-recovery.test.ts`             | 0 / 5     | 0%   |
+| `channel-threading.test.ts`            | 1 / 4     | 25%  |
+| `channels.test.ts`                     | 8 / 8     | 100% |
+| `chat-recovery-public.test.ts`         | 5 / 5     | 100% |
+| `client-tools.test.ts`                 | 41 / 141  | 29%  |
+| `cold-rpc-initialization.test.ts`      | 4 / 4     | 100% |
+| `connection-state.test.ts`             | 2 / 2     | 100% |
+| `context-upgrade.test.ts`              | 11 / 12   | 91%  |
+| `deliver-notice.test.ts`               | 0 / 7     | 0%   |
+| `detached-reconcile-lane.test.ts`      | 0 / 1     | 0%   |
+| `durable-admission.test.ts`            | 4 / 9     | 44%  |
+| `empty-reply.test.ts`                  | 0 / 10    | 0%   |
+| `errored-stream-replay.test.ts`        | 0 / 1     | 0%   |
+| `eviction-recovery.test.ts`            | 0 / 1     | 0%   |
+| `execute-hitl.test.ts`                 | 0 / 16    | 0%   |
+| `execute-tool.test.ts`                 | 6 / 6     | 100% |
+| `extension-manager.test.ts`            | 50 / 50   | 100% |
+| `facet-request-order.test.ts`          | 0 / 1     | 0%   |
+| `fetch-tools.test.ts`                  | 53 / 53   | 100% |
+| `fiber.test.ts`                        | 7 / 7     | 100% |
+| `harness-tool-recovery.test.ts`        | 2 / 2     | 100% |
+| `hooks.test.ts`                        | 92 / 151  | 60%  |
+| `hydration-budget.test.ts`             | 7 / 19    | 36%  |
+| `max-concurrent-agent-tools.test.ts`   | 1 / 5     | 20%  |
+| `mcp-tool-materialization.test.ts`     | 5 / 5     | 100% |
+| `media-eviction.test.ts`               | 18 / 31   | 58%  |
+| `message-reconciliation.test.ts`       | 4 / 11    | 36%  |
+| `messengers.test.ts`                   | 97 / 117  | 82%  |
+| `nested-agent-tools.test.ts`           | 1 / 3     | 33%  |
+| `onconnect-broadcast.test.ts`          | 4 / 17    | 23%  |
+| `onstart-degraded.test.ts`             | 3 / 5     | 60%  |
+| `origin-message-ids.test.ts`           | 0 / 8     | 0%   |
+| `periphery-action-tools.test.ts`       | 9 / 9     | 100% |
+| `periphery-channels.test.ts`           | 12 / 12   | 100% |
+| `periphery-extensions.test.ts`         | 12 / 12   | 100% |
+| `periphery-inference.test.ts`          | 19 / 19   | 100% |
+| `periphery-modules.test.ts`            | 18 / 23   | 78%  |
+| `periphery-transcript.test.ts`         | 12 / 12   | 100% |
+| `periphery-turn-policy.test.ts`        | 13 / 13   | 100% |
+| `prefix-changed.test.ts`               | 1 / 1     | 100% |
+| `prompt-cache.test.ts`                 | 4 / 10    | 40%  |
+| `queued-order.test.ts`                 | 0 / 5     | 0%   |
+| `rpc-chat-turns.test.ts`               | 2 / 5     | 40%  |
+| `run-turn-recovery.test.ts`            | 1 / 11    | 9%   |
+| `run-turn.test.ts`                     | 14 / 35   | 40%  |
+| `scheduled-tasks.test.ts`              | 9 / 9     | 100% |
+| `skills-tools.test.ts`                 | 2 / 2     | 100% |
+| `stop-reason.test.ts`                  | 36 / 46   | 78%  |
+| `stream-cleanup.test.ts`               | 0 / 5     | 0%   |
+| `streaming-message-id.test.ts`         | 1 / 1     | 100% |
+| `submissions.test.ts`                  | 54 / 132  | 40%  |
+| `telegram-messenger.test.ts`           | 2 / 2     | 100% |
+| `terminal-frame-order.test.ts`         | 2 / 4     | 50%  |
+| `think-eviction.test.ts`               | 2 / 3     | 66%  |
+| `think-session.test.ts`                | 127 / 330 | 38%  |
+| `turn-metadata.test.ts`                | 1 / 4     | 25%  |
+| `workflows.test.ts`                    | 3 / 3     | 100% |
+| `workspace-tools.test.ts`              | 10 / 10   | 100% |
+| `ws-web-channel.test.ts`               | 1 / 10    | 10%  |
+
+## Class-only tests
+
+Each of these reaches its behaviour through something private to the Think
+class, so it is not counted above. Its successor asserts the same behaviour
+through the public API: it passes here, and on the class in the ordinary
+suite (`pnpm test:workers`, which CI runs). The list is
+`harness-class-only.json`; a class-only test is deleted with the class.
+
+A mechanics-only test asserts nothing an app can observe, so it has no
+successor; its row says what private thing it pins.
+
+The last column is how many class-only tests the successor stands for, at
+most 4.
+
+| Class-only test                                                                                                                                 | What it reaches                                                                                                                                                                 | Successor                                                                                                                                                                      | Stands for |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------- |
+| `submissions.test.ts`: Think durable submissions > aborts an active recovered continuation without a late overwrite                             | a `running` submission run imported in the class's shape (`insertSubmissionForTest`) and the class's recovery callback run by hand (`cancelDuringRecoveredContinuationForTest`) | `submissions.test.ts`: Think durable submissions > a submission whose isolate is evicted while it runs > stays aborted when it is cancelled while its reply is being recovered | 1          |
+| `submissions.test.ts`: Think durable submissions > lists the running submission when newer ones wait behind it                                  | a submission run imported as `running` in the class's shape (`insertSubmissionForTest`); nothing runs it                                                                        | `submissions.test.ts`: Think durable submissions > while a submission runs > lists it as running, and the one that waits behind it as pending                                  | 1          |
+| `submissions.test.ts`: Think durable submissions > bulk delete skips active submissions even when explicitly requested                          | a submission run imported as `running` in the class's shape (`insertSubmissionForTest`); nothing runs it, beside a seeded `completed` one                                       | `submissions.test.ts`: Think durable submissions > while a submission runs > a bulk delete that asks for every status deletes only the finished one                            | 1          |
+| `hooks.test.ts`: Think — host bridge methods > _insideInferenceLoop is false outside a turn                                                     | reads the class's private `_insideInferenceLoop` flag (`isInsideInferenceLoop`), the seam `addMessages` uses to hold its broadcast mid-turn                                     | `hooks.test.ts`: Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one                                          | 2          |
+| `hooks.test.ts`: Think — host bridge methods > _insideInferenceLoop is false after a completed turn                                             | reads the class's private `_insideInferenceLoop` flag (`isInsideInferenceLoop`), the seam `addMessages` uses to hold its broadcast mid-turn                                     | `hooks.test.ts`: Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one                                          | 2          |
+| `think-session.test.ts`: Think — dynamic configuration > should not let legacy config overwrite newer think_config values on rerun              | Reruns the legacy config lift through Think's private _migrateLegacyConfigToThinkTable seam.                                                                                    | `think-session.test.ts`: Think — dynamic configuration > keeps newer config when a restart lifts the legacy row again                                                          | 1          |
+| `think-session.test.ts`: Think — context blocks > should use context blocks in system prompt assembly even when called directly                 | Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.                                                                                      | `think-session.test.ts`: Think — the system prompt a turn sends > sends the context blocks, loaded on their own                                                                | 1          |
+| `think-session.test.ts`: Think — context blocks > should render empty writable blocks in system prompt                                          | Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.                                                                                      | `think-session.test.ts`: Think — the system prompt a turn sends > sends an empty writable block                                                                                | 1          |
+| `think-session.test.ts`: Think — context blocks > keeps Think's default prompt out when a skills agent does not override getSystemPrompt        | Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.                                                                                      | `think-session.test.ts`: Think — the system prompt a turn sends > sends the skill catalog without Think's default prompt when getSystemPrompt is not overridden                | 1          |
+| `think-session.test.ts`: Think — context blocks > puts an overridden getSystemPrompt above the skills block                                     | Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.                                                                                      | `think-session.test.ts`: Think — the system prompt a turn sends > sends an overridden getSystemPrompt above the skill catalog                                                  | 1          |
+| `think-session.test.ts`: Think — context blocks > keeps an inherited or class-field getSystemPrompt alongside skills                            | Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.                                                                                      | `think-session.test.ts`: Think — the system prompt a turn sends > sends an inherited or class-field getSystemPrompt above the skill catalog                                    | 1          |
+| `think-session.test.ts`: Think — context blocks > loads skills from files in the Workspace and follows edits without rebuilding the prompt      | Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.                                                                                      | `think-session.test.ts`: Think — the system prompt a turn sends > keeps the system prompt the same while Workspace skills change                                               | 1          |
+| `think-session.test.ts`: Think — context blocks > folds a changed skills catalog into the prompt when history is cleared                        | Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.                                                                                      | `think-session.test.ts`: Think — the system prompt a turn sends > folds a changed skill catalog into the system prompt once history is cleared                                 | 1          |
+| `think-session.test.ts`: Think — async configureSession > should have working context blocks from async config                                  | Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.                                                                                      | `think-session.test.ts`: Think — the system prompt a turn sends > sends the context blocks of an async configureSession                                                        | 1          |
+| `think-session.test.ts`: Think — error handling > should recover and continue chatting after error                                              | the turn's failure is injected through the class's private `_transformInferenceResult` seam (`_errorConfig`, via `testChatWithError`)                                           | `think-session.test.ts`: Think — error handling > answers the next turn after a model failure                                                                                  | 1          |
+| `think-session.test.ts`: Think — error handling > should persist partial assistant message on error                                             | the turn's failure is injected through the class's private `_transformInferenceResult` seam (`_errorConfig`, via `testChatWithError`)                                           | `think-session.test.ts`: Think — error handling > keeps the partial reply of a turn whose model reports an error                                                               | 1          |
+| `think-session.test.ts`: Think — error handling > bridges an in-band stream error to chat:request:failed                                        | the in-band error is fed through the class's private `_pumpReply` (`runInBandStreamErrorForTest`)                                                                               | `think-session.test.ts`: Think — error handling > bridges an in-band stream error to chat:request:failed on the RPC path                                                       | 1          |
+| `think-session.test.ts`: Think — onChatRecovery > marks the incident failed when onChatRecovery throws                                          | seeds a fiber row and reads the class's recovery incident records (cf:chat-recovery:incident:*)                                                                                 | `chat-recovery-public.test.ts`: chat recovery, through public behaviour > ends a stalled turn with an error when onChatRecovery throws                                         | 1          |
+| `think-session.test.ts`: Think — onChatResponse > should report in-band stream errors through RPC chat onError                                  | it reads the stream's status from the class's private reply-stream records (`_replyStreams`, via `getLatestStreamStatusForTest`)                                                | `think-session.test.ts`: Think — onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability                                       | 1          |
+| `messengers.test.ts`: think messengers core > burst replies end to end (#2312) > answers a repeated reply id once, after the first was answered | a delivery sink registered under the class's reserved `__cf_delivery:messenger-reply` name and its kept reply run (the class's reply-run rows)                                  | `messengers.test.ts`: think messengers core > streamed replies on adapters without native streaming > answers a webhook its platform sent twice once                           | 1          |
