@@ -4567,7 +4567,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async startFailingReaderTurnForTest(
     message: string,
     turns: number,
-    options: { responseHeaders?: Record<string, string> } = {}
+    options: {
+      responseHeaders?: Record<string, string>;
+      /** How far ahead the next attempt must be for the turn to count as waiting. */
+      waitsAtLeastMs?: number;
+    } = {}
   ): Promise<string> {
     this._failingTurn = {
       message,
@@ -4591,7 +4595,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       const [waiting] = this.sql<{ run_id: string }>`
         SELECT run_id FROM cf_agents_task_runs
         WHERE lane = 'chat' AND status IN ('pending', 'running')
-          AND next_at > ${Date.now() + 5_000}
+          AND next_at > ${Date.now() + (options.waitsAtLeastMs ?? 5_000)}
       `;
       if (waiting) return waiting.run_id;
       if (Date.now() > deadline) {
