@@ -882,13 +882,17 @@ export class Think<
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
           const streamed = this.#streamed.delete(end.operationId);
-          // A turn's end is a safe boundary: a view grown past its budget
-          // re-windows here, as Think's does after a chat request.
-          await this.#transcript.refreshIfNeeded();
           this.#liveCalls.delete(end.operationId);
           this.#toolCalls.delete(end.operationId);
           const clearsAtStart = this.#clearsAtStart.get(end.operationId);
           this.#clearsAtStart.delete(end.operationId);
+          // A turn's end is a safe boundary: a view grown past its budget
+          // re-windows here, as Think's does after a chat request. After the
+          // turn's own bookkeeping, and best-effort: a read that fails leaves
+          // the view as it is, and the turn still reports.
+          await this.#transcript.refreshIfNeeded().catch((error: unknown) => {
+            console.warn("[Think] Could not re-window the transcript", error);
+          });
           // A clear that ran, or runs, while the turn was open.
           const clearedUnder =
             this.#clearing > 0 ||
