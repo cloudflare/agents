@@ -607,7 +607,9 @@ function extractToolPairing(options: unknown): {
 function createOverflowThenOkModel(
   onCall?: (options: unknown) => void,
   alwaysOverflow = false,
-  emitPartialBeforeOverflow = false
+  emitPartialBeforeOverflow = false,
+  /** After the overflow, the retry fails for another reason. */
+  otherErrorOnRetry = false
 ): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -643,6 +645,14 @@ function createOverflowThenOkModel(
               error: new Error(
                 "AI_APICallError: prompt is too long: 213450 tokens > 200000 maximum"
               )
+            });
+            controller.close();
+            return;
+          }
+          if (otherErrorOnRetry) {
+            controller.enqueue({
+              type: "error",
+              error: new Error("the provider rejected the tool schema")
             });
             controller.close();
             return;
@@ -842,6 +852,7 @@ export class OverflowRecoveryTestAgent extends Think {
   proactiveMultiFire = false;
   stepMessages?: "append" | ModelMessage[];
   compactionNoOp = false;
+  otherErrorOnRetry = false;
   compactionThrows = false;
   alwaysOverflow = false;
   emitPartialBeforeOverflow = false;
@@ -954,7 +965,8 @@ export class OverflowRecoveryTestAgent extends Think {
               : createOverflowThenOkModel(
                   onCall,
                   this.alwaysOverflow,
-                  this.emitPartialBeforeOverflow
+                  this.emitPartialBeforeOverflow,
+                  this.otherErrorOnRetry
                 );
     }
     return this._model;
@@ -1028,9 +1040,16 @@ export class OverflowRecoveryTestAgent extends Think {
       noOpCompaction?: boolean;
       alwaysOverflow?: boolean;
       emitPartialBeforeOverflow?: boolean;
+      maxRetries?: number;
+      otherErrorOnRetry?: boolean;
     }
   ): Promise<OverflowChatResult> {
-    this.contextOverflow = { reactive: enabled };
+    this.contextOverflow = {
+      reactive: enabled,
+      ...(opts?.maxRetries !== undefined && { maxRetries: opts.maxRetries })
+    };
+    this.otherErrorOnRetry = opts?.otherErrorOnRetry ?? false;
+    this._model = undefined;
     this.compactionNoOp = opts?.noOpCompaction ?? false;
     this.alwaysOverflow = opts?.alwaysOverflow ?? false;
     this.emitPartialBeforeOverflow = opts?.emitPartialBeforeOverflow ?? false;

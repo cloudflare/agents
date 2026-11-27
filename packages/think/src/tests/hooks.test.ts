@@ -2557,6 +2557,8 @@ describe("Think — beforeTurn config overrides", () => {
 
     expect(result.status).toBe("error");
     expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+    // A turn the override reports failed carries no reply, as on Think.
+    expect(result.messageText).toBeUndefined();
   });
 
   it("keeps structured output for overlapping overridden continuations", async () => {
