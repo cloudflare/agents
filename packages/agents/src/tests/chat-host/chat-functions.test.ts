@@ -1879,6 +1879,24 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
+  it("a stop while a turn waits out its retry backoff tells every tab the request ended", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      const requestId = await cutOffIntoBackoff(instance);
+      const sent: Array<Record<string, unknown>> = [];
+      instance.tabs.push(recordingTab("tab-w", sent));
+      expect(await cancelTurn(instance.deps, requestId)).toBe(true);
+      expect(sent).toContainEqual(
+        expect.objectContaining({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          done: true,
+          outcome: "aborted"
+        })
+      );
+    });
+  });
+
   it("a stop while a turn waits out its retry backoff stores its reply before the next turn stores its question", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {

@@ -281,7 +281,7 @@ function endUnstarted(
   }
 }
 
-/** Stop the turn `requestId`, waiting or running. */
+/** Stop the turn `requestId`, waiting, running or waiting to run again. */
 export async function cancelTurn(
   deps: ChatDeps,
   requestId: string,
@@ -308,7 +308,12 @@ export async function cancelTurn(
   // once the run ends, the next turn stores its question.
   await retrying?.keep();
   const cancelled = await deps.tasks.cancel(requestId, reason);
-  if (cancelled && retrying) await retrying.settle(false);
+  if (cancelled && retrying) {
+    await retrying.settle(false);
+    // Its handler does not run again to say how it ended: every tab was
+    // shown it streaming, so every tab is told.
+    endUnstarted(deps, requestId, "aborted", undefined);
+  }
   return cancelled;
 }
 
