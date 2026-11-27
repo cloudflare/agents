@@ -1392,18 +1392,33 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   ): Promise<ThinkPendingApproval[]> {
     const leaf = await this.#handle(session).getLatestLeaf();
     if (leaf?.role !== "assistant") return [];
-    return asUIMessage(leaf).parts.flatMap((part) =>
-      isToolCallPart(part) && part.state === "approval-requested"
-        ? [
-            {
-              approvalId: part.approval.id,
-              toolCallId: part.toolCallId,
-              toolName: toolNameOf(part),
-              input: part.input
-            }
-          ]
-        : []
-    );
+    const parts = asUIMessage(leaf).parts;
+    // A tool parked for a call inside it (`<callId>/<n>`): the call that
+    // waits is the one to decide, so it is listed by its own tool and input.
+    const parked = parts.some(
+      (part) =>
+        isToolCallPart(part) &&
+        part.state === "approval-requested" &&
+        part.approval.id.includes("/")
+    )
+      ? await this.#parkedCalls(session, leaf.id)
+      : {};
+    return parts.flatMap((part) => {
+      if (!isToolCallPart(part) || part.state !== "approval-requested") {
+        return [];
+      }
+      const pending = Object.hasOwn(parked, part.toolCallId)
+        ? parked[part.toolCallId]?.pending
+        : undefined;
+      return [
+        {
+          approvalId: part.approval.id,
+          toolCallId: pending?.toolCallId ?? part.toolCallId,
+          toolName: pending?.toolName ?? toolNameOf(part),
+          input: pending ? pending.input : part.input
+        }
+      ];
+    });
   }
 
   /**

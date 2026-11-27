@@ -902,6 +902,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.kv.put(RETURNED_MESSAGES_KEY, messages);
   }
 
+  pendingApprovals(session?: string) {
+    return this.harness.pendingApprovals(this.harness.session(session).id);
+  }
+
   composeAborted(): boolean {
     return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
   }

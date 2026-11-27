@@ -781,6 +781,15 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     // The parked tool was aborted, and what it called is kept.
     expect(await stub.composeAborted()).toBe(true);
     expect(await stub.parkedAnnotations()).toBe(1);
+    // Listed as the call that waits: its own tool and input.
+    expect(await stub.pendingApprovals()).toEqual([
+      {
+        approvalId: call?.approvalId,
+        toolCallId: `${call?.toolCallId}/3`,
+        toolName: "dangerous",
+        input: {}
+      }
+    ]);
 
     const receipt = await stub.answer({
       type: "approval",
