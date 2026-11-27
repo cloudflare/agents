@@ -151,6 +151,8 @@ import type {
 import { nanoid } from "nanoid";
 import {
   cancelTurn,
+  chatTurnStreamId,
+  type AgentToolStreams,
   resumeChat,
   chatClientView,
   hasPendingToolInteraction,
@@ -669,14 +671,16 @@ export class AIChatAgent<
       requestIndex: "idx_ai_chat_agent_tool_request_id",
       turnDefinition: (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME
     }),
-    streams: () => this._replyStreams,
+    // SEAM (arch's 6f/R3 ruling): agent tools mapped onto the chat module,
+    // in this one place. R3-identity (#3346) deletes it.
+    streams: () => this._agentToolStreams(),
     storage: () => this.ctx.storage,
     responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
     resetError: "Agent tool run was skipped because the chat was cleared.",
-    turnGeneration: () => this._turns.queue.generation,
+    turnGeneration: () => this._chatClears,
     keepAliveWhile: (fn) => this.keepAliveWhile(fn),
     generateRequestId: () => nanoid(),
-    activeRequestId: () => this._replyStreams.activeRequestId,
+    activeRequestId: () => this._runningChatTurn(),
     broadcastChunk: (requestId, body) =>
       this._frames.broadcast({
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
@@ -705,8 +709,50 @@ export class AIChatAgent<
     messages: () => this.messages,
     // The same as a client's stop for the request (#1630).
     cancelRequest: (requestId, reason) =>
-      this._holdForStop(this._turns.cancel(requestId, reason))
+      this._holdForStop(
+        cancelTurn(
+          this._chatDeps(),
+          requestId,
+          reason === undefined ? undefined : String(reason)
+        ).then(() => {})
+      )
   });
+
+  /** SEAM: chat clears so far, the generation agent tools compare. */
+  private _chatClears = 0;
+
+  /** SEAM: the chat turn running now, if any. */
+  private _runningChatTurn(): string | null {
+    return (
+      this._openChatTurns().find((run) => run.status === "running")?.runId ??
+      null
+    );
+  }
+
+  /** SEAM: a turn's chunks, as agent tools read them, from its stream. */
+  private _agentToolStreams(): AgentToolStreams {
+    const sync = this.streams.__DO_NOT_USE_WILL_BREAK__sync();
+    return {
+      flushBuffer: () => sync.flush(),
+      latestStreamInfoForRequest: (requestId) => {
+        const id = chatTurnStreamId(requestId);
+        return sync.getStream(id) ? { id } : null;
+      },
+      storedChunks: function* (streamId) {
+        let from = 0;
+        for (;;) {
+          const rows = sync.readChunks(streamId, from, 256);
+          for (const row of rows) {
+            yield { body: row.chunk, chunk_index: row.seq };
+          }
+          if (rows.length < 256) return;
+          from = rows[rows.length - 1].seq + 1;
+        }
+      },
+      // Resolved on each use, so read now.
+      activeRequestId: this._runningChatTurn()
+    };
+  }
 
   /**
    * Load the last request context (the session's `transcript:chat:request`
@@ -969,9 +1015,13 @@ export class AIChatAgent<
    */
   private async _serverTurn(
     input: ChatTurnInput,
-    options: { signal?: AbortSignal; storeContext?: boolean } = {}
+    options: {
+      signal?: AbortSignal;
+      storeContext?: boolean;
+      requestId?: string;
+    } = {}
   ): Promise<SaveMessagesResult> {
-    const requestId = nanoid();
+    const requestId = options.requestId ?? nanoid();
     if (options.signal?.aborted) return { requestId, status: "aborted" };
     const ended = new Promise<ChatTurnResult>((resolve) =>
       this._turnWaiters.set(requestId, resolve)
@@ -1507,6 +1557,7 @@ export class AIChatAgent<
       clear: async (connection) => {
         // The chat module's lane: its turns end, waiting or running.
         this._shownQueued.clear();
+        this._chatClears++;
         await clearChat(this._chatDeps(), this._chatLane());
         this.resetTurnState();
         await this.#session.clearMessages();
@@ -3455,21 +3506,20 @@ export class AIChatAgent<
         terminalOnly: options.eventDelivery === "terminal",
         signal: options.signal
       },
-      ({ requestId, signal, shouldStart }) =>
-        this._runProgrammaticMessagesTurn(
-          requestId,
-          (messages) => [
-            ...messages,
-            this.formatAgentToolInput(input, { runId: options.runId })
-          ],
+      // SEAM: the run's turn is a server turn on the chat's lane, under the
+      // run's request id. It carries the run's input as its body and no
+      // client tools (`[]`, not the stored ones: the release's `null`).
+      ({ requestId, signal }) =>
+        this._serverTurn(
           {
-            signal,
-            shouldApplyMessages: shouldStart,
-            // The run's input goes with its turn: it is the stored request
-            // context while the turn runs, and not while it waits.
-            body: { agentToolInput: input },
-            clientTools: null
-          }
+            trigger: "server",
+            messages: [
+              this.formatAgentToolInput(input, { runId: options.runId })
+            ],
+            body: { agentToolInput: input as never },
+            clientTools: []
+          },
+          { requestId, ...(signal && { signal }) }
         )
     );
   }
