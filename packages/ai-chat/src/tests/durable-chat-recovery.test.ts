@@ -380,6 +380,25 @@ describe("onChatRecovery", () => {
     return chunks;
   }
 
+  it("answers after a platform transient before the model call, within a minute", async () => {
+    const agentStub = await getTestAgent(`transient-${crypto.randomUUID()}`);
+    const turn = await (
+      agentStub as unknown as {
+        turnAfterPlatformTransientForTest(): Promise<{
+          retryInMs: number | null;
+          claimed: boolean;
+          reply: boolean;
+        }>;
+      }
+    ).turnAfterPlatformTransientForTest();
+    // The run is tried again after a short wait, not at its claim deadline
+    // (minutes away), and the reply arrives when it is.
+    expect(turn.claimed).toBe(false);
+    expect(turn.retryInMs).toBeGreaterThanOrEqual(30_000);
+    expect(turn.retryInMs).toBeLessThan(60_000);
+    expect(turn.reply).toBe(true);
+  }, 30_000);
+
   it("should fire onChatRecovery for an orphaned stream", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);

@@ -3635,6 +3635,60 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   private _recoveryRootsSeen: Array<string | null> = [];
   private _saveFromNextResponse = false;
 
+  /**
+   * A turn whose `onChatMessage` hits a platform transient before the model
+   * is called. Reports when its run is to be tried again, then makes that
+   * moment now and runs the alarm.
+   */
+  async turnAfterPlatformTransientForTest(): Promise<{
+    retryInMs: number | null;
+    claimed: boolean;
+    reply: boolean;
+  }> {
+    this._throwFromNextTurn = "Network connection lost.";
+    const before = Date.now();
+    void this.saveMessages((current) => [
+      ...current,
+      {
+        id: `u-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      }
+    ]).catch(() => {});
+    const run = () =>
+      this.sql<{
+        run_id: string;
+        generation: string | null;
+        next_at: number;
+      }>`SELECT run_id, generation, next_at FROM cf_agents_task_runs
+         WHERE status = 'running' AND lane IS NOT NULL`[0];
+    // The transient was thrown once the fixture's switch is off again; the
+    // run is then handed back (its claim stripped) to be tried again.
+    const deadline = Date.now() + 10_000;
+    while (this._throwFromNextTurn !== null || run()?.generation != null) {
+      if (Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const waiting = run();
+    if (!waiting) return { retryInMs: null, claimed: false, reply: false };
+    const due = Date.now() - 1;
+    this
+      .sql`UPDATE cf_agents_task_runs SET next_at = ${due} WHERE run_id = ${waiting.run_id}`;
+    this
+      .sql`UPDATE cf_agents_jobs SET time = ${due} WHERE id = ${`task:${waiting.run_id}`}`;
+    await this.lifecycle.alarm();
+    const replyDeadline = Date.now() + 10_000;
+    while (this.messages.at(-1)?.role !== "assistant") {
+      if (Date.now() > replyDeadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return {
+      retryInMs: waiting.next_at - before,
+      claimed: waiting.generation !== null,
+      reply: this.messages.at(-1)?.role === "assistant"
+    };
+  }
+
   /** Make the next `onChatMessage` call throw `message`. */
   throwFromNextTurnForTest(message: string | null): void {
     this._throwFromNextTurn = message;
