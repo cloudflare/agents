@@ -19,6 +19,8 @@ import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
 import type { ToolInvoke } from "../extensions/types";
+import { codemodeExtension } from "../extensions/codemode";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import {
   classifyContextOverflow,
   SteerNotSupportedError,
@@ -46,6 +48,7 @@ const BEFORE_TURN_CALLS_KEY = "test:before-turn:calls";
 /** `operationChunks` and `followOperation` lengths at each `beforeTurn`. */
 const OPERATION_CHUNKS_KEY = "test:before-turn:operation-chunks";
 const SYSTEM_KEY = "test:system";
+const CODE_COUNT_KEY = "test:code-count";
 const TRIPLED_KEY = "test:tripled";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
@@ -2281,6 +2284,164 @@ function summarize(messages: readonly UIMessage[]): string[] {
     });
     return `${message.role}: ${pieces.join(" ")}`;
   });
+}
+
+/** ThinkHarness with codemode installed last, over a Worker executor. */
+export class ThinkCodemodeObject extends DurableObject<Cloudflare.Env> {
+  readonly prompts: PromptMessage[][] = [];
+  readonly offered: string[][] = [];
+  readonly harness = new ThinkHarness({
+    system: "You are a test.",
+    model: new MockLanguageModelV4({
+      doStream: async ({ prompt, tools }) => {
+        // SAFETY: the mock's prompt is the provider's message list.
+        const messages = prompt as unknown as PromptMessage[];
+        this.prompts.push(messages);
+        this.offered.push((tools ?? []).map((offered) => offered.name));
+        const last = messages.filter((m) => m.role !== "system").at(-1);
+        const parts =
+          last?.role === "tool"
+            ? textReply(`tool said: ${toolResultText(last.content)}`)
+            : callReply([
+                {
+                  name: "code",
+                  input: { code: contentText(last?.content) }
+                }
+              ]);
+        return {
+          stream: new ReadableStream<StreamPart>({
+            start(controller) {
+              for (const part of parts) controller.enqueue(part);
+              controller.close();
+            }
+          })
+        };
+      }
+    }),
+    tools: () => ({
+      multiply: tool({
+        description: "Multiply by three",
+        inputSchema: z.object({ value: z.number() }),
+        execute: async ({ value }) => value * 3
+      }),
+      count: tool({
+        description: "Count the calls",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const kv = this.ctx.storage.kv;
+          const n = (kv.get<number>(CODE_COUNT_KEY) ?? 0) + 1;
+          kv.put(CODE_COUNT_KEY, n);
+          return n;
+        }
+      }),
+      wait_here: {
+        ...tool({
+          description: "Wait until released; safe to rerun",
+          inputSchema: z.object({}),
+          execute: async () => {
+            const kv = this.ctx.storage.kv;
+            kv.put(GATE_RUNS_KEY, (kv.get<number>(GATE_RUNS_KEY) ?? 0) + 1);
+            while (!kv.get(RELEASE_KEY)) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            return "released";
+          }
+        }),
+        recovery: "rerun" as const
+      },
+      dangerous: tool({
+        description: "Needs approval",
+        inputSchema: z.object({}),
+        needsApproval: true,
+        execute: async () => "ran"
+      }),
+      ask: tool({
+        description: "Ask the user (direct)",
+        inputSchema: z.object({ question: z.string() }),
+        execute: async ({ question }) => question
+      })
+    }),
+    extensions: [
+      {
+        name: "codemode",
+        extension: codemodeExtension({
+          executor: new DynamicWorkerExecutor({
+            loader: (this.env as unknown as { LOADER: WorkerLoader }).LOADER
+          }),
+          direct: ["ask"]
+        }),
+        after: true
+      }
+    ]
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.harness);
+
+  async prompt(text: string) {
+    const response = await this.harness.session().prompt(text);
+    return { ...response, messages: summarize(response.messages) };
+  }
+
+  submit(text: string): Promise<ThinkReceipt> {
+    return this.harness.session().submit(text);
+  }
+
+  wait(operationId: string): Promise<ThinkOperationResult> {
+    return this.harness.session().wait(operationId);
+  }
+
+  lastOffered(): string[] {
+    return this.offered.at(-1) ?? [];
+  }
+
+  answer(answer: ToolAnswer): Promise<ThinkReceipt> {
+    return this.harness.session().submit(answer);
+  }
+
+  /** The last message's tool parts, as `name state approvalId`. */
+  async lastParts(): Promise<string[]> {
+    const last = (await this.harness.session().messages()).at(-1);
+    return (last?.parts ?? []).flatMap((part) =>
+      "toolCallId" in part
+        ? [
+            `${part.type} ${part.state} ${
+              "approval" in part && part.approval ? part.approval.id : ""
+            }`.trim()
+          ]
+        : []
+    );
+  }
+
+  lastSystem(): string {
+    const prompt = this.prompts.at(-1) ?? [];
+    return prompt
+      .filter((m) => m.role === "system")
+      .map((m) => contentText(m.content) || String(m.content))
+      .join("\n");
+  }
+
+  counted(): number {
+    return this.ctx.storage.kv.get<number>(CODE_COUNT_KEY) ?? 0;
+  }
+
+  async waitStarted(runs: number): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      if ((this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0) >= runs) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("wait_here never started");
+  }
+
+  waitRuns(): number {
+    return this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0;
+  }
+
+  release(): void {
+    this.ctx.storage.kv.put(RELEASE_KEY, true);
+  }
+
+  alarmTime(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
 }
 
 export default {
