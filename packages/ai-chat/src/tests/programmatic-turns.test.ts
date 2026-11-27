@@ -92,9 +92,13 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     // The idle wait has not settled: a round trip to the agent, while the
     // turn is held, comes back first.
     let idleSettled = false;
-    void waitForIdlePromise.then(() => {
-      idleSettled = true;
-    });
+    // Rejections are the awaited promise's to report, not this observer's.
+    void waitForIdlePromise.then(
+      () => {
+        idleSettled = true;
+      },
+      () => {}
+    );
     expect(await agentStub.isStreamHeldForTest("req-programmatic-1")).toBe(
       true
     );
@@ -198,7 +202,7 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
       expect(
         await agentStub.isStreamHeldForTest("req-programmatic-clear-1")
       ).toBe(true);
-    });
+    }, BOUNDS);
 
     const queuedPromise = agentStub.enqueueSyntheticUserMessage("Skipped", {
       body: {
@@ -211,7 +215,7 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     // The programmatic turn waits in the queue behind the held one.
     await vi.waitFor(async () => {
       expect(await agentStub.queuedTurnCountForTest()).toBe(2);
-    });
+    }, BOUNDS);
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
