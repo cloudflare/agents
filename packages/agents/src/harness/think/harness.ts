@@ -221,6 +221,9 @@ const PLACED_KEY = "think:placed";
 
 /** The most a structured output may take, as JSON, inside the run result. */
 const MAX_OUTPUT_BYTES = 512 * 1024;
+
+/** How many schema-produced outputs wait in memory for their callers. */
+const MAX_OUTPUT_VALUES = 32;
 /**
  * The turn definition's run checkpoint naming the reply a turn continues,
  * read to rebuild what a turn streamed outside its attempt.
@@ -1585,7 +1588,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** @internal Abort everything in a session and clear its transcript. */
   async reset(session: ThinkSessionId, handoff?: string): Promise<void> {
-    this.#outputValues.delete(session);
     await this.abort(session);
     const handle = this.#handle(session);
     this.#ownClears.set(session, (this.#ownClears.get(session) ?? 0) + 1);
@@ -1912,13 +1914,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       const output =
         live.output ??
         (placed && !("ended" in placed) ? placed.output : undefined);
-      // The session's latest output, as its schema produced it: one slot
-      // per session, which the next output turn replaces.
+      // The output as its schema produced it, for the caller waiting on
+      // it: the most recent few, oldest dropped first.
       if (live.outputValue !== undefined) {
-        this.#outputValues.set(session, {
-          operationId: live.operationId,
-          value: live.outputValue
-        });
+        const runId = runIdOf(session, live.operationId);
+        this.#outputValues.set(runId, live.outputValue);
+        if (this.#outputValues.size > MAX_OUTPUT_VALUES) {
+          const oldest = this.#outputValues.keys().next().value;
+          if (oldest !== undefined) this.#outputValues.delete(oldest);
+        }
       }
       return outcome.status === "done" && output !== undefined
         ? { ...outcome, output }
@@ -3745,10 +3749,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // As in Think, this isolate's caller gets the value the schema
     // produced; across a restart, the JSON the run's result kept.
     const runId = runIdOf(session, operationId);
-    const latest = this.#outputValues.get(session);
-    if (latest?.operationId === operationId) {
-      this.#outputValues.delete(session);
-      return latest.value;
+    if (this.#outputValues.has(runId)) {
+      const value = this.#outputValues.get(runId);
+      this.#outputValues.delete(runId);
+      return value;
     }
     const record = this.#tasks.peek(runId);
     if (record?.status !== "completed") return undefined;
@@ -3758,13 +3762,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
-   * Each session's latest structured output as its schema produced it,
-   * until read: at most one per session.
+   * Structured outputs as their schemas produced them, by run, until read:
+   * at most `MAX_OUTPUT_VALUES`, oldest dropped first (a dropped one is
+   * read as the run's stored JSON).
    */
-  readonly #outputValues = new Map<
-    ThinkSessionId,
-    { readonly operationId: string; readonly value: unknown }
-  >();
+  readonly #outputValues = new Map<string, unknown>();
 
   #result(record: TaskRecord): ThinkOperationResult {
     const [session, operationId] = operationOf(record.runId);
