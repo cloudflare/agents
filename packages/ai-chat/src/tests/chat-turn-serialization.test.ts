@@ -206,9 +206,13 @@ describe("AIChatAgent chat turn serialization", () => {
     // The idle wait has not settled: a round trip to the agent, while the
     // turn is held, comes back first.
     let idleSettled = false;
-    void waitForIdlePromise.then(() => {
-      idleSettled = true;
-    });
+    // Rejections are the awaited promise's to report, not this observer's.
+    void waitForIdlePromise.then(
+      () => {
+        idleSettled = true;
+      },
+      () => {}
+    );
     expect(await agentStub.isStreamHeldForTest("req-save-1")).toBe(true);
     expect(idleSettled).toBe(false);
 
@@ -333,6 +337,16 @@ describe("AIChatAgent chat turn serialization", () => {
     );
 
     await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 2);
+    // Handling starts each update without awaiting it: both are applied
+    // while the turn is still held.
+    await vi.waitFor(async () => {
+      expect(
+        await agentStub.toolOutputsAppliedForTest([
+          "call_tool_1",
+          "call_tool_2"
+        ])
+      ).toBe(true);
+    }, BOUNDS);
     await agentStub.releaseResponseForTest();
     await agentStub.waitForIdleForTest();
 
