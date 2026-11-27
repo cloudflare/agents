@@ -316,44 +316,8 @@
   },
   {
     "file": "agent-tools.test.ts",
-    "test": "Think agent tools > ends a run whose child reset after its recovered turn ended, before the recovery recorded it",
-    "reason": "the class's chat recovery engine (`_chatRecoveryEngine`), reset at the moment it records the outcome",
-    "successor": {
-      "file": "agent-tools.test.ts",
-      "test": "Think agent tools > waits for a run whose child isolate reset, and returns the status the child's recovery reached"
-    }
-  },
-  {
-    "file": "agent-tools.test.ts",
-    "test": "Think agent tools > finalizes a stranded child run row when its own recovery CONTINUES (#1630)",
-    "reason": "a child run row seeded in the class's table (`cf_agent_tool_child_runs`) and the class's recovery callback (`_chatRecoveryContinueDetached`) run by hand",
-    "successor": {
-      "file": "agent-tools.test.ts",
-      "test": "Think agent tools > waits for a run whose child isolate reset, and returns the status the child's recovery reached"
-    }
-  },
-  {
-    "file": "agent-tools.test.ts",
-    "test": "Think agent tools > finalizes a stranded child run row when its own recovery RETRIES a pre-stream turn (#1630)",
-    "reason": "a child run row seeded in the class's table (`cf_agent_tool_child_runs`) and the class's recovery callback (`_chatRecoveryRetryDetached`) run by hand",
-    "successor": {
-      "file": "agent-tools.test.ts",
-      "test": "Think agent tools > waits for a run whose child isolate reset, and returns the status the child's recovery reached"
-    }
-  },
-  {
-    "file": "agent-tools.test.ts",
     "test": "Think agent tools > reads the stored chunks of a run that is still running",
     "reason": "a reply stream opened through the class's `_replyStreams` and a `running` row inserted into `cf_agent_tool_child_runs`",
-    "successor": {
-      "file": "agent-tools.test.ts",
-      "test": "Think agent tools > follows a Think child that is still streaming when the parent attaches, to its result"
-    }
-  },
-  {
-    "file": "agent-tools.test.ts",
-    "test": "Think agent tools > forwards a chunk broadcast while a cold re-attach drains",
-    "reason": "the class's run tracker (`_agentToolRuns`) and reply streams (`_replyStreams`) driven by hand through a cold re-attach",
     "successor": {
       "file": "agent-tools.test.ts",
       "test": "Think agent tools > follows a Think child that is still streaming when the parent attaches, to its result"
@@ -369,12 +333,6 @@
     "file": "agent-tools.test.ts",
     "test": "Think agent tools > attributes frames via the persisted request id after a DO restart (#1575)",
     "reason": "the class's request-id to run lookup in `_agentToolRuns` after a restart",
-    "mechanicsOnly": true
-  },
-  {
-    "file": "agent-tools.test.ts",
-    "test": "Think agent tools > realigns a cold live counter when re-attaching after the last stored chunk",
-    "reason": "the class's in-memory live sequence counter in `_agentToolRuns` after a restart",
     "mechanicsOnly": true
   }
 ]

@@ -6928,6 +6928,7 @@ export class ThinkAgentToolParent extends Agent {
    */
   async runThinkChildThroughStallForTest(): Promise<{
     status: string;
+    summary?: string;
     error?: string;
   }> {
     const runId = `stall-${crypto.randomUUID()}`;
@@ -6941,6 +6942,7 @@ export class ThinkAgentToolParent extends Agent {
     });
     return {
       status: r.status,
+      ...(r.summary !== undefined && { summary: r.summary }),
       ...(r.error !== undefined && { error: r.error })
     };
   }
