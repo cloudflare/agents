@@ -6328,6 +6328,11 @@ export class ThinkTestAgent extends Think {
     if (this._multiChunks) {
       return createMultiChunkMockModel(this._multiChunks);
     }
+    // The harness-backed Think has no `_transformInferenceResult`: a reply
+    // stripped of its text is the model's own empty answer there.
+    if (this._stripTextResponseForTest && isHarnessBackedForTest(this)) {
+      return createMultiChunkMockModel([]);
+    }
     return createMockModel(
       (callOptions) => {
         this._modelPromptsForTest.push(promptLinesForTest(callOptions));
