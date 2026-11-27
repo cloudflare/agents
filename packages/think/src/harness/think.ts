@@ -1448,7 +1448,8 @@ export class Think<
         return resolveDefault();
       },
       continuation: turn.continuation,
-      requestId: turn.operationId
+      requestId: turn.operationId,
+      abortSignal: turn.signal
     };
     const own = await this.beforeTurn(context);
     // The sandboxed extensions see the subclass's config, as in Think,

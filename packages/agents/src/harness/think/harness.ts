@@ -2106,7 +2106,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         system,
         tools: Object.keys(tools),
         // A copy: a hook that edits it does not change what is offered.
-        toolSet: { ...tools }
+        toolSet: { ...tools },
+        signal
       })) ?? {};
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
