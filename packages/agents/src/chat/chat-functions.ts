@@ -47,14 +47,24 @@ export interface ChatLane {
 export async function submitTurn(
   deps: ChatDeps,
   lane: ChatLane,
-  input: ChatTurnInput & { messages?: readonly UIMessage[] },
+  input: ChatTurnInput,
   options: { requestId?: string; idempotencyKey?: string } = {}
 ): Promise<{ requestId: string }> {
-  const session = deps.sessions.session(deps.session ?? "");
+  const session = deps.sessions.session(input.session ?? deps.session ?? "");
+  // The turn stores the request's messages when it starts (after the
+  // replies queued before it); it carries only those the transcript does not
+  // already hold as they are, since a tab sends its whole list.
+  const fresh: UIMessage[] = [];
   for (const message of input.messages ?? []) {
-    await session.upsertMessage(message as never);
+    const stored = await session.getMessage(message.id);
+    if (!stored || JSON.stringify(stored) !== JSON.stringify(message)) {
+      fresh.push(message);
+    }
   }
-  const { messages: _messages, ...given } = input;
+  const { messages: _messages, ...rest } = input;
+  const given: ChatTurnInput = fresh.length
+    ? { ...rest, messages: fresh }
+    : rest;
   // A client's request sets the tools and body later turns that no client
   // sent (a server turn, a tool answer's continuation) run with.
   let run: ChatTurnInput = given;
@@ -251,7 +261,7 @@ async function applyAnswer(
       await submitTurn(
         deps,
         lane,
-        { trigger: "tool-answer" },
+        { trigger: "tool-answer", replyId: next.id },
         { idempotencyKey: `continue:${next.id}:${answeredCalls(next)}` }
       );
     }
