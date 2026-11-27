@@ -682,15 +682,6 @@ export class Think<
     return this.#configCache as T;
   }
 
-  /**
-   * Run the legacy `assistant_config` lift again, as on Think. The config
-   * capability runs it on start; this is a test seam.
-   * @internal
-   */
-  protected _migrateLegacyConfigToThinkTable(): void {
-    this.#config.migrateLegacy();
-  }
-
   /** The skill sources, as in Think: none unless overridden. */
   getSkills(): SkillSource[] | Promise<SkillSource[]> {
     return [];

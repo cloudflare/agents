@@ -7994,6 +7994,15 @@ export class ThinkLegacyConfigMigrationAgent extends Think<Cloudflare.Env> {
     this._migrateLegacyConfigToThinkTable();
   }
 
+  /**
+   * End this isolate, as an eviction or a deploy does. The next request
+   * starts a new one, whose constructor seeds the legacy row again and
+   * whose start runs the lift again.
+   */
+  resetIsolateForTest(): void {
+    this.ctx.abort("test reset");
+  }
+
   async getRawThinkConfigForTest(): Promise<TestConfig | null> {
     const rows = this.sql<{ value: string }>`
       SELECT value FROM think_config
