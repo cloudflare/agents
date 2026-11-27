@@ -452,6 +452,11 @@ export class TestAgentToolReplayAgent extends Agent {
     });
   }
 
+  /** The child of `runId` loses its run, as a deleted child would. */
+  async dropChildForTest(runId: string): Promise<void> {
+    await this.deleteSubAgent(TestAgentToolStubChild, runId);
+  }
+
   /** A detached run's state; waits for its report once it settled. */
   async detachedStateForTest(runId: string): Promise<{
     status: string | null;

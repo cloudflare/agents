@@ -1463,6 +1463,12 @@ export class AgentToolParent {
     }
 
     const reached = await this._askDetachedChild(meta, runId);
+    const gaveUp = step.checkpoint.get("gaveUp") !== undefined;
+    if (gaveUp && reached && reached.inspection === null) {
+      // The give-up went out already and the child has no run left to
+      // finish: the run is settled, with no second callback.
+      return this._detachedGiveUpResult(meta, runId, false, true);
+    }
     if (reached && reached.inspection === null) {
       // The child answered and has no such run: the parent was reset after
       // it accepted the run and before the child took it, and the input is
@@ -1495,7 +1501,6 @@ export class AgentToolParent {
       );
     }
 
-    const gaveUp = step.checkpoint.get("gaveUp") !== undefined;
     if (gaveUp) {
       // The give-up went out while its teardown was unconfirmed. The child's
       // own abort confirms it now: the run is settled, with no callback.

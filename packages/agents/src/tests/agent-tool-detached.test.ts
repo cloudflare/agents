@@ -203,6 +203,26 @@ describe("detached agent-tool runs on Tasks", () => {
     );
   });
 
+  it("settles a run that gave up, with no second callback, when its child has no run left", async () => {
+    const agent = await parent("detached-gave-up-no-child");
+    await agent.startDetachedForTest(
+      "run-gave-up-gone",
+      { chunkBodies: [], staysRunning: true, cancelFails: true },
+      { maxBudgetMs: 1 }
+    );
+    expect(await agent.checkDetachedForTest("run-gave-up-gone")).toMatchObject({
+      status: "pending",
+      waitReason: "park"
+    });
+    await agent.dropChildForTest("run-gave-up-gone");
+    expect((await agent.checkDetachedForTest("run-gave-up-gone")).status).toBe(
+      "completed"
+    );
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "run-gave-up-gone")
+    ).toEqual(["interrupted"]);
+  });
+
   it("settles an unconfirmed give-up once a later check reads the give-up's own abort (#2769)", async () => {
     const agent = await parent("detached-unconfirmed");
     await agent.startDetachedForTest(
