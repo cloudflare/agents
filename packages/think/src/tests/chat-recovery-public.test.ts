@@ -454,6 +454,23 @@ describe("chat recovery, through public behaviour", () => {
       expect(text).not.toContain("six");
     }, 30_000);
 
+    // Successors of the pre-stream retry tests (think-session, "Think —
+    // onChatRecovery"): a turn cut off before its first chunk is asked again.
+    it("answers a turn a reset cut off before its first chunk, with its user message once", async () => {
+      const { agent } = await resetDuringTurn("retry-pre-stream", 0);
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(
+        messages[1]?.parts.some(
+          (part) => part.type === "text" && (part.text ?? "").length > 0
+        )
+      ).toBe(true);
+    }, 30_000);
+
     it("keeps nothing and runs nothing when onChatRecovery says persist: false, continue: false", async () => {
       const { agent } = await resetDuringTurn("answer-drop", 2, {
         persist: false,

@@ -313,5 +313,14 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > keeps the partial but runs no continuation when onChatRecovery says continue: false"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > retries a pre-stream interrupted user turn by default without duplicating the user message",
+    "reason": "an interrupted turn built from a seeded private fiber (`insertInterruptedFiber`), recovered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > answers a turn a reset cut off before its first chunk, with its user message once"
+    }
   }
 ]
