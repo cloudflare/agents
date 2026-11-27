@@ -11099,11 +11099,16 @@ export class ThinkProgrammaticTestAgent extends Think {
       kv.put("test:recovery-held", true);
       await new Promise<never>(() => {});
     }
-    return {};
+    return kv.get<ChatRecoveryOptions>("test:recovery-answer") ?? {};
   }
 
   async holdRecoveryOnceForTest(): Promise<void> {
     this.ctx.storage.kv.put("test:hold-recovery", true);
+  }
+
+  /** What onChatRecovery answers from now on, across resets. */
+  async answerRecoveryForTest(answer: ChatRecoveryOptions): Promise<void> {
+    this.ctx.storage.kv.put("test:recovery-answer", answer);
   }
 
   async recoveryHeldForTest(): Promise<boolean> {
