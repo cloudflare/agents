@@ -569,6 +569,9 @@ function trackTurnAttemptReasons(agent: Think): void {
   };
 }
 
+/** The storage key of the `onChatRecovery` calls a test reads after a reset. */
+const STORED_RECOVERY_CALLS = "test:recovery-calls";
+
 /** How long a held recovery attempt would wait by itself: never, in a test. */
 const HELD_ATTEMPT_SECONDS = 3600;
 
@@ -1523,14 +1526,21 @@ export class ThinkTestAgent extends Think {
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
-    this._recoveryCallsForTest.push({
+    const call = {
       recoveryKind: ctx.recoveryKind,
       attempt: ctx.attempt,
       partialText: ctx.partialText,
       recoveryData:
         typeof ctx.recoveryData === "string" ? ctx.recoveryData : null,
       createdAt: ctx.createdAt
-    });
+    };
+    this._recoveryCallsForTest.push(call);
+    // Also kept durably, for a test that reads it after a reset.
+    this.ctx.storage.kv.put(STORED_RECOVERY_CALLS, [
+      ...(this.ctx.storage.kv.get<(typeof call)[]>(STORED_RECOVERY_CALLS) ??
+        []),
+      call
+    ]);
     if (this._recoveryHookForTest === "throw") {
       throw new Error("recovery hook boom");
     }
@@ -2962,6 +2972,36 @@ export class ThinkTestAgent extends Think {
     }>
   > {
     return this._beforeStepLog;
+  }
+
+  /** Every `onChatRecovery` call this agent stored, across resets. */
+  async storedRecoveryCallsForTest(): Promise<
+    Array<{ recoveryKind: string; attempt: number; partialText: string }>
+  > {
+    return this.ctx.storage.kv.get(STORED_RECOVERY_CALLS) ?? [];
+  }
+
+  /** Start a turn whose reply streams slowly, without waiting for it. */
+  async startSlowTurnForTest(chunks: string[], delayMs: number): Promise<void> {
+    this._turnConfigOverride = {
+      model: createDelayedMultiChunkMockModel(chunks, delayMs)
+    };
+    await this.submitMessages([
+      {
+        id: `slow-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "a long answer, please" }]
+      }
+    ]);
+  }
+
+  /** Wait until the agent is stable; the conversation's roles. */
+  async settleForTest(): Promise<{ stable: boolean; roles: string[] }> {
+    const stable = await this.waitUntilStable({ timeout: 15_000 });
+    return {
+      stable,
+      roles: (await this.getMessages()).map((message) => message.role)
+    };
   }
 
   async getChunkCount(): Promise<number> {
