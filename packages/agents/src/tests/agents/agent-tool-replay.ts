@@ -430,6 +430,28 @@ export class TestAgentToolReplayAgent extends Agent {
     }
   }
 
+  /**
+   * A detached run as a reset between its accept and its child's start
+   * leaves it: the task open, the child never given the run.
+   */
+  async acceptDetachedWithoutChildForTest(runId: string): Promise<void> {
+    const now = Date.now();
+    await this.tasks.importRun({
+      runId,
+      definition: "__cf_agent_tool_detached",
+      metadata: {
+        agentType: "TestAgentToolStubChild",
+        displayOrder: 0,
+        startedAt: now,
+        detached: { onFinish: "onDetachedDone", maxBudgetAt: now + 3_600_000 }
+      },
+      retain: true,
+      createdAt: now,
+      status: "running",
+      attempt: 1
+    });
+  }
+
   /** A detached run's state; waits for its report once it settled. */
   async detachedStateForTest(runId: string): Promise<{
     status: string | null;

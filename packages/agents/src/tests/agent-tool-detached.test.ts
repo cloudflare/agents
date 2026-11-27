@@ -192,6 +192,17 @@ describe("detached agent-tool runs on Tasks", () => {
     ).toEqual([]);
   });
 
+  it("ends a run whose child never took it (a reset between the accept and the child's start)", async () => {
+    const agent = await parent("detached-never-started");
+    await agent.acceptDetachedWithoutChildForTest("run-never");
+    expect((await agent.checkDetachedForTest("run-never")).status).toBe(
+      "completed"
+    );
+    expect(statuses(await agent.getDetachedDeliveryLog(), "run-never")).toEqual(
+      ["error"]
+    );
+  });
+
   it("settles an unconfirmed give-up once a later check reads the give-up's own abort (#2769)", async () => {
     const agent = await parent("detached-unconfirmed");
     await agent.startDetachedForTest(

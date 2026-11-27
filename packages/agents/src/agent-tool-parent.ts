@@ -1463,6 +1463,22 @@ export class AgentToolParent {
     }
 
     const reached = await this._askDetachedChild(meta, runId);
+    if (reached && reached.inspection === null) {
+      // The child answered and has no such run: the parent was reset after
+      // it accepted the run and before the child took it, and the input is
+      // not kept on the parent. Waiting would only run out the budget.
+      return this._deliverDetachedFromAttempt(
+        meta,
+        {
+          runId,
+          agentType,
+          status: "error",
+          error:
+            "Agent tool run was interrupted before its child started it. Run it again."
+        },
+        step.signal
+      );
+    }
     const inspection = reached?.inspection ?? null;
     if (inspection) this._deliverDetachedMilestones(meta, runId, inspection);
     if (
