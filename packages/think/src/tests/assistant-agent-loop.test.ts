@@ -261,6 +261,8 @@ describe("Think — agentic loop", () => {
         message: string,
         enabled: boolean,
         opts?: {
+          maxRetries?: number;
+          otherErrorOnRetry?: boolean;
           noOpCompaction?: boolean;
           alwaysOverflow?: boolean;
           emitPartialBeforeOverflow?: boolean;
@@ -952,6 +954,33 @@ describe("Think — agentic loop", () => {
       const [branch] = await agent.getCompactedBranches();
       // The supplied assistant message is part of the turn's branch.
       expect(branch).toContain("supplied-assistant");
+    });
+
+    it("doesn't compact with a retry budget of zero", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent;
+      const result = await agent.testChat("trigger overflow", true, {
+        maxRetries: 0
+      });
+      expect(result.compactionCount).toBe(0);
+      expect(result.error).toBeDefined();
+    });
+
+    it("reports a retry that fails for another reason as that error, not an overflow", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent & {
+        getOverflowStats(): Promise<{ errorClassification?: string }>;
+      };
+      const result = await agent.testChat("trigger overflow", true, {
+        otherErrorOnRetry: true
+      });
+      expect(result.compactionCount).toBe(1);
+      expect(result.error).toContain("tool schema");
+      expect(result.errorClassification).not.toBe("context_overflow");
     });
 
     it("keeps sending the compacted history after the guard's budget is spent", async () => {
