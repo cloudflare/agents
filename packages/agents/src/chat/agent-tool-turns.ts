@@ -63,7 +63,7 @@ export async function startAgentToolTurn(
   await submitTurn(
     deps,
     lane,
-    { trigger: "agent-tool", messages: [message] },
+    { trigger: "server", messages: [message] },
     {
       requestId: agentToolTurnId(runId),
       retain: true,
@@ -134,6 +134,7 @@ export function inspectAgentToolTurn(
   const base = {
     runId,
     requestId: id,
+    startedAt: record.createdAt,
     ...(progress ? { progress } : {}),
     ...(milestones.length ? { milestones } : {})
   };
