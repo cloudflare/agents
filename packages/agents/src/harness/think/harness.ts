@@ -1603,6 +1603,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         continuation: placed.continues || live.partial.length > 0
       });
       try {
+        const host = this.#chatHostDeps;
         const turn = chatTurnDefinition(
           {
             tasks: this.#tasks,
@@ -1612,10 +1613,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             session,
             // With a host on the shared dispatch, the turn frames its own
             // reply to the tabs, as AIChatAgent's does (H2c).
-            ...(this.#chatHostDeps?.webSockets && {
-              webSockets: this.#chatHostDeps.webSockets
-            }),
-            ...(this.#chatHostDeps?.emit && { emit: this.#chatHostDeps.emit })
+            // Read per frame: with no tab connected there is no frame to
+            // serialize.
+            get webSockets() {
+              const sockets = host?.webSockets;
+              if (!sockets) return undefined;
+              for (const _ of sockets.getConnections()) return sockets;
+              return undefined;
+            },
+            ...(host?.emit && { emit: host.emit })
           },
           this.#chatHost(run, session, operationId, built, placed, live)
         );

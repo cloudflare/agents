@@ -220,6 +220,31 @@ function saveResult(result: ThinkOperationResult): SaveMessagesResult {
   };
 }
 
+/** Frames a turn and the shared chat dispatch send themselves (H2c). */
+const TURN_FRAMES = new Set<string>([
+  "cf_agent_use_chat_response",
+  "cf_agent_stream_resuming",
+  "cf_agent_stream_resume_none",
+  "cf_agent_stream_pending"
+]);
+
+/** `connection`, with the frames turns send themselves left out. */
+function withoutTurnFrames(connection: Connection): Connection {
+  return new Proxy(connection, {
+    get(target, key) {
+      if (key === "send") {
+        return (text: string) => {
+          const type = /^\{"type":"([^"]+)"/.exec(text)?.[1];
+          if (type !== undefined && TURN_FRAMES.has(type)) return;
+          target.send(text);
+        };
+      }
+      const value = Reflect.get(target, key) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -475,8 +500,10 @@ export class Think<
     this.#chat = new ThinkChat({
       harness: this.harness,
       webSockets: {
-        // ThinkChat answers a connecting tab; turns frame themselves.
-        getConnections: () => [],
+        // Turns frame their own replies and the shared dispatch answers
+        // resumes (H2c): ThinkChat keeps the transcript, clear and connect
+        // frames, and its turn frames are left out.
+        getConnections: () => [...this.getConnections()].map(withoutTurnFrames),
         use: (handlers) => {
           this.#handlers.push(handlers);
         }
