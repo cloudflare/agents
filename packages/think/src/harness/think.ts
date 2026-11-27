@@ -478,6 +478,8 @@ export class Think<
         messages?: TurnConfig["messages"];
         /** The proactive compactions the turn tried (`contextOverflow`). */
         proactive?: number;
+        /** The turn's `stopWhen`, checked as each step ends. */
+        stopWhen?: TurnConfig["stopWhen"];
       }
     | undefined;
   /**
@@ -712,6 +714,7 @@ export class Think<
           await this.#endStep(operationId, message);
           const segment = stepSegments(message);
           const ended = { operationId, step, finishReason, segment, usage };
+          await this.#checkStopWhen(operationId, step, message, segment);
           // A step that called tools ends once they ran, as an AI SDK step
           // does: at the next step, or at the turn's end.
           if (stepResultOf(message, segment).toolCalls.length > 0) {
@@ -2347,6 +2350,9 @@ export class Think<
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
     this.#turnMaxSteps = config.maxSteps;
+    if (this.#ownTurn?.operationId === turn.operationId) {
+      this.#ownTurn.stopWhen = config.stopWhen;
+    }
     // Then `beforeStep`, before each model call, as the AI SDK's
     // `prepareStep` runs in Think. Its fields win for this call.
     // A `beforeTurn` that rewrote the messages rewrote them for the whole
@@ -2592,6 +2598,34 @@ export class Think<
       );
       return undefined;
     }
+  }
+
+  /**
+   * As in Think, a turn's `stopWhen` beside its `maxSteps`: once a step
+   * meets a condition, the turn ends after that step's tools ran.
+   */
+  async #checkStopWhen(
+    operationId: string,
+    step: number,
+    message: UIMessage,
+    segment: number
+  ): Promise<void> {
+    const own = this.#ownTurn;
+    if (own?.operationId !== operationId || !own.stopWhen) return;
+    const conditions = Array.isArray(own.stopWhen)
+      ? own.stopWhen
+      : [own.stopWhen];
+    const steps: ReturnType<typeof stepResultOf>[] = [];
+    for (let at = segment - step; at <= segment; at++) {
+      steps.push(stepResultOf(message, at));
+    }
+    // SAFETY: a condition reads the steps' calls and results, as here.
+    const met = await Promise.all(
+      conditions.map((condition) =>
+        condition({ steps } as unknown as Parameters<typeof condition>[0])
+      )
+    );
+    if (met.some(Boolean)) this.#turnMaxSteps = step + 1;
   }
 
   #classify(error: unknown): ThinkErrorClass {
