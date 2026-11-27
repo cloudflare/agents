@@ -1214,6 +1214,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       : [];
   }
 
+  /** The host the shared chat dispatch runs for, once it has (H2c). */
+  #chatHostDeps: Pick<ChatDeps, "kv" | "webSockets" | "emit"> | undefined;
+
   /**
    * @internal The shared chat dispatch's lane for a session's operations
    * (H2c): a tab's request runs as one of them, in the session's lane.
@@ -1231,6 +1234,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     session: ThinkSessionId,
     host: Pick<ChatDeps, "kv" | "webSockets" | "emit">
   ): ChatDeps {
+    // The host that dispatches tabs' frames is the one the turns frame to.
+    this.#chatHostDeps = host;
     return {
       tasks: this.#tasks,
       streams: this.#streams,
@@ -1526,7 +1531,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             streams: this.#streams,
             sessions: this.#sessions,
             kv: this.lifecycle.storage.kv,
-            session
+            session,
+            // With a host on the shared dispatch, the turn frames its own
+            // reply to the tabs, as AIChatAgent's does (H2c).
+            ...(this.#chatHostDeps?.webSockets && {
+              webSockets: this.#chatHostDeps.webSockets
+            }),
+            ...(this.#chatHostDeps?.emit && { emit: this.#chatHostDeps.emit })
           },
           this.#chatHost(run, session, operationId, built, placed, live)
         );

@@ -466,10 +466,14 @@ export class Think<
         classifyError: (error) => this.#classify(error)
       }
     });
+    // Turns frame their replies to the tabs themselves (H2c): the harness
+    // hands them this host from the start, so an RPC turn frames too.
+    this.harness.chatDeps("", this.#chatHostDeps());
     this.#chat = new ThinkChat({
       harness: this.harness,
       webSockets: {
-        getConnections: () => this.getConnections(),
+        // ThinkChat answers a connecting tab; turns frame themselves.
+        getConnections: () => [],
         use: (handlers) => {
           this.#handlers.push(handlers);
         }
@@ -1344,6 +1348,21 @@ export class Think<
     this.#messages = await this.harness.session().messages();
   }
 
+  /** The host side of the shared chat dispatch: storage, sockets, events. */
+  #chatHostDeps() {
+    return {
+      kv: this.ctx.storage.kv,
+      webSockets: { getConnections: () => this.getConnections() },
+      emit: (type: string, payload: Record<string, unknown>) =>
+        (
+          this._emit as unknown as (
+            type: string,
+            payload: Record<string, unknown>
+          ) => void
+        ).call(this, type, payload)
+    };
+  }
+
   /** Route this Agent's connections through ThinkChat's handlers. */
   #installProtocol(): void {
     const onConnect = this.onConnect.bind(this);
@@ -1360,17 +1379,7 @@ export class Think<
       const session = this.harness.session().id;
       if (
         await chatDispatch(
-          this.harness.chatDeps(session, {
-            kv: this.ctx.storage.kv,
-            webSockets: { getConnections: () => this.getConnections() },
-            emit: (type, payload) =>
-              (
-                this._emit as unknown as (
-                  type: string,
-                  payload: Record<string, unknown>
-                ) => void
-              ).call(this, type, payload)
-          }),
+          this.harness.chatDeps(session, this.#chatHostDeps()),
           this.harness.chatLane(session),
           connection,
           message
