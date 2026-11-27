@@ -3036,4 +3036,19 @@ describe("chat functions over a minimal host", () => {
       });
     });
   });
+
+  it("an ack for a request the chat does not know sends nothing", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-x", sent),
+        JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "nobody" })
+      );
+      expect(sent).toEqual([]);
+    });
+  });
 });
