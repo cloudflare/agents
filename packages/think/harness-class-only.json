@@ -724,5 +724,23 @@
       "file": "channel-recovery.test.ts",
       "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws the SqlError shape (wrapped transient, retryable flag lost) and does NOT terminalize (#1730)",
+    "reason": "the class's recovery engine (`_chatRecoveryEngine`) driven by hand with a platform error thrown inside the recovery attempt: an error shape the runtime throws, which a Workers test cannot raise",
+    "probeCovered": {
+      "scenario": "vTransientSqlWrapped",
+      "verified": "#3474@52dc26ac4"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws a retryable-flagged platform error and does NOT terminalize (#1730)",
+    "reason": "the class's recovery engine (`_chatRecoveryEngine`) driven by hand with a platform error thrown inside the recovery attempt: an error shape the runtime throws, which a Workers test cannot raise",
+    "probeCovered": {
+      "scenario": "vTransientRetryableFlag",
+      "verified": "#3474@52dc26ac4"
+    }
   }
 ]
