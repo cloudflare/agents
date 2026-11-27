@@ -112,6 +112,7 @@ export class ThinkHarnessActionsAgent extends Think {
         inputSchema: z.object({ amount: z.number() }),
         execute: ({ amount }, ctx) => {
           ctx.attachReply({ type: "receipt", amount });
+          // @ts-expect-error: a value that is not an attachment is ignored
           ctx.attachReply("not an attachment");
           return { sent: true };
         }
