@@ -668,7 +668,8 @@ export class Think<
           }
           await this.#stepEnded(ended, message);
         },
-        onChunk: ({ chunk }) => {
+        onChunk: ({ chunk, operationId }) => {
+          this.#streamed.add(operationId);
           // A snapshot reads a delta's text as `text`, as a stream part has it.
           const text = "delta" in chunk ? chunk.delta : undefined;
           // In order, one after another, as Think awaits each chunk's hooks.
@@ -688,6 +689,7 @@ export class Think<
           await this.#chunkHooks;
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
+          const streamed = this.#streamed.delete(end.operationId);
           const clearsAtStart = this.#clearsAtStart.get(end.operationId);
           this.#clearsAtStart.delete(end.operationId);
           // A clear that ran, or runs, while the turn was open.
@@ -723,12 +725,13 @@ export class Think<
             return;
           }
           if (end.status === "unanswered" && end.reason !== "aborted") {
-            // As on Think, a failed turn is reported to observability. A
-            // turn that ran had its messages placed before the model call.
+            // As on Think, a failed turn is reported to observability: in its
+            // stream once the model streamed, in the turn before that. Its
+            // messages were placed once it reached `beforeTurn`.
             this._emit("chat:request:failed", {
               requestId: end.operationId,
-              stage: "stream",
-              messagesPersisted: true,
+              stage: streamed ? "stream" : "turn",
+              messagesPersisted: continued !== undefined,
               error: end.reason ?? "unanswered"
             });
           }
@@ -1194,6 +1197,8 @@ export class Think<
     return this.#running;
   }
 
+  /** The running operations whose model has streamed; dropped at their end. */
+  #streamed = new Set<string>();
   /** Whether each running operation continues a reply; dropped at its end. */
   #continued = new Map<string, boolean>();
   #running:
