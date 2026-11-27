@@ -518,6 +518,31 @@ export class Think<
    */
   readonly #turns = new Map<string, { readonly trigger: TurnTrigger }>();
   /**
+   * A signal for a resumed approval's grant, by operation, until the
+   * operation settles: it fires if the operation ends unanswered.
+   */
+  readonly #grantSignals = new Map<string, AbortController>();
+
+  async #grantSignal(operationId: string): Promise<AbortSignal> {
+    const kept = this.#grantSignals.get(operationId);
+    if (kept) return kept.signal;
+    // An operation that already ended (stopped while the grant was being
+    // prepared) gets a signal that says so, and nothing is kept for it.
+    const status = await this.harness.session().inspect(operationId);
+    if (status && status.status !== "queued" && status.status !== "running") {
+      return stoppedStatus(status)
+        ? AbortSignal.abort()
+        : new AbortController().signal;
+    }
+    // A grant prepared beside this one while it waited keeps its signal:
+    // one signal per operation, so a stop reaches both.
+    const raced = this.#grantSignals.get(operationId);
+    if (raced) return raced.signal;
+    const controller = new AbortController();
+    this.#grantSignals.set(operationId, controller);
+    return controller.signal;
+  }
+  /**
    * A step that called tools, by operation, until its tools ran: at most
    * one per running operation, removed when it ends.
    */
@@ -716,7 +741,14 @@ export class Think<
                 return (model ??= self.resolveModel(chosen as ThinkModel));
               },
               continuation: true,
-              requestId: call.operationId
+              requestId: call.operationId,
+              // As Think's resuming turn: what started it (after a restart,
+              // an approval's continuation), and a signal that fires if the
+              // operation is stopped.
+              trigger:
+                this.#turns.get(call.operationId)?.trigger ??
+                "auto-continuation",
+              abortSignal: await this.#grantSignal(call.operationId)
             } as unknown as TurnContext;
           });
           const decision = await this.#beforeToolCall(call);
@@ -952,6 +984,12 @@ export class Think<
       ) {
         this.#turns.delete(event.status.operationId);
         this.#webRequests.delete(event.status.operationId);
+        const grant = this.#grantSignals.get(event.status.operationId);
+        if (grant) {
+          // As Think's turn signal: it fires on a stop, not on a failure.
+          if (stoppedStatus(event.status)) grant.abort();
+          this.#grantSignals.delete(event.status.operationId);
+        }
         // A call the operation left without an afterToolCall is forgotten.
         for (const [toolCallId, kept] of this.#modelInputs) {
           if (kept.operationId === event.status.operationId) {
@@ -1544,7 +1582,12 @@ export class Think<
     // the one the harness applied is what happened.
     const toolCallId = pending.descriptor.toolCallId;
     let final:
-      | { state?: unknown; output?: unknown; errorText?: unknown }
+      | {
+          state?: unknown;
+          output?: unknown;
+          errorText?: unknown;
+          approval?: { reason?: unknown };
+        }
       | undefined;
     for (const message of this.messages) {
       for (const part of message.parts) {
@@ -1557,7 +1600,12 @@ export class Think<
       return {
         status: "rejected",
         executionId,
-        reason: approved ? "Rejected by user" : (reason ?? "Rejected by user")
+        // The reason the applied rejection carries, whichever caller sent
+        // it.
+        reason:
+          (typeof final.approval?.reason === "string"
+            ? final.approval.reason
+            : undefined) ?? "Rejected by user"
       };
     }
     if (final?.state === "output-available") return final.output;
@@ -2931,6 +2979,7 @@ export class Think<
     // The model stays lazy, as in Think: spreading `context` would read
     // its `model` getter and resolve the default.
     const turnModel = config.model;
+    let grantModel: LanguageModel | undefined;
     const self = this;
     await this.#authorizeTurn(
       turn.operationId,
@@ -2939,13 +2988,19 @@ export class Think<
           system: config.system ?? context.system,
           messages: config.messages ?? context.messages,
           tools: context.tools,
+          // Resolved once, when first read.
           get model() {
-            return turnModel !== undefined
-              ? self.resolveModel(turnModel)
-              : resolveDefault();
+            return (grantModel ??=
+              turnModel !== undefined
+                ? self.resolveModel(turnModel)
+                : resolveDefault());
           },
           continuation: context.continuation,
-          requestId: context.requestId
+          requestId: context.requestId,
+          // As in Think: the grant sees what started the turn, and its
+          // signal, so it can stop its own I/O when the turn stops.
+          trigger: context.trigger,
+          abortSignal: context.abortSignal
         }) as unknown as TurnContext
     );
     // Then `beforeStep`, before each model call, as the AI SDK's
@@ -3017,8 +3072,14 @@ export class Think<
       );
     const model = step.model ?? config.model;
     // Without an override, the turn's one resolution of the default.
+    // As in Think, the model the grant was given is the one the call uses,
+    // unless a step changed it: a string override is resolved once.
     const sent =
-      model !== undefined ? this.resolveModel(model) : resolveDefault();
+      model === undefined
+        ? resolveDefault()
+        : model === turnModel
+          ? (grantModel ??= this.resolveModel(model))
+          : this.resolveModel(model);
     const messages = step.messages ?? turnMessages;
     // A narrowing channel limits the tools the model is offered.
     // A narrowing channel limits the tools the model is offered, and a
@@ -3567,6 +3628,14 @@ function withOperationIds<
       streamId: operationIdOf(ctx.requestId)
     })
   };
+}
+
+/** Whether an operation's status says it was stopped (not failed). */
+function stoppedStatus(status: { status: string; reason?: string }): boolean {
+  return (
+    status.status === "unanswered" &&
+    (status.reason === "aborted" || status.reason === "withdrawn")
+  );
 }
 
 /**

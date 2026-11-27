@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PendingApproval } from "../think";
 
 type ActionsStub = {
@@ -17,6 +17,15 @@ type ActionsStub = {
   attachmentsForTest(requestId?: string): Promise<unknown[]>;
   pendingApprovals(executionId?: string): Promise<PendingApproval[]>;
   approveExecution(executionId: string): Promise<unknown>;
+  grantContext(): Promise<
+    { trigger: string | null; hasSignal: boolean } | undefined
+  >;
+  failModelForTest(): Promise<void>;
+  holdModelForTest(): Promise<void>;
+  modelEnteredForTest(): Promise<boolean>;
+  releaseModelForTest(): Promise<void>;
+  idleForTest(): Promise<boolean>;
+  abortAllRequests(): Promise<void>;
   rejectExecution(
     executionId: string,
     reason?: string,
@@ -122,8 +131,45 @@ describe("harness-backed Think: actions that need a human", () => {
           ? "ran"
           : "other"
     );
-    // Neither answer contradicts what happened to the call.
+    // Neither answer contradicts what happened to the call, and at least
+    // one states it.
     expect(answers).not.toContain(ran ? "rejected" : "ran");
+    expect(answers).toContain(ran ? "ran" : "rejected");
+  });
+
+  it("gives two racing rejections the reason of the one that was applied", async () => {
+    const think = await agent();
+    await think.say("pause and charge 5");
+    const [pending] = await think.pendingApprovals();
+
+    const answers = (await Promise.all([
+      think.rejectExecution(pending.executionId, "first reason"),
+      think.rejectExecution(pending.executionId, "second reason")
+    ])) as Array<{ status?: string; reason?: string }>;
+
+    const rejected = answers.filter((answer) => answer.status === "rejected");
+    expect(rejected.length).toBeGreaterThanOrEqual(1);
+    const applied = rejected[0].reason;
+    expect(["first reason", "second reason"]).toContain(applied);
+    for (const answer of rejected) expect(answer.reason).toBe(applied);
+  });
+
+  it("reports the reason of the rejection that was applied", async () => {
+    const think = await agent();
+    await think.say("pause and charge 5");
+    const [pending] = await think.pendingApprovals();
+
+    const answer = await think.rejectExecution(pending.executionId, "too much");
+    expect(answer).toMatchObject({ status: "rejected", reason: "too much" });
+  });
+
+  it("tells authorizeTurn what started the turn, and gives it the turn's signal", async () => {
+    const think = await agent();
+    await think.say("charge 5");
+    expect(await think.grantContext()).toEqual({
+      trigger: "rpc",
+      hasSignal: true
+    });
   });
 
   it("lists the same descriptor after a restart, from the action and its input", async () => {
@@ -180,6 +226,48 @@ describe("harness-backed Think: actions that need a human", () => {
         error: expect.objectContaining({ name: "ActionAuthorizationError" })
       })
     ]);
+  });
+
+  it("runs a call approved after a restart when getModel() fails and the grant does not read the model", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    await think.failModelForTest();
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    expect(await fresh.approveExecution(pending.executionId)).toEqual({
+      charged: 5
+    });
+    expect(await fresh.charged()).toBe(1);
+    // The grant of the resumed turn is told what resumed it, with a signal.
+    expect(await fresh.grantContext()).toEqual({
+      trigger: "auto-continuation",
+      hasSignal: true
+    });
+  });
+
+  it("gives a grant an aborted signal when its operation was stopped while getModel() ran", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    await fresh.holdModelForTest();
+    const approved = fresh.approveExecution(pending.executionId);
+    await vi.waitFor(async () =>
+      expect(await fresh.modelEnteredForTest()).toBe(true)
+    );
+    await fresh.abortAllRequests();
+    // The stop has settled the operation before the grant is prepared.
+    await vi.waitFor(async () => expect(await fresh.idleForTest()).toBe(true));
+    await fresh.releaseModelForTest();
+    await approved;
+    expect(await fresh.grantContext()).toMatchObject({
+      hasSignal: true,
+      aborted: true
+    });
   });
 
   it("does not run an approved action whose input beforeToolCall changed", async () => {
