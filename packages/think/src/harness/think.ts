@@ -3921,10 +3921,12 @@ export class Think<
       own.proactive = tried + 1;
       // The branch the turn answers, not the session's active one (a
       // regenerate answers an earlier message).
-      const asked = turn.messages
-        .slice(0, replyAt >= 0 ? replyAt : turn.messages.length)
-        .filter((m) => m.role === "user");
-      const question = asked[asked.length - 1]?.id;
+      // The turn's leaf before its reply: its question, or the last message
+      // a programmatic input supplied (an assistant's too).
+      const question =
+        replyAt > 0
+          ? turn.messages[replyAt - 1]?.id
+          : turn.messages[turn.messages.length - 1]?.id;
       const shortened = Boolean(await this.session.compact(question));
       this._emit("chat:context:compacted", {
         reason: "proactive",
