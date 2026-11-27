@@ -62,4 +62,22 @@ describe("attachment consumption (Phase 5)", () => {
     expect(delivered).toHaveLength(1);
     expect(textOf(delivered[0])).toContain('"a": 1');
   });
+
+  it("delivers a turn's attachments to its channel, skipping the ones it cannot render", async () => {
+    const agent = await getAgentByName(
+      env.ThinkToolsTestAgent,
+      `attach-turn-${crypto.randomUUID()}`
+    );
+    // The action attaches a voice_note (not rendered) and a card.
+    await agent.useAttachReplyActionForTest("two");
+    const result = await agent.testChat("call attachAction");
+    expect(result.done).toBe(true);
+
+    // On the web channel, a notice is an assistant message of its own.
+    const notices = ((await agent.getStoredMessages()) as UIMessage[])
+      .filter((message) => message.role === "assistant")
+      .map(textOf)
+      .filter((text) => text.includes('"id": 1'));
+    expect(notices).toHaveLength(1);
+  });
 });

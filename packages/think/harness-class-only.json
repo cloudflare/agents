@@ -724,6 +724,18 @@
       "file": "channel-recovery.test.ts",
       "test": "recovery \u00d7 channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
+<<<<<<< HEAD
 >>>>>>> 89b4bff0e (test(think): channel recovery through a real reset; the fiber-seam channel-recovery tests are class-only, each with a successor)
+=======
+  },
+  {
+    "file": "attachment-consumption.test.ts",
+    "test": "attachment consumption (Phase 5) > delivers known attachments to the channel and skips unknown ones",
+    "reason": "calls the class's private `_renderChannelAttachments` with a list it never recorded",
+    "successor": {
+      "file": "attachment-consumption.test.ts",
+      "test": "attachment consumption (Phase 5) > delivers a turn's attachments to its channel, skipping the ones it cannot render"
+    }
+>>>>>>> c0bfdba83 (Think on the harness: reply attachments go with onChatResponse's result and are posted to the turn's channel; deliverNotice defaults to the active turn's channel and messenger thread)
   }
 ]

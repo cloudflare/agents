@@ -102,6 +102,7 @@ import {
 } from "../action-ledger";
 import { runLedgeredAction } from "../action-run";
 import { ReplyAttachments } from "../reply-attachments";
+import { defaultAttachmentText, deliverReplyAttachments } from "../attachments";
 import type {
   Action,
   ActionApprovalDescriptor,
@@ -588,6 +589,17 @@ export class Think<
     gateway: (model) => this.getGateway(model),
     sessionAffinity: () => this.sessionAffinity
   });
+  /**
+   * Render a reply attachment for delivery to the turn's channel, as on
+   * Think: the text or markdown to post, or `undefined` to skip it (unknown
+   * types, and types a channel handles itself, such as `voice_note`).
+   */
+  renderAttachment(
+    attachment: ReplyAttachment
+  ): string | { markdown: string } | undefined {
+    return defaultAttachmentText(attachment);
+  }
+
   /** The latest turn's reply attachments, as on Think. */
   readonly #replyAttachments = new ReplyAttachments();
   /** The action ledger's coalescing, as on Think. */
@@ -969,9 +981,29 @@ export class Think<
               error
             });
           }
+          // As on Think: the turn's reply attachments go with its result,
+          // and each one this agent can render is posted to the turn's
+          // channel as an interim notice first.
+          const attachments = this.replyAttachments(end.operationId);
+          const turnChannel =
+            this.#turnChannel?.operationId === end.operationId
+              ? this.#turnChannel.channelId
+              : undefined;
+          this.#respondingContext = responding;
+          await deliverReplyAttachments(
+            attachments,
+            (attachment) => this.renderAttachment(attachment),
+            (rendered) =>
+              this.deliverNotice(rendered, {
+                kind: "interim",
+                ...(turnChannel !== undefined && { channel: turnChannel }),
+                ...(responding && { thread: responding.thread.id })
+              })
+          );
           this.#respondingContext = responding;
           try {
             await this.onChatResponse({
+              attachments,
               // As on Think, a turn that ended before it wrote anything still
               // reports, with an empty assistant message.
               message: end.message ?? {
@@ -1737,12 +1769,25 @@ export class Think<
     text: string | { markdown: string },
     options?: DeliverNoticeOptions
   ): Promise<void> {
-    const channelId = options?.channel ?? "web";
-    await deliverChannelNotice(text, options, {
+    // As on Think: the active turn's channel and thread, unless given.
+    const channelId =
+      options?.channel ?? this.activeChannel?.channelId ?? "web";
+    // A messenger turn's thread, while it runs or its response hook does;
+    // outside a turn, a messenger notice names its thread, as on Think.
+    const running = this.#running?.requestId;
+    const active =
+      (running !== undefined
+        ? this.#messengerContexts.get(running)
+        : undefined) ?? this.#respondingContext;
+    const thread =
+      options?.thread ??
+      (active?.messengerId === channelId ? active.thread.id : undefined);
+    const given = thread !== undefined ? { ...options, thread } : options;
+    await deliverChannelNotice(text, given, {
       channelId,
       registry: this.#channels,
       surface: async () =>
-        this.#messengers?.noticeSurface(channelId, options?.thread) as never,
+        this.#messengers?.noticeSurface(channelId, thread) as never,
       addMessages: (messages) => this.addMessages(messages),
       emit: (event) => {
         const emit = this._emit as unknown as (
