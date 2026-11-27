@@ -170,6 +170,21 @@ describe("detached agent-tool runs on Tasks", () => {
     });
   });
 
+  it("drops a run a clear cancelled when a reset stopped the clear before it deleted the run", async () => {
+    const agent = await parent("detached-clear-cut-off");
+    await agent.startDetachedForTest("run-clear-cut", {
+      chunkBodies: [],
+      staysRunning: true
+    });
+    expect(await agent.clearCutOffByResetForTest("run-clear-cut")).toEqual({
+      replayed: [],
+      kept: false
+    });
+    expect(
+      statuses(await agent.getDetachedDeliveryLog(), "run-clear-cut")
+    ).toEqual([]);
+  });
+
   it("settles an unconfirmed give-up once a later check reads the give-up's own abort (#2769)", async () => {
     const agent = await parent("detached-unconfirmed");
     await agent.startDetachedForTest(

@@ -388,6 +388,22 @@ export class TestAgentToolReplayAgent extends Agent {
     };
   }
 
+  /**
+   * Leave `runId` as a clear a reset cut off leaves it: cancelled as
+   * cleared, not deleted. Then what a connect replays, and whether the run
+   * is still kept.
+   */
+  async clearCutOffByResetForTest(runId: string): Promise<{
+    replayed: string[];
+    kept: boolean;
+  }> {
+    await this.tasks.cancel(runId, "agent tool run cleared");
+    const replayed = (await this.captureReplayTerminalEventsForTest())
+      .filter((event) => "runId" in event && event.runId === runId)
+      .map((event) => event.kind);
+    return { replayed, kept: this.tasks.peek(runId) !== undefined };
+  }
+
   /** A detached run's state; waits for its report once it settled. */
   async detachedStateForTest(runId: string): Promise<{
     status: string | null;

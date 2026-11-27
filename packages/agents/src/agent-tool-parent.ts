@@ -1810,6 +1810,12 @@ export class AgentToolParent {
         // The cancel aborts the run's attempt, which stops following the
         // child. A cleared detached run delivers nothing.
         await this.host.tasks.cancel(row.run_id, AGENT_TOOL_CLEARED_REASON);
+      }
+      // The run goes before its child is cleaned up, so a reset during the
+      // cleanup leaves no cleared run behind (one a reset cut off inside the
+      // cancel is dropped when the runs are next listed).
+      this.host.tasks.deleteRun(row.run_id);
+      if (open === "pending" || open === "running") {
         try {
           const child = await this.host.resolveChild(
             row.agent_type,
@@ -1827,10 +1833,8 @@ export class AgentToolParent {
         // By name: the class an export resolves to need not carry it.
         await this.host.deleteChild(row.agent_type, row.run_id);
       } catch {
-        // Kept, with the child, so a later clear tries again.
-        continue;
+        // Best effort, as the release's clear was.
       }
-      this.host.tasks.deleteRun(row.run_id);
     }
   }
 
@@ -1865,9 +1869,25 @@ export class AgentToolParent {
         order: "oldest",
         limit: Number.MAX_SAFE_INTEGER
       })
+      .filter((record) => !this._dropIfCleared(record))
       .map((record) => this._agentToolRowFromTask(record))
       .filter((row): row is AgentToolRunStorageRow => row !== null)
       .sort((left, right) => left.started_at - right.started_at);
+  }
+
+  /**
+   * Delete a run a clear cancelled but a reset stopped before it was
+   * deleted. Returns whether it was one.
+   */
+  private _dropIfCleared(record: TaskRecord): boolean {
+    if (
+      record.status !== "aborted" ||
+      record.reason !== AGENT_TOOL_CLEARED_REASON
+    ) {
+      return false;
+    }
+    this.host.tasks.deleteRun(record.runId);
+    return true;
   }
 
   /** A run's task, read in the shape of a released `cf_agent_tool_runs` row. */
@@ -2142,7 +2162,9 @@ export class AgentToolParent {
 
   /** A run, read from its task in the shape of a released row. */
   private _readAgentToolRun(runId: string): AgentToolRunStorageRow | null {
-    return this._agentToolRowFromTask(this.host.tasks.peek(runId));
+    const record = this.host.tasks.peek(runId);
+    if (record && this._dropIfCleared(record)) return null;
+    return this._agentToolRowFromTask(record);
   }
 
   /**
