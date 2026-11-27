@@ -353,8 +353,28 @@ function callerKeyOf(stored: string): string {
 }
 
 function operationOf(runId: string): [ThinkSessionId, string] {
-  // SAFETY: every run of the operation definition is named by runIdOf.
+  // A run the shared chat dispatch submitted is named by its request id
+  // alone: it is the root session's (H2c).
+  if (!runId.startsWith("[")) return ["", runId];
+  // SAFETY: every other run of the operation definition is named by runIdOf.
   return JSON.parse(runId) as [ThinkSessionId, string];
+}
+
+/**
+ * An operation's stored input. A run the shared chat dispatch submitted
+ * carries the chat-turn definition's input (a tab's request): its messages
+ * are placed as a client's (H2c).
+ */
+function operationInputOf(input: unknown): OperationRunInput {
+  const value = input as Partial<OperationRunInput> & {
+    readonly messages?: readonly UIMessage[];
+    readonly trigger?: string;
+  };
+  if (value.input !== undefined) return value as OperationRunInput;
+  return {
+    input: { kind: "messages", messages: value.messages ?? [] },
+    source: "client"
+  };
 }
 
 /** A session's lane: its operations run one at a time, in order. */
@@ -722,7 +742,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         definition,
         // SAFETY: every run of these definitions was accepted by `enqueue`
         // or carried forward by `onStart`, both with an OperationRunInput.
-        (input, run) => this.#operate(input as OperationRunInput, run),
+        (input, run) => this.#operate(operationInputOf(input), run),
         {
           onStatus: (record) => this.#onStatus(record),
           // The terminal report of a run that ended outside its handler (an
