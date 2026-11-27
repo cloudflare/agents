@@ -1204,6 +1204,20 @@ describe("ThinkHarness durability", () => {
     expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
   });
 
+  it("finishes a turn whose recovery gave up: its partial reply kept, its stream gone", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.abandonRecovery();
+    const receipt = await stub.submit("slow");
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "unanswered",
+      reason: "interrupted"
+    });
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+/);
+    expect(await stub.harnessStreamIds()).toEqual([]);
+  });
+
   it("tells the model a call whose input a stall cut off did not run, even for a tool safe to rerun", async () => {
     const stub = fresh();
     await stub.setStallTimeout(50);

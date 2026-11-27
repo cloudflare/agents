@@ -1639,13 +1639,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       return outcomeOf({}, stored ? asUIMessage(stored) : undefined);
     }
     // The definition gave up on an interrupted turn, past the budget or as
-    // `onRecovery` chose: its partial is stored already.
+    // `onRecovery` chose: its partial is finished as any given-up reply is
+    // (open tool calls failed, its stream dropped), with the reason
+    // `interrupted`.
     if (result.error === TURN_NOT_CONTINUED || chatRecoveryGaveUp(run)) {
-      return {
-        status: "unanswered",
-        reason: "interrupted",
-        ...(live.reply && { messageId: live.reply.id })
-      };
+      return this.#giveUp(run, session, "interrupted", live);
     }
     return this.#giveUp(run, session, result.error ?? result.status, live);
   }
