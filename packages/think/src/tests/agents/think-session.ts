@@ -5543,8 +5543,9 @@ export class ThinkTestAgent extends Think {
     this.chatStreamStallTimeoutMs = 50;
     try {
       await this.testChat("stall after progress, repeatedly");
+      // Counts the attempts run, not the waits for one.
       let rounds = 0;
-      for (; rounds < maxRounds; rounds++) {
+      while (rounds < maxRounds) {
         const continues = recoveryWorkCountForTest(
           this,
           "_chatRecoveryContinue"
@@ -5561,6 +5562,7 @@ export class ThinkTestAgent extends Think {
           this,
           continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
         );
+        rounds++;
       }
       return {
         rounds,
