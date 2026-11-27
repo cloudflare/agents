@@ -2382,6 +2382,13 @@ export class ThinkTestAgent extends Think {
     });
   }
 
+  /** The next reply stalls once after two chunks, and recovery retries it. */
+  async stallNextReplyOnceForTest(): Promise<void> {
+    this._stallAfterChunks = 2;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = 50;
+  }
+
   /**
    * An agent-tool run on an agent whose `onChatResponse` starts a turn of
    * its own once the run's reply completes. With `recovered`, the run's
@@ -3708,6 +3715,25 @@ export class ThinkTestAgent extends Think {
   }
 
   /** Stream the next turns slowly, one chunk every `delayMs`. */
+  #runReads = 0;
+  /**
+   * Count the reads of an operation's state on the harness, if this agent
+   * has one (the harness-backed Think): a tail that spins reads it in a loop.
+   */
+  async countRunReadsForTest(): Promise<void> {
+    const harness = (this as unknown as { harness?: Record<string, unknown> })
+      .harness;
+    if (!harness) return;
+    const inspection = harness.inspection as (...args: unknown[]) => unknown;
+    harness.inspection = (...args: unknown[]) => {
+      this.#runReads++;
+      return inspection.apply(harness, args);
+    };
+  }
+  async runReadsForTest(): Promise<number> {
+    return this.#runReads;
+  }
+
   async useSlowModelForTest(chunks: string[], delayMs: number): Promise<void> {
     this._turnConfigOverride = {
       model: createDelayedMultiChunkMockModel(chunks, delayMs)
@@ -6868,6 +6894,57 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   /** Launch a single real Think child against the current cap. */
+  /**
+   * Run a Think child whose model streams slowly, so the parent follows the
+   * child's run while it is still running, and return what the call gives.
+   */
+  async runSlowThinkChildForTest(): Promise<{
+    reads: number;
+    status: string;
+    summary?: string;
+    error?: string;
+  }> {
+    const runId = `slow-${crypto.randomUUID()}`;
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.useSlowModelForTest(["one ", "two ", "three "], 150);
+    await child.countRunReadsForTest();
+    const r = await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "slow-call",
+      input: "slow child",
+      inputPreview: "slow child"
+    });
+    return {
+      reads: await child.runReadsForTest(),
+      status: r.status,
+      ...(r.summary !== undefined && { summary: r.summary }),
+      ...(r.error !== undefined && { error: r.error })
+    };
+  }
+
+  /**
+   * Run a Think child whose reply stalls once and is retried while the
+   * parent follows it, and return what the call gives.
+   */
+  async runThinkChildThroughStallForTest(): Promise<{
+    status: string;
+    error?: string;
+  }> {
+    const runId = `stall-${crypto.randomUUID()}`;
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.stallNextReplyOnceForTest();
+    const r = await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "stall-call",
+      input: "stall once",
+      inputPreview: "stall once"
+    });
+    return {
+      status: r.status,
+      ...(r.error !== undefined && { error: r.error })
+    };
+  }
+
   async runSingleThinkChildForTest(): Promise<{
     status: string;
     error?: string;

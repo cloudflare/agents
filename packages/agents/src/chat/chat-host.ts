@@ -837,10 +837,15 @@ export function chatTurnDefinition(
             // reply keeps the model's or gets one from the run.
             if (!started && chunk.type !== "start") {
               started = true;
-              const start = {
+              const synthetic = {
                 type: "start",
                 messageId: continuing?.id ?? fallbackId
               } as UIMessageChunk;
+              // Through the chunk hook like every other chunk, so a host
+              // that mirrors the reply (ThinkHarness's live partial) holds
+              // what the stream stores, in the same order.
+              const start =
+                host.hooks?.transformChunk?.(synthetic, parts) ?? synthetic;
               record(start);
               seen.push(start);
               send({

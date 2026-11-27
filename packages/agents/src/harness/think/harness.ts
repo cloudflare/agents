@@ -1138,6 +1138,72 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
+   * @internal The chunks an operation's reply has streamed so far, while it
+   * runs: none once its reply is stored, or for an operation that never ran.
+   */
+  async operationChunks(
+    session: ThinkSessionId,
+    operationId: string
+  ): Promise<UIMessageChunk[]> {
+    await this.lifecycle.ready();
+    return this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+  }
+
+  /**
+   * @internal Follow an operation: the chunks its reply holds now (as this
+   * isolate streams it, earlier attempts' included, or as its stream stores
+   * them), then each chunk it streams after that, then its end (it
+   * settled: an attempt that ends for a retry is not the end), to
+   * `listener`. The end comes once: every settled status (an abort
+   * too, queued or running) is reported as `done` or `unanswered`.
+   * Snapshot and subscription are one synchronous step, so no chunk is
+   * missed or seen twice: keep any `await` out of this method. Call after
+   * `lifecycle.ready()`.
+   */
+  followOperation(
+    session: ThinkSessionId,
+    operationId: string,
+    listener: (
+      event: { type: "chunk"; chunk: UIMessageChunk } | { type: "end" }
+    ) => void
+  ): { chunks: UIMessageChunk[]; stop(): void } {
+    const stop = this.#events.subscribe(session, (event) => {
+      if (event.type === "chunk" && event.operationId === operationId) {
+        listener({ type: "chunk", chunk: event.chunk });
+      } else if (
+        event.type === "operation" &&
+        event.status.operationId === operationId &&
+        (event.status.status === "done" || event.status.status === "unanswered")
+      ) {
+        listener({ type: "end" });
+      }
+    });
+    // An attempt still building its session has not read its earlier
+    // attempts' chunks back yet (its partial is empty): the stored stream
+    // has them then. A live partial with chunks already holds them.
+    const live = this.#live.get(session);
+    const chunks =
+      live?.operationId === operationId && live.partial.length > 0
+        ? [...live.partial]
+        : this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+    return { chunks, stop };
+  }
+
+  /**
+   * @internal Replace fields of one key of an operation's metadata (one
+   * statement, no read), as `Tasks.patchMetadata` does. `false` when the
+   * operation does not exist or the bound would be passed.
+   */
+  patchOperationMetadata(
+    session: ThinkSessionId,
+    operationId: string,
+    key: string,
+    patch: Record<string, TaskJson | null>
+  ): boolean {
+    return this.#tasks.patchMetadata(runIdOf(session, operationId), key, patch);
+  }
+
+  /**
    * @internal An operation's status with its run's times, key and
    * metadata, for the harness-backed Think's submissions.
    */

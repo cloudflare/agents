@@ -119,6 +119,16 @@ type ThinkAgentToolTestStub = {
 };
 
 type ThinkAgentToolParentStub = DurableObjectStub & {
+  runThinkChildThroughStallForTest(): Promise<{
+    status: string;
+    error?: string;
+  }>;
+  runSlowThinkChildForTest(): Promise<{
+    reads: number;
+    status: string;
+    summary?: string;
+    error?: string;
+  }>;
   runThinkChild(input: string, runId?: string): Promise<RunAgentToolResult>;
   runThinkChildWithInjectedUnrelatedError(
     input: string,
@@ -675,6 +685,25 @@ describe("Think agent tools", () => {
       agentType: "ThinkTestAgent",
       status: "completed",
       summary: "Hello from the assistant!"
+    });
+  });
+
+  it("follows a Think child that is still streaming when the parent attaches, to its result", async () => {
+    const parent = await freshParent();
+    const result = await parent.runSlowThinkChildForTest();
+    expect(result).toMatchObject({
+      status: "completed",
+      summary: "one two three "
+    });
+    // Following it reads the run's state a few times, not in a loop (a tail
+    // with nothing to wait on backs off instead of spinning). 0 on the class.
+    expect(result.reads).toBeLessThan(50);
+  });
+
+  it("follows a Think child whose reply stalls and is retried, to its result", async () => {
+    const parent = await freshParent();
+    expect(await parent.runThinkChildThroughStallForTest()).toEqual({
+      status: "completed"
     });
   });
 

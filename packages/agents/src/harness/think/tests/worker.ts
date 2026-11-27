@@ -878,6 +878,35 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return JSON.stringify(settled ?? null);
   }
 
+  /**
+   * Follow an operation, abort it, and say whether the follower got its
+   * end. The operation must be queued or running.
+   */
+  async followThenAbort(operationId: string): Promise<boolean> {
+    let ended!: () => void;
+    const end = new Promise<boolean>((resolve) => {
+      ended = () => resolve(true);
+    });
+    const { stop } = this.harness.followOperation(
+      this.harness.session().id,
+      operationId,
+      (event) => {
+        if (event.type === "end") ended();
+      }
+    );
+    await this.harness.abort(this.harness.session().id, operationId);
+    try {
+      return await Promise.race([
+        end,
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(false), 2000)
+        )
+      ]);
+    } finally {
+      stop();
+    }
+  }
+
   /** Abort with the caller's own reason, through the internal method. */
   abortWithReason(operationId: string, reason: string): Promise<boolean> {
     return this.harness.abort(this.harness.session().id, operationId, reason);

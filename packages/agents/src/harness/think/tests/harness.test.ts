@@ -229,6 +229,15 @@ describe("ThinkHarness turns", () => {
     expect(await stub.wait("sub-pending")).toMatchObject({ status: "done" });
   });
 
+  it("ends a follower of an operation aborted while queued", async () => {
+    const stub = fresh();
+    await stub.submit("gate", { operationId: "running" });
+    await stub.gateStarted(1);
+    await stub.submit("later", { operationId: "queued" });
+    expect(await stub.followThenAbort("queued")).toBe(true);
+    await stub.release();
+  });
+
   it("keeps a caller's reason on an aborted operation, and still says whether it had started", async () => {
     const stub = fresh();
     // Running: held at the gate.

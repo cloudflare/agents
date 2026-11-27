@@ -109,3 +109,5 @@ export {
   type ChatSdkAddress,
   type ChatSdkChannelOptions
 } from "../experimental/channels/chat-sdk";
+export { chunksOfMessage } from "./message-chunks";
+export { REPLAY_PAGE_BYTES, utf8Length } from "./platform-limits";
