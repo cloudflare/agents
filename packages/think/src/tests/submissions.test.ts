@@ -86,6 +86,7 @@ type ThinkSubmissionTestStub = {
   getMessagesForTest(): Promise<UIMessage[]>;
   setFinalAnswerResponseForTest(args: unknown): Promise<void>;
   getFinalAnswerCallsForTest(): Promise<string>;
+  setTurnConfigOverride(config: Record<string, unknown> | null): Promise<void>;
   persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
@@ -426,6 +427,44 @@ function textParts(messages: Array<{ parts?: unknown[] }>): string[] {
       return [];
     })
   );
+}
+
+async function finalAnswerCalls(
+  agent: Awaited<ReturnType<typeof freshAgent>>,
+  id: string
+) {
+  await agent.setFinalAnswerResponseForTest({ title: "t" });
+  const accepted = await agent.testSubmitMessages("answer", {
+    submissionId: `sub-${id}`,
+    metadata: {
+      [workflowPromptMetadataKey]: {
+        workflow: {
+          name: "TEST_WORKFLOW",
+          id: `workflow-${id}`,
+          stepName: "draft-report",
+          eventType: `think-prompt-${id}`
+        },
+        output: {
+          schema: {
+            type: "object",
+            properties: { title: { type: "string" } },
+            required: ["title"],
+            additionalProperties: false
+          }
+        },
+        fingerprint: "fingerprint"
+      }
+    }
+  });
+  await waitForSubmission(
+    agent,
+    accepted.submissionId,
+    (submission) => submission.status === "completed"
+  );
+  return JSON.parse(await agent.getFinalAnswerCallsForTest()) as Array<{
+    toolChoice: unknown;
+    tools: string[];
+  }>;
 }
 
 describe("Think durable submissions", () => {
@@ -2166,6 +2205,23 @@ describe("Think durable submissions", () => {
       }
     });
   });
+
+  it("keeps the final-answer tool on when a turn names its active tools", async () => {
+    const agent = await freshAgent();
+    await agent.setTurnConfigOverride({ activeTools: [] });
+    const calls = await finalAnswerCalls(agent, "active-tools");
+    expect(calls[0].tools).toEqual(["think_final_answer"]);
+  }, 30_000);
+
+  it("pins a structured turn's last permitted step to the final-answer tool", async () => {
+    const agent = await freshAgent();
+    await agent.setTurnConfigOverride({ maxSteps: 1 });
+    const calls = await finalAnswerCalls(agent, "last-step");
+    expect(calls[0].toolChoice).toMatchObject({
+      type: "tool",
+      toolName: "think_final_answer"
+    });
+  }, 30_000);
 
   it("requires a tool call on a structured turn with tools of its own", async () => {
     const agent = await freshAgent();
