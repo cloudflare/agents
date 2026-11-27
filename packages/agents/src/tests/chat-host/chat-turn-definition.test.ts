@@ -1043,10 +1043,9 @@ describe("chatTurnDefinition", () => {
         }
       )({ trigger: "tool-answer" }, laterAttempt("cf-1", 1));
       expect(sent[0]).toMatchObject({ continuation: true });
-      expect(JSON.parse(String(sent[0].body))).toMatchObject({
-        type: "start",
-        messageId: "a1"
-      });
+      // The tabs get it without the message id, so they extend the reply
+      // instead of starting another (#1229); the stored chunk keeps it.
+      expect(JSON.parse(String(sent[0].body))).toEqual({ type: "start" });
     });
   });
 

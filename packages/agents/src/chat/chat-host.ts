@@ -1664,6 +1664,14 @@ export function chatTurnDefinition(
             // Every reply has an id: a continuation keeps the reply's, a new
             // reply keeps the model's or gets one from the run.
             if (!started) offerStream();
+            // A continuation's start goes to the tabs without its message
+            // id: a tab that gets one starts a second assistant message
+            // instead of extending the reply (#1229).
+            const forTabs = (c: UIMessageChunk): UIMessageChunk => {
+              if (!continuing || c.type !== "start") return c;
+              const { messageId: _id, ...rest } = c as { messageId?: string };
+              return rest as UIMessageChunk;
+            };
             if (!started && chunk.type !== "start") {
               started = true;
               const start = {
@@ -1673,7 +1681,7 @@ export function chatTurnDefinition(
               record(start);
               seen.push(start);
               send({
-                body: JSON.stringify(start),
+                body: JSON.stringify(forTabs(start)),
                 done: false,
                 ...(continuing && { continuation: true })
               });
@@ -1698,7 +1706,7 @@ export function chatTurnDefinition(
             seen.push(next);
             checkAnswered();
             send({
-              body: JSON.stringify(next),
+              body: JSON.stringify(forTabs(next)),
               done: false,
               ...(continuing && { continuation: true })
             });

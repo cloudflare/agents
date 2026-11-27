@@ -1047,7 +1047,10 @@ export class AIChatAgent<
         return this.onChatMessage(async () => {}, {
           requestId: call.requestId,
           abortSignal: call.signal,
-          clientTools: [...call.clientTools],
+          // No client tools reach `onChatMessage` as none, as before.
+          ...(call.clientTools.length > 0 && {
+            clientTools: [...call.clientTools]
+          }),
           ...(call.body !== undefined && { body: { ...call.body } }),
           continuation: call.mode === "continue"
         });
