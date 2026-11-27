@@ -29,7 +29,7 @@ import {
   replyIsRemovedAsEmpty,
   stripTrailingReasoning
 } from "./repair-transcript";
-import { settleInterruptedPart } from "./message-builder";
+import { isReplayChunk, settleInterruptedPart } from "./message-builder";
 import { transcriptEndsInAnswer } from "./continuation-turn";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
@@ -1591,6 +1591,10 @@ export function chatTurnDefinition(
       }));
       // A text or reasoning part the reply was cut off in is closed: the
       // continuation writes a part of its own after it.
+      // The reply's parts before this stream, which the reader mutates.
+      const continuingBefore: UIMessage["parts"] = structuredClone(
+        partial?.parts ?? []
+      );
       const continuing = partial && {
         ...partial,
         parts: partial.parts.map(
@@ -1739,6 +1743,7 @@ export function chatTurnDefinition(
             // A continuation's start goes to the tabs without its message
             // id: a tab that gets one starts a second assistant message
             // instead of extending the reply (#1229).
+            const replyBefore = continuingBefore;
             const forTabs = (c: UIMessageChunk): UIMessageChunk => {
               if (!continuing || c.type !== "start") return c;
               const { messageId: _id, ...rest } = c as { messageId?: string };
@@ -1791,6 +1796,14 @@ export function chatTurnDefinition(
                         (next as { toolCallId?: unknown }).toolCallId
                   )
                 : undefined;
+            // A provider that replays an earlier tool round trip (#1404)
+            // re-sends chunks for calls the reply holds: they are dropped,
+            // neither sent (they move a settled part back on a tab) nor
+            // stored (the reader would reopen the settled part). Judged
+            // against the reply as it was before this stream.
+            if (!asked && isReplayChunk(replyBefore as never, next as never)) {
+              return;
+            }
             for (const out of asked ? [next, asked] : [next]) {
               record(out);
               seen.push(out);

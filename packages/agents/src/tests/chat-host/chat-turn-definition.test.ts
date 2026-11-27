@@ -2168,4 +2168,78 @@ describe("chatTurnDefinition", () => {
       expect(JSON.stringify(reply)).toContain("approval-requested");
     });
   });
+
+  it("a continuation's replay of a settled call's chunks is dropped: not sent, and the call keeps its output", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-pick",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: { ok: true }
+          }
+        ]
+      } as never);
+      const types: string[] = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => {
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response" && frame.body) {
+            types.push(JSON.parse(frame.body).type);
+          }
+        }
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start" } as never;
+              yield {
+                type: "tool-input-start",
+                toolCallId: "c1",
+                toolName: "pick"
+              } as never;
+              yield {
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "pick",
+                input: {}
+              } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Done" } as never;
+              yield { type: "text-end", id: "t1" } as never;
+            })()
+        }
+      )({ trigger: "tool-answer", replyId: "a1" }, laterAttempt("rp-9", 1));
+      expect(types).not.toContain("tool-input-start");
+      expect(types).not.toContain("tool-input-available");
+      expect(types).toContain("text-delta");
+      // The settled call keeps its output in the stored reply.
+      expect(JSON.stringify(await session.getMessage("a1"))).toContain(
+        "output-available"
+      );
+    });
+  });
 });
