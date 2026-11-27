@@ -104,6 +104,7 @@ import {
   stableHash
 } from "../../action-ledger";
 import { z } from "zod";
+import { PASS_JOB_ID } from "../../media-eviction";
 import { WorkspaceFiles } from "../../workspace-files";
 import type { TaskRecord } from "agents/internal";
 import type { TaskJson } from "agents/tasks";
@@ -16971,7 +16972,7 @@ export class ThinkMediaEvictionAgent extends Think {
     return (
       (this.sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM cf_agents_jobs
-        WHERE id = ${"think-media-eviction:pass"}
+        WHERE id = ${PASS_JOB_ID}
       `[0]?.count ?? 0) > 0
     );
   }

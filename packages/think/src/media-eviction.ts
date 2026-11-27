@@ -408,7 +408,8 @@ type EvictionCursor = { id: string; index: number };
 const MEDIA_EVICTION_PAGE_ROWS = 256;
 
 /** One pass at a time: requests coalesce on this job id. */
-const PASS_JOB_ID = "think-media-eviction:pass";
+/** @internal The id of the queued pass job; tests wait on it. */
+export const PASS_JOB_ID = "think-media-eviction:pass";
 
 /**
  * Schedules and runs bounded media-eviction passes for one agent, as a
