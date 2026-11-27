@@ -481,5 +481,14 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > keeps a messenger reply pending while the platform re-runs recovery",
+    "reason": "a code-update reset error injected into the class's scheduled recovery callback (private), with a seeded messenger delivery",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a webhook reply once when a reset also cuts its recovery"
+    }
   }
 ]

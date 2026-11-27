@@ -1777,6 +1777,58 @@ describe("think messengers core", () => {
       ).toBeGreaterThan(1);
     }, 30_000);
 
+    // Successor of think-session's "keeps a messenger reply pending while
+    // the platform re-runs recovery": the recovery attempt for a reply a
+    // reset cut is itself cut by a reset while onChatRecovery runs; the reply
+    // stays pending (nothing failed is posted) and is answered once.
+    it("answers a webhook reply once when a reset also cuts its recovery", async () => {
+      const name = `reset-${crypto.randomUUID()}`;
+      // A reset stub stays broken: each call takes a new one.
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      await (await agent()).holdRecoveryOnceForTest();
+      await (
+        await agent()
+      )
+        .fetch("https://example.com/messengers/fake/webhook", {
+          body: JSON.stringify({
+            id: "p1",
+            text: "hello",
+            threadId: "fake:dm"
+          }),
+          method: "POST"
+        })
+        .catch(() => undefined);
+      // The first reset (mid-reply) is the agent's own; its recovery holds.
+      const heldBy = Date.now() + 20_000;
+      while (
+        !(await (await agent()).recoveryHeldForTest().catch(() => false))
+      ) {
+        if (Date.now() > heldBy) throw new Error("recovery never held");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      // The platform cuts the recovery attempt.
+      await (await agent()).resetIsolateForTest().catch(() => undefined);
+
+      let posted: Array<{ kind: string; content: string }> = [];
+      let open = 1;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        const stub = await agent();
+        open = await stub.openReplyRunsForTest().catch(() => 1);
+        posted = await stub.getAdapterCalls().catch(() => []);
+        if (open === 0 && posted.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(open).toBe(0);
+      // Nothing failed was posted: one message, edited as the answer
+      // streamed.
+      expect(posted).toEqual([
+        { kind: "post", content: "Got" },
+        { kind: "edit", content: "Got it" }
+      ]);
+    }, 45_000);
+
     it("finds the private Chat SDK queue methods the recovery drain relies on", () => {
       // The drain feature-checks these at runtime and silently skips when a
       // `chat` release drops or renames them; this fails the upgrade instead.

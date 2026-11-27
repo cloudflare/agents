@@ -1,4 +1,5 @@
 import type { LanguageModel, UIMessage } from "ai";
+import type { ChatRecoveryContext, ChatRecoveryOptions } from "agents/chat";
 import type { Adapter, Chat, ChatInstance } from "chat";
 import { Message, parseMarkdown } from "chat";
 import { Think } from "../../think";
@@ -106,6 +107,34 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
   private _chat: ChatInstance | undefined;
   private _streamCalls = 0;
   override chatRecovery = { maxAttempts: 2 };
+
+  /**
+   * A test can hold the next onChatRecovery, to cut the recovery attempt
+   * there with a reset, as the platform does during a deploy.
+   */
+  override async onChatRecovery(
+    _ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    if (this.ctx.storage.kv.get<boolean>("test:hold-recovery")) {
+      this.ctx.storage.kv.delete("test:hold-recovery");
+      this.ctx.storage.kv.put("test:recovery-held", true);
+      await new Promise<never>(() => {});
+    }
+    return {};
+  }
+
+  async holdRecoveryOnceForTest(): Promise<void> {
+    this.ctx.storage.kv.put("test:hold-recovery", true);
+  }
+
+  async recoveryHeldForTest(): Promise<boolean> {
+    return this.ctx.storage.kv.get<boolean>("test:recovery-held") === true;
+  }
+
+  /** Reset this agent's isolate, as an eviction or a deploy does. */
+  async resetIsolateForTest(): Promise<void> {
+    this.ctx.abort("test: forced reset");
+  }
 
   /**
    * #2106: an agent named `recover-<mode>-…` fails its first model stream
