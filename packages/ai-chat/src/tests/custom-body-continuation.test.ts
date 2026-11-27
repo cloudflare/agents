@@ -178,7 +178,11 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The second request waits behind the first, which is still running:
+    // it captures its body only after the clear.
+    await vi.waitFor(async () => {
+      expect(await agentStub.queuedTurnCountForTest()).toBe(2);
+    }, BOUNDS);
     await agentStub.clearCapturedContext();
 
     ws.send(
@@ -191,9 +195,12 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    // Let the WebSocket message be processed and the continuation queued
-    // before waitForIdle snapshots _chatTurnQueue
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The result was received; the idle wait then covers its apply and the
+    // continuation decision, even when no model call follows.
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    await vi.waitFor(async () => {
+      expect(await agentStub.hasPendingInteractionForTest()).toBe(false);
+    }, BOUNDS);
     await agentStub.waitForIdleForTest();
 
     // Both requests replied after the tool call, so the tool call's message
