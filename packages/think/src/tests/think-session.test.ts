@@ -1406,6 +1406,33 @@ describe("Think — error handling", () => {
 
   // The successor of "should persist partial assistant message on error"
   // through public behaviour: the model reports the error in-band.
+  it("tells a waiting chat, and the running one, that a clear cut them off", async () => {
+    const agent = await freshAgent("clear-queued-chat");
+    expect(await agent.clearWithQueuedChatForTest(false)).toEqual({
+      responses: [],
+      first: {
+        done: false,
+        error: "The chat was cleared before the turn finished."
+      },
+      second: {
+        done: false,
+        error: "The chat was cleared before the turn finished."
+      }
+    });
+  });
+
+  it("tells a chat its caller cancelled nothing more when a clear follows", async () => {
+    const agent = await freshAgent("clear-after-cancel");
+    expect(await agent.clearWithQueuedChatForTest(true)).toEqual({
+      responses: [],
+      first: { done: false, error: null },
+      second: {
+        done: false,
+        error: "The chat was cleared before the turn finished."
+      }
+    });
+  });
+
   it("tells a chat the chat was cleared under it, with no response hook", async () => {
     const agent = await freshAgent("clear-during-chat");
     expect(await agent.clearDuringChatForTest()).toEqual({

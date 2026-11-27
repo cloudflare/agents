@@ -4578,6 +4578,47 @@ export class ThinkTestAgent extends Think {
    * from `beforeTurn`, so the turn fails the way a provider's would, on
    * Think and on the harness-backed Think alike.
    */
+  /**
+   * Two chats, the second waiting behind the first, and a clear. With
+   * `cancelFirst`, the first's caller cancels it just before the clear.
+   */
+  async clearWithQueuedChatForTest(cancelFirst: boolean): Promise<{
+    responses: string[];
+    first: { done: boolean; error: string | null };
+    second: { done: boolean; error: string | null };
+  }> {
+    this._responseLog = [];
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    this._turnConfigOverride = {
+      model: createAbortAwareMockModel("stream", () => markStarted())
+    };
+    const first = new TestCollectingCallback();
+    const second = new TestCollectingCallback();
+    try {
+      const running = this.chat("first", first);
+      await started;
+      const waiting = this.chat("second", second);
+      if (cancelFirst) void this.cancelChat(first.requestId ?? "");
+      await this.clearMessages();
+      await Promise.all([running, waiting]);
+      await this._waitForTurnQueueIdleForTest();
+      const view = (callback: TestCollectingCallback) => ({
+        done: callback.doneCalled,
+        error: callback.errorMessage ?? null
+      });
+      return {
+        responses: this._responseLog.map((response) => response.status),
+        first: view(first),
+        second: view(second)
+      };
+    } finally {
+      this._turnConfigOverride = null;
+    }
+  }
+
   /** The response hooks of a chat turn the chat is cleared under. */
   async clearDuringChatForTest(): Promise<{
     responses: string[];

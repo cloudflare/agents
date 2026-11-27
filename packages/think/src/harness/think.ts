@@ -684,11 +684,31 @@ export class Think<
           await this.#chunkHooks;
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
+          const clearsAtStart = this.#clearsAtStart.get(end.operationId);
+          this.#clearsAtStart.delete(end.operationId);
+          // A clear that ran, or runs, while the turn was open.
+          const clearedUnder =
+            this.#clearing > 0 ||
+            (clearsAtStart !== undefined && clearsAtStart !== this.#clears);
           if (end.message) await this.#endStep(end.operationId, end.message);
           else this.#openSteps.delete(end.operationId);
           // A turn that never ran has no response: one stopped while it
           // waited, or input the harness turned away before a model call (a
           // tool result no call waits for, an empty or unknown operation).
+          const stoppedByCaller = this.#callerStops.delete(end.operationId);
+          // As on Think, a turn the chat was cleared under, running or
+          // waiting, gets no response hook. Its `chat()` caller is told of
+          // the clear, unless it had stopped the turn itself first.
+          if (
+            end.status === "unanswered" &&
+            (end.reason === "aborted" || end.reason === "withdrawn") &&
+            clearedUnder
+          ) {
+            if (!stoppedByCaller && this.#chatClears.has(end.operationId)) {
+              this.#chatClears.set(end.operationId, true);
+            }
+            return;
+          }
           // A turn that wrote a message ran, whatever its reason's text.
           if (
             end.status === "unanswered" &&
@@ -696,18 +716,6 @@ export class Think<
             end.reason !== undefined &&
             NEVER_RAN.has(end.reason)
           ) {
-            return;
-          }
-          // As on Think, a turn the chat was cleared under gets no response
-          // hook; its `chat()` caller is told of the clear instead.
-          if (
-            end.status === "unanswered" &&
-            end.reason === "aborted" &&
-            this.#clearing > 0
-          ) {
-            if (this.#chatClears.has(end.operationId)) {
-              this.#chatClears.set(end.operationId, true);
-            }
             return;
           }
           await this.onChatResponse({
@@ -1241,14 +1249,24 @@ export class Think<
 
   async clearMessages(): Promise<void> {
     this.#clearing++;
+    this.#clears++;
+    // As on Think, a turn started before the clear but not yet submitted is
+    // cut off by it: it counts as a stop, so that turn is skipped as cleared.
+    this.#stops++;
+    this.#lastStop = "cleared";
+    const resetting = this.harness.session().reset();
+    this.#stopping = resetting.catch(() => {});
     try {
-      await this.harness.session().reset();
+      await resetting;
     } finally {
       this.#clearing--;
     }
     await this.#sync();
   }
 
+  /** Clears so far, and the count each running operation started under. */
+  #clears = 0;
+  #clearsAtStart = new Map<string, number>();
   /** Clears in progress: a turn they stop ends cleared, not stopped. */
   #clearing = 0;
   /**
@@ -1290,7 +1308,7 @@ export class Think<
     signal: AbortSignal | undefined
   ): Promise<SaveMessagesResult> {
     const session = this.harness.session();
-    const stop = () => void session.abort(operationId);
+    const stop = () => this.#stopForCaller(operationId);
     signal?.addEventListener("abort", stop, { once: true });
     try {
       if (signal?.aborted) stop();
@@ -1798,7 +1816,7 @@ export class Think<
     });
     options?.signal?.addEventListener(
       "abort",
-      () => void this.harness.session().abort(operationId),
+      () => this.#stopForCaller(operationId),
       { once: true }
     );
     this.#chatClears.set(operationId, false);
@@ -1865,11 +1883,32 @@ export class Think<
 
   /** Stop one turn by its request id; it ends `aborted`. */
   protected abortRequest(requestId: string, _reason?: unknown): void {
-    void this.keepAliveWhile(() => this.harness.session().abort(requestId));
+    this.#stopForCaller(requestId);
   }
 
   async cancelChat(requestId: string): Promise<void> {
-    await this.harness.session().abort(requestId);
+    await this.#stopForCaller(requestId);
+  }
+
+  /**
+   * The operations their callers stopped, until each ends: a clear that
+   * lands while one unwinds did not stop it.
+   */
+  #callerStops = new Set<string>();
+  #stopForCaller(operationId: string): Promise<boolean> {
+    this.#callerStops.add(operationId);
+    const stopping = this.harness
+      .session()
+      .abort(operationId)
+      .then((stopped) => {
+        // Nothing was open under that id, so no turn end will clear it.
+        if (!stopped) this.#callerStops.delete(operationId);
+        return stopped;
+      });
+    void this.keepAliveWhile(() => stopping).catch((error: unknown) =>
+      console.error("[Think] Stopping a turn failed", error)
+    );
+    return stopping;
   }
 
   /** Stop every turn, running or waiting; each ends `aborted`. */
@@ -2040,6 +2079,7 @@ export class Think<
     // The first call of an operation says whether it continues a reply.
     if (!this.#continued.has(turn.operationId)) {
       this.#continued.set(turn.operationId, turn.continuation);
+      this.#clearsAtStart.set(turn.operationId, this.#clears);
     }
     // As in Think: the capability block for the turn's tools follows the
     // prompt, unless a `beforeTurn` gives its own.
