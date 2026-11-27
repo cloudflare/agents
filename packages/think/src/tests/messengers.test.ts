@@ -1821,6 +1821,8 @@ describe("think messengers core", () => {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       expect(open).toBe(0);
+      // Read again after the barrier: what was posted is all there is.
+      posted = await (await agent()).getAdapterCalls();
       // Nothing failed was posted: one message, edited as the answer
       // streamed.
       expect(posted).toEqual([

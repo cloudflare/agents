@@ -48,6 +48,7 @@ async function resetDuringTurn(
   if (!ws) throw new Error("no socket");
   ws.accept();
   const requestId = crypto.randomUUID();
+  const userId = crypto.randomUUID();
   let chunks = 0;
   let opened = false;
   ws.addEventListener("message", (event) => {
@@ -69,7 +70,7 @@ async function resetDuringTurn(
         body: JSON.stringify({
           messages: [
             {
-              id: crypto.randomUUID(),
+              id: userId,
               role: "user",
               parts: [{ type: "text", text: "reset me" }]
             }
@@ -109,7 +110,7 @@ async function resetDuringTurn(
     },
     { timeout: 15_000, interval: 50 }
   );
-  return { requestId, calls, startedAt, resetAt, agent, room };
+  return { requestId, calls, startedAt, resetAt, agent, room, userId };
 }
 
 describe("chat recovery, through public behaviour", () => {
@@ -467,6 +468,7 @@ describe("chat recovery, through public behaviour", () => {
         { timeout: 15_000, interval: 50 }
       );
       return (await (await agent()).getMessages()) as Array<{
+        id: string;
         role: string;
         parts: Array<{ type: string; text?: string }>;
       }>;
@@ -495,15 +497,23 @@ describe("chat recovery, through public behaviour", () => {
     // Successors of the pre-stream retry tests (think-session, "Think —
     // onChatRecovery"): a turn cut off before its first chunk is asked again.
     it("answers a turn a reset cut off after its stream opened but before any text", async () => {
-      const { agent } = await resetDuringTurn("retry-opened", 0, undefined, {
-        openedStream: true
-      });
+      const { agent, userId } = await resetDuringTurn(
+        "retry-opened",
+        0,
+        undefined,
+        {
+          openedStream: true
+        }
+      );
       const messages = await settle(agent);
 
       expect(messages.map((message) => message.role)).toEqual([
         "user",
         "assistant"
       ]);
+      // The same question, asked once more: one model call after the reset.
+      expect(messages[0]?.id).toBe(userId);
+      expect(await (await agent()).modelCallsForTest()).toBe(1);
       expect(
         messages[1]?.parts.some(
           (part) => part.type === "text" && (part.text ?? "").length > 0
@@ -779,6 +789,7 @@ describe("chat recovery, through public behaviour", () => {
     });
     const [, earlier] = (await (await agent()).getMessages()) as Array<{
       id: string;
+      parts: unknown[];
     }>;
 
     await (await agent()).hangModelAtConnectForTest();
@@ -818,6 +829,20 @@ describe("chat recovery, through public behaviour", () => {
       .join("");
     // Asked again from the start, so a whole answer.
     expect(text.length).toBeGreaterThan(0);
+    // The earlier answer is unchanged, and the regenerated one is shown.
+    expect(
+      branches.find((message) => message.id === earlier?.id)?.parts
+    ).toEqual(earlier?.parts);
+    const shown = (await (await agent()).getMessages()) as Array<{
+      id: string;
+    }>;
+    expect(shown.at(-1)?.id).toBe(regenerated?.id);
+    // One model call after the reset, and it was not sent the old answer.
+    const prompts = await (await agent()).getModelPromptsForTest();
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.some((line) => line.startsWith("assistant:"))).toBe(
+      false
+    );
   }, 60_000);
 
   // Successor of the platform-reset tests (think-session, "Think —

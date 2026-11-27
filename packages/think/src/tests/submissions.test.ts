@@ -755,6 +755,14 @@ describe("Think durable submissions", () => {
         })
       ).resolves.toMatchObject({ status: "completed" });
       await tasksIdle(restarted);
+      // Completed once: one question, one reply.
+      const stored = (await restarted.getStoredMessages()) as Array<{
+        role: string;
+      }>;
+      expect(stored.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
     }, 40_000);
 
     it("stays aborted when it is cancelled while its reply is being recovered", async () => {
