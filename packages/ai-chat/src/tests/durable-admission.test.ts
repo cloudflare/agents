@@ -6,7 +6,7 @@
  * the isolate for real with `ctx.abort()`.
  */
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
@@ -26,6 +26,9 @@ type AdmissionStub = {
   ageAdmissionsForTest(ms: number): Promise<void>;
   waitUntilStableForTest(): Promise<boolean>;
   waitForIdleForTest(): Promise<unknown>;
+  holdStreamForTest(requestId: string): Promise<void>;
+  isStreamHeldForTest(requestId: string): Promise<boolean>;
+  releaseStreamForTest(requestId: string): Promise<void>;
 };
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -121,34 +124,17 @@ async function agent(binding: string, room: string): Promise<AdmissionStub> {
   )) as unknown as AdmissionStub;
 }
 
-/** Every frame `ws` receives from now on, parsed. */
-function framesOf(ws: WebSocket): unknown[] {
-  const frames: unknown[] = [];
-  ws.addEventListener("message", (event: MessageEvent) => {
-    frames.push(JSON.parse(event.data as string));
-  });
-  return frames;
-}
-
 /**
- * Wait until `requestId`'s first chunk is out: its turn is running. A queue
- * entry alone can be only a reservation.
+ * Send r1 and hold its stream after its first chunk, so it is still running
+ * whenever the test resets the isolate (the reset drops the hold).
  */
-async function firstChunk(
-  frames: readonly unknown[],
-  requestId: string
-): Promise<void> {
+async function holdRunning(ws: WebSocket, stub: AdmissionStub): Promise<void> {
+  await stub.holdStreamForTest("r1");
+  onTestFinished(() => stub.releaseStreamForTest("r1").catch(() => {}));
+  sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
   await waitFor(
-    async () => frames,
-    (seen) =>
-      seen.some(
-        (frame) =>
-          isUseChatResponseMessage(frame) &&
-          frame.id === requestId &&
-          !frame.done &&
-          typeof frame.body === "string" &&
-          frame.body.includes("chunk-")
-      )
+    () => stub.isStreamHeldForTest("r1"),
+    (held) => held
   );
 }
 
@@ -160,9 +146,7 @@ async function queueBehindRunningTurn(
   ws: WebSocket,
   stub: AdmissionStub
 ): Promise<void> {
-  const frames = framesOf(ws);
-  sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-  await firstChunk(frames, "r1");
+  await holdRunning(ws, stub);
   sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
   await waitFor(
     () => stub.getAdmissionsForTest(),
@@ -400,10 +384,8 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const { ws } = await connectChatWS(
       `/agents/recovery-slow-stream-agent/${room}`
     );
-    const frames = framesOf(ws);
-    sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
     const stub = await agent(binding, room);
-    await firstChunk(frames, "r1");
+    await holdRunning(ws, stub);
     // The fiber is there and the record is still there, as a reset in
     // between leaves them.
     await stub.seedAdmissionForTest("r1", ["u1"]);
