@@ -2109,4 +2109,63 @@ describe("chatTurnDefinition", () => {
       expect(bodies).toEqual(["text-start", "text-delta", "text-end"]);
     });
   });
+
+  it("a call's input that arrives after its approval request is followed by the request again", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const types: string[] = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => {
+          const frame = JSON.parse(text);
+          if (frame.type === "cf_agent_use_chat_response" && frame.body) {
+            const chunk = JSON.parse(frame.body);
+            if (chunk.toolCallId === "c1") types.push(chunk.type);
+          }
+        }
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield {
+                type: "tool-input-start",
+                toolCallId: "c1",
+                toolName: "del"
+              } as never;
+              yield {
+                type: "tool-approval-request",
+                approvalId: "ap1",
+                toolCallId: "c1"
+              } as never;
+              yield {
+                type: "tool-input-available",
+                toolCallId: "c1",
+                toolName: "del",
+                input: { f: 1 }
+              } as never;
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("li-1", 1));
+      expect(types).toEqual([
+        "tool-input-start",
+        "tool-approval-request",
+        "tool-input-available",
+        "tool-approval-request"
+      ]);
+      const reply = await instance.sessions.session("s1").getMessage("a1");
+      expect(JSON.stringify(reply)).toContain("approval-requested");
+    });
+  });
 });

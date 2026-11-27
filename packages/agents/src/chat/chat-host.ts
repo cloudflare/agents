@@ -1779,15 +1779,29 @@ export function chatTurnDefinition(
               controller.enqueue(next);
               return;
             }
-            record(next);
-            seen.push(next);
-            checkAnswered();
-            send({
-              body: JSON.stringify(forTabs(next)),
-              done: false,
-              ...(continuing && { continuation: true })
-            });
-            controller.enqueue(next);
+            // A call's input that arrives after its approval request is
+            // followed by the request again: a tab moves the part to
+            // `input-available` on the input, and would lose the approval.
+            const asked =
+              next.type === "tool-input-available"
+                ? seen.find(
+                    (c) =>
+                      c.type === "tool-approval-request" &&
+                      (c as { toolCallId?: unknown }).toolCallId ===
+                        (next as { toolCallId?: unknown }).toolCallId
+                  )
+                : undefined;
+            for (const out of asked ? [next, asked] : [next]) {
+              record(out);
+              seen.push(out);
+              checkAnswered();
+              send({
+                body: JSON.stringify(forTabs(out)),
+                done: false,
+                ...(continuing && { continuation: true })
+              });
+              controller.enqueue(out);
+            }
           }
         })
       );

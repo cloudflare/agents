@@ -559,7 +559,19 @@ async function applyAnswer(
       message.parts as unknown as Array<Record<string, unknown>>,
       update
     );
-    if (!applied) continue;
+    // The newest message that holds the call decides: an answer it no
+    // longer takes (a repeated decision) does not land on an older one.
+    if (!applied) {
+      if (
+        message.parts.some(
+          (part) =>
+            (part as { toolCallId?: unknown }).toolCallId === answer.toolCallId
+        )
+      ) {
+        return false;
+      }
+      continue;
+    }
     if (!applied.changed) return false;
     const next = {
       ...message,

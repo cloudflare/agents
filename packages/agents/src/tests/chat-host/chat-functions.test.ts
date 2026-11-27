@@ -2926,4 +2926,46 @@ describe("chat functions over a minimal host", () => {
       ]);
     });
   });
+
+  it("a repeated decision does not land on an older message that holds the same call", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      const asking = (id: string) =>
+        ({
+          id,
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-del",
+              toolCallId: "c1",
+              state: "approval-requested",
+              input: {},
+              approval: { id: `ap-${id}` }
+            }
+          ]
+        }) as never;
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage(asking("a1"));
+      await session.appendMessage(asking("a2"));
+      for (let i = 0; i < 2; i++) {
+        await answerTool(instance.deps, instance.lane, {
+          kind: "approval",
+          toolCallId: "c1",
+          approved: false
+        });
+      }
+      expect(JSON.stringify(await session.getMessage("a2"))).toContain(
+        "output-denied"
+      );
+      expect(JSON.stringify(await session.getMessage("a1"))).toContain(
+        "approval-requested"
+      );
+    });
+  });
 });
