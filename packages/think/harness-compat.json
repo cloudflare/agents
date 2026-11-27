@@ -1,9 +1,9 @@
 {
-  "total": 1744,
-  "passed": 1018,
-  "needThink": 1349,
-  "needThinkPassed": 702,
-  "classOnly": 79,
+  "total": 1749,
+  "passed": 1021,
+  "needThink": 1353,
+  "needThinkPassed": 705,
+  "classOnly": 80,
   "mechanicsOnly": 10,
   "files": {
     "action-pause-recovery.test.ts": {
@@ -166,10 +166,6 @@
       "total": 11,
       "passed": 4
     },
-    "upgrade-messenger-rows.test.ts": {
-      "total": 7,
-      "passed": 7
-    },
     "messengers.test.ts": {
       "total": 129,
       "passed": 121
@@ -263,8 +259,8 @@
       "passed": 1
     },
     "submissions.test.ts": {
-      "total": 134,
-      "passed": 57
+      "total": 136,
+      "passed": 59
     },
     "telegram-messenger.test.ts": {
       "total": 2,
@@ -285,6 +281,14 @@
     "turn-metadata.test.ts": {
       "total": 4,
       "passed": 3
+    },
+    "upgrade-action-ledger.test.ts": {
+      "total": 3,
+      "passed": 1
+    },
+    "upgrade-messenger-rows.test.ts": {
+      "total": 7,
+      "passed": 7
     },
     "workflows.test.ts": {
       "total": 3,
@@ -786,13 +790,6 @@
     "message-reconciliation.test.ts > Think \u2014 message reconciliation on incoming submits > does not re-repair an already-errored tool call or clobber its errorText",
     "message-reconciliation.test.ts > Think \u2014 message reconciliation on incoming submits > merges server tool outputs into a stale client snapshot when IDs match",
     "message-reconciliation.test.ts > Think \u2014 message reconciliation on incoming submits > preserves a denied tool approval (output-denied) instead of flipping it to errored",
-    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > answers a reply run it left before any text went out",
-    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it held when its recovery job runs",
-    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it left unsettled, its incident gone",
-    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it settled as interrupted",
-    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a reply run it left mid-stream",
-    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > posts nothing more for a reply run it left completed",
-    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > posts the rest of a recovered reply it settled, from its cursor",
     "messengers.test.ts > telegram messenger provider > classifies Telegram no-op edit errors",
     "messengers.test.ts > telegram messenger provider > requires explicit webhook verification posture",
     "messengers.test.ts > telegram messenger provider > splits long Telegram follow-up text without dropping content",
@@ -1098,9 +1095,11 @@
     "stop-reason.test.ts > a stopped turn ends aborted, whatever reason the stop carried > saveMessages, stopped at stream, reason: none",
     "stop-reason.test.ts > a stopped turn ends aborted, whatever reason the stop carried > saveMessages, stopped at stream, reason: string",
     "streaming-message-id.test.ts > Think \u2014 streaming assistant message-id alignment > stamps the persisted assistant id onto a new turn's start chunk",
+    "submissions.test.ts > Think durable submissions > a submission whose isolate is evicted while it runs > ends in error, without asking the model again, when its turn started longer ago than the stale window",
     "submissions.test.ts > Think durable submissions > a submission whose isolate is evicted while it runs > finishes it once: one question, one reply, and the submission completed",
     "submissions.test.ts > Think durable submissions > a submission whose isolate is evicted while it runs > is never reported as failed while its reply is being recovered",
     "submissions.test.ts > Think durable submissions > a submission whose isolate is evicted while it runs > keeps a tool's result and does not run the tool again",
+    "submissions.test.ts > Think durable submissions > a submission whose isolate is evicted while it runs > retries a stalled reply in the same isolate, however long ago its turn started",
     "submissions.test.ts > Think durable submissions > a submission whose isolate is evicted while it runs > stays aborted when it is cancelled while its reply is being recovered",
     "submissions.test.ts > Think durable submissions > a submission whose isolate is evicted while it runs > stays running when a reset also cuts its recovery, then completes once",
     "submissions.test.ts > Think durable submissions > aborts a pending submission without running it",
@@ -1296,6 +1295,14 @@
     "turn-metadata.test.ts > turn metadata > re-resolves turn metadata from durable history (recovery read path)",
     "turn-metadata.test.ts > turn metadata > returns undefined when the latest user message carries none",
     "turn-metadata.test.ts > turn metadata > stamps chat() metadata on the user message and exposes it during the turn",
+    "upgrade-action-ledger.test.ts > action-ledger rows think@0.24.0 left, after the upgrade > runs an effect it left cut off once, past its lease, and not twice",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > answers a reply run it left before any text went out",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it held when its recovery job runs",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it left unsettled, its incident gone",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a recovered reply it settled as interrupted",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > apologizes for a reply run it left mid-stream",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > posts nothing more for a reply run it left completed",
+    "upgrade-messenger-rows.test.ts > messenger rows think@0.24.0 left, after the upgrade > posts the rest of a recovered reply it settled, from its cursor",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes submitMessages and waitForEvent results after copying serializable data",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes the submitMessages result before cancelling a timed-out prompt",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > keeps the waitForEvent result alive while validating nested output",
