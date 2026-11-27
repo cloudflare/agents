@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**433 of 1312 (0 class-only, each with a successor) tests that construct Think pass (33%).** Across the whole suite, 728 of 1607.
+**440 of 1312 (0 class-only, each with a successor) tests that construct Think pass (33%).** Across the whole suite, 735 of 1607.
 
 A class-only test reaches its behaviour through something private to the
 Think class. It is left out of the headline, it has a successor that
@@ -60,7 +60,7 @@ end. The per-file counts below include it.
 | `mcp-tool-materialization.test.ts`     | 5 / 5    | 100% |
 | `media-eviction.test.ts`               | 3 / 22   | 13%  |
 | `message-reconciliation.test.ts`       | 4 / 11   | 36%  |
-| `messengers.test.ts`                   | 86 / 115 | 74%  |
+| `messengers.test.ts`                   | 93 / 115 | 80%  |
 | `nested-agent-tools.test.ts`           | 1 / 3    | 33%  |
 | `onconnect-broadcast.test.ts`          | 4 / 17   | 23%  |
 | `onstart-degraded.test.ts`             | 3 / 5    | 60%  |

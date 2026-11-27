@@ -1,8 +1,8 @@
 {
   "total": 1607,
-  "passed": 728,
+  "passed": 735,
   "needThink": 1312,
-  "needThinkPassed": 433,
+  "needThinkPassed": 440,
   "classOnly": 0,
   "files": {
     "action-pause-recovery.test.ts": {
@@ -159,7 +159,7 @@
     },
     "messengers.test.ts": {
       "total": 115,
-      "passed": 86
+      "passed": 93
     },
     "nested-agent-tools.test.ts": {
       "total": 3,
@@ -617,9 +617,16 @@
     "messengers.test.ts > think messengers core > attachment fetch > returns a view's own buffer without copying when the view spans all of it",
     "messengers.test.ts > think messengers core > attachment fetch > returns an ArrayBuffer from the adapter unchanged",
     "messengers.test.ts > think messengers core > attachment fetch > returns an empty ArrayBuffer when the adapter resolves nothing",
+    "messengers.test.ts > think messengers core > burst replies end to end (#2312) > answers a direct-message burst once, with every line in order",
+    "messengers.test.ts > think messengers core > burst replies end to end (#2312) > answers a subscribed-thread burst whose mention is not the newest message",
     "messengers.test.ts > think messengers core > burst replies end to end (#2312) > answers a webhook reply once after the object reset mid-reply",
+    "messengers.test.ts > think messengers core > burst replies end to end (#2312) > answers and subscribes an unsubscribed-thread burst whose mention is not the newest message (#2325)",
+    "messengers.test.ts > think messengers core > burst replies end to end (#2312) > answers the first message at once under a configured queue strategy (#2313)",
+    "messengers.test.ts > think messengers core > burst replies end to end (#2312) > finds a skipped mention the adapter did not flag (#2325)",
     "messengers.test.ts > think messengers core > burst replies end to end (#2312) > finds the private Chat SDK queue methods the recovery drain relies on",
+    "messengers.test.ts > think messengers core > burst replies end to end (#2312) > keeps each sender's label when a group burst mixes senders",
     "messengers.test.ts > think messengers core > burst replies end to end (#2312) > keeps nothing of a reply's asker once a turn a reset cut settled",
+    "messengers.test.ts > think messengers core > burst replies end to end (#2312) > keeps the thread locked through a turn that outlives the lock TTL",
     "messengers.test.ts > think messengers core > checkpoints completed before posting the terminal reply when failed after text (#1842)",
     "messengers.test.ts > think messengers core > checkpoints completed before posting the terminal reply when failed before text (#1842)",
     "messengers.test.ts > think messengers core > checkpoints completed before posting the terminal reply when interrupted (#1842)",
