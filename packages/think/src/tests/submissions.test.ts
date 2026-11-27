@@ -574,6 +574,63 @@ describe("Think durable submissions", () => {
       ).resolves.toMatchObject({ status: "pending" });
     });
 
+    it("a cancel says its messages were not stored while it starts, and were once its reply streams", async () => {
+      const agent = await freshAgent();
+      // Its `running` report waits, before the turn stores its question.
+      await agent.holdSubmissionStatusHookForTest("running");
+      onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
+      await agent.testSubmitMessages("cancel me early", {
+        submissionId: "sub-cancel-starting"
+      });
+      await statusHookHeld(agent);
+      // The cancel is asked while it starts; it answers once the report
+      // has run.
+      const early = agent.cancelSubmissionForTest("sub-cancel-starting");
+      await agent.releaseSubmissionStatusHookForTest();
+      await expect(early).resolves.toMatchObject({
+        outcome: "cancelled",
+        previousStatus: "running",
+        messagesApplied: false
+      });
+      await tasksIdle(agent);
+
+      await running(agent, "sub-cancel-streaming");
+      await expect(
+        agent.cancelSubmissionForTest("sub-cancel-streaming")
+      ).resolves.toMatchObject({
+        outcome: "cancelled",
+        previousStatus: "running",
+        messagesApplied: true
+      });
+    }, 30_000);
+
+    it("a reused id is not settled with the result of the submission deleted before it", async () => {
+      const agent = await freshAgent();
+      await running(agent, "sub-reused");
+      // Its terminal report waits while it is deleted and the id reused.
+      await agent.holdSubmissionStatusHookForTest("aborted");
+      onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
+      const cancel = agent.cancelSubmissionForTest("sub-reused", "stop");
+      await statusHookHeld(agent);
+      await expect(agent.deleteSubmissionForTest("sub-reused")).resolves.toBe(
+        true
+      );
+      await agent.releaseChunksForTest();
+      // The id is submitted again, and waited on, before the deleted
+      // one's report ends.
+      const resubmitted = agent.testSubmitMessages("the second one", {
+        submissionId: "sub-reused"
+      });
+      const waiting = agent.waitForSubmissionForTest("sub-reused", {
+        timeoutMs: 20_000
+      });
+      await agent.releaseSubmissionStatusHookForTest();
+      await cancel;
+      await resubmitted;
+      // The deleted one's end is not the reused id's: it runs to its own.
+      await expect(waiting).resolves.toMatchObject({ status: "completed" });
+    }, 30_000);
+
     /** A submission that has completed, and when. */
     async function completed(agent: ThinkSubmissionTestStub, id: string) {
       await agent.testSubmitMessages(`finish ${id}`, { submissionId: id });
@@ -717,6 +774,32 @@ describe("Think durable submissions", () => {
       expect(
         (await restarted.getStoredMessages()).map((message) => message.role)
       ).toEqual(["user", "assistant"]);
+    }, 30_000);
+
+    it("runs it again, its question stored once, when the reset comes before its messages are stored", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      // Its `running` report waits: the turn has not stored its messages.
+      await agent.holdSubmissionStatusHookForTest("running");
+      await agent.testSubmitMessages("run me again", {
+        submissionId: "sub-before-placement"
+      });
+      await statusHookHeld(agent);
+      await expect(agent.getStoredMessages()).resolves.toEqual([]);
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+
+      await expect(
+        restarted.waitForSubmissionForTest("sub-before-placement", {
+          timeoutMs: 20_000
+        })
+      ).resolves.toMatchObject({ status: "completed" });
+      await tasksIdle(restarted);
+      const stored = await restarted.getStoredMessages();
+      expect(stored.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
     }, 30_000);
 
     it("is never reported as failed while its reply is being recovered", async () => {
