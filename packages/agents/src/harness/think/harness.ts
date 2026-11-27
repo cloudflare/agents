@@ -2483,8 +2483,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   ): AsyncGenerator<UIMessageChunk> {
     const { built, live } = turn;
     const { tools } = built;
-    const continuing =
-      call.mode === "continue" ? call.messages.at(-1) : undefined;
+    // The loop's own copy: the chat host builds its reply on the message
+    // it was given as the stream goes, and this one must not change under
+    // the loop (a step it would then read twice).
+    const last = call.mode === "continue" ? call.messages.at(-1) : undefined;
+    const continuing = last && structuredClone(last);
     const before = continuing ? call.messages.slice(0, -1) : [...call.messages];
     const messageId = continuing?.id ?? crypto.randomUUID();
     let reply = continuing;

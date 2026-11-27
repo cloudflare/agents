@@ -1185,6 +1185,18 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
   });
 });
 
+describe("ThinkHarness: a continued turn", () => {
+  it("runs a server tool its model calls, then calls the model again", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const receipt = await stub.continueCallingTool();
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("done");
+    expect(await stub.multiplyRuns()).toBe(1);
+    expect((await stub.messages()).at(-1)).toMatch(/tool said: 12$/);
+  });
+});
+
 describe("ThinkHarness durability", () => {
   it("reports a tool call an eviction cut short, instead of rerunning it", async () => {
     const name = crypto.randomUUID();
