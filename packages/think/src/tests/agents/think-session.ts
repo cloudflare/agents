@@ -1635,7 +1635,22 @@ function ensureReleasedAgentToolTable(sql: SqlStorage): void {
   `);
 }
 
+/** Where a test keeps the answer onChatRecovery gives after a reset. */
+const RECOVERY_ANSWER_KEY = "test:recovery-answer";
+/** Holds onChatRecovery once; set while it is held; its calls, across resets. */
+const RECOVERY_GATE_KEY = "test:recovery-gate";
+const RECOVERY_HELD_KEY = "test:recovery-held";
+const RECOVERY_CALLS_KEY = "test:recovery-calls";
+/** Where a test keeps `chatRecovery` across resets. */
+const RECOVERY_CONFIG_KEY = "test:recovery-config";
+/** Where a test keeps a slow model across resets: chunks and delay. */
+const SLOW_MODEL_KEY = "test:slow-model";
+
 export class ThinkTestAgent extends Think {
+  // A test that resets the isolate can leave its config in storage: the
+  // next isolate's recovery, which runs before any call, reads it here.
+  override chatRecovery: ChatRecoveryConfig =
+    this.ctx.storage.kv.get<ChatRecoveryConfig>(RECOVERY_CONFIG_KEY) ?? true;
   private _response = "Hello from the assistant!";
   private _nextSubAgentConnectionSendDelayMs = 0;
   private _chatErrorLog: string[] = [];
@@ -1707,7 +1722,23 @@ export class ThinkTestAgent extends Think {
     if (this._recoveryHookForTest === "throw") {
       throw new Error("recovery hook boom");
     }
-    return this._recoveryHookForTest ?? {};
+    // Counted in storage, across resets.
+    const calls =
+      (this.ctx.storage.kv.get<number>(RECOVERY_CALLS_KEY) ?? 0) + 1;
+    this.ctx.storage.kv.put(RECOVERY_CALLS_KEY, calls);
+    // A test can hold this hook once, to cut the recovery attempt there.
+    if (this.ctx.storage.kv.get<boolean>(RECOVERY_GATE_KEY)) {
+      this.ctx.storage.kv.delete(RECOVERY_GATE_KEY);
+      this.ctx.storage.kv.put(RECOVERY_HELD_KEY, true);
+      await new Promise<never>(() => {});
+    }
+    // A test that resets the isolate leaves its answer in storage, where the
+    // next isolate's recovery finds it.
+    return (
+      this._recoveryHookForTest ??
+      this.ctx.storage.kv.get<ChatRecoveryOptions>(RECOVERY_ANSWER_KEY) ??
+      {}
+    );
   }
 
   override onChatError(error: unknown): unknown {
@@ -3871,6 +3902,134 @@ export class ThinkTestAgent extends Think {
   /** Whether a turn's model call is waiting on the provider's connect. */
   async modelConnectingForTest(): Promise<boolean> {
     return this._modelConnectingForTest;
+  }
+
+  private _progressingForTest = false;
+  private _progressCallsForTest = 0;
+  private _exhaustedForTest: Array<{
+    reason: string;
+    terminalMessage: string;
+    recoveryRootRequestId: string;
+    partialText: string;
+  }> = [];
+
+  /**
+   * Stall the next `stalledCalls` model streams after `afterParts` parts,
+   * with `chatRecovery` set for as long as the agent lives: unlike
+   * `stallRecoveryForTest`, nothing is put back, so the attempts recovery
+   * schedules for later run under the same stall and the same config. Start
+   * the turn with `testChat`, then read `recoveryProgressForTest`.
+   */
+  async armLastingStallForTest(options: {
+    afterParts: number;
+    stalledCalls: number;
+    timeoutMs: number;
+    maxAttempts: number;
+    keepRecovering?: boolean;
+    /** Each model call writes new text, so each attempt makes progress. */
+    progressing?: boolean;
+    /** `chatRecovery.maxRecoveryWork`: the work budget across attempts. */
+    maxRecoveryWork?: number;
+  }): Promise<void> {
+    this._progressingForTest = options.progressing === true;
+    this._progressCallsForTest = 0;
+    this._modelStallForTest = {
+      afterParts: options.afterParts,
+      calls: options.stalledCalls
+    };
+    this.chatStreamStallTimeoutMs = options.timeoutMs;
+    this._recoveryCallsForTest = [];
+    this._exhaustedForTest = [];
+    this.chatRecovery = {
+      maxAttempts: options.maxAttempts,
+      ...(options.maxRecoveryWork !== undefined && {
+        maxRecoveryWork: options.maxRecoveryWork
+      }),
+      onExhausted: (ctx: ChatRecoveryExhaustedContext) => {
+        this._exhaustedForTest.push({
+          reason: ctx.reason,
+          terminalMessage: ctx.terminalMessage,
+          recoveryRootRequestId: ctx.recoveryRootRequestId,
+          partialText: ctx.partialText
+        });
+      },
+      ...(options.keepRecovering !== undefined && {
+        shouldKeepRecovering: () => options.keepRecovering === true
+      })
+    };
+  }
+
+  /** Model calls this isolate made through the default model. */
+  async modelCallsForTest(): Promise<number> {
+    return this._modelPromptsForTest.length;
+  }
+
+  /** Whether the agent settles within `timeout` ms. */
+  async stableWithinForTest(timeout: number): Promise<boolean> {
+    return this.waitUntilStable({ timeout });
+  }
+
+  /** Where a lasting stall's recovery has got to. */
+  async recoveryProgressForTest(): Promise<{
+    recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];
+    exhausted: ThinkTestAgent["_exhaustedForTest"];
+    roles: string[];
+    lastAssistantText: string;
+  }> {
+    const messages = await this.getMessages();
+    const last = messages.filter((m) => m.role === "assistant").at(-1);
+    return {
+      recoveryCalls: this._recoveryCallsForTest,
+      exhausted: this._exhaustedForTest,
+      roles: messages.map((m) => m.role),
+      lastAssistantText: (last?.parts ?? [])
+        .map((p) => (p.type === "text" ? p.text : ""))
+        .join("")
+    };
+  }
+
+  /**
+   * From now on, across resets: every model call streams `chunks` slowly,
+   * and `chatRecovery` is `config`.
+   */
+  async keepAcrossResetsForTest(options: {
+    chunks: string[];
+    delayMs: number;
+    config: { maxAttempts?: number; maxInterruptedAttempts?: number };
+  }): Promise<void> {
+    this.ctx.storage.kv.put(SLOW_MODEL_KEY, {
+      chunks: options.chunks,
+      delayMs: options.delayMs
+    });
+    this.ctx.storage.kv.put(RECOVERY_CONFIG_KEY, options.config);
+    this.chatRecovery = options.config;
+  }
+
+  /** The last assistant message's text. */
+  async lastAssistantTextForTest(): Promise<string> {
+    const messages = await this.getMessages();
+    const last = messages.filter((m) => m.role === "assistant").at(-1);
+    return (last?.parts ?? [])
+      .map((p) => (p.type === "text" ? p.text : ""))
+      .join("");
+  }
+
+  /** The next onChatRecovery waits, until the isolate is reset. */
+  async holdRecoveryOnceForTest(): Promise<void> {
+    this.ctx.storage.kv.put(RECOVERY_GATE_KEY, true);
+  }
+
+  /** Whether an onChatRecovery is (or was) held; and its calls so far. */
+  async recoveryHoldForTest(): Promise<{ held: boolean; calls: number }> {
+    return {
+      held: this.ctx.storage.kv.get<boolean>(RECOVERY_HELD_KEY) === true,
+      calls: this.ctx.storage.kv.get<number>(RECOVERY_CALLS_KEY) ?? 0
+    };
+  }
+
+  /** What onChatRecovery answers from now on, across resets. */
+  async answerRecoveryForTest(answer: ChatRecoveryOptions): Promise<void> {
+    this.ctx.storage.kv.put(RECOVERY_ANSWER_KEY, answer);
   }
 
   /** What onChatRecovery was told in this isolate, in order. */
@@ -6462,7 +6621,22 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): ThinkModel {
-    const model = this._baseModelForTest();
+    const slow = this.ctx.storage.kv.get<{ chunks: string[]; delayMs: number }>(
+      SLOW_MODEL_KEY
+    );
+    if (slow)
+      return createDelayedMultiChunkMockModel(slow.chunks, slow.delayMs);
+    // A lasting stall that makes progress: each call writes new text, in
+    // enough chunks that some land in the stream log before the stall.
+    if (this._progressingForTest) this._progressCallsForTest++;
+    const model = this._progressingForTest
+      ? createMultiChunkMockModel(
+          Array.from(
+            { length: 30 },
+            (_, k) => `a${this._progressCallsForTest}-${k} `
+          )
+        )
+      : this._baseModelForTest();
     const modelStall = this._modelStallForTest;
     if (modelStall && typeof model !== "string") {
       return stallingModelForTest(model, modelStall.afterParts, () => {

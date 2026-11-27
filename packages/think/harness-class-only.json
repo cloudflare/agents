@@ -382,5 +382,59 @@
       "file": "agent-tools.test.ts",
       "test": "Think agent tools > a run cancelled by its caller's signal while it waits behind a running turn ends aborted before that turn ends, and never runs"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > { continue: false } persists but does not schedule continuation",
+    "reason": "an interrupted turn built from seeded private stream and fiber rows (`insertInterruptedStream`), recovered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > keeps the partial but runs no continuation when onChatRecovery says continue: false"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > retries a pre-stream interrupted user turn by default without duplicating the user message",
+    "reason": "an interrupted turn built from a seeded private fiber (`insertInterruptedFiber`), recovered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > answers a turn a reset cut off before its first chunk, with its user message once"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > continues a regeneration interrupted after partial output on its new branch (#2028)",
+    "reason": "an interrupted regeneration built from seeded private stream rows (`insertInterruptedStream`), recovered by hand (`runScheduledRecoveryRetryForTest`)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > finishes a regeneration a reset cut off on its new branch, keeping the earlier answer"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws a memory-limit reset from a recovery callback without writing anything (#2613)",
+    "reason": "a memory-limit reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` › `isDurableObjectMemoryLimitReset`.",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws a deploy code-update reset (preserve the row to re-run on the fresh isolate) and does NOT terminalize",
+    "reason": "a code-update reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` › `isDurableObjectCodeUpdateReset`.",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize",
+    "reason": "a storage-reset error injected into the class's scheduled recovery callback (private) The error shape is classified in agents' `retries.test.ts` › `isDurableObjectStorageReset`.",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
+    }
   }
 ]

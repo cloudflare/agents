@@ -7,9 +7,102 @@
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
+import { subscribe } from "agents/observability";
 
 async function freshAgent(name: string) {
   return getAgentByName(env.ThinkTestAgent, `${name}-${crypto.randomUUID()}`);
+}
+
+/** Reset the agent's isolate mid-turn, as an eviction does, and wait for
+ * the next start's recovery to ask onChatRecovery. */
+async function resetDuringTurn(
+  name: string,
+  chunksBeforeReset: number,
+  answer?: { continue?: boolean; persist?: boolean },
+  options?: { holdRecovery?: boolean }
+) {
+  const room = `${name}-${crypto.randomUUID()}`;
+  const agent = () => getAgentByName(env.ThinkTestAgent, room);
+  if (answer) await (await agent()).answerRecoveryForTest(answer);
+  if (options?.holdRecovery) await (await agent()).holdRecoveryOnceForTest();
+  const startedAt = Date.now();
+  if (chunksBeforeReset === 0) {
+    // No stream at all: the model call waits on the provider.
+    await (await agent()).hangModelAtConnectForTest();
+  } else {
+    await (
+      await agent()
+    ).useSlowModelForTest(
+      ["one ", "two ", "three ", "four ", "five ", "six "],
+      150
+    );
+  }
+  const res = await exports.default.fetch(
+    `http://example.com/agents/think-test-agent/${room}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  const ws = res.webSocket;
+  if (!ws) throw new Error("no socket");
+  ws.accept();
+  const requestId = crypto.randomUUID();
+  let chunks = 0;
+  ws.addEventListener("message", (event) => {
+    const frame = JSON.parse(String(event.data)) as {
+      type?: string;
+      body?: string;
+      done?: boolean;
+    };
+    if (frame.type !== "cf_agent_use_chat_response" || frame.done) return;
+    if (frame.body?.includes("text-delta")) chunks++;
+  });
+  ws.send(
+    JSON.stringify({
+      type: "cf_agent_use_chat_request",
+      id: requestId,
+      init: {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [
+            {
+              id: crypto.randomUUID(),
+              role: "user",
+              parts: [{ type: "text", text: "reset me" }]
+            }
+          ]
+        })
+      }
+    })
+  );
+  // Mid-reply: after some text. Before the first chunk: while the model
+  // call waits on the provider, before any stream.
+  await vi.waitFor(
+    async () => {
+      expect(
+        chunksBeforeReset === 0
+          ? await (await agent()).modelConnectingForTest()
+          : chunks >= chunksBeforeReset
+      ).toBe(true);
+    },
+    { timeout: 10_000, interval: 10 }
+  );
+  const resetAt = Date.now();
+  await (await agent()).resetIsolateForTest().catch(() => undefined);
+  ws.close();
+  // The next start recovers the turn and asks onChatRecovery.
+  let calls: Array<{
+    partialText: string;
+    streamId: string;
+    createdAt: number;
+    recoveryRootRequestId: string;
+  }> = [];
+  await vi.waitFor(
+    async () => {
+      calls = [...(await (await agent()).recoveryCallsForTest())];
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+    },
+    { timeout: 15_000, interval: 50 }
+  );
+  return { requestId, calls, startedAt, resetAt, agent, room };
 }
 
 describe("chat recovery, through public behaviour", () => {
@@ -168,89 +261,6 @@ describe("chat recovery, through public behaviour", () => {
   // The same context after a real reset of the isolate mid-turn, as an
   // eviction or a deploy leaves a turn: the recovery runs on the next start.
   describe("onChatRecovery's context after a reset", () => {
-    async function resetDuringTurn(name: string, chunksBeforeReset: number) {
-      const room = `${name}-${crypto.randomUUID()}`;
-      const agent = () => getAgentByName(env.ThinkTestAgent, room);
-      const startedAt = Date.now();
-      if (chunksBeforeReset === 0) {
-        // No stream at all: the model call waits on the provider.
-        await (await agent()).hangModelAtConnectForTest();
-      } else {
-        await (
-          await agent()
-        ).useSlowModelForTest(
-          ["one ", "two ", "three ", "four ", "five ", "six "],
-          150
-        );
-      }
-      const res = await exports.default.fetch(
-        `http://example.com/agents/think-test-agent/${room}`,
-        { headers: { Upgrade: "websocket" } }
-      );
-      const ws = res.webSocket;
-      if (!ws) throw new Error("no socket");
-      ws.accept();
-      const requestId = crypto.randomUUID();
-      let chunks = 0;
-      ws.addEventListener("message", (event) => {
-        const frame = JSON.parse(String(event.data)) as {
-          type?: string;
-          body?: string;
-          done?: boolean;
-        };
-        if (frame.type !== "cf_agent_use_chat_response" || frame.done) return;
-        if (frame.body?.includes("text-delta")) chunks++;
-      });
-      ws.send(
-        JSON.stringify({
-          type: "cf_agent_use_chat_request",
-          id: requestId,
-          init: {
-            method: "POST",
-            body: JSON.stringify({
-              messages: [
-                {
-                  id: crypto.randomUUID(),
-                  role: "user",
-                  parts: [{ type: "text", text: "reset me" }]
-                }
-              ]
-            })
-          }
-        })
-      );
-      // Mid-reply: after some text. Before the first chunk: while the model
-      // call waits on the provider, before any stream.
-      await vi.waitFor(
-        async () => {
-          expect(
-            chunksBeforeReset === 0
-              ? await (await agent()).modelConnectingForTest()
-              : chunks >= chunksBeforeReset
-          ).toBe(true);
-        },
-        { timeout: 10_000, interval: 10 }
-      );
-      const resetAt = Date.now();
-      await (await agent()).resetIsolateForTest().catch(() => undefined);
-      ws.close();
-      // The next start recovers the turn and asks onChatRecovery.
-      let calls: Array<{
-        partialText: string;
-        streamId: string;
-        createdAt: number;
-        recoveryRootRequestId: string;
-      }> = [];
-      await vi.waitFor(
-        async () => {
-          calls = [...(await (await agent()).recoveryCallsForTest())];
-          expect(calls.length).toBeGreaterThanOrEqual(1);
-        },
-        { timeout: 15_000, interval: 50 }
-      );
-      return { requestId, calls, startedAt, resetAt };
-    }
-
     it("tells onChatRecovery the partial a reset cut off mid-reply", async () => {
       const { requestId, calls } = await resetDuringTurn("reset-mid", 2);
       const [first] = calls;
@@ -305,4 +315,464 @@ describe("chat recovery, through public behaviour", () => {
       expect(entry.incidentId).toBe(incident.incidentId);
     }
   }, 30_000);
+
+  // Successors of the budget and seal tests (think-session, "Think —
+  // onChatRecovery"): when recovery gives up, and what onExhausted is told.
+  describe("the recovery budget", () => {
+    async function recoverUntil(
+      name: string,
+      options: {
+        afterParts: number;
+        stalledCalls: number;
+        maxAttempts: number;
+        keepRecovering?: boolean;
+        progressing?: boolean;
+        maxRecoveryWork?: number;
+      },
+      done: (progress: {
+        recoveryCalls: unknown[];
+        exhausted: unknown[];
+        lastAssistantText: string;
+      }) => boolean
+    ) {
+      const agent = await freshAgent(name);
+      await agent.armLastingStallForTest({ ...options, timeoutMs: 50 });
+      await agent.testChat("stall, then recover");
+      let progress = await agent.recoveryProgressForTest();
+      await vi.waitFor(
+        async () => {
+          progress = await agent.recoveryProgressForTest();
+          expect(done(progress)).toBe(true);
+        },
+        { timeout: 20_000, interval: 50 }
+      );
+      // A give-up has ended the turn only once the agent is idle, with no
+      // turn running and no recovery left to run: count after that, not at
+      // the first onExhausted. (Think sends the terminal message to the
+      // tabs; it is not stored as the reply, so the reply can't be the
+      // barrier.)
+      if (progress.exhausted.length > 0) {
+        await vi.waitFor(
+          async () => {
+            expect(await agent.stableWithinForTest(2_000)).toBe(true);
+          },
+          { timeout: 20_000, interval: 50 }
+        );
+        progress = await agent.recoveryProgressForTest();
+      }
+      return progress;
+    }
+
+    it("gives up through onExhausted with max_attempts_exceeded once the attempts are spent", async () => {
+      const progress = await recoverUntil(
+        "budget-spent",
+        { afterParts: 0, stalledCalls: 10, maxAttempts: 2 },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.exhausted).toHaveLength(1);
+      const [given] = progress.exhausted;
+      expect(given?.reason).toBe("max_attempts_exceeded");
+      expect(given?.terminalMessage.length).toBeGreaterThan(0);
+      expect(given?.recoveryRootRequestId).toBe(
+        progress.recoveryCalls[0]?.recoveryRootRequestId
+      );
+      // Both attempts were spent before the give-up.
+      expect(progress.recoveryCalls).toHaveLength(2);
+    }, 30_000);
+
+    // Arch's ruling: a live interruption (a stall) is one more scheduled
+    // retry, capped by maxAttempts whatever the progress. onChatRecovery's
+    // `attempt` is the count that resets when the last attempt made progress.
+    it("tells onChatRecovery attempt 1 each time a stalled turn has made progress", async () => {
+      const progress = await recoverUntil(
+        "attempt-progress",
+        { afterParts: 25, stalledCalls: 2, maxAttempts: 5, progressing: true },
+        (p) => p.lastAssistantText.includes("a3-29")
+      );
+
+      expect(progress.recoveryCalls.map((call) => call.attempt)).toEqual([
+        1, 1
+      ]);
+      expect(progress.exhausted).toEqual([]);
+    }, 30_000);
+
+    it("gives a stalled turn up at stall maxAttempts + 1 even when every attempt makes progress", async () => {
+      const progress = await recoverUntil(
+        "give-up-with-progress",
+        { afterParts: 25, stalledCalls: 10, maxAttempts: 2, progressing: true },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.recoveryCalls).toHaveLength(2);
+      expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
+        "max_attempts_exceeded"
+      ]);
+    }, 30_000);
+
+    it("seals a turn that keeps making progress once the work budget is spent", async () => {
+      const progress = await recoverUntil(
+        "work-budget",
+        {
+          afterParts: 25,
+          stalledCalls: 10,
+          maxAttempts: 10,
+          progressing: true,
+          maxRecoveryWork: 2
+        },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
+        "work_budget_exceeded"
+      ]);
+    }, 30_000);
+
+    it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
+      const progress = await recoverUntil(
+        "budget-declined",
+        {
+          afterParts: 0,
+          stalledCalls: 10,
+          maxAttempts: 10,
+          keepRecovering: false
+        },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
+        "recovery_aborted"
+      ]);
+    }, 30_000);
+  });
+
+  // Successors of the persist/continue tests (think-session, "Think —
+  // onChatRecovery"): what a reset-interrupted turn leaves when
+  // onChatRecovery declines.
+  describe("onChatRecovery's answer after a reset", () => {
+    async function settle(
+      agent: Awaited<ReturnType<typeof resetDuringTurn>>["agent"]
+    ) {
+      await vi.waitFor(
+        async () => {
+          expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      return (await (await agent()).getMessages()) as Array<{
+        role: string;
+        parts: Array<{ type: string; text?: string }>;
+      }>;
+    }
+
+    it("keeps the partial but runs no continuation when onChatRecovery says continue: false", async () => {
+      const { agent } = await resetDuringTurn("answer-no-continue", 2, {
+        continue: false
+      });
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      const text = messages[1]?.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      // Only what the reset left: the reply was not continued.
+      expect(text).toMatch(/^one /);
+      expect(text).not.toContain("six");
+      // No model call or continuation ran after the reset.
+      expect(await (await agent()).modelCallsForTest()).toBe(0);
+    }, 30_000);
+
+    // Successors of the pre-stream retry tests (think-session, "Think —
+    // onChatRecovery"): a turn cut off before its first chunk is asked again.
+    it("answers a turn a reset cut off before its first chunk, with its user message once", async () => {
+      const { agent } = await resetDuringTurn("retry-pre-stream", 0);
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(
+        messages[1]?.parts.some(
+          (part) => part.type === "text" && (part.text ?? "").length > 0
+        )
+      ).toBe(true);
+    }, 30_000);
+
+    it("keeps nothing and runs nothing when onChatRecovery says persist: false, continue: false", async () => {
+      const { agent } = await resetDuringTurn("answer-drop", 2, {
+        persist: false,
+        continue: false
+      });
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual(["user"]);
+    }, 30_000);
+  });
+
+  // Successor of the interrupted-attempts bound (think-session, "Think —
+  // onChatRecovery", the work-budget and progress tests): resets that each
+  // land after some progress go on past maxAttempts, and stop at
+  // maxInterruptedAttempts, which never resets.
+  it("recovers past maxAttempts across resets that each follow progress, until maxInterruptedAttempts", async () => {
+    const room = `resets-bound-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    const exhausted: Array<{ reason?: string }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:recovery:exhausted" && event.name === room) {
+        exhausted.push(event.payload as { reason?: string });
+      }
+    });
+    /** A tab, counting the text chunks it is sent. */
+    async function connect() {
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      const tab = { ws, chunks: 0 };
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          body?: string;
+        };
+        if (
+          frame.type === "cf_agent_use_chat_response" &&
+          frame.body?.includes("text-delta")
+        ) {
+          tab.chunks++;
+        }
+      });
+      return tab;
+    }
+    try {
+      await (
+        await agent()
+      ).keepAcrossResetsForTest({
+        chunks: Array.from({ length: 200 }, (_, k) => `w${k} `),
+        delayMs: 40,
+        config: { maxAttempts: 1, maxInterruptedAttempts: 3 }
+      });
+      let tab = await connect();
+      tab.ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "reset me, again" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      let resets = 0;
+      for (;;) {
+        // Some new text reached the tab: this attempt made progress.
+        await vi.waitFor(
+          () => {
+            expect(tab.chunks >= 3 || exhausted.length > 0).toBe(true);
+          },
+          { timeout: 15_000, interval: 20 }
+        );
+        if (exhausted.length > 0 || resets >= 6) break;
+        await (await agent()).resetIsolateForTest().catch(() => undefined);
+        resets++;
+        tab.ws.close();
+        // A new tab wakes the agent, whose start recovers the turn.
+        tab = await connect();
+      }
+      tab.ws.close();
+
+      // Past maxAttempts (1): more than one reset was recovered. Stopped at
+      // maxInterruptedAttempts (3), which progress does not reset.
+      // maxInterruptedAttempts 3: the first two resets are recovered, past
+      // maxAttempts (1); the third ends it.
+      expect(resets).toBe(3);
+      expect(exhausted.map((entry) => entry.reason)).toEqual([
+        "interrupted_attempts_exceeded"
+      ]);
+    } finally {
+      unsubscribe();
+    }
+  }, 90_000);
+
+  // Successor of the regeneration tests (think-session, "Think —
+  // onChatRecovery", #2028): a regeneration a reset cut off is finished on
+  // its own new branch, and the earlier answer is kept.
+  it("finishes a regeneration a reset cut off on its new branch, keeping the earlier answer", async () => {
+    const room = `regen-reset-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    async function tab() {
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      const seen = { chunks: 0, done: 0 };
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          body?: string;
+          done?: boolean;
+        };
+        if (frame.type !== "cf_agent_use_chat_response") return;
+        if (frame.done) seen.done++;
+        else if (frame.body?.includes("text-delta")) seen.chunks++;
+      });
+      return { ws, seen };
+    }
+    const send = (ws: WebSocket, body: Record<string, unknown>) =>
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: { method: "POST", body: JSON.stringify(body) }
+        })
+      );
+    const user = {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "explain monads" }]
+    };
+
+    const first = await tab();
+    send(first.ws, { messages: [user] });
+    await vi.waitFor(() => expect(first.seen.done).toBe(1), {
+      timeout: 10_000,
+      interval: 20
+    });
+    const [, earlier] = (await (await agent()).getMessages()) as Array<{
+      id: string;
+    }>;
+
+    await (
+      await agent()
+    ).useSlowModelForTest(
+      ["one ", "two ", "three ", "four ", "five ", "six "],
+      150
+    );
+    send(first.ws, { messages: [user], trigger: "regenerate-message" });
+    await vi.waitFor(
+      () => expect(first.seen.chunks).toBeGreaterThanOrEqual(2),
+      {
+        timeout: 10_000,
+        interval: 20
+      }
+    );
+    await (await agent()).resetIsolateForTest().catch(() => undefined);
+    first.ws.close();
+
+    // A new tab wakes the agent; its start recovers the regeneration.
+    const second = await tab();
+    await vi.waitFor(
+      async () => {
+        expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        const branches = await (await agent()).getBranchesForTest(user.id);
+        expect(branches).toHaveLength(2);
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    second.ws.close();
+
+    const branches = [
+      ...((await (await agent()).getBranchesForTest(user.id)) as Array<{
+        id: string;
+        parts: Array<{ type: string; text?: string }>;
+      }>)
+    ];
+    expect(branches.map((message) => message.id)).toContain(earlier?.id);
+    const regenerated = branches.find((message) => message.id !== earlier?.id);
+    const text = (regenerated?.parts ?? [])
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    expect(text).toMatch(/^one /);
+    // Finished after the reset: the fresh isolate's model wrote the rest.
+    expect(text).toContain("Hello from the assistant!");
+    // The regenerated branch is the one the conversation now shows.
+    const shown = (await (await agent()).getMessages()) as Array<{
+      id: string;
+    }>;
+    expect(shown.at(-1)?.id).toBe(regenerated?.id);
+  }, 60_000);
+
+  // Successor of the platform-reset tests (think-session, "Think —
+  // onChatRecovery", #1730/#2613): a recovery attempt the platform cuts
+  // (here, a reset while onChatRecovery is running) does not end the turn:
+  // the next start runs the recovery again, and no terminal is sent.
+  it("re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal", async () => {
+    const exhausted: unknown[] = [];
+    let room = "";
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:recovery:exhausted" && event.name === room) {
+        exhausted.push(event.payload);
+      }
+    });
+    try {
+      // First reset: mid-reply. Its recovery's onChatRecovery is held.
+      const first = await resetDuringTurn("platform-cut", 2, undefined, {
+        holdRecovery: true
+      });
+      room = first.room;
+      const agent = first.agent;
+      await vi.waitFor(
+        async () => {
+          expect((await (await agent()).recoveryHoldForTest()).held).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      // The platform cuts the recovery attempt: reset while the hook runs.
+      await (await agent()).resetIsolateForTest().catch(() => undefined);
+
+      // A tab wakes the agent; its start runs the recovery again.
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      const errors: unknown[] = [];
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          error?: boolean;
+        };
+        if (frame.type === "cf_agent_use_chat_response" && frame.error) {
+          errors.push(frame);
+        }
+      });
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await (await agent()).recoveryHoldForTest()).calls
+          ).toBeGreaterThanOrEqual(2);
+          expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        },
+        { timeout: 20_000, interval: 100 }
+      );
+      ws.close();
+
+      expect(exhausted).toEqual([]);
+      expect(errors).toEqual([]);
+      expect(
+        (await (await agent()).lastAssistantTextForTest()).length
+      ).toBeGreaterThan(0);
+    } finally {
+      unsubscribe();
+    }
+  }, 60_000);
 });
