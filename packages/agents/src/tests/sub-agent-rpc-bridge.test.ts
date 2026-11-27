@@ -539,6 +539,10 @@ describe("facet connection operations after frame completion (issue #2055)", () 
       await parent.holdNextConnectionOperationForTest("send", message);
       const delivered = waitForTextMessage(ws, message, 5000);
       const closed = waitForClose(ws, 5000);
+      // Awaited below; marked handled now, so an early failure of the RPC
+      // in between reports once, not again as an unhandled rejection.
+      void delivered.catch(() => {});
+      void closed.catch(() => {});
 
       const scheduled = await callRPC(ws, "sendConnectionMessageAfterDelay", [
         message

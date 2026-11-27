@@ -1741,7 +1741,7 @@ export class TestSubAgentParent extends Agent {
         released: Promise<void>;
       }
     | undefined;
-  /** The facet socket states the root applied, in order. */
+  /** The facet socket states the root has applied, in order. */
   private _appliedConnectionStates: unknown[] = [];
 
   /**
@@ -1795,8 +1795,11 @@ export class TestSubAgentParent extends Agent {
     ...args: Parameters<Agent["_cf_setSubAgentConnectionState"]>
   ): Promise<unknown> {
     await this._waitForConnectionOperationHold("setState", args[1]);
-    this._appliedConnectionStates.push(args[1]);
-    return super._cf_setSubAgentConnectionState(...args);
+    const forwarded = await super._cf_setSubAgentConnectionState(...args);
+    // The socket's state after the write, in the order the root applied
+    // them; nothing when no socket took it.
+    if (forwarded !== null) this._appliedConnectionStates.push(forwarded);
+    return forwarded;
   }
 
   /** Forwards one frame through a deliberately slow live bridge. */
