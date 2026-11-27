@@ -2908,19 +2908,22 @@ export class Think<
     readonly attempt: number;
     readonly partial: UIMessage | undefined;
   }): Promise<"continue" | "abandon"> {
-    // As on Think: a submission whose turn started longer ago than the
-    // stale window is not recovered. It ends `error`.
-    const session = this.harness.session().id;
-    const [running] = await this.harness.submissions(session, {
-      status: ["running"],
-      limit: 1
-    });
-    if (
-      running?.operationId === context.operationId &&
-      Date.now() - (await this.#turnStartedAt(context.operationId)) >
-        (this.constructor as typeof Think).submissionRecoveryStaleMs
-    ) {
-      return "abandon";
+    // As on Think: a submission cut off by a reset whose turn started
+    // longer ago than the stale window is not recovered. It ends `error`.
+    // An attempt that already asked the model in this isolate is a live
+    // retry (a stalled stream), which the window does not judge.
+    if (this.#turnChannel?.operationId !== context.operationId) {
+      const [running] = await this.harness.submissions(
+        this.harness.session().id,
+        { status: ["running"], limit: 1 }
+      );
+      if (
+        running?.operationId === context.operationId &&
+        Date.now() - (running.startedAt ?? running.createdAt) >
+          (this.constructor as typeof Think).submissionRecoveryStaleMs
+      ) {
+        return "abandon";
+      }
     }
     const parts = [...(context.partial?.parts ?? [])];
     const config = this.chatRecovery;

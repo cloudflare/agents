@@ -11752,6 +11752,16 @@ export class ThinkProgrammaticTestAgent extends Think {
     return open.length === 0;
   }
 
+  /** Replies that go quiet for `timeoutMs` are ended by the stall watchdog. */
+  async setStallTimeoutForTest(timeoutMs: number): Promise<void> {
+    this.chatStreamStallTimeoutMs = timeoutMs;
+  }
+
+  /** The held reply never continues; the attempts after it are not held. */
+  async abandonChunkHoldForTest(): Promise<void> {
+    this._chunkHold = null;
+  }
+
   /** Whether a held stream has sent its chunks and is waiting. */
   async isChunkStreamHeldForTest(): Promise<boolean> {
     return this._chunkHold?.reached ?? false;
