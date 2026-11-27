@@ -4,8 +4,10 @@
 // reconnects and resets of the object, for a fixed time. Then the room
 // settles and the fault suite's invariants, plus the fuzz's own, must hold.
 //
-// The seed is printed at the start; `FUZZ_SEED=<n>` replays the same choices
-// (the timing of the server's answers still varies). A red run prints the
+// The seed is printed at the start; `FUZZ_SEED=<n>` replays each tab's and
+// the resetter's choices (the server's timing, and so what a choice lands
+// on, still varies; tool answers are drawn per call id, which the server
+// makes up). A red run prints the
 // seed, the violations and the last of the driver's trace.
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -56,6 +58,14 @@ const TAGS: [string, number][] = [
   ["[429]", 4],
   ["[overflow]", 3]
 ];
+/** A stable number for a string (FNV-1a), to seed a choice by an id. */
+function hash(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++)
+    h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return (h >>> 0) % 1_000_000;
+}
+
 function pick<T>(r: () => number, weighted: [T, number][]): T {
   const total = weighted.reduce((a, [, w]) => a + w, 0);
   let x = r() * total;
@@ -88,7 +98,12 @@ const OPEN = new Set([
 ]);
 
 async function fuzzRoom(cls: Cls, mode: string, seed: number) {
-  const r = rng(seed);
+  // Each actor draws from its own stream, so its choices do not depend on
+  // how the others' interleave: a tab's sends, cancels, clears and
+  // reconnects, and the resetter's times, replay with the seed. A tool
+  // answer's choices come from the seed and the call's id, which the server
+  // makes up, so those differ between runs.
+  const actor = (n: number) => rng(seed * 7919 + n);
   const room = rid(`fz-${cls}-${mode}`);
   const trace: string[] = [];
   const t0 = Date.now();
@@ -135,6 +150,7 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
       ) {
         if (handled.has(b.toolCallId)) return;
         handled.add(b.toolCallId);
+        const r = actor(hash(b.toolCallId));
         if (r() < 0.1) return void log(`ignore ${b.toolName}`);
         const frame = {
           type: MT.TOOL_RESULT,
@@ -162,6 +178,7 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
         const key = `ap:${b.approvalId ?? b.toolCallId}`;
         if (handled.has(key)) return;
         handled.add(key);
+        const r = actor(hash(key));
         if (r() < 0.1) return void log("ignore approval");
         const approved = r() < 0.7;
         const slot = Math.floor(r() * TABS);
@@ -201,6 +218,7 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
   let submits = 0;
   let resets = 0;
   const person = async (slot: number) => {
+    const r = actor(slot + 1);
     while (Date.now() < deadline) {
       let tab = current(slot);
       if (tab.closed || r() < 0.03) {
@@ -240,6 +258,7 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
     }
   };
   const resetter = async () => {
+    const r = actor(100);
     for (;;) {
       await wait(30_000 + Math.floor(r() * 60_000));
       if (Date.now() >= deadline - 20_000) return;
@@ -396,6 +415,10 @@ describe.concurrent("reset fuzz", () => {
       const seed = SEED + i;
       const res = await fuzzRoom(cls, mode, seed);
       expect(res.submits, "the fuzz sent nothing").toBeGreaterThan(0);
+      expect(
+        res.resets,
+        "the fuzz never reset the object"
+      ).toBeGreaterThanOrEqual(1);
       expect(
         res.bad,
         `seed ${SEED} (room ${res.room}, room seed ${seed}, ${res.submits} requests, ${res.resets} resets)\n${res.bad.join("\n")}\nlast of the trace:\n${res.trace.slice(-60).join("\n")}`
