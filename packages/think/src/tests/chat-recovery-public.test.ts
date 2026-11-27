@@ -461,6 +461,32 @@ describe("chat recovery, through public behaviour", () => {
       expect(calledAt.at(-1)! - calledAt[0]!).toBeGreaterThan(300);
     }, 30_000);
 
+    // Successor of think-session's "onExhausted context carries
+    // terminalMessage, recoveryRootRequestId, and the partial (#1631)".
+    it("tells onExhausted the turn's root request, a terminal message and the partial, and keeps the partial", async () => {
+      const progress = await recoverUntil(
+        "exhausted-context",
+        { afterParts: 25, stalledCalls: 10, maxAttempts: 1, progressing: true },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.exhausted).toHaveLength(1);
+      const [ctx] = progress.exhausted as Array<{
+        reason: string;
+        terminalMessage: string;
+        recoveryRootRequestId: string;
+        partialText: string;
+      }>;
+      const [first] = progress.recoveryCalls as unknown as Array<{
+        recoveryRootRequestId: string;
+      }>;
+      expect(ctx?.recoveryRootRequestId).toBe(first?.recoveryRootRequestId);
+      expect(ctx?.terminalMessage.length).toBeGreaterThan(0);
+      expect(ctx?.partialText.length).toBeGreaterThan(0);
+      // What the turn had written is kept for the user.
+      expect(progress.lastAssistantText).toContain(ctx?.partialText.trim());
+    }, 30_000);
+
     it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
       const progress = await recoverUntil(
         "budget-declined",
@@ -623,6 +649,34 @@ describe("chat recovery, through public behaviour", () => {
       // A new answer, with nothing of what the reset cut off.
       expect(text).not.toMatch(/one /);
       expect(text?.length).toBeGreaterThan(0);
+      expect(await (await agent()).modelCallsForTest()).toBe(1);
+    }, 30_000);
+
+    // Successor of think-session's "answers the question again when
+    // onChatRecovery drops a new turn's partial" and "honors { persist:
+    // false } for a text-only partial with no settled work".
+    it("answers the question again, from the start, when onChatRecovery says persist: false", async () => {
+      const { agent, userId } = await resetDuringTurn(
+        "answer-persist-false",
+        2,
+        {
+          persist: false
+        }
+      );
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(messages[0]?.id).toBe(userId);
+      // Asked once more (the slow model doesn't survive the reset, so the
+      // default one answers): a whole answer, with nothing of the dropped
+      // partial ("one two …") before it.
+      const text = messages[1]?.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      expect(text).toBe("Hello from the assistant!");
       expect(await (await agent()).modelCallsForTest()).toBe(1);
     }, 30_000);
 

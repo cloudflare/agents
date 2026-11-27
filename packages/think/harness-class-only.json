@@ -787,5 +787,23 @@
       "scenario": "vTransientPlain (htfaults.mjs, the shell, 18/18 root and facet) / vTransientRunsAgain (faults.mjs, the class: Think and AIChatAgent, root and facet, 8/8 on main 62423fad9)",
       "verified": "#3474@cc6114de9"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > onExhausted context carries terminalMessage, recoveryRootRequestId, and the partial (#1631)",
+    "reason": "an interrupted stream and its chat fiber row inserted in the class's shape (`insertInterruptedStream`, `insertInterruptedFiber`), with recovery triggered by hand and an incident seeded at the cap with its progress marker set by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > the recovery budget > tells onExhausted the turn's root request, a terminal message and the partial, and keeps the partial"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > answers the question again when onChatRecovery drops a new turn's partial",
+    "reason": "an interrupted stream and its chat fiber row inserted in the class's shape (`insertInterruptedStream`, `insertInterruptedFiber`), with recovery triggered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > answers the question again, from the start, when onChatRecovery says persist: false"
+    }
   }
 ]
