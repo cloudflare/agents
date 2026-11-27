@@ -11001,6 +11001,26 @@ export class ThinkProgrammaticTestAgent extends Think {
       body: ctx.body as RpcJsonObject | undefined,
       ...(channel !== undefined && { channel })
     });
+    if (this._detachedWaitGate && !this._detachedWait) {
+      // Started inside this turn, carried on after it: see
+      // `waitFromWorkATurnLeftRunningForTest`.
+      const gate = this._detachedWaitGate;
+      this._detachedWait = (async () => {
+        await gate;
+        const submitted = await this.runTurn({
+          mode: "submit",
+          input: "sent by work the first turn left running"
+        });
+        try {
+          const settled = await this.waitForSubmission(submitted.submissionId, {
+            timeoutMs: 10_000
+          });
+          return settled?.status ?? "missing";
+        } catch (error) {
+          return `threw: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      })();
+    }
     if (this._nestedAdmissionMode && !this._nestedAdmissionAttempted) {
       this._nestedAdmissionAttempted = true;
       try {
@@ -11391,6 +11411,29 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async testSaveMessagesEmptyFunction(): Promise<SaveMessagesResult> {
     return this.saveMessages(() => []);
+  }
+
+  private _detachedWaitGate: Promise<void> | null = null;
+  private _detachedWait: Promise<string> | null = null;
+
+  /**
+   * A turn starts work that outlives it. Once the turn has ended, that work
+   * submits a message and waits for it. Returns how the wait ended.
+   */
+  async waitFromWorkATurnLeftRunningForTest(): Promise<string> {
+    let release = () => {};
+    this._detachedWaitGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this._detachedWait = null;
+    try {
+      await this.testChat("a turn that leaves work running");
+      release();
+      if (!this._detachedWait) throw new Error("the turn started no work");
+      return await (this._detachedWait as Promise<string>);
+    } finally {
+      this._detachedWaitGate = null;
+    }
   }
 
   async runNestedAdmissionScenario(
