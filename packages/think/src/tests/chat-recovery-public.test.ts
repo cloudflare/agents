@@ -613,10 +613,20 @@ describe("chat recovery, through public behaviour", () => {
       ws.addEventListener("message", (event) => {
         const frame = JSON.parse(String(event.data)) as {
           type?: string;
+          id?: string;
           body?: string;
+          replay?: boolean;
         };
+        // As a chat client does: take up a stream it is offered.
+        if (frame.type === "cf_agent_stream_resuming") {
+          ws.send(
+            JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+          );
+        }
+        // New text only: a replay of what was streamed is not progress.
         if (
           frame.type === "cf_agent_use_chat_response" &&
+          !frame.replay &&
           frame.body?.includes("text-delta")
         ) {
           tab.chunks++;

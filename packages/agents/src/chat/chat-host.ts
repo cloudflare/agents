@@ -216,8 +216,21 @@ export function chatRecoveryGaveUp(step: TaskStep): boolean {
  * recovery attempts have ended that way.
  */
 const FAILED_CHECKPOINT = "chat:failed";
-/** Names this isolate among a turn's attempts; made on first use. */
-let isolateId: string | undefined;
+/**
+ * Names this object's instance among a turn's attempts, by its Tasks: a
+ * reset makes a new instance, whose attempts count the old one's as
+ * interrupted, even when the isolate lives on.
+ */
+const instanceIds = new WeakMap<Tasks, string>();
+
+function instanceId(tasks: Tasks): string {
+  let id = instanceIds.get(tasks);
+  if (id === undefined) {
+    id = crypto.randomUUID();
+    instanceIds.set(tasks, id);
+  }
+  return id;
+}
 
 /** The run's checkpoint key holding the id of the reply it stored. */
 const REPLY_CHECKPOINT = "chat:reply";
@@ -726,7 +739,7 @@ export function chatTurnDefinition(
         live?: boolean;
       }>(FAILED_CHECKPOINT);
       const thisAttempt = {
-        isolate: (isolateId ??= crypto.randomUUID()),
+        isolate: instanceId(deps.tasks),
         token: crypto.randomUUID()
       };
       const evaluated =

@@ -20,6 +20,7 @@ import {
   unexecutedToolNames,
   type ChatRecoveryConfig,
   type ChatRecoveryContext,
+  type ChatRecoveryExhaustedContext,
   type ChatRecoveryOptions
 } from "agents/chat";
 import type {
@@ -2980,8 +2981,19 @@ export class Think<
       this.#turnStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
     // Think's released config, as it is: the turn definition's recovery
     // budget honours its fields.
-    if (config === true) return { stallTimeoutMs };
-    const { onExhausted, shouldKeepRecovering } = config;
+    const onExhausted = config === true ? undefined : config.onExhausted;
+    // A give-up is announced, then the app is told, as on Think. The
+    // definition names a turn by its run; an app knows it by its request
+    // (the operation) id.
+    const exhausted = (ctx: ChatRecoveryExhaustedContext) => {
+      const event = withOperationIds(ctx);
+      this._emit("chat:recovery:exhausted", event);
+      return onExhausted?.(event);
+    };
+    if (config === true) {
+      return { stallTimeoutMs, chatRecovery: { onExhausted: exhausted } };
+    }
+    const { shouldKeepRecovering } = config;
     return {
       ...(config.maxAttempts !== undefined && {
         maxAttempts: config.maxAttempts
@@ -2989,11 +3001,7 @@ export class Think<
       stallTimeoutMs,
       chatRecovery: {
         ...config,
-        // The definition names a turn by its run; an app knows it by its
-        // request (the operation) id, as on Think.
-        ...(onExhausted && {
-          onExhausted: (ctx) => onExhausted(withOperationIds(ctx))
-        }),
+        onExhausted: exhausted,
         ...(shouldKeepRecovering && {
           shouldKeepRecovering: (ctx) =>
             shouldKeepRecovering(withOperationIds(ctx))
