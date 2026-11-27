@@ -4,7 +4,8 @@ import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
   CHAT_CLEARED,
   chatTurnDefinition,
-  chatTurnStreamId
+  chatTurnStreamId,
+  runningChatTurn
 } from "../../chat/chat-host";
 import type { TaskStep } from "../../tasks/types";
 import { TaskSettlement } from "../../tasks/settlement";
@@ -293,6 +294,52 @@ describe("chatTurnDefinition", () => {
       expect(
         await instance.streams.status(chatTurnStreamId("run-2"))
       ).toMatchObject({ state: "streaming" });
+    });
+  });
+
+  it("names the running turn to what respond starts, each time it is called, and to nothing else", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const seen: Array<string | undefined> = [];
+      let calls = 0;
+      expect(runningChatTurn()).toBeUndefined();
+      const result = await definitionOf(instance, {
+        respond: async (call) => {
+          calls++;
+          seen.push(runningChatTurn());
+          // Still there after the call has waited on something.
+          await Promise.resolve();
+          await instance.sessions.session("s1").getHistory();
+          seen.push(runningChatTurn());
+          if (calls === 1) {
+            // The first reply overflows: respond is called again.
+            return new ReadableStream({
+              start(controller) {
+                controller.error(new Error("context too long"));
+              }
+            });
+          }
+          return instance.host.respond(call);
+        },
+        hooks: {
+          classifyError: () => "overflow",
+          onContextOverflow: async () => {
+            // The hook is not part of the reply.
+            seen.push(runningChatTurn());
+            return true;
+          }
+        }
+      })({ trigger: "server" }, laterAttempt("run-ctx", 1));
+      expect(result).toMatchObject({ status: "completed" });
+      expect(seen).toEqual([
+        "run-ctx",
+        "run-ctx",
+        undefined,
+        "run-ctx",
+        "run-ctx"
+      ]);
+      expect(runningChatTurn()).toBeUndefined();
     });
   });
 

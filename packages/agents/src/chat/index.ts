@@ -587,3 +587,4 @@ export { backoffDelay } from "../retries";
  * starting sub-agent). Sibling-package support, not a public API.
  */
 export { broadcastReachesUnlistedSockets } from "../dynamic-agents/unlisted-sockets";
+export { runningChatTurn } from "./chat-host";
