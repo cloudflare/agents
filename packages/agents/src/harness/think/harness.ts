@@ -1890,6 +1890,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 : "terminal"
             : "terminal",
         onContextOverflow: async () => {
+          if (hooks?.onContextOverflow) {
+            return hooks.onContextOverflow({ session, operationId });
+          }
           try {
             await this.#handle(session).compact();
           } catch (error) {
