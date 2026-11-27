@@ -723,6 +723,23 @@ describe("Think — a call to a tool the client sent", () => {
     expect(await agent.waitsOnClientForTest()).toBe(true);
     await closeWS(ws);
   });
+
+  it("still waits on it after a restart, before any new turn", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await done;
+    await waitUntil(async () => !(await agent.isChatTurnActiveForTest()), 5000);
+    await closeWS(ws);
+    await agent.resetIsolateForTest().catch(() => {});
+    // A new isolate, with no turn run since: what the last turn recorded.
+    expect(await (await freshAgent(room)).waitsOnClientForTest()).toBe(true);
+  });
 });
 
 // ── Auto-continuation ────────────────────────────────────────────
