@@ -991,8 +991,13 @@ export class AIChatAgent<
     );
     const result = await Promise.race([ended, settled]);
     this._turnWaiters.delete(requestId);
+    // Skipped before anything ran: no request is named.
+    const ranNothing =
+      result.status === "skipped" &&
+      (result.reason === "nothing-to-continue" ||
+        result.reason === "awaiting-client");
     return {
-      requestId,
+      requestId: ranNothing ? "" : requestId,
       status: result.status,
       ...(result.error !== undefined && { error: result.error }),
       ...(result.reason !== undefined && {
@@ -1072,18 +1077,41 @@ export class AIChatAgent<
         ) {
           this._emit("message:request");
         }
-        const response = await this.onChatMessage(async () => {}, {
-          requestId: call.requestId,
-          abortSignal: call.signal,
-          // No client tools reach `onChatMessage` as none, as before.
-          ...(call.clientTools.length > 0 && {
-            clientTools: [...call.clientTools]
-          }),
-          // A request with no custom fields has no body, as before.
-          ...(call.body !== undefined &&
-            Object.keys(call.body).length > 0 && { body: { ...call.body } }),
-          continuation: call.mode === "continue"
-        });
+        // `getCurrentAgent()` in `onChatMessage` and its tools names the tab
+        // that sent the request (or answered the call), when it is here.
+        const originId = (
+          this.tasks.peek(call.requestId)?.metadata as
+            | { chat?: { origin?: string } }
+            | undefined
+        )?.chat?.origin;
+        let originConnection: Connection | undefined;
+        if (originId !== undefined) {
+          for (const connection of this.getConnections()) {
+            if (connection.id === originId) originConnection = connection;
+          }
+        }
+        const ask = () =>
+          this.onChatMessage(async () => {}, {
+            requestId: call.requestId,
+            abortSignal: call.signal,
+            // No client tools reach `onChatMessage` as none, as before.
+            ...(call.clientTools.length > 0 && {
+              clientTools: [...call.clientTools]
+            }),
+            // A request with no custom fields has no body, as before.
+            ...(call.body !== undefined &&
+              Object.keys(call.body).length > 0 && { body: { ...call.body } }),
+            continuation: call.mode === "continue"
+          });
+        const response = await agentContext.run(
+          {
+            agent: this,
+            connection: originConnection,
+            request: undefined,
+            email: undefined
+          },
+          ask
+        );
         // It answered with a reply: however that reply ends, the hook
         // hears of it.
         if (response) this._answered.add(call.requestId);

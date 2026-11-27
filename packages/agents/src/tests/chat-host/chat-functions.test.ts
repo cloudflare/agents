@@ -2788,4 +2788,60 @@ describe("chat functions over a minimal host", () => {
       });
     });
   });
+
+  it("a host turn told to store its context keeps the stored tools it did not bring", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.internal_setConfig(
+        CHAT_REQUEST_CONTEXT_KEY,
+        JSON.stringify({
+          clientTools: [{ name: "pick" }],
+          body: { model: "a" }
+        })
+      );
+      const done = instance.nextResult();
+      await submitTurn(
+        instance.deps,
+        instance.lane,
+        { trigger: "server", body: { model: "b" } },
+        { storeContext: true }
+      );
+      await done;
+      expect(instance.calls[0].clientTools).toEqual([{ name: "pick" }]);
+      expect(
+        JSON.parse((await session.internal_config(CHAT_REQUEST_CONTEXT_KEY))!)
+      ).toEqual({ clientTools: [{ name: "pick" }], body: { model: "b" } });
+    });
+  });
+
+  it("a continue told to store its context that has nothing to continue leaves the context alone", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      const before = JSON.stringify({ body: { model: "stored" } });
+      await session.internal_setConfig(CHAT_REQUEST_CONTEXT_KEY, before);
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      const done = instance.nextResult();
+      await submitTurn(
+        instance.deps,
+        instance.lane,
+        { trigger: "server", mode: "continue", body: { model: "skipped" } },
+        { storeContext: true }
+      );
+      expect(await done).toMatchObject({
+        status: "skipped",
+        reason: "nothing-to-continue"
+      });
+      expect(await session.internal_config(CHAT_REQUEST_CONTEXT_KEY)).toBe(
+        before
+      );
+    });
+  });
 });

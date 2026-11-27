@@ -931,29 +931,9 @@ export function chatTurnDefinition(
           | Record<string, unknown>
           | undefined
       )?.[STOPPED_METADATA.field] === true;
-    if (
-      (client || given.storeContext) &&
-      !stoppedEarly &&
-      step.checkpoint.get(CONTEXT_CHECKPOINT) === undefined
-    ) {
-      await session.internal_setConfig(
-        CHAT_REQUEST_CONTEXT_KEY,
-        // One past the row budget is not kept (a later server turn runs
-        // without it), as the hosts do today.
-        storableRequestContext(
-          given.clientTools?.length ||
-            (given.body && Object.keys(given.body).length)
-            ? JSON.stringify({
-                ...(given.clientTools?.length && {
-                  clientTools: given.clientTools
-                }),
-                ...(given.body && { body: given.body })
-              })
-            : null
-        )
-      );
-      step.checkpoint.set(CONTEXT_CHECKPOINT, true);
-    }
+    // A host turn fills what it does not bring from the stored context
+    // first (it stores the result when told to); a client's request runs
+    // with exactly what it sent.
     let run = given;
     if (
       !client &&
@@ -974,6 +954,30 @@ export function chatTurnDefinition(
         };
       }
     }
+    const storeContext = async () => {
+      if (stoppedEarly || step.checkpoint.get(CONTEXT_CHECKPOINT) !== undefined)
+        return;
+      await session.internal_setConfig(
+        CHAT_REQUEST_CONTEXT_KEY,
+        // One past the row budget is not kept (a later server turn runs
+        // without it), as the hosts do today.
+        storableRequestContext(
+          run.clientTools?.length || (run.body && Object.keys(run.body).length)
+            ? JSON.stringify({
+                ...(run.clientTools?.length && {
+                  clientTools: run.clientTools
+                }),
+                ...(run.body && { body: run.body })
+              })
+            : null
+        )
+      );
+      step.checkpoint.set(CONTEXT_CHECKPOINT, true);
+    };
+    // A client's request stores its context when it starts; a host turn
+    // told to stores it once it is sure to run (a "continue" with nothing
+    // to continue leaves it alone).
+    if (client) await storeContext();
     const streamId = chatTurnStreamId(requestId);
     // Every tab sees the reply as it streams, and how it ended.
     const send = (fields: Record<string, unknown>) => {
@@ -1416,6 +1420,7 @@ export function chatTurnDefinition(
         });
       }
     }
+    if (!client && run.storeContext) await storeContext();
     // A tool answer continues the reply that asked for it (named, or the
     // latest); a host's "continue the last turn" does the same.
     if (
