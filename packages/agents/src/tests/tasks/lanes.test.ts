@@ -159,6 +159,42 @@ describe("Tasks lanes", () => {
     });
   });
 
+  it("starts the lane's next run only once a cancelled head's attempt has returned", async () => {
+    const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
+      await instance.lifecycle.start();
+      // The head ignores its signal until its gate opens, as a stopped
+      // reply still storing what it streamed does.
+      const first = gate();
+      instance.lanedGates.set("a", first.promise);
+      const lane = { lane: "l" } as const;
+      await instance.tasks.run(
+        "laned",
+        { label: "a" },
+        { ...lane, runId: "a", local: "A" }
+      );
+      await instance.tasks.run(
+        "laned",
+        { label: "b" },
+        { ...lane, runId: "b", local: "B" }
+      );
+      await until(() => instance.lanedStarted.length === 1);
+      await instance.tasks.cancel("a");
+      // Settled at once, for whoever waits on it or reads it.
+      expect((await instance.tasks.get("a"))?.status).toBe("aborted");
+      // Whatever is due runs; the next run is not due while a returns.
+      await instance.lifecycle.alarm();
+      first.open();
+      await until(() => instance.lanedLog.includes("end:b"));
+      expect(instance.lanedLog).toEqual([
+        "start:a",
+        "end:a",
+        "start:b",
+        "end:b"
+      ]);
+    });
+  });
+
   it("moves the lane on when a dropped local throws", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {

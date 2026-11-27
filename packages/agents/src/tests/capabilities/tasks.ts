@@ -37,6 +37,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   rememberingGate: Promise<void> | null = null;
   /** Labels of `laned` runs, in the order they started. */
   readonly lanedStarted: string[] = [];
+  /** `start:<label>` and `end:<label>` of `laned` runs, in order. */
+  readonly lanedLog: string[] = [];
   /** The `local` each `laned` attempt was handed, when it had one. */
   readonly lanedLocals: unknown[] = [];
   /** `laned` runs park on their label's gate, when it has one. */
@@ -62,8 +64,13 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
       /** Records its label, parks on its gate, returns the label. */
       laned: async (input: { label: string }, step: TaskStep) => {
         this.lanedStarted.push(input.label);
+        this.lanedLog.push(`start:${input.label}`);
         if (step.local !== undefined) this.lanedLocals.push(step.local);
-        await this.lanedGates.get(input.label);
+        try {
+          await this.lanedGates.get(input.label);
+        } finally {
+          this.lanedLog.push(`end:${input.label}`);
+        }
         return input.label;
       },
 

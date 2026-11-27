@@ -294,6 +294,12 @@ export class Tasks<
   readonly #reporting = new Set<string>();
   /** Lanes {@link holdLane} holds in this isolate. */
   readonly #heldLanes = new Set<string>();
+  /**
+   * Lanes whose cancelled head's attempt is still returning in this
+   * isolate, with how many such attempts: the lane's next run waits for
+   * them, so no two handlers of a lane run at once.
+   */
+  readonly #drainingLanes = new Map<string, number>();
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
@@ -944,6 +950,9 @@ export class Tasks<
 
     const active = this.#liveAttempt(runId);
     if (active) {
+      // The run's lane waits for the attempt to return: it may still be
+      // writing (a stopped reply stores what it streamed).
+      if (row.lane != null) this.#drainLane(row.lane, active.promise);
       // Settled now: the attempt's signal aborts, and nothing it writes
       // afterwards lands (its generation no longer owns the run).
       active.controller.abort(new TaskCancellation(reason));
@@ -1243,7 +1252,7 @@ export class Tasks<
     // A caller that just found this run at its lane's head need not read
     // the lane again; a run since queued behind another has no deadline.
     const known =
-      laneHead && row.next_at !== null && !this.#heldLanes.has(row.lane ?? "");
+      laneHead && row.next_at !== null && !this.#laneHeld(row.lane ?? "");
     if (!known && !this.#laneAllows(row)) {
       // A debounced run still queued when its quiet period ends just waits
       // its turn from now on: no deadline, no wake, until the lane moves;
@@ -2181,7 +2190,7 @@ export class Tasks<
    */
   #laneAllows(row: TaskRunRow | undefined): boolean {
     if (row?.lane == null) return true;
-    if (this.#heldLanes.has(row.lane)) return false;
+    if (this.#laneHeld(row.lane)) return false;
     return this.#store.laneHead(row.lane)?.run_id === row.run_id;
   }
 
@@ -2206,7 +2215,7 @@ export class Tasks<
     lane: string,
     head = this.#store.laneHead(lane)
   ): Promise<void> {
-    if (this.#heldLanes.has(lane)) return;
+    if (this.#laneHeld(lane)) return;
     if (!head) return;
     if (
       head.status === "pending" &&
@@ -2633,6 +2642,30 @@ export class Tasks<
    */
   holdLane(lane: string): void {
     this.#heldLanes.add(lane);
+  }
+
+  /** Whether a lane's runs may not start now, in this isolate. */
+  #laneHeld(lane: string): boolean {
+    return this.#heldLanes.has(lane) || this.#drainingLanes.has(lane);
+  }
+
+  /** Hold `lane` until `attempt` returns, then wake its head. */
+  #drainLane(lane: string, attempt: Promise<void>): void {
+    this.#drainingLanes.set(lane, (this.#drainingLanes.get(lane) ?? 0) + 1);
+    void attempt
+      .catch(() => {})
+      .then(async () => {
+        const left = (this.#drainingLanes.get(lane) ?? 1) - 1;
+        if (left > 0) {
+          this.#drainingLanes.set(lane, left);
+          return;
+        }
+        this.#drainingLanes.delete(lane);
+        await this.#wakeLane(lane);
+      })
+      .catch((error) => {
+        console.error("[Tasks] could not wake a lane after a cancel", error);
+      });
   }
 
   /** @internal Let a held lane run again. */
