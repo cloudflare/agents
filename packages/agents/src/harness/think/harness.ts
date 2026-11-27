@@ -2605,6 +2605,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               // This attempt ran model calls or tools the transcript does
               // not hold yet: make room, then continue from what it
               // streamed, as after an interruption, so nothing runs twice.
+              // A host with its own overflow rule decides (a stopped turn,
+              // or one that doesn't recover overflows, isn't compacted).
+              const hooks = this.#options.hooks;
+              if (hooks?.onContextOverflow) {
+                const room = await hooks.onContextOverflow({
+                  session: turn.session,
+                  operationId: turn.operationId,
+                  signal
+                });
+                if (!room) throw new ModelCallError(kind, failure);
+                throw new ModelCallError("retry", failure);
+              }
               try {
                 await this.#handle(turn.session).compact();
               } catch (error) {
@@ -3462,6 +3474,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                   scope
                 ),
                 onPreliminary: (output) => {
+                  // A tool that ignores its abort reports nothing after it.
+                  if (signal.aborted) return;
                   const chunk: UIMessageChunk = {
                     type: "tool-output-available",
                     toolCallId,
