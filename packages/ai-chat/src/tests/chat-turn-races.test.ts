@@ -620,25 +620,6 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
-  it("a client tool result goes through the enqueue hook a subclass can wrap", async () => {
-    const room = crypto.randomUUID();
-    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
-    const agent = await getAgentByName(env.TestChatAgent, room);
-    await agent.persistMessages([
-      user1,
-      toolReply("assistant-hook", "call-hook")
-    ]);
-
-    send(ws, { ...toolResult("call-hook"), autoContinue: false });
-    await waitUntil(async () => {
-      const stored = (await agent.getPersistedMessages()) as ChatMessage[];
-      return JSON.stringify(stored[1]).includes("output-available");
-    });
-
-    expect(await agent.getInteractionAppliesSeenForTest()).toBe(1);
-    ws.close(1000);
-  });
-
   it("a tab that was away when its request ended gets its done frame on resume", async () => {
     const room = crypto.randomUUID();
     const first = await connectChatWS(`/agents/test-chat-agent/${room}`);

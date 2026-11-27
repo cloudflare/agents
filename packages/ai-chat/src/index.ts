@@ -756,10 +756,10 @@ export class AIChatAgent<
    * @internal Kept for subclasses written against earlier releases.
    */
   protected get _lastClientTools(): ClientToolSchema[] | undefined {
-    return this._turns.lastClientTools;
+    return this._requestContextNow().clientTools;
   }
   protected set _lastClientTools(clientTools: ClientToolSchema[] | undefined) {
-    this._turns.lastClientTools = clientTools;
+    void this._setRequestContext({ ...this._requestContextNow(), clientTools });
   }
 
   /**
@@ -767,10 +767,42 @@ export class AIChatAgent<
    * @internal Kept for subclasses written against earlier releases.
    */
   protected get _lastBody(): Record<string, unknown> | undefined {
-    return this._turns.lastBody;
+    return this._requestContextNow().body;
   }
   protected set _lastBody(body: Record<string, unknown> | undefined) {
-    this._turns.lastBody = body;
+    void this._setRequestContext({ ...this._requestContextNow(), body });
+  }
+
+  /** The chat module's stored request context: the tools and body of the last request. */
+  private _requestContextNow(): {
+    clientTools?: ClientToolSchema[];
+    body?: Record<string, unknown>;
+  } {
+    const stored = this.#session.internal_configNow(CHAT_REQUEST_CONTEXT_KEY);
+    if (stored === null) return {};
+    try {
+      return JSON.parse(stored) as {
+        clientTools?: ClientToolSchema[];
+        body?: Record<string, unknown>;
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /** Replace the stored request context (`{}` deletes it). */
+  protected async _setRequestContext(context: {
+    clientTools?: ClientToolSchema[];
+    body?: Record<string, unknown>;
+  }): Promise<void> {
+    const kept = {
+      ...(context.clientTools?.length && { clientTools: context.clientTools }),
+      ...(context.body && { body: context.body })
+    };
+    await this.#session.internal_setConfig(
+      CHAT_REQUEST_CONTEXT_KEY,
+      Object.keys(kept).length > 0 ? JSON.stringify(kept) : null
+    );
   }
 
   /** Default wait for trailing-edge debounced overlapping submits. */

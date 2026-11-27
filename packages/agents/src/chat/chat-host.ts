@@ -788,15 +788,24 @@ export function chatTurnDefinition(
       if (parked.size > 0) {
         releaseParked(parked, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
       }
+      // A continuation's end says so, as its other frames do.
+      const continuation =
+        run.trigger === "tool-answer" || run.mode === "continue";
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
           body: result.error ?? "",
           done: true,
           error: result.status === "error",
-          outcome: result.status
+          outcome: result.status,
+          ...(continuation && { continuation: true })
         });
       } else {
-        send({ body: "", done: true, outcome: result.status });
+        send({
+          body: "",
+          done: true,
+          outcome: result.status,
+          ...(continuation && { continuation: true })
+        });
       }
       await host.hooks?.onResponse?.(result);
       return result;

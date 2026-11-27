@@ -1,3 +1,4 @@
+import { CHAT_REQUEST_CONTEXT_KEY } from "../../chat";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Connection } from "agents";
@@ -2021,6 +2022,57 @@ describe("chat functions over a minimal host", () => {
         reason: "parent cancelled"
       });
       instance.host.respond = respond;
+    });
+  });
+
+  it("a tool result that settles its call and lists client tools replaces the stored ones for its continuation", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.internal_setConfig(
+        CHAT_REQUEST_CONTEXT_KEY,
+        JSON.stringify({
+          clientTools: [{ name: "locate" }],
+          body: { keep: true }
+        })
+      );
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      const done = instance.nextResult();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "c1",
+          toolName: "locate",
+          output: {},
+          autoContinue: true,
+          clientTools: [{ name: "newer" }]
+        })
+      );
+      await done;
+      expect(instance.calls[0].clientTools).toEqual([{ name: "newer" }]);
+      expect(
+        JSON.parse((await session.internal_config(CHAT_REQUEST_CONTEXT_KEY))!)
+      ).toEqual({ clientTools: [{ name: "newer" }], body: { keep: true } });
     });
   });
 });

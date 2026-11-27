@@ -1777,4 +1777,57 @@ describe("chatTurnDefinition", () => {
       await vi.waitFor(() => expect(cancelled).toBe(true));
     });
   });
+
+  it("a continuation's end frame says it is a continuation, as its other frames do", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: {}
+          }
+        ]
+      } as never);
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () => {
+            throw new Error("The model is unavailable");
+          }
+        }
+      )({ trigger: "tool-answer" }, laterAttempt("cf-1", 1));
+      expect(result).toMatchObject({ status: "error" });
+      expect(sent.find((frame) => frame.done === true)).toMatchObject({
+        body: "The model is unavailable",
+        error: true,
+        continuation: true
+      });
+    });
+  });
 });

@@ -338,7 +338,15 @@ export async function answerTool(
   deps: ChatDeps,
   lane: ChatLane,
   answer: ToolAnswer,
-  options: { autoContinue?: boolean } = {}
+  options: {
+    autoContinue?: boolean;
+    /**
+     * The tools the answering tab runs. When the answer settles its call and
+     * lists some, they replace the stored ones, so its continuation runs
+     * with the latest schemas.
+     */
+    clientTools?: unknown;
+  } = {}
 ): Promise<boolean> {
   const counts = answeringIn(deps);
   const key = deps.session ?? "";
@@ -372,8 +380,23 @@ async function applyAnswer(
   deps: ChatDeps,
   lane: ChatLane,
   answer: ToolAnswer,
-  options: { autoContinue?: boolean }
+  options: { autoContinue?: boolean; clientTools?: unknown }
 ): Promise<boolean> {
+  const storeTools = async () => {
+    if (!Array.isArray(options.clientTools) || !options.clientTools.length)
+      return;
+    const session = deps.sessions.session(deps.session ?? "");
+    const stored = await session.internal_config(REQUEST_CONTEXT_KEY);
+    const context = stored
+      ? (JSON.parse(stored) as Pick<ChatTurnInput, "body">)
+      : {};
+    await session.internal_setConfig(
+      REQUEST_CONTEXT_KEY,
+      storableRequestContext(
+        JSON.stringify({ ...context, clientTools: options.clientTools })
+      )
+    );
+  };
   const update: ToolPartUpdate =
     answer.kind === "result"
       ? toolResultUpdate(
@@ -404,6 +427,7 @@ async function applyAnswer(
               output: answer.output
             }) as never
       );
+      await storeTools();
       // An answer that asks to continue is remembered for its batch: once
       // the batch is answered (by any answer, or a server tool's output),
       // one continuation of that reply waits behind the streaming turn.
@@ -454,6 +478,7 @@ async function applyAnswer(
       parts: applied.parts as unknown as UIMessage["parts"]
     };
     await session.upsertMessage(next as never);
+    await storeTools();
     // Only the latest reply continues: once a later message moved the chat
     // on, an answer for an older call is stored and nothing more.
     if (i !== history.length - 1) return true;
@@ -751,7 +776,10 @@ export async function chatDispatch(
           ...(event.state !== undefined && { state: event.state }),
           ...(event.errorText !== undefined && { errorText: event.errorText })
         },
-        { autoContinue: event.autoContinue === true }
+        {
+          autoContinue: event.autoContinue === true,
+          clientTools: event.clientTools
+        }
       );
       return true;
     case "tool-approval":

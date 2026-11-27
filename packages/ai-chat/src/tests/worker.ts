@@ -1342,20 +1342,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     );
   }
 
-  /** How many applies went through the overridable enqueue hook. */
-  private _interactionAppliesSeen = 0;
-
-  getInteractionAppliesSeenForTest(): number {
-    return this._interactionAppliesSeen;
-  }
-
-  protected override _enqueueInteractionApply(
-    apply: () => Promise<boolean>
-  ): Promise<boolean> {
-    this._interactionAppliesSeen++;
-    return super._enqueueInteractionApply(apply);
-  }
-
   private _getChainedContinuationRegressionResponse(): Response | undefined {
     const lastAssistant = [...this.messages]
       .reverse()
@@ -1528,8 +1514,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   /** Store client tools as a request that sent them would. */
-  setClientToolsForTest(clientTools: ClientToolSchema[]): void {
-    this._lastClientTools = clientTools;
+  async setClientToolsForTest(clientTools: ClientToolSchema[]): Promise<void> {
+    await this._setRequestContext({ body: this._lastBody, clientTools });
   }
 
   /** Tool calls with no result in the transcript the last turn's model saw. */
@@ -5685,12 +5671,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return { body: this._lastBody, clientTools: this._lastClientTools };
   }
 
-  setRequestContextForTest(
+  async setRequestContextForTest(
     body?: Record<string, unknown>,
     clientTools?: ClientToolSchema[]
-  ): void {
-    this._lastBody = body;
-    this._lastClientTools = clientTools;
+  ): Promise<void> {
+    await this._setRequestContext({ body, clientTools });
   }
 
   /**
