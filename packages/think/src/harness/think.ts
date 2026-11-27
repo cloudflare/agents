@@ -1707,6 +1707,8 @@ export class Think<
 
   /** What `configureChannels()` returned at construction, when not a promise. */
   #configuredAtConstruction: ThinkChannels | undefined;
+  /** Operations a browser's chat request started: they run on `web`. */
+  #webRequests = new Set<string>();
   /** The channel registry, read at start (none on a sub-agent). */
   #channels: Map<string, NormalizedChannelDefinition> | undefined;
   /** The running operation's channel, resolved at its first model call. */
@@ -2029,7 +2031,8 @@ export class Think<
       if (!stream.input)
         throw new TypeError('runTurn: mode "stream" requires input');
       return this.chat(stream.input, stream.callback, {
-        ...(stream.signal && { signal: stream.signal })
+        ...(stream.signal && { signal: stream.signal }),
+        ...(stream.channel !== undefined && { channel: stream.channel })
       });
     }
     if (mode === "submit") {
@@ -2047,7 +2050,8 @@ export class Think<
         ...(submit.idempotencyKey !== undefined && {
           idempotencyKey: submit.idempotencyKey
         }),
-        ...(submit.metadata !== undefined && { metadata: submit.metadata })
+        ...(submit.metadata !== undefined && { metadata: submit.metadata }),
+        ...(submit.channel !== undefined && { channel: submit.channel })
       });
     }
     const wait = options as RunTurnWait;
@@ -2124,17 +2128,21 @@ export class Think<
         );
       }
     }
-    const receipt = await this.harness.session().submit(messages, {
-      ...(options?.submissionId !== undefined && {
-        operationId: options.submissionId
-      }),
-      submission: true,
-      // An empty key is no key, as on Think.
-      ...(options?.idempotencyKey && {
-        idempotencyKey: options.idempotencyKey
-      }),
-      ...(metadata !== undefined && { metadata })
-    });
+    // As in Think: the channel is stamped on the user messages, so the
+    // turn that runs them resolves it.
+    const receipt = await this.harness
+      .session()
+      .submit(stampTurnContext(messages, options?.channel), {
+        ...(options?.submissionId !== undefined && {
+          operationId: options.submissionId
+        }),
+        submission: true,
+        // An empty key is no key, as on Think.
+        ...(options?.idempotencyKey && {
+          idempotencyKey: options.idempotencyKey
+        }),
+        ...(metadata !== undefined && { metadata })
+      });
     const inspection = await this.inspectSubmission(receipt.operationId);
     return {
       ...(inspection ?? {
@@ -2644,7 +2652,17 @@ export class Think<
     // The turn's channel, from the stamp on its latest user message, as
     // Think resolves it for a new, continued or recovered turn.
     if (this.#turnChannel?.operationId !== turn.operationId) {
-      const channel = channelFromMessages([...turn.messages]);
+      // A context reminder the harness adds as a message of its own is not
+      // the turn's user message.
+      const history = turn.messages.filter(
+        (message) => message.id !== CONTEXT_REMINDER_ID
+      );
+      const web = this.#webRequests.delete(turn.operationId);
+      const channel = web ? "web" : channelFromMessages(history);
+      // As in Think: a browser's new user message is stamped `web`, so a
+      // continued or recovered turn resolves it again. The client's own
+      // write cannot carry the key.
+      if (web) await this.#stampWeb(history);
       const emit = this._emit as unknown as (
         type: string,
         payload: Record<string, unknown>
@@ -2859,10 +2877,12 @@ export class Think<
       model !== undefined ? this.resolveModel(model) : resolveDefault();
     const messages = step.messages ?? turnMessages;
     // A narrowing channel limits the tools the model is offered.
-    const activeTools =
-      step.activeTools ??
-      config.activeTools ??
-      (channel?.tools ? Object.keys(tools) : undefined);
+    // A narrowing channel limits the tools the model is offered, and a
+    // selection cannot bring back a tool it removed.
+    const selected = step.activeTools ?? config.activeTools;
+    const activeTools = channel?.tools
+      ? (selected ?? Object.keys(tools)).filter((name) => name in tools)
+      : selected;
     const toolChoice = step.toolChoice ?? config.toolChoice;
     const callSettings = defined({
       topP: config.topP,
@@ -2901,6 +2921,14 @@ export class Think<
       ...(Object.keys(callSettings).length > 0 && { callSettings }),
       sendReasoning: config.sendReasoning ?? this.sendReasoning
     } as ThinkTurnConfig;
+  }
+
+  /** Stamp `web` on the latest user message, unless it has a channel. */
+  async #stampWeb(history: readonly UIMessage[]): Promise<void> {
+    const user = [...history].reverse().find((m) => m.role === "user");
+    if (!user || channelFromMessages([user]) !== undefined) return;
+    const [stamped] = stampTurnContext([user], "web");
+    await (await this.#rootHandle()).updateMessage(stamped as SessionMessage);
   }
 
   /** The input a human approved for a call, from the latest reply. */
@@ -3012,6 +3040,9 @@ export class Think<
     };
     const onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      // As in Think: a browser's chat request runs on the `web` channel.
+      const request = chatRequestId(message);
+      if (request !== undefined) this.#webRequests.add(request);
       for (const handlers of this.#handlers) {
         if ((await handlers.onMessage?.(connection, message)) === true) return;
       }
@@ -3504,4 +3535,21 @@ for (const method of [
   Think.prototype.rejectExecution
 ]) {
   callable()(method, undefined as unknown as ClassMethodDecoratorContext);
+}
+
+/** The id of the message a context reminder becomes after a reply. */
+const CONTEXT_REMINDER_ID = "cf_agents_context_reminder";
+
+/** The id of a browser's chat request, if `message` is one. */
+function chatRequestId(message: WSMessage): string | undefined {
+  if (typeof message !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(message) as { type?: unknown; id?: unknown };
+    return parsed.type === "cf_agent_use_chat_request" &&
+      typeof parsed.id === "string"
+      ? parsed.id
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
