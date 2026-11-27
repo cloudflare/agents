@@ -417,6 +417,14 @@ describe("ThinkHarness turns", () => {
     expect(text(await stub.prompt("after"))).toBe("echo: after");
   });
 
+  it("ends a model call at an in-band error even when the provider leaves its stream open", async () => {
+    const stub = fresh();
+    const failed = await stub.prompt("fail and stay open");
+    expect(failed.status).toBe("unanswered");
+    expect(reason(failed)).toMatch(/in-band, left open/);
+    expect(text(await stub.prompt("after"))).toBe("echo: after");
+  });
+
   it("takes a client tool declaration that is not a list as none", async () => {
     const stub = fresh();
     expect(await stub.declareMalformedClientTools()).toBe("done");
