@@ -42,6 +42,8 @@ import {
   reconcileOrphanPartial,
   CHAT_REQUEST_CONTEXT_KEY,
   CHAT_STASH_CHECKPOINT,
+  CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
+  planInterruptedTurn,
   requestContextFromLegacy,
   storableRequestContext,
   interruptedToolPartAsError,
@@ -130,7 +132,6 @@ import {
   AgentToolStreamProgressThrottle,
   isDurableObjectResetError,
   type ChatRecoveryAdapter,
-  type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
   type ChatRecoveryAttemptScope,
   type ChatRecoveryIncident
@@ -4016,59 +4017,66 @@ export class AIChatAgent<
     }
     const leaf = await this.#session.getLatestLeaf();
 
-    // The conversation moved on: a newer question than the one this turn
-    // answered is the latest message. Its own turn answers it.
-    const latestUser = [...this.messages]
-      .reverse()
-      .find((message) => message.role === "user");
-    if (
-      leaf?.role === "user" &&
-      snapshot?.latestUserMessageId !== undefined &&
-      latestUser !== undefined &&
-      latestUser.id !== snapshot.latestUserMessageId
-    ) {
-      this._frames.endUnstarted(null, requestId, "aborted");
-      return;
-    }
-
     const continues = leaf?.role === "assistant";
     const partial = continues
       ? this.messages.find((message) => message.id === leaf.id)
       : undefined;
-    const decision = await this.onChatRecovery({
-      incidentId: requestId,
-      recoveryRootRequestId: snapshot?.recoveryRootRequestId ?? requestId,
-      attempt: 1,
-      maxAttempts: resolveChatRecoveryConfig(this.chatRecovery).maxAttempts,
-      recoveryKind: continues ? "continue" : "retry",
-      streamId,
-      requestId,
-      partialText: (partial?.parts ?? [])
-        .map((part) => (part.type === "text" ? part.text : ""))
-        .join(""),
-      partialParts: (partial?.parts ?? []) as MessagePart[],
-      recoveryData: user,
-      messages: [...this.messages],
-      ...(body !== undefined && { lastBody: body }),
-      ...(clientTools !== undefined && { lastClientTools: clientTools }),
-      createdAt: turn.createdAt
-    });
-    if (decision?.continue === false) {
-      // Not continued: what was streamed stays stored unless the app said
-      // not to keep it.
-      if (decision.persist === false && leaf && leaf.id !== before?.id) {
-        await this.#session.deleteMessages([leaf.id]);
-      }
+    // What the release recorded about this turn's recovery is not carried:
+    // the turn starts on the lane with the budget of a new one.
+    await this._forgetReleasedIncidents(requestId);
+    let decision: ChatRecoveryOptions | void;
+    try {
+      decision = await this.onChatRecovery({
+        incidentId: requestId,
+        recoveryRootRequestId: snapshot?.recoveryRootRequestId ?? requestId,
+        attempt: 1,
+        maxAttempts: resolveChatRecoveryConfig(this.chatRecovery).maxAttempts,
+        recoveryKind: continues ? "continue" : "retry",
+        streamId,
+        requestId,
+        partialText: (partial?.parts ?? [])
+          .map((part) => (part.type === "text" ? part.text : ""))
+          .join(""),
+        partialParts: (partial?.parts ?? []) as MessagePart[],
+        recoveryData: user,
+        messages: [...this.messages],
+        ...(body !== undefined && { lastBody: body }),
+        ...(clientTools !== undefined && { lastClientTools: clientTools }),
+        createdAt: turn.createdAt
+      });
+    } catch (error) {
+      // The app's hook failed: the turn is not continued, and what was
+      // streamed stays stored.
+      console.error("[AIChatAgent] onChatRecovery threw", error);
       this._frames.endUnstarted(null, requestId, "aborted");
       return;
     }
-    // Continue without what was streamed: the question is answered again.
-    const dropped =
+    // "Do not keep it" drops what this turn streamed, unless that holds a
+    // tool's result: the tool ran, so its result stays.
+    const droppable =
       decision?.persist === false &&
-      continues &&
       leaf !== null &&
-      leaf.id !== before?.id;
-    if (dropped) await this.#session.deleteMessages([leaf.id]);
+      leaf.id !== before?.id &&
+      !(partial?.parts ?? []).some(
+        (part) =>
+          part.type.startsWith("tool-") &&
+          ((part as { state?: string }).state === "output-available" ||
+            (part as { state?: string }).state === "output-error")
+      );
+    // Continue without what was streamed: the question is answered again.
+    if (droppable) await this.#session.deleteMessages([leaf.id]);
+    // What to do with it, as the release decided: answer its question
+    // again while that is still the latest message, continue the latest
+    // reply, or nothing when the conversation moved on.
+    const plan = planInterruptedTurn(
+      { snapshot: snapshot ?? null },
+      decision ?? {},
+      droppable ? before : leaf
+    );
+    if (plan.action === "skip") {
+      this._frames.endUnstarted(null, requestId, "aborted");
+      return;
+    }
 
     const context = {
       ...(body !== undefined && { body }),
@@ -4080,15 +4088,34 @@ export class AIChatAgent<
       // A carried turn takes its place in the lane; it is not a new message
       // that could skip the ones waiting.
       { ...this._chatLane(), arrival: "queue" },
-      continues && !dropped
+      plan.action === "continue"
         ? { trigger: "server", mode: "continue", ...context }
         : {
-            trigger: "server",
-            ...(latestUser && { questionId: latestUser.id }),
+            trigger:
+              plan.regeneratedLeafId === undefined
+                ? "submit-message"
+                : "regenerate-message",
+            questionId: plan.questionId,
             ...context
           },
       { requestId }
     );
+  }
+
+  /** Drop the recovery incidents a release kept for `requestId`. */
+  private async _forgetReleasedIncidents(requestId: string): Promise<void> {
+    const incidents = await this.ctx.storage.list<{
+      requestId?: string;
+      recoveryRootRequestId?: string;
+    }>({ prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX });
+    const keys = [...incidents]
+      .filter(
+        ([, incident]) =>
+          incident.requestId === requestId ||
+          incident.recoveryRootRequestId === requestId
+      )
+      .map(([key]) => key);
+    if (keys.length > 0) await this.ctx.storage.delete(keys);
   }
 
   private _resolveAIChatRecoveryStream(
