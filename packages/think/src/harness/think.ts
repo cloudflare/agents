@@ -53,7 +53,21 @@ import {
   type MessengerConcurrency,
   type ThinkMessengers
 } from "../messengers";
-import { deliverChannelNotice } from "../channels/runtime";
+import { resolveChannels } from "../channels";
+import type {
+  ChannelContext,
+  NormalizedChannelDefinition,
+  ThinkChannels
+} from "../channels";
+import {
+  deliverChannelNotice,
+  resolveChannelContext
+} from "../channels/runtime";
+import {
+  channelFromMessages,
+  stampTurnContext,
+  turnMetadataFromMessages
+} from "../turn-metadata";
 import type { DeliverNoticeOptions } from "../turn-types";
 import {
   messengerChannels,
@@ -980,6 +994,13 @@ export class Think<
           )
       });
       await this.#context.load();
+      // As in Think: the channel registry, read at start on the root.
+      if (this.parentPath.length === 0) {
+        this.#channels = resolveChannels(
+          await this.configureChannels(),
+          this.getMessengers() as ThinkMessengers
+        ).channels;
+      }
       if (this.extensionLoader) {
         this.extensionManager = createThinkExtensionManager({
           loader: this.extensionLoader,
@@ -1519,11 +1540,7 @@ export class Think<
     const channelId = options?.channel ?? "web";
     await deliverChannelNotice(text, options, {
       channelId,
-      // Only the messengers so far (configureChannels() comes with C6): it
-      // names what a notice to one of them lacks.
-      registry: new Map(
-        (this.#messengers?.ids ?? []).map((id) => [id, { kind: "messenger" }])
-      ) as never,
+      registry: this.#channels,
       surface: async () =>
         this.#messengers?.noticeSurface(channelId, options?.thread) as never,
       addMessages: (messages) => this.addMessages(messages),
@@ -1536,9 +1553,12 @@ export class Think<
       }
     });
   }
-  configureChannels():
-    | Record<string, unknown>
-    | Promise<Record<string, unknown>> {
+  /**
+   * Return the channels for this agent, as on Think: the implicit `web`
+   * channel and each messenger are always present; these add surfaces and
+   * per-channel policy (instructions, a narrower tool set, `maxTurns`).
+   */
+  configureChannels(): ThinkChannels | Promise<ThinkChannels> {
     return {};
   }
   getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
@@ -1649,14 +1669,32 @@ export class Think<
     return this.#transcript.messages;
   }
 
-  /** The channel of the running turn. Channels are not supported. */
-  get activeChannel(): undefined {
-    return undefined;
+  /** The channel of the running turn, if it resolved to one. */
+  get activeChannel(): ChannelContext | undefined {
+    const turn = this.#turnChannel;
+    return turn && turn.operationId === this.#running?.requestId
+      ? turn.context
+      : undefined;
   }
 
-  /** Metadata of the running turn. Not supported. */
-  get activeTurnMetadata(): undefined {
-    return undefined;
+  /** The channel registry, read at start (none on a sub-agent). */
+  #channels: Map<string, NormalizedChannelDefinition> | undefined;
+  /** The running operation's channel, resolved at its first model call. */
+  #turnChannel:
+    | {
+        operationId: string;
+        context: ChannelContext | undefined;
+        definition: NormalizedChannelDefinition | undefined;
+      }
+    | undefined;
+
+  /**
+   * The server-supplied metadata stamped on the turn's user message, as on
+   * Think: read from the latest user message, so a recovered or continued
+   * turn reads the same value.
+   */
+  get activeTurnMetadata(): Record<string, unknown> | undefined {
+    return turnMetadataFromMessages(this.messages);
   }
 
   /** The turn running now, if any. */
@@ -2005,7 +2043,11 @@ export class Think<
                 (current: UIMessage[]) => unknown
               >
             );
-      receipt = await session.submit(messages);
+      receipt = await session.submit(
+        // As in Think: the channel is stamped on the durable user message,
+        // so a continuation or a recovered turn resolves it again.
+        wait.channel ? stampTurnContext(messages, wait.channel) : messages
+      );
     }
     wait.signal?.addEventListener(
       "abort",
@@ -2306,10 +2348,15 @@ export class Think<
       }
       return;
     }
-    const messages =
+    // As in Think: the channel and the caller's turn metadata are stamped
+    // on the durable user message.
+    const messages = stampTurnContext(
       typeof userMessage === "function"
         ? await userMessage(this.messages)
-        : toInput(userMessage);
+        : toInput(userMessage),
+      options?.channel,
+      options?.metadata
+    );
     this.#turns.set(operationId, { trigger: "rpc" });
     options?.signal?.addEventListener(
       "abort",
@@ -2564,8 +2611,31 @@ export class Think<
   // ── Harness wiring ────────────────────────────────────────────────
 
   async #beforeTurn(turn: ThinkTurnContext): Promise<ThinkTurnConfig | void> {
-    // Every tool on offer, as Think's `beforeTurn` sees them.
-    const tools = turn.toolSet;
+    // The turn's channel, from the stamp on its latest user message, as
+    // Think resolves it for a new, continued or recovered turn.
+    if (this.#turnChannel?.operationId !== turn.operationId) {
+      const channel = channelFromMessages([...turn.messages]);
+      const emit = this._emit as unknown as (
+        type: string,
+        payload: Record<string, unknown>
+      ) => void;
+      this.#turnChannel = {
+        operationId: turn.operationId,
+        context: resolveChannelContext(channel, {
+          registry: this.#channels,
+          requestId: turn.operationId,
+          messengerContext: () => undefined,
+          emit: (event) => emit.call(this, event.type, event.payload)
+        }),
+        definition: channel ? this.#channels?.get(channel) : undefined
+      };
+    }
+    const channel = this.#turnChannel.context
+      ? this.#turnChannel.definition
+      : undefined;
+    // Every tool on offer, as Think's `beforeTurn` sees them, narrowed by
+    // the channel's policy.
+    const tools = channel?.tools ? channel.tools(turn.toolSet) : turn.toolSet;
     // Resolved only when read, as in Think: a `beforeTurn` that sets its
     // own model never needs the default's binding.
     // The step before this call ran its tools: it ends now, before this
@@ -2603,7 +2673,15 @@ export class Think<
     }
     // As in Think: the capability block for the turn's tools follows the
     // prompt, unless a `beforeTurn` gives its own.
-    const base = turn.system ?? this.getSystemPrompt();
+    const prompt = turn.system ?? this.getSystemPrompt();
+    // As in Think: the channel's instructions come before the prompt.
+    const instructions =
+      channel?.instructions && this.#turnChannel.context
+        ? typeof channel.instructions === "function"
+          ? await channel.instructions(this.#turnChannel.context)
+          : channel.instructions
+        : undefined;
+    const base = instructions ? `${instructions}\n\n${prompt}` : prompt;
     const context = {
       system: systemPromptForTurn(base, tools),
       messages: await convertToModelMessages([...turn.messages], {
@@ -2656,7 +2734,8 @@ export class Think<
       const { messages: _messages, ...kept } = changesOf(own ?? {}, config);
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
-    this.#turnMaxSteps = config.maxSteps;
+    // A channel's `maxTurns` is a default a `beforeTurn` may override.
+    this.#turnMaxSteps = config.maxSteps ?? channel?.maxTurns;
     // The model stays lazy, as in Think: spreading `context` would read
     // its `model` getter and resolve the default.
     const turnModel = config.model;
@@ -2749,7 +2828,11 @@ export class Think<
     const sent =
       model !== undefined ? this.resolveModel(model) : resolveDefault();
     const messages = step.messages ?? turnMessages;
-    const activeTools = step.activeTools ?? config.activeTools;
+    // A narrowing channel limits the tools the model is offered.
+    const activeTools =
+      step.activeTools ??
+      config.activeTools ??
+      (channel?.tools ? Object.keys(tools) : undefined);
     const toolChoice = step.toolChoice ?? config.toolChoice;
     const callSettings = defined({
       topP: config.topP,
