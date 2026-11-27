@@ -2617,7 +2617,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                   operationId: turn.operationId,
                   signal
                 });
-                if (!room) throw new ModelCallError(kind, failure);
+                // Declined: the turn ends here, not in another overflow
+                // round the chat host would ask the same rule about.
+                if (!room) throw new ModelCallError("fail", failure);
                 throw new ModelCallError("retry", failure);
               }
               try {

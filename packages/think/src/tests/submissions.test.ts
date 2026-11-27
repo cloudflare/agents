@@ -2416,13 +2416,17 @@ describe("Think durable submissions", () => {
       async () => {
         const submission =
           await restarted.inspectSubmissionForTest("sub-final-cut");
+        expect(submission).toBeDefined();
         expect(submission?.status).not.toBe("running");
         expect(submission?.status).not.toBe("pending");
       },
       { timeout: 20_000 }
     );
-    const stored = JSON.stringify(await restarted.getStoredMessages());
-    expect(stored).not.toContain("think_final_answer");
+    const messages = await restarted.getStoredMessages();
+    // The question is kept; the partial held only the final-answer call,
+    // so nothing of it is.
+    expect(messages.some((m) => m.role === "user")).toBe(true);
+    expect(JSON.stringify(messages)).not.toContain("think_final_answer");
   }, 40_000);
 
   it("keeps the final-answer call from the tool hooks", async () => {
