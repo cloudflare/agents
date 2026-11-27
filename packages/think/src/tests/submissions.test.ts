@@ -23,6 +23,8 @@ type ThinkSubmissionTestStub = {
   setDelayedChunkResponse(chunks: string[], delayMs: number): Promise<void>;
   holdChunksAfterForTest(after: number): Promise<void>;
   isChunkStreamHeldForTest(): Promise<boolean>;
+  setStallTimeoutForTest(timeoutMs: number): Promise<void>;
+  abandonChunkHoldForTest(): Promise<void>;
   releaseChunksForTest(): Promise<void>;
   clearDelayedChunkResponse(): Promise<void>;
   setInBandStreamErrorResponse(
@@ -88,6 +90,7 @@ type ThinkSubmissionTestStub = {
   persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
+  keepSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
   setWorkflowEventFailuresForTest(count: number): Promise<void>;
   repeatSubmissionReportForTest(submissionId: string): Promise<void>;
   getErrorsForTest(): Promise<string[]>;
@@ -764,6 +767,77 @@ describe("Think durable submissions", () => {
         "assistant"
       ]);
     }, 40_000);
+
+    it("ends in error, without asking the model again, when its turn started longer ago than the stale window", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      // The window is far shorter than the reply's first chunk takes.
+      await agent.keepSubmissionRecoveryStaleMsForTest(20);
+      onTestFinished(async () =>
+        (await freshAgent(name)).keepSubmissionRecoveryStaleMsForTest(
+          15 * 60 * 1000
+        )
+      );
+      await agent.setDelayedChunkResponse(["alpha ", "beta ", "gamma "], 200);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("too old to recover", {
+        submissionId: "sub-evicted-stale"
+      });
+      await chunkStreamHeld(agent);
+
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+      await tasksIdle(restarted);
+
+      await expect(
+        restarted.inspectSubmissionForTest("sub-evicted-stale")
+      ).resolves.toMatchObject({
+        status: "error",
+        error: "Submission was interrupted after messages were applied."
+      });
+      // The reply was not produced again: only what was streamed before
+      // the reset is stored, if anything.
+      const replies = (await restarted.getStoredMessages())
+        .filter((message) => message.role === "assistant")
+        .map((message) => JSON.stringify(message));
+      expect(replies.length).toBeLessThanOrEqual(1);
+      for (const reply of replies) {
+        expect(reply).toContain("alpha");
+        expect(reply).not.toContain("beta");
+      }
+    }, 30_000);
+
+    it("retries a stalled reply in the same isolate, however long ago its turn started", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      // The stale window judges a turn a reset cut off, not a stalled one.
+      await agent.keepSubmissionRecoveryStaleMsForTest(20);
+      onTestFinished(async () =>
+        (await freshAgent(name)).keepSubmissionRecoveryStaleMsForTest(
+          15 * 60 * 1000
+        )
+      );
+      await agent.setStallTimeoutForTest(300);
+      onTestFinished(async () =>
+        (await freshAgent(name)).setStallTimeoutForTest(0)
+      );
+      await agent.setDelayedChunkResponse(["alpha ", "beta "], 0);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("stalls once", {
+        submissionId: "sub-stalled-old"
+      });
+      // The reply goes quiet after its first chunk and never continues.
+      await chunkStreamHeld(agent);
+      await agent.abandonChunkHoldForTest();
+
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await agent.inspectSubmissionForTest("sub-stalled-old"))?.status
+          ).toBe("completed"),
+        { timeout: 20_000, interval: 50 }
+      );
+    }, 30_000);
 
     it("stays aborted when it is cancelled while its reply is being recovered", async () => {
       const name = crypto.randomUUID();

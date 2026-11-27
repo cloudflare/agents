@@ -257,6 +257,10 @@ function submissionStatus(
   }
 }
 
+/** What Think reports for a submission interrupted and not recovered. */
+const SUBMISSION_INTERRUPTED =
+  "Submission was interrupted after messages were applied.";
+
 /**
  * Submissions read per page when deleting in bulk, whatever the limit: a
  * small limit does not cost a read per submission it passes over.
@@ -283,10 +287,16 @@ function submissionInspection(
       idempotencyKey: status.idempotencyKey
     }),
     ...(status.metadata !== undefined && { metadata: status.metadata }),
-    // A cancel's own reason, as on Think; else how the operation ended.
+    // A cancel's own reason, as on Think; else how the operation ended. A
+    // turn that was interrupted and not recovered is reported in Think's
+    // words.
     ...(status.status === "unanswered" &&
       (status.abortReason ?? status.reason) !== undefined && {
-        error: status.abortReason ?? status.reason
+        error:
+          status.abortReason ??
+          (status.reason === "interrupted"
+            ? SUBMISSION_INTERRUPTED
+            : status.reason)
       }),
     ...("messageId" in status &&
       status.messageId !== undefined && { messageId: status.messageId })
@@ -364,6 +374,11 @@ export class Think<
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
   static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
+  /**
+   * How long after its turn started an interrupted submission is still
+   * recovered. Past it, the submission ends `error`.
+   */
+  protected static submissionRecoveryStaleMs = 15 * 60 * 1000;
 
   /** Model calls per turn. Read per call, so a subclass field applies. */
   maxSteps = 10;
@@ -2893,6 +2908,23 @@ export class Think<
     readonly attempt: number;
     readonly partial: UIMessage | undefined;
   }): Promise<"continue" | "abandon"> {
+    // As on Think: a submission cut off by a reset whose turn started
+    // longer ago than the stale window is not recovered. It ends `error`.
+    // An attempt that already asked the model in this isolate is a live
+    // retry (a stalled stream), which the window does not judge.
+    if (this.#turnChannel?.operationId !== context.operationId) {
+      const [running] = await this.harness.submissions(
+        this.harness.session().id,
+        { status: ["running"], limit: 1 }
+      );
+      if (
+        running?.operationId === context.operationId &&
+        Date.now() - (running.startedAt ?? running.createdAt) >
+          (this.constructor as typeof Think).submissionRecoveryStaleMs
+      ) {
+        return "abandon";
+      }
+    }
     const parts = [...(context.partial?.parts ?? [])];
     const config = this.chatRecovery;
     const decision = await this.onChatRecovery({
