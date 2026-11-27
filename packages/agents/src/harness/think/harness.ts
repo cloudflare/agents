@@ -32,7 +32,9 @@ import type {
   TaskJson,
   TaskRecord,
   TaskStatus,
-  TaskStep
+  TaskStep,
+  TaskStepAttempt,
+  TaskValue
 } from "../../tasks/types";
 import {
   createToolsFromClientSchemas,
@@ -103,12 +105,14 @@ import { contextExtension, optionsExtension, resolve } from "./extensions/own";
 import { loadInProcess } from "./extensions/in-process";
 import { ReleasedRecords, type OperationInput } from "./records";
 import {
+  callableBy,
   executeTool,
   isServerTool,
   modelTools,
   toolNeedsApproval,
   type ToolOutcome
 } from "./tools";
+import type { ToolInvoke } from "./extensions/types";
 import {
   hasContent,
   isToolCallPart,
@@ -237,6 +241,37 @@ const TOOL_STEP = { retries: { limit: 1 }, timeout: 2 ** 31 - 1 } as const;
 
 const INPUT_CUT_OFF_ERROR =
   "The tool call's input was cut off before it was complete, so the tool did not run.";
+
+/** The Sessions annotation that keeps what parked tools called. */
+const PARKED_KIND = "think:parked-calls";
+
+/** A tool parked for an approval: the calls it made, and the one waiting. */
+type ParkedCall = {
+  readonly calls: Readonly<Record<string, ToolOutcome>>;
+  readonly pending: {
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly input: unknown;
+  };
+};
+
+/** What the `invoke`s under one tool call share. */
+type InvokeScope = {
+  readonly signal: AbortSignal;
+  /** Results kept from before a park, by call id. */
+  readonly seed: Readonly<Record<string, ToolOutcome>>;
+  /** The call an approval was given for. */
+  readonly approved?: string;
+  /** Results this run, by call id. */
+  readonly made: Record<string, ToolOutcome>;
+  parked?: ParkedCall["pending"];
+  /** Aborts the calling tool once it parks. */
+  readonly parking: AbortController;
+  readonly park: () => void;
+};
+
+/** What a call made after its tool parked gets. */
+const PARKED_ERROR = "The call is waiting for an approval.";
 
 const INTERRUPTED_TOOL_ERROR =
   "The tool call was interrupted before it finished, because the agent restarted. It may or may not have taken effect.";
@@ -2009,6 +2044,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           unanswered = "not_waiting";
           break;
         }
+        // A refused approval inside a tool's call (`<callId>/<n>`): what
+        // the parked tool kept goes, since it will not run again.
+        if (
+          answer.type === "approval" &&
+          !answer.approved &&
+          answer.approvalId.includes("/")
+        ) {
+          const refused = answered.parts.find(
+            (part) =>
+              isToolCallPart(part) && part.approval?.id === answer.approvalId
+          );
+          if (refused && isToolCallPart(refused)) {
+            await this.#unpark(session, answered.id, refused.toolCallId);
+          }
+        }
         const latest = history.at(-1);
         const continues =
           input.autoContinue &&
@@ -2622,6 +2672,178 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
+   * A tool call's `invoke`: each call is a recorded step under the calling
+   * one (`<parent>/<n>`), so a call that runs again after a reset gets the
+   * results its earlier calls recorded, in order. It runs the tool hooks
+   * and the tool's recovery rule, as a call from the model does. A call
+   * that needs approval parks the calling tool instead (`scope.park`): the
+   * calls made so far are kept, and when the approval is given the calling
+   * tool runs again from the top, answered from them, and the approved
+   * call runs.
+   */
+  #invoker(
+    turn: TurnContext,
+    stepIndex: number,
+    tools: ToolSet,
+    messages: ModelMessage[],
+    parent: string,
+    scope: InvokeScope
+  ): ToolInvoke {
+    const { run, session, operationId } = turn;
+    const maxAttempts =
+      this.#options.recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    let invoked = 0;
+    return async (toolName, input) => {
+      const toolCallId = `${parent}/${++invoked}`;
+      scope.signal.throwIfAborted();
+      const kept = Object.hasOwn(scope.seed, toolCallId)
+        ? scope.seed[toolCallId]
+        : undefined;
+      if (kept) {
+        scope.made[toolCallId] = kept;
+        return kept;
+      }
+      // Parked: the calling tool is aborted; nothing after it runs.
+      if (scope.parked) throw new Error(PARKED_ERROR);
+      const tool = Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
+      if (!tool || !isServerTool(tools, toolName)) {
+        return { ok: false, errorText: `Tool "${toolName}" is not available.` };
+      }
+      if (!callableBy(tool, "code")) {
+        return {
+          ok: false,
+          errorText: `Tool "${toolName}" can't be called from another tool.`
+        };
+      }
+      if (toolCallId !== scope.approved) {
+        const needsApproval =
+          (await this.#options.toolApproval?.({
+            session,
+            toolName,
+            toolCallId,
+            input
+          })) ||
+          (await toolNeedsApproval(tool, input, { toolCallId, messages }));
+        if (needsApproval) {
+          scope.parked = { toolCallId, toolName, input };
+          scope.park();
+          scope.parking.abort(new Error(PARKED_ERROR));
+          throw new Error(PARKED_ERROR);
+        }
+      }
+      const outcome = (await run.do(
+        `tool:${stepIndex}:${toolCallId}`,
+        TOOL_STEP,
+        // SAFETY: an outcome is the tool's JSON result or its error text,
+        // as the transcript stores it.
+        (async ({ attempt, signal }: TaskStepAttempt): Promise<ToolOutcome> => {
+          if (
+            attempt > 1 &&
+            (toolRecovery(tool) === "report" || attempt - 1 >= maxAttempts)
+          ) {
+            return { ok: false, errorText: INTERRUPTED_TOOL_ERROR };
+          }
+          let runInput = input;
+          const decision = await this.#extensions.hook("beforeToolCall", {
+            session,
+            operationId,
+            toolCallId,
+            toolName,
+            input,
+            attempt
+          });
+          let outcome: ToolOutcome;
+          if (decision?.action === "block") {
+            outcome = { ok: false, errorText: decision.reason };
+          } else if (decision?.action === "substitute") {
+            outcome = { ok: true, output: asJson(decision.output) };
+          } else {
+            if (decision?.action === "run" && decision.input !== undefined) {
+              runInput = decision.input;
+            }
+            outcome = await executeTool(tool, runInput, {
+              toolCallId,
+              messages,
+              abortSignal: AbortSignal.any([signal, scope.signal]),
+              onPreliminary: () => {},
+              invoke: this.#invoker(
+                turn,
+                stepIndex,
+                tools,
+                messages,
+                toolCallId,
+                scope
+              )
+            });
+            if (outcome.ok)
+              outcome = { ok: true, output: asJson(outcome.output) };
+          }
+          await this.#extensions.hook("afterToolCall", {
+            session,
+            operationId,
+            toolCallId,
+            toolName,
+            input: runInput,
+            attempt,
+            ...outcome
+          });
+          return outcome;
+        }) as unknown as (attempt: TaskStepAttempt) => Promise<TaskValue>
+      )) as unknown as ToolOutcome;
+      scope.made[toolCallId] = outcome;
+      return outcome;
+    };
+  }
+
+  /** Keep what a parked tool called, for the run after its approval. */
+  async #park(
+    session: ThinkSessionId,
+    messageId: string,
+    toolCallId: string,
+    call: ParkedCall
+  ): Promise<void> {
+    const stored = await this.#parkedCalls(session, messageId);
+    stored[toolCallId] = call;
+    await this.#handle(session).internal_setAnnotation(
+      PARKED_KIND,
+      messageId,
+      JSON.stringify(stored)
+    );
+  }
+
+  /** Forget what a parked tool kept, once its approval is used. */
+  async #unpark(
+    session: ThinkSessionId,
+    messageId: string,
+    toolCallId: string
+  ): Promise<void> {
+    const stored = await this.#parkedCalls(session, messageId);
+    if (!Object.hasOwn(stored, toolCallId)) return;
+    delete stored[toolCallId];
+    const handle = this.#handle(session);
+    if (Object.keys(stored).length === 0) {
+      await handle.internal_deleteAnnotation(PARKED_KIND, messageId);
+    } else {
+      await handle.internal_setAnnotation(
+        PARKED_KIND,
+        messageId,
+        JSON.stringify(stored)
+      );
+    }
+  }
+
+  /** What a tool parked for an approval kept, by its call id, if any. */
+  async #parkedCalls(
+    session: ThinkSessionId,
+    messageId: string
+  ): Promise<Record<string, ParkedCall>> {
+    const stored = (
+      await this.#handle(session).internal_annotations(PARKED_KIND, [messageId])
+    ).get(messageId);
+    return stored ? (JSON.parse(stored) as Record<string, ParkedCall>) : {};
+  }
+
+  /**
    * Run a model step's server tool calls, each as a durable step of the
    * turn's run, and stream their results. A call that needs approval is
    * asked for instead. Returns the reply with the results in it.
@@ -2651,7 +2873,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const toRun: ToolCallPart[] = [];
     for (const part of calls) {
       const toolName = toolNameOf(part);
-      const tool = Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
+      const tool = offeredTool(tools, toolName);
       if (tool && part.state === "input-available") {
         const needsApproval =
           (await this.#options.toolApproval?.({
@@ -2702,15 +2924,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // Each call's result is streamed as it finishes, so a reset after one
     // of several leaves the finished ones in the reply.
     const finished: { toolCallId: string; outcome: ToolOutcome }[] = [];
+    // Calls that parked for an approval inside them.
+    const parkedCalls: { toolCallId: string; approvalId: string }[] = [];
     let wake = () => {};
     let left = toRun.length;
     const all = Promise.all(
       toRun.map(async (part) => {
         const toolName = toolNameOf(part);
-        const tool = Object.hasOwn(tools, toolName)
-          ? tools[toolName]
-          : undefined;
+        const tool = offeredTool(tools, toolName);
         const { toolCallId } = part;
+        // Parked for an approval inside it: what it called before is
+        // answered from what it kept, and the approved call runs.
+        const kept =
+          part.state === "approval-responded" && part.approval.approved
+            ? (await this.#parkedCalls(session, current.id))[toolCallId]
+            : undefined;
         try {
           // SAFETY: the step returns what the function below returns.
           const recorded = (await turn.run.do(
@@ -2765,10 +2993,31 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               if (decision?.action === "run" && decision.input !== undefined) {
                 input = decision.input;
               }
-              const outcome = await executeTool(tool, input, {
+              let markParked = () => {};
+              const parked = new Promise<undefined>((resolve) => {
+                markParked = () => resolve(undefined);
+              });
+              const parking = new AbortController();
+              const scope: InvokeScope = {
+                signal,
+                seed: kept?.calls ?? {},
+                ...(kept && { approved: kept.pending.toolCallId }),
+                made: {},
+                parking,
+                park: markParked
+              };
+              const running = executeTool(tool, input, {
                 toolCallId,
                 messages: modelMessages,
-                abortSignal: signal,
+                abortSignal: AbortSignal.any([signal, parking.signal]),
+                invoke: this.#invoker(
+                  turn,
+                  stepIndex,
+                  tools,
+                  modelMessages,
+                  toolCallId,
+                  scope
+                ),
                 onPreliminary: (output) =>
                   this.#events.emit(session, {
                     type: "chunk",
@@ -2781,6 +3030,20 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                     }
                   })
               });
+              // A tool that parks is aborted; what it returns is dropped.
+              running.catch(() => {});
+              const outcome = await Promise.race([running, parked]);
+              if (!outcome || scope.parked) {
+                const pending = scope.parked;
+                if (!pending) throw new Error("A tool parked without a call");
+                await this.#park(session, current.id, toolCallId, {
+                  calls: { ...scope.seed, ...scope.made },
+                  pending
+                });
+                return { parked: pending.toolCallId } as TaskJson;
+              }
+              // Run to the end: what it kept is no longer needed.
+              if (kept) await this.#unpark(session, current.id, toolCallId);
               // Journaled as JSON: an output's own `toJSON` decides its form.
               return {
                 input: asJson(input),
@@ -2790,12 +3053,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                   : outcome
               } as TaskJson;
             }
-          )) as unknown as {
-            outcome: ToolOutcome;
-            input: unknown;
-            attempt?: number;
-          };
+          )) as unknown as
+            | { outcome: ToolOutcome; input: unknown; attempt?: number }
+            | { parked: string };
           if (signal.aborted) return;
+          if ("parked" in recorded) {
+            parkedCalls.push({
+              toolCallId,
+              approvalId: `approval:${recorded.parked}`
+            });
+            return;
+          }
           await this.#extensions.hook("afterToolCall", {
             session,
             operationId,
@@ -2845,6 +3113,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
     // A step that ended the attempt (a reset, a suspension) ends it here.
     await all;
+    if (signal.aborted) return current;
+    for (const { toolCallId, approvalId } of parkedCalls) {
+      current = withToolPart(
+        current,
+        toolCallId,
+        (part) =>
+          // SAFETY: the new state is set with exactly the fields it requires.
+          ({
+            ...part,
+            state: "approval-requested",
+            approval: { id: approvalId }
+          }) as ToolCallPart
+      );
+      turn.live.reply = current;
+      yield {
+        type: "tool-approval-request",
+        approvalId,
+        toolCallId
+      } as UIMessageChunk;
+    }
     return current;
   }
 
@@ -3686,6 +3974,15 @@ function toolHash(tool: ToolSet[string] | undefined): Promise<string> {
     toolHashes.set(tool, made);
   }
   return made;
+}
+
+/** The tool the model may call by this name: one it was offered. */
+function offeredTool(
+  tools: ToolSet,
+  name: string
+): ToolSet[string] | undefined {
+  const tool = Object.hasOwn(tools, name) ? tools[name] : undefined;
+  return tool && callableBy(tool, "model") ? tool : undefined;
 }
 
 function toolRecovery(tool: object): ToolRecovery {

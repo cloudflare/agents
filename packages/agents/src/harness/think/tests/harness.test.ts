@@ -740,6 +740,98 @@ describe("ThinkHarness approvals and client tools", () => {
   });
 });
 
+describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
+  it("runs them as its own steps and keeps a code-only tool from the model", async () => {
+    const stub = fresh();
+    expect(text(await stub.prompt("compose"))).toBe("tool said: 9");
+    expect(await stub.tripledRuns()).toBe(1);
+    const offered = await stub.lastOffered();
+    expect(offered).toContain("compose");
+    expect(offered).not.toContain("tripled");
+  });
+
+  it("runs the tool hooks for each call", async () => {
+    const stub = fresh();
+    await stub.setBlock("tripled");
+    expect(text(await stub.prompt("compose"))).toBe(
+      "tool said: blocked by policy"
+    );
+    expect(await stub.tripledRuns()).toBe(0);
+  });
+
+  it("refuses a model's call to a code-only tool", async () => {
+    const stub = fresh();
+    // As for any name the model wasn't offered: the AI SDK's invalid call.
+    expect(text(await stub.prompt("call tripled"))).toMatch(
+      /^tool said: error: /
+    );
+    expect(await stub.tripledRuns()).toBe(0);
+  });
+
+  it("parks the turn for a call that needs approval, then runs the tool again from the top", async () => {
+    const stub = fresh();
+    await stub.prompt("compose approve");
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [compose approval-requested]"
+    );
+    const [call] = await stub.lastToolCalls();
+    expect(call?.approvalId).toBe(`approval:${call?.toolCallId}/3`);
+    expect(await stub.tripledRuns()).toBe(1);
+    expect(await stub.dangerousRuns()).toBe(0);
+    // The parked tool was aborted, and what it called is kept.
+    expect(await stub.composeAborted()).toBe(true);
+    expect(await stub.parkedAnnotations()).toBe(1);
+
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: did the dangerous thing"
+    });
+    // tripled was answered from what the parked call kept, which goes.
+    expect(await stub.tripledRuns()).toBe(1);
+    expect(await stub.dangerousRuns()).toBe(1);
+    expect(await stub.parkedAnnotations()).toBe(0);
+  });
+
+  it("denies the whole call when the approval inside it is refused", async () => {
+    const stub = fresh();
+    await stub.prompt("compose approve");
+    const [call] = await stub.lastToolCalls();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: false
+    });
+    // As a refused approval of the call itself.
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: error: Tool call execution denied."
+    });
+    expect(await stub.dangerousRuns()).toBe(0);
+    expect(await stub.parkedAnnotations()).toBe(0);
+  });
+
+  it("answers the calls a rerun tool made before an eviction from their steps", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("compose gate");
+    await stub.gateStarted(1);
+
+    stub = await crash(name);
+    await stub.release();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({ status: "done", text: "tool said: 9" });
+    // multiply and tripled ran once; the gate, cut short, ran again.
+    expect(await stub.tripledRuns()).toBe(1);
+    expect(await stub.gateRuns()).toBe(2);
+  });
+});
+
 describe("ThinkHarness durability", () => {
   it("reports a tool call an eviction cut short, instead of rerunning it", async () => {
     const name = crypto.randomUUID();

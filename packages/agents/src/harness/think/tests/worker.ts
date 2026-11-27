@@ -18,6 +18,7 @@ import { Tasks } from "../../../tasks/tasks";
 import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
+import type { ToolInvoke } from "../extensions/types";
 import {
   classifyContextOverflow,
   SteerNotSupportedError,
@@ -45,6 +46,8 @@ const BEFORE_TURN_CALLS_KEY = "test:before-turn:calls";
 /** `operationChunks` and `followOperation` lengths at each `beforeTurn`. */
 const OPERATION_CHUNKS_KEY = "test:before-turn:operation-chunks";
 const SYSTEM_KEY = "test:system";
+const TRIPLED_KEY = "test:tripled";
+const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
 const LATE_EXAMPLES_KEY = "test:late-examples";
@@ -235,6 +238,51 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           inputSchema: z.object({}),
           execute: () => this.#gate()
         }),
+        // Offered to other tools' code only.
+        tripled: {
+          ...tool({
+            description: "Triple a number",
+            inputSchema: z.object({ value: z.number() }),
+            execute: async ({ value }) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(TRIPLED_KEY, (kv.get<number>(TRIPLED_KEY) ?? 0) + 1);
+              return value * 3;
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Calls multiply, then tripled (then gate_safe), through invoke.
+        compose: {
+          ...tool({
+            description: "Multiply by three, then triple",
+            inputSchema: z.object({
+              gate: z.boolean().optional(),
+              approve: z.boolean().optional()
+            }),
+            execute: async ({ gate, approve }, options) => {
+              const { invoke } = options as unknown as { invoke: ToolInvoke };
+              const multiplied = await invoke("multiply", { value: 1 });
+              if (!multiplied.ok) return multiplied.errorText;
+              const tripled = await invoke("tripled", {
+                value: multiplied.output
+              });
+              if (!tripled.ok) return tripled.errorText;
+              if (gate) {
+                const gated = await invoke("gate_safe", {});
+                if (!gated.ok) return gated.errorText;
+              }
+              if (approve) {
+                options.abortSignal?.addEventListener("abort", () =>
+                  this.ctx.storage.kv.put(COMPOSE_ABORTED_KEY, true)
+                );
+                const done = await invoke("dangerous", {});
+                return done.ok ? done.output : done.errorText;
+              }
+              return tripled.output;
+            }
+          }),
+          recovery: "rerun" as const
+        },
         // Gone from the tools once a test removes it.
         ...(!this.ctx.storage.kv.get<boolean>(NO_GATE_SAFE_KEY) && {
           gate_safe: {
@@ -554,6 +602,18 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([
           { name: "multiply", input: { value: 5 }, id: "constructor" }
         ]);
+      } else if (text.startsWith("compose")) {
+        parts = callReply([
+          {
+            name: "compose",
+            input: {
+              gate: text === "compose gate",
+              approve: text === "compose approve"
+            }
+          }
+        ]);
+      } else if (text === "call tripled") {
+        parts = callReply([{ name: "tripled", input: { value: 2 } }]);
       } else if (text === "two tools") {
         parts = callReply([
           { name: "multiply", input: { value: 2 } },
@@ -840,6 +900,23 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   returnMessagesFromBeforeTurn(messages: ModelMessage[]): void {
     this.ctx.storage.kv.put(RETURNED_MESSAGES_KEY, messages);
+  }
+
+  composeAborted(): boolean {
+    return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
+  }
+
+  /** Messages with what a parked tool kept. */
+  parkedAnnotations(): number {
+    return this.ctx.storage.sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM cf_agents_session_annotations WHERE kind = 'think:parked-calls'"
+      )
+      .one().n;
+  }
+
+  tripledRuns(): number {
+    return this.ctx.storage.kv.get<number>(TRIPLED_KEY) ?? 0;
   }
 
   addLateTool(): void {

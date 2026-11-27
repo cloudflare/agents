@@ -2731,6 +2731,14 @@ export class SessionsCore {
     return found;
   }
 
+  deleteAnnotation(sessionId: string, kind: string, messageId: string): void {
+    this.io.sqlWrite(
+      `DELETE FROM ${this.#t.annotations}
+       WHERE session_id = ? AND message_id = ? AND kind = ?`,
+      [sessionId, messageId, kind]
+    );
+  }
+
   setAnnotation(
     sessionId: string,
     kind: string,

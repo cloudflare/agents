@@ -322,6 +322,47 @@ describe("extensions: the build", () => {
     expect(ran).toEqual(["late"]);
   });
 
+  it("lets a later extension make another's tool code-only, which its owner still runs", async () => {
+    const ran: string[] = [];
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "owner",
+      loadInProcess("owner", (ctx) =>
+        ctx.tools.transform((tools) => {
+          tools.set("x", {
+            ...tool({
+              description: "x",
+              inputSchema: z.object({}),
+              execute: async () => {
+                ran.push("owner");
+                return "from the owner";
+              }
+            })
+          });
+        })
+      )
+    );
+    manager.load(
+      "later",
+      loadInProcess("later", (ctx) =>
+        ctx.tools.transform((tools) => {
+          expect(tools.setCallers("x", ["code"])).toBe(true);
+          expect(tools.setCallers("missing", ["code"])).toBe(false);
+        })
+      )
+    );
+    const { tools } = await manager.build("");
+    expect(Object.keys(modelTools(tools, undefined))).toEqual([]);
+    expect((tools.x as { callers?: unknown }).callers).toEqual(["code"]);
+    expect(
+      await tools.x?.execute?.(
+        {},
+        { toolCallId: "c", messages: [], context: undefined }
+      )
+    ).toBe("from the owner");
+    expect(ran).toEqual(["owner"]);
+  });
+
   it("keeps a tool callable on the build it came from after a later build drops it", async () => {
     let offered = true;
     const manager = new ExtensionManager(harnessHookRules);

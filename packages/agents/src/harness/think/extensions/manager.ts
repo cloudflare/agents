@@ -20,7 +20,8 @@ import type {
   ExtensionHooks,
   HookMap,
   HookRules,
-  ToolEntry
+  ToolEntry,
+  ToolInvoke
 } from "./types";
 
 type Loaded<M extends HookMap> = {
@@ -229,7 +230,9 @@ function toolOf<M extends HookMap>(
           name,
           input,
           call(options),
-          options.abortSignal
+          options.abortSignal,
+          // The harness's, for a tool that calls another (`ToolInvoke`).
+          (options as { invoke?: ToolInvoke }).invoke
         );
         // The AI SDK streams whatever returns an async iterable, so a tool
         // declared as an async generator returns its outputs as they come.
@@ -271,7 +274,8 @@ function execute<M extends HookMap>(
     session: ThinkSessionId;
     messages: ModelMessage[];
   },
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  invoke: ToolInvoke | undefined
 ): { outputs: AsyncGenerator<unknown>; streams: Promise<boolean> } {
   signal?.throwIfAborted();
   const outputs: unknown[] = [];
@@ -285,12 +289,18 @@ function execute<M extends HookMap>(
   signal?.addEventListener("abort", onAbort, { once: true });
   let settled = false;
   const done = owner
-    .execute(name, input, call, (output) => {
-      streamed = true;
-      knowStreams(true);
-      outputs.push(output);
-      wake?.();
-    })
+    .execute(
+      name,
+      input,
+      call,
+      (output) => {
+        streamed = true;
+        knowStreams(true);
+        outputs.push(output);
+        wake?.();
+      },
+      invoke
+    )
     .finally(() => {
       settled = true;
       knowStreams(streamed);

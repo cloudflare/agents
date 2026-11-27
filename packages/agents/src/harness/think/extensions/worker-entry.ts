@@ -22,7 +22,8 @@ import type {
   HookRules,
   SchemaOf,
   ThinkExtension,
-  ToolCall
+  ToolCall,
+  ToolInvoke
 } from "./types";
 
 /** In a Worker a tool's schema is JSON Schema already. */
@@ -82,9 +83,10 @@ export default class ExtensionWorker extends WorkerEntrypoint {
     tool: string,
     input: unknown,
     call: ToolCall,
-    onOutput: (output: unknown) => void | Promise<void>
+    onOutput: (output: unknown) => void | Promise<void>,
+    invoke?: ToolInvoke
   ) {
-    return (await runtime()).execute(tool, input, call, onOutput);
+    return (await runtime()).execute(tool, input, call, onOutput, invoke);
   }
 
   async cancel(call: Pick<ToolCall, "id" | "session">, reason?: unknown) {

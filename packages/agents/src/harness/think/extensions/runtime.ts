@@ -29,7 +29,9 @@ import type {
   SchemaOf,
   ToolOutcome,
   Transform,
-  Validation
+  Validation,
+  ToolCaller,
+  ToolInvoke
 } from "./types";
 
 /**
@@ -83,6 +85,22 @@ class EntryDraft<Value, Entry> implements Draft<Value, Entry> {
 
   keys(): IterableIterator<string> {
     return this.entries.keys();
+  }
+}
+
+/** A tool draft: also sets who may call a tool another extension set. */
+class ToolEntryDraft
+  extends EntryDraft<ExtensionTool, ToolEntry>
+  implements ToolDraft
+{
+  setCallers(name: string, callers: readonly ToolCaller[]): boolean {
+    const entry = this.entries.get(name);
+    if (!entry) return false;
+    this.entries.set(name, {
+      ...entry,
+      definition: { ...entry.definition, callers: [...callers] }
+    });
+    return true;
   }
 }
 
@@ -207,7 +225,7 @@ export class ExtensionRuntime<
   async build(drafts: Drafts, build: BuildContext): Promise<Drafts> {
     const kept = new Map<string, ExtensionTool>();
     const pending: PromiseLike<unknown>[] = [];
-    const tools = new EntryDraft<ExtensionTool, ToolEntry>(
+    const tools = new ToolEntryDraft(
       drafts.tools,
       (toolName, tool) => {
         kept.set(toolName, tool);
@@ -361,7 +379,8 @@ export class ExtensionRuntime<
     name: string,
     input: unknown,
     call: ToolCall,
-    onOutput: (output: unknown) => void | Promise<void>
+    onOutput: (output: unknown) => void | Promise<void>,
+    invoke?: ToolInvoke
   ): Promise<ToolOutcome> {
     const execute = (await this.#toolFor(call.session, name)).execute;
     if (typeof execute !== "function") {
@@ -375,8 +394,9 @@ export class ExtensionRuntime<
         toolCallId: call.id,
         messages: call.messages,
         abortSignal: controller.signal,
-        context: undefined
-      });
+        context: undefined,
+        ...(invoke && { invoke })
+      } as Parameters<typeof execute>[1]);
       if (!isAsyncIterable(result)) return { ok: true, output: result };
       let last: unknown;
       for await (const output of result) {

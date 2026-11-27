@@ -486,6 +486,15 @@ export class Session {
     this.#core.setAnnotation(this.sessionId, kind, messageId, value);
   }
 
+  /** @internal Delete one annotation (see {@link internal_annotations}). */
+  async internal_deleteAnnotation(
+    kind: string,
+    messageId: string
+  ): Promise<void> {
+    await this.#ready();
+    this.#core.deleteAnnotation(this.sessionId, kind, messageId);
+  }
+
   /**
    * @internal The newest annotation of `kind` among the messages
    * `getHistory({ leafId })` returns, overlay messages included.
