@@ -723,12 +723,11 @@ describe("AIChatAgent as an agent-tool child", () => {
     });
 
     const events = await parent.getEventsForTest();
-    // The reply's own start (with its message id) comes first, then the
-    // model's five chunks: what a live parent gets, also when the run
-    // settled before its parent followed it.
+    // The run settled before its parent followed it: the parent gets the
+    // stored reply rebuilt (its start, the text part's start, its whole
+    // text in one delta, its end, and the finish).
     expect(events.map((event) => event.event.kind)).toEqual([
       "started",
-      "chunk",
       "chunk",
       "chunk",
       "chunk",

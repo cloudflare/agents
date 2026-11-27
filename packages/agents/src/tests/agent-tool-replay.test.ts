@@ -34,6 +34,30 @@ function runText(
     .join("");
 }
 
+describe("a replay of a child whose chunk log carries its milestones", () => {
+  it("sends each milestone once", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `replay-kept-milestone-${crypto.randomUUID()}`
+    );
+    const milestoneBody = JSON.stringify({
+      type: "data-agent-milestone",
+      data: { name: "found", sequence: 0, at: 1 }
+    });
+    const { replay } = await agent.captureLiveAndReplayForTest({
+      runId: "run-kept-milestone",
+      chunkBodies: [textStart, milestoneBody, textDelta("done")],
+      milestones: [{ beforeChunk: 99, name: "found" }]
+    });
+    const milestones = replay.filter(
+      (frame) =>
+        frame.event.kind === "chunk" &&
+        (frame.event as { body: string }).body.includes("data-agent-milestone")
+    );
+    expect(milestones).toHaveLength(1);
+  });
+});
+
 describe("an awaited agent-tool run cleared while it runs", () => {
   it("resolves aborted as cleared, with its agent type, at the root", async () => {
     const agent = await getAgentByName(

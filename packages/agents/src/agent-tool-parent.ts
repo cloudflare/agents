@@ -2524,13 +2524,34 @@ export class AgentToolParent {
           connection
         )
       : sequence;
+    // A child whose chunk log carries its milestones (an AIChatAgent run's
+    // kept stream) has replayed them already.
+    const replayed = new Set<number>();
+    for (const chunk of chunks ?? []) {
+      if (!chunk.body.includes(AGENT_TOOL_MILESTONE_PART)) continue;
+      try {
+        const parsed = JSON.parse(chunk.body) as {
+          type?: unknown;
+          data?: { sequence?: unknown };
+        };
+        if (
+          parsed.type === AGENT_TOOL_MILESTONE_PART &&
+          typeof parsed.data?.sequence === "number"
+        ) {
+          replayed.add(parsed.data.sequence);
+        }
+      } catch {
+        // Not JSON: not a milestone.
+      }
+    }
     return this._broadcastAgentToolMilestones(
       adapter,
       row,
       next,
       replay,
       connection,
-      deadline?.()
+      deadline?.(),
+      replayed
     );
   }
 
@@ -2547,7 +2568,9 @@ export class AgentToolParent {
     sequence: number,
     replay?: true,
     connection?: Connection,
-    timeoutMs?: number
+    timeoutMs?: number,
+    /** Milestone sequences the replayed chunks carried already. */
+    replayed?: ReadonlySet<number>
   ): Promise<number> {
     // Read-only: replaying milestones must never seal a stale child run.
     const inspection = await this._settleWithinRecoveryTimeout(
@@ -2556,6 +2579,7 @@ export class AgentToolParent {
     );
     const milestones: AgentToolMilestone[] = inspection?.milestones ?? [];
     for (const milestone of milestones) {
+      if (replayed?.has(milestone.sequence)) continue;
       this._broadcastAgentToolEvent(
         row.parent_tool_call_id ?? undefined,
         sequence,

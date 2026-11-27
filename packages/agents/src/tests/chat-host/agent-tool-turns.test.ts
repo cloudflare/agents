@@ -1,11 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
-import {
-  chatTurnStreamId,
-  type ChatHost,
-  type ChatModelCall
-} from "../../chat/chat-host";
+import type { ChatHost, ChatModelCall } from "../../chat/chat-host";
 import { submitTurn } from "../../chat/chat-functions";
 import { applyChunkToParts } from "../../chat/message-builder";
 import type { UIMessage } from "ai";
@@ -18,6 +14,7 @@ import {
   carryForwardAgentToolRuns,
   inspectAgentToolTurn,
   recordAgentToolProgress,
+  remainingChunks,
   startAgentToolTurn
 } from "../../chat/agent-tool-turns";
 
@@ -44,6 +41,7 @@ describe("agent-tool runs as chat turns", () => {
         { type: "text", text: "Looking.", state: "done" },
         {
           type: "tool-search",
+          toolName: "search",
           toolCallId: "c1",
           state: "output-available",
           input: { q: "x" },
@@ -51,19 +49,81 @@ describe("agent-tool runs as chat turns", () => {
         },
         {
           type: "tool-fetch",
+          toolName: "fetch",
           toolCallId: "c2",
           state: "output-error",
           input: { url: "u" },
           errorText: "404"
         },
+        {
+          type: "data-agent-milestone",
+          data: { name: "found", sequence: 0, at: 1 }
+        },
+        { type: "step-start" },
         { type: "text", text: "Done.", state: "done" }
-      ]
+      ],
+      metadata: { model: "m" }
     } as unknown as UIMessage;
+    const chunks = chunksOfMessage(message);
     const parts: UIMessage["parts"] = [];
-    for (const chunk of chunksOfMessage(message)) {
+    for (const chunk of chunks) {
       applyChunkToParts(parts, chunk as never);
     }
-    expect(parts).toMatchObject(message.parts);
+    // The accumulator a tab uses makes the stored parts, exactly.
+    expect(parts).toEqual(message.parts);
+    // Each step opened and closed, the milestone once in its place, and
+    // the finish carries the message's metadata.
+    const types = chunks.map((chunk) => chunk.type);
+    expect(types.filter((type) => type === "start-step")).toHaveLength(2);
+    expect(types.filter((type) => type === "finish-step")).toHaveLength(2);
+    expect(
+      types.filter((type) => type === "data-agent-milestone")
+    ).toHaveLength(1);
+    expect(chunks.at(-1)).toEqual({
+      type: "finish",
+      messageMetadata: { model: "m" }
+    });
+  });
+
+  it("finishes a tail cut short as the turn ended, from the stored reply", () => {
+    const stored = {
+      id: "m2",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "One two", state: "done" },
+        {
+          type: "tool-search",
+          toolName: "search",
+          toolCallId: "c1",
+          state: "output-available",
+          input: { q: "x" },
+          output: { hits: 2 }
+        },
+        { type: "step-start" },
+        { type: "text", text: "Three", state: "done" }
+      ],
+      metadata: { model: "m" }
+    } as unknown as UIMessage;
+    // What a tail had read when the stream went: mid-text, mid-tool.
+    const sent = [
+      { type: "start", messageId: "m2" },
+      { type: "start-step" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "One" }
+    ] as never[];
+    const rest = remainingChunks(sent, stored);
+    const parts: UIMessage["parts"] = [];
+    for (const chunk of [...sent, ...rest]) {
+      applyChunkToParts(parts, chunk as never);
+    }
+    expect(parts).toEqual(stored.parts);
+    // The open text part goes on under its own id; the finish closes it.
+    expect(rest[0]).toEqual({ type: "text-delta", id: "t1", delta: " two" });
+    expect(rest.at(-1)).toEqual({
+      type: "finish",
+      messageMetadata: { model: "m" }
+    });
   });
 
   it("runs under its own turn id and is read off that run when it settles", async () => {
@@ -92,7 +152,7 @@ describe("agent-tool runs as chat turns", () => {
     });
   });
 
-  it("replays a settled turn from its kept stream, else from its stored reply", async () => {
+  it("replays a settled turn from its stored reply", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await instance.lifecycle.start();
@@ -106,19 +166,6 @@ describe("agent-tool runs as chat turns", () => {
         }
       );
       await instance.tasks.wait(agentToolTurnId("run-done"));
-      // The turn kept its stream: a later reader gets what a live one got.
-      const streamId = chatTurnStreamId(agentToolTurnId("run-done"));
-      expect(await instance.streams.status(streamId)).toMatchObject({
-        state: "completed"
-      });
-      const kept = await agentToolTurnChunks(instance.deps, "run-done");
-      expect(kept.map((chunk) => chunk.sequence)).toEqual(
-        kept.map((_, index) => index)
-      );
-      expect(kept.length).toBeGreaterThan(0);
-      // Without it (a run carried from a released version), the stored
-      // reply is replayed.
-      await instance.streams.delete(streamId);
       const chunks = await agentToolTurnChunks(instance.deps, "run-done");
       expect(chunks.map((chunk) => JSON.parse(chunk.body))).toEqual([
         { type: "start", messageId: "reply-1" },
