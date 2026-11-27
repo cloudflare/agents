@@ -110,10 +110,21 @@ export async function submitTurn(
 }
 
 /** Stop the turn `requestId`, waiting or running. */
-export function cancelTurn(
+export async function cancelTurn(
   deps: ChatDeps,
   requestId: string
 ): Promise<boolean> {
+  // A turn stopped before it started keeps its question, unanswered: it
+  // would have stored it when it started.
+  const record = deps.tasks.peek(requestId);
+  if (record?.status === "pending" && record.attempt === 0) {
+    const input = deps.tasks.inputOf<ChatTurnInput>(requestId);
+    const session = deps.sessions.session(input?.session ?? deps.session ?? "");
+    for (const message of input?.messages ?? []) {
+      if (message.role === "user")
+        await session.upsertMessage(message as never);
+    }
+  }
   return deps.tasks.cancel(requestId, "chat turn cancelled");
 }
 
@@ -209,7 +220,7 @@ async function applyAnswer(
   // The call is in the reply streaming now: the answer joins that stream.
   const live = liveTurnsOf(deps.streams).get(deps.session ?? "");
   if (live && answer.kind === "result") {
-    if (live.waitsOn(answer.toolCallId)) {
+    if (live.waitingCalls().includes(answer.toolCallId)) {
       live.inject(
         (answer.state === "output-error"
           ? {
@@ -223,9 +234,21 @@ async function applyAnswer(
               output: answer.output
             }) as never
       );
-      // The continuation waits behind the streaming turn in the lane.
-      if (options.autoContinue) {
-        await submitTurn(deps, lane, { trigger: "tool-answer" });
+      // Once the batch is answered, one continuation of that reply waits
+      // behind the streaming turn in the lane.
+      const replyId = live.replyId();
+      if (options.autoContinue && live.waitingCalls().length === 0) {
+        await submitTurn(
+          deps,
+          lane,
+          {
+            trigger: "tool-answer",
+            ...(replyId !== undefined && { replyId })
+          },
+          {
+            idempotencyKey: `continue:${live.requestId}`
+          }
+        );
       }
       return true;
     }
