@@ -11254,6 +11254,18 @@ export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
   private _delayBeforeSuperMs = 0;
   private _forcedStatus: SaveMessagesResult["status"] | null = null;
 
+  private _continueChannels: (string | null)[] = [];
+
+  /** The channel each call to the override was given. */
+  async continueChannelsForTest(): Promise<(string | null)[]> {
+    return this._continueChannels;
+  }
+
+  /** A continuation through `runTurn` on `channel`. */
+  async runTurnContinuationOnChannelForTest(channel: string): Promise<string> {
+    return (await this.runTurn({ continuation: true, channel })).status;
+  }
+
   async configureContinueOverrideForTest(options: {
     delayBeforeSuperMs?: number;
     forcedStatus?: SaveMessagesResult["status"];
@@ -11271,6 +11283,9 @@ export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
         setTimeout(resolve, this._delayBeforeSuperMs)
       );
     }
+    this._continueChannels.push(
+      (options as { channel?: string } | undefined)?.channel ?? null
+    );
     const result = await super.continueLastTurn(body, options);
     return this._forcedStatus
       ? { ...result, status: this._forcedStatus }

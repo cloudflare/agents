@@ -4371,9 +4371,19 @@ export class Think<
     if (own?.operationId !== operationId || !own.stopWhen) return;
     const metas = (own.stepMeta ??= []);
     metas[step] = meta;
-    const calls = stepResultOf(message, segment).toolCalls as Array<{
-      toolCallId: string;
-    }>;
+    // Only the calls the harness will run report back: one that is
+    // settled already (its input didn't parse) or the provider ran is
+    // not waited on.
+    const calls = (
+      stepResultOf(message, segment).toolCalls as Array<{
+        toolCallId: string;
+      }>
+    ).filter((call) => {
+      const part = message.parts.find(
+        (p) => "toolCallId" in p && p.toolCallId === call.toolCallId
+      ) as { state?: string; providerExecuted?: boolean } | undefined;
+      return part?.state === "input-available" && !part.providerExecuted;
+    });
     if (calls.length === 0) {
       await this.#checkStopWhen(own, step, message, segment, []);
       return;

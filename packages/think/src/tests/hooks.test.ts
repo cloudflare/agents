@@ -2081,6 +2081,20 @@ describe("Think — maxSteps property", () => {
     expect(await agent.getBeforeStepLog()).toHaveLength(1);
   });
 
+  it("checks stopWhen after a step whose only tool call doesn't parse", async () => {
+    const agent = await freshToolAgent(
+      `hook-stop-invalid-${crypto.randomUUID()}`
+    );
+    await agent.useInvalidToolInputForTest();
+    await agent.stopOnTokenBudgetForTest(1);
+    const result = await agent.testChat("Call echo");
+    expect(result.done).toBe(true);
+    // The first step met the budget: no model call after it, though no
+    // server tool ran.
+    expect(await agent.getBeforeStepLog()).toHaveLength(1);
+    expect(await agent.getAfterToolCallLog()).toHaveLength(0);
+  });
+
   it("composes TurnConfig stopWhen with the maxSteps bound", async () => {
     const agent = await freshToolAgent("hook-stop-when-tool-call");
     await agent.stopAfterEchoToolCall();
@@ -2563,6 +2577,16 @@ describe("Think — beforeTurn config overrides", () => {
     const invalid = await agent.runTurnWaitForTest("", { continuation: true });
     expect(invalid.status).toBe("error");
     expect(invalid.outputJson).toBeUndefined();
+  });
+
+  it("gives an overridden continueLastTurn the channel runTurn's continuation names", async () => {
+    const agent = await getAgentByName(
+      env.ThinkContinueOverrideTestAgent,
+      `bt-override-channel-${crypto.randomUUID()}`
+    );
+    await agent.runTurnWaitForTest("What is the answer?");
+    await agent.runTurnContinuationOnChannelForTest("voice");
+    expect(await agent.continueChannelsForTest()).toEqual(["voice"]);
   });
 
   it("keeps the status an overridden continueLastTurn returns", async () => {

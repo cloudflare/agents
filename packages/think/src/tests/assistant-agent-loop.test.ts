@@ -275,7 +275,8 @@ describe("Think — agentic loop", () => {
       testProactiveMultiFire(
         message: string,
         maxCompactions?: number,
-        endWithAssistant?: boolean
+        endWithAssistant?: boolean,
+        stepMessages?: "prepend"
       ): Promise<OverflowResult>;
       getCompactedBranches(): Promise<string[][]>;
       armProactiveForTest(): Promise<void>;
@@ -1066,6 +1067,34 @@ describe("Think — agentic loop", () => {
       expect([...prompts[2].toolResults].sort()).toEqual(
         [...prompts[2].toolCalls].sort()
       );
+    });
+
+    it("keeps every tool call with its result when beforeStep rewrites the compacted prompt's start", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent;
+
+      // Three steps, the guard compacting before the second and the third;
+      // beforeStep puts a message before the prompt on every step.
+      const result = await agent.testProactiveMultiFire(
+        "use the echo tool",
+        1,
+        false,
+        "prepend"
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+      expect(result.compactionEvents).toBe(1);
+      const prompts = await agent.getProactiveStepPrompts();
+      expect(prompts.length).toBe(3);
+      expect(prompts[2].toolCalls.length).toBe(2);
+      expect([...prompts[2].toolResults].sort()).toEqual(
+        [...prompts[2].toolCalls].sort()
+      );
+      // The turn's question once: the steps after it are this turn's, and
+      // nothing of the head is taken for one of them.
+      expect(prompts[2].prompt.split("use the echo tool").length - 1).toBe(1);
     });
 
     it.each([false, true])(
